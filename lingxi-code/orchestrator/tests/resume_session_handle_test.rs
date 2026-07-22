@@ -70,6 +70,8 @@ async fn resume_session_adopts_history_and_named_id_keeping_model() {
             named,
             history.clone(),
             Some("11111111-1111-4111-8111-111111111111".to_string()),
+            None,
+            traits::ResumeRuntimeSnapshot::default(),
         )
         .await
         .expect("resume_session must succeed on the production handle");

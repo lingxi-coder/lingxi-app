@@ -45,36 +45,14 @@
 //! The `status`/`clear`/`too-long` branches have no `prompt`, so they map onto
 //! `CommandResult::Done` (the `/effort`/`/model` precedent).
 //!
-//! ## Known gaps (documented, not implemented)
+//! ## Remaining note
 //!
-//! * **Stop-hook enforcement is NOT wired (the real remaining gap).** The
-//!   app-state goal seam now EXISTS — `traits::OrchestratorHandle` carries
-//!   `get_active_goal` / `set_active_goal` / `clear_active_goal` /
-//!   `set_active_goal_last_reason`, and this handler delegates to them (no local
-//!   `Mutex` state). But nothing in the turn loop consults `active_goal` at stop
-//!   time: this port does NOT register a real `Stop` hook, so the directive text
-//!   alone asks the model to keep working — NOTHING mechanically blocks a real
-//!   `Stop` event, and `active_goal` is never auto-cleared on success. Wiring
-//!   that in requires the turn-loop change the spec calls out (a goal-owned hook
-//!   whose non-blocking `ok:true` Prompt-hook result auto-clears `activeGoal`
-//!   and allows the stop). Consequently `set_active_goal_last_reason` has no
-//!   production caller yet, so `lastReason` is always `None`.
-//! * **Trust / hooks-restricted values are not sourced.** [`workspace_trusted`]
-//!   and [`hooks_restricted`] are now `OrchestratorHandle` methods (the
-//!   `kEt(n,t)` gate's two halves), but their default impls return `true` /
-//!   `false` and no composition root passes real values yet (the
-//!   `with_workspace_trusted` / `with_hooks_restricted` builders have no
-//!   production caller), so both gates effectively still hardcode the
-//!   always-succeeds answer and the fixed gate-failure strings below remain
-//!   unreachable until the desktop/mobile roots wire real trust + settings-
-//!   derived restriction values.
 //! * **`lastReasonSuffix` formatting is NOT byte-verified.** The task's
 //!   locked output-string list gives every OTHER literal verbatim but leaves
 //!   this one as a `${lastReasonSuffix}` placeholder; the one targeted
 //!   `strings` probe that reached it was truncated mid-fragment
 //!   (`` `${WMl(o.lastReason)}` ``) with no confirmed static prefix text. Since
-//!   nothing in this handler currently populates `last_reason` anyway (that is
-//!   the turn-loop wiring gap above), [`GoalHandler::status`]'s suffix format
+//!   the binary fragment is incomplete, [`GoalHandler::status`]'s suffix format
 //!   is a best-effort placeholder, clearly marked, not a confirmed port.
 
 use async_trait::async_trait;
@@ -98,14 +76,14 @@ const CLEAR_TOKENS: &[&str] = &["clear", "stop", "off", "reset", "none", "cancel
 const NO_GOAL_SET: &str = "No goal set";
 
 /// `kEt`'s trust-gate failure message, verbatim from the locked output-string
-/// list. [`workspace_trusted`] currently always returns `true`, so this is
-/// unreachable until a real trust seam lands — kept ready for that seam.
+/// list. The value comes from the composition root's effective workspace
+/// trust decision through [`OrchestratorHandle::workspace_trusted`].
 const TRUST_GATE_MESSAGE: &str =
     "/goal is only available in trusted workspaces. Restart, accept the trust dialog, and try again.";
 
 /// `kEt`'s hooks-restricted failure message, verbatim from the locked
-/// output-string list. [`hooks_restricted`] currently always returns `false`,
-/// so this is unreachable until a real restriction query lands.
+/// output-string list. The value comes from merged managed/user/project hook
+/// policy through [`OrchestratorHandle::hooks_restricted`].
 const HOOKS_RESTRICTED_MESSAGE: &str = "/goal can't run while hooks are restricted (disableAllHooks or allowManagedHooksOnly is set in settings or by policy).";
 
 /// `bt("goal_set","too_long")` — the binary's own telemetry call on the
@@ -119,10 +97,8 @@ const TELEMETRY_TOO_LONG_PROPERTY: &str = "too_long";
 
 /// `tengu_stop_hook_removed` — the binary's clear-path telemetry event (per
 /// the task spec), fired when an existing goal's `Stop` hook is torn down.
-/// This port has no real hook to remove (see the module doc's "no hook
-/// add/remove seam" gap); the event still fires so the telemetry surface is
-/// faithful to the semantic action (a goal WAS cleared), carrying the cleared
-/// condition as `details`.
+/// Fired when `/goal clear` removes the session-scoped named Stop Prompt hook,
+/// carrying the cleared condition as `details`.
 const TELEMETRY_STOP_HOOK_REMOVED: &str = "tengu_stop_hook_removed";
 
 /// `Goal condition is limited to {n} characters (got {got})` — verbatim.
@@ -302,6 +278,12 @@ mod tests {
         GoalHandler::new(Arc::new(MockOrchestratorHandle::new()))
     }
 
+    fn mock_handler() -> (Arc<MockOrchestratorHandle>, GoalHandler) {
+        let handle = Arc::new(MockOrchestratorHandle::new());
+        let handler = GoalHandler::new(handle.clone());
+        (handle, handler)
+    }
+
     #[tokio::test]
     async fn empty_arg_with_no_goal_reports_no_goal_set() {
         let h = handler();
@@ -360,6 +342,40 @@ mod tests {
             }
             other => panic!("expected InjectMessage, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn untrusted_workspace_blocks_goal_before_state_changes() {
+        let (handle, h) = mock_handler();
+        handle.set_workspace_trusted(false);
+
+        match h.handle(&args("ship it")).await {
+            CommandResult::Done { display: Some(s) } => {
+                assert_eq!(s, TRUST_GATE_MESSAGE);
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+        assert!(
+            handle.get_active_goal().await.is_none(),
+            "the trust gate must reject before /goal mutates state or registers hooks"
+        );
+    }
+
+    #[tokio::test]
+    async fn restricted_hooks_block_goal_before_state_changes() {
+        let (handle, h) = mock_handler();
+        handle.set_hooks_restricted(true);
+
+        match h.handle(&args("ship it")).await {
+            CommandResult::Done { display: Some(s) } => {
+                assert_eq!(s, HOOKS_RESTRICTED_MESSAGE);
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+        assert!(
+            handle.get_active_goal().await.is_none(),
+            "the managed-hooks restriction must reject before /goal mutates state or registers hooks"
+        );
     }
 
     #[tokio::test]

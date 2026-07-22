@@ -406,7 +406,59 @@ pub fn apply_beta_header_with_auth(
     ctx: &BetaContext,
     is_oauth_subscriber: bool,
 ) {
+    apply_beta_header_with_auth_and_custom(
+        request,
+        provider,
+        endpoint,
+        ctx,
+        is_oauth_subscriber,
+        &[],
+    );
+}
+
+/// Auth-aware beta assembly with an explicit, host-validated CLI beta list.
+/// Keeping the custom values as an argument prevents process environment state
+/// from leaking them onto a custom Anthropic-wire-compatible provider route.
+pub fn apply_beta_header_with_auth_and_custom(
+    request: &mut crate::ProviderRequest,
+    provider: Provider,
+    endpoint: Endpoint,
+    ctx: &BetaContext,
+    is_oauth_subscriber: bool,
+    custom_betas: &[String],
+) {
     apply_beta_header(request, provider, endpoint, ctx);
+
+    // CLI `--betas`: API-key-only, first-party messages.create additions. The
+    // caller passes values only for an AnthropicFirstParty route; this layer
+    // still excludes OAuth and non-Anthropic/count endpoints.
+    if !is_oauth_subscriber
+        && matches!(provider, Provider::Anthropic)
+        && matches!(
+            endpoint,
+            Endpoint::MessagesCreate | Endpoint::MessagesCreateStream
+        )
+    {
+        if !custom_betas.is_empty() {
+            let mut parts: Vec<String> = request
+                .headers
+                .get("anthropic-beta")
+                .into_iter()
+                .flat_map(|v| v.split(','))
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(str::to_string)
+                .collect();
+            for beta in custom_betas.iter().map(String::as_str) {
+                if !parts.iter().any(|existing| existing == beta) {
+                    parts.push(beta.to_string());
+                }
+            }
+            request
+                .headers
+                .insert("anthropic-beta".to_string(), parts.join(","));
+        }
+    }
 
     if is_oauth_subscriber {
         let existing = request.headers.get("anthropic-beta").map(String::as_str);
@@ -771,6 +823,43 @@ mod tests {
         );
         let value = req.headers.get("anthropic-beta").expect("header present");
         assert!(!value.split(',').any(|p| p == OAUTH), "got: {value}");
+    }
+
+    #[test]
+    fn custom_cli_betas_apply_to_stream_and_are_rejected_for_oauth() {
+        let make = || {
+            crate::ProviderRequest::post_json(
+                "https://api.anthropic.com/v1/messages",
+                serde_json::json!({"model": "claude-opus-4-8", "max_tokens": 1024}),
+            )
+        };
+        let custom = vec!["example-beta-1".to_string(), "example-beta-2".to_string()];
+
+        let mut api_key_req = make();
+        apply_beta_header_with_auth_and_custom(
+            &mut api_key_req,
+            Provider::Anthropic,
+            Endpoint::MessagesCreateStream,
+            &BetaContext::for_model("claude-opus-4-8"),
+            false,
+            &custom,
+        );
+        let header = api_key_req.headers["anthropic-beta"].as_str();
+        assert!(header.split(',').any(|part| part == "example-beta-1"));
+        assert!(header.split(',').any(|part| part == "example-beta-2"));
+
+        let mut oauth_req = make();
+        apply_beta_header_with_auth_and_custom(
+            &mut oauth_req,
+            Provider::Anthropic,
+            Endpoint::MessagesCreateStream,
+            &BetaContext::for_model("claude-opus-4-8"),
+            true,
+            &custom,
+        );
+        let header = oauth_req.headers["anthropic-beta"].as_str();
+        assert!(!header.split(',').any(|part| part == "example-beta-1"));
+        assert!(header.split(',').any(|part| part == OAUTH));
     }
 
     /// `apply_beta_header` on a clean request equals `assemble_beta_header`.

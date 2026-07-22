@@ -453,6 +453,7 @@ impl WebFetchTool {
             crate::markdown::make_secondary_model_prompt(&truncated, prompt, is_preapproved);
         let req = SideQueryRequest {
             model: self.apply_model(),
+            profile: None,
             system_prompt: None,
             messages: vec![ConversationMessage::user(MessageId::new(), model_prompt)],
             tools: vec![],

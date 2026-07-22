@@ -493,7 +493,10 @@ mod tests {
             assert_eq!(stored.len(), 1);
             assert_eq!(
                 stored[0].value.rule_content.as_deref(),
-                Some("git commit:*")
+                // `PermissionRule` keeps the shell matcher in its canonical
+                // internal space-star form. The settings serializer is the
+                // boundary that renders this as `Bash(git commit:*)`.
+                Some("git commit *")
             );
             assert!(
                 !stored[0].matches_tool("Bash"),

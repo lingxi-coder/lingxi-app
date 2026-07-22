@@ -36,7 +36,9 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
-use tool_workflow::{save_dynamic_workflow, saved_feedback, sanitize_workflow_name, WorkflowSaveError, WorkflowScope};
+use tool_workflow::{
+    sanitize_workflow_name, save_dynamic_workflow, saved_feedback, WorkflowSaveError, WorkflowScope,
+};
 use tui_core::multiagent::{WorkflowPhase, WorkflowRow};
 use tui_core::theme::Theme;
 
@@ -686,10 +688,12 @@ impl WorkflowSaveView {
             WorkflowScope::Project => {
                 format!("{}/workflows/{file}", branding::DOT_DIR)
             }
-            WorkflowScope::User => tool_workflow::workflow_scope_dir(WorkflowScope::User, &self.cwd)
-                .join(&file)
-                .to_string_lossy()
-                .into_owned(),
+            WorkflowScope::User => {
+                tool_workflow::workflow_scope_dir(WorkflowScope::User, &self.cwd)
+                    .join(&file)
+                    .to_string_lossy()
+                    .into_owned()
+            }
         }
     }
 
@@ -739,7 +743,11 @@ impl WorkflowSaveView {
             Style::default().fg(accent).add_modifier(Modifier::BOLD),
         )));
         lines.push(Line::from(Span::styled(
-            format!("{} scope \u{00b7} {}", self.scope.label(), self.preview_path()),
+            format!(
+                "{} scope \u{00b7} {}",
+                self.scope.label(),
+                self.preview_path()
+            ),
             dim_style,
         )));
         lines.push(Line::from(""));
@@ -751,7 +759,9 @@ impl WorkflowSaveView {
         if let Some(path) = &self.pending_overwrite {
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
-                format!("{path} already exists. Press Enter again to overwrite, or change the name."),
+                format!(
+                    "{path} already exists. Press Enter again to overwrite, or change the name."
+                ),
                 Style::default().fg(error),
             )));
         }
@@ -1250,7 +1260,10 @@ mod tests {
             v.handle_key(press(KeyCode::Enter)),
             ViewOutcome::Pending
         ));
-        let path = tmp.join(branding::DOT_DIR).join("workflows").join("my-wf.js");
+        let path = tmp
+            .join(branding::DOT_DIR)
+            .join("workflows")
+            .join("my-wf.js");
         assert!(path.exists(), "script written to project dir");
         let fb = v.feedback.as_deref().expect("feedback set");
         assert!(fb.starts_with("Dynamic workflow saved to "));
@@ -1291,8 +1304,7 @@ mod tests {
     fn save_view_empty_name_is_a_noop() {
         let tmp = unique_tmp("empty");
         std::fs::create_dir_all(&tmp).unwrap();
-        let mut v =
-            WorkflowSaveView::new("script".to_string(), "   ".to_string(), Theme::dark());
+        let mut v = WorkflowSaveView::new("script".to_string(), "   ".to_string(), Theme::dark());
         v.cwd = tmp.clone();
         v.handle_key(press(KeyCode::Enter));
         assert!(v.feedback.is_none(), "blank name does not save");

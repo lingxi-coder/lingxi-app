@@ -51,9 +51,28 @@ pub async fn try_acquire_lock(
     job_id: &str,
     pid_is_alive: impl Fn(u32) -> bool,
 ) -> Result<(), CronLockError> {
-    let path_str = lock_path.to_str().expect("utf-8 lock path");
+    let state_dir = lock_path
+        .parent()
+        .ok_or_else(|| CronLockError::Io("lock path has no parent".into()))?;
+    let project_root = state_dir
+        .parent()
+        .ok_or_else(|| CronLockError::Io("lock path has no project root".into()))?;
+    if state_dir.file_name() != Some(std::ffi::OsStr::new(branding::DOT_DIR)) {
+        return Err(CronLockError::Io(
+            "lock path is outside the project state directory".into(),
+        ));
+    }
+    let relative = Path::new(branding::DOT_DIR).join(
+        lock_path
+            .file_name()
+            .ok_or_else(|| CronLockError::Io("lock path has no file name".into()))?,
+    );
 
-    if let Ok(content) = fs.read_file(path_str, None, None).await.map(|c| c.content) {
+    if let Ok(content) = fs
+        .read_file_rooted_no_follow(project_root, &relative)
+        .await
+        .map(|c| c.content)
+    {
         if let Ok(existing) = serde_json::from_str::<LockRecord>(&content) {
             if existing.pid != our_pid && pid_is_alive(existing.pid) {
                 return Err(CronLockError::HeldByLivePid { pid: existing.pid });
@@ -67,7 +86,7 @@ pub async fn try_acquire_lock(
         job_id: job_id.to_string(),
     };
     let body = serde_json::to_string(&record).expect("serialize lock record");
-    fs.write_file(path_str, &body)
+    fs.write_file_rooted_atomic(project_root, &relative, &body)
         .await
         .map_err(|e| CronLockError::Io(e.to_string()))?;
     Ok(())
@@ -75,7 +94,23 @@ pub async fn try_acquire_lock(
 
 /// Drop the per-job lock file (best-effort).
 pub async fn release_lock(fs: Arc<dyn FileSystem>, lock_path: &Path) -> Result<(), CronLockError> {
-    fs.delete_file(lock_path.to_str().expect("utf-8 lock path"))
+    let state_dir = lock_path
+        .parent()
+        .ok_or_else(|| CronLockError::Io("lock path has no parent".into()))?;
+    let project_root = state_dir
+        .parent()
+        .ok_or_else(|| CronLockError::Io("lock path has no project root".into()))?;
+    if state_dir.file_name() != Some(std::ffi::OsStr::new(branding::DOT_DIR)) {
+        return Err(CronLockError::Io(
+            "lock path is outside the project state directory".into(),
+        ));
+    }
+    let relative = Path::new(branding::DOT_DIR).join(
+        lock_path
+            .file_name()
+            .ok_or_else(|| CronLockError::Io("lock path has no file name".into()))?,
+    );
+    fs.delete_file_rooted_no_follow(project_root, &relative)
         .await
         .map_err(|e| CronLockError::Io(e.to_string()))
 }

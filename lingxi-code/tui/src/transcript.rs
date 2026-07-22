@@ -175,6 +175,15 @@ impl Transcript {
         self.committed_to_terminal
     }
 
+    /// Mark every finalized cell as needing to be emitted again.
+    ///
+    /// A detached PTY has no terminal scrollback to preserve for the next
+    /// controller. Reattach therefore clears the new terminal and asks the
+    /// live widget to rebuild native scrollback from its structured cells.
+    pub fn reset_terminal_commit(&mut self) {
+        self.committed_to_terminal = 0;
+    }
+
     /// `true` when the transcript holds nothing (no committed cells and no
     /// active cell).
     #[must_use]

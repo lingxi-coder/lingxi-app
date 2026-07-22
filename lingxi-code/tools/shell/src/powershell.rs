@@ -410,8 +410,34 @@ impl Tool for PowerShellTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
+    use std::sync::Mutex;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
     use traits::process::ProcessOutput;
+
+    // PATH is process-global, and several tests install different temporary
+    // `pwsh` binaries. Serialize those overrides and restore them on every exit
+    // path (including panic) so parallel tests cannot resolve a sibling's stub.
+    static PATH_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct PathOverride(Option<OsString>);
+
+    impl PathOverride {
+        fn set(value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let prior = std::env::var_os("PATH");
+            std::env::set_var("PATH", value);
+            Self(prior)
+        }
+    }
+
+    impl Drop for PathOverride {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(path) => std::env::set_var("PATH", path),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+    }
 
     /// 2.1.196 regression lock: grep-family / git diff / git grep exit 1 is
     /// NOT reported as an error (and carries `returnCodeInterpretation`),
@@ -480,6 +506,7 @@ mod tests {
     #[test]
     fn resolve_path_unix_scans_path_env() {
         use std::os::unix::fs::PermissionsExt;
+        let _lock = PATH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let fake = dir.path().join("pwsh");
         std::fs::write(&fake, "#!/bin/sh\necho stub\n").unwrap();
@@ -487,13 +514,8 @@ mod tests {
         perm.set_mode(0o755);
         std::fs::set_permissions(&fake, perm).unwrap();
 
-        let prior = std::env::var_os("PATH");
-        std::env::set_var("PATH", dir.path());
+        let _path = PathOverride::set(dir.path());
         let resolved = resolve_powershell_path();
-        match prior {
-            Some(p) => std::env::set_var("PATH", p),
-            None => std::env::remove_var("PATH"),
-        }
         let resolved = resolved.expect("should find pwsh");
         assert_eq!(resolved.file_name().unwrap(), "pwsh");
     }
@@ -520,9 +542,10 @@ mod tests {
 
     #[cfg(not(target_os = "windows"))]
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn pwsh_missing_returns_invalid_input_with_diagnostic() {
-        let prior = std::env::var_os("PATH");
-        std::env::set_var("PATH", "");
+        let _lock = PATH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _path = PathOverride::set("");
         let ctx = shell_test_ctx(ProcessOutput {
             stdout: String::new(),
             stderr: String::new(),
@@ -533,10 +556,6 @@ mod tests {
         let r = tool
             .call(json!({"command": "Get-Date"}), fresh_ctx(), fresh_tx())
             .await;
-        match prior {
-            Some(p) => std::env::set_var("PATH", p),
-            None => std::env::remove_var("PATH"),
-        }
         let err = r.expect_err("pwsh missing");
         let msg = err.to_string();
         assert!(msg.contains("pwsh not found in PATH"), "got: {msg}");
@@ -544,8 +563,10 @@ mod tests {
 
     #[cfg(not(target_os = "windows"))]
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn foreground_zero_exit_returns_stdout() {
         use std::os::unix::fs::PermissionsExt;
+        let _lock = PATH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let ctx = shell_test_ctx(ProcessOutput {
             stdout: "ok\n".into(),
             stderr: String::new(),
@@ -561,15 +582,10 @@ mod tests {
         p.set_mode(0o755);
         std::fs::set_permissions(&fake, p).unwrap();
 
-        let prior = std::env::var_os("PATH");
-        std::env::set_var("PATH", dir.path());
+        let _path = PathOverride::set(dir.path());
         let res = tool
             .call(json!({"command": "Get-Date"}), fresh_ctx(), fresh_tx())
             .await;
-        match prior {
-            Some(p) => std::env::set_var("PATH", p),
-            None => std::env::remove_var("PATH"),
-        }
         let r = res.expect("ok");
         assert_eq!(r.data["exit_code"], 0);
         assert_eq!(r.data["stdout"], "ok\n");
@@ -627,9 +643,12 @@ mod tests {
 
     #[cfg(not(target_os = "windows"))]
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn sandbox_branch_routes_through_injected_runner_and_cleans_up() {
         use std::os::unix::fs::PermissionsExt;
         use std::sync::Arc;
+
+        let _lock = PATH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
         let runner = Arc::new(RecordingSandboxRunner::default());
         let mut ctx = shell_test_ctx(ProcessOutput {
@@ -654,15 +673,10 @@ mod tests {
         p.set_mode(0o755);
         std::fs::set_permissions(&fake, p).unwrap();
 
-        let prior = std::env::var_os("PATH");
-        std::env::set_var("PATH", dir.path());
+        let _path = PathOverride::set(dir.path());
         let res = tool
             .call(json!({"command": "Get-Date"}), fresh_ctx(), fresh_tx())
             .await;
-        match prior {
-            Some(p) => std::env::set_var("PATH", p),
-            None => std::env::remove_var("PATH"),
-        }
         res.expect("ok");
 
         let calls = runner.wrap_calls.lock().unwrap();

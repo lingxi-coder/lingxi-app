@@ -42,7 +42,9 @@ pub fn get_mcp_auto_background_ms(transport_type: &str, is_non_interactive_sessi
         std::env::var("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS")
             .ok()
             .as_deref(),
-        std::env::var("CLAUDE_AUTO_BACKGROUND_TASKS").ok().as_deref(),
+        std::env::var("CLAUDE_AUTO_BACKGROUND_TASKS")
+            .ok()
+            .as_deref(),
         std::env::var("CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS")
             .ok()
             .as_deref(),
@@ -220,14 +222,7 @@ mod tests {
         );
         // Over-large clamps down to i32::MAX.
         assert_eq!(
-            get_mcp_auto_background_ms_inner(
-                "stdio",
-                false,
-                None,
-                None,
-                Some("9999999999"),
-                true
-            ),
+            get_mcp_auto_background_ms_inner("stdio", false, None, None, Some("9999999999"), true),
             2_147_483_647
         );
         // Override applies even when the flag is OFF.

@@ -336,3 +336,90 @@ async fn refused_connection_does_not_route_commands() {
 
     endpoint.shutdown().await;
 }
+
+#[tokio::test]
+async fn command_before_hello_is_rejected() {
+    let (connection, ran) = bound_connection();
+    let endpoint = start_endpoint(connection).await;
+    let mut ws = connect(endpoint.port()).await;
+
+    send_command(
+        &mut ws,
+        &ClientCommand::SendPrompt {
+            text: "too early".into(),
+            prompt_mode: None,
+            images: Vec::new(),
+            turn_id: None,
+        },
+    )
+    .await;
+
+    match next_frame(&mut ws).await {
+        Frame::Response(response) => {
+            let error = response.error.expect("pre-hello command must be rejected");
+            assert!(error.message.contains("hello"));
+        }
+        other => panic!("expected pre-hello error response, got {other:?}"),
+    }
+    assert!(!ran.load(Ordering::SeqCst));
+    endpoint.shutdown().await;
+}
+
+#[tokio::test]
+async fn second_client_is_rejected_while_first_remains_active() {
+    let (connection, ran) = bound_connection();
+    let endpoint = start_endpoint(connection).await;
+    let mut first = connect(endpoint.port()).await;
+    send_hello(
+        &mut first,
+        &ClientHello {
+            protocol_version: BRIDGE_PROTOCOL_VERSION.into(),
+            client_name: "first".into(),
+            capabilities: Capabilities::default(),
+        },
+    )
+    .await;
+    match next_frame(&mut first).await {
+        Frame::Response(response) => assert!(response.error.is_none()),
+        other => panic!("expected first ServerHello, got {other:?}"),
+    }
+
+    let mut second = connect(endpoint.port()).await;
+    send_hello(
+        &mut second,
+        &ClientHello {
+            protocol_version: BRIDGE_PROTOCOL_VERSION.into(),
+            client_name: "second".into(),
+            capabilities: Capabilities::default(),
+        },
+    )
+    .await;
+    match next_frame(&mut second).await {
+        Frame::Response(response) => {
+            let error = response.error.expect("second client must be rejected");
+            assert!(error.message.contains("active client"));
+        }
+        other => panic!("expected second-client error response, got {other:?}"),
+    }
+    drop(second);
+
+    send_command(
+        &mut first,
+        &ClientCommand::SendPrompt {
+            text: "first still owns connection".into(),
+            prompt_mode: None,
+            images: Vec::new(),
+            turn_id: None,
+        },
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !ran.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("first client command must still route");
+
+    endpoint.shutdown().await;
+}

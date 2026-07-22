@@ -19,22 +19,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+mod support;
+
 fn fixture_bin_path() -> PathBuf {
-    // The fixture lives as a workspace member, so cargo emits its binary into
-    // the shared `target/<profile>/` directory. Locate it by walking up from
-    // this test crate's manifest dir to the workspace root.
-    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    // platforms/posix -> platforms -> workspace root
-    p.pop();
-    p.pop();
-    p.push("target");
-    p.push(if cfg!(debug_assertions) {
-        "debug"
-    } else {
-        "release"
-    });
-    p.push("mock_stdio_mcp");
-    p
+    support::mock_stdio_mcp_bin()
 }
 
 fn spawn_cfg(bin: &Path) -> StdioConfig {
@@ -49,11 +37,6 @@ fn spawn_cfg(bin: &Path) -> StdioConfig {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mcp_client_initialize_handshake_completes_over_stdio() {
     let bin = fixture_bin_path();
-    assert!(
-        bin.exists(),
-        "fixture binary missing at {bin:?}; run `cargo build -p mock_stdio_mcp` first",
-    );
-
     let conn = spawn_stdio(spawn_cfg(&bin))
         .await
         .expect("spawn_stdio failed");
@@ -76,11 +59,6 @@ async fn mcp_client_initialize_handshake_completes_over_stdio() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mcp_client_ping_roundtrips_over_stdio() {
     let bin = fixture_bin_path();
-    assert!(
-        bin.exists(),
-        "fixture binary missing at {bin:?}; run `cargo build -p mock_stdio_mcp` first",
-    );
-
     let conn = spawn_stdio(spawn_cfg(&bin))
         .await
         .expect("spawn_stdio failed");

@@ -175,6 +175,34 @@ impl JsonlWriter {
         self.append_side_record(&value).await
     }
 
+    /// Persist the Claude-compatible agent name together with a versioned,
+    /// immutable resolved definition. The sibling `agentSnapshot` field is an
+    /// additive LingXi extension; old readers continue consuming
+    /// `agentSetting`, while new readers can resume even if the catalog entry is
+    /// later edited or removed.
+    pub async fn append_agent_setting_snapshot(
+        &self,
+        session_id: &str,
+        agent_setting: &str,
+        definition: &serde_json::Value,
+    ) -> Result<(), WriterError> {
+        use sha2::{Digest, Sha256};
+
+        let canonical = serde_json::to_vec(definition).map_err(WriterError::Serialize)?;
+        let hash = format!("{:x}", Sha256::digest(&canonical));
+        let value = serde_json::json!({
+            "type": "agent-setting",
+            "agentSetting": agent_setting,
+            "agentSnapshot": {
+                "schemaVersion": 1,
+                "sha256": hash,
+                "definition": definition,
+            },
+            "sessionId": session_id,
+        });
+        self.append_side_record(&value).await
+    }
+
     /// Append a `worktree-state` metadata line for `session_id` — the persisted
     /// active-worktree record so a later `--continue`/`--resume` can rehydrate
     /// the session's `EnterWorktree` state (making `ExitWorktree` operate instead
@@ -314,6 +342,38 @@ mod tests {
             Some("reviewer"),
         );
 
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn agent_snapshot_round_trips_with_integrity_check() {
+        let tmp = std::env::temp_dir().join(format!(
+            "lingxi-writer-agent-snapshot-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+        let session_id = "22222222-3333-4444-5555-777777777777";
+        let path = tmp.join(format!("{session_id}.jsonl"));
+        let fs: Arc<dyn FileSystem> =
+            Arc::new(platform_posix::fs::PosixFileSystem::new(tmp.clone()));
+        let writer = JsonlWriter::new(path.clone(), fs.clone());
+        let definition = serde_json::json!({
+            "agent_type": "reviewer",
+            "system_prompt": "frozen prompt",
+            "tools": {"Explicit": ["Read"]}
+        });
+        writer
+            .append_agent_setting_snapshot(session_id, "reviewer", &definition)
+            .await
+            .expect("append snapshot");
+
+        let restored = crate::jsonl::loader::read_agent_snapshot(&path, fs, session_id)
+            .await
+            .expect("snapshot restores");
+        assert_eq!(restored, definition);
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let routed = crate::jsonl::reader::route_lines(&raw);
+        assert!(routed.agent_snapshots.contains_key(session_id));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

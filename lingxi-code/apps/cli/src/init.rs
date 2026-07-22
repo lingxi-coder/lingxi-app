@@ -250,6 +250,10 @@ pub enum InitError {
     /// installed; payload is the platform-specific install hint.
     #[error("tmux is not installed.\n{0}")]
     TmuxNotInstalled(String),
+    /// Custom Anthropic beta headers require an API-key-backed first-party
+    /// Anthropic session; OAuth and alternate providers reject them.
+    #[error("--betas requires an Anthropic API key and a first-party Anthropic model")]
+    InvalidCustomBetas,
 }
 
 impl From<engine_desktop::BuildError> for InitError {
@@ -265,6 +269,7 @@ impl From<engine_desktop::BuildError> for InitError {
                 Self::TmuxNotSupportedOnWindows
             }
             engine_desktop::BuildError::TmuxNotInstalled(m) => Self::TmuxNotInstalled(m),
+            engine_desktop::BuildError::InvalidCustomBetas => Self::InvalidCustomBetas,
         }
     }
 }
@@ -694,6 +699,7 @@ pub(crate) fn resolve_desktop_config(
             Vec::new()
         },
         fallback_model,
+        custom_betas: argv.betas.clone().unwrap_or_default(),
         provider_profiles: load_provider_profiles(incl_user, incl_project),
         routing: load_routing(incl_user, incl_project),
         mcp_paths: vec![project_mcp_path, global_mcp_path],
@@ -860,6 +866,8 @@ pub(crate) fn resolve_desktop_config(
             crate::bg_session_forker::CliBgSessionForker::new(
                 crate::run::lingxi_home_dir(),
                 crate::run::daemon_runtime_dir(),
+                crate::background_launch::BackgroundLaunchOptions::from_argv(argv),
+                permission_mode,
             ),
         )),
     }

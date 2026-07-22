@@ -479,11 +479,11 @@ fn frontmatter_paths_values(raw: &str) -> Option<Vec<FrontmatterPathValue>> {
         .collect::<Vec<_>>()
         .join("\n");
     let document: serde_yaml::Value = serde_yaml::from_str(&yaml).ok()?;
-    let paths = document.as_mapping()?.get(serde_yaml::Value::String("paths".into()))?;
+    let paths = document
+        .as_mapping()?
+        .get(serde_yaml::Value::String("paths".into()))?;
     match paths {
-        serde_yaml::Value::String(value) => {
-            Some(vec![FrontmatterPathValue::Scalar(value.clone())])
-        }
+        serde_yaml::Value::String(value) => Some(vec![FrontmatterPathValue::Scalar(value.clone())]),
         serde_yaml::Value::Sequence(values) => {
             let values = values
                 .iter()

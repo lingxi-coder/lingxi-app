@@ -17,7 +17,12 @@ body {
 @keyframes pulse-ring { 0% { box-shadow: 0 0 0 0 var(--ring); } 100% { box-shadow: 0 0 0 8px transparent; } }
 @keyframes cursor-blink { 0%, 50% { opacity: 1; } 51%, 100% { opacity: 0; } }
 @keyframes scan { 0% { transform: translateY(-100%); } 100% { transform: translateY(100%); } }
+@keyframes beta-spin { to { transform: rotate(360deg); } }
 .mono { font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace; }
+.beta-spinner { width: 12px; height: 12px; display: inline-block; flex: 0 0 auto; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: beta-spin 700ms linear infinite; }
 
 button { font-family: inherit; }
 textarea, input { font-family: inherit; }
+:focus-visible { outline: 2px solid oklch(72% 0.18 268); outline-offset: 2px; }
+.drag-region { -webkit-app-region: drag; }
+.no-drag { -webkit-app-region: no-drag; }

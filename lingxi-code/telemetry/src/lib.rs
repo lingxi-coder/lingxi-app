@@ -44,6 +44,18 @@ pub fn emit_session_appended(session_id: &str, message_uuid: &str) {
         session_id = %session_id,
         message_uuid = %message_uuid,
     );
+    let attrs = std::iter::IntoIterator::into_iter([
+        (
+            "session_id".to_string(),
+            crate::otel::AttrValue::from(session_id.to_string()),
+        ),
+        (
+            "message_uuid".to_string(),
+            crate::otel::AttrValue::from(message_uuid.to_string()),
+        ),
+    ])
+    .collect();
+    crate::otel::emit_named_log_event(crate::tengu::session::APPENDED, &attrs);
 }
 
 /// Convenience for [`crate::tengu::session::ROTATED`]. Reserved for M5-08 (resume).
@@ -53,6 +65,18 @@ pub fn emit_session_rotated(session_id: &str, bytes_before_rotation: u64) {
         session_id = %session_id,
         bytes_before_rotation = bytes_before_rotation,
     );
+    let attrs = std::iter::IntoIterator::into_iter([
+        (
+            "session_id".to_string(),
+            crate::otel::AttrValue::from(session_id.to_string()),
+        ),
+        (
+            "bytes_before_rotation".to_string(),
+            crate::otel::AttrValue::from(bytes_before_rotation as i64),
+        ),
+    ])
+    .collect();
+    crate::otel::emit_named_log_event(crate::tengu::session::ROTATED, &attrs);
 }
 
 /// Convenience for [`crate::tengu::session::CORRUPTED`].
@@ -62,6 +86,18 @@ pub fn emit_session_corrupted(session_id: &str, error: &str) {
         session_id = %session_id,
         error = %error,
     );
+    let attrs = std::iter::IntoIterator::into_iter([
+        (
+            "session_id".to_string(),
+            crate::otel::AttrValue::from(session_id.to_string()),
+        ),
+        (
+            "error".to_string(),
+            crate::otel::AttrValue::from(error.to_string()),
+        ),
+    ])
+    .collect();
+    crate::otel::emit_named_log_event(crate::tengu::session::CORRUPTED, &attrs);
 }
 
 // -- M5-10 emit helpers for the 6 batch-1 slash commands ---------------------

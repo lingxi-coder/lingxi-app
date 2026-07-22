@@ -412,6 +412,15 @@ pub fn run_install(
     // Scope is validated BEFORE the "Installing plugin …" progress prefix — the
     // binary emits the bare `Invalid scope: …` line with no prefix.
     let scope = parse_scope(scope)?;
+
+    if !config.is_empty() && !matches!(scope, Scope::User) {
+        return Err(format!(
+            "Installing plugin \"{}\"...{}",
+            arg,
+            fail("install", arg, "--config can only be used with user scope.")
+        ));
+    }
+
     let (name, market) = split_id(arg);
     let registry = load_registry(plugins_dir);
 
@@ -458,8 +467,12 @@ pub fn run_install(
     };
 
     let full_id = format!("{name}@{market_name}");
-    plugin_policy::ensure_marketplace_allowed(&market_name)
-        .map_err(|reason| format!("Installing plugin \"{arg}\"...{}", fail("install", arg, &reason)))?;
+    plugin_policy::ensure_marketplace_allowed(&market_name).map_err(|reason| {
+        format!(
+            "Installing plugin \"{arg}\"...{}",
+            fail("install", arg, &reason)
+        )
+    })?;
 
     // `--config key=value` userConfig persistence. Parse + validate against the
     // plugin's declared schema (byte-faithful errors, no "Installing…" prefix —
@@ -1137,7 +1150,9 @@ mod tests {
             &e.cwd,
         )
         .unwrap();
-        assert!(user_settings(&e)["pluginConfigs"].get("hello@mymkt").is_some());
+        assert!(user_settings(&e)["pluginConfigs"]
+            .get("hello@mymkt")
+            .is_some());
         run_uninstall(
             "hello@mymkt",
             None,
@@ -1150,7 +1165,9 @@ mod tests {
         )
         .unwrap();
         // deletePluginOptions parity: the pluginConfigs entry is gone.
-        assert!(user_settings(&e)["pluginConfigs"].get("hello@mymkt").is_none());
+        assert!(user_settings(&e)["pluginConfigs"]
+            .get("hello@mymkt")
+            .is_none());
     }
 
     #[test]
@@ -1211,6 +1228,63 @@ mod tests {
         assert_eq!(
             err,
             "Invalid scope: bogus. Must be one of: user, project, local."
+        );
+    }
+
+    #[test]
+    fn install_config_rejected_for_project_scope() {
+        let e = env();
+        set_user_config(&e, r#"{"REGION":{"sensitive":false}}"#);
+        let err = run_install(
+            "hello@mymkt",
+            Some("project"),
+            &["REGION=us-east".to_string()],
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "Installing plugin \"hello@mymkt\"...✘ Failed to install plugin \"hello@mymkt\": --config can only be used with user scope."
+        );
+    }
+
+    #[test]
+    fn install_config_rejected_for_local_scope() {
+        let e = env();
+        set_user_config(&e, r#"{"REGION":{"sensitive":false}}"#);
+        let err = run_install(
+            "hello@mymkt",
+            Some("local"),
+            &["REGION=us-east".to_string()],
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "Installing plugin \"hello@mymkt\"...✘ Failed to install plugin \"hello@mymkt\": --config can only be used with user scope."
+        );
+    }
+
+    #[test]
+    fn install_config_persists_with_explicit_user_scope() {
+        let e = env();
+        set_user_config(&e, r#"{"REGION":{"description":"","sensitive":false}}"#);
+        run_install(
+            "hello@mymkt",
+            Some("user"),
+            &["REGION=eu".to_string()],
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap();
+        assert_eq!(
+            user_settings(&e)["pluginConfigs"]["hello@mymkt"]["options"]["REGION"],
+            Value::String("eu".into())
         );
     }
 

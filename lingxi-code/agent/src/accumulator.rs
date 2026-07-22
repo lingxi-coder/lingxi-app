@@ -944,7 +944,10 @@ mod tests {
             "redacted_thinking block preserved"
         );
         assert!(
-            !resp.content.iter().any(|b| matches!(b, ContentBlock::Text { text, .. } if text.contains("leak"))),
+            !resp
+                .content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Text { text, .. } if text.contains("leak"))),
             "stray thinking_delta must not materialize as text"
         );
     }

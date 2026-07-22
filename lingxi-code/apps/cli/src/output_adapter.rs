@@ -51,6 +51,11 @@ impl OutputStream for SinkAdapter {
     ) {
         self.sink.tool_result(tool, result).await;
     }
+    async fn emit_tool_heartbeat(&self, id: &protocol::ToolUseId, tool: &str, elapsed_ms: u64) {
+        self.sink
+            .tool_heartbeat(id.as_str(), tool, elapsed_ms)
+            .await;
+    }
     async fn emit_end_turn(&self, stop_reason: &str, cost: &CostSnapshot) {
         self.sink
             .turn_end(

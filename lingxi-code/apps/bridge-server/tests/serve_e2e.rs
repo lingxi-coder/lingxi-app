@@ -181,7 +181,8 @@ async fn serve_path_handshakes_streams_turn_and_reaps_lockfile() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let workspace = tmp.path().to_path_buf();
     let served =
-        boot::publish_lockfile(endpoint, tmp.path().to_path_buf(), vec![workspace.clone()]);
+        boot::publish_lockfile(endpoint, tmp.path().join("bridge"), vec![workspace.clone()])
+            .expect("publish private lockfile");
     // Destructure so we own each piece independently: the endpoint is consumed by
     // `shutdown()` (by value), and the guard is dropped on its own to reap the
     // file at a precisely-asserted moment.

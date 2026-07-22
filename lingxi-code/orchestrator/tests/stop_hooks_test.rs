@@ -14,18 +14,26 @@ use hooks::events::{HookEvent, HookEventType};
 use hooks::executor::BuiltinHookHandler;
 use hooks::registry::{HookContext, HookRegistry};
 use hooks::response::{HookDecision, HookOutcome, HookResponse, HookResult};
-use hooks::HookExecutorImpl;
+use hooks::{HookExecutorImpl, HookPromptRunner, PromptHookError, PromptHookRequest};
 use orchestrator::test_support::{
     mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
     StaticMemoryProvider,
 };
-use orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
-use protocol::{HookId, HttpRequest, HttpResponse};
+use orchestrator::{
+    ConversationOrchestrator, ConversationOutcome, OrchestratorConfig, TurnOutcome,
+};
+use protocol::{HookId, HttpRequest, HttpResponse, SessionId};
+use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::time::Duration;
+use tokio::sync::mpsc;
 use tokio::sync::RwLock;
-use traits::{HttpError, HttpTransport, RuntimeError, RuntimeSpawner};
+use tokio_util::sync::CancellationToken;
+use traits::{HttpError, HttpTransport, OrchestratorHandle, RuntimeError, RuntimeSpawner};
+
+static GOAL_CAP_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 // ---- unused HTTP / Runtime stubs (Builtin hooks never touch them) ----
 struct UnusedHttp;
@@ -170,6 +178,23 @@ fn orch(api: Arc<MockApiClient>, hooks: Arc<HookExecutorImpl>) -> Arc<Conversati
     ))
 }
 
+fn orch_with_output(
+    api: Arc<MockApiClient>,
+    hooks: Arc<HookExecutorImpl>,
+    output: Arc<MockOutputStream>,
+) -> Arc<ConversationOrchestrator> {
+    Arc::new(ConversationOrchestrator::new(
+        OrchestratorConfig::default(),
+        api,
+        Arc::new(tool_api::registry::ToolRegistry::new()),
+        hooks,
+        Arc::new(NoOpPermissionGate),
+        output,
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    ))
+}
+
 fn end_turn(text: &str) -> llm_client::LlmResponse {
     mock_message_response(
         vec![LlmContentBlock::Text {
@@ -180,8 +205,65 @@ fn end_turn(text: &str) -> llm_client::LlmResponse {
     )
 }
 
+fn end_turn_with_usage(text: &str, input: u64, output: u64) -> llm_client::LlmResponse {
+    llm_client::LlmResponse {
+        id: "msg_goal".to_string(),
+        model: "claude-opus-4-6".to_string(),
+        content: vec![LlmContentBlock::Text {
+            text: text.into(),
+            cache_control: None,
+        }],
+        stop_reason: Some("end_turn".to_string()),
+        stop_details: None,
+        usage: llm_client::Usage {
+            billable_tokens: llm_client::TokenUsage {
+                input,
+                output,
+                cache_write: 0,
+                cache_read: 0,
+                reasoning_output: 0,
+            },
+            ..llm_client::Usage::default()
+        },
+        cost: None,
+        provider_metadata: serde_json::Value::Null,
+    }
+}
+
+struct ScriptedPromptRunner {
+    seen: StdMutex<Vec<PromptHookRequest>>,
+    scripted: StdMutex<VecDeque<Result<String, PromptHookError>>>,
+    on_call: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+
+#[async_trait]
+impl HookPromptRunner for ScriptedPromptRunner {
+    async fn run(&self, req: PromptHookRequest) -> Result<String, PromptHookError> {
+        self.seen.lock().unwrap().push(req);
+        if let Some(on_call) = &self.on_call {
+            on_call();
+        }
+        self.scripted
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| Err(PromptHookError::Query("no scripted prompt response".into())))
+    }
+}
+
+async fn exec_with_prompt_runner(runner: Arc<dyn HookPromptRunner>) -> Arc<HookExecutorImpl> {
+    let registry = Arc::new(RwLock::new(HookRegistry::new()));
+    Arc::new(
+        HookExecutorImpl::new(registry, Arc::new(UnusedHttp), Arc::new(UnusedRuntime))
+            .with_prompt_runner(runner),
+    )
+}
+
 #[tokio::test]
 async fn stop_block_continues_until_cap_then_overrides() {
+    let _env = GOAL_CAP_ENV_LOCK.lock().unwrap();
+    let prior_cap = std::env::var("LINGXI_STOP_HOOK_BLOCK_CAP").ok();
+    std::env::remove_var("LINGXI_STOP_HOOK_BLOCK_CAP");
     // A perpetually-blocking Stop hook drives consecutive continuations up to
     // the default LINGXI_STOP_HOOK_BLOCK_CAP of 8 (binary v2.1.191:
     // `bo=Number.isNaN(jr)?8:jr; if(bo>0&&ar>bo) …yield warning…{reason:"completed"}`),
@@ -253,6 +335,9 @@ async fn stop_block_continues_until_cap_then_overrides() {
             .any(|m| m.text_content().contains("[stop-hook] please continue")),
         "the transcript-only systemMessage must NOT be appended (it must not reach the model)"
     );
+    if let Some(prior_cap) = prior_cap {
+        std::env::set_var("LINGXI_STOP_HOOK_BLOCK_CAP", prior_cap);
+    }
 }
 
 #[tokio::test]
@@ -318,7 +403,7 @@ async fn stop_prevent_continuation_terminates() {
         builtin_hook("stop-prevent", HookEventType::Stop),
     )
     .await;
-    let o = orch(api.clone(), hooks);
+    let o = orch(api.clone(), hooks.clone());
 
     let outcome = o.run_turn("hi").await.expect("turn ok");
     assert!(
@@ -338,7 +423,7 @@ async fn user_prompt_submit_block_aborts_before_api() {
         builtin_hook("prompt-block", HookEventType::UserPromptSubmit),
     )
     .await;
-    let o = orch(api.clone(), hooks);
+    let o = orch(api.clone(), hooks.clone());
 
     let outcome = o.run_turn("blocked prompt").await.expect("turn ok");
     assert!(
@@ -364,9 +449,253 @@ async fn stop_hook_pass_ends_normally() {
         builtin_hook("prompt-block", HookEventType::Stop),
     )
     .await;
-    let o = orch(api.clone(), hooks);
+    let o = orch(api.clone(), hooks.clone());
 
     let outcome = o.run_turn("hi").await.expect("turn ok");
     assert!(matches!(outcome, ConversationOutcome::EndTurn { .. }));
     assert_eq!(api.captured_msgs().await.len(), 1);
+}
+
+#[tokio::test]
+async fn stop_goal_registers_named_prompt_hook_and_clears_when_met() {
+    let api = Arc::new(MockApiClient::new(vec![end_turn("1"), end_turn("2")]));
+    let runner = Arc::new(ScriptedPromptRunner {
+        seen: StdMutex::new(Vec::new()),
+        scripted: StdMutex::new(VecDeque::from([
+            Ok(r#"{"ok": false, "reason": "not yet"}"#.to_string()),
+            Ok(r#"{"ok": true, "reason": "done"}"#.to_string()),
+        ])),
+        on_call: None,
+    });
+    let hooks = exec_with_prompt_runner(runner.clone()).await;
+    let o = orch(api.clone(), hooks.clone());
+
+    o.set_active_goal("ship it").await;
+    let current_session = o.current_session_id().await;
+    assert!(
+        hooks
+            .get_session_named_hook(current_session, "__session_goal_stop")
+            .await
+            .is_some(),
+        "setting /goal must register the named session Stop Prompt hook"
+    );
+
+    let outcome = o.run_turn("hi").await.expect("turn ok");
+    assert!(matches!(outcome, ConversationOutcome::EndTurn { .. }));
+    assert_eq!(api.captured_msgs().await.len(), 2);
+    assert!(
+        o.get_active_goal().await.is_none(),
+        "a completed /goal condition must auto-clear itself"
+    );
+    assert!(
+        hooks
+            .get_session_named_hook(current_session, "__session_goal_stop")
+            .await
+            .is_none(),
+        "completed /goal must remove the temporary Stop hook"
+    );
+    let history = o.session().lock().await.history.clone();
+    assert!(
+        history
+            .iter()
+            .any(|m| m.text_content() == "Stop hook feedback:\nnot yet"),
+        "an unmet goal should append blocking feedback from the /goal evaluator"
+    );
+    let seen = runner.seen.lock().unwrap();
+    assert_eq!(seen.len(), 2);
+    assert!(
+        seen[0].prompt.contains(r#""hook_event_name":"Stop""#),
+        "goal Stop hook must evaluate the Stop payload"
+    );
+}
+
+#[tokio::test]
+async fn stop_goal_is_not_capped_by_stop_hook_block_limit() {
+    let _env = GOAL_CAP_ENV_LOCK.lock().unwrap();
+    let prior_cap = std::env::var("LINGXI_STOP_HOOK_BLOCK_CAP").ok();
+    std::env::set_var("LINGXI_STOP_HOOK_BLOCK_CAP", "1");
+
+    let api = Arc::new(MockApiClient::new(vec![
+        end_turn("1"),
+        end_turn("2"),
+        end_turn("3"),
+    ]));
+    let runner = Arc::new(ScriptedPromptRunner {
+        seen: StdMutex::new(Vec::new()),
+        scripted: StdMutex::new(VecDeque::from([
+            Ok(r#"{"ok": false, "reason": "still working"}"#.to_string()),
+            Ok(r#"{"ok": false, "reason": "still working"}"#.to_string()),
+            Ok(r#"{"ok": true, "reason": "done"}"#.to_string()),
+        ])),
+        on_call: None,
+    });
+    let hooks = exec_with_prompt_runner(runner).await;
+    let output = Arc::new(MockOutputStream::new());
+    let o = orch_with_output(api.clone(), hooks, output.clone());
+    o.set_active_goal("ship it").await;
+
+    let outcome = o.run_turn("hi").await.expect("turn ok");
+    assert!(matches!(outcome, ConversationOutcome::EndTurn { .. }));
+    assert_eq!(
+        api.captured_msgs().await.len(),
+        3,
+        "the /goal continuation must survive beyond the generic stop-hook cap and end only once the goal passes"
+    );
+    assert!(o.get_active_goal().await.is_none());
+    assert!(
+        !output
+            .text_events()
+            .await
+            .iter()
+            .any(|text| text.contains("overriding and ending turn")),
+        "goal continuations must not trip the generic stop-hook cap"
+    );
+    if let Some(prior_cap) = prior_cap {
+        std::env::set_var("LINGXI_STOP_HOOK_BLOCK_CAP", prior_cap);
+    } else {
+        std::env::remove_var("LINGXI_STOP_HOOK_BLOCK_CAP");
+    }
+}
+
+#[tokio::test]
+async fn stop_goal_timeout_keeps_working_until_a_later_success() {
+    let api = Arc::new(MockApiClient::new(vec![end_turn("1"), end_turn("2")]));
+    let runner = Arc::new(ScriptedPromptRunner {
+        seen: StdMutex::new(Vec::new()),
+        scripted: StdMutex::new(VecDeque::from([
+            Err(PromptHookError::Timeout(Duration::from_secs(30))),
+            Ok(r#"{"ok": true, "reason": "done"}"#.to_string()),
+        ])),
+        on_call: None,
+    });
+    let hooks = exec_with_prompt_runner(runner).await;
+    let o = orch(api.clone(), hooks);
+    o.set_active_goal("ship it").await;
+
+    let outcome = o.run_turn("hi").await.expect("turn ok");
+    assert!(matches!(outcome, ConversationOutcome::EndTurn { .. }));
+    assert_eq!(api.captured_msgs().await.len(), 2);
+    let history = o.session().lock().await.history.clone();
+    assert!(
+        history
+            .iter()
+            .any(|m| { m.text_content().contains("timeout after 30000ms") }),
+        "timeout feedback must be injected into the next turn"
+    );
+    assert!(o.get_active_goal().await.is_none());
+}
+
+#[tokio::test]
+async fn stop_goal_query_error_keeps_working_until_a_later_success() {
+    let api = Arc::new(MockApiClient::new(vec![end_turn("1"), end_turn("2")]));
+    let runner = Arc::new(ScriptedPromptRunner {
+        seen: StdMutex::new(Vec::new()),
+        scripted: StdMutex::new(VecDeque::from([
+            Err(PromptHookError::Query("provider 500".into())),
+            Ok(r#"{"ok": true, "reason": "done"}"#.to_string()),
+        ])),
+        on_call: None,
+    });
+    let hooks = exec_with_prompt_runner(runner).await;
+    let o = orch(api.clone(), hooks);
+    o.set_active_goal("ship it").await;
+
+    let outcome = o.run_turn("hi").await.expect("turn ok");
+    assert!(matches!(outcome, ConversationOutcome::EndTurn { .. }));
+    let history = o.session().lock().await.history.clone();
+    assert!(
+        history
+            .iter()
+            .any(|m| m.text_content().contains("provider 500")),
+        "query failures must also feed a reason into the next turn"
+    );
+    assert!(o.get_active_goal().await.is_none());
+}
+
+#[tokio::test]
+async fn stop_goal_explicit_cancel_escapes_before_second_goal_check() {
+    let api = Arc::new(MockApiClient::new(vec![end_turn("1")]));
+    let cancel = CancellationToken::new();
+    let cancel_for_runner = cancel.clone();
+    let runner = Arc::new(ScriptedPromptRunner {
+        seen: StdMutex::new(Vec::new()),
+        scripted: StdMutex::new(VecDeque::from([Ok(
+            r#"{"ok": false, "reason": "not yet"}"#.to_string(),
+        )])),
+        on_call: Some(Arc::new(move || cancel_for_runner.cancel())),
+    });
+    let hooks = exec_with_prompt_runner(runner.clone()).await;
+    let o = orch(api.clone(), hooks);
+    o.set_active_goal("ship it").await;
+
+    let outcome = o
+        .run_turn_with_cancel("hi", cancel)
+        .await
+        .expect("cancel path returns a turn outcome");
+    assert_eq!(outcome, TurnOutcome::Cancelled);
+    assert_eq!(api.captured_msgs().await.len(), 1);
+    assert_eq!(runner.seen.lock().unwrap().len(), 1);
+    assert!(
+        o.get_active_goal().await.is_some(),
+        "explicit cancel must not auto-clear an unmet goal"
+    );
+}
+
+#[tokio::test]
+async fn stop_goal_hard_budget_escape_stops_before_second_goal_check() {
+    let api = Arc::new(MockApiClient::new(vec![
+        end_turn_with_usage("1", 1_000, 500),
+        end_turn_with_usage("2", 1_000, 500),
+    ]));
+    let runner = Arc::new(ScriptedPromptRunner {
+        seen: StdMutex::new(Vec::new()),
+        scripted: StdMutex::new(VecDeque::from([
+            Ok(r#"{"ok": false, "reason": "not yet"}"#.to_string()),
+            Ok(r#"{"ok": true, "reason": "done"}"#.to_string()),
+        ])),
+        on_call: None,
+    });
+    let hooks = exec_with_prompt_runner(runner.clone()).await;
+    let (tx, _rx) = mpsc::channel(8);
+    let tracker = Arc::new(cost::CostTracker::new(
+        SessionId::new(),
+        Arc::new(cost::PricingCatalog::builtin_reference()),
+        tx,
+    ));
+    let mut cfg = OrchestratorConfig::default();
+    cfg.model = "claude-opus-4-6".into();
+    cfg.max_budget_nano_usd = Some(1_000_000);
+    let o = Arc::new(
+        ConversationOrchestrator::new(
+            cfg,
+            api.clone(),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            hooks,
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        )
+        .with_cost_tracker(tracker),
+    );
+    o.set_active_goal("ship it").await;
+
+    let err = o
+        .run_turn("hi")
+        .await
+        .expect_err("budget must stop the loop");
+    assert!(
+        matches!(
+            err,
+            orchestrator::OrchestratorError::MaxBudgetReached { .. }
+        ),
+        "hard budget remains an escape hatch, got {err:?}"
+    );
+    assert_eq!(api.captured_msgs().await.len(), 1);
+    assert_eq!(
+        runner.seen.lock().unwrap().len(),
+        1,
+        "the second goal check must not run once the hard budget is exceeded"
+    );
+    assert!(o.get_active_goal().await.is_some());
 }

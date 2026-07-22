@@ -39,6 +39,19 @@ mod tests {
     }
 
     #[test]
+    fn version_uses_claude_short_flag_and_keeps_uppercase_alias() {
+        for flag in ["-v", "-V", "--version"] {
+            let error = Argv::from_iter(["lingxi-cli", flag]).unwrap_err();
+            assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
+        }
+
+        use clap::CommandFactory;
+        let help = Argv::command().render_help().to_string();
+        assert!(help.contains("-v, --version"));
+        assert!(!help.contains("-V, --version"));
+    }
+
+    #[test]
     fn positional_prompt_is_oneshot() {
         let a = Argv::from_iter(["lingxi-cli", "fix the bug"]).unwrap();
         assert_eq!(a.prompt.as_deref(), Some("fix the bug"));
@@ -161,6 +174,21 @@ mod tests {
     fn fallback_model_default_none() {
         let a = Argv::from_iter(["lingxi-cli", "hi"]).unwrap();
         assert!(a.fallback_model.is_none());
+    }
+
+    #[test]
+    fn fallback_model_normalizes_ordered_csv_and_rejects_empty_entries() {
+        let a = Argv::from_iter([
+            "lingxi-cli",
+            "--fallback-model",
+            " sonnet , haiku,sonnet ",
+            "hi",
+        ])
+        .unwrap();
+        assert_eq!(a.fallback_model.as_deref(), Some("sonnet,haiku"));
+        assert!(
+            Argv::from_iter(["lingxi-cli", "--fallback-model", "sonnet,,haiku", "hi"]).is_err()
+        );
     }
 
     #[test]
@@ -652,6 +680,19 @@ mod tests {
         let a = Argv::from_iter(["lingxi-cli", "--no-chrome", "hi"]).unwrap();
         assert!(a.no_chrome);
         assert!(!a.chrome);
+    }
+
+    #[test]
+    fn chrome_flags_are_mutually_exclusive() {
+        assert!(Argv::from_iter(["lingxi-cli", "--chrome", "--no-chrome", "hi"]).is_err());
+    }
+
+    #[test]
+    fn remote_control_flag_accepts_optional_name() {
+        let unnamed = Argv::from_iter(["lingxi-cli", "--remote-control"]).unwrap();
+        assert_eq!(unnamed.remote_control.as_deref(), Some(""));
+        let named = Argv::from_iter(["lingxi-cli", "--remote-control", "desk"]).unwrap();
+        assert_eq!(named.remote_control.as_deref(), Some("desk"));
     }
 
     #[test]

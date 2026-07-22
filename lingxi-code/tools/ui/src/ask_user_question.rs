@@ -47,9 +47,10 @@
 //!   headless path keeps `PermissionResult::Allow` (vestigial — no interactive
 //!   approval substrate). `requires_user_interaction()` stays true.
 //! - The HTML-preview validation (`validateHtmlPreview`, gated on
-//!   `getQuestionPreviewFormat()==='html'`) and the auto-injected "Other" option
-//!   / `annotations` notes are TUI-render concerns with no headless Rust path:
-//!   `preview` is a passthrough string, HTML validation + Other-injection omitted.
+//!   `getQuestionPreviewFormat()==='html'`) remains out of scope here:
+//!   `preview` is still a passthrough string. The synthetic "Other" answer path
+//!   round-trips the user's text verbatim through `answers`; it does not add a
+//!   model-facing interpretation of that text.
 //!
 //! no-truncation: bounded structured output (`{questions, answers, annotations?}`).
 
@@ -80,6 +81,8 @@ use tool_api::tool_trait::{
 
 /// Tool name byte-lock (`prompt.ts:3`).
 pub const ASK_USER_QUESTION_TOOL_NAME: &str = "AskUserQuestion";
+/// Synthetic option label auto-provided by the interactive UI.
+pub const ASK_USER_QUESTION_OTHER_LABEL: &str = "Other";
 /// Maximum number of questions (`inputSchema` `.max(4)`).
 pub const MAX_ASK_QUESTIONS: usize = 4;
 /// Minimum number of questions (`inputSchema` `.min(1)`).
@@ -806,10 +809,8 @@ impl Tool for AskUserQuestionTool {
         let mut data = Map::new();
         data.insert("questions".into(), questions_to_json(&questions));
         data.insert("answers".into(), Value::Object(answers));
-        if let Some(ann) = input.get("annotations") {
-            if !ann.is_null() {
-                data.insert("annotations".into(), ann.clone());
-            }
+        if let Some(annotations) = input.get("annotations").filter(|value| !value.is_null()) {
+            data.insert("annotations".into(), annotations.clone());
         }
 
         Ok(ToolCallResult {
@@ -1080,6 +1081,62 @@ mod tests {
         });
         let out = tool.call(input, fresh_ctx(), fresh_tx()).await.expect("ok");
         assert_eq!(out.data["annotations"]["Q?"]["notes"], json!("looks good"));
+    }
+
+    struct CustomResolver {
+        answers: HashMap<String, String>,
+    }
+
+    #[async_trait]
+    impl AskUserQuestionResolver for CustomResolver {
+        async fn resolve(
+            &self,
+            _questions: &[Question],
+            _non_interactive: bool,
+        ) -> Result<HashMap<String, String>, ToolError> {
+            Ok(self.answers.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn custom_single_answer_is_preserved_without_generated_annotations() {
+        let mut answers = HashMap::new();
+        answers.insert("Q?".to_string(), "Use unicode 自由输入".to_string());
+        let tool = AskUserQuestionTool::with_resolver(
+            shell_test_ctx(dummy_out()),
+            Arc::new(CustomResolver { answers }),
+        );
+        let input = json!({
+            "questions": [{ "question": "Q?", "header": "H", "options": [opt("A", "a"), opt("B", "b")] }]
+        });
+        let out = tool.call(input, fresh_ctx(), fresh_tx()).await.expect("ok");
+        assert_eq!(out.data["answers"]["Q?"], json!("Use unicode 自由输入"));
+        assert!(out.data.get("annotations").is_none());
+    }
+
+    #[tokio::test]
+    async fn custom_multi_answer_preserves_input_annotations_only() {
+        let mut answers = HashMap::new();
+        answers.insert("Which?".to_string(), "A, pasted value".to_string());
+        let tool = AskUserQuestionTool::with_resolver(
+            shell_test_ctx(dummy_out()),
+            Arc::new(CustomResolver { answers }),
+        );
+        let input = json!({
+            "questions": [{
+                "question": "Which?",
+                "header": "H",
+                "multiSelect": true,
+                "options": [opt("A", "a"), opt("B", "b")]
+            }],
+            "annotations": { "Which?": { "notes": "keep me" } }
+        });
+        let out = tool.call(input, fresh_ctx(), fresh_tx()).await.expect("ok");
+        assert_eq!(out.data["answers"]["Which?"], json!("A, pasted value"));
+        assert_eq!(out.data["annotations"]["Which?"]["notes"], json!("keep me"));
+        assert!(out.data["annotations"]["Which?"]
+            .get("customResponses")
+            .is_none());
     }
 
     struct MultiResolver;

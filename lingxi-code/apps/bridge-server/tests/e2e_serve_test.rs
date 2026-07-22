@@ -8,9 +8,8 @@
 //! served by the same `McpEndpoint` the binary uses.
 //!
 //! Two things are asserted end-to-end (no live network for the turn — the config
-//! carries an EMPTY api key, so a turn fails fast at the api-client with a
-//! transport error, which the production `OrchestratorTurnDriver` surfaces as a
-//! terminal `ClientEvent::Error`):
+//! carries an EMPTY api key, so the bridge rejects the turn before entering the
+//! provider retry path and surfaces one terminal `ClientEvent::Error`):
 //!
 //! - the opening `hello` handshake replies with a `ServerHello` (compatible
 //!   versions), proving the served connection is the real F2-07 pump;
@@ -28,7 +27,7 @@ use bridge::wire::Frame;
 use bridge::{BridgeRequest, Capabilities, ClientHello, McpEndpoint, BRIDGE_PROTOCOL_VERSION};
 use bridge_server::boot;
 use client_protocol::commands::ClientCommand;
-use client_protocol::events::ClientEvent;
+use client_protocol::events::{ClientEvent, ErrorKindDto};
 use engine_desktop::DesktopConfig;
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
@@ -53,6 +52,7 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
         default_model_explicit: true,
         recent_models: Vec::new(),
         fallback_model: None,
+        custom_betas: Vec::new(),
         provider_profiles: None,
         routing: None,
         mcp_paths: vec![cwd.join(".mcp.json")],
@@ -165,8 +165,8 @@ fn submit(command: &ClientCommand) -> Frame {
 }
 
 /// The real boot path serves a connection whose opening `hello` is answered with
-/// a `ServerHello`, and a credential-less turn surfaces a terminal `Error` event
-/// (the orchestrator output stream reaches the connection's event sink).
+/// a `ServerHello`, and a credential-less turn is rejected once, before provider
+/// retries, with a sanitized actionable terminal error.
 #[tokio::test]
 async fn real_boot_handshakes_and_surfaces_turn_error() {
     let (_tmp, cfg) = sandbox_config();
@@ -192,9 +192,8 @@ async fn real_boot_handshakes_and_surfaces_turn_error() {
         other => panic!("expected ServerHello response, got {other:?}"),
     }
 
-    // (2) A turn with no credential fails fast and surfaces a terminal Error
-    //     event (not a hang) — proving the wired orchestrator's output stream
-    //     reaches the connection's event sink.
+    // (2) A turn with no credential fails fast at the bridge boundary and emits
+    //     exactly one terminal Error event (not provider retry telemetry).
     send_frame(
         &mut ws,
         &submit(&ClientCommand::SendPrompt {
@@ -206,29 +205,32 @@ async fn real_boot_handshakes_and_surfaces_turn_error() {
     )
     .await;
 
-    let mut saw_error = false;
-    for _ in 0..50 {
-        match next_frame(&mut ws).await {
-            Frame::Event(ClientEvent::Error { message, .. }) => {
-                assert!(!message.is_empty(), "error event must carry a message");
-                // The message must NOT leak a key (there is none, but be explicit).
-                assert!(!message.contains("sk-"), "error must not embed a key");
-                saw_error = true;
-                break;
-            }
-            // Any other streamed event (e.g. a TurnEnded path) is acceptable to
-            // scan past; the turn must terminate one way or another.
-            Frame::Event(ClientEvent::TurnEnded { .. }) => {
-                saw_error = true; // a clean terminal is also "did not hang"
-                break;
-            }
-            Frame::Event(_) => {}
-            other => panic!("unexpected frame after SendPrompt: {other:?}"),
+    let frame = tokio::time::timeout(Duration::from_secs(2), next_frame(&mut ws))
+        .await
+        .expect("credential rejection must not enter provider retry backoff");
+    match frame {
+        Frame::Event(ClientEvent::Error { kind, message }) => {
+            assert_eq!(kind, ErrorKindDto::Server);
+            assert_eq!(message, bridge_server::driver::CREDENTIAL_REQUIRED_MESSAGE);
+            assert!(
+                message.contains("--api-key-stdin"),
+                "error must be actionable"
+            );
+            assert!(!message.contains("sk-"), "error must not embed a key");
+            assert!(
+                !message.contains("api.anthropic.com"),
+                "error must not expose provider details"
+            );
         }
+        other => panic!("expected one credential-required Error, got {other:?}"),
     }
+
+    // Error is itself the protocol's terminal marker. No retry, TurnEnded, or
+    // duplicate terminal error may follow it for this submitted turn.
+    let duplicate = tokio::time::timeout(Duration::from_millis(300), ws.next()).await;
     assert!(
-        saw_error,
-        "a credential-less turn must terminate (Error or TurnEnded), not hang"
+        duplicate.is_err(),
+        "credential rejection must emit exactly one frame"
     );
 
     endpoint.shutdown().await;
@@ -240,9 +242,8 @@ async fn real_boot_handshakes_and_surfaces_turn_error() {
 #[tokio::test]
 async fn resolved_config_uses_adapter_gate() {
     let args = boot::BridgeArgs {
-        cwd: None,
         model: Some("claude-x".into()),
-        help: false,
+        ..Default::default()
     };
     let cfg = boot::resolve_desktop_config(&args);
     assert!(!cfg.use_noop_permission_gate);

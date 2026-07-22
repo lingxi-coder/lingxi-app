@@ -1895,9 +1895,8 @@ async fn settle_vs_kill_terminal_transition_is_atomic() {
         fs.clone(),
     ));
     let firer = RecordingFirer::new();
-    let registry = Arc::new(
-        TaskRegistry::new(runtime, fs, out_mgr).with_task_completed_firer(firer.clone()),
-    );
+    let registry =
+        Arc::new(TaskRegistry::new(runtime, fs, out_mgr).with_task_completed_firer(firer.clone()));
 
     const ITERS: usize = 400;
     for _ in 0..ITERS {

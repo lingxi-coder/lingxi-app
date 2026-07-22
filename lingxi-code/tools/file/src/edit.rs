@@ -15,6 +15,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
+use telemetry::otel;
 use telemetry::pii::{PiiTagged, Verified};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use telemetry::tengu::tool::{EDIT_COMPLETED, EDIT_FAILED, EDIT_STARTED};
@@ -804,6 +805,12 @@ impl Tool for FileEditTool {
             },
         );
 
+        let structured_patch = crate::structured_patch::build_structured_patch(&before, &after);
+        let (lines_added, lines_removed) = count_patch_lines(&structured_patch);
+        if lines_added > 0 || lines_removed > 0 {
+            otel::record_lines_of_code_change("Edit", lines_added, lines_removed);
+        }
+
         let duration_ms = started.elapsed().as_millis() as u64;
         self.emit_completed(&invocation_id, replacements, duration_ms)
             .await;
@@ -830,7 +837,7 @@ impl Tool for FileEditTool {
             "oldString": old_string,
             "newString": new_string,
             "originalFile": before,
-            "structuredPatch": crate::structured_patch::build_structured_patch(&before, &after),
+            "structuredPatch": structured_patch,
             "userModified": false,
             "replaceAll": replace_all,
         });
@@ -846,6 +853,21 @@ impl Tool for FileEditTool {
             mcp_meta: None,
         })
     }
+}
+
+fn count_patch_lines(hunks: &[crate::structured_patch::StructuredPatchHunk]) -> (u64, u64) {
+    let mut added = 0_u64;
+    let mut removed = 0_u64;
+    for hunk in hunks {
+        for line in &hunk.lines {
+            if line.starts_with('+') {
+                added += 1;
+            } else if line.starts_with('-') {
+                removed += 1;
+            }
+        }
+    }
+    (added, removed)
 }
 
 #[cfg(test)]

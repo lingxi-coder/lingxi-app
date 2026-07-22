@@ -574,9 +574,8 @@ fn build_result_content(
 /// Count persisted jobs in the project's single `scheduled_tasks.json`
 /// (`tasks.len()`). A missing/garbage file counts as zero. Backs the
 /// `MAX_JOBS = 50` limit (CronCreateTool.ts:25).
-fn count_existing_jobs(project_root: &Path) -> usize {
-    let path = cron_file_path(project_root);
-    match std::fs::read_to_string(&path) {
+async fn count_existing_jobs(fs: &dyn traits::FileSystem, project_root: &Path) -> usize {
+    match cron::tasks_file::read_tasks_body(fs, project_root).await {
         Ok(body) => cron::tasks_file::parse_tasks(&body).tasks.len(),
         Err(_) => 0,
     }
@@ -722,7 +721,7 @@ impl Tool for CronCreateTool {
         }
 
         // Too many scheduled jobs already (counted in the single project file).
-        if count_existing_jobs(&self.ctx.cwd()) >= MAX_JOBS {
+        if count_existing_jobs(self.ctx.fs.as_ref(), &self.ctx.cwd()).await >= MAX_JOBS {
             return Err(ValidationError(format!(
                 "Too many scheduled jobs (max {MAX_JOBS}). Cancel one first."
             )));
@@ -804,22 +803,41 @@ impl Tool for CronCreateTool {
         let mut bytes_written: usize = 0;
         if durable {
             let path = cron_file_path(&self.ctx.cwd());
-            if let Some(dir) = path.parent() {
-                if let Err(e) = tokio::fs::create_dir_all(dir).await {
-                    emit_failed(&bus, "io_create_dir", started.elapsed().as_millis() as u64).await;
-                    return Err(ToolError::Io(format!(
-                        "CronCreate: io error at {}: {e}",
-                        dir.display()
-                    )));
-                }
-            }
+            // Serialize in-process contenders before taking the blocking OS
+            // lock, then hold both locks across the entire read-modify-write.
+            let _process_guard = cron::lock_cron_file().await;
+            let _file_guard =
+                match cron::tasks_file::lock_scheduled_tasks(self.ctx.fs.as_ref(), &self.ctx.cwd())
+                    .await
+                {
+                    Ok(guard) => guard,
+                    Err(e) => {
+                        emit_failed(&bus, "io_lock", started.elapsed().as_millis() as u64).await;
+                        return Err(ToolError::Io(format!(
+                            "CronCreate: io error at {}: {e}",
+                            path.display()
+                        )));
+                    }
+                };
             // Read-modify-write the single `{ "tasks": [...] }` document: load the
             // existing tasks (empty if absent/garbage), append the new CronTask,
             // and write the whole file back.
-            let mut doc = match tokio::fs::read_to_string(&path).await {
+            let mut doc = match cron::tasks_file::read_tasks_body(
+                self.ctx.fs.as_ref(),
+                &self.ctx.cwd(),
+            )
+            .await
+            {
                 Ok(body) => cron::tasks_file::parse_tasks(&body),
                 Err(_) => cron::tasks_file::ScheduledTasks::default(),
             };
+            // Re-check under the lock; validate_input's early check is only a
+            // UX fast path and cannot enforce the cap against concurrent writers.
+            if doc.tasks.len() >= MAX_JOBS {
+                return Err(ToolError::InvalidInput(format!(
+                    "Too many scheduled jobs (max {MAX_JOBS}). Cancel one first."
+                )));
+            }
             doc.tasks.push(cron::tasks_file::CronTask {
                 id: id.clone(),
                 cron: cron.clone(),
@@ -831,7 +849,10 @@ impl Tool for CronCreateTool {
             });
             let body = cron::tasks_file::serialize_tasks(&doc);
             bytes_written = body.len();
-            if let Err(e) = tokio::fs::write(&path, body.as_bytes()).await {
+            if let Err(e) =
+                cron::tasks_file::write_tasks_body(self.ctx.fs.as_ref(), &self.ctx.cwd(), &body)
+                    .await
+            {
                 emit_failed(&bus, "io_write", started.elapsed().as_millis() as u64).await;
                 return Err(ToolError::Io(format!(
                     "CronCreate: io error at {}: {e}",
@@ -1078,6 +1099,29 @@ mod tests {
         assert!(written.contains("\"createdAt\": 0"));
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn durable_job_refuses_symlinked_project_state_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let victim = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(victim.path(), tmp.path().join(branding::DOT_DIR)).unwrap();
+        let tool = CronCreateTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
+
+        let err = tool
+            .call(
+                json!({"cron": "*/5 * * * *", "prompt": "escape", "durable": true}),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect_err("symlinked state directory must fail closed");
+        assert!(matches!(err, ToolError::Io(_)));
+        assert!(
+            !victim.path().join("scheduled_tasks.json").exists(),
+            "the symlink target must remain untouched"
+        );
+    }
+
     #[tokio::test]
     async fn durable_creates_append_into_one_file() {
         // Two durable creates accumulate in the SAME file (read-modify-write).
@@ -1094,6 +1138,37 @@ mod tests {
         }
         let doc = read_doc(tmp.path()).await;
         assert_eq!(doc.tasks.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn concurrent_durable_creates_do_not_lose_updates() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first = CronCreateTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
+        let second = CronCreateTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
+
+        let first_call = first.call(
+            json!({"cron": "*/5 * * * *", "prompt": "first", "durable": true}),
+            fresh_ctx(),
+            fresh_tx(),
+        );
+        let second_call = second.call(
+            json!({"cron": "0 9 * * *", "prompt": "second", "durable": true}),
+            fresh_ctx(),
+            fresh_tx(),
+        );
+        let (first_result, second_result) = tokio::join!(first_call, second_call);
+        first_result.expect("first concurrent create");
+        second_result.expect("second concurrent create");
+
+        let doc = read_doc(tmp.path()).await;
+        assert_eq!(doc.tasks.len(), 2);
+        let mut prompts = doc
+            .tasks
+            .iter()
+            .map(|task| task.prompt.as_str())
+            .collect::<Vec<_>>();
+        prompts.sort_unstable();
+        assert_eq!(prompts, ["first", "second"]);
     }
 
     #[tokio::test]

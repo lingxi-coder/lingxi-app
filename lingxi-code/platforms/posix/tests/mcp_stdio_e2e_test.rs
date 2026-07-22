@@ -16,30 +16,14 @@ use std::path::PathBuf;
 use std::time::Duration;
 use traits::{McpTransport, McpTransportSpec};
 
+mod support;
+
 fn fixture_bin_path() -> PathBuf {
-    // The fixture lives as a workspace member, so cargo emits its binary into
-    // the shared `target/<profile>/` directory. Locate it by walking up from
-    // this test crate's manifest dir to the workspace root.
-    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    // platforms/posix -> platforms -> workspace root
-    p.pop();
-    p.pop();
-    p.push("target");
-    p.push(if cfg!(debug_assertions) {
-        "debug"
-    } else {
-        "release"
-    });
-    p.push("mock_stdio_mcp");
-    p
+    support::mock_stdio_mcp_bin()
 }
 
 fn stdio_spec() -> McpTransportSpec {
     let bin = fixture_bin_path();
-    assert!(
-        bin.exists(),
-        "fixture binary missing at {bin:?}; run `cargo build -p mock_stdio_mcp` first"
-    );
     McpTransportSpec::Stdio {
         command: bin.to_string_lossy().into_owned(),
         args: vec![],

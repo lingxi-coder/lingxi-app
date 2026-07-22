@@ -659,8 +659,7 @@ mod tests {
     /// `isEnabled:()=>!je.DISABLE_X` dropping it from findCommand.
     #[tokio::test]
     async fn env_disabled_builtin_does_not_resolve() {
-        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = crate::builtin_support::names::ENV_LOCK.lock().unwrap();
         let var = "DISABLE_DOCTOR_COMMAND";
         let d = seeded_dispatcher();
 

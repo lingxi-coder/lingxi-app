@@ -1,96 +1,154 @@
-# LingXi Code — Desktop
+# LingXi Code Desktop — Internal Beta
 
-A faithful, production-structured recreation of the LingXi Code desktop design
-prototype, built with **Electron + Vite + React 18 + TypeScript**.
+The macOS desktop client runs the real LingXi Rust engine through a bundled,
+loopback-only bridge. The renderer shows only host-authoritative workspaces,
+sessions, models, tasks, permission requests, and diagnostics. It has no
+production mock-data fallback.
 
-The renderer is wired to the real engine over the bridge: the main process
-spawns the Rust `bridge-server`, connects through its discovery lockfile with
-the shared `@lingxi/bridge-client` SDK, streams `ClientEvent`s to the renderer,
-and surfaces engine permission requests as an allow/deny prompt. When the
-`bridge-server` binary is not present (no engine), the renderer falls back to the
-prototype's mock data so the design preview still works in a plain browser. See
-[`../README-bridge.md`](../README-bridge.md) for the end-to-end run path.
+## Beta scope
 
-## Stack
+- Apple Silicon macOS (`arm64`)
+- Native workspace selection and explicit workspace trust
+- Curated multi-provider connection setup (Anthropic, OpenAI, DeepSeek, Gemini,
+  OpenRouter, Z.AI, GLM Coding Plan, and GitHub Copilot token) with per-provider
+  encrypted storage
+- New, listed, and resumed local JSONL sessions
+- Streaming text, thinking, tool activity, cancellation, and permission prompts
+- Engine-reported model selection and background tasks
+- Sanitized in-memory diagnostics and controlled engine restart
+- Manual, checksum-verified updates
 
-- **electron-vite** — bundles the Electron `main`, `preload`, and `renderer`
-  with Vite (HMR in dev).
-- **React 18 + TypeScript** for the renderer.
-- A React context + the `tokens(dark)` factory drives the dark/light theme.
-  Colors are CSS `oklch(...)` values (Electron/Chromium supports oklch).
-- Google Fonts: Inter, Noto Sans SC, JetBrains Mono.
+Cloud accounts, billing, chat/cowork modes, automatic updates, Windows, and
+Linux are outside this Beta. Voice input is an optional local-browser control
+and depends on the macOS speech-recognition permission.
 
-## Project structure
+Internal testers should follow [INTERNAL_BETA.md](./INTERNAL_BETA.md).
 
-```
-src/
-  main/
-    index.ts           Electron main process (frameless macOS-style window)
-    bridge.ts          BridgeManager: spawns bridge-server, connects the client,
-                       wires the renderer IPC seam (resolves the binary path)
-  preload/index.ts     contextBridge surface (window.lingxi: prompts, permissions,
-                       event/state subscriptions)
-  renderer/
-    main.tsx           React entry
-    App.tsx            Root: window chrome, layout, top-level state
-    global.css         Reset, keyframes, scrollbar, .mono
-    bridge/
-      useBridge.ts     Live-conversation store: folds ClientEvents, queues
-                       permission requests, exposes approve/deny
-      conversation.ts  Pure ClientEvent → view-model reducer
-      lingxi.d.ts      Ambient typing for window.lingxi
-    theme/             tokens(dark/light) + Theme context
-    data/              All mock data (PROJECTS, RUN, FILES_CHANGED, MODELS, …)
-    components/
-      Icon.tsx         SVG icon set
-      primitives.tsx   Kbd, ModeTabs, account/menu icons, iconBtn
-      Sidebar.tsx      Chat/Cowork/Code tabs, project tree, account menu
-      TopBar.tsx       Repo breadcrumb, branch chip, diff pill, theme toggle
-      Stage.tsx        Agent-run scrollback (narration, agent cards, audio)
-      Composer.tsx     Prompt input, slash menu, mic recording + waveform
-      PermissionPrompt.tsx  Allow-once / allow-always / deny modal for engine
-                       permission requests
-      pickers.tsx      Permission / Model+Effort+Fast / Context donut popovers
-      RightPanel.tsx   Diff / Plan / Tasks / Shell tabs
-      BackgroundTasks.tsx  Running/finished task list + transcript view
-      settings/        Full multi-page Settings (nav + pages)
-```
+## Security model
 
-## Connecting to the engine
+Electron main is the local authority. The sandboxed renderer receives a narrow,
+runtime-validated API and never receives the stored credential, bridge bearer
+token, process environment, or filesystem access.
 
-On launch the main process resolves the `bridge-server` binary in this order:
+Workspace project settings are fingerprinted. Trust requires an explicit native
+confirmation and is revoked when `.mcp.json`, `.claude/settings*.json`, or
+`.lingxi/settings*.json` changes. Until trust is granted, the bridge ignores
+project executable configuration and the host rejects prompts and session/model/
+task commands.
 
-1. `BridgeManagerOptions.serverBin` (programmatic override), else
-2. the `LINGXI_BRIDGE_SERVER_BIN` environment variable, else
-3. a path derived **relative to the repo** — it walks up from the bundled main
-   process to the first existing `lingxi-code/target/{debug,release}/bridge-server`.
+Provider credentials are stored as per-provider generic-password items in the
+macOS Keychain and written once to bridge stdin as a bounded envelope. They are
+absent from arguments and environment variables. Legacy Safe Storage blobs are
+migrated once after a successful read, then removed. The bridge receives an
+allowlisted environment, publishes discovery data inside a private per-launch
+directory, requires protocol hello before commands, and accepts one
+authenticated client. OAuth/device sign-in remains a CLI/TUI-only flow in this
+Beta and is shown as such in the provider picker.
 
-If none resolve, the bridge surfaces a clear `error` connection state telling you
-to build the binary (`cd lingxi-code && cargo build -p bridge-server --bin
-bridge-server`) or set `LINGXI_BRIDGE_SERVER_BIN`. No absolute author paths are
-baked in, so a fresh clone works as long as the binary is built or the env var is
-set. The engine's `ANTHROPIC_API_KEY` / `LINGXI_API_BASE_URL` pass through from
-the environment untouched.
+## Development
 
-## Scripts
+Prerequisites: Node.js/npm, the Rust toolchain, and an Apple Silicon Mac for the
+release artifact.
 
 ```bash
-npm install        # install dependencies
+cd clients/shared
+npm install
+npm run build
 
-npm run dev        # launch Electron with Vite HMR
-npm run build      # type-check-free production build (main + preload + renderer)
-npm run typecheck  # tsc --noEmit for both node + web tsconfigs
+cd ../electron
+npm install
+npm run typecheck
+npm test
+npm run build
 ```
 
-`npm run build` and `npm run typecheck` are the verification gates and must both
-pass. (Launching the GUI requires a display; building + typechecking is the
-headless verification.)
+For development launch, build the sidecar first:
 
-## Notes
+```bash
+cd lingxi-code
+cargo build -p bridge-server --bin bridge-server
 
-- The window is frameless; the prototype draws its own macOS traffic-light
-  chrome inside the React tree.
-- Dark/light theme toggles live in the top bar (sun/moon) and in
-  Settings → General (system/light/dark tri-state).
-- The microphone composer uses `getUserMedia` + Web Audio for the live
-  waveform; if permission is denied the mic icon turns red.
+cd ../clients/electron
+npm run dev
+```
+
+`LINGXI_BRIDGE_SERVER_BIN` is accepted only in development. Packaged builds
+resolve the sidecar exclusively from their signed resources.
+
+## Build the internal Beta artifact
+
+```bash
+cd lingxi-code
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+RUSTFLAGS="--remap-path-prefix=${REPO_ROOT}=. \
+--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo-home \
+--remap-path-prefix=$HOME/.rustup=/rustup" \
+  cargo build --locked --release -p bridge-server --bin bridge-server
+
+cd ../clients/electron
+npm run package:mac
+npm run verify:package
+```
+
+`npm run verify:package` now runs both the static bundle audit and a packaged
+runtime smoke test. The smoke runner copies the final `.app` to a temporary
+path outside the repository, launches it under an isolated temporary `HOME`
+with renderer URL / sidecar override / API-key environment variables removed,
+uses a random remote-debugging port to confirm `window.lingxi`, truthful
+onboarding copy, renderer security invariants, and a keyless bundled-sidecar
+session/listing flow, then verifies the app and sidecar cleaned up their exact
+temporary runtime directories and processes.
+
+The gitignored `dist/` directory receives:
+
+- `LingXi-Code-<version>-mac-arm64/LingXi Code.app`
+- `LingXi-Code-<version>-mac-arm64.zip`
+- `LingXi-Code-<version>-mac-arm64.zip.sha256`
+
+The in-repo packager uses Electron's official application skeleton, bundles the
+release Rust sidecar at `Contents/Resources/bin/bridge-server`, removes
+development metadata, checks both binaries are arm64, scans for credentials and
+developer paths, applies an ad-hoc signature, and emits a SHA-256 checksum.
+
+The ad-hoc signature is intended only for approved internal distribution. A
+public or wider external release still requires Developer ID signing,
+notarization, stapling, and a separate release approval.
+
+## Install, update, and roll back
+
+1. Verify the ZIP using the accompanying SHA-256 file.
+2. Quit LingXi Code completely.
+3. Replace the existing `/Applications/LingXi Code.app` with the verified app.
+4. Launch it and complete the workspace/provider onboarding if required.
+
+Updates never delete `~/.lingxi` sessions or Electron user data. To roll back,
+quit the app and replace it with the previously retained verified Beta artifact.
+Because internal builds are ad-hoc signed, macOS may require an explicit local
+approval after the artifact is transferred to a different machine.
+
+## Verification gates
+
+```bash
+npm run typecheck
+npm test
+npm run build
+npm audit
+npm run verify:package
+```
+
+The packaged smoke coverage is intentionally limited to what can be asserted
+non-interactively on one machine. Manual follow-up is still required for
+Gatekeeper approval on transferred builds, Developer ID signing/notarization,
+and native trust-dialog copy on a tester's host.
+
+Rust release gates are run from `lingxi-code/`:
+
+```bash
+cargo fmt --check
+cargo test -p bridge -p bridge-server
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+RUSTFLAGS="--remap-path-prefix=${REPO_ROOT}=. \
+--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo-home \
+--remap-path-prefix=$HOME/.rustup=/rustup" \
+  cargo build --locked --release -p bridge-server --bin bridge-server
+```

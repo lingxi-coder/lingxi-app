@@ -88,7 +88,9 @@ pub fn render_message(
         RenderedMessage::AgentNotification { summary, .. } => {
             agent_notification_lines(summary, theme)
         }
-        RenderedMessage::CompactBoundary { .. } => compact_boundary_lines(theme),
+        RenderedMessage::CompactBoundary { summary, .. } => {
+            compact_boundary_lines(summary, verbose, theme)
+        }
         RenderedMessage::AssistantThinking { thinking, .. } => {
             thinking_lines(thinking, width, verbose, theme)
         }
@@ -556,6 +558,7 @@ mod tests {
                 RenderedMessage::CompactBoundary {
                     messages_before: 40,
                     messages_after: 4,
+                    summary: "Summary:\nkept context".to_string(),
                 },
                 false,
                 // Counts intentionally omitted (claude-code parity); the marker

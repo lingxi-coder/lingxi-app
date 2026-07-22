@@ -7,33 +7,15 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
+mod support;
+
 fn fixture_bin_path() -> PathBuf {
-    // The fixture lives as a workspace member, so cargo emits its binary into
-    // the shared `target/<profile>/` directory. Locate it by walking up from
-    // this test crate's manifest dir to the workspace root.
-    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    // platforms/posix -> platforms -> workspace root
-    p.pop();
-    p.pop();
-    p.push("target");
-    // Match the profile this test was built under (debug vs release).
-    p.push(if cfg!(debug_assertions) {
-        "debug"
-    } else {
-        "release"
-    });
-    p.push("mock_stdio_mcp");
-    p
+    support::mock_stdio_mcp_bin()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ping_roundtrips_via_stdio() {
     let bin = fixture_bin_path();
-    assert!(
-        bin.exists(),
-        "fixture binary missing at {bin:?}; run `cargo build -p mock_stdio_mcp` first"
-    );
-
     let cfg = StdioConfig {
         cmd: bin.to_string_lossy().into_owned(),
         args: vec![],
@@ -59,11 +41,6 @@ async fn ping_roundtrips_via_stdio() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn initialize_roundtrips_via_stdio() {
     let bin = fixture_bin_path();
-    assert!(
-        bin.exists(),
-        "fixture binary missing at {bin:?}; run `cargo build -p mock_stdio_mcp` first"
-    );
-
     let cfg = StdioConfig {
         cmd: bin.to_string_lossy().into_owned(),
         args: vec![],

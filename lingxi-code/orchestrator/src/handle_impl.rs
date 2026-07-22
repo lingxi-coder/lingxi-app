@@ -46,6 +46,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
             tracing::warn!(error = %err, "failed to close responses websocket session during clear_session");
         }
         let mut s = self.session.lock().await;
+        let old_session_id = s.session_id;
         s.history.clear();
         s.transcript_only_messages.clear();
         s.compact_summary_messages.clear();
@@ -66,8 +67,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
         // the freshly-cleared session — permanently disabling autocompact there
         // (a tripped breaker only clears on a successful compact, which can then
         // never run). Zero it alongside the cumulative-dropped-tokens reset.
-        *self.compaction_tracking.lock().await =
-            compaction::AutoCompactTrackingState::default();
+        *self.compaction_tracking.lock().await = compaction::AutoCompactTrackingState::default();
         // (parity 2.1.212) claude-code's clearConversation calls resetCostState
         // (yJe): a freshly-cleared session starts the cost footer/status line at
         // zero instead of carrying the prior conversation's accumulated total
@@ -79,6 +79,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
         }
         self.api_calls_recorded
             .store(0, std::sync::atomic::Ordering::SeqCst);
+        self.hooks.clear_session_hooks(old_session_id).await;
         Ok(())
     }
 
@@ -101,38 +102,45 @@ impl OrchestratorHandle for ConversationOrchestrator {
         session_id: protocol::SessionId,
         history: Vec<protocol::ConversationMessage>,
         last_jsonl_uuid: Option<String>,
+        active_goal: Option<ActiveGoalSnapshot>,
+        runtime: traits::ResumeRuntimeSnapshot,
     ) -> Result<(), HandleError> {
         self.abort_startup_responses_websocket_prewarm();
         if let Err(err) = self.api.close_responses_websocket_session().await {
             tracing::warn!(error = %err, "failed to close responses websocket session during resume_session");
         }
         let mut s = self.session.lock().await;
+        let old_session_id = s.session_id;
         s.history = history;
-        // The trait-level transport currently carries protocol messages only,
-        // not JSONL envelope flags. Never leak the previous session's compact
-        // visibility metadata into newly adopted message ids.
-        s.transcript_only_messages.clear();
-        s.compact_summary_messages.clear();
-        s.active_goal = None;
+        s.transcript_only_messages = runtime.transcript_only_message_ids.into_iter().collect();
+        s.compact_summary_messages = runtime.compact_summary_message_ids.into_iter().collect();
+        s.active_goal = active_goal.map(|goal| engine::session::ActiveGoalState {
+            condition: goal.condition,
+            set_at: goal.set_at,
+            last_reason: goal.last_reason,
+        });
         // Adopt the NAMED id (clear_session mints a fresh one; resume does NOT).
         s.session_id = session_id;
         drop(s);
-        // The protocol projection does not retain compactMetadata, so do not
-        // leak the prior live session's cumulative counter into the resumed
-        // transcript. A future typed boundary variant can seed this from the
-        // latest persisted boundary instead of starting the live counter at 0.
-        self.compaction_cumulative_dropped_tokens
-            .store(0, std::sync::atomic::Ordering::Relaxed);
-        // (review #8) Reset the autocompact circuit-breaker / rapid-refill
-        // tracking so an adopted session does not inherit the prior live
-        // session's tripped breaker or stale counters (the full-replay
-        // `with_resume` path seeds this from persisted metadata; this in-place
-        // trait adopt has no such seed, so a clean default is correct).
-        *self.compaction_tracking.lock().await =
-            compaction::AutoCompactTrackingState::default();
+        self.compaction_cumulative_dropped_tokens.store(
+            runtime.cumulative_dropped_tokens,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        *self.compaction_tracking.lock().await = compaction::AutoCompactTrackingState {
+            compacted: runtime.compacted,
+            turn_counter: runtime.turn_counter,
+            turn_id: runtime.turn_id,
+            consecutive_failures: runtime.consecutive_failures,
+            consecutive_rapid_refills: runtime.consecutive_rapid_refills,
+        };
+        if !runtime.loaded_tool_names.is_empty() {
+            self.tools.deferral().mark_loaded(runtime.loaded_tool_names);
+        }
         // Seed the parent-uuid chain so any future append chains off the
         // resumed tail (matching the M5-07 writer's chain semantics).
         *self.last_jsonl_uuid.lock().await = last_jsonl_uuid;
+        self.hooks.clear_session_hooks(old_session_id).await;
+        self.sync_active_goal_stop_hook_for_current_state().await;
         Ok(())
     }
 
@@ -184,21 +192,27 @@ impl OrchestratorHandle for ConversationOrchestrator {
             set_at: SystemTime::now(),
             last_reason: None,
         });
+        let snapshot = s.active_goal.clone();
+        drop(s);
+        self.persist_active_goal_state_to_jsonl(snapshot.as_ref())
+            .await;
+        self.sync_active_goal_stop_hook_for_current_state().await;
     }
 
     async fn clear_active_goal(&self) -> Option<ActiveGoalSnapshot> {
-        let mut s = self.session.lock().await;
-        s.active_goal.take().map(|goal| ActiveGoalSnapshot {
-            condition: goal.condition,
-            set_at: goal.set_at,
-            last_reason: goal.last_reason,
-        })
+        self.clear_active_goal_state_and_hook().await
     }
 
     async fn set_active_goal_last_reason(&self, reason: Option<String>) {
         let mut s = self.session.lock().await;
         if let Some(goal) = s.active_goal.as_mut() {
             goal.last_reason = reason;
+        }
+        let snapshot = s.active_goal.clone();
+        drop(s);
+        if snapshot.is_some() {
+            self.persist_active_goal_state_to_jsonl(snapshot.as_ref())
+                .await;
         }
     }
 
@@ -1060,6 +1074,68 @@ fn resolve_editor() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn hot_resume_restores_compaction_visibility_and_deferred_tools() {
+        use crate::test_support::{
+            noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+            StaticMemoryProvider,
+        };
+        use std::sync::Arc;
+
+        let tools = Arc::new(tool_api::registry::ToolRegistry::new());
+        let orch = crate::ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(Vec::new())),
+            tools.clone(),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+        let transcript_only = protocol::MessageId::new();
+        let compact_summary = protocol::MessageId::new();
+
+        traits::OrchestratorHandle::resume_session(
+            &orch,
+            protocol::SessionId::new(),
+            Vec::new(),
+            None,
+            None,
+            traits::ResumeRuntimeSnapshot {
+                transcript_only_message_ids: vec![transcript_only],
+                compact_summary_message_ids: vec![compact_summary],
+                loaded_tool_names: vec!["DeferredTool".to_string()],
+                cumulative_dropped_tokens: 4_321,
+                compacted: true,
+                turn_counter: 3,
+                turn_id: "turn-after-compact".to_string(),
+                consecutive_failures: 2,
+                consecutive_rapid_refills: 1,
+            },
+        )
+        .await
+        .expect("hot resume");
+
+        let session = orch.session.lock().await;
+        assert!(session.transcript_only_messages.contains(&transcript_only));
+        assert!(session.compact_summary_messages.contains(&compact_summary));
+        drop(session);
+        assert_eq!(
+            orch.compaction_cumulative_dropped_tokens
+                .load(std::sync::atomic::Ordering::Relaxed),
+            4_321
+        );
+        let tracking = orch.compaction_tracking.lock().await;
+        assert!(tracking.compacted);
+        assert_eq!(tracking.turn_counter, 3);
+        assert_eq!(tracking.turn_id, "turn-after-compact");
+        assert_eq!(tracking.consecutive_failures, 2);
+        assert_eq!(tracking.consecutive_rapid_refills, 1);
+        drop(tracking);
+        assert!(tools.deferral().is_loaded("DeferredTool"));
+    }
 
     #[test]
     fn apply_mcp_disabled_adds_removes_and_is_idempotent() {

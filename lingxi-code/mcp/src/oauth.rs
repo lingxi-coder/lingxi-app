@@ -58,6 +58,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt};
 use traits::{Clock, HttpTransport, McpTransportSpec};
 
 pub mod callback;
@@ -704,6 +705,58 @@ pub async fn perform_oauth_flow(
     on_auth_url: &OnAuthorizationUrl,
     scope_override: Option<&str>,
 ) -> Result<Tokens, OAuthError> {
+    perform_oauth_flow_inner(
+        http,
+        clock,
+        oauth,
+        server_name,
+        server_url,
+        on_auth_url,
+        scope_override,
+        None,
+    )
+    .await
+}
+
+/// Drive the OAuth flow while also accepting a pasted callback URL or raw
+/// authorization code from `manual_input`. The loopback listener remains live,
+/// so a browser on the same host can still complete the callback normally; the
+/// first valid source wins. This is the headless/SSH companion to
+/// [`perform_oauth_flow`].
+pub async fn perform_oauth_flow_with_manual_input(
+    http: &Arc<dyn HttpTransport>,
+    clock: &Arc<dyn Clock>,
+    oauth: &traits::McpOAuthConfigDto,
+    server_name: &str,
+    server_url: &str,
+    on_auth_url: &OnAuthorizationUrl,
+    scope_override: Option<&str>,
+    manual_input: &mut (dyn AsyncBufRead + Unpin + Send),
+) -> Result<Tokens, OAuthError> {
+    perform_oauth_flow_inner(
+        http,
+        clock,
+        oauth,
+        server_name,
+        server_url,
+        on_auth_url,
+        scope_override,
+        Some(manual_input),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn perform_oauth_flow_inner(
+    http: &Arc<dyn HttpTransport>,
+    clock: &Arc<dyn Clock>,
+    oauth: &traits::McpOAuthConfigDto,
+    server_name: &str,
+    server_url: &str,
+    on_auth_url: &OnAuthorizationUrl,
+    scope_override: Option<&str>,
+    manual_input: Option<&mut (dyn AsyncBufRead + Unpin + Send)>,
+) -> Result<Tokens, OAuthError> {
     // 1. Discovery.
     let meta =
         discover_auth_server_metadata(http, server_url, oauth.auth_server_metadata_url.as_deref())
@@ -768,7 +821,23 @@ pub async fn perform_oauth_flow(
     // 6. Wait for the redirect, validate state, capture the code. `redirect_uri`
     //    is echoed into the listener's 404 page ("registered redirect_uri must
     //    be {T}").
-    let params = listener.accept(&state, &redirect_uri).await?;
+    let code = if let Some(input) = manual_input {
+        let mut line = String::new();
+        tokio::select! {
+            params = listener.accept(&state, &redirect_uri) => params?.code,
+            read = input.read_line(&mut line) => {
+                let bytes = read.map_err(|e| OAuthError::Callback(format!("read manual callback: {e}")))?;
+                if bytes == 0 {
+                    return Err(OAuthError::Callback(
+                        "stdin closed before an authorization callback or code was provided".into(),
+                    ));
+                }
+                parse_manual_callback_input(&line, &state)?
+            }
+        }
+    } else {
+        listener.accept(&state, &redirect_uri).await?.code
+    };
 
     // 7. Exchange the code for tokens.
     exchange_code(
@@ -776,11 +845,58 @@ pub async fn perform_oauth_flow(
         clock,
         &meta,
         &client_id,
-        &params.code,
+        &code,
         &verifier,
         &redirect_uri,
     )
     .await
+}
+
+/// Parse a headless OAuth response pasted by the user. A bare value is treated
+/// as the authorization code. A callback URL/path must carry both `code` and a
+/// CSRF `state` matching the flow that produced the authorization URL.
+pub fn parse_manual_callback_input(
+    input: &str,
+    expected_state: &str,
+) -> Result<String, OAuthError> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err(OAuthError::Callback(
+            "empty authorization callback or code".into(),
+        ));
+    }
+
+    let query = if let Some((_, query)) = trimmed.split_once('?') {
+        query.split('#').next().unwrap_or(query)
+    } else {
+        return Ok(trimmed.to_string());
+    };
+
+    let mut code = None;
+    let mut state = None;
+    let mut provider_error = None;
+    for pair in query.split('&') {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        let decoded = urlencoding::decode(value)
+            .map_err(|e| OAuthError::Callback(format!("invalid callback encoding: {e}")))?
+            .into_owned();
+        match key {
+            "code" => code = Some(decoded),
+            "state" => state = Some(decoded),
+            "error" => provider_error = Some(decoded),
+            _ => {}
+        }
+    }
+    if let Some(error) = provider_error {
+        return Err(OAuthError::Callback(format!(
+            "authorization server returned {error}"
+        )));
+    }
+    if state.as_deref() != Some(expected_state) {
+        return Err(OAuthError::Callback("state mismatch".into()));
+    }
+    code.filter(|value| !value.is_empty())
+        .ok_or_else(|| OAuthError::Callback("callback is missing code".into()))
 }
 
 // ---------------------------------------------------------------------------
@@ -1321,6 +1437,34 @@ mod tests {
         // No scope param when empty.
         assert!(!url.contains("scope="));
         assert!(!verifier.is_empty());
+    }
+
+    #[test]
+    fn manual_callback_accepts_raw_code_or_matching_redirect() {
+        assert_eq!(
+            parse_manual_callback_input("raw-code\n", "expected").unwrap(),
+            "raw-code"
+        );
+        assert_eq!(
+            parse_manual_callback_input(
+                "http://localhost:3210/callback?code=a%2Bb&state=expected",
+                "expected",
+            )
+            .unwrap(),
+            "a+b"
+        );
+    }
+
+    #[test]
+    fn manual_callback_rejects_wrong_state_and_provider_error() {
+        assert!(matches!(
+            parse_manual_callback_input("/callback?code=x&state=wrong", "expected"),
+            Err(OAuthError::Callback(message)) if message == "state mismatch"
+        ));
+        assert!(matches!(
+            parse_manual_callback_input("/callback?error=access_denied&state=expected", "expected"),
+            Err(OAuthError::Callback(message)) if message.contains("access_denied")
+        ));
     }
 
     /// Metadata builder for the curated-scope tests (all optional fields off).

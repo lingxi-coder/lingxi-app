@@ -135,6 +135,10 @@ pub struct NetworkRestrictionConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FilesystemRestrictionConfig {
+    /// When `true`, disable filesystem sandboxing entirely while keeping the
+    /// surrounding sandbox runtime active.
+    #[serde(default)]
+    pub disabled: bool,
     /// Paths the sandboxed process may write to (mounted read-write).
     #[serde(default)]
     pub allow_write: Vec<String>,

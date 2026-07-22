@@ -223,7 +223,7 @@ pub fn cell_for_message(message: RenderedMessage) -> Box<dyn HistoryCell> {
             max_retries,
         )),
         M::RateLimit { text, upsell } => Box::new(system::RateLimitCell::new(text, upsell)),
-        M::CompactBoundary { .. } => Box::new(system::CompactBoundaryCell),
+        M::CompactBoundary { summary, .. } => Box::new(system::CompactBoundaryCell::new(summary)),
         M::AssistantToolUse { tool, input, .. } => Box::new(tool::ToolUseCell::new(tool, input)),
         M::UserToolResult {
             result,
@@ -549,6 +549,7 @@ mod tests {
             RenderedMessage::CompactBoundary {
                 messages_before: 4,
                 messages_after: 1,
+                summary: "Summary:\nkept context".into(),
             }
         ));
         assert!(maps_to::<message::ThinkingCell>(

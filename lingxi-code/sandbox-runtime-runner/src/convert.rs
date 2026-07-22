@@ -163,6 +163,7 @@ mod tests {
                 allow_mach_lookup: vec![],
             },
             filesystem: FilesystemRestrictionConfig {
+                disabled: false,
                 allow_write: vec!["/work".into()],
                 deny_write: vec!["/work/.git".into()],
                 deny_read: vec!["/secret".into()],

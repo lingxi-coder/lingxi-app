@@ -22,6 +22,7 @@
 //! `compact_boundary` subtype the sentinel-string detection in
 //! [`is_compact_boundary`] should switch to the subtype check.
 
+use engine::session::ActiveGoalState;
 use protocol::{ConversationMessage, MessageId};
 use serde::{Deserialize, Serialize};
 
@@ -146,6 +147,11 @@ pub struct CompactBoundaryMetadata {
     /// The loader's re-splice list for a preserved tail (`preservedMessages`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preserved_messages: Option<PreservedMessages>,
+    /// Active session-scoped `/goal` snapshot at compaction time. This keeps
+    /// an unmet goal resumable even when the original goal-update line is
+    /// summarized away behind a later compact boundary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_goal: Option<ActiveGoalState>,
     /// `uuid` of the last pre-compact message, used to relink the boundary into
     /// the on-disk chain (`logicalParentUuid`).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -191,6 +197,7 @@ pub fn create_compact_boundary(
         pre_compact_discovered_tools: tools,
         preserved_segment: None,
         preserved_messages: None,
+        active_goal: None,
         // Bare 8-4-4-4-12 uuid (NOT the `msg:`-prefixed Display form) — this
         // value must match on-disk JSONL line uuids, which are raw.
         logical_parent_uuid: last_pre_compact_message_uuid.map(|u| u.as_uuid().to_string()),

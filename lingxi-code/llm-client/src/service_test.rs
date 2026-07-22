@@ -1660,23 +1660,29 @@ mod tests {
     fn is_fast_mode_not_enabled_discriminates() {
         // claude-code `YNd`: only a 400 (InvalidRequest) whose message includes
         // "Fast mode is not enabled" triggers the fast-mode-disable-and-retry.
-        assert!(ApiService::is_fast_mode_not_enabled(&LlmError::InvalidRequest {
-            message: "Fast mode is not enabled for this account".into()
-        }));
+        assert!(ApiService::is_fast_mode_not_enabled(
+            &LlmError::InvalidRequest {
+                message: "Fast mode is not enabled for this account".into()
+            }
+        ));
         // A different 400 must NOT trigger it (would otherwise strip speed on any
         // 400 and mask real request errors).
-        assert!(!ApiService::is_fast_mode_not_enabled(&LlmError::InvalidRequest {
-            message: "messages: at least one message is required".into()
-        }));
+        assert!(!ApiService::is_fast_mode_not_enabled(
+            &LlmError::InvalidRequest {
+                message: "messages: at least one message is required".into()
+            }
+        ));
         // Non-400 errors never match (the classifier is 400-scoped via the
         // InvalidRequest discriminant).
-        assert!(!ApiService::is_fast_mode_not_enabled(&LlmError::Overloaded {
-            repeated: false
-        }));
-        assert!(!ApiService::is_fast_mode_not_enabled(&LlmError::RateLimited {
-            retry_after: None,
-            scope: None,
-        }));
+        assert!(!ApiService::is_fast_mode_not_enabled(
+            &LlmError::Overloaded { repeated: false }
+        ));
+        assert!(!ApiService::is_fast_mode_not_enabled(
+            &LlmError::RateLimited {
+                retry_after: None,
+                scope: None,
+            }
+        ));
     }
 
     /// Plan test: budget terminates after DEFAULT_MAX_RETRIES + 1 executions.
@@ -3129,7 +3135,7 @@ mod tests {
         let mut adapter =
             make_adapter_with_routing(transport.clone(), fallback_overrides, None, Some(0));
         // Global fallback also points somewhere — per-model must win.
-        adapter.fallback_model = Some("claude-sonnet-4-20250514".to_string());
+        adapter.fallback_models = vec!["claude-sonnet-4-20250514".to_string()];
 
         let result = adapter
             .messages_create_with_fallback(
@@ -3185,7 +3191,7 @@ mod tests {
             Some(0),
         );
         // Global fallback: opus → haiku.
-        adapter.fallback_model = Some("claude-haiku-4-20250307".to_string());
+        adapter.fallback_models = vec!["claude-haiku-4-20250307".to_string()];
 
         // claude-opus-4-6 is_non_custom_opus=true → allow_fallback=true for non-subscriber.
         let result = adapter
@@ -3267,6 +3273,14 @@ mod tests {
     }
 
     // ── Task 5: fallback chain walk tests ────────────────────────────────────
+
+    #[test]
+    fn fallback_csv_is_ordered_trimmed_and_deduplicated() {
+        assert_eq!(
+            super::parse_fallback_chain(" sonnet,haiku,sonnet "),
+            vec!["sonnet".to_string(), "haiku".to_string()]
+        );
+    }
 
     /// 2-entry chain: primary → chain[0] → chain[1] when all 529s.
     ///
@@ -3504,7 +3518,7 @@ mod tests {
             Some(0),
         );
         // Set global fallback only (no per-model chain).
-        adapter.fallback_model = Some("claude-sonnet-4-20250514".to_string());
+        adapter.fallback_models = vec!["claude-sonnet-4-20250514".to_string()];
 
         let result = adapter
             .messages_create_with_fallback(

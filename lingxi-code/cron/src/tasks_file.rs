@@ -21,6 +21,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use traits::{FileSystem, FlockGuard, FsError};
 
 /// Project-relative `.claude` subdir holding the single tasks file.
 pub const CLAUDE_DIR: &str = branding::DOT_DIR;
@@ -84,6 +85,63 @@ pub fn scheduled_tasks_lock_path(project_root: &Path) -> PathBuf {
     project_root.join(CLAUDE_DIR).join(SCHEDULED_TASKS_LOCK)
 }
 
+/// Root-relative path used by hardened filesystem operations.
+#[must_use]
+pub fn scheduled_tasks_relative_path() -> PathBuf {
+    PathBuf::from(CLAUDE_DIR).join(SCHEDULED_TASKS_FILE)
+}
+
+/// Root-relative advisory-lock path used for every scheduled-task mutation.
+#[must_use]
+pub fn scheduled_tasks_lock_relative_path() -> PathBuf {
+    PathBuf::from(CLAUDE_DIR).join(SCHEDULED_TASKS_LOCK)
+}
+
+/// Recover the project root from a canonical scheduled-tasks path.
+#[must_use]
+pub fn project_root_from_tasks_path(tasks_file: &Path) -> Option<&Path> {
+    let state_dir = tasks_file.parent()?;
+    if state_dir.file_name()? != std::ffi::OsStr::new(CLAUDE_DIR)
+        || tasks_file.file_name()? != std::ffi::OsStr::new(SCHEDULED_TASKS_FILE)
+    {
+        return None;
+    }
+    state_dir.parent().map(|root| {
+        if root.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            root
+        }
+    })
+}
+
+/// Acquire the cross-process lock for a scheduled-task read-modify-write.
+pub async fn lock_scheduled_tasks(
+    fs: &dyn FileSystem,
+    project_root: &Path,
+) -> Result<Box<dyn FlockGuard>, FsError> {
+    fs.flock_exclusive_rooted(project_root, &scheduled_tasks_lock_relative_path())
+        .await
+}
+
+/// Read the scheduled-task document without following project-local symlinks.
+pub async fn read_tasks_body(fs: &dyn FileSystem, project_root: &Path) -> Result<String, FsError> {
+    fs.read_file_rooted_no_follow(project_root, &scheduled_tasks_relative_path())
+        .await
+        .map(|content| content.content)
+}
+
+/// Atomically replace the scheduled-task document without following
+/// project-local symlinks.
+pub async fn write_tasks_body(
+    fs: &dyn FileSystem,
+    project_root: &Path,
+    body: &str,
+) -> Result<(), FsError> {
+    fs.write_file_rooted_atomic(project_root, &scheduled_tasks_relative_path(), body)
+        .await
+}
+
 /// Parse a tasks-file body into [`ScheduledTasks`]. A missing/empty/garbage body
 /// yields an empty document (claude-code treats an unreadable file as no tasks).
 #[must_use]
@@ -115,6 +173,14 @@ mod tests {
         assert_eq!(p, Path::new("/proj/.lingxi/scheduled_tasks.json"));
         let l = scheduled_tasks_lock_path(Path::new("/proj"));
         assert_eq!(l, Path::new("/proj/.lingxi/scheduled_tasks.lock"));
+        assert_eq!(
+            project_root_from_tasks_path(Path::new(".lingxi/scheduled_tasks.json")),
+            Some(Path::new("."))
+        );
+        assert_eq!(
+            project_root_from_tasks_path(Path::new("/proj/elsewhere/tasks.json")),
+            None
+        );
     }
 
     #[test]

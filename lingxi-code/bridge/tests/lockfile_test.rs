@@ -198,3 +198,51 @@ fn bridge_lockfile_drop_cleans_up() {
         "bridge lockfile must be deleted when LockfileGuard drops"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn lockfile_is_private_regular_and_exclusive() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = TempDir::new().unwrap();
+    let bridge_dir = tmp.path().join("bridge");
+    let lf = IdeLockfile::new_for_bridge_dir(bridge_dir.clone(), 43123, vec![]);
+    lf.write().expect("first exclusive write succeeds");
+
+    let dir_mode = std::fs::metadata(&bridge_dir).unwrap().permissions().mode() & 0o777;
+    let file_metadata = std::fs::symlink_metadata(lf.path()).unwrap();
+    assert_eq!(dir_mode, 0o700);
+    assert!(file_metadata.file_type().is_file());
+    assert_eq!(file_metadata.permissions().mode() & 0o777, 0o600);
+    assert_eq!(
+        lf.write().unwrap_err().kind(),
+        std::io::ErrorKind::AlreadyExists,
+        "an existing lockfile must never be overwritten"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn lockfile_write_refuses_symlink_targets_and_directories() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = TempDir::new().unwrap();
+    let real_dir = tmp.path().join("real");
+    std::fs::create_dir(&real_dir).unwrap();
+    let linked_dir = tmp.path().join("linked");
+    symlink(&real_dir, &linked_dir).unwrap();
+    let via_link = IdeLockfile::new_for_bridge_dir(linked_dir, 43124, vec![]);
+    assert!(
+        via_link.write().is_err(),
+        "symlink directory must be refused"
+    );
+
+    let bridge_dir = tmp.path().join("bridge");
+    std::fs::create_dir(&bridge_dir).unwrap();
+    let target = tmp.path().join("target");
+    std::fs::write(&target, b"do not overwrite").unwrap();
+    let lf = IdeLockfile::new_for_bridge_dir(bridge_dir, 43125, vec![]);
+    symlink(&target, lf.path()).unwrap();
+    assert!(lf.write().is_err(), "symlink lockfile must be refused");
+    assert_eq!(std::fs::read(&target).unwrap(), b"do not overwrite");
+}

@@ -28,6 +28,32 @@ jobs:
         working-directory: lingxi-code
         run: cargo test --workspace --all-features
 
+  pty-runtime-linux:
+    name: PTY runtime (Linux)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.82.0
+      - name: Exercise real Linux PTY and process groups
+        working-directory: lingxi-code
+        env:
+          RUST_BACKTRACE: "1"
+        run: cargo test -p platform-pty -- --nocapture --test-threads=1
+
+  pty-runtime-windows:
+    name: PTY runtime (Windows ConPTY)
+    runs-on: windows-2022
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.82.0
+      - name: Exercise real ConPTY and kill-on-close Job Object
+        working-directory: lingxi-code
+        env:
+          RUST_BACKTRACE: "1"
+        run: cargo test -p platform-pty -- --nocapture --test-threads=1
+
   lint:
     runs-on: ubuntu-latest
     steps:

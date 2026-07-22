@@ -33,7 +33,9 @@ impl StringArray {
     /// Returns Ok(None) if i is out of bounds.
     pub fn get(&self, i: usize) -> Result<Option<&str>, Error> {
         match self.get_bytes(i) {
-            Some(gb) => std::str::from_utf8(gb).map(|s| Some(s)).map_err(|e| e.into()),
+            Some(gb) => std::str::from_utf8(gb)
+                .map(|s| Some(s))
+                .map_err(|e| e.into()),
             None => Ok(None),
         }
     }

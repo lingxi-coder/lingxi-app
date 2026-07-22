@@ -38,6 +38,15 @@ fn linux_wrap_includes_ro_bind_root() {
 }
 
 #[test]
+fn linux_wrap_uses_rw_root_when_filesystem_disabled() {
+    let mut cfg = cfg(vec![], vec![]);
+    cfg.filesystem.disabled = true;
+    let wrapped = wrap_with_sandbox("ls", &cfg, Platform::Linux).expect("wrap ok");
+    assert!(wrapped.contains("--bind / /"), "got: {wrapped}");
+    assert!(!wrapped.contains("--ro-bind / /"), "got: {wrapped}");
+}
+
+#[test]
 fn linux_wrap_includes_allowwrite_bindings() {
     let wrapped =
         wrap_with_sandbox("ls", &cfg(vec!["/tmp/work"], vec![]), Platform::Linux).expect("wrap ok");

@@ -69,9 +69,8 @@ async fn emit_failed(bus: &Arc<AnalyticsBus>, kind: &str, duration_ms: u64) {
 }
 
 /// Does a persisted task with `id` exist in the project's single tasks file?
-async fn job_exists(project_root: &Path, id: &str) -> bool {
-    let path = cron_file_path(project_root);
-    match tokio::fs::read_to_string(&path).await {
+async fn job_exists(fs: &dyn traits::FileSystem, project_root: &Path, id: &str) -> bool {
+    match cron::tasks_file::read_tasks_body(fs, project_root).await {
         Ok(body) => cron::tasks_file::parse_tasks(&body)
             .tasks
             .iter()
@@ -158,7 +157,7 @@ impl Tool for CronDeleteTool {
             .and_then(Value::as_str)
             .ok_or_else(|| ValidationError("CronDelete: missing or non-string id".into()))?;
 
-        if !job_exists(&self.ctx.cwd(), id).await {
+        if !job_exists(self.ctx.fs.as_ref(), &self.ctx.cwd(), id).await {
             return Err(ValidationError(format!("No scheduled job with id '{id}'")));
         }
         // PARITY-GAP: TS validateInput also rejects deleting a cron owned by a
@@ -195,15 +194,30 @@ impl Tool for CronDeleteTool {
         // with the matching id and write the rest back. A missing file / missing
         // id surfaces the byte-exact "No scheduled job with id '<id>'" error.
         let path = cron_file_path(&self.ctx.cwd());
-        let body = match tokio::fs::read_to_string(&path).await {
-            Ok(b) => b,
-            Err(_) => {
-                emit_failed(&bus, "not_found", started.elapsed().as_millis() as u64).await;
-                return Err(ToolError::InvalidInput(format!(
-                    "No scheduled job with id '{id}'"
-                )));
-            }
-        };
+        let _process_guard = cron::lock_cron_file().await;
+        let _file_guard =
+            match cron::tasks_file::lock_scheduled_tasks(self.ctx.fs.as_ref(), &self.ctx.cwd())
+                .await
+            {
+                Ok(guard) => guard,
+                Err(e) => {
+                    emit_failed(&bus, "io_lock", started.elapsed().as_millis() as u64).await;
+                    return Err(ToolError::Io(format!(
+                        "CronDelete: io error at {}: {e}",
+                        path.display()
+                    )));
+                }
+            };
+        let body =
+            match cron::tasks_file::read_tasks_body(self.ctx.fs.as_ref(), &self.ctx.cwd()).await {
+                Ok(b) => b,
+                Err(_) => {
+                    emit_failed(&bus, "not_found", started.elapsed().as_millis() as u64).await;
+                    return Err(ToolError::InvalidInput(format!(
+                        "No scheduled job with id '{id}'"
+                    )));
+                }
+            };
         let mut doc = cron::tasks_file::parse_tasks(&body);
         let before = doc.tasks.len();
         doc.tasks.retain(|t| t.id != id);
@@ -215,7 +229,10 @@ impl Tool for CronDeleteTool {
         }
 
         let updated = cron::tasks_file::serialize_tasks(&doc);
-        if let Err(e) = tokio::fs::write(&path, updated.as_bytes()).await {
+        if let Err(e) =
+            cron::tasks_file::write_tasks_body(self.ctx.fs.as_ref(), &self.ctx.cwd(), &updated)
+                .await
+        {
             emit_failed(&bus, "io_remove", started.elapsed().as_millis() as u64).await;
             return Err(ToolError::Io(format!(
                 "CronDelete: io error at {}: {e}",

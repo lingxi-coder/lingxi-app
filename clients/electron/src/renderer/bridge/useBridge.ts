@@ -1,23 +1,10 @@
-/**
- * `useBridge()` — the renderer's live-conversation store (M10 A1 — C3).
- *
- * Subscribes to `window.lingxi.onEvent` / `onConnectionStateChanged`, folds the
- * inbound {@link ClientEvent} stream through the pure {@link reduceEvent} reducer,
- * and exposes the accumulated {@link ConversationState} plus a `sendPrompt` that
- * optimistically echoes the user's message before the engine streams its reply.
- *
- * When `window.lingxi` is absent (the design preview running in a plain browser),
- * the hook reports `hosted === false` and `connected === false`, so callers fall
- * back to the existing mock RUN — the static design preview keeps working.
- */
-
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type {
   ClientEvent,
   PermissionRequest,
   PermissionResponseDto,
 } from '@lingxi/bridge-client';
-import type { ConnectionState } from './lingxi';
+
 import {
   appendUserPrompt,
   emptyConversation,
@@ -25,75 +12,164 @@ import {
   type ConversationState,
   type UsageSnapshot,
 } from './conversation';
+import {
+  beginTaskRefresh,
+  emptyDesktopState,
+  reduceDesktopEvent,
+  type DesktopState,
+} from './desktopState';
+import type {
+  BootstrapState,
+  ConnectionState,
+  CredentialMetadata,
+  DiagnosticEntry,
+  ProviderCredentialMetadata,
+  ProviderCredentialUpdate,
+  WorkspaceMetadata,
+} from './lingxi';
 
-/** What `useBridge` returns to the renderer. */
 export interface UseBridge {
-  /** True when running inside the Electron host (i.e. `window.lingxi` exists). */
   readonly hosted: boolean;
-  /** The coarse connection lifecycle (always `idle` when not hosted). */
+  readonly loading: boolean;
+  readonly bootstrap: BootstrapState | null;
   readonly connection: ConnectionState;
-  /** True once the bridge socket is connected. */
   readonly connected: boolean;
-  /** The accumulated live conversation (drives the Stage when connected). */
   readonly conversation: ConversationState;
-  /** Latest live token-usage snapshot (`usage_update`), or `null`. */
+  readonly desktop: DesktopState;
   readonly usage: UsageSnapshot | null;
-  /** True while a turn is streaming (drives the composer's thinking affordance). */
   readonly running: boolean;
-  /**
-   * The oldest still-unanswered {@link PermissionRequest}, or `null`. Drives the
-   * allow/deny prompt; cleared once the user responds (or another arrives).
-   */
   readonly pendingPermission: PermissionRequest | null;
-  /** Submit a prompt: echo it immediately, then drive a turn via the host. */
-  sendPrompt(text: string): void;
-  /** Cancel the in-flight turn (optionally a specific `turnId`). */
-  cancel(turnId?: number): void;
-  /** Approve the given permission request (defaults to allow-once). */
-  approve(requestId: number, response?: PermissionResponseDto): void;
-  /** Deny the given permission request. */
-  deny(requestId: number): void;
+  readonly error: string | null;
+  clearError(): void;
+  sendPrompt(text: string): Promise<void>;
+  cancel(turnId?: number): Promise<void>;
+  approve(requestId: number, response?: PermissionResponseDto): Promise<void>;
+  deny(requestId: number): Promise<void>;
+  pickWorkspace(): Promise<WorkspaceMetadata | null>;
+  selectRecentWorkspace(path: string): Promise<WorkspaceMetadata>;
+  setWorkspaceTrusted(trusted: boolean): Promise<WorkspaceMetadata>;
+  setCredential(credential: string): Promise<CredentialMetadata>;
+  clearCredential(): Promise<CredentialMetadata>;
+  setProviderCredential(providerId: string, credential: string): Promise<ProviderCredentialUpdate>;
+  clearProviderCredential(providerId: string): Promise<ProviderCredentialMetadata>;
+  setThemePreference(theme: 'dark' | 'light'): Promise<void>;
+  restartBridge(): Promise<void>;
+  refreshDiagnostics(): Promise<DiagnosticEntry[]>;
+  copyDiagnostics(): Promise<void>;
+  exportDiagnostics(): Promise<string | null>;
+  refresh(): Promise<void>;
+  newSession(): Promise<void>;
+  resumeSession(sessionId: string): Promise<void>;
+  setModel(model: string): Promise<void>;
+  refreshTasks(): Promise<void>;
+  taskOutput(taskId: string): Promise<void>;
+  stopTask(taskId: string): Promise<void>;
 }
 
-/** Detect the Electron host once (stable across renders). */
 function getHost() {
   return typeof window !== 'undefined' ? window.lingxi : undefined;
+}
+
+function messageFrom(error: unknown): string {
+  if (error instanceof Error && error.message) return error.message;
+  return 'The desktop host could not complete that action.';
+}
+
+export function shouldResetBridgeRuntime(state: ConnectionState): boolean {
+  return state.status === 'spawning';
+}
+
+export function shouldClearPendingPermissions(state: ConnectionState): boolean {
+  return shouldResetBridgeRuntime(state)
+    || state.status === 'disconnected'
+    || state.status === 'error'
+    || state.status === 'idle';
+}
+
+export function resetBridgeRuntimeState(): {
+  conversation: ConversationState;
+  desktop: DesktopState;
+  permissionQueue: PermissionRequest[];
+} {
+  return {
+    conversation: emptyConversation(),
+    desktop: emptyDesktopState(),
+    permissionQueue: [],
+  };
 }
 
 export function useBridge(): UseBridge {
   const hostRef = useRef(getHost());
   const host = hostRef.current;
   const hosted = host !== undefined;
-
+  const [loading, setLoading] = useState(hosted);
+  const [bootstrap, setBootstrap] = useState<BootstrapState | null>(null);
   const [connection, setConnection] = useState<ConnectionState>({ status: 'idle' });
   const [conversation, setConversation] = useState<ConversationState>(emptyConversation);
-  // FIFO queue of parked permission requests; the head is rendered as the prompt.
-  // Queueing (rather than a single slot) means a second request that arrives
-  // before the first is answered is not silently dropped.
+  const [desktop, setDesktop] = useState<DesktopState>(emptyDesktopState);
   const [permissionQueue, setPermissionQueue] = useState<PermissionRequest[]>([]);
+  const [error, setError] = useState<string | null>(null);
 
-  // Subscribe to the live feed + connection lifecycle for the app's lifetime.
-  useEffect(() => {
+  const capture = useCallback((cause: unknown) => {
+    const message = messageFrom(cause);
+    setError(message);
+    throw cause;
+  }, []);
+
+  const resetRuntime = useCallback(() => {
+    const next = resetBridgeRuntimeState();
+    setConversation(next.conversation);
+    setDesktop(next.desktop);
+    setPermissionQueue(next.permissionQueue);
+  }, []);
+
+  const requestTaskList = useCallback(async () => {
     if (!host) return;
+    setDesktop((previous) => beginTaskRefresh(previous));
+    try {
+      await host.command({ type: 'task_list' });
+    } catch (cause) {
+      capture(cause);
+    }
+  }, [capture, host]);
+
+  useEffect(() => {
+    if (!host) {
+      setLoading(false);
+      setError('LingXi Desktop must run inside the signed Electron application.');
+      return;
+    }
 
     const offEvent = host.onEvent((event: ClientEvent) => {
-      setConversation((prev) => reduceEvent(prev, event));
+      setConversation((previous) => reduceEvent(previous, event));
+      setDesktop((previous) => reduceDesktopEvent(previous, event));
+      if (event.type === 'error') setError(event.message);
     });
     const offState = host.onConnectionStateChanged((state) => {
       setConnection(state);
+      if (shouldResetBridgeRuntime(state)) {
+        resetRuntime();
+        setError(null);
+      } else if (shouldClearPendingPermissions(state)) {
+        setPermissionQueue([]);
+      }
+      if (state.status === 'error') setError(state.message);
+      if (state.status === 'disconnected' && state.reason) setError(state.reason);
     });
     const offPermission = host.onPermission((request: PermissionRequest) => {
-      // Replace any duplicate of the same request id, else append.
-      setPermissionQueue((prev) => [
-        ...prev.filter((r) => r.request_id !== request.request_id),
+      setPermissionQueue((previous) => [
+        ...previous.filter((entry) => entry.request_id !== request.request_id),
         request,
       ]);
     });
 
-    // Pull the current state once in case we mounted after the first transition.
-    void host.connectionState().then(setConnection).catch(() => {
-      /* host not ready — the subscription will deliver the next transition. */
-    });
+    void host.bootstrap()
+      .then((snapshot) => {
+        setBootstrap(snapshot);
+        setConnection(snapshot.connection);
+      })
+      .catch((cause: unknown) => setError(messageFrom(cause)))
+      .finally(() => setLoading(false));
 
     return () => {
       offEvent();
@@ -102,69 +178,230 @@ export function useBridge(): UseBridge {
     };
   }, [host]);
 
-  const sendPrompt = useCallback(
-    (text: string) => {
-      const trimmed = text.trim();
-      if (!trimmed) return;
-      // Optimistic echo: the user message shows immediately, before the engine
-      // streams anything back.
-      setConversation((prev) => appendUserPrompt(prev, trimmed));
-      if (host) {
-        void host.sendPrompt(trimmed).catch(() => {
-          setConversation((prev) =>
-            reduceEvent(prev, {
-              type: 'error',
-              kind: { type: 'transport' },
-              message: 'failed to send prompt to the engine',
-            }),
-          );
-        });
-      }
-    },
-    [host],
-  );
+  useEffect(() => {
+    if (!host || connection.status !== 'connected' || !bootstrap?.workspace.trusted) return;
+    void Promise.all([
+      host.command({ type: 'list_sessions', limit: 100 }),
+      host.command({ type: 'list_models' }),
+      requestTaskList(),
+      host.command({ type: 'refresh_listings', which: [{ type: 'status' }, { type: 'doctor' }] }),
+    ]).catch((cause: unknown) => setError(messageFrom(cause)));
+  }, [bootstrap?.workspace.trusted, host, connection.status, requestTaskList]);
 
-  const cancel = useCallback(
-    (turnId?: number) => {
-      if (host) void host.cancel(turnId).catch(() => undefined);
-    },
-    [host],
-  );
-
-  /** Drop the head of the queue (the just-answered request) regardless of outcome. */
-  const dropPending = useCallback((requestId: number) => {
-    setPermissionQueue((prev) => prev.filter((r) => r.request_id !== requestId));
+  const patchBootstrap = useCallback((patch: Partial<BootstrapState>) => {
+    setBootstrap((previous) => previous ? { ...previous, ...patch } : previous);
   }, []);
 
-  const approve = useCallback(
-    (requestId: number, response?: PermissionResponseDto) => {
-      dropPending(requestId);
-      if (host) void host.approve(requestId, response).catch(() => undefined);
-    },
-    [host, dropPending],
-  );
+  const sendPrompt = useCallback(async (text: string) => {
+    const trimmed = text.trim();
+    if (!trimmed || !host) return;
+    setConversation((previous) => appendUserPrompt(previous, trimmed));
+    try {
+      await host.sendPrompt(trimmed);
+    } catch (cause) {
+      setConversation((previous) => reduceEvent(previous, {
+        type: 'error',
+        kind: { type: 'transport' },
+        message: 'Failed to send the prompt to the engine.',
+      }));
+      capture(cause);
+    }
+  }, [capture, host]);
 
-  const deny = useCallback(
-    (requestId: number) => {
-      dropPending(requestId);
-      if (host) void host.deny(requestId).catch(() => undefined);
-    },
-    [host, dropPending],
-  );
+  const cancel = useCallback(async (turnId?: number) => {
+    if (!host) return;
+    try { await host.cancel(turnId); } catch (cause) { capture(cause); }
+  }, [capture, host]);
 
-  const connected = connection.status === 'connected';
+  const dropPending = useCallback((requestId: number) => {
+    setPermissionQueue((previous) => previous.filter((entry) => entry.request_id !== requestId));
+  }, []);
+
+  const approve = useCallback(async (requestId: number, response?: PermissionResponseDto) => {
+    if (!host) return;
+    try {
+      await host.approve(requestId, response);
+      dropPending(requestId);
+    } catch (cause) { capture(cause); }
+  }, [capture, dropPending, host]);
+
+  const deny = useCallback(async (requestId: number) => {
+    if (!host) return;
+    try {
+      await host.deny(requestId);
+      dropPending(requestId);
+    } catch (cause) { capture(cause); }
+  }, [capture, dropPending, host]);
+
+  const pickWorkspace = useCallback(async () => {
+    if (!host) return null;
+    try {
+      const workspace = await host.pickWorkspace();
+      if (workspace) patchBootstrap({ workspace });
+      return workspace;
+    } catch (cause) { return capture(cause); }
+  }, [capture, host, patchBootstrap]);
+
+  const selectRecentWorkspace = useCallback(async (path: string) => {
+    if (!host) throw new Error('Desktop host unavailable.');
+    try {
+      const workspace = await host.setWorkspace(path);
+      patchBootstrap({ workspace });
+      return workspace;
+    } catch (cause) { return capture(cause); }
+  }, [capture, host, patchBootstrap]);
+
+  const setWorkspaceTrusted = useCallback(async (trusted: boolean) => {
+    if (!host) throw new Error('Desktop host unavailable.');
+    try {
+      const workspace = await host.setWorkspaceTrusted(trusted);
+      patchBootstrap({ workspace });
+      return workspace;
+    } catch (cause) { return capture(cause); }
+  }, [capture, host, patchBootstrap]);
+
+  const setCredential = useCallback(async (credential: string) => {
+    if (!host) throw new Error('Desktop host unavailable.');
+    try {
+      const metadata = await host.setCredential(credential);
+      patchBootstrap({ credential: metadata });
+      return metadata;
+    } catch (cause) { return capture(cause); }
+  }, [capture, host, patchBootstrap]);
+
+  const clearCredential = useCallback(async () => {
+    if (!host) throw new Error('Desktop host unavailable.');
+    try {
+      const credential = await host.clearCredential();
+      patchBootstrap({ credential });
+      return credential;
+    } catch (cause) { return capture(cause); }
+  }, [capture, host, patchBootstrap]);
+
+  const setProviderCredential = useCallback(async (providerId: string, credential: string) => {
+    if (!host) throw new Error('Desktop host unavailable.');
+    try {
+      const update = await host.setProviderCredential(providerId, credential);
+      patchBootstrap({
+        settings: update.settings,
+        credential: update.credential.providerId === 'anthropic' ? update.credential : bootstrap?.credential ?? { configured: false, encryptionAvailable: false },
+        providerCredentials: (bootstrap?.providerCredentials ?? []).map((entry) => entry.providerId === providerId ? update.credential : entry),
+      });
+      return update;
+    } catch (cause) { return capture(cause); }
+  }, [bootstrap?.credential, bootstrap?.providerCredentials, capture, host, patchBootstrap]);
+
+  const clearProviderCredential = useCallback(async (providerId: string) => {
+    if (!host) throw new Error('Desktop host unavailable.');
+    try {
+      const metadata = await host.clearProviderCredential(providerId);
+      patchBootstrap({
+        credential: metadata.providerId === 'anthropic' ? metadata : bootstrap?.credential ?? { configured: false, encryptionAvailable: false },
+        providerCredentials: (bootstrap?.providerCredentials ?? []).map((entry) => entry.providerId === providerId ? metadata : entry),
+      });
+      return metadata;
+    } catch (cause) { return capture(cause); }
+  }, [bootstrap?.credential, bootstrap?.providerCredentials, capture, host, patchBootstrap]);
+
+  const setThemePreference = useCallback(async (theme: 'dark' | 'light') => {
+    if (!host) return;
+    try {
+      const settings = await host.updateSettings({ theme });
+      patchBootstrap({ settings });
+    } catch (cause) { capture(cause); }
+  }, [capture, host, patchBootstrap]);
+
+  const restartBridge = useCallback(async () => {
+    if (!host) return;
+    setError(null);
+    try { await host.restartBridge(); } catch (cause) { capture(cause); }
+  }, [capture, host]);
+
+  const refreshDiagnostics = useCallback(async () => {
+    if (!host) return [];
+    try {
+      const diagnostics = await host.diagnostics();
+      patchBootstrap({ diagnostics });
+      return diagnostics;
+    } catch (cause) { return capture(cause); }
+  }, [capture, host, patchBootstrap]);
+
+  const copyDiagnostics = useCallback(async () => {
+    if (!host) return;
+    try { await host.copyDiagnostics(); } catch (cause) { capture(cause); }
+  }, [capture, host]);
+
+  const exportDiagnostics = useCallback(async () => {
+    if (!host) return null;
+    try { return await host.exportDiagnostics(); } catch (cause) { return capture(cause); }
+  }, [capture, host]);
+
+  const command = useCallback(async (value: Parameters<NonNullable<typeof host>['command']>[0]) => {
+    if (!host) return;
+    try { await host.command(value); } catch (cause) { capture(cause); }
+  }, [capture, host]);
+
+  const refresh = useCallback(async () => {
+    await Promise.all([
+      command({ type: 'list_sessions', limit: 100 }),
+      command({ type: 'list_models' }),
+      requestTaskList(),
+      command({ type: 'refresh_listings', which: [{ type: 'status' }, { type: 'doctor' }] }),
+      refreshDiagnostics(),
+    ]);
+  }, [command, refreshDiagnostics, requestTaskList]);
+
+  const newSession = useCallback(
+    () => command({ type: 'new_session', model: desktop.currentModel ?? undefined }),
+    [command, desktop.currentModel],
+  );
+  const resumeSession = useCallback(
+    (sessionId: string) => command({ type: 'resume_session', session_id: sessionId }),
+    [command],
+  );
+  const setModel = useCallback((model: string) => command({ type: 'set_model', model }), [command]);
+  const refreshTasks = useCallback(() => requestTaskList(), [requestTaskList]);
+  const taskOutput = useCallback(
+    (taskId: string) => command({ type: 'task_output', task_id: taskId, offset: 0 }),
+    [command],
+  );
+  const stopTask = useCallback((taskId: string) => command({ type: 'task_stop', task_id: taskId }), [command]);
 
   return {
     hosted,
+    loading,
+    bootstrap,
     connection,
-    connected,
+    connected: connection.status === 'connected',
     conversation,
+    desktop,
     usage: conversation.usage,
     running: conversation.running,
     pendingPermission: permissionQueue[0] ?? null,
+    error,
+    clearError: () => setError(null),
     sendPrompt,
     cancel,
     approve,
     deny,
+    pickWorkspace,
+    selectRecentWorkspace,
+    setWorkspaceTrusted,
+    setCredential,
+    clearCredential,
+    setProviderCredential,
+    clearProviderCredential,
+    setThemePreference,
+    restartBridge,
+    refreshDiagnostics,
+    copyDiagnostics,
+    exportDiagnostics,
+    refresh,
+    newSession,
+    resumeSession,
+    setModel,
+    refreshTasks,
+    taskOutput,
+    stopTask,
   };
 }

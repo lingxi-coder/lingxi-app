@@ -2976,9 +2976,7 @@ mod tests {
                 &self,
                 _req: protocol::HttpRequest,
             ) -> Result<traits::http::SseStream, HttpError> {
-                let n = self
-                    .calls
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 if n == 0 {
                     // First connect: transient capacity 529 (== overloaded).
                     return Err(HttpError::Status {
@@ -2997,17 +2995,18 @@ mod tests {
                     ) -> std::task::Poll<Option<Self::Item>> {
                         self.0 += 1;
                         let ev = match self.0 {
-                            1 => json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "text", "text": "" } }),
-                            2 => json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "text_delta", "text": "recovered" } }),
+                            1 => {
+                                json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "text", "text": "" } })
+                            }
+                            2 => {
+                                json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "text_delta", "text": "recovered" } })
+                            }
                             3 => json!({ "type": "content_block_stop", "index": 0 }),
                             4 => json!({ "type": "message_stop" }),
                             _ => return std::task::Poll::Ready(None),
                         };
                         std::task::Poll::Ready(Some(Ok(protocol::SseEvent {
-                            event_type: ev
-                                .get("type")
-                                .and_then(Value::as_str)
-                                .map(str::to_string),
+                            event_type: ev.get("type").and_then(Value::as_str).map(str::to_string),
                             data: ev.to_string(),
                             id: None,
                         })))

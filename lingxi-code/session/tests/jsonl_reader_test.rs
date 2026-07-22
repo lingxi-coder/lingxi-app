@@ -136,6 +136,8 @@ const MIXED: &str = concat!(
 fn route_lines_keeps_only_transcript_messages_and_skips_malformed() {
     let routed = route_lines(MIXED);
 
+    assert_eq!(routed.malformed_line_count, 1);
+
     // 4 chain participants in FILE ORDER: user, assistant, attachment, system.
     let order: Vec<(&str, &str)> = routed
         .messages_in_order

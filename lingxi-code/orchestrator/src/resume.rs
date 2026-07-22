@@ -13,6 +13,7 @@
 use crate::config::OrchestratorConfig;
 use crate::conversation::{ConversationOrchestrator, NoStreamingApiClient, OrchestratorApiClient};
 use crate::test_support::{HookExecutor, PermissionGate};
+use engine::session::ActiveGoalState;
 use engine::SessionState;
 use protocol::{ContentBlock, ConversationMessage, MessageId, SessionId};
 use session::jsonl::{load_session, JsonlMessage, JsonlWriter, LoaderError};
@@ -50,6 +51,37 @@ pub struct ReplayedSession {
     /// This is not representable in `SessionState.history`, but must survive a
     /// cold resume for effort and compaction behavior to remain continuous.
     pub runtime_metadata: ResumeRuntimeMetadata,
+}
+
+impl ReplayedSession {
+    /// Project the JSONL-only state into the leaf trait used by bridge/mobile
+    /// hot-resume. Keeping this conversion beside replay prevents individual
+    /// hosts from restoring only a subset of compaction state.
+    #[must_use]
+    pub fn handle_runtime_snapshot(&self) -> traits::ResumeRuntimeSnapshot {
+        let tracking = &self.runtime_metadata.compaction_tracking;
+        traits::ResumeRuntimeSnapshot {
+            transcript_only_message_ids: self
+                .state
+                .transcript_only_messages
+                .iter()
+                .copied()
+                .collect(),
+            compact_summary_message_ids: self
+                .state
+                .compact_summary_messages
+                .iter()
+                .copied()
+                .collect(),
+            loaded_tool_names: session::jsonl::pre_compact_discovered_tools(&self.messages),
+            cumulative_dropped_tokens: self.runtime_metadata.cumulative_dropped_tokens,
+            compacted: tracking.compacted,
+            turn_counter: tracking.turn_counter,
+            turn_id: tracking.turn_id.clone(),
+            consecutive_failures: tracking.consecutive_failures,
+            consecutive_rapid_refills: tracking.consecutive_rapid_refills,
+        }
+    }
 }
 
 /// Runtime state recoverable from a persisted JSONL transcript.
@@ -146,21 +178,23 @@ fn build_state_from_jsonl(
                     .get("isMeta")
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false);
-                if m
-                    .extra
+                if m.extra
                     .get("isVisibleInTranscriptOnly")
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false)
                 {
-                    state.transcript_only_messages.insert(MessageId::from_uuid(msg_uuid));
+                    state
+                        .transcript_only_messages
+                        .insert(MessageId::from_uuid(msg_uuid));
                 }
-                if m
-                    .extra
+                if m.extra
                     .get("isCompactSummary")
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false)
                 {
-                    state.compact_summary_messages.insert(MessageId::from_uuid(msg_uuid));
+                    state
+                        .compact_summary_messages
+                        .insert(MessageId::from_uuid(msg_uuid));
                 }
                 state.history.push(ConversationMessage::User {
                     id: MessageId::from_uuid(msg_uuid),
@@ -200,6 +234,9 @@ fn build_state_from_jsonl(
                 last_uuid = Some(msg_uuid);
             }
             _ => {
+                if let Some(active_goal) = goal_state_from_message(m) {
+                    state.active_goal = active_goal;
+                }
                 // system / compact_boundary / sidechain / agent-internal — skip
                 // for history replay, but still advance the chain pointer so
                 // the next append's parent_uuid is anchored to the last
@@ -214,9 +251,30 @@ fn build_state_from_jsonl(
     (state, last_uuid, resume_runtime_metadata(messages))
 }
 
+fn goal_state_from_message(message: &JsonlMessage) -> Option<Option<ActiveGoalState>> {
+    if message.message_type != "system" {
+        return None;
+    }
+    if message
+        .extra
+        .get("subtype")
+        .and_then(serde_json::Value::as_str)
+        == Some("thread_goal_updated")
+    {
+        let goal_state = message.extra.get("goalState")?;
+        return serde_json::from_value::<Option<ActiveGoalState>>(goal_state.clone()).ok();
+    }
+    let compact_metadata = message.extra.get("compactMetadata")?;
+    let goal_state = compact_metadata.get("activeGoal")?;
+    serde_json::from_value::<Option<ActiveGoalState>>(goal_state.clone()).ok()
+}
+
 fn is_compact_boundary(message: &JsonlMessage) -> bool {
     message.message_type == "system"
-        && message.extra.get("subtype").and_then(serde_json::Value::as_str)
+        && message
+            .extra
+            .get("subtype")
+            .and_then(serde_json::Value::as_str)
             == Some("compact_boundary")
 }
 
@@ -227,8 +285,7 @@ fn is_compact_boundary(message: &JsonlMessage) -> bool {
 fn resume_runtime_metadata(messages: &[JsonlMessage]) -> ResumeRuntimeMetadata {
     let effort = messages.iter().rev().find_map(|m| {
         if m.message_type != "assistant"
-            || m
-                .extra
+            || m.extra
                 .get("isApiErrorMessage")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false)
@@ -275,7 +332,10 @@ fn resume_runtime_metadata(messages: &[JsonlMessage]) -> ResumeRuntimeMetadata {
             .iter()
             .rev()
             .find(|message| message.message_type == "assistant")
-            .map_or_else(|| messages[last_boundary].uuid.clone(), |message| message.uuid.clone());
+            .map_or_else(
+                || messages[last_boundary].uuid.clone(),
+                |message| message.uuid.clone(),
+            );
 
         // A first compact stores zero rapid refills. Each later compact whose
         // predecessor is fewer than the configured turn window away increments
@@ -410,6 +470,7 @@ impl ConversationOrchestrator {
         if let Some(writer) = jsonl_writer {
             orch.jsonl_writer = Some(writer);
         }
+        orch.sync_active_goal_stop_hook_for_current_state().await;
         Ok(orch)
     }
 }

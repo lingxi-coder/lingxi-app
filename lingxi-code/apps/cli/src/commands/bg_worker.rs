@@ -1,57 +1,44 @@
 //! `lingxi-cli __bg-run <short>` — the hidden background-agent **worker**
-//! (increment 3 of the coherent-minimum daemon).
+//! and PTY supervisor.
 //!
 //! This is the detached process the daemon supervisor spawns (never
-//! user-facing) to actually EXECUTE a `--bg` job. It closes the gap the
-//! foundation left open: `--bg` persisted a `state:"working"` phantom job but
-//! nothing ran it. The worker:
+//! user-facing) to host a `--bg` job:
 //!
-//! 1. Reads its `jobs/<short>/state.json` (the durable dispatch artifact the
-//!    `--bg` CLI wrote) to recover the `initialPrompt`, `cwd`, and `sessionId`.
+//! 1. Reads `state.json` plus the owner-only, versioned `launch.json`.
 //!    A missing or already-terminal job is a no-op (exit 0) — the supervisor's
 //!    at-least-once spawn is idempotent this way.
-//! 2. Registers a LIVE `kind:"bg"` session ([`SessionRegistration::register_bg`])
-//!    keyed by `jobId=<short>` so `agents --json` can match the live worker to
-//!    its job row, and marks it `busy`. The registration is dropped (unlinked)
-//!    on exit (RAII).
-//! 3. Builds a headless runtime for the job cwd (synthesizing a print-shaped,
-//!    non-`--background` [`Argv`] so it reuses the same
-//!    [`build_runtime`](crate::init::build_runtime) → `run_turn` path as
-//!    `--print`, and does NOT recursively re-dispatch) and runs the turn.
-//! 4. Rewrites `state.json` to the reader-recognized terminal state — `"done"`
+//! 2. Starts the authenticated protocol-v2 attach endpoint and spawns the
+//!    hidden `__bg-pty-session` child in a real PTY/ConPTY.
+//! 3. Supervises byte input, resize, detach/re-attach, process-tree shutdown,
+//!    output drain, and the PID-reuse-safe `pty.json` record. The child owns the
+//!    live [`SessionRegistration`] and mounts the ordinary interactive TUI;
+//!    becoming idle does not end the worker.
+//! 4. Rewrites `state.json` to the terminal state only when that TUI exits — `"done"`
 //!    on success, `"failed"` on error — via
 //!    [`agents_registry::update_job_state`], which preserves the pinned key
 //!    order and clears `workerPid`.
 //!
-//! The ACTUAL `run_turn` is injected behind the [`run_worker_core`] `execute`
+//! The actual supervisor is injected behind the [`run_worker_core`] `execute`
 //! seam (exactly like `daemon.rs` injects `sleep`/`WorkerSpawner`), so a unit
 //! test drives the `working → done`/`failed` transition with a stubbed executor
 //! and NO live LLM.
 //!
 //! The supervisor spawns this worker with the `LINGXI_*` background-session
-//! environment ([`crate::commands::daemon`]'s `bg_worker_env`), so the turn
+//! environment ([`crate::commands::daemon`]'s `bg_worker_env`), so the child
 //! receives the `# Background Session` prompt section and `/stop` resolves the
-//! job; a vanished worker is respawned by the supervisor with a bounded budget.
+//! job. A vanished worker is failed closed to avoid duplicate side effects.
 //!
 //! The worker also owns an authenticated live attach socket when the daemon
-//! provides `LINGXI_BG_ATTACH_*` env. `agents attach` connects to that socket
+//! provides `LINGXI_BG_ATTACH_*` env. `agents attach` connects to that endpoint
 //! while the worker is still running, avoiding a second `--resume` JSONL writer.
-//! Attached terminals can feed follow-up input and Ctrl-C control back into the
-//! same live turn loop.
+//! Every byte except Ctrl-] reaches the child unchanged; Ctrl-] only detaches.
 
 use crate::agents_registry::{self, SessionRegistration};
-use crate::argv::Argv;
-use crate::daemon_roster::Launch;
+use crate::background_launch::{BackgroundLaunchKind, BackgroundLaunchSpec};
 use crate::exit_codes;
-use crate::output::{OutputSink, PlainSink};
-use crate::output_adapter::SinkAdapter;
-use orchestrator::TurnOutcome;
-use std::collections::VecDeque;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
-use traits::{SlashCommandDispatcher, SlashDispatchResult};
 
 /// `__bg-run` subcommand args: the 8-hex job short id to execute.
 #[derive(Debug, Clone, clap::Args)]
@@ -60,39 +47,25 @@ pub struct Cli {
     pub short: String,
 }
 
-/// The job fields a worker needs to execute a turn, lifted out of
-/// `state.json`. Passed to the injected executor.
+/// Hidden interactive child launched inside the worker-owned PTY.
+#[derive(Debug, Clone, clap::Args)]
+pub struct PtySessionCli {
+    /// The `jobs/<short>/launch.json` context to mount.
+    pub short: String,
+}
+
+/// Durable job identity passed to the injected PTY supervisor.
 #[derive(Debug, Clone)]
 pub struct JobSpec {
     /// The job short id (`jobs/<short>/`).
     pub short: String,
-    /// Optional initial turn prompt for this spawn.
-    pub prompt: Option<String>,
-    /// The directory the turn should run in (the persisted `cwd`).
-    pub cwd: String,
-    /// The worker's session UUID (persisted `sessionId`).
-    pub session_id: String,
-    /// Display label for the live session record (name → intent fallback).
-    pub name: Option<String>,
-    /// How the worker should seed/open the session before any follow-up input.
-    pub launch: WorkerLaunch,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WorkerLaunch {
-    Prompt,
-    Resume {
-        transcript_path: Option<PathBuf>,
-        fork: bool,
-        flag_args: Vec<String>,
-    },
+    /// Complete owner-only launch context. This is the sole source for prompt,
+    /// cwd, resume/fork transcript, runtime flags, and child environment.
+    pub launch: BackgroundLaunchSpec,
 }
 
 /// Production entrypoint: resolve the shared config home and drive
-/// [`run_worker_core`] with the REAL `run_turn`-backed executor. The executor
-/// captures `config_home` so it can DRAIN any durable offline replies queued for
-/// this job (`jobs/<short>/replies/`) and deliver them as follow-up turns on
-/// (re)spawn — the "reliable reply delivery when no live worker" path.
+/// [`run_worker_core`] with the real PTY supervisor.
 pub async fn run(cli: &Cli) -> i32 {
     let config_home = crate::run::daemon_runtime_dir();
     let exec_home = config_home.clone();
@@ -122,427 +95,400 @@ where
     if agents_registry::job_is_terminal(&job) {
         return exit_codes::SUCCESS;
     }
-    let launch = job_launch_for(config_home, short, &job);
-    let prompt = job
-        .initial_prompt
-        .clone()
-        .filter(|value| !value.trim().is_empty());
-    if prompt.is_none() && matches!(launch, WorkerLaunch::Prompt) {
-        // A prompt-less job can never run a turn; mark it done so it doesn't
-        // linger as a perpetual "working" phantom.
-        let _ = agents_registry::update_job_state(config_home, short, "done", None);
-        return exit_codes::SUCCESS;
-    }
-
+    let launch = match crate::background_launch::load_or_migrate_launch_spec(
+        config_home,
+        config_home,
+        short,
+    ) {
+        Ok(Some(launch)) => launch,
+        Ok(None) => {
+            let _ = agents_registry::update_job_state_with_detail(
+                config_home,
+                short,
+                "failed",
+                None,
+                "background launch context is missing or incompatible",
+            );
+            return exit_codes::SUCCESS;
+        }
+        Err(error) => {
+            let _ = agents_registry::update_job_state_with_detail(
+                config_home,
+                short,
+                "failed",
+                None,
+                &format!("could not load background launch context: {error}"),
+            );
+            return exit_codes::SUCCESS;
+        }
+    };
     let spec = JobSpec {
         short: short.to_string(),
-        prompt,
-        cwd: job.cwd.clone().unwrap_or_default(),
-        session_id: job.session_id.clone().unwrap_or_default(),
-        name: job.name.clone().or_else(|| job.intent.clone()),
         launch,
     };
 
-    // 2. Register a LIVE bg session (unlinked on drop / explicit deregister).
-    let session_id = spec.session_id.clone();
-    let reg = SessionRegistration::register_bg(
-        config_home,
-        (!session_id.is_empty()).then_some(session_id.as_str()),
-        spec.name.as_deref(),
-        short,
-    );
-    // Mark the worker actively running. `"busy"` is the live-status token the
-    // registry taxonomy uses (idle/busy/waiting) and the one `merged_state`
-    // treats as "working" for the matched job row.
-    reg.update_status("busy", None);
-
-    // 3. Execute the task (injected). 4. Record the terminal outcome.
+    // The PTY child owns the live SessionRegistration. Registering this parent
+    // too creates duplicate fleet rows and masks the TUI's idle/waiting state
+    // with the supervisor's unconditional `busy` state.
     let outcome = execute(spec).await;
     let new_state = if outcome.is_ok() { "done" } else { "failed" };
     if let Err(e) = agents_registry::update_job_state(config_home, short, new_state, None) {
         tracing::warn!("lingxi-cli __bg-run: could not persist terminal job state: {e}");
     }
 
-    // Unlink the live session now (explicit, though Drop would also do it).
-    reg.deregister();
     exit_codes::SUCCESS
 }
 
-fn job_launch_for(config_home: &Path, short: &str, job: &agents_registry::JobState) -> WorkerLaunch {
-    let roster = crate::daemon_roster::read_roster(
-        config_home,
-        i32::try_from(std::process::id()).unwrap_or(0),
-        false,
-    )
-    .into_roster();
-    let Some(record) = roster.workers.get(short) else {
-        return WorkerLaunch::Prompt;
-    };
-    match &record.dispatch.launch {
-        Launch::Resume {
-            transcript_path,
-            fork,
-            flag_args,
-            ..
-        } => WorkerLaunch::Resume {
-            transcript_path: transcript_path.as_ref().map(PathBuf::from),
-            fork: *fork,
-            flag_args: flag_args.clone(),
-        },
-        Launch::Prompt { .. } => WorkerLaunch::Prompt,
-        _ => {
-            if job.initial_prompt.as_deref().is_some_and(|prompt| !prompt.trim().is_empty()) {
-                WorkerLaunch::Prompt
-            } else {
-                WorkerLaunch::Resume {
-                    transcript_path: None,
-                    fork: false,
-                    flag_args: Vec::new(),
-                }
-            }
-        }
-    }
-}
-
-/// Synthesize the print-shaped [`Argv`] the worker runs the turn with.
-/// `--print`-shaped so the headless deny-on-ask permission default applies (no
-/// interactive prompt is reachable from a detached worker); `background:false`
-/// so it does NOT re-enter the `--bg` dispatch path; and the job's RECORDED
-/// `session_id` is threaded as the runtime's `session_id_override` (init.rs:570)
-/// so the transcript lands in `<sessionId>.jsonl` — the SAME id the job row and
-/// `register_bg` advertise. Omitting it (the earlier bug) minted a fresh id, so
-/// resuming the job's session found no transcript.
-fn worker_argv(spec: &JobSpec) -> Argv {
-    let argv = Argv {
-        prompt: spec.prompt.clone(),
-        print: true,
-        background: false,
-        session_id: (!spec.session_id.is_empty()).then(|| spec.session_id.clone()),
-        ..Argv::default()
-    };
-    argv
-}
-
-/// The production executor: chdir into the job cwd, synthesize a print-shaped
-/// [`Argv`], build the runtime, run the initial turn, then keep driving the
-/// same runtime from live attach input while an attach client remains connected.
-///
-/// Before entering the live-attach loop it also DRAINS the job's durable offline
-/// reply queue (`jobs/<short>/replies/`) into the pending-input buffer, so any
-/// follow-up reply persisted while the job had no live worker is delivered as a
-/// follow-up turn on this (re)spawn — even when no terminal is attached.
-async fn execute_job(config_home: std::path::PathBuf, spec: JobSpec) -> Result<(), String> {
-    // Run the turn in the job's directory (tool + config resolution keys off
-    // `std::env::current_dir()`, which `resolve_desktop_config` reads).
-    if !spec.cwd.is_empty() {
-        if let Err(e) = std::env::set_current_dir(&spec.cwd) {
-            return Err(format!("could not enter job cwd {}: {e}", spec.cwd));
-        }
+/// Spawn the normal CLI TUI in a real PTY and supervise its raw I/O for the
+/// lifetime of the background job. The child remains mounted while idle; an
+/// attach-client disconnect only removes a controller and never ends it.
+async fn execute_job(config_home: PathBuf, job: JobSpec) -> Result<(), String> {
+    let launch = job.launch;
+    if !launch.preflight_approved {
+        return Err("background launch preflight was not approved".to_string());
     }
 
-    let argv = worker_argv(&spec);
+    let attach_hub = crate::bg_attach::AttachHub::start_from_env()
+        .map_err(|e| format!("could not start live attach endpoint: {e}"))?
+        .ok_or_else(|| {
+            "background worker is missing its protocol-v2 attach endpoint".to_string()
+        })?;
+    let cwd = nonempty_path(&launch.cwd)?;
+    let executable = std::env::current_exe()
+        .map_err(|e| format!("could not resolve current executable: {e}"))?;
+    let program = executable.to_string_lossy().into_owned();
+    let args = vec!["__bg-pty-session".to_string(), job.short.clone()];
+    // The launch spec is the complete, allowlisted child environment. Never
+    // inherit the daemon environment here: it can contain credentials or
+    // per-process state intentionally excluded during dispatch.
+    let mut env: HashMap<String, String> = launch
+        .env
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    env.insert("LINGXI_BG_PTY_CHILD".to_string(), "1".to_string());
+    let mut pty_size = platform_pty::TerminalSize {
+        rows: launch.terminal.rows.max(1),
+        cols: launch.terminal.cols.max(1),
+    };
+    let spawned =
+        platform_pty::spawn_pty_process(&program, &args, &cwd, &env, &None, pty_size, &[])
+            .await
+            .map_err(|e| format!("could not spawn background PTY child: {e}"))?;
 
-    // (G05 2.1.212 `/fork` `vAd`) FORK-COPY SEED: a `/fork`-to-background session
-    // is dispatched with its `<sessionId>.jsonl` transcript ALREADY snapshotted
-    // on disk by `CliBgSessionForker` before this worker starts. A FRESH `--bg`
-    // job has no transcript until this (single) worker's `build_runtime` creates
-    // it — and a crashed worker is failed-closed, never re-run — so a transcript
-    // that EXISTS with content at worker start unambiguously means "this is a
-    // forked copy". Load those lines NOW (before `build_runtime` appends the new
-    // turn's records) so they can seed the orchestrator's in-memory history after
-    // the build; without this the forked turn would run with EMPTY context.
-    let fork_seed: Vec<session::jsonl::JsonlMessage> = if spec.session_id.is_empty()
-        || spec.cwd.is_empty()
+    let child_pid = spawned
+        .session
+        .process_id()
+        .ok_or_else(|| "background PTY backend did not expose a child pid".to_string())?;
+    let child_proc_start = i32::try_from(child_pid)
+        .ok()
+        .and_then(crate::daemon_roster::read_proc_start)
+        .ok_or_else(|| {
+            spawned.session.terminate();
+            "could not establish a PID-reuse-safe background PTY identity".to_string()
+        })?;
+    let runtime_record = crate::background_launch::BackgroundPtyRuntime {
+        schema_version: 1,
+        short: job.short.clone(),
+        worker_pid: i32::try_from(std::process::id()).unwrap_or(i32::MAX),
+        child_pid,
+        child_proc_start: Some(child_proc_start),
+        process_group_id: spawned.session.process_group_id(),
+    };
+    if let Err(error) =
+        crate::background_launch::write_pty_runtime(&config_home, &job.short, &runtime_record)
     {
-        Vec::new()
-    } else if let Ok(session_uuid) = uuid::Uuid::parse_str(&spec.session_id) {
-        match crate::run::load_resume_session_from(
-            &config_home,
-            std::path::Path::new(&spec.cwd),
-            session_uuid,
-        )
-        .await
-        {
-            Ok(msgs) => msgs,
-            Err(_) => Vec::new(),
-        }
-    } else {
-        Vec::new()
+        spawned.session.terminate();
+        return Err(format!(
+            "could not persist background PTY runtime identity: {error}"
+        ));
+    }
+    let _runtime_record_guard = PtyRuntimeRecordGuard {
+        config_home: config_home.clone(),
+        short: job.short.clone(),
     };
 
-    let attach_hub = match crate::bg_attach::AttachHub::start_from_env() {
-        Ok(hub) => hub,
-        Err(e) => {
-            tracing::warn!("lingxi-cli __bg-run: could not start live attach socket: {e}");
-            None
+    let platform_pty::SpawnedProcess {
+        session,
+        mut stdout_rx,
+        stderr_rx: _stderr_rx,
+        mut exit_rx,
+    } = spawned;
+    attach_hub.ready();
+    let output_hub = attach_hub.clone();
+    let mut output_task = tokio::spawn(async move {
+        while let Some(bytes) = stdout_rx.recv().await {
+            output_hub.broadcast(&bytes);
         }
-    };
-    let mut attach_rx = attach_hub
-        .as_ref()
-        .and_then(crate::bg_attach::AttachHub::take_input_rx);
-    let sink: Arc<dyn OutputSink> = match attach_hub.as_ref() {
-        Some(hub) => Arc::new(crate::bg_attach::AttachSink::new(hub.clone())),
-        None => Arc::new(PlainSink::new()),
-    };
-    let adapter: Arc<dyn traits::OutputStream> = Arc::new(SinkAdapter::new(sink.clone()));
-    let permission_mode = permission::PermissionMode::Default;
-
-    let runtime = crate::init::build_runtime(&argv, adapter, permission_mode)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    // (G05) Seed the forked copy's replayed history into the freshly-built
-    // orchestrator (mirrors `run::resume_resolved_session`'s engine-side seed) so
-    // the follow-up turn continues the copied conversation with full context. A
-    // fresh `--bg` job's `fork_seed` is empty ⇒ this is a no-op (byte-identical
-    // to the pre-G05 worker). Guarded on a parseable session id.
-    if !fork_seed.is_empty() {
-        if let Ok(session_uuid) = uuid::Uuid::parse_str(&spec.session_id) {
-            crate::run::seed_orchestrator_session(&runtime.orchestrator, session_uuid, &fork_seed)
-                .await;
-        }
-    }
-
-    // Deliver replies queued while this job had no live worker (offline queue),
-    // in enqueue order, ahead of any subsequent live-attach input.
-    let mut queued: VecDeque<String> =
-        crate::bg_reply_queue::drain_replies(&config_home, &spec.short)
-            .into_iter()
-            .map(|reply| reply.text)
-            .collect();
-
-    // Line-assembly buffer for the raw-byte attach transport: partial input
-    // bytes accumulate here (across turns) until a newline completes a line.
-    let mut line_buf: Vec<u8> = Vec::new();
-
-    // A resume worker carries no initial prompt (`spec.prompt == None`): skip the
-    // initial turn and go straight to attach / offline-reply delivery.
-    let outcome: Result<(), String> = async {
-        if let Some(prompt) = spec.prompt.as_deref() {
-            run_attached_turn(&runtime, prompt, attach_rx.as_mut(), &mut queued, &mut line_buf)
-                .await?;
-        }
-        if let (Some(hub), Some(rx)) = (attach_hub.as_ref(), attach_rx.as_mut()) {
-            // The live-attach loop drains `queued` (offline replies first) before
-            // it blocks on live input, so a connected client is not required to
-            // deliver them.
-            run_attach_input_loop(&runtime, sink.as_ref(), hub, rx, &mut queued, &mut line_buf)
-                .await?;
-        } else {
-            // No live attach transport: deliver any offline-queued replies as
-            // plain follow-up turns directly.
-            deliver_offline_replies(&runtime, sink.as_ref(), &mut queued).await?;
-        }
-        Ok(())
-    }
-    .await;
-
-    if let Err(e) = outcome {
-        // (review #7) A turn error would otherwise DROP any follow-up lines a
-        // client submitted mid-turn (buffered in `queued` for the next turn).
-        // Persist them to the durable offline reply queue so a respawn / later
-        // attach still delivers them, mirroring the client-side
-        // persist_pending_line guarantee. (`line_buf` holds only an INCOMPLETE
-        // tail — no Enter yet — so it is intentionally not flushed; complete
-        // lines are already in `queued`.)
-        for line in queued.drain(..) {
-            let _ = crate::bg_reply_queue::enqueue_reply(&config_home, &spec.short, &line);
-        }
-        return Err(e);
-    }
-    Ok(())
-}
-
-/// Deliver offline-queued replies as follow-up turns when there is no live
-/// attach transport. Mirrors [`run_attach_input_loop`]'s per-line handling
-/// (slash-command dispatch vs. a turn) but drives purely from the drained queue.
-async fn deliver_offline_replies(
-    runtime: &crate::init::Runtime,
-    sink: &dyn OutputSink,
-    queued: &mut VecDeque<String>,
-) -> Result<(), String> {
-    while let Some(input) = queued.pop_front() {
-        if input.trim().is_empty() {
-            continue;
-        }
-        if input.starts_with('/') {
-            match runtime.dispatcher.dispatch(&input).await {
-                SlashDispatchResult::Handled { display }
-                | SlashDispatchResult::Unknown { display, .. } => {
-                    sink.command_output(&input, &display).await;
-                }
-                SlashDispatchResult::RunAsTurn { prompt } => {
-                    sink.turn_start().await;
-                    run_attached_turn(runtime, &prompt, None, &mut VecDeque::new(), &mut Vec::new())
-                        .await?;
-                }
-                SlashDispatchResult::NotASlashCommand => {}
-            }
-            if runtime.orchestrator.current_should_exit() {
-                break;
-            }
-        } else {
-            sink.turn_start().await;
-            run_attached_turn(runtime, &input, None, &mut VecDeque::new(), &mut Vec::new()).await?;
-        }
-    }
-    Ok(())
-}
-
-async fn run_attached_turn(
-    runtime: &crate::init::Runtime,
-    prompt: &str,
-    mut attach_rx: Option<&mut mpsc::UnboundedReceiver<crate::bg_attach::AttachInput>>,
-    queued: &mut VecDeque<String>,
-    line_buf: &mut Vec<u8>,
-) -> Result<(), String> {
-    if let Some(rx) = attach_rx.as_mut() {
-        let cancel = CancellationToken::new();
-        let turn = runtime
-            .orchestrator
-            .run_turn_streaming_with_cancel(prompt, cancel.clone());
-        tokio::pin!(turn);
-        let mut rx_closed = false;
-        loop {
-            tokio::select! {
-                result = &mut turn => return handle_turn_result(result),
-                input = rx.recv(), if !rx_closed => {
-                    match input {
-                        // Raw attach bytes: assemble into follow-up lines for the
-                        // next turn (they must not interleave with the running one).
-                        Some(crate::bg_attach::AttachInput::Bytes(bytes)) => {
-                            assemble_lines(line_buf, &bytes, queued);
-                        }
-                        Some(crate::bg_attach::AttachInput::Interrupt) => cancel.cancel(),
-                        // Resize does not affect the worker's line-based turn loop
-                        // (it is not a real PTY yet); the size is ignored.
-                        Some(crate::bg_attach::AttachInput::Resize { .. }) => {}
-                        // A client detach / EOF ends *input* for this turn; the
-                        // in-flight turn still runs to completion.
-                        Some(crate::bg_attach::AttachInput::Detach)
-                        | Some(crate::bg_attach::AttachInput::Eof) => rx_closed = true,
-                        Some(crate::bg_attach::AttachInput::ClientDetached) => {}
-                        None => rx_closed = true,
+    });
+    let mut input_rx = attach_hub.take_input_rx();
+    let mut shutdown = Box::pin(shutdown_signal());
+    let exit_code = loop {
+        tokio::select! {
+            code = &mut exit_rx => break code.unwrap_or(-1),
+            () = &mut shutdown => {
+                let _ = session.signal(platform_pty::ProcessSignal::Terminate);
+                let code = match tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    &mut exit_rx,
+                ).await {
+                    Ok(Ok(code)) => code,
+                    _ => {
+                        let _ = session.signal(platform_pty::ProcessSignal::Kill);
+                        session.wait().await
                     }
+                };
+                break code;
+            }
+            input = recv_attach_input(&mut input_rx), if input_rx.is_some() => {
+                match input {
+                    Some(crate::bg_attach::AttachInput::Bytes(bytes)) => {
+                        session.write(bytes).await.map_err(|e| e.to_string())?;
+                    }
+                    Some(crate::bg_attach::AttachInput::Resize { cols, rows })
+                        if cols > 0 && rows > 0 => {
+                            let requested = platform_pty::TerminalSize { rows, cols };
+                            // portable-pty/ConPTY may coalesce an unchanged size.
+                            // Force a neighboring size first so reconnect always
+                            // delivers a real resize and the TUI fully repaints.
+                            if requested == pty_size {
+                                let neighbor = neighboring_size(requested);
+                                session
+                                    .resize(neighbor)
+                                    .map_err(|e| format!("could not nudge background PTY: {e}"))?;
+                            }
+                            session
+                                .resize(requested)
+                                .map_err(|e| format!("could not resize background PTY: {e}"))?;
+                            pty_size = requested;
+                    }
+                    Some(crate::bg_attach::AttachInput::Detach)
+                    | Some(crate::bg_attach::AttachInput::ClientDetached) => {}
+                    Some(crate::bg_attach::AttachInput::Resize { .. }) => {}
+                    None => input_rx = None,
                 }
             }
         }
-    }
+    };
 
-    runtime
-        .orchestrator
-        .run_turn(prompt)
+    // Child wait can win before the blocking PTY reader has delivered its tail.
+    if tokio::time::timeout(std::time::Duration::from_secs(2), &mut output_task)
         .await
-        .map(|_outcome| ())
-        .map_err(|e| e.to_string())
-}
-
-fn handle_turn_result(
-    result: Result<TurnOutcome, orchestrator::OrchestratorError>,
-) -> Result<(), String> {
-    match result {
-        Ok(TurnOutcome::EndTurn | TurnOutcome::Cancelled) => Ok(()),
-        Ok(TurnOutcome::MaxTurns) => Err("reached MAX_TURNS_PER_CONVERSATION".to_string()),
-        Err(e) => Err(e.to_string()),
+        .is_err()
+    {
+        output_task.abort();
+    }
+    attach_hub.exit(exit_code);
+    if exit_code == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "background PTY child exited with status {exit_code}"
+        ))
     }
 }
 
-async fn run_attach_input_loop(
-    runtime: &crate::init::Runtime,
-    sink: &dyn OutputSink,
-    hub: &crate::bg_attach::AttachHub,
-    rx: &mut mpsc::UnboundedReceiver<crate::bg_attach::AttachInput>,
-    queued: &mut VecDeque<String>,
-    line_buf: &mut Vec<u8>,
-) -> Result<(), String> {
-    while let Some(input) = next_attach_line(hub, rx, queued, line_buf).await {
-        if input.trim().is_empty() {
-            continue;
-        }
-        if input.starts_with('/') {
-            match runtime.dispatcher.dispatch(&input).await {
-                SlashDispatchResult::Handled { display }
-                | SlashDispatchResult::Unknown { display, .. } => {
-                    sink.command_output(&input, &display).await;
-                }
-                SlashDispatchResult::RunAsTurn { prompt } => {
-                    sink.turn_start().await;
-                    run_attached_turn(runtime, &prompt, Some(rx), queued, line_buf).await?;
-                }
-                SlashDispatchResult::NotASlashCommand => {}
-            }
-            if runtime.orchestrator.current_should_exit() {
-                break;
-            }
-        } else {
-            sink.turn_start().await;
-            run_attached_turn(runtime, &input, Some(rx), queued, line_buf).await?;
-        }
-    }
-    Ok(())
+struct PtyRuntimeRecordGuard {
+    config_home: PathBuf,
+    short: String,
 }
 
-/// Append raw attach-transport bytes to `buf` and move every complete
-/// (`\n`-terminated) line into `queued`, stripping a trailing `\r`. The final
-/// partial line (no newline yet) stays in `buf` for the next byte frame.
-fn assemble_lines(buf: &mut Vec<u8>, bytes: &[u8], queued: &mut VecDeque<String>) {
-    buf.extend_from_slice(bytes);
-    while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
-        let mut line: Vec<u8> = buf.drain(..=pos).collect();
-        line.pop(); // drop the trailing '\n'
-        if line.last() == Some(&b'\r') {
-            line.pop();
-        }
-        queued.push_back(String::from_utf8_lossy(&line).into_owned());
+impl Drop for PtyRuntimeRecordGuard {
+    fn drop(&mut self) {
+        crate::background_launch::remove_pty_runtime(&self.config_home, &self.short);
     }
 }
 
-async fn next_attach_line(
-    hub: &crate::bg_attach::AttachHub,
-    rx: &mut mpsc::UnboundedReceiver<crate::bg_attach::AttachInput>,
-    queued: &mut VecDeque<String>,
-    line_buf: &mut Vec<u8>,
-) -> Option<String> {
-    loop {
-        if let Some(line) = queued.pop_front() {
-            return Some(line);
-        }
-        // Drain everything currently buffered, assembling raw bytes into lines.
-        while let Ok(input) = rx.try_recv() {
-            match input {
-                crate::bg_attach::AttachInput::Bytes(bytes) => {
-                    assemble_lines(line_buf, &bytes, queued);
-                }
-                crate::bg_attach::AttachInput::Interrupt
-                | crate::bg_attach::AttachInput::Resize { .. }
-                | crate::bg_attach::AttachInput::Detach
-                | crate::bg_attach::AttachInput::Eof
-                | crate::bg_attach::AttachInput::ClientDetached => {}
-            }
-        }
-        if let Some(line) = queued.pop_front() {
-            return Some(line);
-        }
-        if !hub.has_clients() {
-            return None;
-        }
-        match rx.recv().await {
-            Some(crate::bg_attach::AttachInput::Bytes(bytes)) => {
-                assemble_lines(line_buf, &bytes, queued);
-            }
-            Some(crate::bg_attach::AttachInput::Interrupt)
-            | Some(crate::bg_attach::AttachInput::Resize { .. }) => continue,
-            // Client EOF (`Ctrl-D`) ends attach input.
-            Some(crate::bg_attach::AttachInput::Eof) => return None,
-            Some(crate::bg_attach::AttachInput::Detach)
-            | Some(crate::bg_attach::AttachInput::ClientDetached) => {
-                if !hub.has_clients() {
-                    return None;
-                }
-            }
-            None => return None,
-        }
+fn neighboring_size(size: platform_pty::TerminalSize) -> platform_pty::TerminalSize {
+    let cols = if size.cols > 1 {
+        size.cols - 1
+    } else {
+        size.cols.saturating_add(1).max(1)
+    };
+    platform_pty::TerminalSize { cols, ..size }
+}
+
+async fn recv_attach_input(
+    receiver: &mut Option<tokio::sync::mpsc::Receiver<crate::bg_attach::AttachInput>>,
+) -> Option<crate::bg_attach::AttachInput> {
+    match receiver.as_mut() {
+        Some(receiver) => receiver.recv().await,
+        None => std::future::pending().await,
     }
+}
+
+fn nonempty_path(value: &str) -> Result<PathBuf, String> {
+    if value.trim().is_empty() {
+        std::env::current_dir().map_err(|e| format!("could not resolve job cwd: {e}"))
+    } else {
+        Ok(PathBuf::from(value))
+    }
+}
+
+#[cfg(unix)]
+async fn shutdown_signal() {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut terminate = signal(SignalKind::terminate()).expect("install SIGTERM handler");
+    let mut interrupt = signal(SignalKind::interrupt()).expect("install SIGINT handler");
+    let mut hangup = signal(SignalKind::hangup()).expect("install SIGHUP handler");
+    tokio::select! {
+        _ = terminate.recv() => {}
+        _ = interrupt.recv() => {}
+        _ = hangup.recv() => {}
+    }
+}
+
+#[cfg(not(unix))]
+async fn shutdown_signal() {
+    let _ = tokio::signal::ctrl_c().await;
+}
+
+/// Run the hidden child within the worker-owned PTY. This is the sole owner of
+/// the live background registration and the normal interactive TUI runtime.
+pub async fn run_pty_session(cli: &PtySessionCli) -> i32 {
+    let config_home = crate::run::daemon_runtime_dir();
+    let launch = match crate::background_launch::read_launch_spec(&config_home, &cli.short) {
+        Ok(spec) => spec,
+        Err(e) => {
+            eprintln!("lingxi-cli: could not load background launch spec: {e}");
+            return exit_codes::RUNTIME_ERROR;
+        }
+    };
+    if !launch.preflight_approved {
+        eprintln!("lingxi-cli: background launch preflight was not approved");
+        return exit_codes::RUNTIME_ERROR;
+    }
+    if let Err(e) = std::env::set_current_dir(&launch.cwd) {
+        eprintln!(
+            "lingxi-cli: could not enter background cwd {}: {e}",
+            launch.cwd
+        );
+        return exit_codes::RUNTIME_ERROR;
+    }
+    let session_id = match uuid::Uuid::parse_str(&launch.session_id) {
+        Ok(session_id) => session_id,
+        Err(e) => {
+            eprintln!("lingxi-cli: invalid background session id: {e}");
+            return exit_codes::RUNTIME_ERROR;
+        }
+    };
+    let mut argv = launch.tui_argv();
+    // Resolve session-scoped downloads in the process that owns the TUI
+    // lifetime. The guard keeps plugin archives alive until this child exits.
+    let _startup_resources = match crate::startup_resources::prepare(&mut argv).await {
+        Ok(guard) => guard,
+        Err(e) => {
+            eprintln!("lingxi-cli: background startup resource setup failed: {e}");
+            return exit_codes::RUNTIME_ERROR;
+        }
+    };
+    let name = launch.options.name.clone().or_else(|| {
+        agents_registry::read_job(&config_home, &cli.short).and_then(|job| job.name.or(job.intent))
+    });
+    let registration = Arc::new(SessionRegistration::register_bg(
+        &config_home,
+        Some(&launch.session_id),
+        name.as_deref(),
+        &cli.short,
+    ));
+    registration.update_status("idle", None);
+
+    let initial_prompt = launch
+        .initial_prompt
+        .clone()
+        .filter(|prompt| !prompt.trim().is_empty());
+    let outcome = match launch.launch {
+        BackgroundLaunchKind::Fresh => {
+            let tui_build =
+                match crate::init::build_runtime_for_tui_inner(&argv, Some(session_id)).await {
+                    Ok(tui_build) => tui_build,
+                    Err(e) => {
+                        eprintln!("lingxi-cli: background TUI init failed: {e}");
+                        registration.deregister();
+                        return exit_codes::RUNTIME_ERROR;
+                    }
+                };
+            crate::mode::run_ratatui_with_initial_prompt(
+                tui_build,
+                Some(registration.clone()),
+                Vec::new(),
+                initial_prompt,
+            )
+            .await
+        }
+        BackgroundLaunchKind::Resume | BackgroundLaunchKind::Fork => {
+            let messages = match load_exact_transcript(&config_home, &launch).await {
+                Ok(messages) => messages,
+                Err(e) => {
+                    eprintln!("lingxi-cli: could not resume background session: {e}");
+                    registration.deregister();
+                    return exit_codes::RUNTIME_ERROR;
+                }
+            };
+            crate::run::mount_background_resumed_tui(
+                &argv,
+                session_id,
+                messages,
+                registration.clone(),
+                initial_prompt,
+            )
+            .await
+        }
+    };
+    let code = crate::run::drive_background_tui_switch_loop(
+        &argv,
+        outcome,
+        Some(session_id),
+        registration.clone(),
+    )
+    .await;
+    registration.deregister();
+    code
+}
+
+async fn load_exact_transcript(
+    config_home: &Path,
+    launch: &BackgroundLaunchSpec,
+) -> Result<Vec<session::jsonl::JsonlMessage>, String> {
+    let canonical_path = validate_exact_transcript_path(config_home, launch)?;
+    let cwd = nonempty_path(&launch.cwd)?;
+    let fs: Arc<dyn traits::FileSystem> = Arc::new(platform_posix::PosixFileSystem::new(cwd));
+    let reader = session::jsonl::JsonlReader::new(canonical_path, fs);
+    let loaded = reader.read_routed().await.map_err(|e| e.to_string())?;
+    let (chain, _) = session::jsonl::build_conversation_chain(&loaded, &launch.session_id);
+    if chain.is_empty() {
+        Err("transcript contains no resumable conversation".to_string())
+    } else {
+        Ok(chain)
+    }
+}
+
+fn validate_exact_transcript_path(
+    config_home: &Path,
+    launch: &BackgroundLaunchSpec,
+) -> Result<PathBuf, String> {
+    let path = PathBuf::from(&launch.transcript_path);
+    let metadata = std::fs::symlink_metadata(&path)
+        .map_err(|e| format!("could not inspect transcript {}: {e}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("transcript is not a regular file".to_string());
+    }
+    let canonical_path = std::fs::canonicalize(&path)
+        .map_err(|e| format!("could not resolve transcript {}: {e}", path.display()))?;
+    let projects_root = config_home.join("projects");
+    let canonical_projects = std::fs::canonicalize(&projects_root).map_err(|e| {
+        format!(
+            "could not resolve transcript root {}: {e}",
+            projects_root.display()
+        )
+    })?;
+    let expected_name = format!("{}.jsonl", launch.session_id);
+    if !canonical_path.starts_with(&canonical_projects)
+        || canonical_path.file_name().and_then(|name| name.to_str()) != Some(&expected_name)
+    {
+        return Err("transcript path does not match the recorded session".to_string());
+    }
+    Ok(canonical_path)
 }
 
 #[cfg(test)]
@@ -578,39 +524,45 @@ mod tests {
             respawn_flags: &respawn,
             in_flight: None,
             backend: Some("daemon"),
-            initial_prompt: Some(prompt),
+            // Public fleet state deliberately excludes the raw prompt.
+            initial_prompt: None,
             detail: None,
             worker_pid: None,
         };
         write_job_state(home, short, &job).unwrap();
+        crate::background_launch::write_launch_spec(
+            home,
+            short,
+            &BackgroundLaunchSpec {
+                schema_version: crate::background_launch::LAUNCH_SPEC_VERSION,
+                short: short.to_string(),
+                created_at: 1,
+                preflight_approved: true,
+                launch: BackgroundLaunchKind::Fresh,
+                session_id: "11111111-1111-1111-1111-111111111111".to_string(),
+                transcript_path: home.join("session.jsonl").display().to_string(),
+                cwd: cwd.clone(),
+                origin_cwd: cwd,
+                worktree_path: None,
+                worktree_ownership_token: None,
+                initial_prompt: Some(prompt.to_string()),
+                options: crate::background_launch::BackgroundLaunchOptions::default(),
+                env: std::collections::BTreeMap::new(),
+                terminal: crate::background_launch::TerminalSize::default(),
+            },
+        )
+        .unwrap();
     }
 
     #[test]
-    fn worker_argv_threads_the_jobs_session_id() {
-        // Regression: the worker must run the turn under the job's RECORDED
-        // session id (→ `session_id_override` → `<sessionId>.jsonl`), not a
-        // freshly-minted one, so the job row / live registration / transcript
-        // all agree and `--resume <sessionId>` finds the turn.
-        let spec = JobSpec {
-            short: "74d8a00f".to_string(),
-            prompt: Some("say hi".to_string()),
-            cwd: "/tmp/x".to_string(),
-            session_id: "cb1f9d13-20a6-4e53-ad3e-5720d438a5f2".to_string(),
-            name: None,
-            launch: WorkerLaunch::Prompt,
-        };
-        let argv = worker_argv(&spec);
+    fn unchanged_resize_has_a_safe_repaint_neighbor() {
+        let size = platform_pty::TerminalSize { rows: 24, cols: 80 };
         assert_eq!(
-            argv.session_id.as_deref(),
-            Some("cb1f9d13-20a6-4e53-ad3e-5720d438a5f2")
+            neighboring_size(size),
+            platform_pty::TerminalSize { rows: 24, cols: 79 }
         );
-        assert!(argv.print && !argv.background);
-        // An empty recorded id falls back to a minted one (None override).
-        let spec_empty = JobSpec {
-            session_id: String::new(),
-            ..spec
-        };
-        assert_eq!(worker_argv(&spec_empty).session_id, None);
+        let narrow = platform_pty::TerminalSize { rows: 1, cols: 1 };
+        assert_eq!(neighboring_size(narrow).cols, 2);
     }
 
     #[tokio::test]
@@ -619,7 +571,7 @@ mod tests {
         seed_job(&home, "bc7c6b33", "port the daemon");
         let mut seen: Option<String> = None;
         let code = run_worker_core(&home, "bc7c6b33", |spec| {
-            seen = spec.prompt.clone();
+            seen = spec.launch.initial_prompt.clone();
             async move { Ok(()) }
         })
         .await;
@@ -678,7 +630,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_prompt_job_is_marked_done_without_executing() {
+    async fn promptless_launch_still_mounts_an_idle_background_tui() {
         let home = tmpdir();
         seed_job(&home, "eeee5555", "   ");
         let mut called = false;
@@ -688,16 +640,38 @@ mod tests {
         })
         .await;
         assert_eq!(code, exit_codes::SUCCESS);
-        assert!(!called, "no turn for an empty prompt");
+        assert!(called, "a promptless launch remains attachable while idle");
         assert_eq!(read_job(&home, "eeee5555").unwrap().state, "done");
     }
 
     #[tokio::test]
-    async fn live_bg_session_registered_during_execution_then_unlinked() {
+    async fn missing_private_launch_context_fails_closed() {
+        let home = tmpdir();
+        seed_job(&home, "face0001", "private prompt");
+        std::fs::remove_file(crate::background_launch::launch_spec_path(
+            &home, "face0001",
+        ))
+        .unwrap();
+        let mut called = false;
+        let code = run_worker_core(&home, "face0001", |_spec| {
+            called = true;
+            async move { Ok(()) }
+        })
+        .await;
+        assert_eq!(code, exit_codes::SUCCESS);
+        assert!(!called);
+        let job = read_job(&home, "face0001").unwrap();
+        assert_eq!(job.state, "failed");
+        assert!(job
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("launch context")));
+    }
+
+    #[tokio::test]
+    async fn supervisor_does_not_register_a_duplicate_bg_session() {
         let home = tmpdir();
         seed_job(&home, "ffff6666", "observe me");
-        // While the executor runs, a live `kind:"bg"` session for THIS process
-        // exists under sessions/<pid>.json (own pid is alive → reader keeps it).
         let observed = std::cell::Cell::new(0usize);
         let code = run_worker_core(&home, "ffff6666", |_spec| {
             let sessions =
@@ -707,31 +681,36 @@ mod tests {
         })
         .await;
         assert_eq!(code, exit_codes::SUCCESS);
-        assert_eq!(observed.get(), 1, "a live bg session is registered mid-run");
-        // …and it is unlinked once the worker returns.
-        let after = agents_registry::read_live_sessions(&agents_registry::sessions_dir(&home));
-        assert!(
-            after.iter().all(|s| s.kind != "bg"),
-            "live bg session unlinked on exit"
-        );
+        assert_eq!(observed.get(), 0, "only the PTY child may register the job");
     }
 
-    #[tokio::test]
-    async fn attach_input_loop_drains_queued_line_without_clients() {
-        let home = tmpdir();
-        let sock = home.join("attach.sock");
-        let hub = crate::bg_attach::AttachHub::start(sock, "token-1".to_string()).unwrap();
-        let mut rx = hub.take_input_rx().unwrap();
-        let mut queued = VecDeque::from(["follow up".to_string()]);
-        let mut line_buf: Vec<u8> = Vec::new();
+    #[cfg(unix)]
+    #[test]
+    fn exact_transcript_validation_rejects_symlink_and_outside_paths() {
+        use std::os::unix::fs::symlink;
 
+        let home = tmpdir();
+        seed_job(&home, "aaaa7777", "resume");
+        let mut launch = crate::background_launch::read_launch_spec(&home, "aaaa7777").unwrap();
+        let projects = home.join("projects").join("-repo");
+        std::fs::create_dir_all(&projects).unwrap();
+        let exact = projects.join(format!("{}.jsonl", launch.session_id));
+        std::fs::write(&exact, b"{}\n").unwrap();
+        launch.transcript_path = exact.display().to_string();
         assert_eq!(
-            next_attach_line(&hub, &mut rx, &mut queued, &mut line_buf).await,
-            Some("follow up".to_string())
+            validate_exact_transcript_path(&home, &launch).unwrap(),
+            std::fs::canonicalize(&exact).unwrap()
         );
-        assert_eq!(
-            next_attach_line(&hub, &mut rx, &mut queued, &mut line_buf).await,
-            None
-        );
+
+        let outside = home.join(format!("{}.jsonl", launch.session_id));
+        std::fs::write(&outside, b"{}\n").unwrap();
+        launch.transcript_path = outside.display().to_string();
+        assert!(validate_exact_transcript_path(&home, &launch).is_err());
+
+        let link = projects.join(format!("{}.jsonl", launch.session_id));
+        std::fs::remove_file(&link).unwrap();
+        symlink(&outside, &link).unwrap();
+        launch.transcript_path = link.display().to_string();
+        assert!(validate_exact_transcript_path(&home, &launch).is_err());
     }
 }

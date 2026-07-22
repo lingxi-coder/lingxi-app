@@ -620,10 +620,15 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("user-agent"))
             .expect("must have user-agent header");
-        // R-V1: UA carries the claude-code parity-target version (2.1.207), not
-        // LingXi's CARGO_PKG_VERSION.
+        // R-V1: UA carries the central claude-code parity-target version, not
+        // LingXi's CARGO_PKG_VERSION. Historical version literals belong in the
+        // versioned parity harness, not in this live implementation test.
         assert_eq!(
-            ua_value, "Claude-User (claude-code/2.1.207; +https://support.anthropic.com/)",
+            ua_value,
+            &format!(
+                "Claude-User (claude-code/{}; +https://support.anthropic.com/)",
+                traits::CLAUDE_CODE_VERSION
+            ),
             "WebFetch UA must be claude-code's `Claude-User (...)` form with the parity version"
         );
     }

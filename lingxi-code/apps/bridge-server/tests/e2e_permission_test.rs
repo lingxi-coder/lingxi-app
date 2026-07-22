@@ -34,12 +34,14 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bridge::wire::Frame;
-use bridge::McpEndpoint;
+use bridge::{BridgeRequest, Capabilities, ClientHello, McpEndpoint, BRIDGE_PROTOCOL_VERSION};
 use bridge_server::server::{BridgeConnection, TurnDriver};
-use client_adapter::{AdapterOutputStream, AdapterPermissionGate};
+use client_adapter::{
+    AdapterOutputStream, AdapterPermissionGate, ClientEventSink, PermissionRequestSink,
+};
 use client_protocol::commands::ClientCommand;
 use client_protocol::events::ClientEvent;
-use client_protocol::permission::{PermissionKindDto, PermissionResponseDto};
+use client_protocol::permission::{PermissionKindDto, PermissionRequest, PermissionResponseDto};
 use futures_util::{SinkExt, StreamExt};
 use orchestrator::test_support::{
     content_block_start_text, content_block_start_tool_use, content_block_stop, input_json_delta,
@@ -70,6 +72,53 @@ impl TurnDriver for OrchestratorTurnDriver {
         // Errors surface as adapter `Error` events in the full server; here a
         // turn against the scripted mock always succeeds.
         let _ = self.orchestrator.run_turn_streaming(&prompt).await;
+    }
+}
+
+/// A deterministic reconnect-regression driver. The first prompt parks until the
+/// test releases it; if the connection close path fails to abort that spawned
+/// turn loop, its stale event + permission request will leak into the next
+/// reconnect because the connection reuses one bound driver.
+struct ReconnectIsolationDriver {
+    event_sink: Arc<dyn ClientEventSink>,
+    permission_sink: Arc<dyn PermissionRequestSink>,
+    first_started: Arc<tokio::sync::Notify>,
+    release_first: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl TurnDriver for ReconnectIsolationDriver {
+    async fn run_turn(&self, prompt: String) {
+        match prompt.as_str() {
+            "first blocked turn" => {
+                self.first_started.notify_one();
+                self.release_first.notified().await;
+                self.event_sink
+                    .emit(ClientEvent::TextDelta {
+                        text: "STALE-FIRST-EVENT".into(),
+                    })
+                    .await;
+                self.permission_sink
+                    .emit_request(PermissionRequest {
+                        request_id: 41,
+                        kind: PermissionKindDto::ToolUseConfirm {
+                            tool_name: "StaleTool".into(),
+                            tool_input_json: "{}".into(),
+                            default_allow: false,
+                        },
+                        worker: None,
+                    })
+                    .await;
+            }
+            "second fresh turn" => {
+                self.event_sink
+                    .emit(ClientEvent::TextDelta {
+                        text: "fresh-second-event".into(),
+                    })
+                    .await;
+            }
+            other => panic!("unexpected reconnect test prompt: {other}"),
+        }
     }
 }
 
@@ -151,10 +200,27 @@ async fn connect(
         .header("x-lingxi-ide-authorization", TEST_TOKEN)
         .body(())
         .unwrap();
-    let (ws, response) = tokio_tungstenite::connect_async(req)
+    let (mut ws, response) = tokio_tungstenite::connect_async(req)
         .await
         .expect("ws upgrade must succeed");
     assert_eq!(response.status(), 101, "upgrade must return 101");
+    let hello = Frame::Request(BridgeRequest {
+        id: 0,
+        method: "hello".into(),
+        params: serde_json::to_value(ClientHello {
+            protocol_version: BRIDGE_PROTOCOL_VERSION.into(),
+            client_name: "permission-test".into(),
+            capabilities: Capabilities::default(),
+        })
+        .unwrap(),
+    });
+    ws.send(Message::Text(serde_json::to_string(&hello).unwrap()))
+        .await
+        .expect("send hello");
+    match next_frame(&mut ws).await {
+        Frame::Response(response) => assert!(response.error.is_none()),
+        other => panic!("expected ServerHello response, got {other:?}"),
+    }
     ws
 }
 
@@ -172,6 +238,20 @@ where
         match msg {
             Message::Text(t) => return serde_json::from_str(&t).expect("decode Frame"),
             // tungstenite handles Ping/Pong; ignore anything non-text.
+            _ => continue,
+        }
+    }
+}
+
+async fn next_frame_with_timeout<S>(ws: &mut S, timeout: Duration) -> Option<Frame>
+where
+    S: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+{
+    loop {
+        let maybe = tokio::time::timeout(timeout, ws.next()).await.ok()?;
+        let msg = maybe?.expect("message must not be a ws error");
+        match msg {
+            Message::Text(t) => return Some(serde_json::from_str(&t).expect("decode Frame")),
             _ => continue,
         }
     }
@@ -341,6 +421,75 @@ async fn disconnect_mid_permission_denies() {
         drained,
         "the parked permission request must be drained when the connection drops (fail-closed)"
     );
+
+    endpoint.shutdown().await;
+}
+
+#[tokio::test]
+async fn reconnect_does_not_receive_stale_frames_from_aborted_first_turn() {
+    let connection = BridgeConnection::new();
+    let first_started = Arc::new(tokio::sync::Notify::new());
+    let release_first = Arc::new(tokio::sync::Notify::new());
+    let gate = Arc::new(AdapterPermissionGate::new(connection.permission_sink()));
+    let driver: Arc<dyn TurnDriver> = Arc::new(ReconnectIsolationDriver {
+        event_sink: connection.event_sink(),
+        permission_sink: connection.permission_sink(),
+        first_started: first_started.clone(),
+        release_first: release_first.clone(),
+    });
+    let endpoint =
+        McpEndpoint::start_on_ephemeral_port_with_pump(Arc::new(connection.bind(gate, driver)))
+            .await
+            .expect("endpoint must start");
+    endpoint.set_auth_token(TEST_TOKEN.to_string());
+
+    let mut first = connect(endpoint.port()).await;
+    send_command(
+        &mut first,
+        &ClientCommand::SendPrompt {
+            text: "first blocked turn".into(),
+            prompt_mode: None,
+            images: Vec::new(),
+            turn_id: None,
+        },
+    )
+    .await;
+    first_started.notified().await;
+
+    drop(first);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let mut second = connect(endpoint.port()).await;
+    send_command(
+        &mut second,
+        &ClientCommand::SendPrompt {
+            text: "second fresh turn".into(),
+            prompt_mode: None,
+            images: Vec::new(),
+            turn_id: None,
+        },
+    )
+    .await;
+
+    match next_frame_with_timeout(&mut second, Duration::from_secs(2)).await {
+        Some(Frame::Event(ClientEvent::TextDelta { text })) => {
+            assert_eq!(text, "fresh-second-event");
+        }
+        other => panic!("expected only the second turn's event after reconnect, got {other:?}"),
+    }
+
+    release_first.notify_waiters();
+
+    match next_frame_with_timeout(&mut second, Duration::from_millis(300)).await {
+        None => {}
+        Some(Frame::Event(ClientEvent::TextDelta { text })) => {
+            panic!("stale first-turn event leaked into the reconnect: {text}");
+        }
+        Some(Frame::PermissionRequest(req)) => {
+            panic!("stale permission request leaked into the reconnect: {req:?}");
+        }
+        Some(other) => panic!("unexpected extra frame after reconnect: {other:?}"),
+    }
 
     endpoint.shutdown().await;
 }

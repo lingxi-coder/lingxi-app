@@ -693,9 +693,8 @@ mod tests {
 
     #[test]
     fn file_warning_covers_write_family_and_glob() {
-        let warn = |spec: &str| {
-            permission_rule_file_warning(&PermissionRuleValue::from_rule_string(spec))
-        };
+        let warn =
+            |spec: &str| permission_rule_file_warning(&PermissionRuleValue::from_rule_string(spec));
         // parity 2.1.210: Write/NotebookEdit/MultiEdit steer to Edit(path).
         assert_eq!(
             warn("Write(src/foo.ts)").as_deref(),
@@ -783,9 +782,8 @@ mod tests {
 
     #[test]
     fn file_warning_absent_for_covered_and_bare_and_prefix_rules() {
-        let warn = |spec: &str| {
-            permission_rule_file_warning(&PermissionRuleValue::from_rule_string(spec))
-        };
+        let warn =
+            |spec: &str| permission_rule_file_warning(&PermissionRuleValue::from_rule_string(spec));
         // Tools with their OWN matcher never warn.
         assert!(warn("Edit(src/foo.ts)").is_none());
         assert!(warn("Read(secret.env)").is_none());

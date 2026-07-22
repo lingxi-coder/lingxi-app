@@ -446,6 +446,63 @@ struct LoopRuntimeState {
     rescheduled_this_turn: bool,
 }
 
+/// Session-scoped dynamic-loop state.
+///
+/// Claude Code stores these fields on the live session object.  Keeping them
+/// behind an owned handle prevents one bridge connection's normal prompt from
+/// clearing another connection's in-flight loop tick.
+#[derive(Clone, Default)]
+pub struct LoopRuntime {
+    state: std::sync::Arc<Mutex<LoopRuntimeState>>,
+}
+
+impl LoopRuntime {
+    /// Mark the start of a loop tick and clear the prior reschedule marker.
+    pub fn begin_tick(&self, prompt: String) {
+        let mut st = self.state.lock().unwrap();
+        st.tick_in_flight_prompt = Some(prompt);
+        st.rescheduled_this_turn = false;
+    }
+
+    /// Peek at the current in-flight loop prompt.
+    #[must_use]
+    pub fn in_flight_prompt(&self) -> Option<String> {
+        self.state.lock().unwrap().tick_in_flight_prompt.clone()
+    }
+
+    /// Take and clear the current in-flight loop prompt.
+    pub fn take_in_flight_prompt(&self) -> Option<String> {
+        self.state.lock().unwrap().tick_in_flight_prompt.take()
+    }
+
+    /// Record that the model scheduled its own next wakeup this turn.
+    pub fn mark_rescheduled(&self) {
+        self.state.lock().unwrap().rescheduled_this_turn = true;
+    }
+
+    /// Take and clear the per-turn reschedule marker.
+    pub fn take_rescheduled(&self) -> bool {
+        let mut st = self.state.lock().unwrap();
+        std::mem::take(&mut st.rescheduled_this_turn)
+    }
+
+    /// Return the consecutive keepalive count.
+    #[must_use]
+    pub fn consecutive_keepalives(&self) -> u32 {
+        self.state.lock().unwrap().consecutive_keepalives
+    }
+
+    /// Set the consecutive keepalive count.
+    pub fn set_consecutive_keepalives(&self, count: u32) {
+        self.state.lock().unwrap().consecutive_keepalives = count;
+    }
+
+    /// Clear all state for a fresh loop/session.
+    pub fn reset(&self) {
+        *self.state.lock().unwrap() = LoopRuntimeState::default();
+    }
+}
+
 static LOOP_RUNTIME: Mutex<LoopRuntimeState> = Mutex::new(LoopRuntimeState {
     tick_in_flight_prompt: None,
     consecutive_keepalives: 0,

@@ -714,7 +714,10 @@ mod tests {
             1,
             "the last assistant-led group is preserved verbatim"
         );
-        assert_eq!(result.messages_to_preserve[0].text_content(), "second reply");
+        assert_eq!(
+            result.messages_to_preserve[0].text_content(),
+            "second reply"
+        );
         let sent = client.seen.lock().unwrap().clone().expect("client called");
         let replayed: Vec<String> = sent.messages[..sent.messages.len() - 1]
             .iter()

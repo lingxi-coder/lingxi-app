@@ -59,7 +59,9 @@ impl Worktree {
     pub fn name(&self) -> Result<Option<&str>, Error> {
         let opt_bytes = unsafe { crate::opt_bytes(self, raw::git_worktree_name(self.raw)) };
         match opt_bytes {
-            Some(ob) => std::str::from_utf8(ob).map(|s| Some(s)).map_err(|e| e.into()),
+            Some(ob) => std::str::from_utf8(ob)
+                .map(|s| Some(s))
+                .map_err(|e| e.into()),
             None => Ok(None),
         }
     }

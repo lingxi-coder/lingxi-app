@@ -13,7 +13,7 @@ use std::time::{Duration, SystemTime};
 use tasks::registry::TaskRegistry;
 use tasks::{TaskSpawnInput, TaskType};
 use tokio::sync::{Mutex, RwLock};
-use traits::{Clock, FileSystem, RuntimeSpawner};
+use traits::{Clock, FileSystem, FsError, RuntimeSpawner};
 
 /// Default auto-expiry age for a RECURRING cron job — 30 days, 1:1 with
 /// claude-code `DEFAULT_CRON_JITTER_CONFIG.recurringMaxAgeMs`
@@ -24,6 +24,7 @@ use traits::{Clock, FileSystem, RuntimeSpawner};
 pub const DEFAULT_RECURRING_MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 /// One registered cron job: its schedule, prompt, and last-fire bookkeeping.
+#[derive(Clone)]
 pub struct CronTaskDef {
     /// Stable job identifier (used for lock filenames and logs).
     pub id: String,
@@ -227,16 +228,28 @@ impl CronScheduler {
     /// skipped with a warning. Call once after construction, before
     /// [`Self::start`].
     pub async fn load_persisted(&self) {
-        let path = self.tasks_file.to_string_lossy();
-        let Ok(body) = self
-            .fs
-            .read_file(&path, None, None)
-            .await
-            .map(|c| c.content)
+        let Some(project_root) = crate::tasks_file::project_root_from_tasks_path(&self.tasks_file)
+        else {
+            tracing::error!(path = %self.tasks_file.display(), "cron: invalid tasks-file path");
+            return;
+        };
+        let Ok(body) = crate::tasks_file::read_tasks_body(self.fs.as_ref(), project_root).await
         else {
             return; // file absent → nothing to load
         };
-        let doc = crate::tasks_file::parse_tasks(&body);
+        let doc = match serde_json::from_str::<crate::tasks_file::ScheduledTasks>(&body) {
+            Ok(doc) => doc,
+            Err(error) => {
+                // `parse_tasks` intentionally treats corrupt user-facing reads
+                // as empty, but scheduler startup must not silently reinterpret
+                // corrupt durable state as an empty valid task document.
+                tracing::warn!(
+                    path = %self.tasks_file.display(),
+                    "cron tasks file has invalid authoritative state: {error}; skipping"
+                );
+                return;
+            }
+        };
         for t in doc.tasks {
             // Anchor expiry/catch-up off the persisted ms timestamps. A
             // missing/zero `createdAt` falls back to "now" (a fresh window).
@@ -343,6 +356,53 @@ impl CronScheduler {
         Ok(())
     }
 
+    async fn process_due_ids(&self, now: SystemTime, due_ids: Vec<String>) {
+        for id in due_ids {
+            // Per-job lock with PID liveness check.
+            let lock_path = self.lock_dir.join(format!("{id}.lock"));
+            let our_pid = std::process::id();
+            let acquired =
+                try_acquire_lock(self.fs.clone(), &lock_path, our_pid, &id, pid_alive_check).await;
+            match acquired {
+                Ok(()) => {}
+                Err(CronLockError::HeldByLivePid { pid }) => {
+                    tracing::debug!("cron job {id} held by live PID {pid}; skipping");
+                    continue;
+                }
+                Err(error) => {
+                    // Fail closed: running without the intended ownership lock
+                    // turns a transient filesystem/parse failure into duplicate
+                    // task execution across scheduler processes.
+                    tracing::warn!("cron job {id} lock acquisition failed: {error}; skipping");
+                    continue;
+                }
+            }
+
+            // Jitter to avoid thundering herd.
+            if self.jitter_seconds > 0 {
+                use rand::Rng;
+                let delay = rand::rng().random_range(0..self.jitter_seconds);
+                tokio::time::sleep(Duration::from_secs(u64::from(delay))).await;
+            }
+
+            // Re-read the authoritative state after the lock/jitter window and
+            // claim the run BEFORE launch so a peer that already persisted
+            // `lastFiredAt`/deletion suppresses this stale due snapshot.
+            if let Some(task_input) = self.claim_due_job_if_still_due(&id, now).await {
+                if let Err(e) = self
+                    .task_registry
+                    .create(TaskType::Dream, task_input, format!("cron: {id}"))
+                    .await
+                {
+                    tracing::error!("cron task {id} create failed: {e}");
+                }
+            }
+
+            // Release the lock so other peers see "stale" if we crash mid-task.
+            let _ = crate::lock::release_lock(self.fs.clone(), &lock_path).await;
+        }
+    }
+
     async fn tick(&self) {
         let now = self.clock.now();
 
@@ -391,73 +451,7 @@ impl CronScheduler {
                 .collect()
         };
 
-        for id in due_ids {
-            // Per-job lock with PID liveness check.
-            let lock_path = self.lock_dir.join(format!("{id}.lock"));
-            let our_pid = std::process::id();
-            let acquired =
-                try_acquire_lock(self.fs.clone(), &lock_path, our_pid, &id, pid_alive_check).await;
-            if let Err(CronLockError::HeldByLivePid { pid }) = acquired {
-                tracing::debug!("cron job {id} held by live PID {pid}; skipping");
-                continue;
-            }
-
-            // Jitter to avoid thundering herd.
-            if self.jitter_seconds > 0 {
-                use rand::Rng;
-                let delay = rand::rng().random_range(0..self.jitter_seconds);
-                tokio::time::sleep(Duration::from_secs(u64::from(delay))).await;
-            }
-
-            // Spawn task via §11 TaskRegistry.
-            let task_input = TaskSpawnInput::Dream {
-                prompt: self
-                    .tasks
-                    .read()
-                    .await
-                    .get(&id)
-                    .map(|t| t.prompt.clone())
-                    .unwrap_or_default(),
-                max_iterations: None,
-            };
-            if let Err(e) = self
-                .task_registry
-                .create(TaskType::Dream, task_input, format!("cron: {id}"))
-                .await
-            {
-                tracing::error!("cron task {id} create failed: {e}");
-            }
-
-            // Post-fire bookkeeping: a ONE-SHOT job auto-deletes (it has now
-            // fired once); a RECURRING job records `last_run` AND persists
-            // `lastFiredAt` (epoch ms) so missed-run catch-up does not re-fire
-            // this run after a restart.
-            let one_shot = {
-                let mut tasks = self.tasks.write().await;
-                finalize_fired_job(&mut tasks, &id, now)
-            };
-            if one_shot {
-                // Remove the one-shot from the single tasks file. A missing entry
-                // (a non-durable, in-memory-only job) is a no-op — its in-memory
-                // state suffices since it never reloads.
-                self.remove_task_from_file(&id).await;
-                tracing::info!(cron_id = %id, "one-shot cron job fired and auto-deleted");
-            } else {
-                // Read-modify-write the single tasks file, setting `lastFiredAt`
-                // (ms) on this job's entry. A missing entry (in-memory-only job)
-                // is skipped — its in-memory `last_run` suffices since it never
-                // reloads; and a delete that races the fire makes the read fail,
-                // so we never resurrect it.
-                let now_ms = now
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as u64)
-                    .unwrap_or(0);
-                self.set_last_fired_in_file(&id, now_ms).await;
-            }
-
-            // Release the lock so other peers see "stale" if we crash mid-task.
-            let _ = crate::lock::release_lock(self.fs.clone(), &lock_path).await;
-        }
+        self.process_due_ids(now, due_ids).await;
     }
 
     /// Cancel the tick loop, if running. Idempotent.
@@ -472,35 +466,167 @@ impl CronScheduler {
     /// effort; read-modify-write via the `fs` seam). A missing file / missing id
     /// is a no-op.
     async fn remove_task_from_file(&self, id: &str) {
-        let path = self.tasks_file.to_string_lossy();
-        if let Ok(body) = self
-            .fs
-            .read_file(&path, None, None)
-            .await
-            .map(|c| c.content)
-        {
+        let _process_guard = crate::lock_cron_file().await;
+        let Some(project_root) = crate::tasks_file::project_root_from_tasks_path(&self.tasks_file)
+        else {
+            return;
+        };
+        let Ok(_file_guard) =
+            crate::tasks_file::lock_scheduled_tasks(self.fs.as_ref(), project_root).await
+        else {
+            return;
+        };
+        if let Ok(body) = crate::tasks_file::read_tasks_body(self.fs.as_ref(), project_root).await {
             if let Some(updated) = tasks_file_without(&body, id) {
-                let _ = self.fs.write_file(&path, &updated).await;
+                let _ =
+                    crate::tasks_file::write_tasks_body(self.fs.as_ref(), project_root, &updated)
+                        .await;
             }
         }
     }
 
-    /// Set `lastFiredAt` (epoch ms) on the task with `id` in the single persisted
-    /// tasks file (best effort; read-modify-write via the `fs` seam). A missing
-    /// file / missing id is a no-op.
-    async fn set_last_fired_in_file(&self, id: &str, last_fired_at_ms: u64) {
-        let path = self.tasks_file.to_string_lossy();
-        if let Ok(body) = self
-            .fs
-            .read_file(&path, None, None)
-            .await
-            .map(|c| c.content)
-        {
-            if let Some(updated) = tasks_file_with_last_fired(&body, id, last_fired_at_ms) {
-                let _ = self.fs.write_file(&path, &updated).await;
+    async fn claim_due_job_if_still_due(
+        &self,
+        id: &str,
+        now: SystemTime,
+    ) -> Option<TaskSpawnInput> {
+        let local = { self.tasks.read().await.get(id).cloned()? };
+
+        let Some(project_root) = crate::tasks_file::project_root_from_tasks_path(&self.tasks_file)
+        else {
+            return self.claim_in_memory_due_job(id, now).await;
+        };
+
+        let _process_guard = crate::lock_cron_file().await;
+        let Ok(_file_guard) =
+            crate::tasks_file::lock_scheduled_tasks(self.fs.as_ref(), project_root).await
+        else {
+            tracing::warn!("cron job {id} failed to lock scheduled tasks file; skipping");
+            return None;
+        };
+
+        let body = match crate::tasks_file::read_tasks_body(self.fs.as_ref(), project_root).await {
+            Ok(body) => body,
+            Err(FsError::NotFound(_)) => return self.claim_in_memory_due_job(id, now).await,
+            Err(error) => {
+                // An unreadable durable state file is not evidence that this is
+                // an in-memory-only job. Fail closed or a transient I/O error
+                // can make multiple schedulers execute the same stale record.
+                tracing::warn!(
+                    "cron job {id} could not read authoritative state: {error}; skipping"
+                );
+                return None;
             }
+        };
+
+        let doc = match serde_json::from_str::<crate::tasks_file::ScheduledTasks>(&body) {
+            Ok(doc) => doc,
+            Err(error) => {
+                // User-facing listing deliberately treats malformed JSON as an
+                // empty document. Execution claims cannot: doing so would make
+                // a stale durable job look in-memory-only and execute it.
+                tracing::warn!("cron job {id} has invalid authoritative state: {error}; skipping");
+                return None;
+            }
+        };
+        let Some(on_disk) = doc.tasks.into_iter().find(|task| task.id == id) else {
+            return self.claim_in_memory_due_job(id, now).await;
+        };
+
+        let authoritative = match parse_cron(&on_disk.cron) {
+            Ok(schedule) => CronTaskDef {
+                id: on_disk.id,
+                schedule,
+                prompt: on_disk.prompt,
+                agent_type: local.agent_type,
+                last_run: on_disk
+                    .last_fired_at
+                    .filter(|ms| *ms > 0)
+                    .map(|ms| SystemTime::UNIX_EPOCH + Duration::from_millis(ms)),
+                enabled: local.enabled,
+                created_at: if on_disk.created_at > 0 {
+                    SystemTime::UNIX_EPOCH + Duration::from_millis(on_disk.created_at)
+                } else {
+                    local.created_at
+                },
+                recurring: on_disk.recurring.unwrap_or(false),
+            },
+            Err(e) => {
+                tracing::warn!("cron job {id} has invalid persisted schedule during claim: {e}");
+                return None;
+            }
+        };
+
+        if !is_job_due(&authoritative, now) {
+            self.sync_task_from_authoritative(&authoritative).await;
+            return None;
+        }
+
+        let updated = if authoritative.recurring {
+            tasks_file_with_last_fired(&body, id, unix_epoch_ms(now))
+        } else {
+            tasks_file_without(&body, id)
+        };
+        let Some(updated) = updated else {
+            return None;
+        };
+        if let Err(e) =
+            crate::tasks_file::write_tasks_body(self.fs.as_ref(), project_root, &updated).await
+        {
+            tracing::warn!("cron job {id} failed to persist claimed run: {e}");
+            return None;
+        }
+
+        self.apply_claimed_task_state(&authoritative, now).await
+    }
+
+    async fn claim_in_memory_due_job(&self, id: &str, now: SystemTime) -> Option<TaskSpawnInput> {
+        let mut tasks = self.tasks.write().await;
+        let prompt = {
+            let task = tasks.get(id)?;
+            if !is_job_due(task, now) {
+                return None;
+            }
+            task.prompt.clone()
+        };
+        finalize_fired_job(&mut tasks, id, now);
+        Some(TaskSpawnInput::Dream {
+            prompt,
+            max_iterations: None,
+        })
+    }
+
+    async fn sync_task_from_authoritative(&self, authoritative: &CronTaskDef) {
+        let mut tasks = self.tasks.write().await;
+        if let Some(task) = tasks.get_mut(&authoritative.id) {
+            *task = authoritative.clone();
         }
     }
+
+    async fn apply_claimed_task_state(
+        &self,
+        authoritative: &CronTaskDef,
+        now: SystemTime,
+    ) -> Option<TaskSpawnInput> {
+        let mut tasks = self.tasks.write().await;
+        let one_shot = finalize_fired_job(&mut tasks, &authoritative.id, now);
+        if !one_shot {
+            if let Some(task) = tasks.get_mut(&authoritative.id) {
+                *task = authoritative.clone();
+                task.last_run = Some(now);
+            }
+        }
+        Some(TaskSpawnInput::Dream {
+            prompt: authoritative.prompt.clone(),
+            max_iterations: None,
+        })
+    }
+}
+
+fn unix_epoch_ms(at: SystemTime) -> u64 {
+    at.duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// Detect whether `pid` corresponds to a live process. Used by
@@ -723,5 +849,288 @@ mod expiry_tests {
             nine_am,
             utc
         ));
+    }
+}
+
+#[cfg(test)]
+mod scheduler_tick_tests {
+    use super::CronScheduler;
+    use async_trait::async_trait;
+    use futures::Stream;
+    use std::collections::HashMap;
+    use std::future::Future;
+    use std::path::{Path, PathBuf};
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::time::{Duration, SystemTime};
+    use tasks::output_manager::TaskOutputManager;
+    use tasks::registry::TaskRegistry;
+    use traits::filesystem::{FileContent, FileEvent, FlockGuard, FsError};
+    use traits::{BackgroundTaskHandle, Clock, FileSystem, RuntimeError, RuntimeSpawner};
+
+    const NOW: u64 = 1_700_000_000;
+    const TASKS_PATH: &str = "/proj/.lingxi/scheduled_tasks.json";
+    const OUTPUT_DIR: &str = "/proj/task-output";
+
+    struct MemFs {
+        files: tokio::sync::Mutex<HashMap<String, String>>,
+    }
+
+    struct MemFlockGuard(String);
+
+    impl FlockGuard for MemFlockGuard {
+        fn path(&self) -> &str {
+            &self.0
+        }
+    }
+
+    impl MemFs {
+        fn with(path: &str, body: &str) -> Arc<Self> {
+            let mut files = HashMap::new();
+            files.insert(path.to_string(), body.to_string());
+            Arc::new(Self {
+                files: tokio::sync::Mutex::new(files),
+            })
+        }
+
+        async fn get(&self, path: &str) -> Option<String> {
+            self.files.lock().await.get(path).cloned()
+        }
+
+        async fn count_suffix(&self, suffix: &str) -> usize {
+            self.files
+                .lock()
+                .await
+                .keys()
+                .filter(|path| path.ends_with(suffix))
+                .count()
+        }
+    }
+
+    #[async_trait]
+    impl FileSystem for MemFs {
+        async fn read_file(
+            &self,
+            path: &str,
+            _offset: Option<u64>,
+            _limit: Option<u64>,
+        ) -> Result<FileContent, FsError> {
+            match self.files.lock().await.get(path) {
+                Some(content) => Ok(FileContent {
+                    content: content.clone(),
+                    truncated: false,
+                    total_lines: content.lines().count() as u64,
+                }),
+                None => Err(FsError::NotFound(path.to_string())),
+            }
+        }
+
+        async fn write_file(&self, path: &str, content: &str) -> Result<(), FsError> {
+            self.files
+                .lock()
+                .await
+                .insert(path.to_string(), content.to_string());
+            Ok(())
+        }
+
+        fn is_within_workspace(&self, _: &str) -> bool {
+            true
+        }
+
+        async fn watch(
+            &self,
+            _: &str,
+        ) -> Result<Pin<Box<dyn Stream<Item = FileEvent> + Send>>, FsError> {
+            Err(FsError::Io("unsupported".into()))
+        }
+
+        async fn append_file(&self, path: &str, content: &str) -> Result<(), FsError> {
+            self.files
+                .lock()
+                .await
+                .entry(path.to_string())
+                .or_default()
+                .push_str(content);
+            Ok(())
+        }
+
+        async fn truncate(&self, _: &str, _: u64) -> Result<(), FsError> {
+            Ok(())
+        }
+
+        async fn file_mtime(&self, _: &str) -> Result<SystemTime, FsError> {
+            Ok(SystemTime::UNIX_EPOCH)
+        }
+
+        async fn file_size(&self, path: &str) -> Result<u64, FsError> {
+            Ok(self
+                .files
+                .lock()
+                .await
+                .get(path)
+                .map_or(0, |content| content.len() as u64))
+        }
+
+        async fn delete_file(&self, path: &str) -> Result<(), FsError> {
+            self.files.lock().await.remove(path);
+            Ok(())
+        }
+
+        async fn symlink(&self, _: &str, _: &str) -> Result<(), FsError> {
+            Ok(())
+        }
+
+        async fn flock_exclusive(&self, _: &str) -> Result<Box<dyn FlockGuard>, FsError> {
+            Err(FsError::Io("unsupported".into()))
+        }
+
+        async fn flock_exclusive_rooted(
+            &self,
+            root: &Path,
+            relative: &Path,
+        ) -> Result<Box<dyn FlockGuard>, FsError> {
+            Ok(Box::new(MemFlockGuard(
+                root.join(relative).display().to_string(),
+            )))
+        }
+
+        async fn fsync(&self, _: &str) -> Result<(), FsError> {
+            Ok(())
+        }
+    }
+
+    struct FixedClock(SystemTime);
+
+    impl FixedClock {
+        fn at_secs(secs: u64) -> Arc<Self> {
+            Arc::new(Self(SystemTime::UNIX_EPOCH + Duration::from_secs(secs)))
+        }
+    }
+
+    impl Clock for FixedClock {
+        fn now(&self) -> SystemTime {
+            self.0
+        }
+    }
+
+    struct UnusedRuntime;
+
+    #[async_trait]
+    impl RuntimeSpawner for UnusedRuntime {
+        async fn spawn(
+            &self,
+            _: &str,
+            _: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
+        ) -> Result<BackgroundTaskHandle, RuntimeError> {
+            panic!("spawn should not be called in scheduler tick tests");
+        }
+
+        async fn sleep(&self, duration: Duration) {
+            tokio::time::sleep(duration).await;
+        }
+
+        async fn cancel(&self, _: &BackgroundTaskHandle) -> Result<(), RuntimeError> {
+            panic!("cancel should not be called in scheduler tick tests");
+        }
+    }
+
+    fn registry(fs: Arc<dyn FileSystem>) -> Arc<TaskRegistry> {
+        Arc::new(TaskRegistry::new(
+            Arc::new(UnusedRuntime),
+            fs.clone(),
+            Arc::new(TaskOutputManager::new(PathBuf::from(OUTPUT_DIR), fs)),
+        ))
+    }
+
+    fn scheduler(
+        registry: Arc<TaskRegistry>,
+        fs: Arc<dyn FileSystem>,
+        clock: Arc<dyn Clock>,
+    ) -> CronScheduler {
+        let mut scheduler = CronScheduler::new(
+            registry,
+            fs,
+            clock,
+            Arc::new(UnusedRuntime),
+            PathBuf::from(TASKS_PATH),
+        );
+        scheduler.jitter_seconds = 0;
+        scheduler
+    }
+
+    #[tokio::test]
+    async fn stale_due_snapshot_from_peer_only_creates_one_task() {
+        let created_ms = (NOW - 120) * 1000;
+        let body = format!(
+            r#"{{"tasks":[{{"id":"d11111111","cron":"* * * * *","prompt":"hello","createdAt":{created_ms},"recurring":true}}]}}"#
+        );
+        let fs = MemFs::with(TASKS_PATH, &body);
+        let clock = FixedClock::at_secs(NOW);
+
+        let scheduler_a = scheduler(registry(fs.clone()), fs.clone(), clock.clone());
+        let scheduler_b = scheduler(registry(fs.clone()), fs.clone(), clock.clone());
+
+        scheduler_a.load_persisted().await;
+        scheduler_b.load_persisted().await;
+
+        let stale_due_ids = {
+            let tasks = scheduler_b.tasks.read().await;
+            tasks
+                .values()
+                .filter(|task| super::is_job_due(task, clock.now()))
+                .map(|task| task.id.clone())
+                .collect::<Vec<_>>()
+        };
+
+        scheduler_a.tick().await;
+        scheduler_b
+            .process_due_ids(clock.now(), stale_due_ids)
+            .await;
+
+        assert_eq!(
+            fs.count_suffix(".output").await,
+            1,
+            "the stale second scheduler snapshot must not create a duplicate task"
+        );
+
+        let after = crate::tasks_file::parse_tasks(&fs.get(TASKS_PATH).await.unwrap());
+        assert_eq!(after.tasks.len(), 1);
+        assert_eq!(after.tasks[0].last_fired_at, Some(NOW * 1000));
+
+        let scheduler_b_last_run = scheduler_b
+            .tasks
+            .read()
+            .await
+            .get("d11111111")
+            .and_then(|task| task.last_run);
+        assert_eq!(
+            scheduler_b_last_run,
+            Some(SystemTime::UNIX_EPOCH + Duration::from_secs(NOW))
+        );
+    }
+
+    #[tokio::test]
+    async fn corrupt_authoritative_state_never_executes_stale_in_memory_job() {
+        let created_ms = (NOW - 120) * 1000;
+        let body = format!(
+            r#"{{"tasks":[{{"id":"d22222222","cron":"* * * * *","prompt":"must not run","createdAt":{created_ms},"recurring":true}}]}}"#
+        );
+        let fs = MemFs::with(TASKS_PATH, &body);
+        let clock = FixedClock::at_secs(NOW);
+        let scheduler = scheduler(registry(fs.clone()), fs.clone(), clock.clone());
+        scheduler.load_persisted().await;
+        let stale_due_ids = vec!["d22222222".to_string()];
+        fs.files
+            .lock()
+            .await
+            .insert(TASKS_PATH.to_string(), "{".to_string());
+
+        scheduler.process_due_ids(clock.now(), stale_due_ids).await;
+
+        assert_eq!(
+            fs.count_suffix(".output").await,
+            0,
+            "corrupt durable state must fail closed instead of running stale memory"
+        );
     }
 }

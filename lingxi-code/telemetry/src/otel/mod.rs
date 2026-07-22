@@ -22,14 +22,16 @@
 //! - [`logs`]: the `claude_code.events` log signal names + `OTEL_LOG_*` gate
 //!   helpers (the orchestrator's opt-in `assistant_response` log line reads
 //!   [`logs::assistant_responses_enabled`]).
+//! - [`runtime`]: the default-off, fail-open OTLP / Prometheus provider
+//!   lifecycle used by the process entrypoints, including flush + shutdown,
+//!   HTTP/gRPC transport configuration, TLS/header handling, and a small global
+//!   recording surface for core record sites.
 //! - [`record`]: the **recording foundation** (finding H-09) — the
 //!   [`record::MetricRecorder`]/[`record::LogRecorder`] traits every record site
 //!   depends on, a byte-noop default ([`record::NoopRecorder`]) for the gate-off
 //!   path, and a config-gated in-memory/console recorder
 //!   ([`record::InMemoryRecorder`]) that accumulates counters/histograms/logs and
-//!   honors the `LINGXI_OTEL_CONTENT_MAX_LENGTH` content cap. The real OTLP
-//!   transport behind these traits and the ~20 app-code record sites remain
-//!   documented follow-ups (see [`record`]).
+//!   honors the `LINGXI_OTEL_CONTENT_MAX_LENGTH` content cap.
 //!
 //! ## Rebrand policy
 //!
@@ -42,20 +44,17 @@
 //!
 //! ## Remainder (partial — see H-BIN-06 / H-09 return notes)
 //!
-//! The recording *abstraction* now exists ([`record`]): the traits, the byte-noop
-//! default, the in-memory/console recorder, and the content cap. What remains is
-//! (1) the real OTLP egress over grpc/http behind those traits — the metric
-//! readers, the `LoggerProvider`, the trace provider, all consuming
-//! [`config::OtelConfig`]; and (2) wiring the ~20 instrument recording sites
-//! (session/token/cost/tool/git/subagent/mcp/hook/compaction), which live in
-//! currently-dirty app files. Both are enumerated as explicit follow-ups in
-//! [`record`].
+//! The provider/runtime layer now exists ([`runtime`]). The remaining work is
+//! broader app-code record-site coverage beyond the narrow startup/shutdown +
+//! assistant-response wiring landed with this module.
 
 pub mod config;
 pub mod headers_helper;
 pub mod logs;
 pub mod metrics;
 pub mod record;
+/// Process-level OpenTelemetry provider lifecycle and narrow live record sites.
+pub mod runtime;
 
 pub use config::{
     bool_env, compute_content_max_length, env_truthy, int_env, js_number, ExporterKind,
@@ -67,6 +66,10 @@ pub use record::{
     recorder_from_config, truncate_content, AttrValue, Attributes, CounterSeries, HistogramSeries,
     InMemoryRecorder, LogRecord, LogRecorder, MetricRecorder, NoopRecorder, Recorder,
     TruncatedContent,
+};
+pub use runtime::{
+    emit_assistant_response_log, emit_hook_lifecycle, emit_named_log_event, install_process,
+    prometheus_text, record_counter, record_histogram, record_lines_of_code_change, TelemetryGuard,
 };
 
 /// Whether the OpenTelemetry monitoring stack is enabled for this process

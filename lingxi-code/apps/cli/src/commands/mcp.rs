@@ -15,16 +15,22 @@
 //!   * `reset-project-choices` — clear the project's approved/rejected
 //!     `.mcp.json` server choices in the global config.
 //!
-//! NOTICE (parse faithfully, then `NOT_IMPLEMENTED`): `serve` (stdio MCP SERVER
-//! — lingxi's `mcp` crate is client-side), `login` / `logout` (OAuth browser
-//! flow), `add-from-claude-desktop` (Claude Desktop import). These print a
-//! not-yet-implemented notice and never start a billable chat turn.
+//! `serve` enters a real long-running CLI path; `login` / `logout` drive the
+//! configured MCP OAuth flow via `mcp::oauth`; `add-from-claude-desktop` imports
+//! Claude Desktop server entries into the selected scope.
 
+use crate::exit_codes::{RUNTIME_ERROR, SUCCESS};
 use clap::{Args, Subcommand};
 use mcp::connection::ConfigScope;
-use std::path::PathBuf;
-
-use crate::exit_codes::{NOT_IMPLEMENTED, RUNTIME_ERROR, SUCCESS};
+use mcp::oauth;
+use platform_posix::{self, PosixClock, PosixHttp};
+use std::collections::{hash_map::Entry, HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
+use tokio::sync::Mutex;
+use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 
 /// `mcp` family payload (a commander subcommand group). Bare `lingxi-cli mcp`
 /// (no child) prints help, matching claude.
@@ -312,22 +318,10 @@ pub async fn run(cli: &Cli) -> i32 {
         Sub::List => run_list(),
         Sub::Get(a) => run_get(a),
         Sub::ResetProjectChoices => run_reset_project_choices(),
-        Sub::Serve(_) => {
-            eprintln!("lingxi-cli mcp serve: not yet implemented");
-            NOT_IMPLEMENTED
-        }
-        Sub::Login(_) => {
-            eprintln!("lingxi-cli mcp login: not yet implemented");
-            NOT_IMPLEMENTED
-        }
-        Sub::Logout(_) => {
-            eprintln!("lingxi-cli mcp logout: not yet implemented");
-            NOT_IMPLEMENTED
-        }
-        Sub::AddFromClaudeDesktop(_) => {
-            eprintln!("lingxi-cli mcp add-from-claude-desktop: not yet implemented");
-            NOT_IMPLEMENTED
-        }
+        Sub::Serve(a) => run_serve(a).await,
+        Sub::Login(a) => run_login(a).await,
+        Sub::Logout(a) => run_logout(a).await,
+        Sub::AddFromClaudeDesktop(a) => run_add_from_claude_desktop(a),
     }
 }
 
@@ -344,6 +338,810 @@ fn print_family_help() {
         .name("lingxi-cli mcp");
     let _ = cmd.print_help();
     println!();
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// serve / login / logout / add-from-claude-desktop
+// ──────────────────────────────────────────────────────────────────────────
+
+const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
+
+type ProtocolWriter = Arc<Mutex<BufWriter<tokio::io::Stdout>>>;
+
+/// MCP stdio output adapter. Normal turn text/tool events stay silent; only
+/// protocol-authorized progress notifications are written to stdout.
+struct McpProtocolOutput {
+    writer: ProtocolWriter,
+    progress_tokens: Mutex<HashMap<String, serde_json::Value>>,
+}
+
+impl McpProtocolOutput {
+    fn new(writer: ProtocolWriter) -> Self {
+        Self {
+            writer,
+            progress_tokens: Mutex::new(HashMap::new()),
+        }
+    }
+
+    async fn register_progress(
+        &self,
+        tool_use_id: &protocol::ToolUseId,
+        token: Option<serde_json::Value>,
+    ) {
+        if let Some(token) = token {
+            self.progress_tokens
+                .lock()
+                .await
+                .insert(tool_use_id.as_str().to_string(), token);
+        }
+    }
+
+    async fn unregister_progress(&self, tool_use_id: &protocol::ToolUseId) {
+        self.progress_tokens
+            .lock()
+            .await
+            .remove(tool_use_id.as_str());
+    }
+}
+
+#[async_trait::async_trait]
+impl traits::OutputStream for McpProtocolOutput {
+    async fn emit_text(&self, _text: &str) {}
+
+    async fn emit_tool_call(
+        &self,
+        _id: &protocol::ToolUseId,
+        _tool: &str,
+        _input: &serde_json::Value,
+    ) {
+    }
+
+    async fn emit_tool_result(
+        &self,
+        _id: &protocol::ToolUseId,
+        _tool: &str,
+        _model_text: &str,
+        _result: &serde_json::Value,
+    ) {
+    }
+
+    async fn emit_tool_heartbeat(&self, id: &protocol::ToolUseId, tool: &str, elapsed_ms: u64) {
+        let token = self.progress_tokens.lock().await.get(id.as_str()).cloned();
+        if let Some(token) = token {
+            let frame = serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/progress",
+                "params": {
+                    "progressToken": token,
+                    "progress": elapsed_ms,
+                    "message": format!("{tool} is still running"),
+                }
+            });
+            let _ = write_protocol_frame(&self.writer, &frame).await;
+        }
+    }
+
+    async fn emit_end_turn(&self, _stop_reason: &str, _cost: &traits::CostSnapshot) {}
+}
+
+struct McpServePermissionSink;
+
+#[async_trait::async_trait]
+impl client_adapter::PermissionRequestSink for McpServePermissionSink {
+    async fn emit_request(&self, _request: client_protocol::permission::PermissionRequest) {
+        eprintln!("MCP serve denied an interactive permission prompt in headless mode.");
+    }
+}
+
+/// Implement `mcp serve` as a newline-delimited JSON-RPC 2.0 MCP server over
+/// stdin/stdout. Runtime diagnostics are intentionally restricted to stderr.
+async fn run_serve(a: &ServeArgs) -> i32 {
+    let writer = Arc::new(Mutex::new(BufWriter::new(tokio::io::stdout())));
+    let output = Arc::new(McpProtocolOutput::new(writer.clone()));
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut cfg = engine_desktop::DesktopConfig::default();
+    cfg.api_base = crate::init::resolve_api_base();
+    cfg.api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
+    cfg.cwd = cwd;
+    cfg.lingxi_home = crate::run::lingxi_home_dir();
+    // This command exports LingXi's own tool surface. Configured outbound MCP
+    // servers are not recursively re-exported.
+    cfg.mcp_paths.clear();
+    cfg.cli_mcp_servers.clear();
+    cfg.use_noop_permission_gate = true;
+    cfg.deny_unresolved_ask = true;
+    cfg.session_persistence = false;
+
+    let permission_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+        Arc::new(McpServePermissionSink);
+    let runtime = match engine_desktop::build(
+        cfg,
+        output.clone() as Arc<dyn traits::OutputStream>,
+        permission_sink,
+    )
+    .await
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("Failed to initialize LingXi MCP server: {error}");
+            return RUNTIME_ERROR;
+        }
+    };
+    if a.debug || a.verbose {
+        eprintln!("LingXi MCP stdio server initialized.");
+    }
+
+    match serve_stdio(runtime.orchestrator, output, writer).await {
+        Ok(()) => SUCCESS,
+        Err(error) => {
+            eprintln!("LingXi MCP stdio server failed: {error}");
+            RUNTIME_ERROR
+        }
+    }
+}
+
+async fn serve_stdio(
+    orchestrator: Arc<orchestrator::ConversationOrchestrator>,
+    output: Arc<McpProtocolOutput>,
+    writer: ProtocolWriter,
+) -> Result<(), String> {
+    let mut lines = BufReader::new(tokio::io::stdin()).lines();
+    let active = Arc::new(Mutex::new(HashMap::<String, CancellationToken>::new()));
+    let mut calls = JoinSet::new();
+    let mut initialize_seen = false;
+    let mut client_initialized = false;
+
+    loop {
+        tokio::select! {
+            joined = calls.join_next(), if !calls.is_empty() => {
+                if let Some(Err(error)) = joined {
+                    eprintln!("MCP tool task failed: {error}");
+                }
+            }
+            line = lines.next_line() => {
+                let line = line.map_err(|e| format!("read stdin: {e}"))?;
+                let Some(line) = line else { break };
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let message: serde_json::Value = match serde_json::from_str(&line) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        let response = jsonrpc_error(serde_json::Value::Null, -32700, "Parse error", Some(serde_json::json!({ "detail": error.to_string() })));
+                        write_protocol_frame(&writer, &response).await.map_err(|e| e.to_string())?;
+                        continue;
+                    }
+                };
+                let Some(object) = message.as_object() else {
+                    let response = jsonrpc_error(serde_json::Value::Null, -32600, "Invalid Request", None);
+                    write_protocol_frame(&writer, &response).await.map_err(|e| e.to_string())?;
+                    continue;
+                };
+                let request_id = object.get("id").cloned();
+                let method = object.get("method").and_then(serde_json::Value::as_str);
+                if object.get("jsonrpc").and_then(serde_json::Value::as_str) != Some("2.0") || method.is_none() {
+                    if request_id.is_some() {
+                        let response = jsonrpc_error(request_id.unwrap_or(serde_json::Value::Null), -32600, "Invalid Request", None);
+                        write_protocol_frame(&writer, &response).await.map_err(|e| e.to_string())?;
+                    }
+                    continue;
+                }
+                let method = method.unwrap_or_default();
+                let params = object.get("params").cloned().unwrap_or_else(|| serde_json::json!({}));
+
+                match method {
+                    "notifications/initialized" => {
+                        if initialize_seen {
+                            client_initialized = true;
+                        }
+                    }
+                    "notifications/cancelled" => {
+                        if let Some(id) = params.get("requestId") {
+                            if let Some(cancel) = active.lock().await.get(&request_id_key(id)).cloned() {
+                                cancel.cancel();
+                            }
+                        }
+                    }
+                    _ if request_id.is_none() => {}
+                    "initialize" => {
+                        let id = request_id.unwrap_or(serde_json::Value::Null);
+                        let requested = params.get("protocolVersion").and_then(serde_json::Value::as_str);
+                        let response = if initialize_seen {
+                            jsonrpc_error(id, -32600, "Server is already initialized", None)
+                        } else if requested != Some(MCP_PROTOCOL_VERSION) {
+                            jsonrpc_error(
+                                id,
+                                -32602,
+                                "Unsupported protocol version",
+                                Some(serde_json::json!({
+                                    "supported": [MCP_PROTOCOL_VERSION],
+                                    "requested": requested,
+                                })),
+                            )
+                        } else {
+                            initialize_seen = true;
+                            initialize_response(id)
+                        };
+                        write_protocol_frame(&writer, &response).await.map_err(|e| e.to_string())?;
+                    }
+                    "ping" => {
+                        let response = jsonrpc_result(request_id.unwrap_or(serde_json::Value::Null), serde_json::json!({}));
+                        write_protocol_frame(&writer, &response).await.map_err(|e| e.to_string())?;
+                    }
+                    _ if !client_initialized => {
+                        let response = jsonrpc_error(
+                            request_id.unwrap_or(serde_json::Value::Null),
+                            -32002,
+                            "Server is not initialized",
+                            None,
+                        );
+                        write_protocol_frame(&writer, &response).await.map_err(|e| e.to_string())?;
+                    }
+                    "tools/list" => {
+                        let tools = orchestrator.mcp_tool_definitions().await;
+                        let response = jsonrpc_result(
+                            request_id.unwrap_or(serde_json::Value::Null),
+                            serde_json::json!({ "tools": tools }),
+                        );
+                        write_protocol_frame(&writer, &response).await.map_err(|e| e.to_string())?;
+                    }
+                    "tools/call" => {
+                        let id = request_id.unwrap_or(serde_json::Value::Null);
+                        let key = request_id_key(&id);
+                        let cancel = CancellationToken::new();
+                        let duplicate = {
+                            let mut active = active.lock().await;
+                            match active.entry(key.clone()) {
+                                Entry::Occupied(_) => true,
+                                Entry::Vacant(entry) => {
+                                    entry.insert(cancel.clone());
+                                    false
+                                }
+                            }
+                        };
+                        if duplicate {
+                            let response = jsonrpc_error(id, -32600, "Duplicate request id", None);
+                            write_protocol_frame(&writer, &response).await.map_err(|e| e.to_string())?;
+                            continue;
+                        }
+                        let progress_token = params
+                            .get("_meta")
+                            .and_then(|meta| meta.get("progressToken"))
+                            .cloned();
+                        let orchestrator = orchestrator.clone();
+                        let output = output.clone();
+                        let writer = writer.clone();
+                        let active = active.clone();
+                        calls.spawn(async move {
+                            let response = call_tool_response(
+                                orchestrator,
+                                output,
+                                id,
+                                params,
+                                progress_token,
+                                cancel,
+                            )
+                            .await;
+                            active.lock().await.remove(&key);
+                            let _ = write_protocol_frame(&writer, &response).await;
+                        });
+                    }
+                    _ => {
+                        let response = jsonrpc_error(
+                            request_id.unwrap_or(serde_json::Value::Null),
+                            -32601,
+                            "Method not found",
+                            Some(serde_json::json!({ "method": method })),
+                        );
+                        write_protocol_frame(&writer, &response).await.map_err(|e| e.to_string())?;
+                    }
+                }
+            }
+        }
+    }
+
+    for cancel in active.lock().await.values() {
+        cancel.cancel();
+    }
+    if tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while calls.join_next().await.is_some() {}
+    })
+    .await
+    .is_err()
+    {
+        calls.shutdown().await;
+    }
+    Ok(())
+}
+
+async fn call_tool_response(
+    orchestrator: Arc<orchestrator::ConversationOrchestrator>,
+    output: Arc<McpProtocolOutput>,
+    request_id: serde_json::Value,
+    params: serde_json::Value,
+    progress_token: Option<serde_json::Value>,
+    cancel: CancellationToken,
+) -> serde_json::Value {
+    let Some(name) = params.get("name").and_then(serde_json::Value::as_str) else {
+        return jsonrpc_error(request_id, -32602, "Missing tool name", None);
+    };
+    let arguments = params
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    if !arguments.is_object() {
+        return jsonrpc_error(request_id, -32602, "Tool arguments must be an object", None);
+    }
+
+    let tool_use_id = protocol::ToolUseId::new();
+    output.register_progress(&tool_use_id, progress_token).await;
+    let result = orchestrator
+        .call_tool_from_host(
+            tool_use_id.clone(),
+            name.to_string(),
+            arguments,
+            Some(cancel),
+        )
+        .await;
+    output.unregister_progress(&tool_use_id).await;
+
+    match result {
+        Ok(None) => jsonrpc_error(request_id, -32602, &format!("Unknown tool: {name}"), None),
+        Ok(Some(protocol::ContentBlock::ToolResult {
+            content,
+            is_error,
+            content_blocks,
+            ..
+        })) => {
+            let content = content_blocks
+                .unwrap_or_else(|| vec![serde_json::json!({ "type": "text", "text": content })]);
+            jsonrpc_result(
+                request_id,
+                serde_json::json!({ "content": content, "isError": is_error }),
+            )
+        }
+        Ok(Some(_)) => jsonrpc_result(
+            request_id,
+            serde_json::json!({
+                "content": [{ "type": "text", "text": "Tool returned an unsupported result" }],
+                "isError": true,
+            }),
+        ),
+        Err(error) => jsonrpc_result(
+            request_id,
+            serde_json::json!({
+                "content": [{ "type": "text", "text": format!("Tool execution failed: {error}") }],
+                "isError": true,
+            }),
+        ),
+    }
+}
+
+fn initialize_response(id: serde_json::Value) -> serde_json::Value {
+    jsonrpc_result(
+        id,
+        serde_json::json!({
+            "protocolVersion": MCP_PROTOCOL_VERSION,
+            "capabilities": { "tools": { "listChanged": false } },
+            "serverInfo": {
+                "name": "LingXi",
+                "version": env!("CARGO_PKG_VERSION"),
+            },
+        }),
+    )
+}
+
+fn jsonrpc_result(id: serde_json::Value, result: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result })
+}
+
+fn jsonrpc_error(
+    id: serde_json::Value,
+    code: i64,
+    message: &str,
+    data: Option<serde_json::Value>,
+) -> serde_json::Value {
+    let mut error = serde_json::json!({ "code": code, "message": message });
+    if let Some(data) = data {
+        error["data"] = data;
+    }
+    serde_json::json!({ "jsonrpc": "2.0", "id": id, "error": error })
+}
+
+fn request_id_key(id: &serde_json::Value) -> String {
+    serde_json::to_string(id).unwrap_or_else(|_| "null".into())
+}
+
+async fn write_protocol_frame(
+    writer: &ProtocolWriter,
+    frame: &serde_json::Value,
+) -> std::io::Result<()> {
+    let mut bytes = serde_json::to_vec(frame)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    bytes.push(b'\n');
+    let mut stdout = writer.lock().await;
+    stdout.write_all(&bytes).await?;
+    stdout.flush().await
+}
+
+fn open_native_browser(url: &str) {
+    #[cfg(target_os = "macos")]
+    let command: Option<(&str, &[&str])> = Some(("open", &[]));
+    #[cfg(target_os = "linux")]
+    let command: Option<(&str, &[&str])> = Some(("xdg-open", &[]));
+    #[cfg(target_os = "windows")]
+    let command: Option<(&str, &[&str])> = Some(("cmd", &["/c", "start", ""]));
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    let command: Option<(&str, &[&str])> = None;
+    if let Some((program, prefix)) = command {
+        let _ = std::process::Command::new(program)
+            .args(prefix)
+            .arg(url)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
+}
+
+/// Implement `mcp login <name>`.
+async fn run_login(a: &LoginArgs) -> i32 {
+    let Some(cfg) = find_loaded_server(&a.name) else {
+        eprintln!(
+            "No MCP server named \"{}\". Run `lingxi-cli mcp add` to add one.",
+            a.name
+        );
+        return RUNTIME_ERROR;
+    };
+
+    let (server_url, oauth_cfg) = match extract_oauth_spec(&cfg) {
+        Some(v) => v,
+        None => {
+            eprintln!(
+                "MCP server \"{}\" does not have OAuth configuration.",
+                a.name
+            );
+            return RUNTIME_ERROR;
+        }
+    };
+
+    let storage = match mcp_token_storage().await {
+        Ok(storage) => storage,
+        Err(_) => {
+            eprintln!("Failed to initialize MCP credential storage.");
+            return RUNTIME_ERROR;
+        }
+    };
+    let clock: Arc<dyn traits::Clock> = Arc::new(PosixClock::new());
+    let http: Arc<dyn traits::HttpTransport> = Arc::new(PosixHttp::new());
+
+    let server_key = oauth::server_key(&cfg.name, &cfg.spec);
+    let no_browser = a.no_browser;
+    let on_auth_url: oauth::OnAuthorizationUrl = Arc::new(move |url: &str| {
+        if no_browser {
+            println!("Open this URL in your browser to authenticate:");
+            println!("{url}");
+            println!("Paste the callback URL or authorization code, then press Enter:");
+        } else {
+            println!("Opening this URL for authentication:");
+            println!("{url}");
+            open_native_browser(url);
+        }
+    });
+    let tokens = if no_browser {
+        let mut input = BufReader::new(tokio::io::stdin());
+        oauth::perform_oauth_flow_with_manual_input(
+            &http,
+            &clock,
+            oauth_cfg,
+            &cfg.name,
+            server_url,
+            &on_auth_url,
+            None,
+            &mut input,
+        )
+        .await
+    } else {
+        oauth::perform_oauth_flow(
+            &http,
+            &clock,
+            oauth_cfg,
+            &cfg.name,
+            server_url,
+            &on_auth_url,
+            None,
+        )
+        .await
+    };
+    let tokens = match tokens {
+        Ok(tokens) => tokens,
+        Err(err) => {
+            eprintln!("MCP login failed for \"{}\": {err}", a.name);
+            return RUNTIME_ERROR;
+        }
+    };
+
+    match oauth::save_tokens(&storage, &clock, &server_key, &tokens).await {
+        Ok(()) => {
+            println!("Successfully authenticated MCP server \"{}\".", a.name);
+            SUCCESS
+        }
+        Err(e) => {
+            eprintln!("Failed to persist MCP tokens for \"{}\": {e}", a.name);
+            RUNTIME_ERROR
+        }
+    }
+}
+
+/// Implement `mcp logout <name>`.
+async fn run_logout(a: &LogoutArgs) -> i32 {
+    let storage = match mcp_token_storage().await {
+        Ok(storage) => storage,
+        Err(_) => {
+            eprintln!("Failed to initialize MCP credential storage.");
+            return RUNTIME_ERROR;
+        }
+    };
+    let http: Arc<dyn traits::HttpTransport> = Arc::new(PosixHttp::new());
+
+    // Remote revocation is best-effort and only possible while the server
+    // configuration still exists. Local deletion is authoritative and runs for
+    // every matching credential even when the server is missing/disconnected.
+    if let Some(cfg) = find_loaded_server(&a.name) {
+        if let Some((server_url, oauth_cfg)) = extract_oauth_spec(&cfg) {
+            let server_key = oauth::server_key(&cfg.name, &cfg.spec);
+            oauth::revoke_server_tokens(&storage, &http, &server_key, server_url, oauth_cfg).await;
+        }
+    }
+
+    let accounts = match storage.list(oauth::MCP_OAUTH_SERVICE).await {
+        Ok(accounts) => accounts,
+        Err(e) => {
+            eprintln!("Failed to enumerate MCP tokens for \"{}\": {e}", a.name);
+            return RUNTIME_ERROR;
+        }
+    };
+    for account in credential_accounts_for_server(accounts, &a.name) {
+        if let Err(e) = storage.delete(oauth::MCP_OAUTH_SERVICE, &account).await {
+            eprintln!("Failed to clear MCP tokens for \"{}\": {e}", a.name);
+            return RUNTIME_ERROR;
+        }
+    }
+    println!("Successfully logged out from MCP server \"{}\".", a.name);
+    SUCCESS
+}
+
+fn credential_accounts_for_server(accounts: Vec<String>, server_name: &str) -> Vec<String> {
+    let prefix = format!("{server_name}|");
+    accounts
+        .into_iter()
+        .filter(|account| account == server_name || account.starts_with(&prefix))
+        .collect()
+}
+
+/// Implement `mcp add-from-claude-desktop`. Reads Claude Desktop's
+/// `claude_desktop_config.json`, imports entries into the selected scope, and
+/// reuses `write_server` to preserve the existing policy and name validation.
+fn run_add_from_claude_desktop(a: &AddFromClaudeDesktopArgs) -> i32 {
+    let Some(path) = claude_desktop_config_path() else {
+        eprintln!("Claude Desktop config is unavailable on this platform.");
+        return RUNTIME_ERROR;
+    };
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        eprintln!(
+            "Could not read Claude Desktop config at {}.",
+            path.display()
+        );
+        return RUNTIME_ERROR;
+    };
+
+    let Ok(imported) = mcp::json_config::parse_mcp_json_string(&raw, ConfigScope::Project) else {
+        eprintln!("Could not parse Claude Desktop config.");
+        return RUNTIME_ERROR;
+    };
+    if imported.is_empty() {
+        eprintln!("No MCP servers found in {}.", path.display());
+        return RUNTIME_ERROR;
+    }
+
+    let mut existing: HashSet<String> =
+        load_all_servers().into_iter().map(|cfg| cfg.name).collect();
+    let mut failures = 0usize;
+    let mut added = 0usize;
+    for cfg in imported {
+        if existing.contains(&cfg.name) {
+            eprintln!(
+                "MCP server {} already exists in another configuration scope; skipping import.",
+                cfg.name
+            );
+            failures += 1;
+            continue;
+        }
+        let Some(entry) = cfg_to_entry_value(&cfg) else {
+            eprintln!("Skipping unsupported MCP server \"{}\".", cfg.name);
+            failures += 1;
+            continue;
+        };
+        match write_server(&cfg.name, &entry, a.scope) {
+            Ok(WriteOutcome::Added(path)) => {
+                println!(
+                    "Added MCP server {} to {} config.",
+                    cfg.name,
+                    a.scope.label()
+                );
+                print_file_modified(a.scope, &path);
+                existing.insert(cfg.name.clone());
+                added += 1;
+            }
+            Ok(WriteOutcome::AlreadyExists) => {
+                eprintln!(
+                    "MCP server {} already exists in {}.",
+                    cfg.name,
+                    a.scope.exists_suffix()
+                );
+                failures += 1;
+            }
+            Err(e) => {
+                eprintln!("Failed to import MCP server {}: {e}", cfg.name);
+                failures += 1;
+            }
+        }
+    }
+
+    if failures == 0 || added > 0 {
+        SUCCESS
+    } else {
+        RUNTIME_ERROR
+    }
+}
+
+/// Resolve one MCP config entry by name from the merged, precedence-ordered
+/// current view used by `mcp list` / `mcp get`.
+fn find_loaded_server(name: &str) -> Option<mcp::connection::McpServerConfig> {
+    load_all_servers().into_iter().find(|cfg| cfg.name == name)
+}
+
+/// Extract `(url, oauth_cfg)` when `cfg` is an OAuth-capable MCP remote transport.
+fn extract_oauth_spec(
+    cfg: &mcp::connection::McpServerConfig,
+) -> Option<(&str, &traits::McpOAuthConfigDto)> {
+    match &cfg.spec {
+        traits::McpTransportSpec::Sse {
+            url,
+            oauth: Some(cfg),
+            ..
+        } => Some((url.as_str(), cfg)),
+        traits::McpTransportSpec::Http {
+            url,
+            oauth: Some(cfg),
+            ..
+        } => Some((url.as_str(), cfg)),
+        _ => None,
+    }
+}
+
+/// Build a CLI-local secure-storage backend used for MCP OAuth token persistence.
+async fn mcp_token_storage() -> Result<Arc<dyn traits::SecureStorage>, String> {
+    let home = crate::run::lingxi_home_dir();
+    let user = std::env::var("USER").unwrap_or_else(|_| "default".to_string());
+    platform_posix::secure_storage_for_platform(user, home.clone(), home.join(".credentials.json"))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Convert a parsed MCP server config into the JSON object shape accepted by
+/// `write_server` (`command` / `args` / `env` or `type` + `url` + `headers`).
+fn cfg_to_entry_value(cfg: &mcp::connection::McpServerConfig) -> Option<serde_json::Value> {
+    match &cfg.spec {
+        traits::McpTransportSpec::Stdio { command, args, env } => Some(serde_json::json!({
+            "type": "stdio",
+            "command": command,
+            "args": args,
+            "env": env,
+        })),
+        traits::McpTransportSpec::Sse { url, headers, .. } => {
+            let mut obj = serde_json::Map::new();
+            obj.insert("type".into(), "sse".into());
+            obj.insert("url".into(), serde_json::Value::String(url.clone()));
+            if !headers.is_empty() {
+                obj.insert(
+                    "headers".into(),
+                    serde_json::Value::Object(
+                        headers
+                            .iter()
+                            .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                            .collect(),
+                    ),
+                );
+            }
+            Some(serde_json::Value::Object(obj))
+        }
+        traits::McpTransportSpec::Http { url, headers, .. } => {
+            let mut obj = serde_json::Map::new();
+            obj.insert("type".into(), "http".into());
+            obj.insert("url".into(), serde_json::Value::String(url.clone()));
+            if !headers.is_empty() {
+                obj.insert(
+                    "headers".into(),
+                    serde_json::Value::Object(
+                        headers
+                            .iter()
+                            .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                            .collect(),
+                    ),
+                );
+            }
+            Some(serde_json::Value::Object(obj))
+        }
+        _ => None,
+    }
+}
+
+/// Resolve Claude Desktop config path for supported host families.
+fn claude_desktop_config_path() -> Option<PathBuf> {
+    if cfg!(target_os = "macos") {
+        let home = dirs::home_dir()?;
+        return Some(home.join("Library/Application Support/Claude/claude_desktop_config.json"));
+    }
+    if std::env::var("WSL_DISTRO_NAME").is_ok() {
+        return wsl_claude_desktop_config_path();
+    }
+    None
+}
+
+fn wsl_claude_desktop_config_path() -> Option<PathBuf> {
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        if let Some(appdata) = windows_path_to_wsl(&appdata) {
+            return Some(appdata.join("Claude/claude_desktop_config.json"));
+        }
+    }
+    if let Ok(profile) = std::env::var("USERPROFILE") {
+        if let Some(profile) = windows_path_to_wsl(&profile) {
+            return Some(profile.join("AppData/Roaming/Claude/claude_desktop_config.json"));
+        }
+    }
+
+    // WSL's Linux username is not required to match the Windows account name.
+    // Prefer asking Windows for its roaming profile before using the historical
+    // same-name fallback.
+    if let Ok(output) = std::process::Command::new("cmd.exe")
+        .args(["/D", "/S", "/C", "echo %APPDATA%"])
+        .output()
+    {
+        if output.status.success() {
+            let appdata = String::from_utf8_lossy(&output.stdout);
+            if let Some(appdata) = windows_path_to_wsl(appdata.trim()) {
+                return Some(appdata.join("Claude/claude_desktop_config.json"));
+            }
+        }
+    }
+
+    let user = std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .ok()?;
+    Some(
+        Path::new("/mnt/c/Users")
+            .join(user)
+            .join("AppData/Roaming/Claude/claude_desktop_config.json"),
+    )
+}
+
+fn windows_path_to_wsl(raw: &str) -> Option<PathBuf> {
+    let raw = raw.trim().trim_matches('"');
+    if raw.starts_with("/mnt/") {
+        return Some(PathBuf::from(raw));
+    }
+    let bytes = raw.as_bytes();
+    if bytes.len() < 3
+        || !bytes[0].is_ascii_alphabetic()
+        || bytes[1] != b':'
+        || !matches!(bytes[2], b'\\' | b'/')
+    {
+        return None;
+    }
+    let drive = (bytes[0] as char).to_ascii_lowercase();
+    let suffix = raw[3..].replace('\\', "/");
+    Some(Path::new("/mnt").join(drive.to_string()).join(suffix))
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -1639,6 +2437,79 @@ mod url_redaction_tests {
     fn non_url_input_falls_back_to_raw() {
         // No `://` ⟶ return the raw string unchanged (graceful fallback).
         assert_eq!(redact_url_for_display("not-a-url"), "not-a-url");
+    }
+}
+
+#[cfg(test)]
+mod serve_protocol_tests {
+    use super::{
+        credential_accounts_for_server, initialize_response, jsonrpc_error, windows_path_to_wsl,
+    };
+
+    #[test]
+    fn initialize_response_is_a_stable_2025_06_18_frame() {
+        let encoded = serde_json::to_string(&initialize_response(serde_json::json!(1))).unwrap();
+        assert_eq!(
+            encoded,
+            format!(
+                "{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{{\"tools\":{{\"listChanged\":false}}}},\"serverInfo\":{{\"name\":\"LingXi\",\"version\":\"{}\"}}}}}}",
+                env!("CARGO_PKG_VERSION")
+            )
+        );
+    }
+
+    #[test]
+    fn protocol_error_preserves_request_id_and_optional_data() {
+        assert_eq!(
+            jsonrpc_error(
+                serde_json::json!("req-7"),
+                -32602,
+                "bad params",
+                Some(serde_json::json!({ "field": "name" })),
+            ),
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": "req-7",
+                "error": {
+                    "code": -32602,
+                    "message": "bad params",
+                    "data": { "field": "name" },
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn logout_matches_all_hashed_credentials_for_only_one_server() {
+        assert_eq!(
+            credential_accounts_for_server(
+                vec![
+                    "alpha|1111".into(),
+                    "beta|2222".into(),
+                    "alpha|3333".into(),
+                    "alpha".into(),
+                ],
+                "alpha",
+            ),
+            vec!["alpha|1111", "alpha|3333", "alpha"]
+        );
+    }
+
+    #[test]
+    fn translates_windows_profile_paths_for_wsl_without_assuming_linux_username() {
+        assert_eq!(
+            windows_path_to_wsl(r#"C:\Users\Windows User\AppData\Roaming"#).as_deref(),
+            Some(std::path::Path::new(
+                "/mnt/c/Users/Windows User/AppData/Roaming"
+            ))
+        );
+        assert_eq!(
+            windows_path_to_wsl(r#"D:/Profiles/Alice/AppData/Roaming"#).as_deref(),
+            Some(std::path::Path::new(
+                "/mnt/d/Profiles/Alice/AppData/Roaming"
+            ))
+        );
+        assert!(windows_path_to_wsl("relative/path").is_none());
     }
 }
 

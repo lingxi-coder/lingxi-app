@@ -15,6 +15,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
+use telemetry::otel;
 use telemetry::pii::{PiiTagged, Verified};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use telemetry::tengu::tool::{WRITE_COMPLETED, WRITE_FAILED, WRITE_STARTED};
@@ -377,6 +378,19 @@ impl Tool for FileWriteTool {
             return Err(ToolError::Io(e.to_string()));
         }
 
+        let structured_patch = if is_create {
+            Vec::new()
+        } else {
+            crate::structured_patch::build_structured_patch(
+                prior_decoded.as_deref().unwrap_or(""),
+                content,
+            )
+        };
+        let (lines_added, lines_removed) = count_patch_lines(&structured_patch);
+        if lines_added > 0 || lines_removed > 0 {
+            otel::record_lines_of_code_change("Write", lines_added, lines_removed);
+        }
+
         let bytes_written = content.as_bytes().len() as u64;
         let duration_ms = started.elapsed().as_millis() as u64;
         self.emit_completed(&invocation_id, bytes_written, duration_ms)
@@ -425,10 +439,7 @@ impl Tool for FileWriteTool {
         let structured_patch = if is_create {
             serde_json::json!([])
         } else {
-            let prior = prior_decoded.as_deref().unwrap_or("");
-            serde_json::json!(crate::structured_patch::build_structured_patch(
-                prior, content
-            ))
+            serde_json::json!(structured_patch)
         };
 
         // `data` is byte-faithful to claude-code's Write result `data` object —
@@ -479,6 +490,21 @@ impl Tool for FileWriteTool {
             mcp_meta: None,
         })
     }
+}
+
+fn count_patch_lines(hunks: &[crate::structured_patch::StructuredPatchHunk]) -> (u64, u64) {
+    let mut added = 0_u64;
+    let mut removed = 0_u64;
+    for hunk in hunks {
+        for line in &hunk.lines {
+            if line.starts_with('+') {
+                added += 1;
+            } else if line.starts_with('-') {
+                removed += 1;
+            }
+        }
+    }
+    (added, removed)
 }
 
 #[cfg(test)]

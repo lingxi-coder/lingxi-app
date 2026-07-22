@@ -20,6 +20,7 @@
 //! takes no subcommands, only `-h/--help`).
 
 use clap::Args;
+use migrations::settings_update::read_settings_map;
 
 use crate::exit_codes::SUCCESS;
 
@@ -88,6 +89,7 @@ pub async fn run(_cli: &Cli) -> i32 {
     let servers = mcp::json_config::load_mcp_servers(&project_mcp_path, &global_for_load, &cwd);
     report_mcp_servers(&servers);
     report_mcp_config_warnings(&cwd, global_config.as_deref());
+    report_plugin_config_warnings(&config_home, &cwd);
 
     SUCCESS
 }
@@ -130,5 +132,75 @@ fn report_mcp_servers(servers: &[mcp::McpServerConfig]) {
             s.scope,
             state
         );
+    }
+}
+
+fn report_plugin_config_warnings(home: &std::path::Path, cwd: &std::path::Path) {
+    let warnings = collect_ignored_plugin_config_warnings(home, cwd);
+    if warnings.is_empty() {
+        return;
+    }
+    println!("Plugin config warnings: {}", warnings.len());
+    for warning in warnings {
+        println!("  - {warning}");
+    }
+}
+
+fn collect_ignored_plugin_config_warnings(
+    home: &std::path::Path,
+    cwd: &std::path::Path,
+) -> Vec<String> {
+    [
+        (
+            "project",
+            crate::commands::plugin_settings::Scope::Project.path(home, cwd),
+        ),
+        (
+            "local",
+            crate::commands::plugin_settings::Scope::Local.path(home, cwd),
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(scope, path)| {
+        let settings = read_settings_map(&path).ok()?;
+        let plugin_configs = settings.get("pluginConfigs")?;
+        let entries = plugin_configs.as_object()?;
+        (!entries.is_empty()).then(|| {
+            format!(
+                "{} defines pluginConfigs in {}, but runtime ignores project/local pluginConfigs for safety. Move these values to user settings.",
+                scope,
+                path.display()
+            )
+        })
+    })
+    .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ignored_project_local_plugin_configs_are_reported() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let cwd = tmp.path().join("repo");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(cwd.join(branding::DOT_DIR)).unwrap();
+        std::fs::write(
+            cwd.join(branding::DOT_DIR).join("settings.json"),
+            r#"{"pluginConfigs":{"hello@mkt":{"options":{"REGION":"us-east"}}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            cwd.join(branding::DOT_DIR).join("settings.local.json"),
+            r#"{"pluginConfigs":{"other@mkt":{"options":{"REGION":"eu"}}}}"#,
+        )
+        .unwrap();
+
+        let warnings = collect_ignored_plugin_config_warnings(&home, &cwd);
+        assert_eq!(warnings.len(), 2);
+        assert!(warnings[0].contains("project defines pluginConfigs"));
+        assert!(warnings[1].contains("local defines pluginConfigs"));
     }
 }

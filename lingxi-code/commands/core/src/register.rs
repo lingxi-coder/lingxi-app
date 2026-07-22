@@ -1097,7 +1097,9 @@ mod batch_8_tests {
             assert!(reg.get_handler(name).is_some(), "/{name} handler missing");
         }
         assert_eq!(
-            reg.resolve("subtask").expect("/subtask must resolve").description,
+            reg.resolve("subtask")
+                .expect("/subtask must resolve")
+                .description,
             "Send a subagent off with your full context; its result comes back here"
         );
         // The DEFAULT `/fork` is now the background-session-copy variant (`vAd`).
@@ -1119,8 +1121,14 @@ mod batch_8_tests {
         register_all_builtin_commands(&mut reg);
         batch_8(&mut reg, Arc::new(MockOrchestratorHandle::new()), false);
 
-        let fork_desc = reg.resolve("fork").expect("/fork must resolve").description.clone();
-        let subtask = reg.resolve("subtask").and_then(|_| reg.get_handler("subtask"));
+        let fork_desc = reg
+            .resolve("fork")
+            .expect("/fork must resolve")
+            .description
+            .clone();
+        let subtask = reg
+            .resolve("subtask")
+            .and_then(|_| reg.get_handler("subtask"));
 
         // Restore the env before asserting so a failure never leaks the override.
         std::env::remove_var("CLAUDE_CODE_DISABLE_AGENT_VIEW");
@@ -1152,7 +1160,9 @@ mod batch_8_tests {
             "Spawn a background agent that inherits the full conversation"
         );
         assert!(
-            reg.resolve("subtask").and_then(|_| reg.get_handler("subtask")).is_none(),
+            reg.resolve("subtask")
+                .and_then(|_| reg.get_handler("subtask"))
+                .is_none(),
             "/subtask must NOT be registered when the disableAgentView setting is true"
         );
     }

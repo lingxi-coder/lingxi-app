@@ -59,7 +59,7 @@ pub enum TodoState {
 }
 
 /// Active session-scoped `/goal` state.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActiveGoalState {
     /// User-supplied goal condition.
     pub condition: String,

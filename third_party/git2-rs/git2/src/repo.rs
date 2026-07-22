@@ -543,7 +543,9 @@ impl Repository {
     /// If there is no namespace, Ok(None) is returned.
     pub fn namespace(&self) -> Result<Option<&str>, Error> {
         match self.namespace_bytes() {
-            Some(nb) => std::str::from_utf8(nb).map(|s| Some(s)).map_err(|e| e.into()),
+            Some(nb) => std::str::from_utf8(nb)
+                .map(|s| Some(s))
+                .map_err(|e| e.into()),
             None => Ok(None),
         }
     }

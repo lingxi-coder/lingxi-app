@@ -22,6 +22,7 @@ pub mod connect_method_view;
 pub mod connect_picker_view;
 pub mod dialog_view;
 pub mod footer;
+pub mod input_status;
 pub mod model_picker_view;
 mod paste_burst;
 pub mod pending_input_preview;
@@ -50,6 +51,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 use tui_core::ask_user_question_bridge::AskUserQuestionExchange;
+use tui_core::orchestrator_bridge::RunningAgentStatus;
 use tui_core::permission_bridge::PermissionExchange;
 use tui_core::theme::Theme;
 
@@ -240,6 +242,11 @@ pub struct BottomPane {
     verbose: bool,
     /// Preview of queued inputs (empty seam until a queue source exists).
     pending_input_preview: PendingInputPreview,
+    /// Model-managed working plan rendered directly above the composer.
+    planned_tasks: Vec<input_status::PlanTask>,
+    /// Foreground + background agents currently running, rendered directly
+    /// below the composer.
+    running_agents: Vec<RunningAgentStatus>,
     /// Owner-fed context-pressure banner (`TurnEvent::ContextPressure` — the
     /// claude-code `<TokenWarning>` line). Rendered as its own row between the
     /// status row and the composer; `None` renders nothing.
@@ -285,6 +292,8 @@ impl BottomPane {
             status: BottomPaneStatus::default(),
             verbose: false,
             pending_input_preview: PendingInputPreview::new(),
+            planned_tasks: Vec::new(),
+            running_agents: Vec::new(),
             context_pressure: None,
             theme,
             accent: None,
@@ -298,6 +307,7 @@ impl BottomPane {
     /// when the command registry is wired and after `/reload-skills`.
     pub fn set_registry_commands(&mut self, rows: Vec<RegistrySlashRow>) {
         self.registry_commands = rows;
+        self.sync_completion();
     }
 
     /// Set the active permission mode shown by the below-composer indicator.
@@ -689,6 +699,37 @@ impl BottomPane {
     /// (`TurnEvent::ContextPressure`); `None` removes the banner row.
     pub fn set_context_pressure(&mut self, banner: Option<traits::ContextPressureBanner>) {
         self.context_pressure = banner;
+    }
+
+    /// Replace the model-managed plan shown above the composer. An all-complete
+    /// plan is hidden, matching the task stores' terminal clear behavior.
+    pub fn set_planned_tasks(&mut self, tasks: Vec<input_status::PlanTask>) {
+        self.planned_tasks = if !tasks.is_empty()
+            && tasks
+                .iter()
+                .all(|task| task.state == input_status::PlanTaskState::Completed)
+        {
+            Vec::new()
+        } else {
+            tasks
+        };
+    }
+
+    /// Current model-managed plan, for event reducers and tests.
+    #[must_use]
+    pub fn planned_tasks(&self) -> &[input_status::PlanTask] {
+        &self.planned_tasks
+    }
+
+    /// Replace the live agent snapshot shown below the composer.
+    pub fn set_running_agents(&mut self, agents: Vec<RunningAgentStatus>) {
+        self.running_agents = agents;
+    }
+
+    /// Current live-agent snapshot, for event reducers and tests.
+    #[must_use]
+    pub fn running_agents(&self) -> &[RunningAgentStatus] {
+        &self.running_agents
     }
 
     /// The context-pressure banner currently shown, if any (tests/owner).
@@ -1344,12 +1385,9 @@ impl BottomPane {
         ))
     }
 
-    /// The pane's vertical zones within `area`, in codex's order (codex
-    /// `BottomPane::as_renderable`): the running status indicator ABOVE,
-    /// then the context-pressure banner, the queued-input preview, the
-    /// composer, and finally the below-composer slot — the completion popup
-    /// when open (codex `ActivePopup` replacing the footer), the key-hint
-    /// footer otherwise.
+    /// The pane's vertical zones within `area`: running status, context banner,
+    /// queued-input preview, planned tasks, composer, live agents, permission
+    /// mode, then the completion/footer slot.
     fn zones(&self, area: Rect) -> std::rc::Rc<[Rect]> {
         let below = if let Some(c) = self.completion.as_ref() {
             CompletionView::desired_height(c)
@@ -1358,13 +1396,21 @@ impl BottomPane {
         };
         let mode_row =
             permission_mode_indicator::indicator_height(self.permission_mode, &self.theme);
+        let task_rows =
+            u16::try_from(input_status::task_lines(&self.planned_tasks, &self.theme).len())
+                .unwrap_or(u16::MAX);
+        let agent_rows =
+            u16::try_from(input_status::agent_lines(&self.running_agents, &self.theme).len())
+                .unwrap_or(u16::MAX);
         Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(self.status_rows(area.width)),
                 Constraint::Length(u16::from(self.context_pressure.is_some())),
                 Constraint::Length(self.pending_input_preview.desired_height(area.width)),
+                Constraint::Length(task_rows),
                 Constraint::Min(3),
+                Constraint::Length(agent_rows),
                 Constraint::Length(mode_row),
                 Constraint::Length(below),
             ])
@@ -1395,6 +1441,12 @@ impl BottomPane {
             .desired_height(width);
         let preview = self.pending_input_preview.desired_height(width);
         let banner = u16::from(self.context_pressure.is_some());
+        let task_rows =
+            u16::try_from(input_status::task_lines(&self.planned_tasks, &self.theme).len())
+                .unwrap_or(u16::MAX);
+        let agent_rows =
+            u16::try_from(input_status::agent_lines(&self.running_agents, &self.theme).len())
+                .unwrap_or(u16::MAX);
         // The status indicator is 2 rows while compacting (spinner line + the
         // progress bar) when the bar fits, else 1 for a normal running turn.
         // The caller supplies a fresh `running` (the pane's own flag can be
@@ -1417,7 +1469,7 @@ impl BottomPane {
         };
         let mode_row =
             permission_mode_indicator::indicator_height(self.permission_mode, &self.theme);
-        let base = status + banner + preview + composer + mode_row + below;
+        let base = status + banner + preview + task_rows + composer + agent_rows + mode_row + below;
         let overlay = if let Some(view) = self.view_stack.active() {
             view.desired_height(width)
         } else {
@@ -1429,11 +1481,9 @@ impl BottomPane {
 
 impl Renderable for BottomPane {
     /// Draw the pane: the running status indicator (only while a turn is in
-    /// flight) + context-pressure banner + queued-input preview + the
-    /// borderless composer (background block with a `›` gutter prompt), then
-    /// the below-composer slot — the completion popup when open, the
-    /// key-hint footer otherwise — with the active (top) stacked view painted
-    /// over the full area, unless it owns the whole frame.
+    /// flight) + context-pressure banner + queued-input preview + planned tasks
+    /// + composer + live agents + below-composer chrome, with the active view
+    /// painted over the full area unless it owns the whole frame.
     fn render(&self, area: Rect, buf: &mut Buffer) {
         if let Some(view) = self.full_frame_view() {
             view.render(area, buf);
@@ -1468,18 +1518,22 @@ impl Renderable for BottomPane {
             Paragraph::new(self.context_pressure_line(banner)).render(zones[1], buf);
         }
         self.pending_input_preview.render(zones[2], buf);
+        Paragraph::new(input_status::task_lines(&self.planned_tasks, &self.theme))
+            .render(zones[3], buf);
         ComposerView::new(&self.composer)
             .with_attached_images(&self.attached_image_labels)
             .with_accent(self.accent.map(crate::style_adapter::to_ratatui))
-            .render(zones[3], buf);
+            .render(zones[4], buf);
+        Paragraph::new(input_status::agent_lines(&self.running_agents, &self.theme))
+            .render(zones[5], buf);
         // Permission-mode indicator (below the composer, above the footer);
         // empty for `Default` mode (zero-height zone → nothing drawn).
         if let Some(line) =
             permission_mode_indicator::indicator_line(self.permission_mode, &self.theme)
         {
-            Paragraph::new(line).render(zones[4], buf);
+            Paragraph::new(line).render(zones[6], buf);
         }
-        let below = zones[5];
+        let below = zones[7];
         if let Some(popup) = &self.completion {
             // `CompletionView::render` anchors UPWARD from the rect it is
             // given (it grew up from the composer's top edge in the old
@@ -1534,7 +1588,7 @@ impl Renderable for BottomPane {
         }
         ComposerView::new(&self.composer)
             .with_attached_images(&self.attached_image_labels)
-            .cursor_pos(self.zones(area)[3])
+            .cursor_pos(self.zones(area)[4])
     }
 
     fn cursor_style(&self, area: Rect) -> SetCursorStyle {
@@ -1548,7 +1602,7 @@ impl Renderable for BottomPane {
         }
         ComposerView::new(&self.composer)
             .with_attached_images(&self.attached_image_labels)
-            .cursor_style(self.zones(area)[3])
+            .cursor_style(self.zones(area)[4])
     }
 }
 
@@ -2311,6 +2365,55 @@ mod tests {
     }
 
     #[test]
+    fn planned_tasks_render_above_input_and_agents_below_it() {
+        use input_status::{PlanTask, PlanTaskState};
+
+        let mut pane = pane();
+        let base_height = pane.desired_height(80);
+        pane.set_planned_tasks(vec![
+            PlanTask {
+                id: Some("1".into()),
+                subject: "Inspect layout".into(),
+                active_form: None,
+                state: PlanTaskState::Completed,
+            },
+            PlanTask {
+                id: Some("2".into()),
+                subject: "Build status UI".into(),
+                active_form: Some("Building status UI".into()),
+                state: PlanTaskState::InProgress,
+            },
+        ]);
+        pane.set_running_agents(vec![RunningAgentStatus {
+            id: "a123".into(),
+            task_type: "local_agent".into(),
+            agent_type: "Explore".into(),
+            description: "Mapping event flow".into(),
+            status: "running".into(),
+        }]);
+        assert_eq!(pane.desired_height(80), base_height + 3);
+
+        let area = Rect::new(0, 0, 80, pane.desired_height(80));
+        let mut buf = Buffer::empty(area);
+        pane.render(area, &mut buf);
+        let rows = buffer_rows(&buf);
+        let tasks = rows
+            .iter()
+            .position(|row| row.contains("✔ Inspect layout"))
+            .expect("task row");
+        let input = rows
+            .iter()
+            .position(|row| row.starts_with('›'))
+            .expect("composer prompt");
+        let agent = rows
+            .iter()
+            .position(|row| row.contains("1 local agent"))
+            .expect("agent status");
+        assert!(tasks < input, "tasks must be above input: {rows:?}");
+        assert!(input < agent, "agents must be below input: {rows:?}");
+    }
+
+    #[test]
     fn key_routing_order_active_view_before_completion_before_composer() {
         let mut pane = pane();
         // Completion open: Down navigates the popup, not the composer/history.
@@ -2398,6 +2501,35 @@ mod tests {
         // Tab completes the highlighted registry command into the buffer.
         let _ = pane.handle_key(key(KeyCode::Tab));
         assert_eq!(pane.composer().text(), last);
+    }
+
+    #[test]
+    fn set_registry_commands_refreshes_an_open_command_popup_immediately() {
+        let mut pane = pane();
+        typ(&mut pane, "/pla");
+        let before = pane
+            .completion()
+            .expect("builtin popup open")
+            .selected_insert()
+            .to_string();
+        pane.set_registry_commands(vec![RegistrySlashRow {
+            name: "/plan-z".to_string(),
+            description: "dynamic".to_string(),
+            menu_description: Some("dynamic".to_string()),
+            aliases: vec!["/pz".to_string()],
+        }]);
+        let after = pane
+            .completion()
+            .expect("popup still open after snapshot swap")
+            .items()
+            .iter()
+            .map(|item| item.insert.clone())
+            .collect::<Vec<_>>();
+        assert!(
+            after.iter().any(|item| item == "/plan-z"),
+            "dynamic registry row missing after refresh: {after:?}"
+        );
+        assert_ne!(before, "/plan-z");
     }
 
     #[test]

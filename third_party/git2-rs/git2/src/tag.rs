@@ -39,7 +39,9 @@ impl<'repo> Tag<'repo> {
     /// Returns Ok(None) if there is no message
     pub fn message(&self) -> Result<Option<&str>, Error> {
         match self.message_bytes() {
-            Some(mb) => std::str::from_utf8(mb).map(|s| Some(s)).map_err(|e| e.into()),
+            Some(mb) => std::str::from_utf8(mb)
+                .map(|s| Some(s))
+                .map_err(|e| e.into()),
             None => Ok(None),
         }
     }

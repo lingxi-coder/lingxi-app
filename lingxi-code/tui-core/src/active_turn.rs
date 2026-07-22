@@ -32,6 +32,9 @@ pub struct ActiveTurn {
     text_idx: Option<usize>,
     /// Tool ids started but not yet resulted, in start order.
     running_tools: Vec<protocol::ToolUseId>,
+    /// Latest heartbeat age for each running tool. Kept outside the transcript
+    /// so periodic liveness updates never grow scrollback.
+    tool_heartbeats: HashMap<protocol::ToolUseId, u64>,
     /// Tool-call inputs stashed by id at `ToolUseStart`, consumed at
     /// `ToolUseResult` to derive the diff fields (`old_string`/`new_string`/
     /// `file_path`) the result renderer uses for Edit/Write.
@@ -64,6 +67,12 @@ impl ActiveTurn {
         !self.running_tools.is_empty()
     }
 
+    /// Latest elapsed time reported for a running tool, if any.
+    #[must_use]
+    pub fn tool_elapsed_ms(&self, id: &protocol::ToolUseId) -> Option<u64> {
+        self.tool_heartbeats.get(id).copied()
+    }
+
     /// Fold one streaming event into `messages` + this state. Message-list
     /// growth mirrors the iocraft `tui::streaming::apply_event` contract:
     ///
@@ -89,6 +98,7 @@ impl ActiveTurn {
                 self.text_idx = None;
                 self.running_tools.clear();
                 self.tool_inputs.clear();
+                self.tool_heartbeats.clear();
             }
             TurnEvent::TextDelta(delta) => {
                 if let Some(RenderedMessage::AssistantText { body, .. }) =
@@ -116,9 +126,27 @@ impl ActiveTurn {
                 self.running_tools.push(id.clone());
                 messages.push(RenderedMessage::AssistantToolUse { id, tool, input });
             }
+            TurnEvent::ToolHeartbeat { id, elapsed_ms, .. } => {
+                if self.running_tools.contains(&id) {
+                    self.tool_heartbeats.insert(id, elapsed_ms);
+                }
+            }
+            TurnEvent::ToolHeartbeatBatch { heartbeats } => {
+                for heartbeat in heartbeats.drain() {
+                    self.apply(
+                        TurnEvent::ToolHeartbeat {
+                            id: heartbeat.id,
+                            tool: heartbeat.tool,
+                            elapsed_ms: heartbeat.elapsed_ms,
+                        },
+                        messages,
+                    );
+                }
+            }
             TurnEvent::ToolUseResult { id, tool, result } => {
                 self.text_idx = None;
                 self.running_tools.retain(|r| r != &id);
+                self.tool_heartbeats.remove(&id);
                 let (old_string, new_string, file_path) = self
                     .tool_inputs
                     .remove(&id)
@@ -135,6 +163,7 @@ impl ActiveTurn {
             TurnEvent::CompactionCompleted {
                 messages_before,
                 messages_after,
+                summary,
                 ..
             } => {
                 if !matches!(
@@ -144,6 +173,7 @@ impl ActiveTurn {
                     messages.push(RenderedMessage::CompactBoundary {
                         messages_before,
                         messages_after,
+                        summary,
                     });
                 }
             }
@@ -152,6 +182,7 @@ impl ActiveTurn {
                 self.text_idx = None;
                 self.running_tools.clear();
                 self.tool_inputs.clear();
+                self.tool_heartbeats.clear();
             }
             _ => {}
         }
@@ -261,6 +292,35 @@ mod tests {
             msgs.last(),
             Some(RenderedMessage::UserToolResult { .. })
         ));
+    }
+
+    #[test]
+    fn heartbeat_updates_live_state_without_growing_transcript() {
+        let mut at = ActiveTurn::new();
+        let mut msgs = Vec::new();
+        let id = protocol::ToolUseId::new();
+        at.apply(TurnEvent::TurnStarted, &mut msgs);
+        at.apply(start_tool(&id, "Bash", serde_json::json!({})), &mut msgs);
+        let before = msgs.len();
+        at.apply(
+            TurnEvent::ToolHeartbeat {
+                id: id.clone(),
+                tool: "Bash".into(),
+                elapsed_ms: 9_000,
+            },
+            &mut msgs,
+        );
+        assert_eq!(msgs.len(), before);
+        assert_eq!(at.tool_elapsed_ms(&id), Some(9_000));
+        at.apply(
+            TurnEvent::ToolUseResult {
+                id: id.clone(),
+                tool: "Bash".into(),
+                result: serde_json::json!({}),
+            },
+            &mut msgs,
+        );
+        assert_eq!(at.tool_elapsed_ms(&id), None);
     }
 
     #[test]
@@ -380,6 +440,7 @@ mod tests {
             messages_before: 10,
             messages_after: 3,
             bytes_saved: 1024,
+            summary: "Summary:\nimportant context".to_string(),
         };
         at.apply(ev(), &mut msgs);
         at.apply(ev(), &mut msgs);
@@ -388,8 +449,9 @@ mod tests {
             msgs[0],
             RenderedMessage::CompactBoundary {
                 messages_before: 10,
-                messages_after: 3
-            }
+                messages_after: 3,
+                ref summary
+            } if summary == "Summary:\nimportant context"
         ));
     }
 

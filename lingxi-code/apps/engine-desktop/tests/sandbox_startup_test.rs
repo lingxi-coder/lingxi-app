@@ -84,6 +84,7 @@ fn config_with_settings(settings_json: &str) -> (tempfile::TempDir, DesktopConfi
         default_model_explicit: true,
         recent_models: Vec::new(),
         fallback_model: None,
+        custom_betas: Vec::new(),
         provider_profiles: None,
         routing: None,
         mcp_paths: vec![cwd.join(".mcp.json")],

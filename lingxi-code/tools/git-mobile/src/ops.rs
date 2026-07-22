@@ -19,6 +19,7 @@
 use std::path::Path;
 
 use serde::Serialize;
+use telemetry::otel;
 use thiserror::Error;
 
 /// Upper bound on the number of UTF-8 characters of unified-diff text returned
@@ -475,6 +476,7 @@ pub fn commit(repo: &git2::Repository, message: &str) -> Result<GitCommitResult,
     let oid = repo
         .commit(Some("HEAD"), &sig, &sig, message, &tree, &parents)
         .map_err(|e| GitOpError::from_git2(&e))?;
+    otel::record_counter(otel::metrics::COMMIT_COUNT, 1.0, &otel::Attributes::new());
     Ok(GitCommitResult {
         oid: oid.to_string(),
     })

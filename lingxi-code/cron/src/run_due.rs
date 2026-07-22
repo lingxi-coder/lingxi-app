@@ -15,9 +15,10 @@
 //! [`crate::schedule::CronExpression::next_match_after`]), so the semantics —
 //! epoch-millisecond timestamps, missed-run catch-up-once, one-shot auto-delete,
 //! recurring `lastFiredAt` persistence, 30-day recurring auto-expiry — are 1:1
-//! with desktop. The ONLY intentional differences on the single-shot path: it
-//! takes NO A9 cross-process lock and applies NO jitter (a phone is single
-//! process and the foreground service is the only firer).
+//! with desktop. The single-shot path takes no per-job A9 firing lock and
+//! applies no jitter (a phone is single process and the foreground service is
+//! the only firer); every scheduled-task file mutation still takes the shared
+//! root-confined cross-process lock.
 //!
 //! Firing itself is abstracted behind [`CronJobFirer`] (`fire(prompt) -> result`)
 //! so the same core serves desktop (a Dream subagent) and mobile (a fresh
@@ -97,7 +98,8 @@ pub struct FiredJob {
 /// `recurring_max_age` mirrors [`crate::scheduler::CronScheduler`]'s field
 /// (`Some(`[`DEFAULT_RECURRING_MAX_AGE`]`)` on both hosts; `None` disables
 /// expiry). A missing / unparseable tasks file fires nothing. Unlike the desktop
-/// tick loop, this takes no cross-process lock and applies no jitter.
+/// tick loop, firing takes no per-job lock and applies no jitter; persistence
+/// mutations remain serialized in-process and cross-process.
 pub async fn run_due_jobs(
     tasks_file: &Path,
     fs: Arc<dyn FileSystem>,
@@ -106,15 +108,13 @@ pub async fn run_due_jobs(
     recurring_max_age: Option<Duration>,
 ) -> Vec<FiredJob> {
     let now = clock.now();
-    let path = tasks_file.to_string_lossy();
+    let Some(project_root) = crate::tasks_file::project_root_from_tasks_path(tasks_file) else {
+        return Vec::new();
+    };
 
     // Load the persisted (durable) jobs into a transient in-memory map, mirroring
     // `CronScheduler::load_persisted` (epoch-ms timestamps; invalid cron skipped).
-    let Ok(body) = fs
-        .read_file(path.as_ref(), None, None)
-        .await
-        .map(|c| c.content)
-    else {
+    let Ok(body) = crate::tasks_file::read_tasks_body(fs.as_ref(), project_root).await else {
         return Vec::new(); // file absent → nothing to fire
     };
     let mut tasks: HashMap<String, CronTaskDef> = HashMap::new();
@@ -159,7 +159,7 @@ pub async fn run_due_jobs(
         .collect();
     for id in &expired_ids {
         tasks.remove(id);
-        remove_task_from_file(fs.as_ref(), path.as_ref(), id).await;
+        remove_task_from_file(fs.as_ref(), project_root, id).await;
         tracing::info!(
             event = "tengu_scheduled_task_expired",
             cron_id = %id,
@@ -187,10 +187,10 @@ pub async fn run_due_jobs(
 
         let one_shot = finalize_fired_job(&mut tasks, &id, now);
         if one_shot {
-            remove_task_from_file(fs.as_ref(), path.as_ref(), &id).await;
+            remove_task_from_file(fs.as_ref(), project_root, &id).await;
             tracing::info!(cron_id = %id, "one-shot cron job fired and auto-deleted");
         } else {
-            set_last_fired_in_file(fs.as_ref(), path.as_ref(), &id, now_ms).await;
+            set_last_fired_in_file(fs.as_ref(), project_root, &id, now_ms).await;
         }
 
         fired.push(FiredJob {
@@ -215,11 +215,9 @@ pub async fn next_fire_epoch_ms(
     clock: Arc<dyn Clock>,
 ) -> Option<u64> {
     let now = clock.now();
-    let path = tasks_file.to_string_lossy();
-    let body = fs
-        .read_file(path.as_ref(), None, None)
+    let project_root = crate::tasks_file::project_root_from_tasks_path(tasks_file)?;
+    let body = crate::tasks_file::read_tasks_body(fs.as_ref(), project_root)
         .await
-        .map(|c| c.content)
         .ok()?;
 
     let mut earliest: Option<SystemTime> = None;
@@ -258,11 +256,14 @@ fn system_time_to_epoch_ms(t: SystemTime) -> u64 {
 
 /// Remove `id` from the single tasks file (read-modify-write via `fs`). A missing
 /// file / id is a no-op. Mirrors `CronScheduler::remove_task_from_file`.
-async fn remove_task_from_file(fs: &dyn FileSystem, path: &str, id: &str) {
+async fn remove_task_from_file(fs: &dyn FileSystem, project_root: &Path, id: &str) {
     let _guard = CRON_FILE_LOCK.lock().await;
-    if let Ok(body) = fs.read_file(path, None, None).await.map(|c| c.content) {
+    let Ok(_file_guard) = crate::tasks_file::lock_scheduled_tasks(fs, project_root).await else {
+        return;
+    };
+    if let Ok(body) = crate::tasks_file::read_tasks_body(fs, project_root).await {
         if let Some(updated) = tasks_file_without(&body, id) {
-            let _ = fs.write_file(path, &updated).await;
+            let _ = crate::tasks_file::write_tasks_body(fs, project_root, &updated).await;
         }
     }
 }
@@ -270,11 +271,19 @@ async fn remove_task_from_file(fs: &dyn FileSystem, path: &str, id: &str) {
 /// Set `lastFiredAt` (epoch ms) on `id` in the single tasks file (read-modify-
 /// write via `fs`). A missing file / id is a no-op. Mirrors
 /// `CronScheduler::set_last_fired_in_file`.
-async fn set_last_fired_in_file(fs: &dyn FileSystem, path: &str, id: &str, last_fired_at_ms: u64) {
+async fn set_last_fired_in_file(
+    fs: &dyn FileSystem,
+    project_root: &Path,
+    id: &str,
+    last_fired_at_ms: u64,
+) {
     let _guard = CRON_FILE_LOCK.lock().await;
-    if let Ok(body) = fs.read_file(path, None, None).await.map(|c| c.content) {
+    let Ok(_file_guard) = crate::tasks_file::lock_scheduled_tasks(fs, project_root).await else {
+        return;
+    };
+    if let Ok(body) = crate::tasks_file::read_tasks_body(fs, project_root).await {
         if let Some(updated) = tasks_file_with_last_fired(&body, id, last_fired_at_ms) {
-            let _ = fs.write_file(path, &updated).await;
+            let _ = crate::tasks_file::write_tasks_body(fs, project_root, &updated).await;
         }
     }
 }
@@ -298,6 +307,12 @@ mod tests {
     // ---- Minimal in-memory FileSystem (only read/write/delete are exercised) ----
     struct MemFs {
         files: TokioMutex<HashMap<String, String>>,
+    }
+    struct MemFlockGuard(String);
+    impl FlockGuard for MemFlockGuard {
+        fn path(&self) -> &str {
+            &self.0
+        }
     }
     impl MemFs {
         fn with(path: &str, body: &str) -> Arc<Self> {
@@ -384,6 +399,15 @@ mod tests {
         }
         async fn flock_exclusive(&self, _: &str) -> Result<Box<dyn FlockGuard>, FsError> {
             Err(FsError::Io("unsupported".into()))
+        }
+        async fn flock_exclusive_rooted(
+            &self,
+            root: &Path,
+            relative: &Path,
+        ) -> Result<Box<dyn FlockGuard>, FsError> {
+            Ok(Box::new(MemFlockGuard(
+                root.join(relative).display().to_string(),
+            )))
         }
         async fn fsync(&self, _: &str) -> Result<(), FsError> {
             Ok(())

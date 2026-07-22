@@ -39,6 +39,12 @@ command-api = { path = "../../command-api" }
 # ConversationOrchestrator's cancelable streaming entry, so `orchestrator` is now
 # a LIBRARY dependency (it was dev-only when the only driver was the test one).
 orchestrator = { path = "../../orchestrator" }
+# Desktop Beta session lifecycle: enumerate/replay the same JSONL store used by
+# the CLI/mobile hosts, then adopt the replayed protocol history in place.
+session = { path = "../../session" }
+protocol = { path = "../../protocol" }
+platform-posix = { path = "../../platforms/posix" }
+uuid = "1.10"
 # Input message queue (spec §27). The connection's SendPrompt path enqueues a
 # prompt that arrives while a turn is in flight and the spawned run loop drains
 # it as a follow-up turn — the parity twin of print.ts run()'s `running` guard +
@@ -51,6 +57,7 @@ tool-cron = { path = "../../tools/cron" }
 # production runtime through the desktop composition root. app→app is permitted
 # by the dependency gate (apps are leaves; the rule only forbids non-leaf→leaf).
 engine-desktop = { path = "../engine-desktop" }
+telemetry = { path = "../../telemetry" }
 # S2: `boot::load_settings_blocks` reads the layered settings `providers` /
 # `routing` blocks (same loader the CLI uses) to fill the DesktopConfig.
 engine = { path = "../../engine" }
@@ -62,6 +69,7 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "
 # surface of tokio-util 0.7 — no extra feature needed.
 tokio-util = { workspace = true }
 async-trait.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -73,15 +81,11 @@ anyhow = "1"
 # exercise the permission round-trip over a live WebSocket. `orchestrator` itself
 # is a normal dependency above (S1); the mocks it re-exports are available to
 # tests through it without a separate dev-dep entry.
-protocol = { path = "../../protocol" }
 tool-api = { path = "../../tool-api" }
 # F2-08 routing tests: the real builtin slash-command set the desktop
 # composition root seeds, so `RunSlashCommand` routes through the production
 # registry (not a test-only stub).
 command-core = { path = "../../commands/core" }
-# Wakeup-scheduler resolution test flips the loop-prompt flag via the test-only
-# flag override (binary `ROt`/`Uvi`).
-telemetry = { path = "../../telemetry" }
 tokio-tungstenite = "0.21"
 futures-util.workspace = true
 http = "1"

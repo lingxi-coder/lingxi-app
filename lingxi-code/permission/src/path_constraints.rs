@@ -839,7 +839,10 @@ mod tests {
         assert_eq!(a.reason, a.message);
         // A leading `../out.txt` (no real segment before `..`) does NOT trip this
         // guard — it falls through to the ordinary containment check.
-        assert!(check("echo x > out.txt").is_none(), "plain in-cwd write is fine");
+        assert!(
+            check("echo x > out.txt").is_none(),
+            "plain in-cwd write is fine"
+        );
     }
 
     #[test]

@@ -826,9 +826,7 @@ pub fn run_update(
     let count = registry.len();
     for marketplace in registry.keys() {
         plugin_policy::ensure_marketplace_allowed(marketplace).map_err(|reason| {
-            format!(
-                "Updating {count} marketplace(s)...✘ Failed to update marketplace(s): {reason}"
-            )
+            format!("Updating {count} marketplace(s)...✘ Failed to update marketplace(s): {reason}")
         })?;
     }
     for entry in registry.values_mut() {

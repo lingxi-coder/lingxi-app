@@ -1,42 +1,78 @@
-/**
- * Ambient typing for the `window.lingxi` surface (M10 A1 — C3).
- *
- * The preload (`src/preload/index.ts`) exposes this API via `contextBridge`,
- * but the renderer's tsconfig only includes `src/renderer/**`, so the renderer
- * cannot import the preload's `LingxiApi` type directly. This declaration
- * mirrors that surface 1:1 (verified against `src/preload/index.ts`) so the
- * renderer is fully typed without reaching across the project boundary.
- *
- * The wire DTOs (`ClientEvent`, `PermissionRequest`, `PermissionResponseDto`)
- * come from the shared SDK — the single source of truth for the contract.
- */
+import type { ClientCommand, ClientEvent, PermissionRequest, PermissionResponseDto } from '@lingxi/bridge-client';
 
-import type {
-  ClientEvent,
-  PermissionRequest,
-  PermissionResponseDto,
-} from '@lingxi/bridge-client';
-
-/** Coarse lifecycle of the bridge connection (mirrors the main process). */
 export type ConnectionState =
   | { status: 'idle' }
   | { status: 'spawning' }
+  | { status: 'restarting' }
   | { status: 'connecting' }
   | { status: 'connected' }
   | { status: 'disconnected'; reason?: string }
   | { status: 'error'; message: string };
 
-/** An unsubscribe handle returned by the `on*` registrations. */
+export type AllowedClientCommand = Extract<ClientCommand, {
+  type: 'set_model' | 'list_models' | 'new_session' | 'resume_session' | 'list_sessions' |
+    'task_list' | 'task_output' | 'task_stop';
+}> | { type: 'refresh_listings'; which: Array<{ type: 'status' | 'doctor' }> };
+export interface PublicSettings {
+  version: 1;
+  theme?: 'dark' | 'light';
+  model?: string;
+  apiBaseUrl?: string;
+  lastWorkspace?: string;
+  recentWorkspaces: string[];
+}
+export interface WorkspaceMetadata {
+  path?: string;
+  trusted: boolean;
+  fingerprint?: string;
+  recovery?: {
+    state: 'missing';
+    message: string;
+  };
+}
+export interface CredentialMetadata { configured: boolean; encryptionAvailable: boolean }
+export interface ProviderCredentialMetadata extends CredentialMetadata { providerId: string }
+export interface ProviderCredentialUpdate { credential: ProviderCredentialMetadata; settings: PublicSettings }
+export interface DiagnosticEntry {
+  timestamp: string;
+  level: 'info' | 'warn' | 'error';
+  source: 'host' | 'bridge';
+  message: string;
+}
+export interface BootstrapState {
+  settings: PublicSettings;
+  workspace: WorkspaceMetadata;
+  credential: CredentialMetadata;
+  providerCredentials?: ProviderCredentialMetadata[];
+  connection: ConnectionState;
+  diagnostics: DiagnosticEntry[];
+}
 export type Unsubscribe = () => void;
 
-/** The typed surface exposed to the renderer as `window.lingxi`. */
 export interface LingxiApi {
   platform: NodeJS.Platform;
   isElectron: true;
+  bootstrap(): Promise<BootstrapState>;
+  settings(): Promise<PublicSettings>;
+  updateSettings(patch: { theme?: 'dark' | 'light'; model?: string | null; apiBaseUrl?: string | null }): Promise<PublicSettings>;
+  pickWorkspace(): Promise<WorkspaceMetadata | null>;
+  setWorkspace(path: string): Promise<WorkspaceMetadata>;
+  setWorkspaceTrusted(trusted: boolean): Promise<WorkspaceMetadata>;
+  credential(): Promise<CredentialMetadata>;
+  setCredential(credential: string): Promise<CredentialMetadata>;
+  clearCredential(): Promise<CredentialMetadata>;
+  providerCredentials(): Promise<ProviderCredentialMetadata[]>;
+  setProviderCredential(providerId: string, credential: string): Promise<ProviderCredentialUpdate>;
+  clearProviderCredential(providerId: string): Promise<ProviderCredentialMetadata>;
+  restartBridge(): Promise<void>;
+  diagnostics(): Promise<DiagnosticEntry[]>;
+  copyDiagnostics(): Promise<void>;
+  exportDiagnostics(): Promise<string | null>;
   sendPrompt(text: string): Promise<void>;
   approve(requestId: number, response?: PermissionResponseDto): Promise<void>;
   deny(requestId: number): Promise<void>;
   cancel(turnId?: number): Promise<void>;
+  command(command: AllowedClientCommand): Promise<void>;
   connectionState(): Promise<ConnectionState>;
   onEvent(cb: (event: ClientEvent) => void): Unsubscribe;
   onPermission(cb: (request: PermissionRequest) => void): Unsubscribe;
@@ -45,7 +81,6 @@ export interface LingxiApi {
 
 declare global {
   interface Window {
-    /** Present only when hosted by the Electron preload; `undefined` in a browser. */
     lingxi?: LingxiApi;
   }
 }

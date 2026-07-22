@@ -7,6 +7,7 @@
 
 use protocol::{Secret, SecureStorageData, SecureStorageMetadata};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use thiserror::Error;
@@ -134,6 +135,11 @@ pub struct CredentialManager {
     refresh_lock: Mutex<()>,
     // caches are kept under RwLock; M1 only exposes api_key getter.
     api_key_cache: RwLock<Option<(Secret<String>, std::time::SystemTime)>>,
+    /// Credentials injected by the packaged desktop bridge live only for the
+    /// lifetime of this engine process. The Electron host owns persistence;
+    /// writing them to the Rust keychain on every launch would re-trigger the
+    /// macOS Keychain authorization for each ad-hoc desktop build.
+    provider_key_cache: RwLock<HashMap<String, Secret<String>>>,
     api_key_ttl: Duration,
 }
 
@@ -153,6 +159,7 @@ impl CredentialManager {
             http,
             refresh_lock: Mutex::new(()),
             api_key_cache: RwLock::new(None),
+            provider_key_cache: RwLock::new(HashMap::new()),
             api_key_ttl: Duration::from_secs(300),
         }
     }
@@ -221,6 +228,16 @@ impl CredentialManager {
         Ok(())
     }
 
+    /// Inject a provider key for a packaged desktop process without touching
+    /// Rust secure storage. The desktop host has already persisted the key in
+    /// its own OS Keychain and sends it over the one-shot stdin boundary.
+    pub async fn set_provider_key_ephemeral(&self, id: &str, secret: &str) {
+        self.provider_key_cache
+            .write()
+            .await
+            .insert(id.to_string(), Secret::new(secret.to_string()));
+    }
+
     /// Load the per-provider key stored under credential `id`. Returns `Ok(None)`
     /// when no key has been stored (the composite then falls through to env, then
     /// `Authentication`).
@@ -228,6 +245,9 @@ impl CredentialManager {
         &self,
         id: &str,
     ) -> Result<Option<Secret<String>>, CredentialError> {
+        if let Some(secret) = self.provider_key_cache.read().await.get(id) {
+            return Ok(Some(Secret::new(secret.expose_secret().clone())));
+        }
         let Some(raw) = self
             .storage
             .retrieve("lingxi", &provider_key_account(id))
@@ -780,6 +800,25 @@ mod oauth_tests {
             .expect("get")
             .expect("present");
         assert_eq!(got.expose_secret(), "sk-or-secret");
+    }
+
+    #[tokio::test]
+    async fn ephemeral_provider_key_does_not_touch_secure_storage() {
+        let (storage, cm) = manager();
+        cm.set_provider_key_ephemeral("deepseek", "sk-ephemeral")
+            .await;
+
+        let got = cm
+            .get_provider_key("deepseek")
+            .await
+            .expect("get")
+            .expect("present");
+        assert_eq!(got.expose_secret(), "sk-ephemeral");
+        assert!(storage
+            .retrieve("lingxi", &provider_key_account("deepseek"))
+            .await
+            .expect("retrieve")
+            .is_none());
     }
 
     #[tokio::test]

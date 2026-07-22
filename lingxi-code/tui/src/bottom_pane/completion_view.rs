@@ -307,6 +307,12 @@ impl CompletionView {
         self.selected
     }
 
+    /// Visible/testing seam over the full candidate list.
+    #[must_use]
+    pub fn items(&self) -> &[CompletionItem] {
+        &self.items
+    }
+
     /// Move the highlight up (clamped).
     pub fn prev(&mut self) {
         self.selected = self.selected.saturating_sub(1);

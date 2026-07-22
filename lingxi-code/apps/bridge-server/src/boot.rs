@@ -28,29 +28,33 @@
 //! connection is handed to the endpoint.
 
 use std::collections::BTreeMap;
+use std::io::{BufRead, Read};
 use std::path::PathBuf;
 use std::sync::Arc;
+
+use serde::Deserialize;
 
 use bridge::lockfile::{IdeLockfile, LockfileGuard};
 use bridge::McpEndpoint;
 use engine_desktop::{build, DesktopConfig, DesktopRuntime};
+use platform_posix::PosixFileSystem;
 use traits::{OrchestratorHandle, OutputStream, SlashCommandDispatcher};
 
-use crate::driver::OrchestratorTurnDriver;
-use crate::router::EngineCommandRouter;
-use crate::server::BridgeConnection;
+use crate::driver::{CredentialRequiredTurnDriver, OrchestratorTurnDriver};
+use crate::router::{EngineCommandRouter, SessionStoreContext};
+use crate::server::{BridgeConnection, TurnDriver};
 
-/// The env var the LLM API key is read from at runtime (NEVER hardcoded /
-/// printed / committed — spec hard rule).
-pub const API_KEY_ENV: &str = "ANTHROPIC_API_KEY";
 /// Env override for the API base URL (mirrors `apps/cli`'s `resolve_api_base`).
 pub const API_BASE_ENV: &str = "LINGXI_API_BASE_URL";
 /// The canonical Anthropic endpoint used when [`API_BASE_ENV`] is unset.
 pub const DEFAULT_API_BASE: &str = "https://api.anthropic.com";
+/// Maximum accepted credential length from `--api-key-stdin`.
+pub const MAX_STDIN_API_KEY_BYTES: usize = 16 * 1024;
+/// Maximum accepted JSON credential envelope size from `--credential-stdin`.
+pub const MAX_STDIN_CREDENTIAL_BYTES: usize = 64 * 1024;
 
-/// Parsed command-line flags / env the binary accepts (a tiny hand-rolled
-/// parser — `apps/bridge-server` deliberately avoids a clap dependency for the
-/// two flags it needs).
+/// Parsed command-line flags the binary accepts (a tiny hand-rolled parser;
+/// `apps/bridge-server` deliberately avoids a clap dependency).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BridgeArgs {
     /// `--cwd <dir>`: working directory to root the engine at. The process
@@ -59,6 +63,17 @@ pub struct BridgeArgs {
     pub cwd: Option<PathBuf>,
     /// `--model <id>`: the default model id (overrides the desktop default).
     pub model: Option<String>,
+    /// Read one bounded credential line from stdin before assembling the engine.
+    pub api_key_stdin: bool,
+    /// Read a bounded JSON envelope containing the API key and provider keys.
+    pub credential_stdin: bool,
+    /// Allow workspace-controlled configuration and customization sources.
+    pub trusted_workspace: bool,
+    /// Enforce the packaged desktop credential boundary: trusted workspace
+    /// customizations still load, but credential-bearing settings must not.
+    pub packaged_credential_stdin_only: bool,
+    /// Override the discovery lockfile directory. Must be absolute.
+    pub bridge_dir: Option<PathBuf>,
     /// `--help` / `-h`: print usage and exit.
     pub help: bool,
 }
@@ -97,6 +112,22 @@ impl BridgeArgs {
                         .ok_or_else(|| "--model requires a model id argument".to_string())?;
                     out.model = Some(v.as_ref().to_string());
                 }
+                "--api-key-stdin" => out.api_key_stdin = true,
+                "--credential-stdin" => out.credential_stdin = true,
+                "--trusted-workspace" => out.trusted_workspace = true,
+                "--packaged-credential-stdin-only" => {
+                    out.packaged_credential_stdin_only = true;
+                }
+                "--bridge-dir" => {
+                    let v = it
+                        .next()
+                        .ok_or_else(|| "--bridge-dir requires a directory argument".to_string())?;
+                    let path = PathBuf::from(v.as_ref());
+                    if !path.is_absolute() {
+                        return Err("--bridge-dir must be an absolute path".to_string());
+                    }
+                    out.bridge_dir = Some(path);
+                }
                 other => return Err(format!("unknown argument: {other}")),
             }
         }
@@ -111,7 +142,7 @@ pub fn usage() -> String {
         "lingxi-bridge-server {}\n\
          \n\
          Serves one local conversation over a loopback WebSocket for the Electron/iOS shell.\n\
-         The LLM API key is read from the {API_KEY_ENV} environment variable at runtime.\n\
+         The LLM API key can be supplied as one bounded line on stdin.\n\
          \n\
          USAGE:\n    \
              bridge-server [OPTIONS]\n\
@@ -119,13 +150,110 @@ pub fn usage() -> String {
          OPTIONS:\n    \
              --cwd <DIR>      Working directory to root the engine at (default: current dir)\n    \
              --model <ID>     Default model id (default: the desktop build default)\n    \
+             --api-key-stdin  Read the API key from one line on stdin\n    \
+             --credential-stdin\n    \
+                              Read a provider credential envelope from stdin\n    \
+             --trusted-workspace\n    \
+                              Enable workspace settings, hooks, MCP, agents, plugins, and memory\n    \
+             --packaged-credential-stdin-only\n    \
+                              In trusted packaged desktop mode, accept credentials only from stdin\n    \
+             --bridge-dir <DIR>\n    \
+                              Absolute discovery lockfile directory\n    \
              -h, --help       Print this help\n\
          \n\
          ENVIRONMENT:\n    \
-             {API_KEY_ENV}   LLM API key (required for live turns; the server still boots without it)\n    \
              {API_BASE_ENV}  Override the API base URL (default: {DEFAULT_API_BASE})\n",
         env!("CARGO_PKG_VERSION")
     )
+}
+
+/// Read exactly one credential line with a hard allocation bound.
+///
+/// Only the trailing line ending is removed; credential whitespace is otherwise
+/// preserved. Error text never contains input bytes.
+pub fn read_api_key_line<R: BufRead>(reader: &mut R) -> Result<String, String> {
+    let mut bytes = Vec::with_capacity(256);
+    let mut limited = (&mut *reader).take((MAX_STDIN_API_KEY_BYTES + 2) as u64);
+    limited
+        .read_until(b'\n', &mut bytes)
+        .map_err(|_| "failed to read API key from stdin".to_string())?;
+
+    let without_lf = bytes.strip_suffix(b"\n").unwrap_or(&bytes);
+    let content_len = without_lf.strip_suffix(b"\r").unwrap_or(without_lf).len();
+    if content_len > MAX_STDIN_API_KEY_BYTES
+        || (bytes.len() > MAX_STDIN_API_KEY_BYTES && !bytes.ends_with(b"\n"))
+    {
+        return Err(format!(
+            "API key from stdin exceeds the {MAX_STDIN_API_KEY_BYTES}-byte limit"
+        ));
+    }
+    if !bytes.ends_with(b"\n") && bytes.len() == MAX_STDIN_API_KEY_BYTES + 2 {
+        return Err(format!(
+            "API key from stdin exceeds the {MAX_STDIN_API_KEY_BYTES}-byte limit"
+        ));
+    }
+    if bytes.ends_with(b"\n") {
+        bytes.pop();
+        if bytes.ends_with(b"\r") {
+            bytes.pop();
+        }
+    }
+    String::from_utf8(bytes).map_err(|_| "API key from stdin must be valid UTF-8".to_string())
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+/// One bounded credential payload accepted from the Electron parent.
+pub struct CredentialEnvelope {
+    /// Optional legacy Anthropic API key.
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// Provider id to API key/bearer token mappings.
+    #[serde(default)]
+    pub provider_keys: BTreeMap<String, String>,
+}
+
+/// Read and validate the one-line JSON envelope used by the packaged desktop.
+/// The returned values never appear in an error message or command-line flag.
+pub fn read_credential_envelope<R: BufRead>(reader: &mut R) -> Result<CredentialEnvelope, String> {
+    let mut bytes = Vec::with_capacity(512);
+    let mut limited = (&mut *reader).take((MAX_STDIN_CREDENTIAL_BYTES + 2) as u64);
+    limited
+        .read_until(b'\n', &mut bytes)
+        .map_err(|_| "failed to read credentials from stdin".to_string())?;
+    let line = bytes.strip_suffix(b"\n").unwrap_or(&bytes);
+    let line = line.strip_suffix(b"\r").unwrap_or(line);
+    if line.is_empty() || line.len() > MAX_STDIN_CREDENTIAL_BYTES {
+        return Err(format!(
+            "credential envelope exceeds the {MAX_STDIN_CREDENTIAL_BYTES}-byte limit"
+        ));
+    }
+    let envelope: CredentialEnvelope =
+        serde_json::from_slice(line).map_err(|_| "invalid credential envelope".to_string())?;
+    if let Some(key) = envelope.api_key.as_ref() {
+        if key.is_empty() || key.len() > MAX_STDIN_API_KEY_BYTES || key.contains('\0') {
+            return Err("invalid API key in credential envelope".to_string());
+        }
+    }
+    if envelope.provider_keys.len() > 32 {
+        return Err("credential envelope contains too many providers".to_string());
+    }
+    for (provider, key) in &envelope.provider_keys {
+        if provider.is_empty()
+            || provider.len() > 64
+            || !provider.chars().enumerate().all(|(index, ch)| {
+                ch.is_ascii_lowercase()
+                    || ch.is_ascii_digit()
+                    || (index > 0 && matches!(ch, '-' | '_' | '.'))
+            })
+        {
+            return Err("invalid provider id in credential envelope".to_string());
+        }
+        if key.is_empty() || key.len() > MAX_STDIN_API_KEY_BYTES || key.contains('\0') {
+            return Err("invalid provider credential in credential envelope".to_string());
+        }
+    }
+    Ok(envelope)
 }
 
 /// Resolve the API base URL: honours [`API_BASE_ENV`], else [`DEFAULT_API_BASE`].
@@ -165,6 +293,21 @@ fn load_settings_blocks() -> (
     }
 }
 
+#[must_use]
+fn settings_credential_sources_allowed(args: &BridgeArgs) -> bool {
+    args.trusted_workspace && !args.packaged_credential_stdin_only
+}
+
+/// User config-home: `$LINGXI_CONFIG_DIR` when set (including an empty value),
+/// else `~/.lingxi`. Shared by desktop config and lockfile resolution.
+#[must_use]
+pub fn lingxi_config_home() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os(branding::CONFIG_DIR_ENV) {
+        return Some(PathBuf::from(dir));
+    }
+    dirs::home_dir().map(|h| h.join(branding::DOT_DIR))
+}
+
 /// Resolve a deterministic [`DesktopConfig`] from [`BridgeArgs`] + `std::env`.
 ///
 /// Mirrors `apps/cli/src/init.rs`'s `resolve_desktop_config` field-for-field,
@@ -176,20 +319,9 @@ fn load_settings_blocks() -> (
 /// `chdir`'d into any `--cwd` (so the settings / hook / `.mcp.json` loaders read
 /// the same dir).
 ///
-/// The `ANTHROPIC_API_KEY` env value is read here but is NEVER logged; an empty
-/// key is a valid config (the server boots for transport testing and only a live
-/// turn fails with a 401 — surfaced to the client as a terminal `Error` event).
-/// User config-home: `$LINGXI_CONFIG_DIR` when set (claude-code `tr()` `??`: an
-/// empty value is honored verbatim → cwd-relative), else `~/.claude`. Shared by
-/// the bridge's desktop-config + lockfile resolution.
-#[must_use]
-pub fn lingxi_config_home() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os(branding::CONFIG_DIR_ENV) {
-        return Some(PathBuf::from(dir));
-    }
-    dirs::home_dir().map(|h| h.join(branding::DOT_DIR))
-}
-
+/// The API key is deliberately left empty here; `main` may assign the bounded
+/// stdin value immediately before assembly. An empty key is valid for transport
+/// testing and only fails when a live turn needs credentials.
 #[must_use]
 pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -207,11 +339,24 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         default_model.clone_from(m);
     }
 
-    let (provider_profiles, routing, api_key_helper) = load_settings_blocks();
+    let (provider_profiles, routing, api_key_helper) = if args.trusted_workspace {
+        let (provider_profiles, routing, api_key_helper) = load_settings_blocks();
+        if settings_credential_sources_allowed(args) {
+            (provider_profiles, routing, api_key_helper)
+        } else {
+            (None, routing, None)
+        }
+    } else {
+        (None, None, None)
+    };
+    let trusted = args.trusted_workspace;
 
     DesktopConfig {
         api_base: resolve_api_base(),
-        api_key: std::env::var(API_KEY_ENV).unwrap_or_default(),
+        // Credentials are supplied explicitly by the parent over stdin and
+        // assigned by `main` immediately before assembly. Never inherit them
+        // from environment or argv.
+        api_key: String::new(),
         api_key_helper,
         cwd,
         lingxi_home,
@@ -225,9 +370,15 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         // The Electron bridge does not expose --fallback-model (CLI --print
         // only); the Opus consecutive-529 fallback stays disabled here.
         fallback_model: None,
+        // The Electron host currently exposes no custom beta-header flag.
+        custom_betas: Vec::new(),
         provider_profiles,
         routing,
-        mcp_paths: vec![project_mcp_path, global_mcp_path],
+        mcp_paths: if trusted {
+            vec![project_mcp_path, global_mcp_path]
+        } else {
+            Vec::new()
+        },
         // A transport binds the connection-scoped AdapterPermissionGate (F2-06).
         use_noop_permission_gate: false,
         // Transport host: the adapter gate IS the enforcement, so headless
@@ -246,7 +397,7 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         // parity), which also makes the session-start
         // `fire_instructions_loaded()` fire over those files. Tests inject a
         // controlled provider (or `None`); only this real-host path reads the FS.
-        memory_provider: Some(orchestrator::prompt::real_provider()),
+        memory_provider: trusted.then(orchestrator::prompt::real_provider),
         // The Electron bridge has no permission-mode CLI flag; default mode.
         permission_mode: permission::PermissionMode::Default,
         // Plan 3c: bridge has no interactive secure prompt; headless no-op.
@@ -274,10 +425,21 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         // The Electron bridge has no --exclude-dynamic-system-prompt-sections flag.
         exclude_dynamic_system_prompt_sections: false,
         // The bridge has no `--setting-sources` flag; load all tiers.
-        setting_source_scope: (true, true),
+        setting_source_scope: if trusted {
+            (true, true)
+        } else {
+            (false, false)
+        },
         // The Electron bridge has no --safe-mode / --bare flags (CLI-only
         // reduced modes); all customizations load.
-        customization_gates: engine_desktop::CustomizationGates::default(),
+        customization_gates: if trusted {
+            engine_desktop::CustomizationGates::default()
+        } else {
+            engine_desktop::CustomizationGates {
+                safe_mode: true,
+                bare: false,
+            }
+        },
         // The Electron bridge has no --no-session-persistence flag; persist.
         session_persistence: true,
         // (M4 cc2.1.198) The Electron bridge exposes none of --agents /
@@ -303,8 +465,9 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
 
 /// True iff the config has neither an API key/apiKeyHelper NOR any
 /// settings-configured provider profile — i.e. no way to authenticate a live
-/// turn. The server still boots (transport testing is valuable), but the caller
-/// logs a clear, NON-SECRET warning so the operator knows turns will 401.
+/// turn. The server still boots (transport testing and read-only listings remain
+/// valuable), but [`assemble`] binds a fail-fast turn driver so no provider call
+/// or retry is attempted.
 #[must_use]
 pub fn has_no_credential_source(cfg: &DesktopConfig) -> bool {
     cfg.api_key.is_empty()
@@ -345,7 +508,35 @@ pub struct BoundServer {
 /// Returns the [`engine_desktop::BuildError`] string if the engine cannot be
 /// assembled (effectively infallible today).
 pub async fn assemble(cfg: DesktopConfig) -> Result<BoundServer, String> {
+    assemble_with_provider_keys(cfg, BTreeMap::new()).await
+}
+
+/// Assemble a runtime after injecting provider credentials received over the
+/// dedicated stdin boundary. Provider secrets never enter `DesktopConfig` or
+/// the process environment; they are held only in the engine process. The
+/// Electron host owns persistent Keychain storage, so packaged startup does
+/// not write the same key into the Rust Keychain on every launch.
+pub async fn assemble_with_provider_keys(
+    cfg: DesktopConfig,
+    provider_keys: BTreeMap<String, String>,
+) -> Result<BoundServer, String> {
     let connection = BridgeConnection::new();
+
+    // Decide the turn boundary before `cfg` moves into the desktop runtime.
+    // A keyless bridge still builds the runtime so handshake and read-only
+    // listings remain available, but its turn driver must never enter the
+    // provider client's retry path.
+    let credential_required = has_no_credential_source(&cfg) && provider_keys.is_empty();
+
+    // Capture the persisted-session inputs before `cfg` moves into the desktop
+    // composition root. The router uses the same cwd/config-home pair as the
+    // orchestrator's JSONL writer, so list and resume address the exact store
+    // this connection writes.
+    let session_store = SessionStoreContext::new(
+        cfg.lingxi_home.clone(),
+        cfg.cwd.to_string_lossy().into_owned(),
+        Arc::new(PosixFileSystem::new(cfg.cwd.clone())),
+    );
 
     // The orchestrator's output stream + the gate's request sink BOTH ride the
     // same connection-scoped outbound channel (the F2-06 contract).
@@ -357,6 +548,13 @@ pub async fn assemble(cfg: DesktopConfig) -> Result<BoundServer, String> {
     let runtime = build(cfg, output, permission_sink)
         .await
         .map_err(|e| e.to_string())?;
+
+    for (provider_id, secret) in &provider_keys {
+        runtime
+            .credentials
+            .set_provider_key_ephemeral(provider_id, secret)
+            .await;
+    }
 
     // `use_noop_permission_gate: false` ⇒ build MUST surface the adapter gate.
     let gate = runtime.permission_gate.clone().ok_or_else(|| {
@@ -374,6 +572,7 @@ pub async fn assemble(cfg: DesktopConfig) -> Result<BoundServer, String> {
     // `Now`-command abort from a user interrupt) and the queue's now-abort hook
     // (sets it to `QueueNowCommand` right before firing the active-turn token).
     let queue = connection.queue_handle();
+    let loop_runtime = connection.loop_runtime_handle();
     let cancel_reason = orchestrator::prompt::mid_turn_input::CancelReasonFlag::new();
     runtime
         .orchestrator
@@ -400,9 +599,12 @@ pub async fn assemble(cfg: DesktopConfig) -> Result<BoundServer, String> {
     // threaded out of `engine_desktop::build` on `DesktopRuntime` precisely because
     // the tool is constructed before this seam. Setting it more than once is a no-op
     // (`OnceLock`); a fresh per-connection `assemble` builds a fresh runtime + cell.
-    let wakeup_scheduler: Arc<dyn tool_cron::WakeupScheduler> = Arc::new(
-        crate::driver::MsgQueueWakeupScheduler::new(queue.clone(), runtime.runtime_spawner.clone()),
-    );
+    let wakeup_scheduler: Arc<dyn tool_cron::WakeupScheduler> =
+        Arc::new(crate::driver::MsgQueueWakeupScheduler::with_loop_runtime(
+            queue.clone(),
+            runtime.runtime_spawner.clone(),
+            loop_runtime,
+        ));
     // The driver re-uses the SAME scheduler at its turn-completion edge to arm the
     // `/loop` keepalive fallback (binary `lKi`); clone before the cell consumes it.
     let driver_wakeup_scheduler = wakeup_scheduler.clone();
@@ -411,32 +613,38 @@ pub async fn assemble(cfg: DesktopConfig) -> Result<BoundServer, String> {
         // at the composition root over a benign double-wire.
     }
 
-    // Production turn driver: errors surface as a terminal `ClientEvent::Error`
-    // through the SAME connection-scoped event sink. Wired with the connection's
-    // queue + the shared reason flag so each turn registers its cancel token, and
-    // the wakeup scheduler so the turn-end edge can arm the keepalive fallback.
-    let driver = Arc::new(
-        OrchestratorTurnDriver::with_error_sink(runtime.orchestrator.clone(), event_sink)
-            .with_queue(queue, cancel_reason)
-            .with_wakeup_scheduler(driver_wakeup_scheduler),
-    );
+    // Keep the full runtime/router alive without credentials, but reject model
+    // turns at the bridge boundary before provider retries begin. With any
+    // configured source, use the production driver and its queue/cancel wiring.
+    let driver: Arc<dyn TurnDriver> = if credential_required {
+        Arc::new(CredentialRequiredTurnDriver::new(event_sink))
+    } else {
+        Arc::new(
+            OrchestratorTurnDriver::with_error_sink(runtime.orchestrator.clone(), event_sink)
+                .with_queue(queue, cancel_reason)
+                .with_wakeup_scheduler(driver_wakeup_scheduler),
+        )
+    };
 
     // The full command-routing seam over the real engine handles.
     let handle: Arc<dyn OrchestratorHandle> = runtime.orchestrator.clone();
     let dispatcher: Arc<dyn SlashCommandDispatcher> =
         Arc::new(RegistrySlashDispatcherClone::wrap(&runtime));
-    let router = Arc::new(EngineCommandRouter::new(
-        handle,
-        runtime.auth.clone(),
-        runtime.task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>,
-        Some(dispatcher),
-        // slash_registry: the shared CommandRegistry is not exposed on
-        // DesktopRuntime, so the router's proactive `CommandsChanged` catalog
-        // push (M-14) is inert here — RunSlashCommand still dispatches via the
-        // dispatcher above. FOLLOW-UP: expose DesktopRuntime.shared_registry and
-        // thread it in to enable the catalog-diff push over the bridge.
-        None,
-    ));
+    let router = Arc::new(
+        EngineCommandRouter::new(
+            handle,
+            runtime.auth.clone(),
+            runtime.task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>,
+            Some(dispatcher),
+            // slash_registry: the shared CommandRegistry is not exposed on
+            // DesktopRuntime, so the router's proactive `CommandsChanged` catalog
+            // push (M-14) is inert here — RunSlashCommand still dispatches via the
+            // dispatcher above. FOLLOW-UP: expose DesktopRuntime.shared_registry and
+            // thread it in to enable the catalog-diff push over the bridge.
+            None,
+        )
+        .with_session_store(session_store),
+    );
 
     let connection = connection.bind(gate, driver).bind_router(router);
     Ok(BoundServer {
@@ -501,29 +709,23 @@ pub struct ServedEndpoint {
 /// `authToken` is the one a connecting client MUST present) and is NEVER logged.
 /// The returned [`ServedEndpoint`] owns a [`LockfileGuard`] that reaps the file
 /// on drop.
-#[must_use]
 pub fn publish_lockfile(
     endpoint: McpEndpoint,
     lockfile_dir: PathBuf,
     workspace_folders: Vec<PathBuf>,
-) -> ServedEndpoint {
+) -> std::io::Result<ServedEndpoint> {
     let port = endpoint.port();
     let lockfile = IdeLockfile::new_for_bridge_dir(lockfile_dir, port, workspace_folders);
-    // An I/O failure writing the discovery file is non-fatal to serving — the
-    // endpoint is already bound — but we surface it via the guard's empty path
-    // so a failed write still yields a coherent (file-absent) ServedEndpoint.
     let lockfile_path = lockfile.path();
-    if let Err(e) = lockfile.write() {
-        tracing::warn!(path = %lockfile_path.display(), error = %e, "failed to write bridge lockfile");
-    }
+    lockfile.write()?;
     // The endpoint MUST enforce the SAME token the lockfile published.
     endpoint.set_auth_token(lockfile.auth_token().to_string());
     let lock_guard = LockfileGuard::new(lockfile_path.clone());
-    ServedEndpoint {
+    Ok(ServedEndpoint {
         endpoint,
         lockfile_path,
         lock_guard,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -555,6 +757,29 @@ mod tests {
     fn parse_missing_value_is_error() {
         assert!(BridgeArgs::parse(["--cwd"]).is_err());
         assert!(BridgeArgs::parse(["--model"]).is_err());
+        assert!(BridgeArgs::parse(["--bridge-dir"]).is_err());
+    }
+
+    #[test]
+    fn parse_security_flags_and_absolute_bridge_dir() {
+        let args = BridgeArgs::parse([
+            "--api-key-stdin",
+            "--credential-stdin",
+            "--trusted-workspace",
+            "--packaged-credential-stdin-only",
+            "--bridge-dir",
+            "/tmp/lingxi-bridge",
+        ])
+        .expect("security flags parse");
+        assert!(args.api_key_stdin);
+        assert!(args.credential_stdin);
+        assert!(args.trusted_workspace);
+        assert!(args.packaged_credential_stdin_only);
+        assert_eq!(
+            args.bridge_dir.as_deref(),
+            Some(std::path::Path::new("/tmp/lingxi-bridge"))
+        );
+        assert!(BridgeArgs::parse(["--bridge-dir", "relative/path"]).is_err());
     }
 
     #[test]
@@ -570,11 +795,56 @@ mod tests {
     }
 
     #[test]
-    fn usage_mentions_key_env_but_never_a_value() {
+    fn usage_mentions_stdin_but_never_a_value_or_key_env() {
         let u = usage();
-        assert!(u.contains(API_KEY_ENV), "usage must name the key env var");
-        // The usage text is static — it can never carry a secret value.
+        assert!(u.contains("--api-key-stdin"));
+        assert!(!u.contains("ANTHROPIC_API_KEY"));
         assert!(!u.contains("sk-"), "usage must not embed a key literal");
+    }
+
+    #[test]
+    fn stdin_key_is_one_line_bounded_and_errors_never_echo_it() {
+        let mut input = std::io::Cursor::new(b"secret value\r\nignored\n".to_vec());
+        assert_eq!(read_api_key_line(&mut input).unwrap(), "secret value");
+
+        let secret = "z".repeat(MAX_STDIN_API_KEY_BYTES + 1);
+        let mut oversized = std::io::Cursor::new(format!("{secret}\n").into_bytes());
+        let error = read_api_key_line(&mut oversized).unwrap_err();
+        assert!(error.contains("limit"));
+        assert!(!error.contains(&secret));
+    }
+
+    #[test]
+    fn credential_envelope_accepts_provider_keys_without_echoing_secrets() {
+        let mut input = std::io::Cursor::new(
+            br#"{"api_key":null,"provider_keys":{"openai":"sk-secret","deepseek":"ds-secret"}}"#
+                .to_vec(),
+        );
+        let envelope = read_credential_envelope(&mut input).expect("envelope parses");
+        assert_eq!(
+            envelope.provider_keys.get("openai").map(String::as_str),
+            Some("sk-secret")
+        );
+        assert_eq!(envelope.provider_keys.len(), 2);
+
+        let secret = "x".repeat(MAX_STDIN_CREDENTIAL_BYTES + 1);
+        let mut oversized = std::io::Cursor::new(
+            format!(r#"{{"provider_keys":{{"openai":"{secret}"}}}}"#).into_bytes(),
+        );
+        let error = read_credential_envelope(&mut oversized)
+            .err()
+            .expect("oversized envelope must fail");
+        assert!(error.contains("limit"));
+        assert!(!error.contains(&secret));
+    }
+
+    #[test]
+    fn credential_envelope_rejects_javascript_camel_case_fields() {
+        let mut input = std::io::Cursor::new(
+            br#"{"apiKey":null,"providerKeys":{"deepseek":"ds-secret"}}"#.to_vec(),
+        );
+        let error = read_credential_envelope(&mut input).expect_err("protocol mismatch must fail");
+        assert_eq!(error, "invalid credential envelope");
     }
 
     #[test]
@@ -587,6 +857,55 @@ mod tests {
         assert_eq!(cfg.default_model, "custom-model");
         // A transport always binds the adapter gate.
         assert!(!cfg.use_noop_permission_gate);
+    }
+
+    #[test]
+    fn workspace_is_untrusted_by_default() {
+        let cfg = resolve_desktop_config(&BridgeArgs::default());
+        assert!(cfg.api_key.is_empty(), "credentials must not come from env");
+        assert!(cfg.api_key_helper.is_none());
+        assert!(cfg.provider_profiles.is_none());
+        assert!(cfg.routing.is_none());
+        assert!(cfg.mcp_paths.is_empty());
+        assert_eq!(cfg.setting_source_scope, (false, false));
+        assert!(cfg.customization_gates.safe_mode);
+        assert!(cfg.memory_provider.is_none());
+        assert_eq!(cfg.permission_mode, permission::PermissionMode::Default);
+        assert!(!cfg.allow_dangerously_skip_permissions);
+    }
+
+    #[test]
+    fn trusted_workspace_preserves_customization_sources() {
+        let cfg = resolve_desktop_config(&BridgeArgs {
+            trusted_workspace: true,
+            ..BridgeArgs::default()
+        });
+        assert_eq!(cfg.setting_source_scope, (true, true));
+        assert_eq!(
+            cfg.customization_gates,
+            engine_desktop::CustomizationGates::default()
+        );
+        assert_eq!(cfg.mcp_paths.len(), 2);
+        assert!(cfg.memory_provider.is_some());
+    }
+
+    #[test]
+    fn packaged_boundary_keeps_trusted_customizations_but_rejects_settings_credentials() {
+        let cfg = resolve_desktop_config(&BridgeArgs {
+            trusted_workspace: true,
+            packaged_credential_stdin_only: true,
+            ..BridgeArgs::default()
+        });
+        assert_eq!(cfg.setting_source_scope, (true, true));
+        assert_eq!(
+            cfg.customization_gates,
+            engine_desktop::CustomizationGates::default()
+        );
+        assert_eq!(cfg.mcp_paths.len(), 2);
+        assert!(cfg.memory_provider.is_some());
+        assert!(cfg.api_key_helper.is_none());
+        assert!(cfg.provider_profiles.is_none());
+        assert!(has_no_credential_source(&cfg));
     }
 
     #[test]
@@ -623,6 +942,9 @@ mod tests {
     /// links end to end.
     #[tokio::test]
     async fn assemble_binds_connection() {
+        let _loop_state = crate::driver::LOOP_KA_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let tmp = tempfile::tempdir().expect("tempdir");
         let cwd = tmp.path().to_path_buf();
         let cfg = DesktopConfig {
@@ -637,6 +959,7 @@ mod tests {
             default_model_explicit: true,
             recent_models: Vec::new(),
             fallback_model: None,
+            custom_betas: Vec::new(),
             provider_profiles: None,
             routing: None,
             mcp_paths: vec![cwd.join(".mcp.json")],

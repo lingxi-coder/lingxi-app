@@ -1182,7 +1182,10 @@ fn battery_xcopy_robocopy_positive() {
 fn battery_xcopy_robocopy_positive_pathed_exe() {
     // Basename-lowercase membership: a path-qualified `xcopy.exe` still matches.
     let stmts = vec![
-        bstmt(vec![cmd("C:\\Windows\\System32\\robocopy.exe", &["a", "b"])]),
+        bstmt(vec![cmd(
+            "C:\\Windows\\System32\\robocopy.exe",
+            &["a", "b"],
+        )]),
         bstmt(vec![cmd("git", &["status"])]),
     ];
     let r = battery(&stmts, false);

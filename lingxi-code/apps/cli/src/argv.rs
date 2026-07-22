@@ -30,12 +30,34 @@ fn parse_positive_budget_usd(value: &str) -> Result<f64, String> {
     Ok(amount)
 }
 
+/// Normalize Claude's ordered comma-separated fallback list while keeping the
+/// existing public field backward compatible as a single CSV string.
+fn parse_fallback_model_list(value: &str) -> Result<String, String> {
+    let mut models: Vec<String> = Vec::new();
+    for raw in value.split(',') {
+        let model = raw.trim();
+        if model.is_empty() {
+            return Err("--fallback-model entries must not be empty".to_string());
+        }
+        if !models.iter().any(|existing| existing.as_str() == model) {
+            models.push(model.to_string());
+        }
+    }
+    Ok(models.join(","))
+}
+
 /// AI coding assistant — runs a single turn or REPL
 #[derive(Debug, Parser, Clone, Default)]
-#[command(name = "lingxi-cli", version, about, long_about = None)]
+#[command(
+    name = "lingxi-cli",
+    version,
+    disable_version_flag = true,
+    about,
+    long_about = None
+)]
 #[allow(clippy::struct_excessive_bools, clippy::doc_markdown)]
 pub struct Argv {
-    /// Top-level subcommand (mcp, auth, plugin, project, setup-token, agents,
+    /// Top-level subcommand (mcp, auth, plugin, project, setup-token, agents, attach,
     /// install, update, doctor, auto-mode, ultrareview, gateway). Declared BEFORE the
     /// `prompt` positional so clap resolves a leading subcommand-name token as
     /// the subcommand (and an optional-value global flag like `-d`/`-r` before
@@ -47,6 +69,16 @@ pub struct Argv {
     /// The user prompt for this one-shot conversation
     // When absent (and `--resume` is not set), enters REPL mode (M5-13).
     pub prompt: Option<String>,
+
+    /// Output the version number
+    // Claude advertises lowercase `-v` and also accepts legacy uppercase `-V`.
+    #[arg(
+        short = 'v',
+        short_alias = 'V',
+        long = "version",
+        action = clap::ArgAction::Version
+    )]
+    pub version: Option<bool>,
 
     /// Print mode: exit after first end_turn
     #[arg(short = 'p', long = "print")]
@@ -92,8 +124,27 @@ pub struct Argv {
     // gated to print mode by the consumer. When the primary model hits the
     // consecutive-529 Opus gate, the turn loop switches to this model
     // (`query.ts:894-948`).
-    #[arg(long = "fallback-model", value_name = "MODEL")]
+    #[arg(
+        long = "fallback-model",
+        value_name = "MODEL",
+        value_parser = parse_fallback_model_list
+    )]
     pub fallback_model: Option<String>,
+
+    /// Start a remote-control session using Anthropic's hosted relay. LingXi
+    /// parses this surface for compatibility and then fails explicitly because
+    /// that private relay contract is unavailable.
+    #[arg(
+        long = "remote-control",
+        value_name = "name",
+        num_args = 0..=1,
+        default_missing_value = ""
+    )]
+    pub remote_control: Option<String>,
+
+    /// Prefix used by remote-control session names.
+    #[arg(long = "remote-control-session-name-prefix", value_name = "prefix")]
+    pub remote_control_session_name_prefix: Option<String>,
 
     /// Maximum number of agentic turns before the loop early-exits (claude-code
     /// `--max-turns <turns>`, "only works with --print"). Maps to
@@ -357,7 +408,8 @@ pub struct Argv {
     pub effort: Option<String>,
 
     /// Enable beta features (Warning: Custom betas are only available for API key users)
-    // TODO(betas): wire into beta feature activation
+    // Values are stable-deduplicated during startup and injected only into
+    // first-party Anthropic API-key messages requests.
     #[arg(long = "betas", value_name = "betas", num_args = 1..)]
     pub betas: Option<Vec<String>>,
 
@@ -552,11 +604,11 @@ pub struct Argv {
     pub disable_slash_commands: bool,
 
     /// Enable Claude in Chrome integration
-    #[arg(long = "chrome")]
+    #[arg(long = "chrome", conflicts_with = "no_chrome")]
     pub chrome: bool,
 
     /// Disable Claude in Chrome integration
-    #[arg(long = "no-chrome")]
+    #[arg(long = "no-chrome", conflicts_with = "chrome")]
     pub no_chrome: bool,
 
     /// Render screen-reader friendly output (flat text, no decorative borders

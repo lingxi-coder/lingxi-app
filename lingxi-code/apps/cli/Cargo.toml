@@ -71,6 +71,7 @@ migrations = { path = "../../migrations" }
 # Real posix primitives: `has_internet` HTTP probe (bypass_env.rs) + session-row
 # FileSystem (run.rs) bind the live `PosixHttp` / `PosixFileSystem`.
 platform-posix = { path = "../../platforms/posix" }
+platform-pty = { path = "../../platforms/pty" }
 # CLI-resolved permission mode + bypass-safety guard substrate (cli_mode /
 # bypass_guard). The real `BypassEnv` impl (`bypass_env.rs`) names this directly.
 permission = { path = "../../permission" }
@@ -105,7 +106,7 @@ crossterm = { workspace = true }
 
 # clap 4.6+ requires edition2024; pin to a release compatible with Rust 1.82.
 clap = { version = "=4.5.20", features = ["derive", "env"] }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "io-std", "io-util", "time"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "io-std", "io-util", "time", "net"] }
 tokio-util = { workspace = true, features = ["rt"] }
 futures = { workspace = true }
 async-trait = { workspace = true }
@@ -117,6 +118,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 
 [dev-dependencies]
 # Pinned: assert_cmd 2.0.x is the last MSRV-1.82-compatible series.
@@ -137,7 +139,9 @@ filetime = "0.2"
 # already uses.
 # `signal` adds the safe `kill(pid, 0)` wrapper for the agents live-session
 # registry's liveness probe (`agents_registry::process_alive`, M7 cc2.1.198).
-nix = { version = "0.27", default-features = false, features = ["user", "signal"] }
+nix = { version = "0.27", default-features = false, features = ["user", "signal", "poll"] }
+rustix = { version = "0.38", features = ["fs"] }
+
 
 [target.'cfg(unix)'.dev-dependencies]
 libc = "0.2"

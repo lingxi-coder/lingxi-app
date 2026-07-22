@@ -347,11 +347,16 @@ impl ProcessRunner for PosixProcess {
         }
 
         let mut child = tcmd.spawn().map_err(|e| ProcessError::Io(e.to_string()))?;
+        // Capture this before polling `wait()`: Tokio clears `Child::id()` once
+        // the direct child has been reaped. A busy executor can observe the
+        // timeout and the already-completed child in the same poll, so looking
+        // the id up only during the background handoff is racy.
+        let spawned_pid = child
+            .id()
+            .ok_or_else(|| ProcessError::Io("spawned child has no pid".into()))?;
         let child_registration = if print_mode_cleanup {
-            child.id().map(|pid| {
-                active_children::register(pid);
-                ChildRegistration(pid)
-            })
+            active_children::register(spawned_pid);
+            Some(ChildRegistration(spawned_pid))
         } else {
             None
         };
@@ -414,6 +419,49 @@ impl ProcessRunner for PosixProcess {
             }));
         }
 
+        // The timer may become ready while this future is starved by other
+        // workspace work, after the OS process has already exited. Because the
+        // select is deliberately timer-biased, that used to enter the
+        // background branch and then fail (`Child::id()` is `None` after
+        // `wait()`). An exited process cannot be moved to the background. Drain
+        // any immediately available tail from its pipes, with a small bounded
+        // grace period, and report the real completion instead.
+        let completed_status = match exit_status.take() {
+            Some(status) => Some(status),
+            None => child
+                .try_wait()
+                .map_err(|e| ProcessError::Io(e.to_string()))?,
+        };
+        if let Some(status) = completed_status {
+            const MAX_POST_EXIT_READS: usize = 256;
+            let grace = tokio::time::sleep(std::time::Duration::from_millis(50));
+            tokio::pin!(grace);
+            let mut reads = 0usize;
+            while !(out_done && err_done) && reads < MAX_POST_EXIT_READS {
+                tokio::select! {
+                    // Prefer already-buffered output/EOF over an elapsed grace
+                    // timer. The read-count cap prevents a descendant that
+                    // inherited the pipes from starving this loop indefinitely.
+                    biased;
+                    r = sout.read_buf(&mut out_buf), if !out_done => {
+                        reads += 1;
+                        match r { Ok(0) | Err(_) => out_done = true, Ok(_) => {} }
+                    }
+                    r = serr.read_buf(&mut err_buf), if !err_done => {
+                        reads += 1;
+                        match r { Ok(0) | Err(_) => err_done = true, Ok(_) => {} }
+                    }
+                    () = &mut grace => break,
+                }
+            }
+            return Ok(traits::ForegroundOutcome::Completed(ProcessOutput {
+                stdout: String::from_utf8_lossy(&out_buf).into_owned(),
+                stderr: String::from_utf8_lossy(&err_buf).into_owned(),
+                exit_code: status.code().unwrap_or(-1),
+                timed_out: false,
+            }));
+        }
+
         // ===== Timeout → move to background =====
         // Land a per-task output file (same O_NOFOLLOW symlink guard as
         // `spawn_background`) and hand the live child to a detached reaper. The
@@ -436,9 +484,7 @@ impl ProcessRunner for PosixProcess {
         let std_file2 = std_file
             .try_clone()
             .map_err(|e| ProcessError::Io(format!("clone fd: {e}")))?;
-        let pid = child
-            .id()
-            .ok_or_else(|| ProcessError::Io("backgrounded child has no pid".into()))?;
+        let pid = spawned_pid;
 
         tokio::spawn(async move {
             // Hold the print-mode registration for the child's remaining life so

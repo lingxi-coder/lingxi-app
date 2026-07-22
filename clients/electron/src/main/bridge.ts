@@ -1,429 +1,588 @@
-/**
- * Main-process bridge manager (M10 A1 — C2).
- *
- * Owns the lifecycle that turns the Electron shell into a real client of the
- * Rust `bridge-server`:
- *
- *   1. Spawn the built `bridge-server` binary as a child process. Its path is
- *      resolved from `opts.serverBin` → `LINGXI_BRIDGE_SERVER_BIN` → a path
- *      derived RELATIVE to the repo (`<repoRoot>/lingxi-code/target/{debug,
- *      release}/bridge-server`, first existing); a clear, actionable error is
- *      thrown if none resolve.
- *      `ANTHROPIC_API_KEY` / `LINGXI_API_BASE_URL` pass through from the
- *      environment; `--cwd` / `--model` come from env overrides (the key is
- *      NEVER read into a string we log — it rides inherited `env` untouched).
- *   2. Wait for the F2-04 discovery lockfile to appear under `~/.lingxi/bridge`
- *      (`<port>.lock`). We snapshot the pre-existing lockfiles first and accept
- *      the first NEW one the child writes, so a stale lockfile from a previous
- *      run never wins the race.
- *   3. Connect a {@link BridgeClient} (from `@lingxi/bridge-client`) through that
- *      lockfile — the token in its body is the WS-upgrade auth.
- *   4. Wire IPC: the renderer drives turns / permissions through
- *      `ipcMain.handle(...)`, and every inbound {@link ClientEvent} is forwarded
- *      to the renderer via `webContents.send('lingxi:event', evt)`.
- *   5. {@link BridgeManager.dispose} kills the child, closes the socket, and
- *      removes every IPC handler + listener — called on app quit / all-windows-
- *      closed so no orphan process or dangling handler survives.
- *
- * The renderer surface (channel names) is mirrored 1:1 in `src/preload/index.ts`.
- */
-
 import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, readdirSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { ipcMain, type WebContents } from 'electron';
+import type { IpcMainInvokeEvent, WebContents } from 'electron';
 import {
   BridgeClient,
-  defaultBridgeDir,
   type ClientEvent,
   type PermissionRequest,
-  type PermissionResponseDto,
 } from '@lingxi/bridge-client';
 
-// ── IPC channel names (mirror these in the preload) ──────────────────────────
+import { buildBridgeArguments, buildBridgeEnvironment, buildCredentialEnvelope, diagnosticEvent, DiagnosticBuffer, sanitizeDiagnostic } from './host-utils.js';
+import {
+  assertCommandAllowedDuringTurn,
+  validateClientCommand,
+  validateBridgeLockfile,
+  validateOptionalTurnId,
+  validatePermissionResponse,
+  validatePrompt,
+  validateRequestId,
+} from './validation.js';
 
-/** Renderer → main: submit a user prompt to drive a turn. */
 export const CH_SEND_PROMPT = 'lingxi:sendPrompt';
-/** Renderer → main: approve a parked permission request. */
 export const CH_APPROVE = 'lingxi:approve';
-/** Renderer → main: deny a parked permission request. */
 export const CH_DENY = 'lingxi:deny';
-/** Renderer → main: cancel the in-flight turn. */
 export const CH_CANCEL = 'lingxi:cancel';
-/** Renderer → main (invoke): read the current connection state synchronously. */
+export const CH_COMMAND = 'lingxi:command';
 export const CH_CONNECTION_STATE = 'lingxi:connectionState';
-/** Main → renderer (send): one inbound {@link ClientEvent} from the engine. */
 export const CH_EVENT = 'lingxi:event';
-/** Main → renderer (send): one inbound {@link PermissionRequest} from the engine. */
 export const CH_PERMISSION = 'lingxi:permission';
-/** Main → renderer (send): a {@link ConnectionState} transition. */
 export const CH_STATE_CHANGED = 'lingxi:connectionStateChanged';
 
-/** Coarse lifecycle of the bridge connection, surfaced to the renderer. */
 export type ConnectionState =
   | { status: 'idle' }
   | { status: 'spawning' }
+  | { status: 'restarting' }
   | { status: 'connecting' }
   | { status: 'connected' }
   | { status: 'disconnected'; reason?: string }
   | { status: 'error'; message: string };
 
-/** Tunables for {@link BridgeManager} (all optional — env-resolved by default). */
-export interface BridgeManagerOptions {
-  /** Override the bridge-server binary path (else `LINGXI_BRIDGE_SERVER_BIN` / default). */
-  serverBin?: string;
-  /** Override the engine working directory (else `LINGXI_CWD` / `process.cwd()`). */
-  cwd?: string;
-  /** Override the default model id (else `LINGXI_MODEL`, omitted if unset). */
+export interface BridgeLaunchConfig {
+  workspace: string;
+  apiKey?: string;
+  providerCredentials?: Record<string, string>;
+  trusted: boolean;
   model?: string;
-  /** Directory to watch for the discovery lockfile (else `~/.lingxi/bridge`). */
-  bridgeDir?: string;
-  /** How long to wait for the child to publish its lockfile (default 15_000ms). */
+  apiBaseUrl?: string;
+}
+
+export interface BridgeRuntimeVersions {
+  serverName: string;
+  serverProtocol: string;
+  clientProtocol: string;
+}
+
+export interface BridgeManagerOptions {
+  /** Development-only binary override. Ignored in packaged builds. */
+  serverBin?: string;
+  /** Parent for owner-only, per-launch discovery directories. */
+  bridgeRoot?: string;
   lockfileTimeoutMs?: number;
+  stopTimeoutMs?: number;
+  isPackaged?: boolean;
+  resourcesPath?: string;
+  launchConfig: () => BridgeLaunchConfig | Promise<BridgeLaunchConfig>;
+  /** Synchronous trust snapshot used by privileged IPC checks. */
+  accessState?: () => { workspace?: string; trusted: boolean };
+  diagnostics?: DiagnosticBuffer;
+  onModelChanged?: (model: string) => void;
 }
 
-/** Binary name we look for under the workspace `lingxi-code/target/{profile}`. */
-const SERVER_BIN_NAME = 'bridge-server';
+const SERVER_BIN_NAME = process.platform === 'win32' ? 'bridge-server.exe' : 'bridge-server';
+const MAX_PENDING_PERMISSIONS = 1_000;
+const require = createRequire(import.meta.url);
+const electronModule = require('electron');
+const ipcMain = (typeof electronModule === 'string' ? undefined : electronModule.ipcMain) ?? {
+  handle: () => { throw new Error('ipcMain is unavailable outside Electron'); },
+  removeHandler: () => undefined,
+};
 
-/**
- * Walk upward from `start` looking for a built `bridge-server` under
- * `<dir>/lingxi-code/target/{debug,release}/bridge-server`, returning the first
- * existing path. This anchors the binary RELATIVE to the repo (no absolute
- * author path) and works from both the bundled `out/main` and the `src/main`
- * source tree, since both live under the repo root.
- */
-function findWorkspaceServerBin(start: string): string | undefined {
-  let dir = start;
-  // Bound the walk at the filesystem root (dirname is idempotent there).
-  for (;;) {
-    for (const profile of ['debug', 'release']) {
-      const candidate = join(dir, 'lingxi-code', 'target', profile, SERVER_BIN_NAME);
-      if (existsSync(candidate)) {
-        return candidate;
-      }
-    }
-    const parent = dirname(dir);
-    if (parent === dir) {
-      return undefined;
-    }
-    dir = parent;
-  }
-}
-
-/** Absolute path of this module's directory (works for both ESM bundle + source). */
 function moduleDir(): string {
   try {
     return dirname(fileURLToPath(import.meta.url));
   } catch {
-    // Extremely defensive: if `import.meta.url` is unavailable, fall back to cwd.
     return process.cwd();
   }
 }
 
-/**
- * Resolve the bridge-server binary path:
- *   1. an explicit `opts.serverBin` override, else
- *   2. the `LINGXI_BRIDGE_SERVER_BIN` environment variable, else
- *   3. a path derived RELATIVE to the repo by walking up from this module to a
- *      built `lingxi-code/target/{debug,release}/bridge-server`.
- *
- * Throws an actionable error when none resolve, telling the user to build the
- * binary or set the env var — no absolute author paths are ever baked in.
- */
-export function resolveServerBin(opts: BridgeManagerOptions = {}): string {
+function findWorkspaceServerBin(start: string): string | undefined {
+  let dir = start;
+  for (;;) {
+    for (const profile of ['debug', 'release']) {
+      const candidate = join(dir, 'lingxi-code', 'target', profile, SERVER_BIN_NAME);
+      if (existsSync(candidate)) return candidate;
+    }
+    const parent = dirname(dir);
+    if (parent === dir) return undefined;
+    dir = parent;
+  }
+}
+
+/** Packaged builds use only process.resourcesPath; overrides/search are development-only. */
+export function resolveServerBin(opts: Omit<BridgeManagerOptions, 'launchConfig'> = {}): string {
+  if (opts.isPackaged) {
+    const resourcesPath = opts.resourcesPath ?? process.resourcesPath;
+    const packagedBinary = join(resourcesPath, 'bin', SERVER_BIN_NAME);
+    if (existsSync(packagedBinary)) return packagedBinary;
+    throw new Error(`packaged bridge-server is missing from application resources`);
+  }
   const explicit = opts.serverBin ?? process.env['LINGXI_BRIDGE_SERVER_BIN'];
-  if (explicit) {
-    return explicit;
-  }
+  if (explicit) return explicit;
   const found = findWorkspaceServerBin(moduleDir());
-  if (found) {
-    return found;
-  }
-  throw new Error(
-    `bridge-server binary not found. Build it from the cargo workspace ` +
-      `("cd lingxi-code && cargo build -p bridge-server --bin bridge-server", ` +
-      `which emits lingxi-code/target/debug/bridge-server), or point ` +
-      `LINGXI_BRIDGE_SERVER_BIN at a prebuilt binary.`,
-  );
+  if (found) return found;
+  throw new Error('bridge-server binary not found; build it or set LINGXI_BRIDGE_SERVER_BIN in development');
 }
 
-/** Lockfile filenames currently in `dir` (so we can tell which one the child adds). */
-function snapshotLockfiles(dir: string): Set<string> {
+function lockfiles(dir: string): string[] {
   try {
-    return new Set(readdirSync(dir).filter((n) => n.endsWith('.lock') && !n.startsWith('.')));
+    return readdirSync(dir).filter((name) => name.endsWith('.lock') && !name.startsWith('.'));
   } catch {
-    return new Set();
+    return [];
   }
 }
 
-/**
- * Manages one `bridge-server` child + its {@link BridgeClient} and the IPC seam
- * between the renderer and that client. Construct once in the main process and
- * call {@link start}; call {@link dispose} on shutdown.
- */
+function urlOrigin(raw: string): string | undefined {
+  try {
+    const url = new URL(raw);
+    return url.protocol === 'file:' ? 'file://' : url.origin;
+  } catch {
+    return undefined;
+  }
+}
+
+function connectionDiagnostic(state: ConnectionState, generation: number): string {
+  return diagnosticEvent('connection_state', { generation, state });
+}
+
+function childExitDiagnostic(code: number | null, signal: NodeJS.Signals | null, generation: number): string {
+  return diagnosticEvent('child_exit', {
+    clean: signal === null && code === 0,
+    code,
+    generation,
+    signal,
+  });
+}
+
+function bridgeVersionDiagnostic(server: string, serverProtocol: string, clientProtocol: string): string {
+  return diagnosticEvent('bridge_handshake', {
+    clientProtocol,
+    server,
+    serverProtocol,
+  });
+}
+
+function ignorableLockfileError(input: unknown): boolean {
+  if (!(input instanceof Error)) return false;
+  return (input as NodeJS.ErrnoException).code === 'ENOENT'
+    || input instanceof SyntaxError
+    || /bridge lockfile|JSON/.test(input.message);
+}
+
 export class BridgeManager {
-  private readonly opts: BridgeManagerOptions;
   private child: ChildProcess | null = null;
   private client: BridgeClient | null = null;
   private state: ConnectionState = { status: 'idle' };
   private disposed = false;
   private ipcRegistered = false;
+  private restartChain: Promise<void> = Promise.resolve();
+  private generation = 0;
+  private launchDir: string | null = null;
+  private activeWorkspace: string | undefined;
+  private activeWorkspaceTrusted = false;
+  private activeCredentialAvailable = false;
+  private activeTurn = false;
+  private lastRuntimeVersions: BridgeRuntimeVersions | undefined;
+  private readonly pendingPermissionIds = new Set<number>();
+  private readonly targets = new Map<WebContents, Set<string>>();
+  private readonly diagnostics: DiagnosticBuffer;
 
-  /** Renderer targets to forward inbound frames + state changes to. */
-  private readonly targets = new Set<WebContents>();
-
-  constructor(opts: BridgeManagerOptions = {}) {
-    this.opts = opts;
+  constructor(private readonly opts: BridgeManagerOptions) {
+    this.diagnostics = opts.diagnostics ?? new DiagnosticBuffer();
   }
 
-  /** The latest connection state (also pushed to the renderer on every change). */
   get connectionState(): ConnectionState {
     return this.state;
   }
 
-  /**
-   * Register a renderer's {@link WebContents} to receive forwarded events. A
-   * destroyed `WebContents` is auto-removed. Safe to call before {@link start}.
-   */
-  registerWindow(wc: WebContents): void {
-    this.targets.add(wc);
-    wc.once('destroyed', () => this.targets.delete(wc));
+  get turnActive(): boolean {
+    return this.activeTurn;
   }
 
-  /**
-   * Spawn the server, wait for its lockfile, connect the client, and wire IPC.
-   * Resolves once connected; on any failure it records an `error` state, tears
-   * the child down, and rejects (the caller may surface this to the renderer).
-   */
-  async start(): Promise<void> {
-    if (this.child || this.client) {
-      throw new Error('BridgeManager already started');
-    }
-    this.registerIpc();
+  get runtimeVersions(): BridgeRuntimeVersions | undefined {
+    return this.lastRuntimeVersions ? { ...this.lastRuntimeVersions } : undefined;
+  }
 
-    const bridgeDir = this.opts.bridgeDir ?? defaultBridgeDir();
-    const preexisting = snapshotLockfiles(bridgeDir);
+  registerWindow(webContents: WebContents, rendererUrl: string): void {
+    const origin = urlOrigin(rendererUrl);
+    if (!origin) throw new Error('invalid renderer URL');
+    const origins = this.targets.get(webContents) ?? new Set<string>();
+    origins.add(origin);
+    this.targets.set(webContents, origins);
+    webContents.once('destroyed', () => this.targets.delete(webContents));
+  }
+
+  async start(): Promise<void> {
+    if (this.disposed) throw new Error('BridgeManager is disposed');
+    if (this.child || this.client) throw new Error('BridgeManager already started');
+    this.registerIpc();
+    try {
+      await this.startInternal();
+    } catch (error) {
+      // launchConfig runs before the child lifecycle begins. Surface failures
+      // such as an unreadable Keychain credential through the same renderer
+      // connection state as spawn/protocol failures.
+      if (this.state.status !== 'error') this.fail(error);
+      throw error;
+    }
+  }
+
+  restart(): Promise<void> {
+    this.registerIpc();
+    this.restartChain = this.restartChain.catch(() => undefined).then(async () => {
+      if (this.disposed) return;
+      this.setState({ status: 'restarting' });
+      await this.stopBridge();
+      await this.startInternal();
+    });
+    return this.restartChain;
+  }
+
+  private async startInternal(): Promise<void> {
+    const launch = await this.opts.launchConfig();
+    this.activeWorkspace = launch.workspace;
+    this.activeWorkspaceTrusted = launch.trusted;
+    this.activeCredentialAvailable = Boolean(launch.apiKey) || Object.keys(launch.providerCredentials ?? {}).length > 0;
+    const bridgeDir = this.createLaunchDirectory();
+    const generation = ++this.generation;
 
     this.setState({ status: 'spawning' });
     let child: ChildProcess;
     try {
-      // Resolving the binary path can throw (e.g. it isn't built / no env var);
-      // surface that as a clean `error` state rather than a stuck `spawning`.
-      child = this.spawnServer();
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      this.setState({ status: 'error', message });
-      throw err;
+      child = this.spawnServer(launch, bridgeDir);
+    } catch (error) {
+      this.fail(error);
+      this.removeLaunchDirectory();
+      throw error;
     }
     this.child = child;
+    this.captureLogs(child, [launch.apiKey, ...Object.values(launch.providerCredentials ?? {})].filter((value): value is string => Boolean(value)));
 
     child.once('exit', (code, signal) => {
+      this.diagnostics.add('info', 'host', childExitDiagnostic(code, signal, generation));
+      if (generation !== this.generation) return;
       this.child = null;
       if (!this.disposed) {
-        this.setState({
-          status: 'disconnected',
-          reason: `bridge-server exited (code=${code ?? 'null'}, signal=${signal ?? 'null'})`,
-        });
+        this.setState({ status: 'disconnected', reason: `bridge-server exited (code=${code ?? 'null'}, signal=${signal ?? 'null'})` });
       }
     });
-    child.once('error', (err) => {
-      if (!this.disposed) {
-        this.setState({ status: 'error', message: `failed to spawn bridge-server: ${err.message}` });
-      }
+    child.once('error', (error) => {
+      if (generation === this.generation && !this.disposed) this.fail(`failed to spawn bridge-server: ${error.message}`);
     });
 
     try {
-      const lockfilePath = await this.waitForLockfile(bridgeDir, preexisting);
+      const lockfilePath = await this.waitForLockfile(bridgeDir, launch, generation);
       this.setState({ status: 'connecting' });
-
       const client = new BridgeClient({ lockfilePath, clientName: 'lingxi-electron/0.1.0' });
       this.client = client;
-      this.wireClient(client);
-
-      await client.connect();
+      this.wireClient(client, generation);
+      const hello = await client.connect();
+      if (generation !== this.generation) return;
+      this.lastRuntimeVersions = {
+        serverName: hello.server_name,
+        serverProtocol: hello.protocol_version,
+        clientProtocol: hello.capabilities.client_protocol_version,
+      };
+      this.diagnostics.add(
+        'info',
+        'bridge',
+        bridgeVersionDiagnostic(hello.server_name, hello.protocol_version, hello.capabilities.client_protocol_version),
+      );
       this.setState({ status: 'connected' });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      this.setState({ status: 'error', message });
-      this.teardownChildAndClient();
-      throw err;
+    } catch (error) {
+      if (generation === this.generation) {
+        this.fail(error);
+        await this.stopBridge();
+      }
+      throw error;
     }
   }
 
-  // ── Spawn ───────────────────────────────────────────────────────────────────
+  private createLaunchDirectory(): string {
+    const root = this.opts.bridgeRoot ?? join(tmpdir(), 'lingxi-electron-bridge');
+    mkdirSync(root, { recursive: true, mode: 0o700 });
+    chmodSync(root, 0o700);
+    const directory = mkdtempSync(join(root, 'launch-'));
+    chmodSync(directory, 0o700);
+    this.launchDir = directory;
+    return directory;
+  }
 
-  private spawnServer(): ChildProcess {
+  private spawnServer(launch: BridgeLaunchConfig, bridgeDir: string): ChildProcess {
     const bin = resolveServerBin(this.opts);
-    const cwd = this.opts.cwd ?? process.env['LINGXI_CWD'] ?? process.cwd();
-    const model = this.opts.model ?? process.env['LINGXI_MODEL'];
-
-    const args: string[] = ['--cwd', cwd];
-    if (model) {
-      args.push('--model', model);
-    }
-
-    // Inherit the full environment so `ANTHROPIC_API_KEY` / `LINGXI_API_BASE_URL`
-    // pass through untouched — the key is never copied into a local string here.
-    return spawn(bin, args, {
-      cwd,
-      env: process.env,
-      stdio: ['ignore', 'inherit', 'inherit'],
+    const args = buildBridgeArguments({
+      workspace: launch.workspace,
+      bridgeDir,
+      model: launch.model,
+      hasApiKey: Boolean(launch.apiKey),
+      hasCredentialStdin: Object.keys(launch.providerCredentials ?? {}).length > 0,
+      trusted: launch.trusted,
+      packagedCredentialBoundary: Boolean(this.opts.isPackaged),
     });
+
+    const child = spawn(bin, args, {
+      cwd: launch.workspace,
+      env: buildBridgeEnvironment(process.env, launch.apiBaseUrl),
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
+      detached: process.platform !== 'win32',
+    });
+    const providerCredentials = launch.providerCredentials ?? {};
+    if (Object.keys(providerCredentials).length > 0) {
+      child.stdin?.end(buildCredentialEnvelope(launch));
+    } else if (launch.apiKey) child.stdin?.end(`${launch.apiKey}\n`);
+    else child.stdin?.end();
+    return child;
   }
 
-  // ── Lockfile wait ─────────────────────────────────────────────────────────
+  private captureLogs(child: ChildProcess, secrets: readonly string[] = []): void {
+    const attach = (stream: NodeJS.ReadableStream | null, level: 'info' | 'error'): void => {
+      if (!stream) return;
+      let buffered = '';
+      const flush = (): void => {
+        const text = sanitizeDiagnostic(buffered, secrets);
+        buffered = '';
+        if (text) this.diagnostics.add(level, 'bridge', text, secrets);
+      };
+      stream.on('data', (chunk: Buffer | string) => {
+        buffered += chunk.toString();
+        const lines = buffered.split(/\r?\n/);
+        buffered = lines.pop() ?? '';
+        for (const line of lines) {
+          const text = sanitizeDiagnostic(line, secrets);
+          if (text) this.diagnostics.add(level, 'bridge', text, secrets);
+        }
+        if (buffered.length > 8_000) flush();
+      });
+      stream.on('end', flush);
+    };
+    attach(child.stdout, 'info');
+    attach(child.stderr, 'error');
+  }
 
-  /**
-   * Poll `dir` for the first `<port>.lock` that was NOT present in `preexisting`,
-   * returning its absolute path. Rejects on timeout or if the child exits first.
-   */
-  private waitForLockfile(dir: string, preexisting: Set<string>): Promise<string> {
+  private waitForLockfile(dir: string, launch: BridgeLaunchConfig, generation: number): Promise<string> {
     const timeoutMs = this.opts.lockfileTimeoutMs ?? 15_000;
     const deadline = Date.now() + timeoutMs;
-    const pollMs = 50;
-
     return new Promise<string>((resolve, reject) => {
       const tick = (): void => {
-        if (this.disposed) {
-          reject(new Error('bridge manager disposed before lockfile appeared'));
-          return;
-        }
-        if (!this.child) {
-          reject(new Error('bridge-server exited before publishing a lockfile'));
-          return;
-        }
-        const current = snapshotLockfiles(dir);
-        for (const name of current) {
-          if (!preexisting.has(name)) {
-            resolve(join(dir, name));
-            return;
+        if (this.disposed || generation !== this.generation) return reject(new Error('bridge launch superseded'));
+        if (!this.child) return reject(new Error('bridge-server exited before publishing a lockfile'));
+        for (const name of lockfiles(dir).sort((left, right) => left.localeCompare(right))) {
+          const path = join(dir, name);
+          try {
+            const metadata = lstatSync(path);
+            if (!metadata.isFile()) throw new Error('bridge lockfile is not a regular file');
+            if (metadata.size > 64 * 1024) throw new Error('bridge lockfile is too large');
+            if (process.platform !== 'win32' && (metadata.mode & 0o077) !== 0) {
+              throw new Error('bridge lockfile permissions are not owner-only');
+            }
+            if (process.getuid && metadata.uid !== process.getuid()) throw new Error('bridge lockfile owner mismatch');
+            validateBridgeLockfile(JSON.parse(readFileSync(path, 'utf8')), this.child.pid!, launch.workspace);
+            return resolve(path);
+          } catch (error) {
+            const failure = error instanceof Error ? error : new Error(String(error));
+            if (!ignorableLockfileError(failure)) return reject(failure);
+            this.diagnostics.add('warn', 'host', diagnosticEvent('lockfile_ignored', { file: path, reason: failure.message }));
           }
         }
-        if (Date.now() >= deadline) {
-          reject(new Error(`timed out after ${timeoutMs}ms waiting for bridge lockfile in ${dir}`));
-          return;
-        }
-        setTimeout(tick, pollMs);
+        if (Date.now() >= deadline) return reject(new Error(`timed out waiting for bridge lockfile`));
+        setTimeout(tick, 50);
       };
       tick();
     });
   }
 
-  // ── Client wiring ───────────────────────────────────────────────────────────
-
-  private wireClient(client: BridgeClient): void {
-    client.on('event', (evt: ClientEvent) => {
-      this.broadcast(CH_EVENT, evt);
+  private wireClient(client: BridgeClient, generation: number): void {
+    client.on('event', (event: ClientEvent) => {
+      if (event.type === 'turn_started') this.activeTurn = true;
+      if (event.type === 'turn_ended' || event.type === 'session_ended' || event.type === 'error') {
+        this.activeTurn = false;
+      }
+      if (event.type === 'model_changed') {
+        try { this.opts.onModelChanged?.(event.model); }
+        catch (error) { this.diagnostics.add('warn', 'host', error); }
+      }
+      this.broadcast(CH_EVENT, event);
     });
-    client.on('permission', (req: PermissionRequest) => {
-      this.broadcast(CH_PERMISSION, req);
-    });
-    client.on('close', (code: number, reason: string) => {
-      if (!this.disposed) {
-        this.setState({ status: 'disconnected', reason: reason || `ws closed (code=${code})` });
+    client.on('permission', (request: PermissionRequest) => {
+      if (Number.isSafeInteger(request.request_id) && request.request_id >= 0) {
+        if (!this.pendingPermissionIds.has(request.request_id) && this.pendingPermissionIds.size >= MAX_PENDING_PERMISSIONS) {
+          this.diagnostics.add('warn', 'bridge', 'permission request limit reached');
+          return;
+        }
+        this.pendingPermissionIds.add(request.request_id);
+        this.broadcast(CH_PERMISSION, request);
       }
     });
-    client.on('error', (err: Error) => {
-      if (!this.disposed) {
-        this.setState({ status: 'error', message: err.message });
-      }
+    client.on('close', (code, reason) => {
+      if (generation === this.generation && !this.disposed) this.setState({ status: 'disconnected', reason: reason || `ws closed (code=${code})` });
+    });
+    client.on('error', (error) => {
+      if (generation === this.generation && !this.disposed) this.fail(error);
     });
   }
 
-  // ── IPC ───────────────────────────────────────────────────────────────────
+  private assertSender(event: IpcMainInvokeEvent): void {
+    const origins = this.targets.get(event.sender);
+    const senderFrame = event.senderFrame;
+    if (!origins || !senderFrame || senderFrame !== event.sender.mainFrame) throw new Error('unauthorized IPC sender');
+    const origin = urlOrigin(senderFrame.url);
+    if (!origin || !origins.has(origin)) throw new Error('unauthorized IPC origin');
+  }
 
   private registerIpc(): void {
-    if (this.ipcRegistered) {
-      return;
-    }
+    if (this.ipcRegistered) return;
     this.ipcRegistered = true;
-
-    ipcMain.handle(CH_SEND_PROMPT, (_e, text: string) => {
-      this.requireClient().sendPrompt(text);
+    ipcMain.handle(CH_SEND_PROMPT, (event: IpcMainInvokeEvent, text: unknown) => {
+      this.assertSender(event);
+      this.requirePromptClient().sendPrompt(validatePrompt(text));
     });
-    ipcMain.handle(CH_APPROVE, (_e, requestId: number, response?: PermissionResponseDto) => {
-      this.requireClient().approvePermission(requestId, response ?? { type: 'allow_once' });
+    ipcMain.handle(CH_APPROVE, (event: IpcMainInvokeEvent, requestId: unknown, response: unknown) => {
+      this.assertSender(event);
+      const id = validateRequestId(requestId);
+      const permissionResponse = validatePermissionResponse(response);
+      if (!this.pendingPermissionIds.has(id)) throw new Error('permission request is not pending');
+      this.requireClient().approvePermission(id, permissionResponse);
+      this.pendingPermissionIds.delete(id);
     });
-    ipcMain.handle(CH_DENY, (_e, requestId: number) => {
-      this.requireClient().denyPermission(requestId);
+    ipcMain.handle(CH_DENY, (event: IpcMainInvokeEvent, requestId: unknown) => {
+      this.assertSender(event);
+      const id = validateRequestId(requestId);
+      if (!this.pendingPermissionIds.has(id)) throw new Error('permission request is not pending');
+      this.requireClient().denyPermission(id);
+      this.pendingPermissionIds.delete(id);
     });
-    ipcMain.handle(CH_CANCEL, (_e, turnId?: number) => {
-      this.requireClient().cancel(turnId);
+    ipcMain.handle(CH_CANCEL, (event: IpcMainInvokeEvent, turnId: unknown) => {
+      this.assertSender(event);
+      this.requireClient().cancel(validateOptionalTurnId(turnId));
     });
-    ipcMain.handle(CH_CONNECTION_STATE, () => this.state);
+    ipcMain.handle(CH_COMMAND, (event: IpcMainInvokeEvent, command: unknown) => {
+      this.assertSender(event);
+      const validated = validateClientCommand(command, this.activeWorkspace);
+      assertCommandAllowedDuringTurn(validated, this.activeTurn);
+      this.requireClient().sendCommand(validated);
+    });
+    ipcMain.handle(CH_CONNECTION_STATE, (event: IpcMainInvokeEvent) => {
+      this.assertSender(event);
+      return this.state;
+    });
   }
 
   private unregisterIpc(): void {
-    if (!this.ipcRegistered) {
-      return;
+    if (!this.ipcRegistered) return;
+    for (const channel of [CH_SEND_PROMPT, CH_APPROVE, CH_DENY, CH_CANCEL, CH_COMMAND, CH_CONNECTION_STATE]) {
+      ipcMain.removeHandler(channel);
     }
-    ipcMain.removeHandler(CH_SEND_PROMPT);
-    ipcMain.removeHandler(CH_APPROVE);
-    ipcMain.removeHandler(CH_DENY);
-    ipcMain.removeHandler(CH_CANCEL);
-    ipcMain.removeHandler(CH_CONNECTION_STATE);
     this.ipcRegistered = false;
   }
 
   private requireClient(): BridgeClient {
-    if (!this.client) {
-      throw new Error(`bridge client not connected (state=${this.state.status})`);
-    }
+    this.refreshAccessState();
+    if (!this.activeWorkspaceTrusted) throw new Error('workspace trust is required before using the engine');
+    if (!this.client) throw new Error(`bridge client not connected (state=${this.state.status})`);
     return this.client;
   }
 
-  // ── Renderer fan-out ─────────────────────────────────────────────────────────
+  private requirePromptClient(): BridgeClient {
+    const client = this.requireClient();
+    this.refreshAccessState();
+    if (!this.activeCredentialAvailable) throw new Error('provider credential is required before sending a prompt');
+    return client;
+  }
+
+  private refreshAccessState(): void {
+    const workspace = this.activeWorkspace;
+    if (!workspace) {
+      this.activeWorkspaceTrusted = false;
+      this.activeCredentialAvailable = false;
+      return;
+    }
+    if (this.opts.accessState) {
+      const snapshot = this.opts.accessState();
+      const matchesWorkspace = snapshot.workspace === workspace;
+      this.activeWorkspaceTrusted = matchesWorkspace && snapshot.trusted;
+      if (!matchesWorkspace) this.activeCredentialAvailable = false;
+      return;
+    }
+    const launch = this.opts.launchConfig();
+    if (launch instanceof Promise) return;
+    const matchesWorkspace = launch.workspace === workspace;
+    this.activeWorkspaceTrusted = matchesWorkspace && launch.trusted;
+    this.activeCredentialAvailable = matchesWorkspace
+      && (Boolean(launch.apiKey) || Object.keys(launch.providerCredentials ?? {}).length > 0);
+  }
 
   private broadcast(channel: string, payload: unknown): void {
-    for (const wc of this.targets) {
-      if (wc.isDestroyed()) {
-        this.targets.delete(wc);
-        continue;
-      }
-      wc.send(channel, payload);
+    for (const webContents of this.targets.keys()) {
+      if (webContents.isDestroyed()) this.targets.delete(webContents);
+      else webContents.send(channel, payload);
     }
   }
 
   private setState(next: ConnectionState): void {
     this.state = next;
+    this.diagnostics.add('info', 'host', connectionDiagnostic(next, this.generation));
     this.broadcast(CH_STATE_CHANGED, next);
   }
 
-  // ── Teardown ─────────────────────────────────────────────────────────────────
+  private fail(error: unknown): void {
+    const message = sanitizeDiagnostic(error);
+    this.diagnostics.add('error', 'host', message);
+    this.setState({ status: 'error', message });
+  }
 
-  private teardownChildAndClient(): void {
-    if (this.client) {
+  private async stopBridge(): Promise<void> {
+    ++this.generation;
+    this.pendingPermissionIds.clear();
+    this.activeWorkspace = undefined;
+    this.activeWorkspaceTrusted = false;
+    this.activeCredentialAvailable = false;
+    this.activeTurn = false;
+    const client = this.client;
+    this.client = null;
+    if (client) {
       try {
-        this.client.removeAllListeners();
-        this.client.close();
+        client.removeAllListeners();
+        client.close();
       } catch {
-        // closing a half-open socket can throw — ignore on teardown.
+        // A half-open socket may throw while closing.
       }
-      this.client = null;
     }
-    if (this.child) {
-      this.child.removeAllListeners();
-      try {
-        this.child.kill();
-      } catch {
-        // already-dead child — ignore.
-      }
-      this.child = null;
+
+    const child = this.child;
+    this.child = null;
+    if (child && child.exitCode === null && child.signalCode === null) await new Promise<void>((resolve) => {
+      let settled = false;
+      let timer: NodeJS.Timeout | undefined;
+      const finish = (): void => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        resolve();
+      };
+      child.once('exit', finish);
+      try { this.signalChildTree(child, 'SIGINT'); } catch { finish(); return; }
+      timer = setTimeout(() => {
+        try { this.signalChildTree(child, 'SIGKILL'); } catch { /* already gone */ }
+        finish();
+      }, this.opts.stopTimeoutMs ?? 2_000);
+      timer.unref();
+    });
+    this.removeLaunchDirectory();
+  }
+
+  private signalChildTree(child: ChildProcess, signal: NodeJS.Signals): void {
+    if (process.platform !== 'win32' && child.pid) process.kill(-child.pid, signal);
+    else child.kill(signal);
+  }
+
+  private removeLaunchDirectory(): void {
+    const launchDir = this.launchDir;
+    this.launchDir = null;
+    if (launchDir) {
+      try { rmSync(launchDir, { recursive: true, force: true }); } catch (error) { this.diagnostics.add('warn', 'host', error); }
     }
   }
 
-  /**
-   * Kill the child, close the socket, and remove every IPC handler + listener.
-   * Idempotent — safe to call on both `window-all-closed` and `will-quit`.
-   */
-  dispose(): void {
-    if (this.disposed) {
-      return;
-    }
+  async dispose(): Promise<void> {
+    if (this.disposed) return;
     this.disposed = true;
-    this.teardownChildAndClient();
+    await this.restartChain.catch(() => undefined);
+    await this.stopBridge();
     this.unregisterIpc();
     this.targets.clear();
   }

@@ -208,15 +208,15 @@ pub const LIBSSH2_CHANNEL_EXTENDED_DATA_MERGE: c_int = 2;
 pub const LIBSSH2_SESSION_BLOCK_INBOUND: c_int = 1;
 pub const LIBSSH2_SESSION_BLOCK_OUTBOUND: c_int = 2;
 
-pub const  LIBSSH2_TRACE_TRANS : c_int = 1<<1;
-pub const  LIBSSH2_TRACE_KEX   : c_int = 1<<2;
-pub const  LIBSSH2_TRACE_AUTH  : c_int = 1<<3;
-pub const  LIBSSH2_TRACE_CONN  : c_int = 1<<4;
-pub const  LIBSSH2_TRACE_SCP   : c_int = 1<<5;
-pub const  LIBSSH2_TRACE_SFTP  : c_int = 1<<6;
-pub const  LIBSSH2_TRACE_ERROR : c_int = 1<<7;
-pub const  LIBSSH2_TRACE_PUBLICKEY : c_int = 1<<8;
-pub const  LIBSSH2_TRACE_SOCKET : c_int = 1<<9;
+pub const LIBSSH2_TRACE_TRANS: c_int = 1 << 1;
+pub const LIBSSH2_TRACE_KEX: c_int = 1 << 2;
+pub const LIBSSH2_TRACE_AUTH: c_int = 1 << 3;
+pub const LIBSSH2_TRACE_CONN: c_int = 1 << 4;
+pub const LIBSSH2_TRACE_SCP: c_int = 1 << 5;
+pub const LIBSSH2_TRACE_SFTP: c_int = 1 << 6;
+pub const LIBSSH2_TRACE_ERROR: c_int = 1 << 7;
+pub const LIBSSH2_TRACE_PUBLICKEY: c_int = 1 << 8;
+pub const LIBSSH2_TRACE_SOCKET: c_int = 1 << 9;
 pub enum LIBSSH2_SESSION {}
 pub enum LIBSSH2_AGENT {}
 pub enum LIBSSH2_CHANNEL {}

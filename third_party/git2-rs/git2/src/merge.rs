@@ -362,7 +362,9 @@ impl MergeFileResult {
     /// returns `Ok(None)` if a filename conflict would occur
     pub fn path(&self) -> Result<Option<&str>, Error> {
         match self.path_bytes() {
-            Some(pb) => std::str::from_utf8(pb).map(|s| Some(s)).map_err(|e| e.into()),
+            Some(pb) => std::str::from_utf8(pb)
+                .map(|s| Some(s))
+                .map_err(|e| e.into()),
             None => Ok(None),
         }
     }

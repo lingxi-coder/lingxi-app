@@ -63,6 +63,7 @@ pub fn wrap_with_sandbox(
 /// passes this string to `/bin/sh -c` and is responsible for spawning the
 /// optional `socat` companion when `network.allowed_domains` is non-empty.
 fn wrap_linux_bwrap(command: &str, policy: &SandboxRuntimeConfig) -> String {
+    let filesystem_disabled = policy.filesystem.disabled;
     // Default ro root + tmpfs ephemeral writes + procfs/devfs + pid-ns +
     // die-with-parent — match claude-code's defaults.
     let mut args: Vec<String> = vec![
@@ -71,7 +72,11 @@ fn wrap_linux_bwrap(command: &str, policy: &SandboxRuntimeConfig) -> String {
         // (finding 5). Without it an unprivileged bwrap cannot create the pid/net
         // namespaces below. Verified to start + degrade under user.max_user_namespaces=0.
         "--unshare-user-try".into(),
-        "--ro-bind".into(),
+        if filesystem_disabled {
+            "--bind".into()
+        } else {
+            "--ro-bind".into()
+        },
         "/".into(),
         "/".into(),
         "--tmpfs".into(),
@@ -85,10 +90,12 @@ fn wrap_linux_bwrap(command: &str, policy: &SandboxRuntimeConfig) -> String {
     ];
 
     // Writable paths per filesystem.allow_write.
-    for path in &policy.filesystem.allow_write {
-        args.push("--bind".into());
-        args.push(path.clone());
-        args.push(path.clone());
+    if !filesystem_disabled {
+        for path in &policy.filesystem.allow_write {
+            args.push("--bind".into());
+            args.push(path.clone());
+            args.push(path.clone());
+        }
     }
 
     // Deny-write: re-mount existing denied / bare-repo paths read-only IN PLACE.
@@ -96,10 +103,12 @@ fn wrap_linux_bwrap(command: &str, policy: &SandboxRuntimeConfig) -> String {
     // parent (bwrap: later mounts win — verified). NEVER `--ro-bind-try /dev/null`
     // (that blanks the host file); ro-bind-in-place preserves it read-only
     // (finding 3, sandbox-adapter.ts:264).
-    for path in &policy.ro_bind_in_place {
-        args.push("--ro-bind".into());
-        args.push(path.clone());
-        args.push(path.clone());
+    if !filesystem_disabled {
+        for path in &policy.ro_bind_in_place {
+            args.push("--ro-bind".into());
+            args.push(path.clone());
+            args.push(path.clone());
+        }
     }
 
     // Conservative network posture: full host net ONLY for an allow-all policy
@@ -116,7 +125,7 @@ fn wrap_linux_bwrap(command: &str, policy: &SandboxRuntimeConfig) -> String {
     let quoted = shell_escape_single(command);
     let joined = args.join(" ");
     let base = format!("bwrap {joined} -- /bin/sh -c {quoted}");
-    if policy.scrub_paths.is_empty() {
+    if filesystem_disabled || policy.scrub_paths.is_empty() {
         return base;
     }
     // Host-side post-command scrub of planted bare-repo files (finding 4,
@@ -234,6 +243,9 @@ fn normalize(paths: &[String]) -> Vec<String> {
 /// when there is nothing to deny/re-allow (byte-identical to a `Some` with empty
 /// vectors, which `v0d` also renders as just `(allow file-read*)`).
 fn build_read_config(policy: &SandboxRuntimeConfig) -> Option<ReadConfig> {
+    if policy.filesystem.disabled {
+        return None;
+    }
     if policy.filesystem.deny_read.is_empty() && policy.filesystem.allow_read.is_empty() {
         return None;
     }
@@ -252,6 +264,9 @@ fn build_read_config(policy: &SandboxRuntimeConfig) -> Option<ReadConfig> {
 /// `(allow file-write*)` fallback) and prepend the base paths, matching the
 /// faithful `sandbox-runtime` runner (`manager::build_fs_configs_macos`).
 fn build_write_config(policy: &SandboxRuntimeConfig) -> Option<WriteConfig> {
+    if policy.filesystem.disabled {
+        return None;
+    }
     let mut allow_only = get_default_write_paths();
     allow_only.extend(normalize(&policy.filesystem.allow_write));
     Some(WriteConfig {
@@ -436,6 +451,19 @@ mod tests {
     }
 
     #[test]
+    fn filesystem_disabled_makes_sbpl_read_write_open() {
+        let mut cfg = SandboxRuntimeConfig::default();
+        cfg.filesystem.disabled = true;
+        cfg.filesystem.allow_write = vec!["/work".into()];
+        cfg.filesystem.deny_write = vec!["/work/.git".into()];
+        cfg.filesystem.deny_read = vec!["/secret".into()];
+        let p = generate_sbpl_profile_with(&cfg, "TAG");
+        assert!(p.contains("; File read\n(allow file-read*)\n"), "{p}");
+        assert!(p.contains("(allow file-write*)"), "{p}");
+        assert!(!p.contains(".git/config"), "{p}");
+    }
+
+    #[test]
     fn sbpl_allow_git_config_drops_the_config_deny() {
         let mut deny = SandboxRuntimeConfig::default();
         deny.filesystem.allow_write = vec!["/work".into()];
@@ -527,6 +555,24 @@ mod tests {
             ro_pos > bind_pos,
             "ro-bind-in-place must follow allow_write bind to override it:\n{w}"
         );
+    }
+
+    #[test]
+    fn filesystem_disabled_skips_extra_binds_and_scrub_suffix() {
+        let mut cfg = SandboxRuntimeConfig::default();
+        cfg.filesystem.disabled = true;
+        cfg.filesystem.allow_write = vec!["/work".into()];
+        cfg.ro_bind_in_place = vec!["/work/.git/HEAD".into()];
+        cfg.scrub_paths = vec!["/work/.git/HEAD".into()];
+        let w = wrap_linux_bwrap("true", &cfg);
+        assert!(w.contains("--bind / /"), "{w}");
+        assert!(!w.contains("--ro-bind / /"), "{w}");
+        assert!(!w.contains("--bind /work /work"), "{w}");
+        assert!(
+            !w.contains("--ro-bind /work/.git/HEAD /work/.git/HEAD"),
+            "{w}"
+        );
+        assert!(!w.contains("rm -rf --"), "{w}");
     }
 
     #[test]

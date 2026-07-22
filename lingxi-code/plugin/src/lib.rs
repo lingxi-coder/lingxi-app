@@ -48,6 +48,11 @@ pub use manifest::{
     UserConfigField, UserConfigSchema,
 };
 pub use marketplace::MarketplaceManager;
+/// Normalize an extracted MCP bundle into the shared plugin manifest layout.
+pub use mcpb::ensure_plugin_manifest;
+/// Guarded zip extraction used by both installed MCP bundles and session-only
+/// `--plugin-url` archives.
+pub use mcpb::unpack_mcpb as unpack_plugin_archive;
 pub use source::PluginSource;
 pub use strict_policy::{PluginComponent, StrictPluginOnlyPolicy};
 pub use trust::{default_trust_for_source, PluginTrustLevel};

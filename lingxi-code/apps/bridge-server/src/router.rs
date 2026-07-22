@@ -38,33 +38,32 @@
 //! | `TaskStop` | `TaskRegistryHandle::kill` | `TaskStatusChanged` |
 //! | `ForceCompact` | `force_compact` | `CompactionCompleted` |
 //! | `ClearSession` | `clear_session` (REJECTED mid-turn) | `SessionEnded` / `Error` |
+//! | `ListSessions` / `RefreshListings{Sessions}` | persisted JSONL catalog | `SessionList` |
+//! | `NewSession` | `clear_session` + optional `switch_model` | `SessionStarted` / `Error` |
+//! | `ResumeSession` | JSONL replay + `resume_session` | `SessionResumed` / `Error` |
 //! | `RequestExit` | `request_exit` | — |
 //!
 //! ## Mid-turn semantics
 //!
-//! `ClearSession` is **rejected while a turn is in flight** (plan §2): the
+//! Session mutations are **rejected while a turn is in flight** (plan §2): the
 //! connection sets [`EngineCommandRouter::set_turn_active`] on `SendPrompt` and
-//! clears it on turn end; a `ClearSession` arriving in that window is refused
-//! with an [`ClientEvent::Error`] and never reaches the engine.
+//! clears it on turn end; a clear/new/resume arriving in that window is refused
+//! with a [`ClientEvent::Error`] and never reaches the engine/store.
 //!
 //! ## Reserved / feed-deferred
 //!
 //! Per governing decisions §0.7/§0.9, the router NEVER live-sources the reserved
 //! DTOs (`ThinkingDelta`, `UsageUpdate`, `CoordinatorStatus`); the corresponding
 //! engine sources do not exist in the foundation, so no command maps to them.
-//! Listing kinds with no engine handle in the foundation (`Sessions`, `Memory`,
-//! `Settings`, `SlashCommands`) are left unrouted here — they are HOST/engine-tier
-//! reads the binary wires when it has the desktop runtime in hand (plan §2);
-//! routing them is additive and does not change this seam's shape.
+//! Listing kinds with no engine handle or host store in the foundation
+//! (`Memory`, `Settings`) remain unrouted here.
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use command_api::builtin_support::names::{core_description, is_palette_hidden};
-use command_api::model::CommandSource;
-use command_api::registry::CommandRegistry;
 use client_adapter::lowering::{
     lower_agent_info, lower_doctor_report, lower_hook_info, lower_mcp_server_info,
     lower_status_snapshot, lower_task_output_chunk, lower_task_record,
@@ -73,12 +72,43 @@ use client_adapter::ClientEventSink;
 use client_protocol::commands::{ClientCommand, ListingKindDto};
 use client_protocol::events::{ClientEvent, ErrorKindDto};
 use client_protocol::listings::{AuthStateDto, SlashCommandDto, TaskStatusDto};
+use command_api::builtin_support::names::{core_description, is_palette_hidden};
+use command_api::model::CommandSource;
+use command_api::registry::CommandRegistry;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use traits::auth::{AuthHandle, LoginInfo};
 use traits::orchestrator::OrchestratorHandle;
 use traits::task_registry::{TaskListFilter, TaskRegistryHandle};
 use traits::SlashCommandDispatcher;
+
+/// Default number of recent sessions returned when `ListSessions` omits its
+/// explicit limit. This matches the CLI `/resume` picker and the mobile host.
+const DEFAULT_SESSION_LIST_LIMIT: usize = 5;
+
+/// Inputs needed to enumerate and replay the persisted JSONL session store.
+///
+/// Kept optional on [`EngineCommandRouter`] so existing embedded/test callers
+/// that only need model/auth/task routing remain source-compatible. Production
+/// bridge boot always supplies this context.
+pub struct SessionStoreContext {
+    lingxi_home: PathBuf,
+    session_cwd: String,
+    fs: Arc<dyn traits::FileSystem>,
+}
+
+impl SessionStoreContext {
+    /// Build a session-store context rooted at the desktop config directory and
+    /// the connection's project cwd.
+    #[must_use]
+    pub fn new(lingxi_home: PathBuf, session_cwd: String, fs: Arc<dyn traits::FileSystem>) -> Self {
+        Self {
+            lingxi_home,
+            session_cwd,
+            fs,
+        }
+    }
+}
 
 /// The engine-routing seam for the full [`ClientCommand`] surface (everything
 /// except the turn + permission path the [`crate::server::BridgeConnection`]
@@ -133,6 +163,9 @@ pub struct EngineCommandRouter {
     /// present it lets the router emit `SlashCommandCatalog` pulls and
     /// `CommandsChanged` pushes from the same live registry snapshot.
     slash_registry: Option<Arc<RwLock<CommandRegistry>>>,
+    /// Optional persisted-session catalog/replay context. Production boot wires
+    /// it; lightweight users of the routing seam can omit it.
+    session_store: Option<SessionStoreContext>,
     /// Set while a turn is in flight — `ClearSession` is rejected in this window
     /// (plan §2 mid-turn semantics).
     turn_active: AtomicBool,
@@ -154,8 +187,16 @@ impl EngineCommandRouter {
             tasks,
             dispatcher,
             slash_registry,
+            session_store: None,
             turn_active: AtomicBool::new(false),
         }
+    }
+
+    /// Attach the persisted JSONL session store used by list/resume commands.
+    #[must_use]
+    pub fn with_session_store(mut self, session_store: SessionStoreContext) -> Self {
+        self.session_store = Some(session_store);
+        self
     }
 
     /// Mark whether a turn is currently in flight. The connection flips this
@@ -200,6 +241,62 @@ impl EngineCommandRouter {
     /// List tasks (optionally filtered) and emit one `TaskRow` per task.
     async fn emit_task_list(&self, filter: TaskListFilter, sink: &dyn ClientEventSink) {
         emit_task_rows(&*self.tasks, sink, filter).await;
+    }
+
+    /// Enumerate the real persisted JSONL catalog. A missing/empty store is a
+    /// successful empty listing; other loader failures are surfaced as a
+    /// recoverable client error without leaking filesystem details.
+    async fn emit_session_list(&self, limit: usize, sink: &dyn ClientEventSink) {
+        let Some(store) = self.session_store.as_ref() else {
+            sink.emit(ClientEvent::SessionList {
+                sessions: Vec::new(),
+            })
+            .await;
+            return;
+        };
+
+        match session::jsonl::list_recent_sessions_with_diagnostics(
+            &store.lingxi_home,
+            &store.session_cwd,
+            limit,
+            store.fs.clone(),
+        )
+        .await
+        {
+            Ok(catalog) => {
+                let sessions = catalog
+                    .sessions
+                    .iter()
+                    .map(client_adapter::lowering::lower_session_metadata)
+                    .collect();
+                sink.emit(ClientEvent::SessionList { sessions }).await;
+                if catalog.skipped_files > 0 {
+                    tracing::warn!(
+                        skipped_files = catalog.skipped_files,
+                        "bridge-server: unreadable sessions skipped"
+                    );
+                    sink.emit(ClientEvent::Error {
+                        kind: ErrorKindDto::Internal,
+                        message: "Some unreadable sessions were skipped. Repair or remove damaged session files, then retry.".to_string(),
+                    })
+                    .await;
+                }
+            }
+            Err(session::jsonl::LoaderError::EmptyDirectory) => {
+                sink.emit(ClientEvent::SessionList {
+                    sessions: Vec::new(),
+                })
+                .await;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "bridge-server: session catalog unavailable");
+                sink.emit(ClientEvent::Error {
+                    kind: ErrorKindDto::Internal,
+                    message: "session catalog is unavailable. Repair or remove unreadable session files, then retry.".to_string(),
+                })
+                .await;
+            }
+        }
     }
 
     /// Snapshot the live slash-command catalog from the shared registry, adding
@@ -286,7 +383,8 @@ impl EngineCommandRouter {
             }
             ListingKindDto::SlashCommands => {
                 if let Some(commands) = self.slash_command_catalog().await {
-                    sink.emit(ClientEvent::SlashCommandCatalog { commands }).await;
+                    sink.emit(ClientEvent::SlashCommandCatalog { commands })
+                        .await;
                 } else {
                     tracing::debug!(
                         "bridge-server: slash-command catalog unavailable (no shared registry)"
@@ -296,9 +394,11 @@ impl EngineCommandRouter {
             // HOST/engine-tier reads the binary wires once it holds the desktop
             // runtime (plan §2). No engine handle for these in the foundation —
             // routing them is additive and does not change this seam's shape.
-            ListingKindDto::Sessions
-            | ListingKindDto::Memory
-            | ListingKindDto::Settings => {
+            ListingKindDto::Sessions => {
+                self.emit_session_list(DEFAULT_SESSION_LIST_LIMIT, sink)
+                    .await;
+            }
+            ListingKindDto::Memory | ListingKindDto::Settings => {
                 tracing::debug!(
                     ?kind,
                     "bridge-server: listing kind has no engine handle in the foundation"
@@ -518,6 +618,134 @@ impl CommandRouter for EngineCommandRouter {
                     }
                 }
             }
+            ClientCommand::ListSessions { limit } => {
+                let limit = limit.map_or(DEFAULT_SESSION_LIST_LIMIT, |value| value as usize);
+                self.emit_session_list(limit, &*sink).await;
+            }
+            ClientCommand::NewSession { cwd: _, model } => {
+                if self.is_turn_active() {
+                    sink.emit(ClientEvent::Error {
+                        kind: ErrorKindDto::Protocol,
+                        message: "cannot start a new session while a turn is in flight".into(),
+                    })
+                    .await;
+                    return;
+                }
+
+                if let Err(error) = self.handle.clear_session().await {
+                    sink.emit(ClientEvent::Error {
+                        kind: ErrorKindDto::Internal,
+                        message: format!("new session (clear_session) failed: {error}"),
+                    })
+                    .await;
+                    return;
+                }
+
+                if let Some(model) = model {
+                    let listings = self.handle.list_model_listings().await;
+                    let (model_id, profile) = traits::parse_model_ref(&model, &listings);
+                    if let Err(error) = self
+                        .handle
+                        .switch_model(&model_id, profile.as_deref())
+                        .await
+                    {
+                        sink.emit(ClientEvent::Error {
+                            kind: ErrorKindDto::Internal,
+                            message: format!("new session model switch failed: {error}"),
+                        })
+                        .await;
+                        return;
+                    }
+                }
+
+                let session_id = self.handle.current_session_id().await.to_string();
+                sink.emit(ClientEvent::SessionStarted { session_id }).await;
+            }
+            ClientCommand::ResumeSession { session_id, cwd } => {
+                if self.is_turn_active() {
+                    sink.emit(ClientEvent::Error {
+                        kind: ErrorKindDto::Protocol,
+                        message: "cannot resume while a turn is in flight".into(),
+                    })
+                    .await;
+                    return;
+                }
+
+                let uuid = match uuid::Uuid::parse_str(&session_id) {
+                    Ok(uuid) => uuid,
+                    Err(error) => {
+                        sink.emit(ClientEvent::Error {
+                            kind: ErrorKindDto::Protocol,
+                            message: format!(
+                                "resume: malformed session id {session_id:?}: {error}"
+                            ),
+                        })
+                        .await;
+                        return;
+                    }
+                };
+
+                let Some(store) = self.session_store.as_ref() else {
+                    sink.emit(ClientEvent::Error {
+                        kind: ErrorKindDto::Internal,
+                        message: "resume: persisted session store is unavailable".into(),
+                    })
+                    .await;
+                    return;
+                };
+                let cwd = cwd.unwrap_or_else(|| store.session_cwd.clone());
+                let replayed = match orchestrator::replay_session_state(
+                    &store.lingxi_home,
+                    &cwd,
+                    uuid,
+                    store.fs.clone(),
+                )
+                .await
+                {
+                    Ok(replayed) => replayed,
+                    Err(error) => {
+                        sink.emit(ClientEvent::Error {
+                            kind: ErrorKindDto::Protocol,
+                            message: format!("resume: session {session_id} not resumable: {error}"),
+                        })
+                        .await;
+                        return;
+                    }
+                };
+
+                let messages = client_adapter::lowering::lower_transcript(&replayed.state.history);
+                let runtime_snapshot = replayed.handle_runtime_snapshot();
+                if let Err(error) =
+                    self.handle
+                        .resume_session(
+                            protocol::SessionId::from_uuid(uuid),
+                            replayed.state.history,
+                            replayed.last_message_uuid.map(|value| value.to_string()),
+                            replayed.state.active_goal.clone().map(|goal| {
+                                traits::ActiveGoalSnapshot {
+                                    condition: goal.condition,
+                                    set_at: goal.set_at,
+                                    last_reason: goal.last_reason,
+                                }
+                            }),
+                            runtime_snapshot,
+                        )
+                        .await
+                {
+                    sink.emit(ClientEvent::Error {
+                        kind: ErrorKindDto::Internal,
+                        message: format!("resume_session failed: {error}"),
+                    })
+                    .await;
+                    return;
+                }
+
+                sink.emit(ClientEvent::SessionResumed {
+                    session_id: uuid.to_string(),
+                    messages,
+                })
+                .await;
+            }
             ClientCommand::RequestExit => {
                 self.handle.request_exit().await;
             }
@@ -571,8 +799,7 @@ impl CommandRouter for EngineCommandRouter {
             //
             // `SendPrompt` + `Cancel` are the turn path (`TurnDriver`), and
             // `ApprovePermission`/`DenyPermission` the permission path — both on
-            // `BridgeConnection` directly. Session New/Resume + their listing
-            // (`Sessions`) are HOST-driven swaps the binary owns (decision §0.5).
+            // `BridgeConnection` directly.
             // The `#[non_exhaustive]` enum also requires a catch-all.
             other => {
                 tracing::debug!(

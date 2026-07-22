@@ -59,6 +59,7 @@ pub mod agents_registry;
 pub mod argv;
 pub mod ax_screen_reader;
 pub mod background_dispatch;
+pub mod background_launch;
 pub mod bg_attach;
 pub mod bg_reply_queue;
 pub mod bg_session_forker;
@@ -81,6 +82,7 @@ pub mod repl_loop;
 pub mod run;
 pub mod session_cost;
 pub mod sigint;
+mod startup_resources;
 mod startup_trace;
 pub mod stream_json;
 pub mod stream_json_input;
@@ -272,7 +274,7 @@ fn commander_error(e: &clap::Error, args: &[OsString]) -> Option<String> {
 /// Top-level entrypoint. Returns the process exit code.
 pub async fn run_cli(args: Vec<OsString>) -> i32 {
     startup_trace::start();
-    let parsed = match Argv::from_iter(args.clone()) {
+    let mut parsed = match Argv::from_iter(args.clone()) {
         Ok(a) => a,
         Err(e) => {
             // claude-code (commander) renders several argv errors differently
@@ -303,10 +305,21 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     // The interactive fullscreen TUI owns the terminal — suppress stderr logging
     // there so WARN lines don't corrupt the rendered frame. A subcommand
     // (mcp/auth/…) or print/stdio mode keeps the normal stderr logger.
-    let interactive_tui = parsed.command.is_none()
-        && matches!(crate::mode::decide_mode(&parsed), crate::mode::Mode::Tui);
+    let interactive_tui = matches!(
+        parsed.command.as_ref(),
+        Some(crate::commands::Commands::BgPtySession(_))
+    ) || (parsed.command.is_none()
+        && matches!(crate::mode::decide_mode(&parsed), crate::mode::Mode::Tui));
     startup_trace::mark("mode_decide_for_logging");
     logging::init(parsed.debug_enabled(), interactive_tui);
+    let _telemetry_guard = telemetry::otel::install_process(
+        "lingxi-cli",
+        parsed.command.is_none()
+            || matches!(
+                parsed.command.as_ref(),
+                Some(crate::commands::Commands::BgPtySession(_))
+            ),
+    );
     tracing::debug!(?parsed, "argv parsed");
 
     // (M3 cc2.1.198) `--bg`/`--background` × `--print`/`-p` is rejected UP
@@ -362,6 +375,39 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         std::env::set_var("LINGXI_BRIEF", "1");
     }
 
+    // Custom beta headers are an API-key-only Anthropic surface. Validate at
+    // startup so OAuth/non-key sessions do not appear to accept an inert flag.
+    if let Some(raw_betas) = parsed.betas.as_mut() {
+        let mut seen = std::collections::HashSet::new();
+        raw_betas.retain(|beta| {
+            let trimmed = beta.trim();
+            !trimmed.is_empty() && seen.insert(trimmed.to_string())
+        });
+        for beta in raw_betas.iter_mut() {
+            *beta = beta.trim().to_string();
+            if beta.contains(',') || beta.chars().any(char::is_control) {
+                eprintln!("lingxi-cli: invalid --betas value `{beta}`");
+                return exit_codes::ARGV_ERROR;
+            }
+        }
+        if !raw_betas.is_empty() {
+            if std::env::var("ANTHROPIC_API_KEY")
+                .ok()
+                .is_none_or(|key| key.trim().is_empty())
+            {
+                eprintln!("lingxi-cli: --betas is only available for Anthropic API-key users.");
+                return exit_codes::RUNTIME_ERROR;
+            }
+            if parsed.model.as_deref().is_some_and(|model| {
+                let (profile, _) = llm_client::split_profile_model(model);
+                profile != "anthropic"
+            }) {
+                eprintln!("lingxi-cli: --betas is only supported by the Anthropic provider.");
+                return exit_codes::RUNTIME_ERROR;
+            }
+        }
+    }
+
     // `--cwd <dir>` must apply BEFORE the subcommand dispatch, not just for
     // session modes: the subcommands resolve their target project from the LIVE
     // process cwd (mcp via `current_dir()` → project key + `<cwd>/.mcp.json`,
@@ -373,6 +419,28 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     if let Err(e) = cwd::apply_cwd(parsed.cwd.as_deref()) {
         eprintln!("lingxi-cli: {e}");
         return exit_codes::RUNTIME_ERROR;
+    }
+
+    // These public flags depend on Anthropic-private services/protocols. Never
+    // accept them as inert success and never route them to LingXi's unrelated
+    // local desktop bridge.
+    if parsed.no_chrome {
+        // This flag is an explicit negative capability, not an accepted no-op.
+        // The setting is inherited by background/session children and is the
+        // single gate future optional browser integrations must consult.
+        std::env::set_var("LINGXI_DISABLE_CHROME", "1");
+    }
+    if parsed.chrome {
+        eprintln!(
+            "lingxi-cli: --chrome requires the unavailable Anthropic Chrome extension protocol."
+        );
+        return exit_codes::NOT_IMPLEMENTED;
+    }
+    if parsed.remote_control.is_some() {
+        eprintln!(
+            "lingxi-cli: --remote-control requires the unavailable Anthropic relay/auth protocol."
+        );
+        return exit_codes::NOT_IMPLEMENTED;
     }
 
     // Managed enterprise startup version gate (parity 2.1.207 H-BIN-09,
@@ -411,16 +479,21 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         return command.run().await;
     }
 
-    // (M8 daemon) `--background`/`--bg` dispatch: write the durable job +
-    // roster row and ensure the supervisor daemon, then return — WITHOUT
-    // building the in-process engine/turn. Placed here (after the subcommand
-    // dispatch, before `build_runtime`) so `validate_background_args` (the
-    // `--bg` × `--print` reject above) and `--cwd` are already applied, but no
-    // billable session is constructed. This is the OS-daemon path, distinct
-    // from the in-process `registerAsyncAgent` spawner in engine-desktop.
-    if parsed.background {
-        return crate::background_dispatch::dispatch_background(&parsed).await;
-    }
+    // Session-only network resources are resolved before any orchestrator/TUI
+    // state is constructed. Background sessions defer this into the PTY child:
+    // resolving a plugin URL here would serialize a path below this process's
+    // temporary guard and delete it as soon as daemonization returned.
+    let _startup_resources = if parsed.background {
+        None
+    } else {
+        match startup_resources::prepare(&mut parsed).await {
+            Ok(guard) => Some(guard),
+            Err(e) => {
+                eprintln!("lingxi-cli: {e}");
+                return exit_codes::RUNTIME_ERROR;
+            }
+        }
+    };
 
     // `--session-id <uuid>` validation (claude-code main.tsx:1276-1300), byte-exact
     // messages + exit 1. Runs for every session mode (print/TUI/REPL) before any
@@ -486,6 +559,14 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
             eprintln!("{msg}");
             return exit_codes::RUNTIME_ERROR; // TS process.exit(1)
         }
+    }
+
+    // Background dispatch happens only after session/settings validation and
+    // permission safety enforcement. The dispatcher then runs the foreground
+    // trust/bypass setup UI and records that approval in launch.json before it
+    // daemonises; the hidden PTY child never owns unattended setup dialogs.
+    if parsed.background {
+        return crate::background_dispatch::dispatch_background(&parsed, permission_mode).await;
     }
 
     // P3 cross-flag validation for --input-format=stream-json and

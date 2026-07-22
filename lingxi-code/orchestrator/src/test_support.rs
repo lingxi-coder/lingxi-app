@@ -363,12 +363,7 @@ impl OutputStream for MockOutputStream {
             input: input.clone(),
         });
     }
-    async fn emit_tool_heartbeat(
-        &self,
-        id: &protocol::ToolUseId,
-        tool: &str,
-        elapsed_ms: u64,
-    ) {
+    async fn emit_tool_heartbeat(&self, id: &protocol::ToolUseId, tool: &str, elapsed_ms: u64) {
         self.events.lock().await.push(OutputEvent::ToolHeartbeat {
             id: id.clone(),
             tool: tool.to_string(),
@@ -399,6 +394,7 @@ impl OutputStream for MockOutputStream {
         messages_before: u32,
         messages_after: u32,
         bytes_saved: u64,
+        summary: &str,
     ) {
         self.events
             .lock()
@@ -407,6 +403,7 @@ impl OutputStream for MockOutputStream {
                 messages_before,
                 messages_after,
                 bytes_saved,
+                summary: summary.to_string(),
             });
     }
     async fn emit_thinking(&self, thinking: &str, signature: Option<&str>) {
@@ -1255,7 +1252,8 @@ mod tests {
     #[tokio::test]
     async fn mock_output_records_compaction_completed() {
         let m = MockOutputStream::new();
-        m.emit_compaction_completed(42, 7, 1234).await;
+        m.emit_compaction_completed(42, 7, 1234, "Summary:\nkept context")
+            .await;
         let events = m.snapshot().await;
         let last = events.last().expect("at least one event");
         assert!(
@@ -1264,8 +1262,9 @@ mod tests {
                 OutputEvent::CompactionCompleted {
                     messages_before: 42,
                     messages_after: 7,
-                    bytes_saved: 1234
-                }
+                    bytes_saved: 1234,
+                    summary
+                } if summary == "Summary:\nkept context"
             ),
             "got: {last:?}"
         );

@@ -18,7 +18,7 @@
 use async_trait::async_trait;
 use chrono::Utc;
 use serde_json::json;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use tokio::sync::Mutex;
 
 /// Sink for CLI output. Implementations live in this module.
@@ -37,6 +37,8 @@ pub trait OutputSink: Send + Sync {
     async fn tool_call(&self, tool: &str, input: &serde_json::Value);
     /// Emit a tool-result announcement.
     async fn tool_result(&self, tool: &str, result: &serde_json::Value);
+    /// Emit a coalescible liveness update for a still-running tool.
+    async fn tool_heartbeat(&self, id: &str, tool: &str, elapsed_ms: u64);
     /// Emit the output of a slash command.
     async fn command_output(&self, name: &str, display: &str);
     /// Emit an error. Plain mode goes to stderr; JSON mode goes to stdout.
@@ -46,6 +48,7 @@ pub trait OutputSink: Send + Sync {
 /// Plain-text stdout sink (default).
 pub struct PlainSink {
     out: Mutex<std::io::Stdout>,
+    err: Mutex<std::io::Stderr>,
 }
 
 impl PlainSink {
@@ -54,6 +57,7 @@ impl PlainSink {
     pub fn new() -> Self {
         Self {
             out: Mutex::new(std::io::stdout()),
+            err: Mutex::new(std::io::stderr()),
         }
     }
 }
@@ -81,7 +85,19 @@ impl OutputSink for PlainSink {
         let _ = g.flush();
     }
     async fn tool_result(&self, _tool: &str, _r: &serde_json::Value) {
-        /* swallowed in plain mode */
+        if std::io::stderr().is_terminal() {
+            let mut g = self.err.lock().await;
+            let _ = write!(g, "\r\x1b[2K");
+            let _ = g.flush();
+        }
+    }
+    async fn tool_heartbeat(&self, _id: &str, tool: &str, elapsed_ms: u64) {
+        if std::io::stderr().is_terminal() {
+            let mut g = self.err.lock().await;
+            let seconds = elapsed_ms / 1_000;
+            let _ = write!(g, "\r\x1b[2K[tool: {tool} · {seconds}s]");
+            let _ = g.flush();
+        }
     }
     async fn command_output(&self, _name: &str, display: &str) {
         let mut g = self.out.lock().await;
@@ -159,6 +175,16 @@ impl OutputSink for JsonSink {
             "ts": Self::ts(),
             "tool": tool,
             "result": result,
+        }))
+        .await;
+    }
+    async fn tool_heartbeat(&self, id: &str, tool: &str, elapsed_ms: u64) {
+        self.emit(json!({
+            "event": "tool_heartbeat",
+            "ts": Self::ts(),
+            "id": id,
+            "tool": tool,
+            "elapsed_ms": elapsed_ms,
         }))
         .await;
     }

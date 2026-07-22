@@ -464,12 +464,10 @@ pub fn process_alive(pid: i32) -> bool {
     )
 }
 
-/// Non-unix hosts have no cheap probe wired — treat records as live (the
-/// registry is best-effort there; stale rows age out on rewrite).
 #[cfg(not(unix))]
 #[must_use]
-pub fn process_alive(_pid: i32) -> bool {
-    true
+pub fn process_alive(pid: i32) -> bool {
+    crate::daemon_roster::ProcProbe::is_alive(&crate::daemon_roster::SystemProbe, pid)
 }
 
 /// Read all live-session records under `dir`, dropping records whose pid is
@@ -617,10 +615,41 @@ pub fn write_job_state(
     job: &JobStateWrite,
 ) -> std::io::Result<()> {
     let dir = jobs_dir(config_home).join(short);
+    if let Ok(metadata) = std::fs::symlink_metadata(&dir) {
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "background job path is not a real directory",
+            ));
+        }
+    }
     std::fs::create_dir_all(&dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+    }
     let body = serde_json::to_string(job)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    let tmp = dir.join(format!("state.json.tmp.{}", std::process::id()));
+    let tmp = dir.join(format!(
+        "state.json.tmp.{}.{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    #[cfg(unix)]
+    {
+        use std::io::Write as _;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        file.write_all(body.as_bytes())?;
+        file.sync_all()?;
+    }
+    #[cfg(not(unix))]
     std::fs::write(&tmp, body.as_bytes())?;
     let target = dir.join("state.json");
     match std::fs::rename(&tmp, &target) {
@@ -634,8 +663,8 @@ pub fn write_job_state(
 
 /// Read a SINGLE background job's `jobs/<short>/state.json` into a [`JobState`].
 /// `None` when the dir/file is missing or the JSON is unparseable (the same
-/// tolerance as [`read_jobs`]). The `--bg` worker reads its own job through
-/// this to recover the `initialPrompt`/`cwd`/`sessionId` it must execute.
+/// tolerance as [`read_jobs`]). The `--bg` worker uses this only for public
+/// lifecycle identity; private prompt/runtime context comes from `launch.json`.
 #[must_use]
 pub fn read_job(config_home: &Path, short: &str) -> Option<JobState> {
     let path = jobs_dir(config_home).join(short).join("state.json");
@@ -1322,6 +1351,19 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
             .collect();
         assert!(leftovers.is_empty(), "temp file renamed away");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let dir_mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+            let file_mode = std::fs::metadata(dir.join("state.json"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(dir_mode, 0o700);
+            assert_eq!(file_mode, 0o600);
+        }
     }
 
     #[test]

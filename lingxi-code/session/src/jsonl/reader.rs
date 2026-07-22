@@ -54,6 +54,12 @@ pub fn is_transcript_message_type(ty: &str) -> bool {
 /// | `agentColors` | ⏭ already handled by `agent_color.rs` (confirmed correct C6) | `"agent-color"` |
 #[derive(Debug, Clone, Default)]
 pub struct LoadedTranscript {
+    /// Number of non-empty lines dropped because they were malformed JSON or
+    /// claimed to be transcript messages but failed schema validation. The
+    /// tolerant reader still returns every recoverable line; catalog callers
+    /// use this only to distinguish an entirely corrupt file from a genuinely
+    /// empty or metadata-only transcript.
+    pub malformed_line_count: usize,
     /// Chain-participant lines (`user`/`assistant`/`attachment`/`system`) in
     /// FILE ORDER. This is what [`JsonlReader::read_all`] returns and what the
     /// golden round-trip / append-chain tests rely on.
@@ -101,6 +107,9 @@ pub struct LoadedTranscript {
     /// `agent-setting` entries: keyed by `agentId` → raw JSON value of the setting.
     /// Binary `Yle`: `agentSettings.set(N.agentId, N)`.
     pub agent_settings: HashMap<String, Value>,
+    /// LingXi compatibility extension: immutable, versioned resolved-agent
+    /// snapshots keyed by session id. Older Claude-compatible records omit it.
+    pub agent_snapshots: HashMap<String, Value>,
     /// `mode` entries: keyed by `sessionId` → mode string, last-write-wins.
     /// Binary `Yle`: `modes.set(N.sessionId, N.mode)`.
     pub modes: HashMap<String, String>,
@@ -272,6 +281,7 @@ pub fn route_lines(content: &str) -> LoadedTranscript {
         }
         // Phase 1 — tolerant JSON parse; skip malformed lines (no error).
         let Ok(value) = serde_json::from_str::<Value>(line) else {
+            out.malformed_line_count += 1;
             continue;
         };
         let ty = value.get("type").and_then(Value::as_str).unwrap_or("");
@@ -281,6 +291,7 @@ pub fn route_lines(content: &str) -> LoadedTranscript {
             // to be messages; a failure here means a corrupt transcript line, so
             // skip it (still no hard error, matching the tolerant contract).
             let Ok(msg) = serde_json::from_value::<JsonlMessage>(value) else {
+                out.malformed_line_count += 1;
                 continue;
             };
             out.by_uuid.insert(msg.uuid.clone(), msg.clone());
@@ -367,6 +378,13 @@ pub fn route_lines(content: &str) -> LoadedTranscript {
             ) {
                 out.agent_settings
                     .insert(sid.to_string(), agent_setting.clone());
+            }
+            if let (Some(sid), Some(snapshot)) = (
+                value.get("sessionId").and_then(Value::as_str),
+                value.get("agentSnapshot"),
+            ) {
+                out.agent_snapshots
+                    .insert(sid.to_string(), snapshot.clone());
             }
         } else if ty == "mode" {
             // Binary `Yle`: `modes.set(N.sessionId, N.mode)`.

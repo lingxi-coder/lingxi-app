@@ -538,8 +538,14 @@ mod tests {
         rec.add_counter(super::super::metrics::TOKEN_USAGE, 50.0, &a);
         rec.add_counter(super::super::metrics::TOKEN_USAGE, 7.0, &b);
 
-        assert_eq!(rec.counter_value(super::super::metrics::TOKEN_USAGE, &a), 150.0);
-        assert_eq!(rec.counter_value(super::super::metrics::TOKEN_USAGE, &b), 7.0);
+        assert_eq!(
+            rec.counter_value(super::super::metrics::TOKEN_USAGE, &a),
+            150.0
+        );
+        assert_eq!(
+            rec.counter_value(super::super::metrics::TOKEN_USAGE, &b),
+            7.0
+        );
         // Two distinct series accumulated.
         assert_eq!(rec.counters().len(), 2);
     }
@@ -559,7 +565,10 @@ mod tests {
         rec.add_counter(super::super::metrics::SESSION_COUNT, 1.0, &a);
         rec.add_counter(super::super::metrics::SESSION_COUNT, 1.0, &b);
         assert_eq!(rec.counters().len(), 1);
-        assert_eq!(rec.counter_value(super::super::metrics::SESSION_COUNT, &a), 2.0);
+        assert_eq!(
+            rec.counter_value(super::super::metrics::SESSION_COUNT, &a),
+            2.0
+        );
     }
 
     #[test]
@@ -609,7 +618,10 @@ mod tests {
             ("tool_source", "mcp".into()),
         ]);
         rec.add_counter(super::super::metrics::TOOL_EXECUTION, 1.0, &a);
-        assert_eq!(rec.counters()[0].attributes.get("tool_source"), Some(&"mcp".into()));
+        assert_eq!(
+            rec.counters()[0].attributes.get("tool_source"),
+            Some(&"mcp".into())
+        );
     }
 
     #[test]
@@ -698,7 +710,11 @@ mod tests {
         let out = truncate_content(&s, cap);
         assert!(out.truncated);
         let marker = "\n\n[TRUNCATED - Content exceeds 2KB limit]";
-        assert!(out.content.ends_with(marker), "got tail: {:?}", &out.content[out.content.len().saturating_sub(60)..]);
+        assert!(
+            out.content.ends_with(marker),
+            "got tail: {:?}",
+            &out.content[out.content.len().saturating_sub(60)..]
+        );
         assert_eq!(utf16_len(&out.content), cap as usize);
     }
 

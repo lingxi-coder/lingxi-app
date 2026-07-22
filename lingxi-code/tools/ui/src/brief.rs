@@ -68,12 +68,10 @@ const BRIEF_GATE_FLAG: &str = "tengu_kairos_brief";
 /// `isEnvTruthy`) and the `--forward-subagent-text` sibling convention.
 #[must_use]
 pub fn brief_tool_enabled() -> bool {
-    let env_on = |k: &str| {
-        std::env::var(k)
-            .map(|v| !v.is_empty())
-            .unwrap_or(false)
-    };
-    env_on("LINGXI_BRIEF") || env_on("CLAUDE_CODE_BRIEF") || telemetry::flag_bool(BRIEF_GATE_FLAG, false)
+    let env_on = |k: &str| std::env::var(k).map(|v| !v.is_empty()).unwrap_or(false);
+    env_on("LINGXI_BRIEF")
+        || env_on("CLAUDE_CODE_BRIEF")
+        || telemetry::flag_bool(BRIEF_GATE_FLAG, false)
 }
 
 /// Model-facing tool prompt — byte-faithful port of `BriefTool/prompt.ts`

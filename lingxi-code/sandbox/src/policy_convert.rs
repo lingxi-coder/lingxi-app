@@ -316,8 +316,10 @@ pub fn convert_settings_to_runtime_config(
     if let Some(domains) = &ctx.managed_allowed_domains {
         cfg.network.allowed_domains = domains.clone();
     }
-    if let Some(read_paths) = &ctx.managed_read_paths {
-        cfg.filesystem.allow_read = read_paths.clone();
+    if !cfg.filesystem.disabled {
+        if let Some(read_paths) = &ctx.managed_read_paths {
+            cfg.filesystem.allow_read = read_paths.clone();
+        }
     }
 
     // allowAppleEvents SOURCE RESTRICTION (applied LAST). claude-code honors
@@ -833,5 +835,87 @@ mod deny_write_symlink_tests {
             |_| None,
         );
         assert_eq!(out, "/a/loop");
+    }
+}
+
+#[cfg(test)]
+mod filesystem_disabled_tests {
+    use super::{convert_settings_to_runtime_config, SandboxConvertContext};
+    use crate::runtime_config::{FilesystemRestrictionConfig, SandboxSettingsJson, SettingsJson};
+    use serde_json::json;
+    use std::path::PathBuf;
+
+    fn settings_with_disabled_filesystem() -> SettingsJson {
+        serde_json::from_value(json!({
+            "permissions": {
+                "allow": ["Edit(src/main.rs)"],
+                "deny": ["Read(secret.txt)"]
+            },
+            "settingsDir": "/proj/.lingxi",
+            "sandbox": {
+                "enabled": true,
+                "filesystem": {
+                    "disabled": true,
+                    "allowWrite": ["custom/write"],
+                    "allowRead": ["custom/read"]
+                }
+            }
+        }))
+        .expect("settings parse")
+    }
+
+    #[test]
+    fn merged_filesystem_disabled_flag_survives() {
+        let cfg = convert_settings_to_runtime_config(
+            &settings_with_disabled_filesystem(),
+            &SandboxConvertContext::default(),
+        );
+        assert!(cfg.filesystem.disabled);
+        assert!(cfg
+            .filesystem
+            .allow_write
+            .contains(&"/proj/.lingxi/custom/write".to_string()));
+        assert!(cfg
+            .filesystem
+            .allow_read
+            .contains(&"/proj/.lingxi/custom/read".to_string()));
+    }
+
+    #[test]
+    fn managed_read_override_is_ignored_when_filesystem_disabled() {
+        let cfg = convert_settings_to_runtime_config(
+            &settings_with_disabled_filesystem(),
+            &SandboxConvertContext {
+                managed_read_paths: Some(vec!["/managed/only".to_string()]),
+                ..SandboxConvertContext::default()
+            },
+        );
+        assert!(cfg.filesystem.disabled);
+        assert!(cfg
+            .filesystem
+            .allow_read
+            .contains(&"/proj/.lingxi/custom/read".to_string()));
+        assert!(!cfg
+            .filesystem
+            .allow_read
+            .contains(&"/managed/only".to_string()));
+    }
+
+    #[test]
+    fn disabled_flag_deserializes_from_filesystem_subtree() {
+        let filesystem: FilesystemRestrictionConfig =
+            serde_json::from_value(json!({ "disabled": true })).expect("filesystem parse");
+        assert!(filesystem.disabled);
+
+        let settings = SettingsJson {
+            settings_dir: Some(PathBuf::from("/proj/.lingxi")),
+            sandbox: Some(SandboxSettingsJson {
+                filesystem: Some(filesystem),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let cfg = convert_settings_to_runtime_config(&settings, &SandboxConvertContext::default());
+        assert!(cfg.filesystem.disabled);
     }
 }

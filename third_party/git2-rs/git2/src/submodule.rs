@@ -23,7 +23,9 @@ impl<'repo> Submodule<'repo> {
     /// Returns `Ok(None)` if the branch is not yet available.
     pub fn branch(&self) -> Result<Option<&str>, Error> {
         match self.branch_bytes() {
-            Some(bb) => std::str::from_utf8(bb).map(|s| Some(s)).map_err(|e| e.into()),
+            Some(bb) => std::str::from_utf8(bb)
+                .map(|s| Some(s))
+                .map_err(|e| e.into()),
             None => Ok(None),
         }
     }
@@ -59,7 +61,9 @@ impl<'repo> Submodule<'repo> {
     /// Returns `Ok(None)` if the URL isn't present
     pub fn url(&self) -> Result<Option<&str>, Error> {
         match self.opt_url_bytes() {
-            Some(oub) => std::str::from_utf8(oub).map(|s| Some(s)).map_err(|e| e.into()),
+            Some(oub) => std::str::from_utf8(oub)
+                .map(|s| Some(s))
+                .map_err(|e| e.into()),
             None => Ok(None),
         }
     }

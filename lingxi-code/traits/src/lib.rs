@@ -6,15 +6,19 @@
 //!
 //! See spec §4 (Trait System) and D17 (Runtime boundary).
 
-#![forbid(unsafe_code)]
+// Platform filesystem primitives are safe by default. The Windows rooted-file
+// implementation is the sole exception: the standard library has no
+// handle-relative open/rename API, so that module wraps a small audited set of
+// `ntdll` calls. Keeping this at `deny` lets the exception remain item-scoped.
+#![deny(unsafe_code)]
 
 /// The claude-code version LingXi replicates byte-for-byte (the parity target),
 /// distinct from this workspace's own `CARGO_PKG_VERSION`. claude-code embeds its
 /// `VERSION` in outward-facing identifiers — the `AI_AGENT` child-env value
-/// (`claude-code_2-1-208_agent`) and the WebFetch `User-Agent`
-/// (`claude-code/2.1.208`). LingXi is a 1:1 copy, so it presents the same string.
+/// (`claude-code_2-1-216_agent`) and the WebFetch `User-Agent`
+/// (`claude-code/2.1.216`). LingXi is a 1:1 copy, so it presents the same string.
 /// Single source of truth (R-V1) so the AI_AGENT and User-Agent stamps never drift.
-pub const CLAUDE_CODE_VERSION: &str = "2.1.208";
+pub const CLAUDE_CODE_VERSION: &str = "2.1.216";
 
 pub mod agent_name_registry;
 pub mod agent_view;
@@ -43,6 +47,8 @@ pub mod permission_gate;
 pub mod platform;
 pub mod process;
 pub mod prompting_gate;
+#[cfg_attr(windows, allow(unsafe_code))]
+pub mod rooted_fs;
 pub mod runtime;
 pub mod sandbox;
 pub mod secure_storage;
@@ -90,12 +96,12 @@ pub use mcp::*;
 pub use notification::{NotificationError, NotificationRequest, NotificationService};
 pub use orchestrator::{
     curated_model_names, is_curated_model, parse_model_ref, provider_default_model,
-    provider_fallback_order, provider_has_curated_list, ActiveGoalSnapshot, AgentInfo,
-    CheckStatus, CompactionSummary, ContextPressureBanner, ContextPressureLevel, CostSnapshot,
-    DoctorCheck, DoctorReport, DoctorSummary, ForkOutcome, HandleError, HookInfo,
-    McpActionState, McpServerInfo, McpStatus, MemoryEditorOutcome, ModelListing, ModelUsageRow,
-    OrchestratorHandle, OutputEvent, OutputStream, RateLimitSnapshot, RecapOutcome,
-    RewindRowData, StatusSnapshot, TurnOutcome,
+    provider_fallback_order, provider_has_curated_list, ActiveGoalSnapshot, AgentInfo, CheckStatus,
+    CompactionSummary, ContextPressureBanner, ContextPressureLevel, CostSnapshot, DoctorCheck,
+    DoctorReport, DoctorSummary, ForkOutcome, HandleError, HookInfo, McpActionState, McpServerInfo,
+    McpStatus, MemoryEditorOutcome, ModelListing, ModelUsageRow, OrchestratorHandle, OutputEvent,
+    OutputStream, RateLimitSnapshot, RecapOutcome, ResumeRuntimeSnapshot, RewindRowData,
+    StatusSnapshot, TurnOutcome,
 };
 pub use permission_gate::{PermissionDecision, PermissionGate};
 pub use platform::Platform;
@@ -105,6 +111,7 @@ pub use process::{
 pub use prompting_gate::{
     PermissionRequest, PromptDecision, PromptDefault, PromptError, PromptingGate,
 };
+pub use rooted_fs::{AtomicWriteOptions, RootedFileLock};
 pub use runtime::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
 pub use sandbox::{
     BackendPlanHandle, NetworkPolicy, ProcessCommand, ResourceLimits, Sandbox, SandboxBackend,

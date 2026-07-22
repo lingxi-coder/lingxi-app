@@ -72,8 +72,8 @@ export const PROJECTS: Project[] = [
 // agent run = the "Ran an agent" receipt cards in the screenshot
 // types: dispatch (heading), narration (plain text), agent (card), thinking
 export type RunItem =
-  | { type: 'narration'; text: string; tone?: 'muted'; strong?: boolean }
-  | { type: 'agent'; state: 'done' | 'running'; title: string; sub?: string; expandable?: boolean; link?: boolean }
+  | { type: 'narration'; text: string; tone?: 'muted'; strong?: boolean; role?: 'user' | 'assistant' }
+  | { type: 'agent'; state: 'done' | 'running'; title: string; sub?: string; detail?: string; error?: boolean; expandable?: boolean; link?: boolean }
   | { type: 'meta'; dur: string; tokens: string }
   | { type: 'audio'; bars: number[]; duration: number }
   // The assistant's streamed reasoning (`thinking_delta`), rendered as a dim,
@@ -226,7 +226,7 @@ export const TRANSCRIPT_DEMO: TranscriptStepData[] = [
   { kind: 'tool', label: 'Ran List existing plans', expanded: true },
   {
     kind: 'bash',
-    cmd: 'ls /Users/luolingfeng/Projects/LingXi-Next/docs/superpowers/plans/ 2>/dev/null | head -20',
+    cmd: 'ls docs/superpowers/plans/ 2>/dev/null | head -20',
     out: [
       '2026-05-21-claw-code-staged-graphify.md',
       '2026-05-22-lingxi-core-m1-01-foundation.md',

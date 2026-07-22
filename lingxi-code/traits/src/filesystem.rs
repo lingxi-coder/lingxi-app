@@ -4,6 +4,7 @@
 use async_trait::async_trait;
 use futures_core::stream::Stream;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use std::pin::Pin;
 use thiserror::Error;
 
@@ -102,6 +103,58 @@ pub trait FileSystem: Send + Sync {
     ) -> Result<(), FsError> {
         let _ = mode;
         self.append_file(path, content).await
+    }
+
+    /// Read a UTF-8 file addressed relative to a trusted `root`, without
+    /// following symlinks below that root on hardened platform implementations.
+    ///
+    /// The default keeps in-memory/mock implementations source-compatible by
+    /// validating the relative path and delegating to [`read_file`](Self::read_file).
+    async fn read_file_rooted_no_follow(
+        &self,
+        root: &Path,
+        relative: &Path,
+    ) -> Result<FileContent, FsError> {
+        let path = crate::rooted_fs::checked_join(root, relative)?;
+        self.read_file(&path.to_string_lossy(), None, None).await
+    }
+
+    /// Atomically replace a file addressed relative to a trusted `root`,
+    /// refusing symlink traversal below the root on hardened platforms.
+    ///
+    /// The default delegates to [`write_file`](Self::write_file) after lexical
+    /// validation so virtual/mock filesystems retain their existing semantics.
+    async fn write_file_rooted_atomic(
+        &self,
+        root: &Path,
+        relative: &Path,
+        content: &str,
+    ) -> Result<(), FsError> {
+        let path = crate::rooted_fs::checked_join(root, relative)?;
+        self.write_file(&path.to_string_lossy(), content).await
+    }
+
+    /// Lock a file addressed relative to a trusted `root`. Hardened platform
+    /// implementations create missing private parents and open every component
+    /// without following symlinks.
+    async fn flock_exclusive_rooted(
+        &self,
+        root: &Path,
+        relative: &Path,
+    ) -> Result<Box<dyn FlockGuard>, FsError> {
+        let path = crate::rooted_fs::checked_join(root, relative)?;
+        self.flock_exclusive(&path.to_string_lossy()).await
+    }
+
+    /// Delete a file addressed relative to a trusted root without following
+    /// symlinked parent components on hardened platforms.
+    async fn delete_file_rooted_no_follow(
+        &self,
+        root: &Path,
+        relative: &Path,
+    ) -> Result<(), FsError> {
+        let path = crate::rooted_fs::checked_join(root, relative)?;
+        self.delete_file(&path.to_string_lossy()).await
     }
 
     /// Truncate `path` to exactly `len` bytes.

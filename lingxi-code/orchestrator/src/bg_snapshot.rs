@@ -71,9 +71,10 @@ pub fn history_to_jsonl_lines(
     let mut parent_uuid: Option<String> = None;
     for msg in history {
         let (kind, inner) = match msg {
-            ConversationMessage::User { content, .. } => {
-                ("user", serde_json::json!({ "role": "user", "content": content }))
-            }
+            ConversationMessage::User { content, .. } => (
+                "user",
+                serde_json::json!({ "role": "user", "content": content }),
+            ),
             ConversationMessage::Assistant { content, .. } => {
                 let mut inner = serde_json::json!({ "role": "assistant", "content": content });
                 // Stamp the parent's active model so `state_from_messages`
@@ -155,8 +156,14 @@ mod tests {
         // First line has no parent.
         assert_eq!(lines[0].parent_uuid, None);
         // Each subsequent line chains to the prior line's uuid.
-        assert_eq!(lines[1].parent_uuid.as_deref(), Some(lines[0].uuid.as_str()));
-        assert_eq!(lines[2].parent_uuid.as_deref(), Some(lines[1].uuid.as_str()));
+        assert_eq!(
+            lines[1].parent_uuid.as_deref(),
+            Some(lines[0].uuid.as_str())
+        );
+        assert_eq!(
+            lines[2].parent_uuid.as_deref(),
+            Some(lines[1].uuid.as_str())
+        );
         // Kinds + trailer fields.
         assert_eq!(lines[0].message_type, "user");
         assert_eq!(lines[1].message_type, "assistant");

@@ -5,6 +5,7 @@
 //! in a bounded queue and drained when the sink shows up.
 
 use crate::killswitch::Killswitch;
+use crate::otel::runtime::mirror_analytics_event;
 use crate::sink::{AnalyticsSink, LogEventMetadata};
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -57,6 +58,7 @@ impl AnalyticsBus {
         if traits::traffic_mode::is_telemetry_disabled() {
             return;
         }
+        mirror_analytics_event(name, &metadata);
         if let Some(sink) = self.sink.read().await.as_ref() {
             sink.log_event(name, metadata).await;
         } else {

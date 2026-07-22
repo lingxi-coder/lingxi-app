@@ -72,14 +72,15 @@ pub enum RenderedMessage {
     /// (M7-04) Redacted thinking. Single dim+italic line `✻ Thinking…`.
     AssistantRedactedThinking,
     /// (M7-04) Compaction boundary. REPLACES M6-08's `[Compacted …]` `SystemText`.
-    /// Renders `✻ Conversation compacted (ctrl+o for history)` (dim). Counts are
-    /// retained for telemetry/debug parity though the rendered line omits them
-    /// (claude-code parity — the boundary line carries no numbers).
+    /// Renders the compact hint in normal mode and its full summary under
+    /// Ctrl-O. Counts are retained for telemetry/debug parity but not rendered.
     CompactBoundary {
         /// Message count before compaction (debug/telemetry parity; not rendered).
         messages_before: u32,
         /// Message count after compaction (debug/telemetry parity; not rendered).
         messages_after: u32,
+        /// Full compact summary. Hidden in normal mode and revealed by Ctrl-O.
+        summary: String,
     },
     /// (M7-04) Level-aware system text. info → plain dim body; warning/error →
     /// `●` marker + colored body.

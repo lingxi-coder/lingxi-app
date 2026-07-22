@@ -68,6 +68,12 @@ pub trait WakeupScheduler: Send + Sync {
     /// Schedule a one-shot self-wakeup. `delay` is already clamped to
     /// `[MIN_DELAY_SECONDS, MAX_DELAY_SECONDS]` by the tool.
     async fn schedule(&self, delay: Duration, prompt: String, reason: String);
+
+    /// Return the session-scoped loop state owned by this scheduler's host.
+    /// Hosts without a session object keep the legacy process-local fallback.
+    fn loop_runtime(&self) -> Option<Arc<crate::autonomous_loop::LoopRuntime>> {
+        None
+    }
 }
 
 /// Shared, set-once handle to the live [`WakeupScheduler`].
@@ -160,6 +166,37 @@ pub async fn arm_keepalive(scheduler: &Arc<dyn WakeupScheduler>, prompt: &str) -
     KeepaliveOutcome::Armed
 }
 
+/// Session-scoped variant of [`arm_keepalive`].
+pub async fn arm_keepalive_with_runtime(
+    scheduler: &Arc<dyn WakeupScheduler>,
+    prompt: &str,
+    runtime: &crate::autonomous_loop::LoopRuntime,
+) -> KeepaliveOutcome {
+    use crate::autonomous_loop as al;
+    if !al::is_loop_dynamic_enabled() {
+        telemetry::emit_loop_ended("gate_off", None);
+        return KeepaliveOutcome::GateOff;
+    }
+    if runtime.consecutive_keepalives() >= KEEPALIVE_BUDGET {
+        tracing::info!(
+            "[loop] keepalive budget exhausted (model declined to reschedule twice) — ending loop"
+        );
+        telemetry::emit_loop_ended("model_stopped", Some(true));
+        return KeepaliveOutcome::BudgetExhausted;
+    }
+    let delay = clamp_delay_seconds(KEEPALIVE_DELAY_SECONDS as f64);
+    scheduler
+        .schedule(
+            Duration::from_secs(delay as u64),
+            prompt.to_string(),
+            "loop keepalive fallback".to_string(),
+        )
+        .await;
+    runtime.set_consecutive_keepalives(runtime.consecutive_keepalives() + 1);
+    telemetry::emit_loop_keepalive_fired(delay as u64, al::is_loop_default_sentinel(prompt));
+    KeepaliveOutcome::Armed
+}
+
 /// The turn-completion keepalive trigger (binary loading→idle `useEffect`:
 /// `let l=tAt();if(l!==null){I7e(null);if(iKi()&&!Xke())lKi(l)}`).
 ///
@@ -195,6 +232,20 @@ pub async fn maybe_arm_keepalive(scheduler: &Arc<dyn WakeupScheduler>) -> Option
         return None;
     }
     Some(arm_keepalive(scheduler, &prompt).await)
+}
+
+/// Session-scoped variant of [`maybe_arm_keepalive`].
+pub async fn maybe_arm_keepalive_with_runtime(
+    scheduler: &Arc<dyn WakeupScheduler>,
+    runtime: &crate::autonomous_loop::LoopRuntime,
+) -> Option<KeepaliveOutcome> {
+    use crate::autonomous_loop as al;
+    let prompt = runtime.take_in_flight_prompt()?;
+    let rescheduled = runtime.take_rescheduled();
+    if !al::is_loop_keepalive_enabled() || rescheduled {
+        return None;
+    }
+    Some(arm_keepalive_with_runtime(scheduler, &prompt, runtime).await)
 }
 
 /// Format an epoch-ms timestamp as local `HH:MM:SS`.
@@ -603,8 +654,13 @@ impl Tool for ScheduleWakeupTool {
         // calls ScheduleWakeup, the keepalive budget is refreshed. Also record the
         // reschedule (the port's `Xke()=true` signal) so the turn-end keepalive
         // check sees the model rescheduled and does NOT arm a fallback.
-        crate::autonomous_loop::set_loop_consecutive_keepalives(0);
-        crate::autonomous_loop::mark_loop_rescheduled();
+        if let Some(runtime) = wakeup.loop_runtime() {
+            runtime.set_consecutive_keepalives(0);
+            runtime.mark_rescheduled();
+        } else {
+            crate::autonomous_loop::set_loop_consecutive_keepalives(0);
+            crate::autonomous_loop::mark_loop_rescheduled();
+        }
 
         // PARITY: binary `cKi` success emit — `chosen_delay_seconds` is the RAW
         // requested delay (`Number.isFinite(e)?e:0`, NOT rounded); `reason_length`

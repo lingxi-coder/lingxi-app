@@ -1,20 +1,95 @@
-import { app, shell, BrowserWindow } from 'electron';
-import { join } from 'path';
-import { fileURLToPath } from 'url';
-import { dirname } from 'path';
+import { app, BrowserWindow, safeStorage, shell, type Session } from 'electron';
+import { join } from 'node:path';
+import { dirname } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { BridgeManager } from './bridge.js';
+import { HostController } from './host.js';
+import { DiagnosticBuffer, sanitizeDiagnostic } from './host-utils.js';
+import { SettingsStore } from './settings.js';
+import { MacKeychainCredentialStore } from './keychain.js';
+import { PROVIDER_IDS } from '../shared/providers.js';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-
-/**
- * The single bridge manager for this app instance (M10 A1 — C2). It owns the
- * `bridge-server` child + the WS client + the renderer IPC seam. Created on
- * `whenReady`, disposed on quit.
- */
+const moduleDirectory = dirname(fileURLToPath(import.meta.url));
+const securedSessions = new WeakSet<Session>();
 let bridge: BridgeManager | null = null;
+let host: HostController | null = null;
+let quitting = false;
+
+function developmentRendererUrl(): string | undefined {
+  if (app.isPackaged) return undefined;
+  const raw = process.env['ELECTRON_RENDERER_URL'];
+  if (!raw) return undefined;
+  try {
+    const url = new URL(raw);
+    const loopback = url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '::1';
+    if ((url.protocol === 'http:' || url.protocol === 'https:') && loopback) return url.toString();
+  } catch {
+    // Invalid development URL falls back to the bundled renderer.
+  }
+  return undefined;
+}
+
+function isLocalRendererUrl(raw: string): boolean {
+  try {
+    const url = new URL(raw);
+    return url.protocol === 'file:'
+      || ((url.protocol === 'http:' || url.protocol === 'https:')
+        && (url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '::1'));
+  } catch {
+    return false;
+  }
+}
+
+function secureSession(session: Session): void {
+  if (securedSessions.has(session)) return;
+  securedSessions.add(session);
+  // The composer can use the browser's speech recognition API, but no other
+  // permission is needed by the desktop app. Keep the allowlist scoped to the
+  // local renderer so a future navigation cannot inherit microphone access.
+  session.setPermissionCheckHandler((_webContents, permission, requestingOrigin) => (
+    permission === 'media' && isLocalRendererUrl(requestingOrigin)
+  ));
+  session.setPermissionRequestHandler((webContents, permission, callback) => callback(
+    permission === 'media' && isLocalRendererUrl(webContents.getURL())
+  ));
+  session.on('will-download', (event) => event.preventDefault());
+}
+
+function rendererTarget(): { url: string; load: (window: BrowserWindow) => Promise<void> } {
+  const devUrl = developmentRendererUrl();
+  if (devUrl) return { url: devUrl, load: (window) => window.loadURL(devUrl) };
+  const file = join(moduleDirectory, '../renderer/index.html');
+  return { url: pathToFileURL(file).toString(), load: (window) => window.loadFile(file) };
+}
+
+function isHttpsUrl(raw: string): boolean {
+  try {
+    const url = new URL(raw);
+    return url.protocol === 'https:' && !url.username && !url.password;
+  } catch { return false; }
+}
+
+const providerEnvironmentVariables: Readonly<Record<string, string>> = {
+  anthropic: 'ANTHROPIC_API_KEY',
+  openai: 'OPENAI_API_KEY',
+  deepseek: 'DEEPSEEK_API_KEY',
+  gemini: 'GEMINI_API_KEY',
+  openrouter: 'OPENROUTER_API_KEY',
+  zai: 'ZAI_API_KEY',
+  'glm-coding': 'GLM_API_KEY',
+  'github-copilot': 'GITHUB_TOKEN',
+};
+
+/** Developer opt-in fallback for a locked/missing Keychain item. */
+function readEnvironmentCredential(providerId: string): string | undefined {
+  const variable = providerEnvironmentVariables[providerId];
+  const value = variable ? process.env[variable] : undefined;
+  return typeof value === 'string' && value.length > 0 && value.length <= 16_384 ? value : undefined;
+}
 
 function createWindow(): BrowserWindow {
+  const target = rendererTarget();
   const mainWindow = new BrowserWindow({
     width: 1320,
     height: 860,
@@ -22,68 +97,130 @@ function createWindow(): BrowserWindow {
     minHeight: 600,
     show: false,
     backgroundColor: '#0c0b10',
-    // The prototype renders its own macOS-style window chrome (traffic lights),
-    // so we hide the native title bar but keep the window frameless.
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: -100, y: -100 },
     autoHideMenuBar: true,
     webPreferences: {
-      preload: join(__dirname, '../preload/index.mjs'),
-      sandbox: false,
+      preload: join(moduleDirectory, '../preload/index.cjs'),
+      sandbox: true,
       contextIsolation: true,
+      nodeIntegration: false,
+      webviewTag: false,
+      navigateOnDragDrop: false,
+      webSecurity: true,
+      devTools: !app.isPackaged,
     },
   });
 
-  // Route bridge events/permissions/state to this window's renderer.
-  bridge?.registerWindow(mainWindow.webContents);
+  secureSession(mainWindow.webContents.session);
+  bridge?.registerWindow(mainWindow.webContents, target.url);
+  host?.registerWindow(mainWindow.webContents, target.url);
 
-  mainWindow.on('ready-to-show', () => {
-    mainWindow.show();
-  });
-
-  mainWindow.webContents.setWindowOpenHandler((details) => {
-    void shell.openExternal(details.url);
+  mainWindow.once('ready-to-show', () => mainWindow.show());
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (isHttpsUrl(url)) void shell.openExternal(url);
     return { action: 'deny' };
   });
+  mainWindow.webContents.on('will-attach-webview', (event) => event.preventDefault());
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    const expected = new URL(target.url);
+    const proposed = new URL(url);
+    const sameDocumentOrigin = expected.protocol === 'file:'
+      ? proposed.protocol === 'file:' && proposed.pathname === expected.pathname
+      : proposed.origin === expected.origin;
+    if (!sameDocumentOrigin) event.preventDefault();
+  });
 
-  // electron-vite injects ELECTRON_RENDERER_URL in dev for HMR.
-  const rendererUrl = process.env['ELECTRON_RENDERER_URL'];
-  if (rendererUrl) {
-    void mainWindow.loadURL(rendererUrl);
-  } else {
-    void mainWindow.loadFile(join(__dirname, '../renderer/index.html'));
-  }
-
+  void target.load(mainWindow);
   return mainWindow;
 }
 
-app.whenReady().then(() => {
-  // Register the IPC handlers up front so the renderer can call them as soon as
-  // it loads, even while the child is still spawning/connecting. start() runs in
-  // the background; failures surface to the renderer as a `connectionState`
-  // transition (the IPC handlers are registered synchronously inside start()).
-  bridge = new BridgeManager();
-  void bridge.start().catch((err: unknown) => {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error(`[bridge] start failed: ${message}`);
-  });
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+if (!hasSingleInstanceLock) app.quit();
 
+if (hasSingleInstanceLock) void app.whenReady().then(() => {
+  const userData = app.getPath('userData');
+  const diagnostics = new DiagnosticBuffer(join(userData, 'logs', 'desktop.jsonl'));
+  diagnostics.add('info', 'host', `desktop start: app=${app.getVersion()} electron=${process.versions.electron} platform=${process.platform} arch=${process.arch}`);
+  const settings = new SettingsStore(userData, safeStorage, new MacKeychainCredentialStore());
+  bridge = new BridgeManager({
+    isPackaged: app.isPackaged,
+    resourcesPath: process.resourcesPath,
+    bridgeRoot: join(app.getPath('userData'), 'bridge-runtime'),
+    diagnostics,
+    accessState: () => {
+      const workspace = settings.getWorkspace();
+      return workspace
+        ? { workspace, trusted: settings.getTrust(workspace).trusted }
+        : { trusted: false };
+    },
+    onModelChanged: (model) => { settings.update({ model }); },
+    launchConfig: async () => {
+      const workspace = settings.getWorkspace();
+      if (!workspace) throw new Error('select a workspace before starting the bridge');
+      const configured = settings.getPublic();
+      const providerIds = PROVIDER_IDS;
+      const credentials = settings.readProviderCredentials(providerIds);
+      for (const providerId of providerIds) {
+        if (credentials[providerId] === undefined) {
+          const environmentCredential = readEnvironmentCredential(providerId);
+          if (environmentCredential !== undefined) credentials[providerId] = environmentCredential;
+        }
+      }
+      const unavailable = settings
+        .providerCredentialMetadataFor(providerIds)
+        .filter((entry) => entry.configured && credentials[entry.providerId] === undefined)
+        .map((entry) => entry.providerId);
+      if (unavailable.length > 0) {
+        throw new Error(`stored provider credential could not be decrypted (${unavailable.join(', ')}); replace it in Settings`);
+      }
+      return {
+        workspace,
+        trusted: settings.getTrust(workspace).trusted,
+        apiKey: credentials['anthropic'],
+        providerCredentials: Object.fromEntries(
+          Object.entries(credentials).filter(([providerId]) => providerId !== 'anthropic'),
+        ),
+        model: configured.model,
+        apiBaseUrl: configured.apiBaseUrl,
+      };
+    },
+  });
+  host = new HostController(settings, bridge, diagnostics);
+  host.registerIpc();
   createWindow();
+
+  if (settings.getWorkspace()) {
+    void bridge.start().catch((error: unknown) => {
+      diagnostics.add('error', 'host', sanitizeDiagnostic(error));
+    });
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
-});
+  });
 
-app.on('window-all-closed', () => {
-  bridge?.dispose();
-  bridge = null;
+  app.on('second-instance', () => {
+  const window = BrowserWindow.getAllWindows()[0];
+  if (!window) return;
+  if (window.isMinimized()) window.restore();
+  window.show();
+  window.focus();
+  });
+
+  app.on('window-all-closed', () => {
+  // On macOS the app remains alive and the bridge stays available for reopen.
   if (process.platform !== 'darwin') app.quit();
-});
+  });
 
-// Belt-and-suspenders: also reap the child on quit (covers the macOS path where
-// the app stays alive after all windows close, then quits later).
-app.on('will-quit', () => {
-  bridge?.dispose();
+  app.on('before-quit', (event) => {
+  if (quitting) return;
+  event.preventDefault();
+  quitting = true;
+  host?.dispose();
+  host = null;
+  const currentBridge = bridge;
   bridge = null;
-});
+  void (currentBridge?.dispose() ?? Promise.resolve()).finally(() => app.quit());
+  });

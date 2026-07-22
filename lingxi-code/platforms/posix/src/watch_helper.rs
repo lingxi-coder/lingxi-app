@@ -54,12 +54,18 @@ pub async fn watch_dir_with_debounce(
 
     // mpsc bridge from the (blocking) notify callback into async land.
     let (tx, rx) = mpsc::channel::<FileEvent>(128);
+    // Do not report a usable stream until the native watcher is armed. The
+    // previous implementation returned immediately after `spawn_blocking`,
+    // so a caller could mutate the directory before FSEvents/inotify had
+    // registered and permanently lose the first event.
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
 
     // Spawn a blocking task to host the debouncer; notify's callback runs on
     // its own thread, so we can't keep the Debouncer on the async runtime
     // directly. The task exits when `tx` is dropped (consumer closed).
     let watch_root = dir_path.clone();
     tokio::task::spawn_blocking(move || {
+        let mut ready_tx = Some(ready_tx);
         // Test-only liveness probe: increments on entry, decrements on the
         // closure's return (any exit path). Lets lifecycle tests assert the
         // blocking thread is actually released after a consumer drop, without
@@ -83,6 +89,9 @@ pub async fn watch_dir_with_debounce(
                 Ok(d) => d,
                 Err(e) => {
                     tracing::error!("notify debouncer init failed: {e}");
+                    if let Some(tx) = ready_tx.take() {
+                        let _ = tx.send(Err(format!("notify debouncer init failed: {e}")));
+                    }
                     return;
                 }
             };
@@ -103,7 +112,13 @@ pub async fn watch_dir_with_debounce(
             .watch(&watch_root, RecursiveMode::Recursive)
         {
             tracing::error!("notify watch({:?}) failed: {e}", watch_root);
+            if let Some(tx) = ready_tx.take() {
+                let _ = tx.send(Err(format!("notify watch({watch_root:?}) failed: {e}")));
+            }
             return;
+        }
+        if let Some(tx) = ready_tx.take() {
+            let _ = tx.send(Ok(()));
         }
 
         // Pump events until the async receiver closes. A quiet directory never
@@ -153,6 +168,16 @@ pub async fn watch_dir_with_debounce(
         }
         drop(debouncer); // explicit RAII release
     });
+
+    match ready_rx.await {
+        Ok(Ok(())) => {}
+        Ok(Err(message)) => return Err(FsError::Io(message)),
+        Err(_) => {
+            return Err(FsError::Io(
+                "native file watcher exited before initialization completed".to_string(),
+            ));
+        }
+    }
 
     Ok(Box::pin(ReceiverStream::new(rx)))
 }

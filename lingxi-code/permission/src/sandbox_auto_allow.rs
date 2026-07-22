@@ -289,7 +289,9 @@ mod wog {
 
     /// Strip a single `['"\\]` char globally — WOg's `.replace(/['"\\]/g,"")`.
     fn dequote(s: &str) -> String {
-        s.chars().filter(|c| !matches!(c, '\'' | '"' | '\\')).collect()
+        s.chars()
+            .filter(|c| !matches!(c, '\'' | '"' | '\\'))
+            .collect()
     }
 
     /// Parse a leading `^([A-Za-z_][A-Za-z0-9_]*)\+?=(.*)$` env-assignment token,
@@ -577,8 +579,7 @@ mod wog {
         // recheck on the dequoted argv `u` below is retained.
         let u: Vec<String> = l.iter().map(|m| dequote(m)).collect();
         // Dequoted argv env-assign Itt recheck.
-        if u
-            .iter()
+        if u.iter()
             .any(|m| parse_env_assign(m).is_some_and(|(name, _)| ast::itt(name)))
         {
             return false;
@@ -607,15 +608,16 @@ mod wog {
         // GOg-form.
         if gog_has(f)
             && (d
-                || u.iter().any(|m| {
-                    m.contains('[') && re(&ARR_EXP, r"[$`]").is_match(m)
-                }))
+                || u.iter()
+                    .any(|m| m.contains('[') && re(&ARR_EXP, r"[$`]").is_match(m)))
         {
             return false;
         }
         // test-form.
         if f == "test"
-            && (d || u.iter().any(|m| m == "-t" || ast::TEST_ARITH_CMP_OPS.contains(&m.as_str())))
+            && (d
+                || u.iter()
+                    .any(|m| m == "-t" || ast::TEST_ARITH_CMP_OPS.contains(&m.as_str())))
         {
             return false;
         }
@@ -628,9 +630,7 @@ mod wog {
             return false;
         }
         // jobs-form.
-        if f == "jobs"
-            && (d || p || u.iter().any(|m| re(&JOBS_X, r"^-[^-]*x").is_match(m)))
-        {
+        if f == "jobs" && (d || p || u.iter().any(|m| re(&JOBS_X, r"^-[^-]*x").is_match(m))) {
             return false;
         }
         // set-form.
@@ -913,7 +913,9 @@ mod tests {
         // `echo $FOO` is too-complex (simple_expansion) but WOg-clean: echo is
         // not a gated family, so `p`/`d` are not consulted → auto-allow.
         assert!(wog_cfg().wog_allows_when_too_complex("echo $FOO", R));
-        assert!(wog_cfg().wog_allows_when_too_complex("echo $(date)", "Contains command_substitution"));
+        assert!(
+            wog_cfg().wog_allows_when_too_complex("echo $(date)", "Contains command_substitution")
+        );
         // A safe env-assign prefix (VOg strips it) still allows.
         assert!(wog_cfg().wog_allows_when_too_complex("cat $FILE", R));
     }

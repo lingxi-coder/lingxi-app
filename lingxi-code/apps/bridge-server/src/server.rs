@@ -41,7 +41,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
 use bridge::wire::Frame;
@@ -176,12 +176,8 @@ pub struct BridgeConnection {
     router: Option<Arc<dyn CommandRouter>>,
     /// Set once the opening `hello` handshake is ACCEPTED (compatible versions).
     handshaken: Arc<AtomicBool>,
-    /// Set once a `hello` handshake is REFUSED (a breaking-version mismatch,
-    /// governing decision §0.10 / F2-07). A refused connection's subsequent
-    /// commands are dropped — a peer disagreeing on a breaking version never
-    /// drives the engine. (Distinct from "no `hello` yet": the F2-05/F2-06
-    /// single-client skeleton predates a mandatory handshake, so a client that
-    /// never sent a `hello` is the trusted local child and still routes.)
+    /// Set once a `hello` handshake is refused. A refused connection's
+    /// subsequent commands are rejected and can never drive the engine.
     handshake_refused: Arc<AtomicBool>,
     /// Input message queue (spec §27). A `SendPrompt` that arrives while a turn
     /// is in flight is ENQUEUED here instead of spawning a second concurrent
@@ -193,11 +189,17 @@ pub struct BridgeConnection {
     /// never queued, so the inverted permission handshake that unblocks a parked
     /// tool `check()` keeps dispatching immediately (server design above).
     queue: Arc<MessageQueueManager>,
+    /// Dynamic-loop state scoped to this connection/session.
+    loop_runtime: Arc<tool_cron::LoopRuntime>,
     /// Whether the single turn-drain loop is currently running. Twin of
     /// print.ts run()'s `running` flag (L1866): the first `SendPrompt` that wins
     /// this flag OWNS the drain loop; concurrent prompts enqueue and the owner
     /// drains them before clearing the flag.
     turn_running: Arc<AtomicBool>,
+    /// Abort handle for the currently-owned spawned turn-drain loop. On close we
+    /// abort it so stale turn work cannot survive into the next reconnect and
+    /// emit onto a newly-claimed outbound sink.
+    active_turn_task: Arc<StdMutex<Option<tokio::task::AbortHandle>>>,
 }
 
 impl Default for BridgeConnection {
@@ -229,7 +231,11 @@ fn prompt_command(text: String) -> QueuedCommand {
 /// Drain every queued MAIN-THREAD prompt as a follow-up turn, coalescing
 /// consecutive prompts into one turn (twin of `joinPromptValues` /
 /// `drainCommandQueue`). Runs until no main-thread command remains.
-async fn drain_main_thread(driver: &Arc<dyn TurnDriver>, queue: &Arc<MessageQueueManager>) {
+async fn drain_main_thread(
+    driver: &Arc<dyn TurnDriver>,
+    queue: &Arc<MessageQueueManager>,
+    loop_runtime: &Arc<tool_cron::LoopRuntime>,
+) {
     loop {
         // Snapshot the highest-priority main-thread, non-slash prompts so a run
         // of consecutive prompts merges into a single follow-up turn.
@@ -251,7 +257,11 @@ async fn drain_main_thread(driver: &Arc<dyn TurnDriver>, queue: &Arc<MessageQueu
                 Some(cmd) => {
                     if let Some(t) = cmd.text() {
                         if !t.is_empty() {
-                            tag_loop_tick_in_flight(cmd.source == QueueSource::Cron, t);
+                            tag_loop_tick_in_flight(
+                                loop_runtime,
+                                cmd.source == QueueSource::Cron,
+                                t,
+                            );
                             driver.run_turn(t.to_string()).await;
                         }
                     }
@@ -270,8 +280,8 @@ async fn drain_main_thread(driver: &Arc<dyn TurnDriver>, queue: &Arc<MessageQueu
             .find(|c| c.source == QueueSource::Cron && consumed.contains(&c.uuid))
             .and_then(|c| c.text().map(str::to_string));
         match cron_tick {
-            Some(ref t) => tag_loop_tick_in_flight(true, t),
-            None => tag_loop_tick_in_flight(false, &joined),
+            Some(ref t) => tag_loop_tick_in_flight(loop_runtime, true, t),
+            None => tag_loop_tick_in_flight(loop_runtime, false, &joined),
         }
         queue.remove(&consumed, "drained into follow-up turn").await;
         driver.run_turn(joined).await;
@@ -282,11 +292,11 @@ async fn drain_main_thread(driver: &Arc<dyn TurnDriver>, queue: &Arc<MessageQueu
 /// edge can arm the keepalive fallback. A `QueueSource::Cron` command IS a loop
 /// tick (binary `d.kind==="loop"`); any other turn clears a stale tag so a user
 /// turn never inherits one.
-fn tag_loop_tick_in_flight(is_cron: bool, text: &str) {
+fn tag_loop_tick_in_flight(loop_runtime: &tool_cron::LoopRuntime, is_cron: bool, text: &str) {
     if is_cron {
-        tool_cron::begin_loop_tick(text.to_string());
+        loop_runtime.begin_tick(text.to_string());
     } else {
-        tool_cron::take_loop_tick_in_flight_prompt();
+        loop_runtime.take_in_flight_prompt();
     }
 }
 
@@ -314,7 +324,9 @@ impl BridgeConnection {
             queue: Arc::new(MessageQueueManager::with_recorder(Arc::new(
                 TelemetryQueueRecorder::new(),
             ))),
+            loop_runtime: Arc::new(tool_cron::LoopRuntime::default()),
             turn_running: Arc::new(AtomicBool::new(false)),
+            active_turn_task: Arc::new(StdMutex::new(None)),
         }
     }
 
@@ -369,6 +381,12 @@ impl BridgeConnection {
         self.queue.clone()
     }
 
+    /// A clone of this connection's dynamic-loop state.
+    #[must_use]
+    pub fn loop_runtime_handle(&self) -> Arc<tool_cron::LoopRuntime> {
+        self.loop_runtime.clone()
+    }
+
     /// A clone of the gate handle, for tests that need to observe the parked /
     /// drained request count directly.
     #[must_use]
@@ -376,16 +394,28 @@ impl BridgeConnection {
         self.gate.clone().expect("gate_handle called before bind()")
     }
 
-    /// Ensure the connection's outbound cell points at the live [`FrameSink`].
-    /// Idempotent: the transport hands a fresh `FrameSink` clone on every
-    /// `on_frame`, but they all feed the same per-connection write task, so we
-    /// only need to populate the cell once (and re-populating with a clone is
-    /// harmless).
-    async fn ensure_outbound(&self, out: &FrameSink) {
+    /// Claim the single active-client slot, or confirm that `out` belongs to the
+    /// client that already owns it.
+    async fn claim_outbound(&self, out: &FrameSink) -> bool {
         let mut cell = self.out.lock().await;
-        if cell.is_none() {
-            *cell = Some(out.clone());
+        match cell.as_ref() {
+            Some(active) => active.same_channel(out),
+            None => {
+                *cell = Some(out.clone());
+                true
+            }
         }
+    }
+
+    fn error_response(id: u64, message: impl Into<String>) -> Frame {
+        Frame::Response(BridgeResponse {
+            id,
+            result: None,
+            error: Some(BridgeWireError {
+                code: -32600,
+                message: message.into(),
+            }),
+        })
     }
 
     /// Handle the opening `hello` handshake frame (F2-07).
@@ -399,6 +429,15 @@ impl BridgeConnection {
     /// false, so no subsequent command is routed. A compatible handshake replies
     /// with our [`ServerHello`] and flips `handshaken`.
     async fn handle_hello(&self, request_id: u64, hello: ClientHello) {
+        if self.handshake_refused.load(Ordering::SeqCst) {
+            if let Some(sink) = self.out.lock().await.as_ref() {
+                let _ = sink.send(Self::error_response(
+                    request_id,
+                    "connection handshake was already refused",
+                ));
+            }
+            return;
+        }
         let bridge_ok = version_compatible(BRIDGE_PROTOCOL_VERSION, &hello.protocol_version);
         let server_caps = Capabilities::default();
         let client_ok = version_compatible(
@@ -585,8 +624,9 @@ impl BridgeConnection {
         }
 
         let queue = self.queue.clone();
+        let loop_runtime = self.loop_runtime.clone();
         let turn_running = self.turn_running.clone();
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             // Seed turn — the prompt that won the loop (carries its images).
             driver.run_turn_with_images(text, images).await;
 
@@ -595,7 +635,7 @@ impl BridgeConnection {
             // close the race where a prompt enqueues between the empty-check and
             // the flag clear (twin of print.ts recheckCommandQueue).
             loop {
-                drain_main_thread(&driver, &queue).await;
+                drain_main_thread(&driver, &queue, &loop_runtime).await;
                 turn_running.store(false, Ordering::SeqCst);
                 // If a prompt slipped in after the last drain but before the
                 // store, re-claim the loop and drain again; otherwise we're done.
@@ -609,6 +649,10 @@ impl BridgeConnection {
                 break;
             }
         });
+        *self
+            .active_turn_task
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(task.abort_handle());
     }
 
     /// Resolve a parked permission request on the gate (the WS read task side of
@@ -637,7 +681,15 @@ impl BridgeConnection {
 #[async_trait]
 impl FramePump for BridgeConnection {
     async fn on_frame(&self, frame: Frame, out: FrameSink) {
-        self.ensure_outbound(&out).await;
+        if !self.claim_outbound(&out).await {
+            if let Frame::Request(request) = frame {
+                let _ = out.send(Self::error_response(
+                    request.id,
+                    "bridge-server already has an active client",
+                ));
+            }
+            return;
+        }
         match frame {
             // The opening handshake (F2-07) rides the request/response envelope:
             // `method == "hello"` with a `ClientHello` payload. It is answered
@@ -649,21 +701,21 @@ impl FramePump for BridgeConnection {
                 Ok(hello) => self.handle_hello(id, hello).await,
                 Err(e) => {
                     tracing::debug!(error = %e, "bridge-server: undecodable ClientHello");
+                    if let Some(sink) = self.out.lock().await.as_ref() {
+                        let _ = sink.send(Self::error_response(id, "invalid hello request"));
+                    }
                 }
             },
-            Frame::Request(BridgeRequest { params, .. }) => {
-                // A peer that disagreed on a breaking version was REFUSED at the
-                // handshake (`handshake_refused` set); drop its commands so a
-                // mismatched client can never drive the engine (the load-bearing
-                // F2-07 guarantee, governing decision §0.10). (The F2-05/F2-06
-                // single-client skeleton predates a mandatory handshake: a client
-                // that never sent a `hello` is the trusted local Electron child and
-                // still routes — the version guard only ENGAGES once a `hello`
-                // arrives and is refused.)
-                if self.handshake_refused.load(Ordering::SeqCst) {
-                    tracing::debug!(
-                        "bridge-server: dropping command on a version-refused connection"
-                    );
+            Frame::Request(BridgeRequest { id, params, .. }) => {
+                if !self.handshaken.load(Ordering::SeqCst) {
+                    let message = if self.handshake_refused.load(Ordering::SeqCst) {
+                        "connection handshake was refused"
+                    } else {
+                        "successful hello required before commands"
+                    };
+                    if let Some(sink) = self.out.lock().await.as_ref() {
+                        let _ = sink.send(Self::error_response(id, message));
+                    }
                     return;
                 }
                 match serde_json::from_value::<ClientCommand>(params) {
@@ -683,6 +735,46 @@ impl FramePump for BridgeConnection {
     }
 
     async fn on_close(&self) {
+        self.close_connection(None).await;
+    }
+
+    async fn on_close_with_sink(&self, sink: FrameSink) {
+        self.close_connection(Some(&sink)).await;
+    }
+}
+
+impl BridgeConnection {
+    fn abort_active_turn_task(&self) {
+        if let Some(handle) = self
+            .active_turn_task
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .take()
+        {
+            handle.abort();
+        }
+    }
+
+    async fn close_connection(&self, closing: Option<&FrameSink>) {
+        let mut active = self.out.lock().await;
+        if closing.is_some_and(|sink| {
+            active
+                .as_ref()
+                .is_none_or(|current| !current.same_channel(sink))
+        }) {
+            return;
+        }
+        *active = None;
+        drop(active);
+        self.handshaken.store(false, Ordering::SeqCst);
+        self.handshake_refused.store(false, Ordering::SeqCst);
+        self.abort_active_turn_task();
+        self.turn_running.store(false, Ordering::SeqCst);
+        self.queue.clear_active_turn().await;
+        self.queue.clear().await;
+        self.loop_runtime.take_in_flight_prompt();
+        self.tool_names.lock().await.clear();
+
         // Fail-closed: drop every parked permission sender so any in-flight
         // `check()` resolves `Deny` (the client that would approve is gone).
         if let Some(gate) = self.gate.as_ref() {
@@ -1020,6 +1112,23 @@ mod tests {
         }
     }
 
+    #[test]
+    fn loop_runtime_is_isolated_between_connections() {
+        let first = super::BridgeConnection::new();
+        let second = super::BridgeConnection::new();
+        first
+            .loop_runtime
+            .begin_tick("first connection tick".to_string());
+
+        // A normal prompt on another connection clears only its own state.
+        second.loop_runtime.take_in_flight_prompt();
+        assert_eq!(
+            first.loop_runtime.in_flight_prompt().as_deref(),
+            Some("first connection tick")
+        );
+        assert_eq!(second.loop_runtime.in_flight_prompt(), None);
+    }
+
     /// REGRESSION (verify-wf HIGH): a dynamic loop tick whose sentinel resolved to
     /// NON-slash instruction text takes the BATCHED drain branch. The drain must
     /// still tag it as the in-flight loop tick (binary `if(d.kind==="loop")
@@ -1043,9 +1152,10 @@ mod tests {
             captured: Arc::new(Mutex::new(None)),
             notify: Arc::new(Notify::new()),
         });
-        super::drain_main_thread(&driver, &queue).await;
+        let loop_runtime = Arc::new(tool_cron::LoopRuntime::default());
+        super::drain_main_thread(&driver, &queue, &loop_runtime).await;
         assert_eq!(
-            tool_cron::loop_tick_in_flight_prompt().as_deref(),
+            loop_runtime.in_flight_prompt().as_deref(),
             Some("# Autonomous loop tick"),
             "the batched drain branch must tag a Cron tick as in-flight"
         );
@@ -1071,9 +1181,10 @@ mod tests {
             captured: Arc::new(Mutex::new(None)),
             notify: Arc::new(Notify::new()),
         });
-        super::drain_main_thread(&driver, &queue).await;
+        let loop_runtime = Arc::new(tool_cron::LoopRuntime::default());
+        super::drain_main_thread(&driver, &queue, &loop_runtime).await;
         assert_eq!(
-            tool_cron::loop_tick_in_flight_prompt(),
+            loop_runtime.in_flight_prompt(),
             None,
             "a user prompt must not be tagged as a loop tick"
         );

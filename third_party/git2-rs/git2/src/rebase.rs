@@ -117,7 +117,9 @@ impl<'repo> Rebase<'repo> {
         let name_bytes =
             unsafe { crate::opt_bytes(self, raw::git_rebase_orig_head_name(self.raw)) };
         match name_bytes {
-            Some(nb) => std::str::from_utf8(nb).map(|s| Some(s)).map_err(|e| e.into()),
+            Some(nb) => std::str::from_utf8(nb)
+                .map(|s| Some(s))
+                .map_err(|e| e.into()),
             None => Ok(None),
         }
     }
@@ -321,7 +323,9 @@ impl<'rebase> RebaseOperation<'rebase> {
     pub fn exec(&self) -> Result<Option<&str>, Error> {
         let exec_bytes = unsafe { crate::opt_bytes(self, (*self.raw).exec) };
         match exec_bytes {
-            Some(eb) => std::str::from_utf8(eb).map(|s| Some(s)).map_err(|e| e.into()),
+            Some(eb) => std::str::from_utf8(eb)
+                .map(|s| Some(s))
+                .map_err(|e| e.into()),
             None => Ok(None),
         }
     }

@@ -58,6 +58,15 @@ impl FrameSink {
     pub fn send(&self, frame: Frame) -> bool {
         self.tx.send(frame).is_ok()
     }
+
+    /// Whether both handles belong to the same WebSocket connection.
+    ///
+    /// This exposes channel identity without exposing the channel itself, so a
+    /// shared pump can enforce a single active client.
+    #[must_use]
+    pub fn same_channel(&self, other: &Self) -> bool {
+        self.tx.same_channel(&other.tx)
+    }
 }
 
 /// A per-connection read/write pump callback supplied by the caller
@@ -87,6 +96,12 @@ pub trait FramePump: Send + Sync + 'static {
     /// task vanishes, so a turn future can never hang waiting for an approval
     /// from a client that is gone.
     async fn on_close(&self) {}
+
+    /// Connection-aware close notification. The default preserves the original
+    /// [`Self::on_close`] API for pumps that do not need connection identity.
+    async fn on_close_with_sink(&self, _sink: FrameSink) {
+        self.on_close().await;
+    }
 }
 
 /// Endpoint handle. Holds the listener port and the auth-token cell.
@@ -338,7 +353,7 @@ where
     // The connection ended (disconnect / Close / read error). Notify the pump so
     // it can run fail-closed teardown (the bridge-server connection drains its
     // permission gate here — F2-06).
-    pump.on_close().await;
+    pump.on_close_with_sink(sink).await;
 }
 
 /// Constant-time byte-slice equality. Length-mismatch is short-circuited

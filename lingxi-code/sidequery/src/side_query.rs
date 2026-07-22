@@ -21,6 +21,13 @@ use thiserror::Error;
 pub struct SideQueryRequest {
     /// Model id (e.g. `claude-haiku-4-5`).
     pub model: String,
+    /// Optional provider profile that owns `model`.
+    ///
+    /// Compaction inherits this from the live session so a model id shared by
+    /// multiple providers is routed through the same provider as the parent
+    /// turn instead of falling back to registry-first resolution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
     /// Optional system prompt; when `None` the provider default applies.
     pub system_prompt: Option<String>,
     /// Conversation messages to feed the model.

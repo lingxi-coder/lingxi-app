@@ -189,6 +189,7 @@ impl OutputStream for AdapterOutputStream {
         messages_before: u32,
         messages_after: u32,
         bytes_saved: u64,
+        _summary: &str,
     ) {
         self.sink
             .emit(ClientEvent::CompactionCompleted {
@@ -459,7 +460,9 @@ mod tests {
         let sink = MockSink::arc();
         let stream = AdapterOutputStream::new(sink.clone());
 
-        stream.emit_compaction_completed(42, 8, 1_024).await;
+        stream
+            .emit_compaction_completed(42, 8, 1_024, "Summary:\nkept context")
+            .await;
 
         let events = sink.events().await;
         assert_eq!(events.len(), 1);

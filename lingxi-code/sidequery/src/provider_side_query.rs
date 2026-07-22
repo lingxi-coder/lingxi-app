@@ -1,12 +1,14 @@
-//! Concrete [`SideQueryClient`] backed by `llm_client::DefaultLlmClient`.
+//! Concrete [`SideQueryClient`] backed by the provider-neutral LLM stack.
 //!
 //! A side query is a stateless one-shot LLM call (see [`crate::side_query`]).
 //! [`ProviderSideQueryClient`] wires the [`SideQueryRequest`] DTO to the
-//! Anthropic Messages endpoint and decodes the [`LlmResponse`] back into a
-//! [`SideQueryResponse`]. It owns a [`DefaultLlmClient`] for routing, codec,
-//! and auth middleware, plus an object-safe
-//! [`Arc<dyn HttpTransport>`] handle so the whole client stays usable behind
-//! `Arc<dyn SideQueryClient>` (`MemorySelector::new` takes exactly that).
+//! configured provider and decodes the [`LlmResponse`] back into a
+//! [`SideQueryResponse`]. Utility callers can construct an isolated Anthropic
+//! client with [`ProviderSideQueryClient::new`]. Session-bound compaction and
+//! recap use [`ProviderSideQueryClient::from_service`] so the fork reuses the
+//! parent [`llm_client::ApiService`] — including its exact provider route,
+//! OAuth/keychain credential, message normalization, prompt-cache boundaries,
+//! headers, and retry behavior.
 //!
 //! ## Field forwarding
 //!
@@ -14,7 +16,7 @@
 //! plus `tool_choice`, `stop_sequences` and (cc 2.1.198) `thinking` — a
 //! `Some` session [`llm_client::model::thinking::ThinkingConfig`] resolves
 //! through the SAME `reasoning_for_request` rules as the main loop, so the
-//! compaction fork call inherits the session's extended-thinking config.
+//! isolated call inherits the supplied extended-thinking config.
 //! `output_format` drives the structured-text decode (not a server-side
 //! `response_format`); `max_retries` stays dropped. Existing callers pass
 //! `None`/empty for the extras, so their wire stays byte-identical.
@@ -46,13 +48,8 @@ const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 /// Static credential id used inside the internal config for a static API key.
 const SIDEQUERY_CRED_ID: &str = "sidequery_key";
 
-/// Sized newtype adapter around an `Arc<dyn HttpTransport>`.
-///
-/// `DefaultLlmClient::execute` is generic over `T: Transport` and carries an
-/// implicit `Sized` bound, so an unsized `&dyn HttpTransport` cannot be passed
-/// directly. Wrapping the trait object in this sized newtype (which itself
-/// implements `HttpTransport` by delegating to the inner `Arc`) lets the client
-/// store an object-safe handle yet still satisfy the generic, sized bound.
+/// Sized newtype adapter around an `Arc<dyn HttpTransport>` for the isolated
+/// constructor's [`LlmTransportBridge`].
 struct ArcTransport(Arc<dyn HttpTransport>);
 
 #[async_trait]
@@ -70,17 +67,20 @@ impl HttpTransport for ArcTransport {
     }
 }
 
-/// One-shot [`SideQueryClient`] that routes through Anthropic's Messages API.
-///
-/// Construct with [`Self::new`] for the common case. The `from_provider`
-/// constructor is no longer available; callers that previously used it should
-/// switch to [`Self::new`].
+enum ProviderSideQueryBackend {
+    /// Standalone utility-query client built from a raw Anthropic API key.
+    Direct {
+        client: DefaultLlmClient,
+        transport: Arc<dyn HttpTransport>,
+    },
+    /// The live session service used by compaction/recap.
+    Session(Arc<llm_client::ApiService>),
+}
+
+/// One-shot [`SideQueryClient`] that can either run as an isolated Anthropic
+/// utility client or through a live session's provider-neutral service.
 pub struct ProviderSideQueryClient {
-    /// `DefaultLlmClient` owning routing, codec, and auth middleware.
-    client: DefaultLlmClient,
-    /// Object-safe transport handle. Stored as `Arc<dyn HttpTransport>` (not a
-    /// generic `T`) so the struct is usable behind `Arc<dyn SideQueryClient>`.
-    transport: Arc<dyn HttpTransport>,
+    backend: ProviderSideQueryBackend,
 }
 
 impl ProviderSideQueryClient {
@@ -141,7 +141,22 @@ impl ProviderSideQueryClient {
             .expect("sidequery ClientConfig is structurally valid")
             .with_credential_provider(cred_provider);
 
-        Self { client, transport }
+        Self {
+            backend: ProviderSideQueryBackend::Direct { client, transport },
+        }
+    }
+
+    /// Bind side queries to the live session API service.
+    ///
+    /// This is the required constructor for compaction and recap. It prevents
+    /// the fork from silently switching to a fresh static-key Anthropic client
+    /// when the parent is authenticated with OAuth, a keychain credential, a
+    /// gateway, or a non-Anthropic provider profile.
+    #[must_use]
+    pub fn from_service(service: Arc<llm_client::ApiService>) -> Self {
+        Self {
+            backend: ProviderSideQueryBackend::Session(service),
+        }
     }
 }
 
@@ -286,6 +301,28 @@ fn decode_response(resp: llm_client::LlmResponse, want_structured: bool) -> Side
 #[async_trait]
 impl SideQueryClient for ProviderSideQueryClient {
     async fn query(&self, request: SideQueryRequest) -> Result<SideQueryResponse, SideQueryError> {
+        if let ProviderSideQueryBackend::Session(service) = &self.backend {
+            let wants_structured = request.output_format.is_some();
+            let resp = service
+                .messages_create_side_query(
+                    &request.model,
+                    request.profile.as_deref(),
+                    request.system_prompt.as_deref(),
+                    request.messages,
+                    request.tools,
+                    request.max_tokens,
+                    convert_tool_choice(request.tool_choice.as_ref()),
+                    request.stop_sequences,
+                    request.temperature,
+                )
+                .await?;
+            return Ok(decode_response(resp, wants_structured));
+        }
+
+        let ProviderSideQueryBackend::Direct { client, transport } = &self.backend else {
+            unreachable!("session backend returned above")
+        };
+
         // Build the LlmRequest from the SideQueryRequest DTO.
         let system: Vec<SystemBlock> = request
             .system_prompt
@@ -318,6 +355,7 @@ impl SideQueryClient for ProviderSideQueryClient {
 
         let llm_req = LlmRequest {
             model: request.model,
+            profile: request.profile,
             system,
             messages,
             tools,
@@ -333,10 +371,10 @@ impl SideQueryClient for ProviderSideQueryClient {
 
         // Route through the transport bridge so the existing Arc<dyn
         // HttpTransport> is usable as an llm_client::Transport.
-        let arc_transport = ArcTransport(Arc::clone(&self.transport));
+        let arc_transport = ArcTransport(Arc::clone(transport));
         let bridge = LlmTransportBridge::new(arc_transport);
 
-        let resp = self.client.execute(&llm_req, &bridge).await?;
+        let resp = client.execute(&llm_req, &bridge).await?;
 
         Ok(decode_response(resp, request.output_format.is_some()))
     }
@@ -589,6 +627,7 @@ mod tests {
     fn req(output_format: Option<serde_json::Value>) -> SideQueryRequest {
         SideQueryRequest {
             model: "claude-haiku-4-5".into(),
+            profile: None,
             system_prompt: Some("system".into()),
             messages: vec![ConversationMessage::user(MessageId::new(), "hi".into())],
             tools: vec![],
@@ -687,6 +726,124 @@ mod tests {
             body.get("stop_sequences").is_none(),
             "stop_sequences dropped"
         );
+    }
+
+    /// `/compact` must not build a second static-key Anthropic client. The
+    /// session backend reuses the parent's provider service, which also runs
+    /// Claude Code's pre-wire normalization: transcript-only compact markers
+    /// are removed and adjacent user turns are merged before encoding.
+    #[tokio::test]
+    async fn session_backend_reuses_parent_route_auth_and_message_pipeline() {
+        let response = serde_json::json!({
+            "id": "msg_compact",
+            "model": "claude-sonnet-4-20250514",
+            "content": [{ "type": "text", "text": "<summary>ok</summary>" }],
+            "stop_reason": "end_turn",
+            "usage": { "input_tokens": 3, "output_tokens": 2 }
+        })
+        .to_string();
+        let transport = Arc::new(StubTransport::new(response));
+
+        let config = ClientConfig {
+            providers: vec![ProviderProfile {
+                provider_id: ProviderId::AnthropicFirstParty,
+                profile_name: "parent-profile".to_string(),
+                base_url: DEFAULT_BASE_URL.to_string(),
+                protocol: ProtocolFamily::AnthropicMessages,
+                auth: AuthStrategy::OAuthBearer,
+                credential: CredentialConfig::Static {
+                    id: "parent-session-key".to_string(),
+                },
+                models: vec![ModelProfile {
+                    display_model: "claude-sonnet-4-20250514".to_string(),
+                    request_model: "claude-sonnet-4-20250514".to_string(),
+                    billing_model: "claude-sonnet-4".to_string(),
+                    aliases: vec![],
+                    description: None,
+                    capabilities: Capabilities {
+                        streaming: false,
+                        tools: true,
+                        reasoning: true,
+                        ..Capabilities::default()
+                    },
+                }],
+                pricing: PricingConfig::default(),
+                signing: None,
+                azure: None,
+                supports_websockets: false,
+                supports_websocket_compression: false,
+                websocket_connect_timeout_ms: None,
+            }],
+        };
+        let parent_client = DefaultLlmClient::from_config(config)
+            .expect("parent client config")
+            .with_credential_provider(Arc::new(StaticCredentialProvider::new(
+                Credential::BearerToken("parent-oauth-token".to_string()),
+            )));
+        let parent_transport: Arc<dyn llm_client::Transport> = Arc::new(LlmTransportBridge::new(
+            ArcTransport(transport.clone() as Arc<dyn HttpTransport>),
+        ));
+        let parent_service = Arc::new(
+            llm_client::ApiService::new(
+                Arc::new(parent_client),
+                parent_transport,
+                llm_client::SubscriberState::default(),
+                llm_client::model::user_agent::UserAgentEnv::default(),
+                "test",
+                None,
+                None,
+            )
+            // Exercise the main-turn temperature default: disabled thinking
+            // would inject `temperature: 1`, which the side query's explicit
+            // `None` must clear to preserve its independent wire contract.
+            .with_thinking(llm_client::model::thinking::ThinkingConfig::Disabled)
+            // A main `--json-schema` requirement must not leak into compact.
+            .with_forced_tool_choice(llm_client::ToolChoice::Tool {
+                name: "StructuredOutput".to_string(),
+            }),
+        );
+        let client = ProviderSideQueryClient::from_service(parent_service);
+        let mut request = req(None);
+        request.model = "claude-sonnet-4-20250514".to_string();
+        request.profile = Some("parent-profile".to_string());
+        request.temperature = None;
+        request.messages = vec![
+            ConversationMessage::System {
+                id: MessageId::new(),
+                content: "Conversation compacted".to_string(),
+            },
+            ConversationMessage::user(MessageId::new(), "existing context".into()),
+            ConversationMessage::user(MessageId::new(), "compact prompt".into()),
+        ];
+
+        let result = client.query(request).await.expect("session side query");
+        assert_eq!(result.text.as_deref(), Some("<summary>ok</summary>"));
+
+        let received = transport.received.lock().unwrap();
+        assert_eq!(received.len(), 1);
+        let sent = &received[0];
+        assert!(sent.headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("authorization") && value == "Bearer parent-oauth-token"
+        }));
+        assert!(sent.headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("anthropic-beta") && value.contains("oauth-2025-04-20")
+        }));
+        let body: serde_json::Value =
+            serde_json::from_str(sent.body.as_deref().expect("request body")).unwrap();
+        assert_eq!(body["model"], "claude-sonnet-4-20250514");
+        assert!(
+            body.get("tool_choice").is_none(),
+            "main-turn forced tool choice leaked into compact: {body}"
+        );
+        assert!(
+            body.get("temperature").is_none(),
+            "main-turn temperature default leaked into compact: {body}"
+        );
+        let messages = body["messages"].as_array().expect("messages array");
+        assert_eq!(messages.len(), 1, "boundary dropped + user turns merged");
+        let content = messages[0]["content"].as_array().expect("content array");
+        assert_eq!(content[0]["text"], "existing context\n");
+        assert_eq!(content[1]["text"], "compact prompt");
     }
 
     #[tokio::test]

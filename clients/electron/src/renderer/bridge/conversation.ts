@@ -28,7 +28,7 @@
  * here — they are out of scope for the one-conversation Stage view.
  */
 
-import type { ClientEvent } from '@lingxi/bridge-client';
+import type { ClientEvent, MessageDto } from '@lingxi/bridge-client';
 import type { RunItem } from '../data';
 
 /**
@@ -97,7 +97,7 @@ export function appendUserPrompt(state: ConversationState, text: string): Conver
   const items = state.items.slice();
   // A new user turn closes any previously-open streaming lines.
   closeThinking(items, state.openThinkingIndex);
-  items.push({ type: 'narration', text: trimmed, strong: true });
+  items.push({ type: 'narration', text: trimmed, strong: true, role: 'user' });
   return { ...state, items, openAssistantIndex: -1, openThinkingIndex: -1 };
 }
 
@@ -112,6 +112,13 @@ function toolLabel(tool: string): string {
  */
 export function reduceEvent(state: ConversationState, event: ClientEvent): ConversationState {
   switch (event.type) {
+    case 'session_started':
+    case 'session_ended':
+      return emptyConversation();
+
+    case 'session_resumed':
+      return conversationFromMessages(event.messages);
+
     case 'turn_started':
       // Opening a turn starts fresh streaming lines.
       return { ...state, running: true, openAssistantIndex: -1, openThinkingIndex: -1 };
@@ -142,7 +149,7 @@ export function reduceEvent(state: ConversationState, event: ClientEvent): Conve
       let idx = state.openAssistantIndex;
       if (idx < 0 || items[idx]?.type !== 'narration') {
         idx = items.length;
-        items.push({ type: 'narration', text: event.text });
+        items.push({ type: 'narration', text: event.text, role: 'assistant' });
       } else {
         const prev = items[idx] as Extract<RunItem, { type: 'narration' }>;
         items[idx] = { ...prev, text: prev.text + event.text };
@@ -197,7 +204,12 @@ export function reduceEvent(state: ConversationState, event: ClientEvent): Conve
       }
       const items = state.items.slice();
       const prev = items[idx] as Extract<RunItem, { type: 'agent' }>;
-      items[idx] = { ...prev, state: 'done' };
+      items[idx] = {
+        ...prev,
+        state: 'done',
+        detail: previewToolResult(event.result_json),
+        error: event.is_error,
+      };
       let next: ConversationState = { ...state, items };
       if (event.is_error) {
         next = pushError(next, `${toolLabel(event.tool)} failed`);
@@ -234,6 +246,73 @@ export function reduceEvent(state: ConversationState, event: ClientEvent): Conve
   }
 }
 
+/** Rebuild the visible transcript carried by a successful session resume. */
+export function conversationFromMessages(messages: readonly MessageDto[]): ConversationState {
+  const items: RunItem[] = [];
+  const toolIndex = new Map<string, number>();
+
+  for (const message of messages) {
+    for (const block of message.blocks) {
+      switch (block.type) {
+        case 'text':
+          if (block.text.trim()) {
+            items.push({
+              type: 'narration',
+              text: block.text,
+              strong: message.role === 'user',
+              role: message.role === 'user' ? 'user' : 'assistant',
+            });
+          }
+          break;
+        case 'thinking':
+          if (block.thinking.trim()) {
+            items.push({ type: 'thinking', text: block.thinking, done: true });
+          }
+          break;
+        case 'redacted_thinking':
+          items.push({ type: 'thinking', text: 'Prior reasoning was redacted.', done: true });
+          break;
+        case 'tool_use': {
+          const idx = items.length;
+          items.push({
+            type: 'agent',
+            state: 'running',
+            title: toolLabel(block.tool),
+            sub: previewToolInput(block.input_json),
+            expandable: true,
+          });
+          toolIndex.set(block.id, idx);
+          break;
+        }
+        case 'tool_result': {
+          const idx = toolIndex.get(block.id);
+          const result = previewToolResult(block.result_json);
+          if (idx !== undefined && items[idx]?.type === 'agent') {
+            const previous = items[idx] as Extract<RunItem, { type: 'agent' }>;
+            items[idx] = { ...previous, state: 'done', detail: result, error: block.is_error };
+          } else {
+            items.push({
+              type: 'agent',
+              state: 'done',
+              title: toolLabel(block.tool),
+              detail: result,
+              error: block.is_error,
+              expandable: true,
+            });
+          }
+          break;
+        }
+      }
+    }
+  }
+
+  return {
+    ...emptyConversation(),
+    items,
+    toolIndex: Object.fromEntries(toolIndex),
+  };
+}
+
 /** Fold a whole event sequence (handy for tests + re-hydration). */
 export function reduceEvents(state: ConversationState, events: readonly ClientEvent[]): ConversationState {
   return events.reduce(reduceEvent, state);
@@ -249,7 +328,7 @@ function items_at(state: ConversationState, idx: number): RunItem | undefined {
 function pushError(state: ConversationState, message: string): ConversationState {
   const items = state.items.slice();
   closeThinking(items, state.openThinkingIndex);
-  items.push({ type: 'narration', text: `✗ ${message}`, strong: true });
+  items.push({ type: 'narration', text: `✗ ${message}`, strong: true, role: 'assistant' });
   return {
     ...state,
     items,
@@ -273,11 +352,33 @@ function previewToolInput(inputJson: string): string | undefined {
       const candidate =
         obj['file_path'] ?? obj['path'] ?? obj['command'] ?? obj['pattern'] ?? obj['query'];
       if (typeof candidate === 'string' && candidate.length > 0) {
-        return candidate.length > 80 ? candidate.slice(0, 79) + '…' : candidate;
+        const safe = redactSensitiveText(candidate);
+        return safe.length > 160 ? safe.slice(0, 159) + '…' : safe;
       }
     }
   } catch {
     // not JSON / malformed — fall through to no subtitle.
   }
   return undefined;
+}
+
+function previewToolResult(resultJson: string): string | undefined {
+  if (!resultJson) return undefined;
+  let text = resultJson;
+  try {
+    const parsed: unknown = JSON.parse(resultJson);
+    text = typeof parsed === 'string' ? parsed : JSON.stringify(parsed, null, 2);
+  } catch {
+    // Preserve non-JSON tool output as text.
+  }
+  const safe = redactSensitiveText(text.trim());
+  if (!safe) return undefined;
+  return safe.length > 2_000 ? safe.slice(0, 1_999) + '…' : safe;
+}
+
+function redactSensitiveText(value: string): string {
+  return value
+    .replace(/\b(sk-(?:ant-|proj-)?[A-Za-z0-9_-]{12,})\b/g, '[REDACTED]')
+    .replace(/\b(Bearer\s+)[A-Za-z0-9._~+\/-]+=*/gi, '$1[REDACTED]')
+    .replace(/((?:api[_-]?key|token|secret|password)\s*[=:]\s*)[^\s,;]+/gi, '$1[REDACTED]');
 }

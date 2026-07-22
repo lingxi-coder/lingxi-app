@@ -9,7 +9,12 @@
 use rand::rngs::OsRng;
 use rand::TryRngCore;
 use serde::{Deserialize, Serialize};
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 /// The literal `ideName` value we publish in the `~/.lingxi/ide/` lockfile,
 /// scanned by the real IDE peer (claude-code, VS Code Claude, …).
@@ -54,6 +59,20 @@ pub struct IdeLockfile {
 }
 
 impl IdeLockfile {
+    fn ensure_private_directory(&self) -> std::io::Result<()> {
+        std::fs::create_dir_all(&self.ide_dir)?;
+        let metadata = std::fs::symlink_metadata(&self.ide_dir)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "lockfile directory must be a real directory, not a symlink",
+            ));
+        }
+        #[cfg(unix)]
+        std::fs::set_permissions(&self.ide_dir, std::fs::Permissions::from_mode(0o700))?;
+        Ok(())
+    }
+
     /// Generate a 32-char lowercase hex auth token from `OsRng`.
     #[must_use]
     pub fn generate_auth_token() -> String {
@@ -193,18 +212,39 @@ impl IdeLockfile {
         self.port
     }
 
-    /// Atomically write the JSON body to disk.
+    /// Exclusively write the JSON body as a private regular file.
     ///
     /// # Errors
-    /// Returns I/O errors if serialization, the temp-file write, or the
-    /// rename-into-place step fails.
+    /// Returns I/O errors if the directory is unsafe, serialization fails, or a
+    /// path (including a stale file or symlink) already occupies this port.
     pub fn write(&self) -> std::io::Result<()> {
         let serialized = serde_json::to_vec_pretty(&self.body)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-        // Atomic write: tempfile in same dir + rename.
-        let tmp = self.ide_dir.join(format!(".{}.lock.tmp", self.port));
-        std::fs::write(&tmp, &serialized)?;
-        std::fs::rename(&tmp, self.path())?;
+        self.ensure_private_directory()?;
+
+        let path = self.path();
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options.open(&path)?;
+        if let Err(error) = file.write_all(&serialized) {
+            drop(file);
+            let _ = std::fs::remove_file(&path);
+            return Err(error);
+        }
+        #[cfg(unix)]
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            drop(file);
+            let _ = std::fs::remove_file(&path);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "lockfile path is not a regular file",
+            ));
+        }
         Ok(())
     }
 

@@ -11,24 +11,28 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
+    "test": "node --import ../shared/node_modules/tsx/dist/loader.mjs --test test/*.test.ts test/*.test.mjs",
+    "package:mac": "node scripts/package-mac.mjs",
+    "verify:package:static": "node scripts/verify-package.mjs",
+    "verify:package:smoke": "node scripts/packaged-app-smoke.mjs",
+    "verify:package": "npm run verify:package:static && npm run verify:package:smoke",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
     "typecheck": "npm run typecheck:node && npm run typecheck:web"
   },
   "dependencies": {
-    "@lingxi/bridge-client": "file:../shared",
-    "electron-updater": "^6.3.9"
+    "@lingxi/bridge-client": "file:../shared"
   },
   "devDependencies": {
     "@types/node": "^22.10.5",
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
-    "@vitejs/plugin-react": "^4.3.4",
-    "electron": "^33.3.1",
-    "electron-vite": "^2.3.0",
+    "@vitejs/plugin-react": "^5.2.0",
+    "electron": "43.1.1",
+    "electron-vite": "^5.0.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "typescript": "^5.7.3",
-    "vite": "^5.4.11"
+    "vite": "^7.3.6"
   }
 }

@@ -202,18 +202,20 @@ impl Sandbox for PosixSandbox {
         // (wired into the wrap suffix in Task 5 — inert until then). This port's
         // `prepare` carries one cwd, so `original_cwd == cwd` (the TS
         // `[originalCwd, cwd]` widening collapses to a single dir).
-        if let Some(cwd) = &cmd.cwd {
-            let (ro_in_place, scrub) = split_bare_repo_paths(std::slice::from_ref(cwd));
-            let mut ro = ro_in_place;
-            // The wrapper ignored `deny_write` before; now it enforces it for
-            // existing paths (absent ones are simply not present to write to).
-            for d in &runtime_cfg.filesystem.deny_write {
-                if std::path::Path::new(d).exists() {
-                    ro.push(d.clone());
+        if !runtime_cfg.filesystem.disabled {
+            if let Some(cwd) = &cmd.cwd {
+                let (ro_in_place, scrub) = split_bare_repo_paths(std::slice::from_ref(cwd));
+                let mut ro = ro_in_place;
+                // The wrapper ignored `deny_write` before; now it enforces it for
+                // existing paths (absent ones are simply not present to write to).
+                for d in &runtime_cfg.filesystem.deny_write {
+                    if std::path::Path::new(d).exists() {
+                        ro.push(d.clone());
+                    }
                 }
+                runtime_cfg.ro_bind_in_place = ro;
+                runtime_cfg.scrub_paths = scrub;
             }
-            runtime_cfg.ro_bind_in_place = ro;
-            runtime_cfg.scrub_paths = scrub;
         }
 
         // Build the full original command string for wrapping (command + args).

@@ -22,6 +22,11 @@ thiserror.workspace = true
 # nested-progress stream. No runtime pulled into this low-level crate.
 tokio = { workspace = true, features = ["sync"] }
 tokio-util.workspace = true
+fs2 = "0.4"
+tempfile = "3.13"
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "0.38", features = ["fs"] }
 
 [dev-dependencies]
 # `#[tokio::test]` for the async default-impl test on `HttpTransport`.

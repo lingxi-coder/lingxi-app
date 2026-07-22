@@ -222,3 +222,50 @@ test('usage_update captures the live token snapshot without emitting a scrollbac
   });
   assert.equal(s.usage?.outputTokens, 900);
 });
+
+test('session_resumed atomically replaces the transcript with lowered history', () => {
+  let s = appendUserPrompt(emptyConversation(), 'stale optimistic prompt');
+  s = reduceEvent(s, {
+    type: 'session_resumed',
+    session_id: 'abc',
+    messages: [
+      { role: 'user', blocks: [{ type: 'text', text: 'prior question' }] },
+      {
+        role: 'assistant',
+        blocks: [
+          { type: 'thinking', thinking: 'considering' },
+          { type: 'tool_use', id: 'tool-1', tool: 'Read', input_json: '{"file_path":"src/lib.rs"}' },
+          { type: 'tool_result', id: 'tool-1', tool: 'Read', result_json: '"contents"', is_error: false },
+          { type: 'text', text: 'prior answer' },
+        ],
+      },
+    ],
+  });
+  assert.equal(s.running, false);
+  assert.equal(s.items.length, 4);
+  assert.deepEqual(s.items.map((item) => item.type), ['narration', 'thinking', 'agent', 'narration']);
+  const user = s.items[0] as Narration;
+  assert.equal(user.text, 'prior question');
+  assert.equal(user.strong, true);
+  const tool = s.items[2] as Agent;
+  assert.equal(tool.state, 'done');
+  assert.equal(tool.detail, 'contents');
+});
+
+test('session_started and session_ended clear stale conversation state', () => {
+  const populated = appendUserPrompt(emptyConversation(), 'old');
+  assert.deepEqual(reduceEvent(populated, { type: 'session_started', session_id: 'new' }), emptyConversation());
+  assert.deepEqual(reduceEvent(populated, { type: 'session_ended' }), emptyConversation());
+});
+
+test('tool result details redact common credential shapes', () => {
+  let s = reduceEvent(emptyConversation(), {
+    type: 'tool_use_started', id: 'secret', tool: 'Bash', input_json: '{"command":"curl -H Authorization:Bearer sk-ant-example123456789"}',
+  });
+  s = reduceEvent(s, {
+    type: 'tool_use_result', id: 'secret', tool: 'Bash', result_json: '"token=super-secret-value"', is_error: false,
+  });
+  const tool = s.items[0] as Agent;
+  assert.doesNotMatch(tool.sub ?? '', /sk-ant-example/);
+  assert.doesNotMatch(tool.detail ?? '', /super-secret-value/);
+});

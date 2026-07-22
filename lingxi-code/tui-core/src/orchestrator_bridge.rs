@@ -17,8 +17,106 @@
 //! 5. On `emit_end_turn` the bridge fires `TurnEvent::TurnEnded(_)`.
 
 use async_trait::async_trait;
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::UnboundedSender;
 use traits::{ContextPressureBanner, CostSnapshot, OutputStream, TurnOutcome};
+
+/// One live heartbeat value retained by the bridge. Heartbeats are transient
+/// render state and therefore may be replaced by a newer value for the same
+/// tool while the UI is backpressured.
+#[derive(Debug, Clone)]
+pub struct ToolHeartbeatUpdate {
+    /// Stable tool-use identifier.
+    pub id: protocol::ToolUseId,
+    /// Tool name used by the activity renderer.
+    pub tool: String,
+    /// Latest elapsed wall time in milliseconds.
+    pub elapsed_ms: u64,
+}
+
+#[derive(Debug, Default)]
+struct CoalescedToolHeartbeatsState {
+    latest: Vec<ToolHeartbeatUpdate>,
+    signal_queued: bool,
+}
+
+/// Latest-value mailbox used to ensure slow TUI consumers can have at most one
+/// heartbeat wake-up queued. Ordinary transcript-bearing events keep their
+/// FIFO semantics; only replaceable heartbeat state is coalesced.
+#[derive(Debug, Default)]
+pub struct CoalescedToolHeartbeats {
+    state: Mutex<CoalescedToolHeartbeatsState>,
+}
+
+impl CoalescedToolHeartbeats {
+    fn publish(&self, update: ToolHeartbeatUpdate) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(current) = state
+            .latest
+            .iter_mut()
+            .find(|current| current.id == update.id)
+        {
+            *current = update;
+        } else {
+            state.latest.push(update);
+        }
+        if state.signal_queued {
+            false
+        } else {
+            state.signal_queued = true;
+            true
+        }
+    }
+
+    /// Drain the newest heartbeat for each running tool and permit the bridge
+    /// to queue the next wake-up.
+    #[must_use]
+    pub fn drain(&self) -> Vec<ToolHeartbeatUpdate> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.signal_queued = false;
+        std::mem::take(&mut state.latest)
+    }
+
+    fn reset_after_send_failure(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.signal_queued = false;
+        state.latest.clear();
+    }
+}
+
+/// A slash-command row used to atomically refresh the interactive completion
+/// catalog after plugins or skills are reconciled. This transport type lives
+/// in `tui-core` so app-level async effects can update the owning widget
+/// without process-global mutable state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandCatalogEntry {
+    /// Command name including the leading slash.
+    pub name: String,
+    /// Full searchable description.
+    pub description: String,
+    /// Optional compact menu description.
+    pub menu_description: Option<String>,
+    /// Alternate names including the leading slash.
+    pub aliases: Vec<String>,
+}
+
+/// One live agent rendered next to the TUI composer.
+///
+/// Foreground Agent/Task tool calls are synthesized by the widget; background
+/// agents arrive as full snapshots from the CLI's task-registry poller.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunningAgentStatus {
+    /// Stable agent/task id (or the foreground tool-use id before launch).
+    pub id: String,
+    /// Claude task-registry type used by the compact footer summarizer.
+    pub task_type: String,
+    /// Display agent type, e.g. `Explore` or `general-purpose`.
+    pub agent_type: String,
+    /// Short task description supplied to the Agent tool.
+    pub description: String,
+    /// Lifecycle wire state. The input-adjacent surface keeps pending/running.
+    pub status: String,
+}
 
 /// Events flowing from the orchestrator into the TUI render loop.
 ///
@@ -44,6 +142,24 @@ pub enum TurnEvent {
         tool: String,
         /// JSON input passed to the tool.
         input: serde_json::Value,
+    },
+    /// Periodic liveness update for a tool that has started but not completed.
+    /// This is live state only: consumers must not append it to transcript
+    /// history.
+    ToolHeartbeat {
+        /// Stable id of the running tool call.
+        id: protocol::ToolUseId,
+        /// Tool name, retained so stateless clients can render the update.
+        tool: String,
+        /// Wall-clock age of the tool invocation in milliseconds.
+        elapsed_ms: u64,
+    },
+    /// Coalesced heartbeat wake-up produced by [`BridgeOutputStream`]. The
+    /// consumer drains the mailbox and applies each latest update exactly as a
+    /// [`Self::ToolHeartbeat`] without adding transcript rows.
+    ToolHeartbeatBatch {
+        /// Shared latest-value mailbox.
+        heartbeats: Arc<CoalescedToolHeartbeats>,
     },
     /// A tool result has returned.
     ToolUseResult {
@@ -102,10 +218,9 @@ pub enum TurnEvent {
         seq: String,
     },
     /// A successful `force_compact` finished. The TUI appends a
-    /// `CompactBoundary` variant, rendered by `CompactBoundaryMessage`
-    /// (M7-04) as `✻ Conversation compacted (ctrl+o for history)`. (M6-08
-    /// emitted a `[Compacted N → M messages]` `SystemText` placeholder;
-    /// M7-04 replaced it.)
+    /// `CompactBoundary` variant, rendered as a compact hint in normal mode
+    /// and the complete summary when Ctrl-O enables verbose transcript mode.
+    /// (M6-08 emitted a `[Compacted N → M messages]` placeholder.)
     CompactionCompleted {
         /// Message count BEFORE compaction.
         messages_before: u32,
@@ -113,6 +228,8 @@ pub enum TurnEvent {
         messages_after: u32,
         /// UX estimate of bytes freed.
         bytes_saved: u64,
+        /// Full transcript-only compact summary revealed by Ctrl-O.
+        summary: String,
     },
     /// Unified rate-limit header snapshot (llm-client future-work batch 3,
     /// Task 9). Mirrors `traits::OutputEvent::RateLimit`'s nine fields —
@@ -173,6 +290,19 @@ pub enum TurnEvent {
         body: String,
         /// `true` → render as an error (red); `false` → dim informational.
         is_error: bool,
+    },
+    /// The live command registry was reconciled. The render-thread owner swaps
+    /// this complete snapshot into the bottom pane in one event, preserving the
+    /// composer and repairing any now-invalid completion selection.
+    CommandCatalogRefreshed {
+        /// Complete registry-backed completion catalog.
+        commands: Vec<CommandCatalogEntry>,
+    },
+    /// Full snapshot of background agents that are pending or running. Sent by
+    /// the CLI task-registry poller; replaces the previous snapshot atomically.
+    AgentStatusSnapshot {
+        /// Currently live background agents.
+        agents: Vec<RunningAgentStatus>,
     },
     /// A `/compact` (or otherwise forced) compaction pass began. The CLI's
     /// compact closure sends this SYNCHRONOUSLY before awaiting the multi-second
@@ -238,6 +368,7 @@ pub enum TurnEvent {
 /// the whole TUI lifetime).
 pub struct BridgeOutputStream {
     tx: UnboundedSender<TurnEvent>,
+    heartbeats: Arc<CoalescedToolHeartbeats>,
 }
 
 impl BridgeOutputStream {
@@ -245,7 +376,10 @@ impl BridgeOutputStream {
     /// by the render loop.
     #[must_use]
     pub fn new(tx: UnboundedSender<TurnEvent>) -> Self {
-        Self { tx }
+        Self {
+            tx,
+            heartbeats: Arc::new(CoalescedToolHeartbeats::default()),
+        }
     }
 }
 
@@ -285,6 +419,24 @@ impl OutputStream for BridgeOutputStream {
             tool: tool.to_string(),
             input: input.clone(),
         });
+    }
+
+    async fn emit_tool_heartbeat(&self, id: &protocol::ToolUseId, tool: &str, elapsed_ms: u64) {
+        let update = ToolHeartbeatUpdate {
+            id: id.clone(),
+            tool: tool.to_string(),
+            elapsed_ms,
+        };
+        if self.heartbeats.publish(update)
+            && self
+                .tx
+                .send(TurnEvent::ToolHeartbeatBatch {
+                    heartbeats: Arc::clone(&self.heartbeats),
+                })
+                .is_err()
+        {
+            self.heartbeats.reset_after_send_failure();
+        }
     }
 
     async fn emit_tool_result(
@@ -334,11 +486,13 @@ impl OutputStream for BridgeOutputStream {
         messages_before: u32,
         messages_after: u32,
         bytes_saved: u64,
+        summary: &str,
     ) {
         let _ = self.tx.send(TurnEvent::CompactionCompleted {
             messages_before,
             messages_after,
             bytes_saved,
+            summary: summary.to_string(),
         });
     }
 
@@ -483,6 +637,47 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn emit_tool_heartbeat_translates_without_transcript_payload() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let bridge = BridgeOutputStream::new(tx);
+        let id = protocol::ToolUseId::new();
+        bridge.emit_tool_heartbeat(&id, "Bash", 12_345).await;
+        match rx.recv().await.unwrap() {
+            TurnEvent::ToolHeartbeatBatch { heartbeats } => {
+                let updates = heartbeats.drain();
+                assert_eq!(updates.len(), 1);
+                let update = &updates[0];
+                let got = &update.id;
+                let tool = &update.tool;
+                let elapsed_ms = update.elapsed_ms;
+                assert_eq!(got, &id);
+                assert_eq!(tool, "Bash");
+                assert_eq!(elapsed_ms, 12_345);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_heartbeats_coalesce_under_consumer_backpressure() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let bridge = BridgeOutputStream::new(tx);
+        let id = protocol::ToolUseId::new();
+
+        bridge.emit_tool_heartbeat(&id, "Bash", 1_000).await;
+        bridge.emit_tool_heartbeat(&id, "Bash", 2_000).await;
+        bridge.emit_tool_heartbeat(&id, "Bash", 3_000).await;
+
+        let TurnEvent::ToolHeartbeatBatch { heartbeats } = rx.recv().await.unwrap() else {
+            panic!("expected a coalesced heartbeat wake-up");
+        };
+        let updates = heartbeats.drain();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].elapsed_ms, 3_000);
+        assert!(rx.try_recv().is_err(), "only one wake-up may be queued");
     }
 
     #[tokio::test]

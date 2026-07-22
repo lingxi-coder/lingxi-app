@@ -56,9 +56,21 @@ pub(crate) fn rate_limit_lines(text: &str, upsell: Option<&str>, theme: &Theme) 
 }
 
 /// Compaction boundary marker. The before/after counts are intentionally not
-/// rendered (claude-code parity — the boundary line carries no numbers).
-pub(crate) fn compact_boundary_lines(theme: &Theme) -> Vec<StyledLine> {
-    colored_lines("✻ Conversation compacted (ctrl+o for history)", theme.dim)
+/// rendered. Normal mode shows the compact hint; Ctrl-O reveals the full
+/// transcript-only summary under the boundary.
+pub(crate) fn compact_boundary_lines(
+    summary: &str,
+    verbose: bool,
+    theme: &Theme,
+) -> Vec<StyledLine> {
+    if !verbose || summary.trim().is_empty() {
+        return colored_lines("✻ Conversation compacted (ctrl+o for history)", theme.dim);
+    }
+
+    let mut lines = colored_lines("✻ Conversation compacted", theme.dim);
+    lines.push(StyledLine::plain(String::new()));
+    lines.extend(colored_lines(summary, theme.dim));
+    lines
 }
 
 /// [`RenderedMessage::SystemText`](tui_core::message::RenderedMessage::SystemText)
@@ -188,11 +200,27 @@ impl StyledCell for RateLimitCell {
 /// — the dim compaction marker line. The message's before/after counts are
 /// intentionally not rendered (claude-code parity).
 #[derive(Debug)]
-pub struct CompactBoundaryCell;
+pub struct CompactBoundaryCell {
+    summary: String,
+}
+
+impl CompactBoundaryCell {
+    /// Create a compact boundary carrying the expandable summary.
+    #[must_use]
+    pub fn new(summary: String) -> Self {
+        Self { summary }
+    }
+
+    /// Full compact summary revealed in verbose mode.
+    #[must_use]
+    pub fn summary(&self) -> &str {
+        &self.summary
+    }
+}
 
 impl StyledCell for CompactBoundaryCell {
-    fn styled_lines(&self, _width: usize, theme: &Theme, _verbose: bool) -> Vec<StyledLine> {
-        compact_boundary_lines(theme)
+    fn styled_lines(&self, _width: usize, theme: &Theme, verbose: bool) -> Vec<StyledLine> {
+        compact_boundary_lines(&self.summary, verbose, theme)
     }
 }
 
@@ -274,12 +302,27 @@ mod tests {
     }
 
     #[test]
-    fn compact_boundary_cell_renders_dim_marker_without_counts() {
-        let cell = CompactBoundaryCell;
+    fn compact_boundary_cell_reveals_summary_only_when_verbose() {
+        let cell = CompactBoundaryCell::new("Summary:\nkept context".to_string());
         assert_eq!(
             plain(&cell),
             vec!["✻ Conversation compacted (ctrl+o for history)".to_string()]
         );
         assert_eq!(first_fg(&cell), Some(rata(Theme::dark().dim)));
+
+        let expanded = cell
+            .display_lines(
+                80,
+                &Theme::dark(),
+                RenderMode {
+                    raw: false,
+                    verbose: true,
+                },
+            )
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(expanded[0], "✻ Conversation compacted");
+        assert!(expanded.join("\n").contains("Summary:\nkept context"));
     }
 }

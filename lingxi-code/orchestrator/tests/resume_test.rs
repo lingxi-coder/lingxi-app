@@ -1,5 +1,6 @@
 //! from an on-disk JSONL so the next live turn's append chains correctly.
 
+use engine::session::ActiveGoalState;
 use orchestrator::{
     replay_session_state, runtime_metadata_from_messages, state_from_messages, ResumeError,
 };
@@ -143,6 +144,67 @@ fn resume_restores_effort_compaction_counters_and_rapid_refill_tracking() {
     assert!(metadata.compaction_tracking.compacted);
     assert_eq!(metadata.compaction_tracking.turn_counter, 1);
     assert_eq!(metadata.compaction_tracking.consecutive_rapid_refills, 1);
+}
+
+#[test]
+fn resume_recovers_active_goal_from_compact_metadata_and_later_updates() {
+    let sid = Uuid::new_v4();
+    let line = |value: serde_json::Value| serde_json::from_value(value).unwrap();
+    let set_at = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+    let compact_goal = ActiveGoalState {
+        condition: "ship it".to_string(),
+        set_at,
+        last_reason: Some("initial".to_string()),
+    };
+    let updated_goal = ActiveGoalState {
+        condition: "ship it".to_string(),
+        set_at,
+        last_reason: Some("still working".to_string()),
+    };
+    let messages = vec![
+        line(json!({
+            "type":"system", "subtype":"compact_boundary",
+            "uuid":Uuid::new_v4().to_string(), "parentUuid":null,
+            "sessionId":sid.to_string(), "timestamp":"2026-07-19T00:00:00.000Z",
+            "cwd":"/tmp", "version":"0.12.0", "isSidechain":false,
+            "message":{}, "compactMetadata":{"preTokens":1000,"postTokens":400,"activeGoal":serde_json::to_value(&compact_goal).unwrap()}
+        })),
+        line(json!({
+            "type":"assistant", "uuid":Uuid::new_v4().to_string(), "parentUuid":null,
+            "sessionId":sid.to_string(), "timestamp":"2026-07-19T00:00:01.000Z",
+            "cwd":"/tmp", "version":"0.12.0", "isSidechain":false,
+            "message":{"role":"assistant","content":"one"}
+        })),
+        line(json!({
+            "type":"system", "subtype":"thread_goal_updated",
+            "uuid":Uuid::new_v4().to_string(), "parentUuid":null,
+            "sessionId":sid.to_string(), "timestamp":"2026-07-19T00:00:02.000Z",
+            "cwd":"/tmp", "version":"0.12.0", "isSidechain":false,
+            "message":null, "goalState":serde_json::to_value(&updated_goal).unwrap()
+        })),
+    ];
+
+    let state = state_from_messages(sid, &messages);
+    let restored = state.active_goal.expect("goal restored");
+    assert_eq!(restored.condition, "ship it");
+    assert_eq!(restored.last_reason.as_deref(), Some("still working"));
+}
+
+#[test]
+fn resume_without_goal_metadata_defaults_to_none() {
+    let sid = Uuid::new_v4();
+    let messages = vec![serde_json::from_value(json!({
+        "type":"assistant", "uuid":Uuid::new_v4().to_string(), "parentUuid":null,
+        "sessionId":sid.to_string(), "timestamp":"2026-07-19T00:00:01.000Z",
+        "cwd":"/tmp", "version":"0.12.0", "isSidechain":false,
+        "message":{"role":"assistant","content":"one"}
+    }))
+    .unwrap()];
+
+    assert!(
+        state_from_messages(sid, &messages).active_goal.is_none(),
+        "legacy sessions without goal metadata must resume with no active goal"
+    );
 }
 
 #[tokio::test]

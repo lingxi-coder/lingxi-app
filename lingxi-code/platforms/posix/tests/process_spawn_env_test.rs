@@ -8,6 +8,11 @@ use platform_posix::process::PosixProcess;
 use std::collections::HashMap;
 use traits::{ProcessCommand, ProcessRunner, SandboxBackend, SandboxedCommand, SandboxedTag};
 
+// These tests intentionally mutate the process-global environment. Keep the
+// mutation cases serialized so one test cannot remove another test's sentinel
+// while its child process is being spawned.
+static ENV_MUTATION_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn mk(command: &str, args: Vec<&str>, env: HashMap<String, String>) -> SandboxedCommand {
     SandboxedCommand::__new_sandboxed(
         ProcessCommand {
@@ -88,6 +93,7 @@ async fn run_injects_spawn_env_contract_for_bash_provider() {
 /// under the parallel test runner.
 #[tokio::test]
 async fn run_strips_wo_denylist_from_hook_command_env() {
+    let _env_guard = ENV_MUTATION_LOCK.lock().await;
     // Seed the PARENT process env with denylisted keys + one survivor. The
     // runner inherits the parent env (tokio default), so these reach `env`
     // unless stripped.
@@ -132,7 +138,7 @@ async fn run_strips_wo_denylist_from_hook_command_env() {
     ] {
         assert!(
             !out.stdout.lines().any(|l| l.starts_with(denied)),
-            "denylisted hook env var leaked: {denied} in {out:?}"
+            "denylisted hook env var leaked: {denied}"
         );
     }
     // A non-denylisted custom var survives.
@@ -140,7 +146,7 @@ async fn run_strips_wo_denylist_from_hook_command_env() {
         out.stdout
             .lines()
             .any(|l| l == "LX_HOOK_SURVIVOR=i-survive"),
-        "non-denylisted hook env var was wrongly stripped: {out:?}"
+        "non-denylisted hook env var was wrongly stripped"
     );
 
     // NEGATIVE direction: a NON-hook command (no `hook_command` tag) KEEPS the
@@ -156,7 +162,7 @@ async fn run_strips_wo_denylist_from_hook_command_env() {
             .stdout
             .lines()
             .any(|l| l == "CLAUDE_CODE_OAUTH_TOKEN=secret-oauth"),
-        "non-hook command must NOT strip the denylist: {out_non_hook:?}"
+        "non-hook command must NOT strip the hook-only denylist"
     );
 
     for k in [
@@ -178,6 +184,7 @@ async fn run_strips_wo_denylist_from_hook_command_env() {
 /// twins are stripped from the child env; inert without the flag.
 #[tokio::test]
 async fn run_scrubs_gha_secrets_only_when_flagged() {
+    let _env_guard = ENV_MUTATION_LOCK.lock().await;
     let env_bin = ["/usr/bin/env", "/bin/env"]
         .into_iter()
         .find(|p| std::path::Path::new(p).exists())
@@ -201,12 +208,12 @@ async fn run_scrubs_gha_secrets_only_when_flagged() {
     ] {
         assert!(
             !out.stdout.lines().any(|l| l.starts_with(scrubbed)),
-            "GHA secret leaked under the scrub flag: {scrubbed} in {out:?}"
+            "GHA secret leaked under the scrub flag: {scrubbed}"
         );
     }
     assert!(
         out.stdout.lines().any(|l| l == "LX_GHA_SURVIVOR=i-survive"),
-        "non-listed var wrongly scrubbed: {out:?}"
+        "non-listed var wrongly scrubbed"
     );
 
     // FLAG OFF (default) → the secret survives; the scrub is inert.
@@ -219,7 +226,7 @@ async fn run_scrubs_gha_secrets_only_when_flagged() {
             .stdout
             .lines()
             .any(|l| l == "ANTHROPIC_API_KEY=sk-secret"),
-        "without the flag the scrub must be inert: {out_off:?}"
+        "without the flag the scrub must be inert"
     );
 
     for k in [
@@ -257,17 +264,17 @@ async fn run_omits_shell_for_non_bash_provider() {
         .expect("run");
     assert!(
         !out.stdout.lines().any(|l| l.starts_with("SHELL=")),
-        "non-bash-provider spawn must not pass SHELL: {out:?}"
+        "non-bash-provider spawn must not pass SHELL"
     );
     // The unconditional contract vars are still present.
     assert!(
         out.stdout.lines().any(|l| l == "LINGXI=1"),
-        "missing LINGXI=1: {out:?}"
+        "missing LINGXI=1"
     );
     assert!(
         out.stdout
             .lines()
             .any(|l| l.starts_with("AI_AGENT=claude-code_") && l.ends_with("_agent")),
-        "missing AI_AGENT: {out:?}"
+        "missing AI_AGENT"
     );
 }

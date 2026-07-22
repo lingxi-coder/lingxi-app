@@ -44,6 +44,52 @@ use tokio_util::sync::CancellationToken;
 
 use crate::server::TurnDriver;
 
+/// Stable, non-secret failure reported when the bridge has no configured way
+/// to authenticate provider requests.
+///
+/// Keep this message independent of the prompt, provider response, and local
+/// configuration values: it is safe to display directly in desktop clients.
+pub const CREDENTIAL_REQUIRED_MESSAGE: &str =
+    "Provider credential required. Restart bridge-server with --api-key-stdin, or configure a trusted credential source, then retry.";
+
+/// A fail-fast turn driver used when boot found no provider credential source.
+///
+/// The rest of the runtime remains assembled so handshake and read-only command
+/// routing continue to work. Only model turns are stopped here, before they can
+/// enter the provider client's retry path. Each submitted turn emits exactly
+/// one terminal [`ClientEvent::Error`].
+pub struct CredentialRequiredTurnDriver {
+    event_sink: Arc<dyn ClientEventSink>,
+}
+
+impl CredentialRequiredTurnDriver {
+    /// Construct the fail-fast driver over the connection's event sink.
+    #[must_use]
+    pub fn new(event_sink: Arc<dyn ClientEventSink>) -> Self {
+        Self { event_sink }
+    }
+
+    async fn reject_turn(&self) {
+        self.event_sink
+            .emit(ClientEvent::Error {
+                kind: ErrorKindDto::Server,
+                message: CREDENTIAL_REQUIRED_MESSAGE.to_string(),
+            })
+            .await;
+    }
+}
+
+#[async_trait]
+impl TurnDriver for CredentialRequiredTurnDriver {
+    async fn run_turn(&self, _prompt: String) {
+        self.reject_turn().await;
+    }
+
+    async fn run_turn_with_images(&self, _prompt: String, _images: Vec<ImageRefDto>) {
+        self.reject_turn().await;
+    }
+}
+
 /// A msgqueue-backed [`orchestrator::prompt::mid_turn_input::MidTurnInputSource`].
 ///
 /// Bridges the orchestrator's queue-agnostic mid-turn drain seam to the
@@ -130,6 +176,7 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for MsgQueueMidTur
 pub struct MsgQueueWakeupScheduler {
     queue: Arc<msgqueue::MessageQueueManager>,
     runtime: Arc<dyn traits::RuntimeSpawner>,
+    loop_runtime: Arc<tool_cron::LoopRuntime>,
 }
 
 impl MsgQueueWakeupScheduler {
@@ -139,7 +186,25 @@ impl MsgQueueWakeupScheduler {
         queue: Arc<msgqueue::MessageQueueManager>,
         runtime: Arc<dyn traits::RuntimeSpawner>,
     ) -> Self {
-        Self { queue, runtime }
+        Self {
+            queue,
+            runtime,
+            loop_runtime: Arc::new(tool_cron::LoopRuntime::default()),
+        }
+    }
+
+    /// Build the adapter over an existing connection-scoped loop runtime.
+    #[must_use]
+    pub fn with_loop_runtime(
+        queue: Arc<msgqueue::MessageQueueManager>,
+        runtime: Arc<dyn traits::RuntimeSpawner>,
+        loop_runtime: Arc<tool_cron::LoopRuntime>,
+    ) -> Self {
+        Self {
+            queue,
+            runtime,
+            loop_runtime,
+        }
     }
 }
 
@@ -180,6 +245,10 @@ impl tool_cron::WakeupScheduler for MsgQueueWakeupScheduler {
                 }),
             )
             .await;
+    }
+
+    fn loop_runtime(&self) -> Option<Arc<tool_cron::LoopRuntime>> {
+        Some(self.loop_runtime.clone())
     }
 }
 
@@ -225,6 +294,8 @@ pub struct OrchestratorTurnDriver {
     /// with no per-connection queue). Wired at `boot::assemble` with the SAME
     /// [`MsgQueueWakeupScheduler`] filling the tool's `WakeupSchedulerCell`.
     wakeup_scheduler: Option<Arc<dyn tool_cron::WakeupScheduler>>,
+    /// Session-scoped dynamic-loop bookkeeping obtained from the scheduler.
+    loop_runtime: Option<Arc<tool_cron::LoopRuntime>>,
 }
 
 impl OrchestratorTurnDriver {
@@ -242,6 +313,7 @@ impl OrchestratorTurnDriver {
             queue: None,
             cancel_reason: None,
             wakeup_scheduler: None,
+            loop_runtime: None,
         }
     }
 
@@ -282,6 +354,7 @@ impl OrchestratorTurnDriver {
             queue: None,
             cancel_reason: None,
             wakeup_scheduler: None,
+            loop_runtime: None,
         }
     }
 
@@ -292,6 +365,7 @@ impl OrchestratorTurnDriver {
     /// [`MsgQueueWakeupScheduler`] it uses to fill the tool's `WakeupSchedulerCell`.
     #[must_use]
     pub fn with_wakeup_scheduler(mut self, scheduler: Arc<dyn tool_cron::WakeupScheduler>) -> Self {
+        self.loop_runtime = scheduler.loop_runtime();
         self.wakeup_scheduler = Some(scheduler);
         self
     }
@@ -373,7 +447,11 @@ impl OrchestratorTurnDriver {
         // is a no-op for non-loop-tick turns (no in-flight prompt) and when the
         // keepalive gate is off, so it is safe to call after EVERY turn.
         if let Some(scheduler) = self.wakeup_scheduler.as_ref() {
-            tool_cron::maybe_arm_keepalive(scheduler).await;
+            if let Some(runtime) = self.loop_runtime.as_ref() {
+                tool_cron::maybe_arm_keepalive_with_runtime(scheduler, runtime).await;
+            } else {
+                tool_cron::maybe_arm_keepalive(scheduler).await;
+            }
         }
         match result {
             // Success / cancellation / max-turns all already produced their
@@ -857,11 +935,16 @@ mod tests {
     /// A keepalive recorder scheduler for the turn-completion trigger tests.
     struct KaRec {
         calls: std::sync::Mutex<Vec<std::time::Duration>>,
+        runtime: Arc<tool_cron::LoopRuntime>,
     }
     #[async_trait::async_trait]
     impl tool_cron::WakeupScheduler for KaRec {
         async fn schedule(&self, delay: std::time::Duration, _p: String, _r: String) {
             self.calls.lock().unwrap().push(delay);
+        }
+
+        fn loop_runtime(&self) -> Option<Arc<tool_cron::LoopRuntime>> {
+            Some(self.runtime.clone())
         }
     }
 
@@ -875,12 +958,13 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         telemetry::test_set_flag("tengu_kairos_loop_dynamic", true);
         telemetry::test_set_flag("tengu_kairos_loop_keepalive", true);
-        tool_cron::reset_loop_runtime_state();
+        let loop_runtime = Arc::new(tool_cron::LoopRuntime::default());
         // The drain tags a Cron-sourced command as the in-flight loop tick.
-        tool_cron::begin_loop_tick("<<autonomous-loop-dynamic>>".to_string());
+        loop_runtime.begin_tick("<<autonomous-loop-dynamic>>".to_string());
 
         let rec = Arc::new(KaRec {
             calls: std::sync::Mutex::new(Vec::new()),
+            runtime: loop_runtime.clone(),
         });
         let sched: Arc<dyn tool_cron::WakeupScheduler> = rec.clone();
         let driver = build_driver(streaming_one_turn()).with_wakeup_scheduler(sched);
@@ -888,12 +972,20 @@ mod tests {
         driver.run_turn("loop tick".to_string()).await;
 
         let calls = rec.calls.lock().unwrap();
-        assert_eq!(calls.len(), 1, "a silent loop tick must arm one keepalive");
+        assert_eq!(
+            calls.len(),
+            1,
+            "a silent loop tick must arm one keepalive (dynamic={}, keepalive={}, in_flight={:?}, consecutive={})",
+            tool_cron::is_loop_dynamic_enabled(),
+            tool_cron::is_loop_keepalive_enabled(),
+            loop_runtime.in_flight_prompt(),
+            loop_runtime.consecutive_keepalives(),
+        );
         assert_eq!(calls[0], std::time::Duration::from_secs(1200));
         drop(calls);
         telemetry::test_clear_flag("tengu_kairos_loop_dynamic");
         telemetry::test_clear_flag("tengu_kairos_loop_keepalive");
-        tool_cron::reset_loop_runtime_state();
+        loop_runtime.reset();
     }
 
     /// A NON-loop turn (no in-flight tick) never arms a keepalive, even with a
@@ -905,10 +997,11 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         telemetry::test_set_flag("tengu_kairos_loop_dynamic", true);
         telemetry::test_set_flag("tengu_kairos_loop_keepalive", true);
-        tool_cron::reset_loop_runtime_state(); // no begin_loop_tick → user turn
+        let loop_runtime = Arc::new(tool_cron::LoopRuntime::default());
 
         let rec = Arc::new(KaRec {
             calls: std::sync::Mutex::new(Vec::new()),
+            runtime: loop_runtime,
         });
         let sched: Arc<dyn tool_cron::WakeupScheduler> = rec.clone();
         let driver = build_driver(streaming_one_turn()).with_wakeup_scheduler(sched);

@@ -1,8 +1,8 @@
 //! Parity **delta baseline** vs Claude Code 2.1.215.
 //!
 //! Unlike [`parity_claude_2_1_208`], this file does **not** own or pin the live
-//! `traits::CLAUDE_CODE_VERSION` — the port's version-facing wave tracks an
-//! earlier release. This is a *forward-looking* capture of the real 2.1.215
+//! `traits::CLAUDE_CODE_VERSION` — the port's version-facing wave now tracks
+//! 2.1.216. This is a historical capture of the real 2.1.215
 //! native binary's observable CLI surface (root/agents/mcp/plugin `--help`),
 //! recorded so audits diff against the CURRENT release instead of the stale
 //! 2.1.198/2.1.208 fixtures. (An audit run against a 2.1.198 baseline is how a
@@ -56,7 +56,10 @@ fn root_help_pins_2_1_214_215_new_flags() {
     // M-04: `--plugin-url` fetches a session-only plugin .zip (repeatable).
     // LingXi gap: the argv flag exists but is a dead stub (parsed, never
     // consumed — no download / no thread-through to cli_plugin_dirs).
-    assert!(ROOT_HELP.contains("--plugin-url <url>"), "2.1.215 ships --plugin-url");
+    assert!(
+        ROOT_HELP.contains("--plugin-url <url>"),
+        "2.1.215 ships --plugin-url"
+    );
     assert!(
         ROOT_HELP.contains("Fetch a plugin .zip from a URL for this"),
         "--plugin-url help text drifted"

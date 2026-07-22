@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use fs2::FileExt;
 use futures_core::stream::Stream;
 use futures_util::stream::empty;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use traits::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
 
@@ -144,6 +144,55 @@ impl FileSystem for PosixFileSystem {
         // Same flush rationale as `append_file`: make append-then-read
         // deterministic across the blocking pool.
         f.flush().await.map_err(|e| FsError::Io(e.to_string()))
+    }
+
+    async fn read_file_rooted_no_follow(
+        &self,
+        root: &Path,
+        relative: &Path,
+    ) -> Result<FileContent, FsError> {
+        let content = traits::rooted_fs::read_to_string(root, relative)?;
+        Ok(FileContent {
+            total_lines: content.lines().count() as u64,
+            content,
+            truncated: false,
+        })
+    }
+
+    async fn write_file_rooted_atomic(
+        &self,
+        root: &Path,
+        relative: &Path,
+        content: &str,
+    ) -> Result<(), FsError> {
+        traits::rooted_fs::atomic_write(
+            root,
+            relative,
+            content.as_bytes(),
+            traits::AtomicWriteOptions::default(),
+        )
+    }
+
+    async fn flock_exclusive_rooted(
+        &self,
+        root: &Path,
+        relative: &Path,
+    ) -> Result<Box<dyn FlockGuard>, FsError> {
+        traits::rooted_fs::lock_exclusive(
+            root,
+            relative,
+            traits::rooted_fs::PRIVATE_DIR_MODE,
+            traits::rooted_fs::PRIVATE_FILE_MODE,
+        )
+        .map(|guard| Box::new(guard) as Box<dyn FlockGuard>)
+    }
+
+    async fn delete_file_rooted_no_follow(
+        &self,
+        root: &Path,
+        relative: &Path,
+    ) -> Result<(), FsError> {
+        traits::rooted_fs::remove_file(root, relative)
     }
 
     async fn truncate(&self, path: &str, len: u64) -> Result<(), FsError> {

@@ -20,6 +20,7 @@
 use clap::Subcommand;
 
 pub mod agents;
+pub mod attach;
 pub mod auth;
 pub mod auto_mode;
 pub mod bg_worker;
@@ -37,6 +38,7 @@ pub mod plugin_prune;
 pub mod plugin_settings;
 pub mod plugin_tag;
 pub mod project;
+pub mod remote_control;
 pub mod rm;
 pub mod setup_token;
 pub mod ultrareview;
@@ -68,11 +70,16 @@ pub enum Commands {
     Plugin(plugin::Cli),
     /// Manage LingXi project state
     Project(project::Cli),
+    /// Start a persistent remote-control server
+    #[command(name = "remote-control")]
+    RemoteControl(remote_control::Cli),
     /// Set up a long-lived authentication token (requires Claude subscription)
     #[command(name = "setup-token")]
     SetupToken(setup_token::Cli),
     /// Manage background agents
     Agents(agents::Cli),
+    /// Attach to a running background job
+    Attach(attach::Cli),
     /// Delete a background session and its worktree. Unlike `stop`, works on
     /// already-exited sessions.
     Rm(rm::Cli),
@@ -85,10 +92,13 @@ pub enum Commands {
     /// Run the background-agent supervisor daemon (internal; spawned by `--bg`).
     #[command(name = "daemon", hide = true)]
     Daemon(daemon::Cli),
-    /// Execute a single background job headlessly (internal; spawned by the
-    /// daemon supervisor for each pending `--bg` job).
+    /// Supervise one background PTY child (internal; spawned by the daemon for
+    /// each pending `--bg` job).
     #[command(name = "__bg-run", hide = true)]
     BgRun(bg_worker::Cli),
+    /// Mount the interactive child inside a worker-owned PTY.
+    #[command(name = "__bg-pty-session", hide = true)]
+    BgPtySession(bg_worker::PtySessionCli),
 }
 
 impl Commands {
@@ -107,13 +117,16 @@ impl Commands {
             Commands::Install(_) => "install",
             Commands::Plugin(_) => "plugin",
             Commands::Project(_) => "project",
+            Commands::RemoteControl(_) => "remote-control",
             Commands::SetupToken(_) => "setup-token",
             Commands::Agents(_) => "agents",
+            Commands::Attach(_) => "attach",
             Commands::Rm(_) => "rm",
             Commands::Ultrareview(_) => "ultrareview",
             Commands::Update(_) => "update",
             Commands::Daemon(_) => "daemon",
             Commands::BgRun(_) => "__bg-run",
+            Commands::BgPtySession(_) => "__bg-pty-session",
         }
     }
 
@@ -128,13 +141,16 @@ impl Commands {
             Commands::Install(c) => install::run(c).await,
             Commands::Plugin(c) => plugin::run(c).await,
             Commands::Project(c) => project::run(c).await,
+            Commands::RemoteControl(c) => remote_control::run(c).await,
             Commands::SetupToken(c) => setup_token::run(c).await,
             Commands::Agents(c) => agents::run(c).await,
+            Commands::Attach(c) => attach::run(c).await,
             Commands::Rm(c) => rm::run(c).await,
             Commands::Ultrareview(c) => ultrareview::run(c).await,
             Commands::Update(c) => update::run(c).await,
             Commands::Daemon(c) => daemon::run(c).await,
             Commands::BgRun(c) => bg_worker::run(c).await,
+            Commands::BgPtySession(c) => bg_worker::run_pty_session(c).await,
         }
     }
 }
@@ -155,11 +171,14 @@ mod top_level_name_tests {
             ("doctor", "doctor"),
             ("mcp", "mcp"),
             ("auth", "auth"),
+            ("remote-control", "remote-control"),
         ] {
             let a = Argv::from_iter(["lingxi-cli", token]).unwrap();
             let cmd = a.command.expect("token must parse as a subcommand");
             assert_eq!(cmd.top_level_name(), expected, "for token `{token}`");
         }
+        let a = Argv::from_iter(["lingxi-cli", "attach", "bead0001"]).unwrap();
+        assert_eq!(a.command.unwrap().top_level_name(), "attach");
         // `upgrade` is an alias of `update` — it must still report `update`.
         let a = Argv::from_iter(["lingxi-cli", "upgrade"]).unwrap();
         assert_eq!(a.command.unwrap().top_level_name(), "update");

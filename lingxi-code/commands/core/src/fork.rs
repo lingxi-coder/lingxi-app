@@ -359,7 +359,10 @@ mod tests {
 
     #[tokio::test]
     async fn bg_with_prompt_routes_to_background_seam() {
-        match bg_handler().handle(&args("keep investigating the flake")).await {
+        match bg_handler()
+            .handle(&args("keep investigating the flake"))
+            .await
+        {
             CommandResult::Done { display: Some(s) } => {
                 assert_eq!(
                     s,

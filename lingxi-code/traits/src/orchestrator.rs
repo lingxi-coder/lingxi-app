@@ -102,6 +102,35 @@ pub struct ActiveGoalSnapshot {
     pub last_reason: Option<String>,
 }
 
+/// Transcript-adjacent runtime state needed by an in-place session resume.
+///
+/// This leaf-friendly mirror deliberately uses primitive fields instead of
+/// depending on `session` or `compaction` (both depend on this crate).  Without
+/// it, bridge/mobile hot-resume adopted the messages but silently reset compact
+/// bookkeeping and lost transcript-visibility flags already reconstructed by
+/// the JSONL loader.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResumeRuntimeSnapshot {
+    /// Message ids hidden from the normal conversation projection.
+    pub transcript_only_message_ids: Vec<protocol::MessageId>,
+    /// Message ids that are compact summaries.
+    pub compact_summary_message_ids: Vec<protocol::MessageId>,
+    /// Tool names restored from compact-boundary ToolSearch metadata.
+    pub loaded_tool_names: Vec<String>,
+    /// Persisted cumulative token count discarded by compaction.
+    pub cumulative_dropped_tokens: u64,
+    /// Whether this session has compacted at least once.
+    pub compacted: bool,
+    /// Turns since the most recent compact.
+    pub turn_counter: u32,
+    /// Identifier of the turn that most recently compacted.
+    pub turn_id: String,
+    /// Consecutive failed autocompact attempts.
+    pub consecutive_failures: u32,
+    /// Consecutive rapid-refill compactions.
+    pub consecutive_rapid_refills: u32,
+}
+
 /// One model's cumulative usage for the `/usage` "Usage by model" block
 /// (claude-code `cbg`). Mirrors `cost::summary::ModelCostSummary`'s numeric
 /// fields; defined here (not reused from `cost`) because `traits` cannot
@@ -1303,8 +1332,10 @@ pub trait OrchestratorHandle: Send + Sync {
         session_id: SessionId,
         history: Vec<protocol::ConversationMessage>,
         last_jsonl_uuid: Option<String>,
+        active_goal: Option<ActiveGoalSnapshot>,
+        runtime: ResumeRuntimeSnapshot,
     ) -> Result<(), HandleError> {
-        let _ = (session_id, history, last_jsonl_uuid);
+        let _ = (session_id, history, last_jsonl_uuid, active_goal, runtime);
         Err(HandleError::Unimplemented("resume_session".into()))
     }
 }
@@ -1377,6 +1408,10 @@ pub enum OutputEvent {
         messages_after: u32,
         /// UX estimate of bytes freed.
         bytes_saved: u64,
+        /// Full model-generated compact summary displayed when the transcript
+        /// is expanded (Ctrl-O). This is the same continuation summary stored
+        /// in the post-compact history.
+        summary: String,
     },
     /// A streaming reasoning ("thinking") delta as it arrives. (§0.7
     /// "light up thinking/usage"). Recorded by `MockOutputStream` so the
@@ -1534,13 +1569,7 @@ pub trait OutputStream: Send + Sync {
     ///
     /// **Default no-op**: sinks that do not surface tool heartbeats keep
     /// compiling unchanged.
-    async fn emit_tool_heartbeat(
-        &self,
-        _id: &protocol::ToolUseId,
-        _tool: &str,
-        _elapsed_ms: u64,
-    ) {
-    }
+    async fn emit_tool_heartbeat(&self, _id: &protocol::ToolUseId, _tool: &str, _elapsed_ms: u64) {}
 
     /// Emit the end-of-turn marker with the cost snapshot.
     async fn emit_end_turn(&self, stop_reason: &str, cost: &CostSnapshot);
@@ -1555,13 +1584,15 @@ pub trait OutputStream: Send + Sync {
     /// during the compaction wait.
     async fn emit_compaction_started(&self) {}
 
-    /// Emit a compaction-completed event and its before/after size delta.
+    /// Emit a compaction-completed event, its size delta, and the summary that
+    /// transcript UIs reveal in verbose mode.
     /// Default no-op for adapters that do not render compaction state.
     async fn emit_compaction_completed(
         &self,
         _messages_before: u32,
         _messages_after: u32,
         _bytes_saved: u64,
+        _summary: &str,
     ) {
     }
 

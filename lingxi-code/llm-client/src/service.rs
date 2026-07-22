@@ -10,7 +10,9 @@
 use crate::convert::{
     ensure_tool_result_pairing, normalize_messages_for_api, to_llm_messages, to_tool_declarations,
 };
-use crate::model::betas::{apply_beta_header_with_auth, BetaContext, Endpoint, Provider};
+use crate::model::betas::{
+    apply_beta_header_with_auth_and_custom, BetaContext, Endpoint, Provider,
+};
 use crate::model::rate_limit::{
     formatted_reset_times_from_headers, parse_retry_after, parse_unified_reset,
     rate_limit_error_message, RateLimitInfo, RawUtilization, SubscriptionContext,
@@ -242,9 +244,16 @@ pub struct ApiService {
     /// loop reports each backoff so the TUI can show "Retrying in Ns… (attempt
     /// X/Y)".
     retry_reporter: Option<Arc<dyn RetryReporter>>,
-    /// Global fallback model, if configured (used by `messages_create_with_fallback`
-    /// when no per-model entry exists in `fallback_overrides`).
-    fallback_model: Option<String>,
+    /// Ordered global fallback chain. A scalar legacy value becomes one entry;
+    /// the CLI's comma-separated form is normalized into this vector once at
+    /// construction so every new user turn starts from the primary model and
+    /// walks the same immutable order.
+    fallback_models: Vec<String>,
+    /// Host-validated CLI beta additions for first-party Anthropic API-key
+    /// message requests. Kept as explicit session state instead of a process
+    /// environment variable so concurrent embedded runtimes cannot leak flags
+    /// into one another.
+    custom_cli_betas: Vec<String>,
     /// Per-model fallback chains from `routing.fallback`.
     ///
     /// Key is the request's resolved display model; value is the ordered chain
@@ -426,6 +435,16 @@ struct CacheEditingInputs {
     pinned: Vec<PinnedCacheEdits>,
 }
 
+fn parse_fallback_chain(raw: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for model in raw.split(',').map(str::trim).filter(|m| !m.is_empty()) {
+        if !out.iter().any(|existing| existing == model) {
+            out.push(model.to_string());
+        }
+    }
+    out
+}
+
 impl ApiService {
     /// Construct the service.  Called by Task 10 host constructors.
     ///
@@ -535,6 +554,10 @@ impl ApiService {
             // whether the caller used the canonical name or an alias.
             alias_to_display.insert(m.display_model.clone(), m.display_model.clone());
         }
+        let fallback_models = fallback_model
+            .as_deref()
+            .map(parse_fallback_chain)
+            .unwrap_or_default();
         Self {
             client,
             transport,
@@ -548,7 +571,8 @@ impl ApiService {
             ua,
             version: version.into(),
             analytics,
-            fallback_model,
+            fallback_models,
+            custom_cli_betas: Vec::new(),
             fallback_overrides,
             alias_to_display,
             settings_max_retries,
@@ -594,10 +618,13 @@ impl ApiService {
         self
     }
 
-    /// Force a specific `tool_choice` on every request this adapter drives — used
-    /// by `--json-schema` structured output to compel the `StructuredOutput`
-    /// tool. Builder-style; `None` (the default) leaves tool choice to the model.
+    /// Attach host-validated, stable-deduplicated CLI beta additions.
     #[must_use]
+    pub fn with_custom_cli_betas(mut self, betas: Vec<String>) -> Self {
+        self.custom_cli_betas = betas;
+        self
+    }
+
     /// Attach a UI retry-status sink. The retry loop then reports each backoff
     /// (error text + attempt/max + delay) so the TUI can surface it, matching
     /// Claude Code's `SystemAPIErrorMessage` retry display.
@@ -1041,6 +1068,16 @@ impl ApiService {
             .with_effort(has_effort)
     }
 
+    /// Return host-validated CLI betas only for the first-party Anthropic
+    /// route. Custom providers may share the Anthropic wire protocol, but must
+    /// never inherit a first-party experimental header by accident.
+    fn custom_cli_betas(&self, prepared: &crate::PreparedLlmCall) -> Vec<String> {
+        if prepared.route.resolved_route.provider_id != crate::ProviderId::AnthropicFirstParty {
+            return Vec::new();
+        }
+        self.custom_cli_betas.clone()
+    }
+
     /// `true` for protocols that speak to Anthropic models (first-party or via
     /// Bedrock/Vertex). Only these get the `claude-cli/<ver>` User-Agent;
     /// OpenAI / Gemini / Azure / Copilot routes get a neutral UA so we don't
@@ -1213,12 +1250,14 @@ impl ApiService {
             crate::ProtocolFamily::AnthropicMessages
         ) {
             let ctx = Self::beta_context(prepared);
-            apply_beta_header_with_auth(
+            let custom_betas = self.custom_cli_betas(prepared);
+            apply_beta_header_with_auth_and_custom(
                 &mut prepared.provider_request,
                 Provider::Anthropic,
                 Endpoint::MessagesCreate,
                 &ctx,
                 self.effective_subscriber().is_subscriber,
+                &custom_betas,
             );
         }
         // User-Agent (Task 3) — provider-aware (see apply_user_agent).
@@ -1240,12 +1279,14 @@ impl ApiService {
             crate::ProtocolFamily::AnthropicMessages
         ) {
             let ctx = Self::beta_context(prepared);
-            apply_beta_header_with_auth(
+            let custom_betas = self.custom_cli_betas(prepared);
+            apply_beta_header_with_auth_and_custom(
                 &mut prepared.provider_request,
                 Provider::Anthropic,
                 Endpoint::MessagesCreateStream,
                 &ctx,
                 self.effective_subscriber().is_subscriber,
+                &custom_betas,
             );
         }
         self.apply_user_agent(prepared);
@@ -2136,6 +2177,55 @@ impl ApiService {
         self.drive_non_stream(req, ctl).await
     }
 
+    /// Run a session-bound side query through the same request builder,
+    /// provider routing, credentials, cache layout, headers, and retry driver
+    /// as the parent conversation.
+    ///
+    /// This is the compaction/recap path. It deliberately replaces the main
+    /// request's forced tool choice (for example `--json-schema`) with the side
+    /// query's own choice: Claude Code's compaction call exposes no tools and
+    /// must not inherit a main-turn `StructuredOutput` requirement. All other
+    /// session-scoped wire behavior, including thinking configuration and
+    /// request metadata, remains shared.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn messages_create_side_query(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&str>,
+        messages: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        max_tokens: u32,
+        tool_choice: Option<crate::ToolChoice>,
+        stop_sequences: Vec<String>,
+        temperature: Option<f32>,
+    ) -> Result<LlmResponse, LlmError> {
+        let mut req = self.build_request(
+            model,
+            profile,
+            system,
+            messages,
+            tools,
+            false,
+            Some(max_tokens),
+        )?;
+
+        // `build_request` applies main-turn-only overrides. A forked summary
+        // owns these fields independently, so restore its explicit values.
+        req.tool_choice = tool_choice;
+        req.stop_sequences = stop_sequences;
+        req.temperature = temperature.map(f64::from);
+
+        let ctl = resolve_retry_control_with_settings(
+            model,
+            None,
+            self.effective_subscriber().is_subscriber,
+            &ResolveRetryEnv::from_process_env(),
+            self.settings_max_retries,
+        );
+        self.drive_non_stream(req, ctl).await
+    }
+
     /// Non-streaming call with the **Opus-fallback** policy wired
     /// (provider-neutral). The drive logic of the orchestrator's
     /// `OrchestratorApiClient::messages_create_with_fallback`.
@@ -2177,12 +2267,13 @@ impl ApiService {
         //   3. global fallback_model             → single-entry chain
         // The chain is walked entry-by-entry in the drive loop.
         let effective_chain: Vec<String> = if let Some(fb) = fallback_model {
-            // Explicit call-site model → single-entry chain (preserves pre-Task-8 contract).
-            vec![fb.to_string()]
+            // The legacy call-site parameter remains a string for API
+            // compatibility, but Claude's CLI value is an ordered CSV list.
+            parse_fallback_chain(fb)
         } else if let Some(chain) = self.fallback_overrides.get(display_model) {
             chain.clone()
-        } else if let Some(global) = &self.fallback_model {
-            vec![global.clone()]
+        } else if !self.fallback_models.is_empty() {
+            self.fallback_models.clone()
         } else {
             vec![]
         };

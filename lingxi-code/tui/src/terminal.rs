@@ -192,7 +192,28 @@ where
         let cursor_pos = backend
             .get_cursor_position()
             .unwrap_or(Position { x: 0, y: 0 });
-        Ok(Self {
+        Ok(Self::from_screen_and_cursor(
+            backend,
+            screen_size,
+            cursor_pos,
+        ))
+    }
+
+    /// Build a terminal without issuing a cursor-position query.
+    ///
+    /// Detached background PTYs have no controller available to answer DSR;
+    /// their logical screen starts at the origin and is repainted on attach.
+    pub fn with_options_at_origin(mut backend: B) -> io::Result<Self> {
+        let screen_size = backend.size()?;
+        Ok(Self::from_screen_and_cursor(
+            backend,
+            screen_size,
+            Position { x: 0, y: 0 },
+        ))
+    }
+
+    fn from_screen_and_cursor(backend: B, screen_size: Size, cursor_pos: Position) -> Self {
+        Self {
             backend,
             buffers: [Buffer::empty(Rect::ZERO), Buffer::empty(Rect::ZERO)],
             current: 0,
@@ -200,7 +221,7 @@ where
             viewport_area: Rect::new(0, cursor_pos.y, 0, 0),
             last_known_screen_size: screen_size,
             last_known_cursor_pos: cursor_pos,
-        })
+        }
     }
 
     /// A [`Frame`] over the current buffer for one render pass.
@@ -579,6 +600,21 @@ where
             return Ok(());
         }
         self.clear_after_position(self.viewport_area.as_position())
+    }
+
+    /// Clear the entire attached terminal and reset the inline viewport so the
+    /// caller can replay structured scrollback from the beginning.
+    pub fn reset_for_replay(&mut self) -> io::Result<()> {
+        let origin = Position { x: 0, y: 0 };
+        self.backend.set_cursor_position(origin)?;
+        self.backend.clear_region(ClearType::All)?;
+        self.viewport_area = Rect::ZERO;
+        self.last_known_cursor_pos = origin;
+        self.last_known_screen_size = self.backend.size()?;
+        for buffer in &mut self.buffers {
+            buffer.reset();
+        }
+        Ok(())
     }
 
     /// Clear from `position` through the end of screen and force a full redraw.
@@ -1093,7 +1129,9 @@ mod tests {
         // is a no-op regardless. Backstops every call site.
         assert_eq!(ansi(&SetScrollRegion(1..1)), "");
         assert_eq!(ansi(&SetScrollRegion(0..0)), "");
-        assert_eq!(ansi(&SetScrollRegion(5..2)), "");
+        let reversed_start = 5;
+        let reversed_end = 2;
+        assert_eq!(ansi(&SetScrollRegion(reversed_start..reversed_end)), "");
     }
 
     // ===== Plan Phase 1 step 6 tests =====

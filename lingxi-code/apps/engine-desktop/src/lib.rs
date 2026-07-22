@@ -34,7 +34,8 @@ pub mod settings_watch;
 mod skill_loader;
 
 use client_adapter::{AdapterPermissionGate, PermissionRequestSink};
-use command_api::{CommandRegistry, RegistrySlashDispatcher};
+use command_api::model::BuiltinCommandHandler;
+use command_api::{parse_slash_command, CommandRegistry, RegistrySlashDispatcher};
 use command_core::{
     register_all_builtin_commands, register_core_batch_1, register_core_batch_2,
     register_core_batch_4, register_core_batch_5,
@@ -525,10 +526,9 @@ async fn load_boot_permission_tiers(
             Ok(mut r) => {
                 // parity 2.1.210: same file-matcher warning for managed rules.
                 for rule in &r {
-                    if let Some(line) = permission::permission_rule_startup_warning(
-                        rule,
-                        "managed policy settings",
-                    ) {
+                    if let Some(line) =
+                        permission::permission_rule_startup_warning(rule, "managed policy settings")
+                    {
                         tracing::warn!("{line}");
                     }
                 }
@@ -1540,6 +1540,7 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 ///     default_model_explicit: false,
 ///     recent_models: Vec::new(),
 ///     fallback_model: None,
+///     custom_betas: Vec::new(),
 ///     provider_profiles: Some(BTreeMap::new()),
 ///     routing: None,
 ///     mcp_paths: vec![PathBuf::from("/tmp/project/.mcp.json")],
@@ -1578,6 +1579,8 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 ///     worktree_launch: None,
 ///     // `None` ⟶ inert: no `--tmux` worktree tmux session.
 ///     tmux_launch: None,
+///     // `None` ⟶ background session forking is unavailable to this host.
+///     bg_session_forker: None,
 /// };
 ///
 /// assert_eq!(cfg.cwd, PathBuf::from("/tmp/project"));
@@ -1620,6 +1623,9 @@ pub struct DesktopConfig {
     /// `--print`/non-interactive mode ("only works with --print"); the CLI host
     /// applies that gate before filling this field (`resolve_desktop_config`).
     pub fallback_model: Option<String>,
+    /// Host-validated custom Anthropic beta header additions for this session.
+    /// Empty keeps request headers unchanged.
+    pub custom_betas: Vec<String>,
     /// Settings-declared `providers` block as raw JSON, fed verbatim to
     /// `llm_client::ClientConfig` via `build()`. `None` ⟶ built-in profiles only.
     pub provider_profiles: Option<std::collections::BTreeMap<String, serde_json::Value>>,
@@ -1983,19 +1989,42 @@ impl CustomizationGates {
 
 impl std::fmt::Debug for DesktopConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // `dyn MemoryHierarchyProvider` is not `Debug`, so render the
-        // `memory_provider` field as a presence marker. Every other field is
-        // printed verbatim so `{cfg:?}` stays useful for host logging.
+        // Secret-, prompt-, and executable-config-bearing fields are rendered
+        // only as presence/count markers so `{cfg:?}` remains safe for host
+        // diagnostics. Trait objects use the same presence-only convention.
         f.debug_struct("DesktopConfig")
-            .field("api_base", &self.api_base)
-            .field("api_key", &self.api_key)
-            .field("api_key_helper", &self.api_key_helper)
+            .field(
+                "api_base",
+                &if self.api_base.is_empty() {
+                    "<empty>"
+                } else {
+                    "<configured>"
+                },
+            )
+            .field(
+                "api_key",
+                &if self.api_key.is_empty() {
+                    "<empty>"
+                } else {
+                    "<redacted>"
+                },
+            )
+            .field(
+                "api_key_helper",
+                &self.api_key_helper.as_ref().map(|_| "<redacted>"),
+            )
             .field("cwd", &self.cwd)
             .field("lingxi_home", &self.lingxi_home)
             .field("default_model", &self.default_model)
             .field("fallback_model", &self.fallback_model)
-            .field("provider_profiles", &self.provider_profiles)
-            .field("routing", &self.routing)
+            .field(
+                "provider_profile_count",
+                &self
+                    .provider_profiles
+                    .as_ref()
+                    .map(|profiles| profiles.len()),
+            )
+            .field("routing_configured", &self.routing.is_some())
             .field("mcp_paths", &self.mcp_paths)
             .field("use_noop_permission_gate", &self.use_noop_permission_gate)
             .field("deny_unresolved_ask", &self.deny_unresolved_ask)
@@ -2028,19 +2057,28 @@ impl std::fmt::Debug for DesktopConfig {
                     &"None"
                 },
             )
-            .field("system_prompt_override", &self.system_prompt_override)
-            .field("append_system_prompt", &self.append_system_prompt)
+            .field(
+                "system_prompt_override_configured",
+                &self.system_prompt_override.is_some(),
+            )
+            .field(
+                "append_system_prompt_configured",
+                &self.append_system_prompt.is_some(),
+            )
             .field("session_id_override", &self.session_id_override)
             .field("disable_slash_commands", &self.disable_slash_commands)
             .field("add_dir", &self.add_dir)
-            .field("cli_mcp_servers", &self.cli_mcp_servers)
+            .field("cli_mcp_server_count", &self.cli_mcp_servers.len())
             .field(
                 "exclude_dynamic_system_prompt_sections",
                 &self.exclude_dynamic_system_prompt_sections,
             )
             .field("customization_gates", &self.customization_gates)
             .field("session_persistence", &self.session_persistence)
-            .field("cli_agents_json", &self.cli_agents_json)
+            .field(
+                "cli_agents_json_configured",
+                &self.cli_agents_json.is_some(),
+            )
             .field("cli_agent", &self.cli_agent)
             .field("cli_plugin_dirs", &self.cli_plugin_dirs)
             .field("initial_effort", &self.initial_effort)
@@ -2070,6 +2108,7 @@ impl Default for DesktopConfig {
             default_model_explicit: false,
             recent_models: Vec::new(),
             fallback_model: None,
+            custom_betas: Vec::new(),
             provider_profiles: None,
             routing: None,
             mcp_paths: Vec::new(),
@@ -2485,6 +2524,10 @@ pub enum BuildError {
     /// API base URL resolution / api-client construction failed.
     #[error("api base resolution failed: {0}")]
     ApiBase(String),
+    /// Custom beta headers were requested for a route/auth mode that cannot
+    /// safely carry Anthropic first-party API-key beta headers.
+    #[error("custom betas require a first-party Anthropic API-key session")]
+    InvalidCustomBetas,
     /// Orchestrator construction failed.
     #[error("orchestrator construction failed: {0}")]
     Orchestrator(String),
@@ -2695,7 +2738,12 @@ fn anthropic_models_for(
     // spurious "ambiguous across profiles: anthropic, openrouter". Push the BARE
     // model (so `anthropic/claude-x` registers as `claude-x`, not the qualified
     // ref). `split_profile_model` is the canonical routing split.
-    for m in std::iter::once(default_model).chain(fallback_model) {
+    let fallback_models = fallback_model
+        .into_iter()
+        .flat_map(|csv| csv.split(','))
+        .map(str::trim)
+        .filter(|m| !m.is_empty());
+    for m in std::iter::once(default_model).chain(fallback_models) {
         let (profile, bare) = llm_client::split_profile_model(m);
         if profile == "anthropic" {
             ids.push(bare);
@@ -4251,6 +4299,9 @@ pub async fn build(
             None => true,
         }
     };
+    if !cfg.custom_betas.is_empty() && (!has_api_key || !session_provider_first_party) {
+        return Err(BuildError::InvalidCustomBetas);
+    }
 
     let composite = provider_config::MultiCredentialProvider::new(
         credentials.clone(),
@@ -4361,6 +4412,7 @@ pub async fn build(
         settings_backoff_ms,
     )
     .with_subscription(subscription.clone())
+    .with_custom_cli_betas(cfg.custom_betas.clone())
     .with_request_metadata(request_metadata)
     // Boot SESSION thinking config, resolved host-side from MAX_THINKING_TOKENS
     // + --max-thinking-tokens + alwaysThinkingEnabled (claude-code `qIe()`+`wn`).
@@ -4439,8 +4491,12 @@ pub async fn build(
     // live `/fast` toggle is seen by the adapter on the next turn. Defaults
     // `false`, so request bodies stay byte-identical until toggled.
     let fast_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Keep the concrete session service shared with compaction/recap. Their
+    // forked summary call must use the same resolved provider route and live
+    // credential as the parent turn (Claude Code's single API pipeline).
+    let api_service = Arc::new(service_built);
     let provider_adapter = Arc::new(
-        ProviderApiAdapter::new(Arc::new(service_built))
+        ProviderApiAdapter::new(api_service.clone())
             .with_initial_effort(cfg.initial_effort.clone().map(serde_json::Value::String))
             .with_fast_mode(fast_flag.clone()),
     );
@@ -5360,9 +5416,12 @@ pub async fn build(
             Some(cfg.api_base.clone()),
             http.clone() as Arc<dyn traits::HttpTransport>,
         ));
+    let compaction_side_query: Arc<dyn sidequery::SideQueryClient> = Arc::new(
+        sidequery::ProviderSideQueryClient::from_service(api_service.clone()),
+    );
     let forked_runner = Arc::new(
         sidequery::ForkedAgentRunner::new()
-            .with_side_query_client(side_query_client.clone(), orch_cfg.model.clone())
+            .with_side_query_client(compaction_side_query, orch_cfg.model.clone())
             // (M10 cc2.1.198) the compaction summary call INHERITS the session
             // extended-thinking config (binary: `thinkingConfig: mXt(r)` on the
             // summarizer `sEt` call @216945141). This is the SAME resolved
@@ -7105,18 +7164,30 @@ pub async fn build(
     // re-passed on `--resume`) wins; otherwise, on a resume with no `--agent`, the
     // persisted `agentSetting` (`rVe` restoration). `from_resume` selects the miss
     // warning + suppresses the re-persist (the record is already on disk).
-    let (wanted_agent, from_resume): (Option<String>, bool) = match cfg.cli_agent.clone() {
-        Some(w) => (Some(w), false),
+    let (wanted_agent, resumed_agent_snapshot, from_resume): (
+        Option<String>,
+        Option<serde_json::Value>,
+        bool,
+    ) = match cfg.cli_agent.clone() {
+        Some(w) => (Some(w), None, false),
         None if cfg.session_id_override.is_some() => {
+            let snapshot_fs =
+                Arc::new(PosixFileSystem::new(watch_cwd.clone())) as Arc<dyn traits::FileSystem>;
             let persisted = session::jsonl::loader::read_agent_setting(
                 &main_transcript_path,
-                Arc::new(PosixFileSystem::new(watch_cwd.clone())) as Arc<dyn traits::FileSystem>,
+                snapshot_fs.clone(),
                 &main_session_uuid,
             )
             .await;
-            (persisted, true)
+            let snapshot = session::jsonl::loader::read_agent_snapshot(
+                &main_transcript_path,
+                snapshot_fs,
+                &main_session_uuid,
+            )
+            .await;
+            (persisted, snapshot, true)
         }
-        None => (None, false),
+        None => (None, None, false),
     };
     if let Some(wanted) = wanted_agent {
         // Resolve against the FINAL catalog, extracting what the main thread
@@ -7124,9 +7195,15 @@ pub async fn build(
         // catalog read lock is released before we mutate the orchestrator seam.
         let applied = {
             let cat = plugin_agent_catalog.read().await;
-            let hit = cat.iter().find(|a| a.agent_type == wanted).or_else(|| {
-                let suffix = format!(":{wanted}");
-                cat.iter().find(|a| a.agent_type.ends_with(&suffix))
+            let snapshot_def = resumed_agent_snapshot
+                .as_ref()
+                .and_then(|v| serde_json::from_value::<agent::AgentDefinition>(v.clone()).ok())
+                .filter(|a| a.agent_type == wanted);
+            let hit = snapshot_def.as_ref().or_else(|| {
+                cat.iter().find(|a| a.agent_type == wanted).or_else(|| {
+                    let suffix = format!(":{wanted}");
+                    cat.iter().find(|a| a.agent_type.ends_with(&suffix))
+                })
             });
             match hit {
                 Some(a) => {
@@ -7156,6 +7233,7 @@ pub async fn build(
                         // below (the source drives the `g9e` trusted-source gate).
                         a.frontmatter_hooks.clone(),
                         a.source,
+                        a.clone(),
                     ))
                 }
                 None => {
@@ -7186,6 +7264,7 @@ pub async fn build(
             model_override,
             frontmatter_hooks,
             source,
+            resolved_definition,
         )) = applied
         {
             tracing::debug!(agent = %agent_type, from_resume, "--agent applied to main thread");
@@ -7199,7 +7278,12 @@ pub async fn build(
             // moves into `set_main_thread_agent`.
             if !from_resume && cfg.session_persistence {
                 if let Err(e) = main_agent_setting_writer
-                    .append_agent_setting(&main_session_uuid, &agent_type)
+                    .append_agent_setting_snapshot(
+                        &main_session_uuid,
+                        &agent_type,
+                        &serde_json::to_value(&resolved_definition)
+                            .expect("resolved AgentDefinition must serialize"),
+                    )
                     .await
                 {
                     tracing::warn!(error = %e, "failed to persist --agent agent-setting record");
@@ -7285,7 +7369,23 @@ pub async fn build(
     //     shutdown path — so the matching `SessionEnd` is NOT fired here. The
     //     `ConversationOrchestrator::fire_session_end` helper exists for a future
     //     batch that adds an explicit host teardown seam.
-    orch.fire_session_start("startup").await;
+    let session_start = orch.fire_session_start("startup").await;
+    if session_start.reload_skills {
+        let home = dirs::home_dir().unwrap_or_else(|| cfg.lingxi_home.clone());
+        let managed_dir = crate::settings_watch::managed_settings_dir();
+        let handler = command_core::reload_skills::ReloadSkillsHandler::with_all_roots(
+            shared_command_registry.clone(),
+            cfg.cwd.clone(),
+            cfg.lingxi_home.clone(),
+            Some(managed_dir),
+            home,
+            Vec::new(),
+            cfg.customization_gates.safe_mode,
+        );
+        if let Some(parsed) = parse_slash_command("/reload-skills") {
+            let _ = handler.handle(&parsed).await;
+        }
+    }
 
     // (7.1) Instruction-load lifecycle: fire the `InstructionsLoaded` hooks now
     //       that memory + the hook registry are wired. claude-code fires this
@@ -7886,13 +7986,40 @@ mod tests {
         assert_eq!(cfg.permission_mode, permission::PermissionMode::Default);
 
         // Frozen field set is fully reachable via struct-update syntax, and the
-        // type derives `Clone`/`Debug` so a host can fan it out + log it.
+        // type implements `Clone`/secret-safe `Debug` so a host can fan it out
+        // and include its non-sensitive shape in diagnostics.
         let custom = DesktopConfig {
             use_noop_permission_gate: false,
             ..cfg.clone()
         };
         assert!(!custom.use_noop_permission_gate);
         let _ = format!("{custom:?}");
+    }
+
+    #[test]
+    fn desktop_config_debug_redacts_secret_bearing_fields() {
+        const SECRET_CANARY: &str = "LX_SECRET_CANARY_NEVER_LOG_6e44f87c";
+
+        let cfg = DesktopConfig {
+            api_base: format!("https://user:{SECRET_CANARY}@example.test/?token={SECRET_CANARY}"),
+            api_key: SECRET_CANARY.to_string(),
+            api_key_helper: Some(format!("printf {SECRET_CANARY}")),
+            provider_profiles: Some(std::collections::BTreeMap::from([(
+                "private".to_string(),
+                serde_json::json!({ "apiKey": SECRET_CANARY }),
+            )])),
+            routing: Some(serde_json::json!({ "credential": SECRET_CANARY })),
+            system_prompt_override: Some(SECRET_CANARY.to_string()),
+            append_system_prompt: Some(SECRET_CANARY.to_string()),
+            cli_agents_json: Some(format!(r#"{{"prompt":"{SECRET_CANARY}"}}"#)),
+            ..DesktopConfig::default()
+        };
+
+        let debug = format!("{cfg:?}");
+        assert!(!debug.contains(SECRET_CANARY), "secret leaked: {debug}");
+        assert!(debug.contains("<redacted>"));
+        assert!(debug.contains("provider_profile_count: Some(1)"));
+        assert!(debug.contains("routing_configured: true"));
     }
 
     /// The CLI-resolved `permission_mode` threads from `DesktopConfig` into the
@@ -8047,6 +8174,7 @@ mod tests {
             default_model_explicit: true,
             recent_models: Vec::new(),
             fallback_model: None,
+            custom_betas: Vec::new(),
             provider_profiles: None,
             routing: None,
             mcp_paths: vec![cwd.join(".mcp.json")],
@@ -9651,14 +9779,13 @@ mod tests {
         );
     }
 
-    /// (P2-02 cc2.1.207) `rVe` miss branch: when the persisted agent is GONE from
-    /// the resumed catalog (`activeAgents` no longer lists it), restoration falls
-    /// back to default behavior (no agent re-adopted) — the boot still succeeds
-    /// and no frontmatter `Stop` hook is installed. (The byte-exact
-    /// `Resumed session had agent "X" but it is no longer available. Using default
-    /// behavior.` warning is emitted via `tracing::warn`.)
+    /// P1 resolved-agent snapshot: when the persisted agent is gone from the
+    /// resumed catalog, a versioned and integrity-checked snapshot still restores
+    /// the behavior that was active when the session was created. Legacy
+    /// transcripts without a snapshot continue to use the old name lookup and
+    /// therefore fall back to the default when the name is unavailable.
     #[tokio::test]
-    async fn build_resume_missing_agent_falls_back_to_default() {
+    async fn build_resume_missing_catalog_agent_uses_persisted_snapshot() {
         use traits::OrchestratorHandle as _;
 
         let (_tmp, mut cfg) = test_config(true);
@@ -9698,9 +9825,46 @@ mod tests {
 
         let hooks = rt2.orchestrator.list_hooks().await;
         assert!(
-            !hooks.iter().any(|h| h.event == "Stop"),
-            "a resumed-but-unavailable agent must NOT install its frontmatter hook \
-             (default fallback): {hooks:?}"
+            hooks.iter().any(|h| h.event == "Stop"),
+            "a resumed agent must retain its snapshotted frontmatter hook even \
+             after the catalog entry is removed: {hooks:?}"
+        );
+    }
+
+    /// Legacy `agent-setting` records contain only the agent name. They retain
+    /// the pre-snapshot behavior: resolve by name and fail back to the default
+    /// when that catalog entry is no longer available.
+    #[tokio::test]
+    async fn build_resume_legacy_missing_agent_falls_back_to_default() {
+        use traits::OrchestratorHandle as _;
+
+        let (_tmp, mut cfg) = test_config(true);
+        let session_id = "55555555-6666-7777-8888-999999999999";
+        cfg.session_id_override = Some(session_id.to_string());
+        cfg.cli_agent = None;
+        cfg.cli_agents_json = None;
+
+        let transcript_path =
+            session::jsonl::session_path(&cfg.lingxi_home, &cfg.cwd.to_string_lossy(), session_id);
+        let fs: Arc<dyn traits::FileSystem> =
+            Arc::new(platform_posix::fs::PosixFileSystem::new(cfg.cwd.clone()));
+        session::jsonl::JsonlWriter::new(transcript_path, fs)
+            .append_agent_setting(session_id, "tester")
+            .await
+            .expect("write legacy agent-setting");
+
+        let output: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let permission_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+        let runtime = build(cfg, output, permission_sink)
+            .await
+            .expect("legacy resume with a missing agent must still succeed");
+
+        let hooks = runtime.orchestrator.list_hooks().await;
+        assert!(
+            !hooks.iter().any(|hook| hook.event == "Stop"),
+            "a legacy name-only record cannot restore a missing agent: {hooks:?}"
         );
     }
 

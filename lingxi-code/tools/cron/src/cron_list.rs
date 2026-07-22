@@ -86,9 +86,8 @@ fn truncate_single_line(s: &str, max_width: usize) -> String {
 /// jobs. Every persisted task is durable by definition, so the `durable:false`
 /// key (CronListTool.ts' `durable === false` spread, which only applies to the
 /// separate in-memory session tasks) is never emitted here.
-async fn read_all_jobs(project_root: &Path) -> Vec<Value> {
-    let path = cron::tasks_file::scheduled_tasks_path(project_root);
-    let body = match tokio::fs::read_to_string(&path).await {
+async fn read_all_jobs(fs: &dyn traits::FileSystem, project_root: &Path) -> Vec<Value> {
+    let body = match cron::tasks_file::read_tasks_body(fs, project_root).await {
         Ok(b) => b,
         Err(_) => return Vec::new(), // file absent → no jobs
     };
@@ -239,7 +238,7 @@ impl Tool for CronListTool {
         // (`ctx ? allTasks.filter(t => t.agentId === ctx.agentId) : allTasks`).
         // There is no teammate context in this Rust seam, so every persisted
         // job is listed.
-        let jobs = read_all_jobs(&self.ctx.cwd()).await;
+        let jobs = read_all_jobs(self.ctx.fs.as_ref(), &self.ctx.cwd()).await;
         let content = render_result(&jobs);
 
         let mut md: LogEventMetadata = HashMap::new();

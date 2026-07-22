@@ -33,18 +33,122 @@
 //! upgrade takeover, orphan reap) will build on. See the module's residual
 //! plan in the porting notes.
 
+use crate::background_launch::LaunchSpecRef;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Wire protocol version the daemon speaks (binary `Ip`).
-pub const PROTO: u32 = 1;
+pub const PROTO: u32 = 2;
 /// Minimum acceptable protocol version (binary `Zen`).
 pub const PROTO_MIN: u32 = 1;
 /// Maximum roster file size before it is treated as corrupt (binary `yef` =
 /// 8 MiB). Anything larger is quarantined, not parsed.
 pub const MAX_ROSTER_BYTES: u64 = 8_388_608;
+
+/// Marker file written inside each managed worktree to pin ownership metadata.
+pub const WORKTREE_OWNERSHIP_MARKER: &str = ".lingxi-worktree-owner.json";
+/// Owned marker schema version.
+pub const WORKTREE_OWNERSHIP_MARKER_SCHEMA_VERSION: u32 = 2;
+
+/// Managed-worktree ownership metadata persisted in the worktree root.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeOwnershipMarker {
+    pub schema_version: u32,
+    pub short: String,
+    pub session_id: String,
+    pub ownership_token: String,
+    pub canonical_worktree_path: String,
+    pub created_at_millis: i64,
+}
+
+impl WorktreeOwnershipMarker {
+    fn new(
+        short: &str,
+        session_id: &str,
+        token: &str,
+        worktree_path: &Path,
+    ) -> std::io::Result<Self> {
+        Ok(Self {
+            schema_version: WORKTREE_OWNERSHIP_MARKER_SCHEMA_VERSION,
+            short: short.to_string(),
+            session_id: session_id.to_string(),
+            ownership_token: token.to_string(),
+            canonical_worktree_path: canonicalize_managed_worktree_path(worktree_path)?
+                .display()
+                .to_string(),
+            created_at_millis: now_millis(),
+        })
+    }
+}
+
+/// Canonicalize a managed-worktree path without accepting a leaf symlink.
+pub fn canonicalize_managed_worktree_path(worktree_path: &Path) -> std::io::Result<PathBuf> {
+    let metadata = std::fs::symlink_metadata(worktree_path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "managed worktree path is not a real directory",
+        ));
+    }
+    std::fs::canonicalize(worktree_path)
+}
+
+/// Canonical path of a managed-worktree ownership marker file.
+#[must_use]
+pub fn worktree_ownership_marker_path(worktree_path: &Path) -> PathBuf {
+    worktree_path.join(WORKTREE_OWNERSHIP_MARKER)
+}
+
+/// Persist an owner-only marker next to a managed worktree.
+pub fn write_worktree_ownership_marker(
+    worktree_path: &Path,
+    short: &str,
+    session_id: &str,
+    token: &str,
+) -> std::io::Result<()> {
+    use std::io::Write as _;
+
+    let path = worktree_ownership_marker_path(worktree_path);
+    let marker = WorktreeOwnershipMarker::new(short, session_id, token, worktree_path)?;
+    let raw =
+        serde_json::to_vec_pretty(&marker).map_err(|err| std::io::Error::other(err.to_string()))?;
+    let tmp = worktree_path.join(format!(
+        "{WORKTREE_OWNERSHIP_MARKER}.tmp.{}.{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    let result = (|| {
+        let mut file = platform_pty::create_current_user_private_file(&tmp)?;
+        file.write_all(&raw)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&tmp, &path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&path)?.permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(&path, perms)?;
+    }
+    Ok(())
+}
+
+/// Read a managed-worktree ownership marker.
+pub fn read_worktree_ownership_marker(
+    worktree_path: &Path,
+) -> std::io::Result<WorktreeOwnershipMarker> {
+    let path = worktree_ownership_marker_path(worktree_path);
+    let raw = std::fs::read_to_string(path)?;
+    serde_json::from_str(&raw).map_err(|err| std::io::Error::other(err.to_string()))
+}
 
 /// `roster.json` under the daemon runtime dir (binary `cae()` = `lae()`/
 /// `roster.json`).
@@ -168,6 +272,14 @@ pub struct Dispatch {
     pub cwd: String,
     /// How the worker is launched (discriminated on `mode`).
     pub launch: Launch,
+    /// Owner-only durable launch context. Protocol-v1 records omit this and
+    /// are migrated on first worker load.
+    #[serde(
+        rename = "launchSpec",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub launch_spec: Option<LaunchSpecRef>,
     /// Extra environment (default `{}`).
     #[serde(default)]
     pub env: BTreeMap<String, String>,
@@ -688,16 +800,36 @@ pub fn write_roster(runtime_dir: &Path, roster: &Roster) -> std::io::Result<()> 
 
 /// Atomic write via a sibling temp file + rename, chmod'd to `mode`.
 fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> std::io::Result<()> {
-    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
-    std::fs::write(&tmp, bytes)?;
-    set_mode(&tmp, mode);
-    match std::fs::rename(&tmp, path) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let _ = std::fs::remove_file(&tmp);
-            Err(e)
-        }
+    use std::io::Write as _;
+
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("roster.json");
+    let tmp = path.with_file_name(format!(
+        ".{file_name}.tmp.{}.{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    let result = (|| {
+        // Creation-time owner-only protection matters on Windows as well as
+        // Unix: roster.json contains the bearer token for a live PTY.  The
+        // platform helper supplies a protected current-user DACL on Windows
+        // and CREATE_NEW+0600 on Unix, avoiding an inherited-ACL exposure
+        // window before the atomic rename.
+        let mut file = platform_pty::create_current_user_private_file(&tmp)?;
+        set_mode(&tmp, mode);
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        // A failed write or fsync is just as terminal as a failed rename. Do
+        // not leave a sibling temp file containing the private roster behind.
+        let _ = std::fs::remove_file(&tmp);
     }
+    result
 }
 
 #[cfg(unix)]
@@ -741,7 +873,12 @@ impl ProcProbe for SystemProbe {
         )
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    fn is_alive(&self, pid: i32) -> bool {
+        windows_process_alive(pid)
+    }
+
+    #[cfg(not(any(unix, windows)))]
     fn is_alive(&self, pid: i32) -> bool {
         pid > 1
     }
@@ -755,6 +892,7 @@ impl ProcProbe for SystemProbe {
 /// Returns the trimmed start-time string, or `None` if `ps` failed / produced
 /// no output.
 #[must_use]
+#[cfg(unix)]
 pub fn read_proc_start(pid: i32) -> Option<String> {
     if pid <= 1 {
         return None;
@@ -774,6 +912,65 @@ pub fn read_proc_start(pid: i32) -> Option<String> {
     } else {
         Some(s)
     }
+}
+
+/// Query a Windows process creation timestamp for PID-reuse-safe adoption.
+#[cfg(windows)]
+#[must_use]
+pub fn read_proc_start(pid: i32) -> Option<String> {
+    if pid <= 1 {
+        return None;
+    }
+    let script = format!(
+        "(Get-Process -Id {pid} -ErrorAction Stop).StartTime.ToUniversalTime().ToString('o')"
+    );
+    let output = std::process::Command::new("powershell.exe")
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &script,
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!value.is_empty()).then_some(value)
+}
+
+#[cfg(not(any(unix, windows)))]
+#[must_use]
+pub fn read_proc_start(_pid: i32) -> Option<String> {
+    None
+}
+
+#[cfg(windows)]
+fn windows_process_alive(pid: i32) -> bool {
+    if pid <= 1 {
+        return false;
+    }
+    let filter = format!("PID eq {pid}");
+    let Ok(output) = std::process::Command::new("tasklist.exe")
+        .args(["/FI", &filter, "/FO", "CSV", "/NH"])
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.lines().any(|line| {
+        let mut fields = line.split(',');
+        let _image = fields.next();
+        fields
+            .next()
+            .and_then(|field| field.trim().trim_matches('"').parse::<i32>().ok())
+            == Some(pid)
+    })
 }
 
 /// Why a worker was not adopted.
@@ -884,6 +1081,7 @@ mod tests {
                 launch: Launch::Prompt {
                     args: vec!["hello".to_string()],
                 },
+                launch_spec: None,
                 env: BTreeMap::new(),
                 reattach_env: None,
                 worktree: None,
@@ -930,7 +1128,10 @@ mod tests {
 
         // pretty-JSON, 2-space indent, no `parseFailed` key.
         let body = std::fs::read_to_string(roster_path(&dir)).unwrap();
-        assert!(body.contains("  \"proto\": 1"), "2-space pretty: {body}");
+        assert!(
+            body.contains(&format!("  \"proto\": {PROTO}")),
+            "2-space pretty: {body}"
+        );
         assert!(
             !body.contains("parseFailed"),
             "parseFailed stripped: {body}"
@@ -1095,7 +1296,7 @@ mod tests {
         let dir = tmpdir();
         std::fs::write(
             roster_path(&dir),
-            r#"{"proto":2,"supervisorPid":1,"updatedAt":1,"workers":{}}"#,
+            r#"{"proto":3,"supervisorPid":1,"updatedAt":1,"workers":{}}"#,
         )
         .unwrap();
         match read_roster(&dir, 5, false) {

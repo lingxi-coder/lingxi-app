@@ -231,6 +231,7 @@ impl ForkedAgentRunner {
             } else {
                 cp.tool_use_options.main_loop_model.clone()
             },
+            profile: cp.tool_use_options.model_profile.clone(),
             // Replay the parent's already-rendered system prompt verbatim;
             // `user_context` / `system_context` were inputs the parent used to
             // render it and must NOT be re-applied here (double-rendering would
@@ -387,11 +388,12 @@ mod tests {
         let runner = ForkedAgentRunner::new()
             .with_side_query_client(client.clone(), "claude-opus-4-6".into());
 
-        let req = request_with(
+        let mut req = request_with(
             vec![user_msg("PREFIX-A"), user_msg("PREFIX-B")],
             vec![user_msg("PROMPT-A")],
             Some(512),
         );
+        req.cache_safe_params.tool_use_options.model_profile = Some("parent-profile".into());
 
         let result = runner.run(req).await.expect("wired run succeeds");
 
@@ -411,6 +413,11 @@ mod tests {
         assert_eq!(
             sent.model, "test",
             "the side query must inherit the live parent model"
+        );
+        assert_eq!(
+            sent.profile.as_deref(),
+            Some("parent-profile"),
+            "the side query must inherit the live parent provider route"
         );
         assert_eq!(sent.system_prompt.as_deref(), Some("PARENT SYSTEM PROMPT"));
         assert_eq!(sent.max_tokens, 512); // honored override

@@ -37,7 +37,7 @@ use llm_client::model::context_window::{context_window_for_model, max_output_tok
 use serde_json::{json, Value};
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::{mpsc, oneshot, Mutex};
 use traits::{CostSnapshot, OutputStream};
 
@@ -83,8 +83,56 @@ fn emit_line_to_stdout(out: &mut std::io::Stdout, line: &str) {
 /// `stream_json_input::emit_replay_ack_queued`. The direct-write
 /// `emit_replay_ack` survives only for the batch `read_input_turns` path, which
 /// runs before any drain task exists (tests / non-streaming callers).
+#[derive(Debug, Default)]
+struct CoalescedHeartbeatLineState {
+    latest: Vec<(String, String)>,
+    signal_queued: bool,
+}
+
+/// Latest-value mailbox for stream-json tool heartbeats. It bounds queued
+/// heartbeat wake-ups to one while retaining the newest frame per tool call;
+/// data, control, and result frames remain ordinary FIFO messages.
+#[derive(Debug, Default)]
+pub struct CoalescedHeartbeatLines {
+    state: StdMutex<CoalescedHeartbeatLineState>,
+}
+
+impl CoalescedHeartbeatLines {
+    fn publish(&self, id: String, line: String) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, current)) = state.latest.iter_mut().find(|(key, _)| key == &id) {
+            *current = line;
+        } else {
+            state.latest.push((id, line));
+        }
+        if state.signal_queued {
+            false
+        } else {
+            state.signal_queued = true;
+            true
+        }
+    }
+
+    fn drain(&self) -> Vec<String> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.signal_queued = false;
+        std::mem::take(&mut state.latest)
+            .into_iter()
+            .map(|(_, line)| line)
+            .collect()
+    }
+
+    fn reset_after_send_failure(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.signal_queued = false;
+        state.latest.clear();
+    }
+}
+
 pub enum OutboundMsg {
     Line(String),
+    /// Wake the single writer to drain the coalesced heartbeat mailbox.
+    Heartbeats(Arc<CoalescedHeartbeatLines>),
     Flush(oneshot::Sender<()>),
 }
 
@@ -94,6 +142,11 @@ fn spawn_drain_task(mut rx: mpsc::UnboundedReceiver<OutboundMsg>) {
         while let Some(msg) = rx.recv().await {
             match msg {
                 OutboundMsg::Line(line) => emit_line_to_stdout(&mut stdout, &line),
+                OutboundMsg::Heartbeats(heartbeats) => {
+                    for line in heartbeats.drain() {
+                        emit_line_to_stdout(&mut stdout, &line);
+                    }
+                }
                 OutboundMsg::Flush(done) => {
                     let _ = stdout.flush();
                     let _ = done.send(());
@@ -311,6 +364,9 @@ pub struct StreamJsonStream {
     /// subagent blocks are not yet re-emitted here). AtomicBool so it can be set
     /// after Arc construction.
     forward_subagent_text: AtomicBool,
+    /// Latest-value mailbox that prevents an unbounded backlog of replaceable
+    /// tool heartbeat frames when stdout is slow.
+    heartbeat_lines: Arc<CoalescedHeartbeatLines>,
 }
 
 impl StreamJsonStream {
@@ -335,6 +391,7 @@ impl StreamJsonStream {
             include_partial_messages: AtomicBool::new(false),
             include_hook_events: AtomicBool::new(false),
             forward_subagent_text: AtomicBool::new(false),
+            heartbeat_lines: Arc::new(CoalescedHeartbeatLines::default()),
         }
     }
 
@@ -388,6 +445,18 @@ impl StreamJsonStream {
     fn enqueue(&self, v: &Value) {
         let line = serialize_ndjson_line(v);
         self.enqueue_line(line);
+    }
+
+    /// Build the client-protocol heartbeat frame used by stream-json. Keeping
+    /// this conversion in one pure helper prevents the CLI from inventing a
+    /// second heartbeat schema.
+    fn build_tool_heartbeat_frame(id: &protocol::ToolUseId, tool: &str, elapsed_ms: u64) -> Value {
+        serde_json::to_value(client_protocol::events::ClientEvent::ToolHeartbeat {
+            id: id.to_string(),
+            tool: tool.to_string(),
+            elapsed_ms,
+        })
+        .expect("ClientEvent::ToolHeartbeat must serialize")
     }
 
     /// Return a clone of the outbound sender so the ControlPlaneWriter
@@ -783,20 +852,45 @@ impl StreamJsonStream {
         betas: &[String],
     ) -> serde_json::Map<String, Value> {
         let mut model_usage = serde_json::Map::new();
-        if cost.input_tokens > 0 || cost.output_tokens > 0 || cost.total_usd > 0.0 {
-            let ctx_window = context_window_for_model(model_id, betas);
-            let max_output = max_output_tokens_for_model(model_id);
-            let entry = json!({
-                "inputTokens": cost.input_tokens,
-                "outputTokens": cost.output_tokens,
-                "cacheReadInputTokens": cost.cache_read_tokens,
-                "cacheCreationInputTokens": cost.cache_creation_tokens,
-                "webSearchRequests": 0_u64,
-                "costUSD": cost.total_usd,
-                "contextWindow": ctx_window,
-                "maxOutputTokens": max_output
-            });
-            model_usage.insert(model_id.to_string(), entry);
+        // Cost tracking records the provider response's actual model. That is
+        // essential when `--fallback-model` switched away from the session's
+        // primary: result metadata must name the model that consumed tokens,
+        // not merely the configured primary. Preserve the legacy aggregate
+        // fallback for hosts that do not expose per-model rows yet.
+        if !cost.by_model.is_empty() {
+            for row in &cost.by_model {
+                let ctx_window = context_window_for_model(&row.model, betas);
+                let max_output = max_output_tokens_for_model(&row.model);
+                #[allow(clippy::cast_precision_loss)]
+                let cost_usd = row.total_nano_usd as f64 / 1_000_000_000.0;
+                model_usage.insert(
+                    row.model.clone(),
+                    json!({
+                        "inputTokens": row.input_tokens,
+                        "outputTokens": row.output_tokens,
+                        "cacheReadInputTokens": row.cache_read_input_tokens,
+                        "cacheCreationInputTokens": row.cache_creation_input_tokens,
+                        "webSearchRequests": 0_u64,
+                        "costUSD": cost_usd,
+                        "contextWindow": ctx_window,
+                        "maxOutputTokens": max_output
+                    }),
+                );
+            }
+        } else if cost.input_tokens > 0 || cost.output_tokens > 0 || cost.total_usd > 0.0 {
+            model_usage.insert(
+                model_id.to_string(),
+                json!({
+                    "inputTokens": cost.input_tokens,
+                    "outputTokens": cost.output_tokens,
+                    "cacheReadInputTokens": cost.cache_read_tokens,
+                    "cacheCreationInputTokens": cost.cache_creation_tokens,
+                    "webSearchRequests": 0_u64,
+                    "costUSD": cost.total_usd,
+                    "contextWindow": context_window_for_model(model_id, betas),
+                    "maxOutputTokens": max_output_tokens_for_model(model_id)
+                }),
+            );
         }
         model_usage
     }
@@ -887,7 +981,6 @@ impl StreamJsonStream {
             "uuid": uuid,
         }))
     }
-
 }
 
 #[async_trait]
@@ -962,6 +1055,21 @@ impl OutputStream for StreamJsonStream {
             .build_tool_result_frame(_id.as_str(), model_text, result)
             .await;
         self.enqueue(&frame);
+    }
+
+    async fn emit_tool_heartbeat(&self, id: &protocol::ToolUseId, tool: &str, elapsed_ms: u64) {
+        if self.suppress_frames {
+            return;
+        }
+        let line = serialize_ndjson_line(&Self::build_tool_heartbeat_frame(id, tool, elapsed_ms));
+        if self.heartbeat_lines.publish(id.to_string(), line)
+            && self
+                .out_tx
+                .send(OutboundMsg::Heartbeats(Arc::clone(&self.heartbeat_lines)))
+                .is_err()
+        {
+            self.heartbeat_lines.reset_after_send_failure();
+        }
     }
 
     async fn emit_end_turn(&self, _stop_reason: &str, _cost: &CostSnapshot) {
@@ -1527,6 +1635,41 @@ mod tests {
         assert_eq!(f3["toolUseResult"], err);
     }
 
+    #[test]
+    fn tool_heartbeat_uses_client_protocol_wire_shape() {
+        let id = protocol::ToolUseId::new();
+        let frame = StreamJsonStream::build_tool_heartbeat_frame(&id, "Bash", 4_321);
+        assert_eq!(frame["type"], "tool_heartbeat");
+        assert_eq!(frame["id"], id.to_string());
+        assert_eq!(frame["tool"], "Bash");
+        assert_eq!(frame["elapsed_ms"], 4_321);
+    }
+
+    #[tokio::test]
+    async fn tool_heartbeats_coalesce_when_stdout_is_backpressured() {
+        let stream = StreamJsonStream::new(make_params("sess-heartbeat"));
+        let mut rx = stream
+            .drain_rx
+            .lock()
+            .await
+            .take()
+            .expect("drain receiver available");
+        let id = protocol::ToolUseId::new();
+
+        stream.emit_tool_heartbeat(&id, "Bash", 1_000).await;
+        stream.emit_tool_heartbeat(&id, "Bash", 2_000).await;
+        stream.emit_tool_heartbeat(&id, "Bash", 3_000).await;
+
+        let OutboundMsg::Heartbeats(heartbeats) = rx.try_recv().expect("heartbeat wake-up") else {
+            panic!("expected coalesced heartbeat wake-up");
+        };
+        let lines = heartbeats.drain();
+        assert_eq!(lines.len(), 1);
+        let frame: Value = serde_json::from_str(&lines[0]).expect("valid heartbeat json");
+        assert_eq!(frame["elapsed_ms"], 3_000);
+        assert!(rx.try_recv().is_err(), "only one wake-up may be queued");
+    }
+
     /// Verify U+2028/U+2029 escaping.
     #[test]
     fn line_terminator_escaping() {
@@ -1862,6 +2005,7 @@ mod tests {
             .await;
         let line = match rx.try_recv().expect("a frame was enqueued") {
             OutboundMsg::Line(l) => l,
+            OutboundMsg::Heartbeats(_) => panic!("expected a Line frame"),
             OutboundMsg::Flush(_) => panic!("expected a Line frame"),
         };
         let frame: Value = serde_json::from_str(&line).expect("frame is valid json");
@@ -2112,6 +2256,32 @@ mod tests {
             entry1m["maxOutputTokens"], 64_000_u64,
             "opus-4-8[1m] maxOutputTokens unchanged"
         );
+    }
+
+    #[tokio::test]
+    async fn model_usage_reports_actual_fallback_model_rows() {
+        let stream = StreamJsonStream::new(make_params("fallback-result"));
+        let cost = CostSnapshot {
+            input_tokens: 17,
+            output_tokens: 5,
+            total_usd: 0.000_002,
+            by_model: vec![traits::orchestrator::ModelUsageRow {
+                model: "claude-haiku-4-5".to_string(),
+                total_nano_usd: 2_000,
+                input_tokens: 17,
+                output_tokens: 5,
+                cache_read_input_tokens: 3,
+                cache_creation_input_tokens: 2,
+            }],
+            ..Default::default()
+        };
+        let frame = stream
+            .build_result_success_frame("done", "end_turn", &cost, "claude-opus-4-6", "off", &[])
+            .await;
+        let usage = frame["modelUsage"].as_object().expect("modelUsage map");
+        assert!(!usage.contains_key("claude-opus-4-6"));
+        assert_eq!(usage["claude-haiku-4-5"]["inputTokens"], 17);
+        assert_eq!(usage["claude-haiku-4-5"]["cacheReadInputTokens"], 3);
     }
 
     // ── P2b: rate_limit_event frame ───────────────────────────────────────────

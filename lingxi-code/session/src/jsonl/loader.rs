@@ -67,6 +67,18 @@ pub struct SessionMetadata {
     pub path: PathBuf,
 }
 
+/// A resumable-session catalog plus the number of UUID-named transcript files
+/// that could not be read or contained no recoverable messages.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionCatalog {
+    /// Readable, resumable sessions sorted and limited like
+    /// [`list_recent_sessions`].
+    pub sessions: Vec<SessionMetadata>,
+    /// Corrupt or unreadable candidate files skipped while preserving the
+    /// readable portion of the catalog.
+    pub skipped_files: usize,
+}
+
 impl Ord for SessionMetadata {
     fn cmp(&self, other: &Self) -> Ordering {
         // Newest-first (mtime desc), tie-break by `created` (birthtime) desc.
@@ -302,12 +314,14 @@ fn is_loop_session(messages: &[JsonlMessage]) -> bool {
 /// chain tip's `leafUuid`) > first-user-message — composed from
 /// `readLiteMetadata`'s custom-over-ai rule (`sessionStorage.ts:4771-4775`) and
 /// `getLogDisplayTitle` (`utils/log.ts:30`). Returns `Ok(false)` when the dir
-/// does not exist (`NotFound`) and `Ok(true)` when it was read; I/O errors carry
-/// the offending path as `arg`, exactly as the original single-dir scan did.
+/// does not exist (`NotFound`) and `Ok(true)` when it was read. Directory-level
+/// I/O errors are returned; unreadable or wholly corrupt candidate files are
+/// counted in `skipped_files` so readable siblings can still be listed.
 async fn collect_dir(
     dir: &Path,
     fs: &Arc<dyn FileSystem>,
     rows: &mut Vec<SessionMetadata>,
+    skipped_files: &mut usize,
 ) -> Result<bool, LoaderError> {
     let mut entries = match tokio::fs::read_dir(dir).await {
         Ok(rd) => rd,
@@ -332,14 +346,20 @@ async fn collect_dir(
         if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
             continue;
         }
-        let metadata = entry.metadata().await.map_err(|source| LoaderError::Io {
-            arg: path.display().to_string(),
-            source,
-        })?;
-        let modified = metadata.modified().map_err(|source| LoaderError::Io {
-            arg: path.display().to_string(),
-            source,
-        })?;
+        let metadata = match entry.metadata().await {
+            Ok(metadata) => metadata,
+            Err(_) => {
+                *skipped_files += 1;
+                continue;
+            }
+        };
+        let modified = match metadata.modified() {
+            Ok(modified) => modified,
+            Err(_) => {
+                *skipped_files += 1;
+                continue;
+            }
+        };
         // `created()` is the parity analog of TS `st.birthtime`. Unlike
         // `modified()` it is NOT available on every platform/filesystem — it
         // returns `Err` where birthtime is unsupported — so we fall back to
@@ -363,10 +383,22 @@ async fn collect_dir(
         // leafUuid), `custom_titles` + `ai_titles` (keyed by sessionId). See
         // `LoadedTranscript`.
         let reader = JsonlReader::new(path.clone(), fs.clone());
-        let loaded = reader.read_routed().await.map_err(|e| LoaderError::Io {
-            arg: path.display().to_string(),
-            source: std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()),
-        })?;
+        let loaded = match reader.read_routed().await {
+            Ok(loaded) => loaded,
+            Err(_) => {
+                *skipped_files += 1;
+                continue;
+            }
+        };
+
+        // Preserve crash-tail tolerance: a valid transcript remains resumable
+        // even when its last line was truncated. If no message can be recovered
+        // at all, however, a zero-turn `(session)` row would be a dead resume
+        // target and conceal catalog damage from the desktop client.
+        if loaded.messages_in_order.is_empty() && loaded.malformed_line_count > 0 {
+            *skipped_files += 1;
+            continue;
+        }
 
         // SESSION.1 — claude-code HIDES sub-agent / sidechain transcripts from
         // the /resume picker. The decision is made from the FIRST line only:
@@ -615,15 +647,34 @@ pub async fn list_recent_sessions(
     limit: usize,
     fs: Arc<dyn FileSystem>,
 ) -> Result<Vec<SessionMetadata>, LoaderError> {
+    Ok(
+        list_recent_sessions_with_diagnostics(lingxi_home, cwd, limit, fs)
+            .await?
+            .sessions,
+    )
+}
+
+/// Enumerate resumable sessions while retaining a count of corrupt or
+/// unreadable candidate files that were skipped. Readable sessions are never
+/// discarded because a sibling transcript is damaged. If every candidate is
+/// damaged, the function returns [`LoaderError::Io`] so callers can surface a
+/// recoverable catalog error instead of a misleading empty state.
+pub async fn list_recent_sessions_with_diagnostics(
+    lingxi_home: &Path,
+    cwd: &str,
+    limit: usize,
+    fs: Arc<dyn FileSystem>,
+) -> Result<SessionCatalog, LoaderError> {
     // `git_worktree_paths` already returns empty for git-error / non-repo /
     // single-worktree, so an empty vec is the "behave exactly as before" signal.
     let worktree_paths = git_worktree_paths(cwd);
-    list_recent_sessions_inner(lingxi_home, cwd, limit, &fs, &worktree_paths).await
+    list_recent_sessions_inner_with_diagnostics(lingxi_home, cwd, limit, &fs, &worktree_paths).await
 }
 
 /// Worktree-path-injectable core of [`list_recent_sessions`] (so unit tests can
 /// drive the multi-worktree branch without a real git repo). `worktree_paths`
 /// empty ⇒ today's single-cwd-dir behavior; len > 1 ⇒ the SESSION.5 union.
+#[cfg(test)]
 async fn list_recent_sessions_inner(
     lingxi_home: &Path,
     cwd: &str,
@@ -631,14 +682,35 @@ async fn list_recent_sessions_inner(
     fs: &Arc<dyn FileSystem>,
     worktree_paths: &[String],
 ) -> Result<Vec<SessionMetadata>, LoaderError> {
+    Ok(
+        list_recent_sessions_inner_with_diagnostics(lingxi_home, cwd, limit, fs, worktree_paths)
+            .await?
+            .sessions,
+    )
+}
+
+async fn list_recent_sessions_inner_with_diagnostics(
+    lingxi_home: &Path,
+    cwd: &str,
+    limit: usize,
+    fs: &Arc<dyn FileSystem>,
+    worktree_paths: &[String],
+) -> Result<SessionCatalog, LoaderError> {
     let mut rows: Vec<SessionMetadata> = Vec::new();
+    let mut skipped_files = 0;
 
     if worktree_paths.len() <= 1 {
         // 0/1 worktrees (or git unavailable): scan ONLY the cwd's project dir.
         // `collect_dir` returns false on NotFound; the `rows.is_empty()` check
         // below collapses both "missing dir" and "no resumable files" into the
         // original `EmptyDirectory`, while other I/O errors propagate as `Io`.
-        collect_dir(&project_dir_for_cwd(lingxi_home, cwd), fs, &mut rows).await?;
+        collect_dir(
+            &project_dir_for_cwd(lingxi_home, cwd),
+            fs,
+            &mut rows,
+            &mut skipped_files,
+        )
+        .await?;
     } else {
         // > 1 worktrees: union every projects-root subdir whose name matches a
         // worktree's sanitized prefix (this also covers the cwd's own dir, since
@@ -667,14 +739,20 @@ async fn list_recent_sessions_inner(
                     let name = entry.file_name();
                     let Some(name) = name.to_str() else { continue };
                     if prefixes.iter().any(|p| worktree_dir_matches(name, p)) {
-                        collect_dir(&entry.path(), fs, &mut rows).await?;
+                        collect_dir(&entry.path(), fs, &mut rows, &mut skipped_files).await?;
                     }
                 }
             }
             // Projects root unreadable: fall back to the cwd's project dir, like
             // claude-code's `getStatOnlyLogsForWorktrees` catch branch.
             Err(_) => {
-                collect_dir(&project_dir_for_cwd(lingxi_home, cwd), fs, &mut rows).await?;
+                collect_dir(
+                    &project_dir_for_cwd(lingxi_home, cwd),
+                    fs,
+                    &mut rows,
+                    &mut skipped_files,
+                )
+                .await?;
             }
         }
 
@@ -682,12 +760,24 @@ async fn list_recent_sessions_inner(
     }
 
     if rows.is_empty() {
+        if skipped_files > 0 {
+            return Err(LoaderError::Io {
+                arg: project_dir_for_cwd(lingxi_home, cwd).display().to_string(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "session catalog contains no recoverable transcripts",
+                ),
+            });
+        }
         return Err(LoaderError::EmptyDirectory);
     }
 
     rows.sort();
     rows.truncate(limit);
-    Ok(rows)
+    Ok(SessionCatalog {
+        sessions: rows,
+        skipped_files,
+    })
 }
 
 /// Load a session by UUID and return the MAIN-THREAD conversation chain
@@ -778,6 +868,35 @@ pub async fn read_agent_setting(
         .get(session_id)
         .and_then(Value::as_str)
         .map(str::to_string)
+}
+
+/// Read the last immutable resolved-agent snapshot for a session. Returns
+/// `None` for legacy transcripts and for malformed/unsupported snapshot
+/// versions. Integrity is checked before the definition is returned.
+pub async fn read_agent_snapshot(
+    transcript_path: &Path,
+    fs: Arc<dyn FileSystem>,
+    session_id: &str,
+) -> Option<Value> {
+    use sha2::{Digest, Sha256};
+
+    if !tokio::fs::try_exists(transcript_path)
+        .await
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    let reader = JsonlReader::new(transcript_path.to_path_buf(), fs);
+    let loaded = reader.read_routed().await.ok()?;
+    let snapshot = loaded.agent_snapshots.get(session_id)?;
+    if snapshot.get("schemaVersion").and_then(Value::as_u64) != Some(1) {
+        return None;
+    }
+    let definition = snapshot.get("definition")?;
+    let expected = snapshot.get("sha256").and_then(Value::as_str)?;
+    let canonical = serde_json::to_vec(definition).ok()?;
+    let actual = format!("{:x}", Sha256::digest(&canonical));
+    (actual == expected).then(|| definition.clone())
 }
 
 /// (parity 2.1.212) Read the persisted `worktree-state` for `session_id` from

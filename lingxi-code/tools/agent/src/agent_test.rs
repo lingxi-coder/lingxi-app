@@ -2696,7 +2696,16 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     // spawn_async seam is unwired (no silent sync fallback).
     // =====================================================================
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn g13_async_unwired_returns_clear_error_not_sync() {
+        // `AgentTool::call` reads the process-global background-task kill switch.
+        // Serialize with the test that deliberately enables it; otherwise this
+        // async-path assertion can be rerouted through the synchronous branch
+        // when the test binary runs cases in parallel.
+        let _g = BG_DISABLE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
         let spawner = arc_mock_spawner();
         // Exercise the DEFAULT (unwired) spawn_async stub — production wires it
         // (BackgroundAgentSpawner), but a host that doesn't must still surface a

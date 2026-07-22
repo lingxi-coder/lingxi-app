@@ -5,10 +5,11 @@
 //! engine ([`engine_desktop::build`]) through the connection-scoped routing in
 //! [`bridge_server`]:
 //!
-//! 1. Parse flags (`--cwd`, `--model`, `--help`) and resolve a deterministic
+//! 1. Parse flags and resolve a deterministic
 //!    [`engine_desktop::DesktopConfig`] from env/argv ([`bridge_server::boot`]).
-//!    The LLM API key is read from `ANTHROPIC_API_KEY` at runtime and is NEVER
-//!    logged. A missing key / provider only warns (the server still boots for
+//!    With `--api-key-stdin` or `--credential-stdin`, one bounded credential
+//!    payload is read directly from stdin and is NEVER logged or copied into
+//!    env/argv. A missing accepted credential source only warns (the server still boots for
 //!    transport testing; a live turn 401s and surfaces as a `ClientEvent::Error`).
 //! 2. Assemble a fully-bound [`bridge_server::server::BridgeConnection`] from a
 //!    real [`engine_desktop::DesktopRuntime`] (turn driver + command router +
@@ -22,6 +23,7 @@
 
 #![forbid(unsafe_code)]
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use bridge::McpEndpoint;
@@ -58,17 +60,29 @@ async fn main() -> anyhow::Result<()> {
         std::env::set_current_dir(cwd)
             .map_err(|e| anyhow::anyhow!("failed to chdir into --cwd {}: {e}", cwd.display()))?;
     }
+    let _telemetry_guard = telemetry::otel::install_process("bridge-server", false);
 
-    // (2) Resolve config + assemble the real runtime/connection. The key value
-    //     is read from the environment inside `resolve_desktop_config` and is
-    //     never logged.
-    let cfg = boot::resolve_desktop_config(&args);
-    if boot::has_no_credential_source(&cfg) {
-        // NON-SECRET warning: names the env var, never a value.
+    // (2) Resolve config, then receive credentials over the dedicated stdin
+    //     channel before assembly. They are never placed in argv/env or logged.
+    let mut cfg = boot::resolve_desktop_config(&args);
+    let mut provider_keys = BTreeMap::new();
+    if args.credential_stdin {
+        let envelope = boot::read_credential_envelope(&mut std::io::stdin().lock())
+            .map_err(|e| anyhow::anyhow!(e))?;
+        if let Some(api_key) = envelope.api_key {
+            cfg.api_key = api_key;
+        }
+        provider_keys = envelope.provider_keys;
+    }
+    if args.api_key_stdin {
+        cfg.api_key = boot::read_api_key_line(&mut std::io::stdin().lock())
+            .map_err(|e| anyhow::anyhow!(e))?;
+    }
+    if boot::has_no_credential_source(&cfg) && provider_keys.is_empty() {
+        // NON-SECRET warning: never includes a credential value.
         tracing::warn!(
-            "no {} set and no settings provider configured — the server will boot for transport \
-             testing, but live turns will fail with a 401 until a credential is supplied",
-            boot::API_KEY_ENV
+            "no accepted credential source was supplied — the server will boot for transport \
+             testing, but live turns will fail until a credential is supplied"
         );
     }
     tracing::info!(
@@ -78,7 +92,7 @@ async fn main() -> anyhow::Result<()> {
         "bridge-server: resolved desktop config"
     );
 
-    let bound = boot::assemble(cfg)
+    let bound = boot::assemble_with_provider_keys(cfg, provider_keys)
         .await
         .map_err(|e| anyhow::anyhow!("failed to assemble bridge runtime: {e}"))?;
 
@@ -94,18 +108,23 @@ async fn main() -> anyhow::Result<()> {
     //     reap are factored into `boot::publish_lockfile` so the headless serve
     //     test drives the SAME code with a temp dir.
     let workspace = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let bridge_dir = boot::lingxi_config_home()
-        .ok_or_else(|| anyhow::anyhow!("no home directory to root the bridge lockfile"))?
-        .join("bridge");
-    std::fs::create_dir_all(&bridge_dir)
-        .map_err(|e| anyhow::anyhow!("failed to create bridge lockfile dir: {e}"))?;
+    let bridge_dir = match &args.bridge_dir {
+        Some(path) => path.clone(),
+        None => boot::lingxi_config_home()
+            .ok_or_else(|| anyhow::anyhow!("no home directory to root the bridge lockfile"))?
+            .join("bridge"),
+    };
+    if !bridge_dir.is_absolute() {
+        anyhow::bail!("bridge lockfile directory must be absolute");
+    }
     let boot::ServedEndpoint {
         endpoint,
         lockfile_path,
         // `lock_guard` reaps the lockfile on shutdown OR panic (Drop-guard); it
         // is held to end-of-scope rather than dropped early.
         lock_guard,
-    } = boot::publish_lockfile(endpoint, bridge_dir, vec![workspace]);
+    } = boot::publish_lockfile(endpoint, bridge_dir, vec![workspace])
+        .map_err(|e| anyhow::anyhow!("failed to publish bridge lockfile: {e}"))?;
 
     // (5) Log the chosen port + lockfile path (NEVER the token), then block.
     tracing::info!(

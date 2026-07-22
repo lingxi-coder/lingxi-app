@@ -661,6 +661,9 @@ mod tests {
     fn outbound_line(msg: crate::stream_json::OutboundMsg) -> String {
         match msg {
             crate::stream_json::OutboundMsg::Line(line) => line,
+            crate::stream_json::OutboundMsg::Heartbeats(_) => {
+                panic!("unexpected heartbeat message")
+            }
             crate::stream_json::OutboundMsg::Flush(_) => panic!("unexpected flush message"),
         }
     }

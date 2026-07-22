@@ -36,16 +36,35 @@ pub struct CliBgSessionForker {
     runtime_dir: PathBuf,
     /// Engine version string stamped on every snapshotted transcript line.
     version: String,
+    /// Full interactive CLI launch context captured at composition time.
+    launch_options: crate::background_launch::BackgroundLaunchOptions,
+    /// Foreground-resolved mode that already passed the bypass safety guard.
+    resolved_permission_mode: permission::PermissionMode,
 }
 
 impl CliBgSessionForker {
     /// Construct a forker over the resolved config-home + daemon runtime dir.
     #[must_use]
-    pub fn new(config_home: PathBuf, runtime_dir: PathBuf) -> Self {
+    pub fn new(
+        config_home: PathBuf,
+        runtime_dir: PathBuf,
+        launch_options: crate::background_launch::BackgroundLaunchOptions,
+        resolved_permission_mode: permission::PermissionMode,
+    ) -> Self {
         Self {
             config_home,
             runtime_dir,
             version: env!("CARGO_PKG_VERSION").to_string(),
+            launch_options,
+            resolved_permission_mode,
+        }
+    }
+
+    fn launch_context(&self) -> crate::background_dispatch::ForkLaunchContext {
+        crate::background_dispatch::ForkLaunchContext {
+            options: Some(self.launch_options.clone()),
+            resolved_permission_mode: Some(self.resolved_permission_mode),
+            ..crate::background_dispatch::ForkLaunchContext::default()
         }
     }
 }
@@ -59,12 +78,6 @@ impl BgSessionForker for CliBgSessionForker {
         prompt: &str,
         model: &str,
     ) -> Result<String, BgForkError> {
-        // The copied session RE-DERIVES its own system prompt on resume from its
-        // cwd/LINGXI.md hierarchy (the resume loader rebuilds it), so the parent's
-        // rendered prompt is not written into the snapshot transcript. Accepted
-        // via the seam for forward-compat (a future cache-identical seed).
-        let _ = system_prompt;
-
         // Resolve the LIVE cwd at fork time (a Bash `cd` may have moved it since
         // boot) so the snapshot path and the recorded job cwd agree.
         let cwd_pb = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -94,12 +107,18 @@ impl BgSessionForker for CliBgSessionForker {
         }
 
         // 3. Dispatch a detached daemon worker that resumes the copied session.
-        let short = crate::background_dispatch::dispatch_forked_session(
+        let mut launch_context = self.launch_context();
+        launch_context.model = Some(model.to_string());
+        if let Some(system_prompt) = system_prompt {
+            launch_context.system_prompt = Some(system_prompt.to_string());
+        }
+        let short = crate::background_dispatch::dispatch_forked_session_with_context(
             &self.config_home,
             &self.runtime_dir,
             &cwd,
             &new_session_id,
             prompt,
+            &launch_context,
         )
         .map_err(|e| BgForkError::Dispatch(e.to_string()))?;
 
@@ -119,17 +138,57 @@ impl BgSessionForker for CliBgSessionForker {
         // resumes `session_id` directly via the same `Launch::Resume` machinery.
         let cwd_pb = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let cwd = cwd_pb.display().to_string();
-        let short = crate::background_dispatch::dispatch_forked_session(
+        let short = crate::background_dispatch::dispatch_resumed_session_with_context(
             &self.config_home,
             &self.runtime_dir,
             &cwd,
             session_id,
-            "",
+            &self.launch_context(),
         )
         .map_err(|e| BgForkError::Dispatch(e.to_string()))?;
         // Same grounding caveat as `fork_to_background`: the 2.1.212 resume-as-bg
         // dispatch has no recoverable oracle line (the TUI special dispatcher
         // renders it), so this is grounded on the minted short id, NOT byte-verified.
-        Ok(format!("Resumed session into a new background session ({short})."))
+        Ok(format!(
+            "Resumed session into a new background session ({short})."
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn live_fork_context_preserves_launch_options_and_resolved_mode() {
+        let forker = CliBgSessionForker::new(
+            PathBuf::from("/tmp/config"),
+            PathBuf::from("/tmp/runtime"),
+            crate::background_launch::BackgroundLaunchOptions {
+                model: Some("captured-model".to_string()),
+                agent: Some("reviewer".to_string()),
+                allowed_tools: Some(vec!["Read".to_string()]),
+                mcp_config: Some(vec!["mcp.json".to_string()]),
+                ..crate::background_launch::BackgroundLaunchOptions::default()
+            },
+            permission::PermissionMode::Plan,
+        );
+
+        let context = forker.launch_context();
+        let options = context.options.unwrap();
+        assert_eq!(options.model.as_deref(), Some("captured-model"));
+        assert_eq!(options.agent.as_deref(), Some("reviewer"));
+        assert_eq!(
+            options.allowed_tools.as_ref().unwrap(),
+            &vec!["Read".to_string()]
+        );
+        assert_eq!(
+            options.mcp_config.as_ref().unwrap(),
+            &vec!["mcp.json".to_string()]
+        );
+        assert_eq!(
+            context.resolved_permission_mode,
+            Some(permission::PermissionMode::Plan)
+        );
     }
 }

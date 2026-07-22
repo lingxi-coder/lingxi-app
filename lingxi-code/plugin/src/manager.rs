@@ -188,8 +188,7 @@ impl PluginManager {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        *self.blocked_marketplaces.write().await =
-            blocked.into_iter().map(Into::into).collect();
+        *self.blocked_marketplaces.write().await = blocked.into_iter().map(Into::into).collect();
     }
 
     /// Install a plugin from `source`.
@@ -471,7 +470,12 @@ impl PluginManager {
             return Err(PluginManagerError::Blocked(reason));
         }
         if let Some(marketplace) = cache_marketplace_name(&install_dir) {
-            if self.blocked_marketplaces.read().await.contains(&marketplace) {
+            if self
+                .blocked_marketplaces
+                .read()
+                .await
+                .contains(&marketplace)
+            {
                 return Err(PluginManagerError::Marketplace(format!(
                     "Marketplace '{marketplace}' is blocked by managed settings"
                 )));

@@ -119,6 +119,10 @@ pub struct HookContext {
 pub struct HookRegistry {
     sources: HashMap<HookSource, Vec<HookDefinition>>,
     plugin: HashMap<PluginId, Vec<HookDefinition>>,
+    /// Session-scoped named hooks keyed by session id then logical hook name.
+    /// Used by runtime-installed hooks that must be replaceable/clearable as a
+    /// unit (for example `/goal`'s temporary Stop hook).
+    session_named: HashMap<SessionId, HashMap<String, HookDefinition>>,
     /// Frontmatter hooks scoped to the agent (claude `addSessionHook` keyed on
     /// the agent id, registerFrontmatterHooks.ts). Registered by
     /// [`Self::register_agent_hooks`] when a subagent starts and removed wholesale
@@ -135,6 +139,7 @@ impl HookRegistry {
         Self {
             sources: HashMap::new(),
             plugin: HashMap::new(),
+            session_named: HashMap::new(),
             frontmatter: HashMap::new(),
         }
     }
@@ -157,6 +162,57 @@ impl HookRegistry {
     /// Drop every hook owned by `plugin_id` (used when a plugin unloads).
     pub fn unregister_plugin(&mut self, plugin_id: &PluginId) {
         self.plugin.remove(plugin_id);
+    }
+
+    /// Insert or replace one named runtime hook scoped to `session_id`.
+    /// Returns the previous definition, if the slot was already populated.
+    pub fn upsert_session_named_hook(
+        &mut self,
+        session_id: SessionId,
+        name: String,
+        mut hook: HookDefinition,
+    ) -> Option<HookDefinition> {
+        warn_if_bare_mcp_matcher(&hook);
+        hook.name = name.clone();
+        hook.source = HookSource::Session;
+        self.session_named
+            .entry(session_id)
+            .or_default()
+            .insert(name, hook)
+    }
+
+    /// Borrow a named runtime hook scoped to `session_id`, if present.
+    #[must_use]
+    pub fn get_session_named_hook(
+        &self,
+        session_id: SessionId,
+        name: &str,
+    ) -> Option<&HookDefinition> {
+        self.session_named.get(&session_id)?.get(name)
+    }
+
+    /// Remove one named runtime hook scoped to `session_id`.
+    pub fn remove_session_named_hook(
+        &mut self,
+        session_id: SessionId,
+        name: &str,
+    ) -> Option<HookDefinition> {
+        let removed = self.session_named.get_mut(&session_id)?.remove(name);
+        if self
+            .session_named
+            .get(&session_id)
+            .is_some_and(std::collections::HashMap::is_empty)
+        {
+            self.session_named.remove(&session_id);
+        }
+        removed
+    }
+
+    /// Remove every named runtime hook scoped to `session_id`.
+    pub fn clear_session_hooks(&mut self, session_id: SessionId) -> usize {
+        self.session_named
+            .remove(&session_id)
+            .map_or(0, |hooks| hooks.len())
     }
 
     /// Register an agent's frontmatter hooks, scoped to `agent_id` so they fire
@@ -230,6 +286,15 @@ impl HookRegistry {
         for hooks in self.plugin.values_mut() {
             if let Some(pos) = hooks.iter().position(|h| h.id == hook_id) {
                 hooks.remove(pos);
+                return true;
+            }
+        }
+        for hooks in self.session_named.values_mut() {
+            if let Some(name) = hooks
+                .iter()
+                .find_map(|(name, hook)| (hook.id == hook_id).then_some(name.clone()))
+            {
+                hooks.remove(&name);
                 return true;
             }
         }
@@ -326,6 +391,9 @@ impl HookRegistry {
             self.sources.values().flatten().filter(keep).collect();
         for hooks in self.plugin.values() {
             matched.extend(hooks.iter().filter(keep));
+        }
+        if let Some(hooks) = self.session_named.get(&_ctx.session_id) {
+            matched.extend(hooks.values().filter(keep));
         }
         // Agent-scoped frontmatter hooks (registered via `register_agent_hooks`
         // for the lifetime of a running subagent) fire alongside source/plugin
@@ -608,6 +676,11 @@ impl HookRegistry {
         let subscribed = |h: &&HookDefinition| h.events.contains(event_type);
         self.sources.values().flatten().any(|h| subscribed(&h))
             || self.plugin.values().flatten().any(|h| subscribed(&h))
+            || self
+                .session_named
+                .values()
+                .flat_map(std::collections::HashMap::values)
+                .any(|h| h.events.contains(event_type))
             || self.frontmatter.values().flatten().any(|h| subscribed(&h))
     }
 
@@ -622,6 +695,7 @@ impl HookRegistry {
     pub fn all_hooks(&self) -> Vec<&HookDefinition> {
         let mut out: Vec<&HookDefinition> = self.sources.values().flatten().collect();
         out.extend(self.plugin.values().flatten());
+        out.extend(self.session_named.values().flat_map(|hooks| hooks.values()));
         out.extend(self.frontmatter.values().flatten());
         out
     }
@@ -933,6 +1007,65 @@ mod all_hooks_tests {
         assert_eq!(names, vec!["b1"]);
         // Clearing an unknown agent is a no-op.
         assert_eq!(r.clear_agent_hooks(AgentId::new()), 0);
+    }
+
+    #[test]
+    fn session_named_hooks_are_scoped_and_replaceable() {
+        let mut r = HookRegistry::new();
+        let a = SessionId::new();
+        let b = SessionId::new();
+        let first = hk("old-name", HookEventType::Stop, HookSource::User);
+        let replaced = hk("other-name", HookEventType::Stop, HookSource::Project);
+        let keep = hk("keep", HookEventType::Stop, HookSource::User);
+
+        assert!(r
+            .upsert_session_named_hook(a, "goal-stop".into(), first)
+            .is_none());
+        let previous = r
+            .upsert_session_named_hook(a, "goal-stop".into(), replaced)
+            .expect("existing hook replaced");
+        assert_eq!(previous.name, "goal-stop");
+        assert_eq!(previous.source, HookSource::Session);
+        r.upsert_session_named_hook(b, "goal-stop".into(), keep);
+
+        let match_a = r.match_event(
+            &HookEvent::Stop {
+                reason: "done".into(),
+            },
+            &HookContext {
+                session_id: a,
+                ..Default::default()
+            },
+        );
+        assert_eq!(match_a.len(), 1);
+        assert_eq!(match_a[0].name, "goal-stop");
+        assert_eq!(match_a[0].source, HookSource::Session);
+
+        let match_b = r.match_event(
+            &HookEvent::Stop {
+                reason: "done".into(),
+            },
+            &HookContext {
+                session_id: b,
+                ..Default::default()
+            },
+        );
+        assert_eq!(match_b.len(), 1);
+        assert_eq!(match_b[0].name, "goal-stop");
+        assert_ne!(match_b[0].id, match_a[0].id);
+
+        assert!(r.remove_session_named_hook(a, "goal-stop").is_some());
+        let after_remove = r.match_event(
+            &HookEvent::Stop {
+                reason: "done".into(),
+            },
+            &HookContext {
+                session_id: a,
+                ..Default::default()
+            },
+        );
+        assert!(after_remove.is_empty());
+        assert_eq!(r.clear_session_hooks(b), 1);
     }
 
     #[test]

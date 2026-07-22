@@ -47,6 +47,8 @@ use client_protocol::events::ClientEvent;
 use client_protocol::permission::{
     PermissionKindDto, PermissionRequest as PermissionRequestDto, PermissionResponseDto,
 };
+use command_api::model::BuiltinCommandHandler;
+use command_api::parse_slash_command;
 use command_api::RegistrySlashDispatcher;
 use llm_client::oauth::anthropic::client::ClaudeAiOAuthClient;
 use llm_client::oauth::anthropic::config::ClaudeAiOAuthConfig;
@@ -632,21 +634,20 @@ pub async fn build_mobile_inner(
     // subscriber (`SubscriberState::default()` — api-key-only inference), and
     // binds no live subscription slot / availability map / CostTracker (out of
     // scope; mobile parity did not).
-    let provider_adapter = Arc::new(ProviderApiAdapter::new(Arc::new(
-        llm_client::ApiService::new_with_routing(
-            llm_client,
-            llm_transport,
-            subscriber_state,
-            UserAgentEnv::from_process_env(),
-            env!("CARGO_PKG_VERSION"),
-            Some(analytics_bus.clone()), // audit fix: API events share the one bus
-            None,
-            Some(cost_estimator),
-            fallback_overrides,
-            settings_max_retries,
-            settings_backoff_ms,
-        ),
-    )));
+    let api_service = Arc::new(llm_client::ApiService::new_with_routing(
+        llm_client,
+        llm_transport,
+        subscriber_state,
+        UserAgentEnv::from_process_env(),
+        env!("CARGO_PKG_VERSION"),
+        Some(analytics_bus.clone()), // audit fix: API events share the one bus
+        None,
+        Some(cost_estimator),
+        fallback_overrides,
+        settings_max_retries,
+        settings_backoff_ms,
+    ));
+    let provider_adapter = Arc::new(ProviderApiAdapter::new(api_service.clone()));
     let api_client: Arc<dyn OrchestratorApiClient> = provider_adapter.clone();
     let streaming_api: Arc<dyn StreamingApiClient> =
         streaming_override.unwrap_or(provider_adapter as Arc<dyn StreamingApiClient>);
@@ -1178,12 +1179,9 @@ pub async fn build_mobile_inner(
     // the flag-gated CONTEXT_COLLAPSE/REACTIVE_COMPACT path.) Built before
     // `orch_cfg` is moved into the orchestrator so it can read `orch_cfg.model`.
     let cache_safe_slot = Arc::new(sidequery::CacheSafeParamsSlot::new());
-    let compaction_side_query: Arc<dyn sidequery::SideQueryClient> =
-        Arc::new(sidequery::ProviderSideQueryClient::new(
-            cfg.api_key.clone(),
-            Some(cfg.api_base.clone()),
-            http.clone() as Arc<dyn traits::HttpTransport>,
-        ));
+    let compaction_side_query: Arc<dyn sidequery::SideQueryClient> = Arc::new(
+        sidequery::ProviderSideQueryClient::from_service(api_service.clone()),
+    );
     let forked_runner = Arc::new(
         sidequery::ForkedAgentRunner::new()
             .with_side_query_client(compaction_side_query, orch_cfg.model.clone()),
@@ -1291,7 +1289,7 @@ pub async fn build_mobile_inner(
         disable_agent_view,
     );
     *shared_command_registry.write().await = reg;
-    let dispatcher = RegistrySlashDispatcher::new(shared_command_registry)
+    let dispatcher = RegistrySlashDispatcher::new(shared_command_registry.clone())
         // (#3) Real embedded-shell expansion for markdown/plugin + builtin
         // `InjectMessage` prompts. Non-MCP only.
         .with_shell_expansion(shell_expansion_provider);
@@ -1312,7 +1310,21 @@ pub async fn build_mobile_inner(
     //     when no matching hook is registered (the common case). No matching
     //     `SessionEnd` is fired here: like desktop, `build_mobile` returns the
     //     runtime and the FFI host drops it with no hook-capable teardown seam.
-    orch.fire_session_start("startup").await;
+    let session_start = orch.fire_session_start("startup").await;
+    if session_start.reload_skills {
+        let handler = command_core::reload_skills::ReloadSkillsHandler::with_all_roots(
+            shared_command_registry.clone(),
+            cwd.clone(),
+            cfg.lingxi_home.clone(),
+            None,
+            cwd.clone(),
+            Vec::new(),
+            false,
+        );
+        if let Some(parsed) = parse_slash_command("/reload-skills") {
+            let _ = handler.handle(&parsed).await;
+        }
+    }
     orch.fire_instructions_loaded().await;
 
     Ok(MobileRuntime {
@@ -1966,6 +1978,16 @@ impl MobileEngineHandle {
                         protocol::SessionId::from_uuid(uuid),
                         replayed.state.history.clone(),
                         replayed.last_message_uuid.map(|u| u.to_string()),
+                        replayed
+                            .state
+                            .active_goal
+                            .clone()
+                            .map(|goal| traits::ActiveGoalSnapshot {
+                                condition: goal.condition,
+                                set_at: goal.set_at,
+                                last_reason: goal.last_reason,
+                            }),
+                        replayed.handle_runtime_snapshot(),
                     )
                     .await
                     .map_err(|e| ClientError::Internal {
@@ -2396,18 +2418,13 @@ impl MobileEngineHandle {
     /// List the persisted cron jobs for the management UI (each with its computed
     /// next fire + human schedule). A missing / unparseable file lists nothing.
     pub async fn cron_list(&self) -> Vec<CronTaskDto> {
-        let path = cron::tasks_file::scheduled_tasks_path(&self.firer_cfg.cwd);
-        let path_str = path.to_string_lossy().into_owned();
-        let Ok(content) = self
-            .firer_platform
-            .filesystem()
-            .read_file(&path_str, None, None)
-            .await
+        let fs = self.firer_platform.filesystem();
+        let Ok(content) = cron::tasks_file::read_tasks_body(fs.as_ref(), &self.firer_cfg.cwd).await
         else {
             return Vec::new();
         };
         let now = self.firer_platform.clock().now();
-        cron::tasks_file::parse_tasks(&content.content)
+        cron::tasks_file::parse_tasks(&content)
             .tasks
             .into_iter()
             .map(|t| CronTaskDto {
@@ -2439,15 +2456,16 @@ impl MobileEngineHandle {
         cron::parse_cron(&cron_expr)
             .map_err(|e| MobileEngineError::Internal(format!("invalid cron expression: {e}")))?;
         let fs = self.firer_platform.filesystem();
-        let path_str = cron::tasks_file::scheduled_tasks_path(&self.firer_cfg.cwd)
-            .to_string_lossy()
-            .into_owned();
         // Serialize against a concurrent firing pass's write-back (lost-update guard).
-        let _guard = cron::lock_cron_file().await;
-        let mut doc = match fs.read_file(&path_str, None, None).await {
-            Ok(c) => cron::tasks_file::parse_tasks(&c.content),
-            Err(_) => cron::tasks_file::ScheduledTasks::default(),
-        };
+        let _process_guard = cron::lock_cron_file().await;
+        let _file_guard = cron::tasks_file::lock_scheduled_tasks(fs.as_ref(), &self.firer_cfg.cwd)
+            .await
+            .map_err(|e| MobileEngineError::Internal(format!("lock scheduled_tasks.json: {e}")))?;
+        let mut doc =
+            match cron::tasks_file::read_tasks_body(fs.as_ref(), &self.firer_cfg.cwd).await {
+                Ok(body) => cron::tasks_file::parse_tasks(&body),
+                Err(_) => cron::tasks_file::ScheduledTasks::default(),
+            };
         let now = self.firer_platform.clock().now();
         let now_ms = now
             .duration_since(std::time::SystemTime::UNIX_EPOCH)
@@ -2463,9 +2481,13 @@ impl MobileEngineHandle {
             permanent: None,
         };
         doc.tasks.push(task.clone());
-        fs.write_file(&path_str, &cron::tasks_file::serialize_tasks(&doc))
-            .await
-            .map_err(|e| MobileEngineError::Internal(format!("write scheduled_tasks.json: {e}")))?;
+        cron::tasks_file::write_tasks_body(
+            fs.as_ref(),
+            &self.firer_cfg.cwd,
+            &cron::tasks_file::serialize_tasks(&doc),
+        )
+        .await
+        .map_err(|e| MobileEngineError::Internal(format!("write scheduled_tasks.json: {e}")))?;
         Ok(CronTaskDto {
             human: tool_cron::schedule_cron::cron_to_human(&task.cron),
             next_fire_ms: task_next_fire_ms(&task.cron, now_ms, None, now),
@@ -2481,23 +2503,30 @@ impl MobileEngineHandle {
     /// Delete a cron job by id. Returns `true` iff a job was removed.
     pub async fn cron_delete(&self, id: String) -> bool {
         let fs = self.firer_platform.filesystem();
-        let path_str = cron::tasks_file::scheduled_tasks_path(&self.firer_cfg.cwd)
-            .to_string_lossy()
-            .into_owned();
         // Serialize against a concurrent firing pass's write-back (lost-update guard).
-        let _guard = cron::lock_cron_file().await;
-        let Ok(content) = fs.read_file(&path_str, None, None).await else {
+        let _process_guard = cron::lock_cron_file().await;
+        let Ok(_file_guard) =
+            cron::tasks_file::lock_scheduled_tasks(fs.as_ref(), &self.firer_cfg.cwd).await
+        else {
             return false;
         };
-        let mut doc = cron::tasks_file::parse_tasks(&content.content);
+        let Ok(content) = cron::tasks_file::read_tasks_body(fs.as_ref(), &self.firer_cfg.cwd).await
+        else {
+            return false;
+        };
+        let mut doc = cron::tasks_file::parse_tasks(&content);
         let before = doc.tasks.len();
         doc.tasks.retain(|t| t.id != id);
         if doc.tasks.len() == before {
             return false;
         }
-        fs.write_file(&path_str, &cron::tasks_file::serialize_tasks(&doc))
-            .await
-            .is_ok()
+        cron::tasks_file::write_tasks_body(
+            fs.as_ref(),
+            &self.firer_cfg.cwd,
+            &cron::tasks_file::serialize_tasks(&doc),
+        )
+        .await
+        .is_ok()
     }
 }
 

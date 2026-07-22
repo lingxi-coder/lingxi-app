@@ -327,26 +327,13 @@ impl std::fmt::Display for WorkflowSaveError {
 }
 impl std::error::Error for WorkflowSaveError {}
 
-/// `mkdir(dir, {recursive:true, mode})` — recursive dir creation with a unix
-/// mode on every created component (oracle `mode:448` = `0o700`). The mode is a
-/// no-op on non-unix targets.
-fn create_dir_all_mode(dir: &Path, _mode: u32) -> std::io::Result<()> {
-    let mut b = std::fs::DirBuilder::new();
-    b.recursive(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        b.mode(_mode);
-    }
-    b.create(dir)
-}
-
 /// Save a dynamic workflow to disk (claude-code `eya`). Writes the sanitized
 /// `<name>.js` under [`workflow_scope_dir`], creating the dir `0o700` and the
-/// file `0o600`. Without `overwrite` the file is opened `wx` (create-new), so an
-/// existing file yields [`WorkflowSaveError::AlreadyExists`] (the oracle's EEXIST
-/// path); with `overwrite` it is truncated. Telemetry (`tengu_workflow_saved`)
-/// is emitted by the caller from the returned [`WorkflowSaved`].
+/// file `0o600`. The entire save is protected by a root-confined advisory lock
+/// and a same-directory atomic replacement. No path component below the trusted
+/// root may be a symlink/reparse point. Without `overwrite`, the final install
+/// is an atomic no-clobber operation and yields
+/// [`WorkflowSaveError::AlreadyExists`] on collision.
 pub fn save_dynamic_workflow(
     name: &str,
     scope: WorkflowScope,
@@ -358,33 +345,54 @@ pub fn save_dynamic_workflow(
     let dir = workflow_scope_dir(scope, cwd);
     let path = dir.join(format!("{sanitized}.js"));
 
-    create_dir_all_mode(&dir, 0o700).map_err(WorkflowSaveError::Io)?;
-
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true);
-    if overwrite {
-        opts.create(true).truncate(true);
-    } else {
-        opts.create_new(true);
-    }
-    #[cfg(unix)]
+    // Project saves are anchored at cwd so `.lingxi` itself cannot be swapped
+    // for a symlink. User saves anchor one level above the configured home for
+    // the same reason; a relative configured home remains cwd-relative.
+    let (root, relative_dir) = match scope {
+        WorkflowScope::Project => (
+            cwd.to_path_buf(),
+            PathBuf::from(branding::DOT_DIR).join("workflows"),
+        ),
+        WorkflowScope::User if dir.is_absolute() => {
+            let config_home = dir.parent().unwrap_or(&dir);
+            match (config_home.parent(), config_home.file_name()) {
+                (Some(parent), Some(name)) => {
+                    (parent.to_path_buf(), PathBuf::from(name).join("workflows"))
+                }
+                _ => (config_home.to_path_buf(), PathBuf::from("workflows")),
+            }
+        }
+        WorkflowScope::User => (
+            std::env::current_dir().unwrap_or_else(|_| cwd.to_path_buf()),
+            dir.clone(),
+        ),
+    };
+    let relative = relative_dir.join(format!("{sanitized}.js"));
+    let lock_relative = relative_dir.join(".save.lock");
+    let io_error =
+        |error: traits::FsError| WorkflowSaveError::Io(std::io::Error::other(error.to_string()));
+    let _lock = traits::rooted_fs::lock_exclusive(
+        &root,
+        &lock_relative,
+        traits::rooted_fs::PRIVATE_DIR_MODE,
+        traits::rooted_fs::PRIVATE_FILE_MODE,
+    )
+    .map_err(io_error)?;
+    let options = traits::AtomicWriteOptions {
+        overwrite,
+        ..traits::AtomicWriteOptions::default()
+    };
+    if let Err(error) =
+        traits::rooted_fs::atomic_write(&root, &relative, script.as_bytes(), options)
     {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
-    }
-    let mut file = match opts.open(&path) {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+        if matches!(error, traits::FsError::AlreadyExists(_)) {
             return Err(WorkflowSaveError::AlreadyExists {
                 name: sanitized,
                 path,
             });
         }
-        Err(e) => return Err(WorkflowSaveError::Io(e)),
-    };
-    use std::io::Write;
-    file.write_all(script.as_bytes())
-        .map_err(WorkflowSaveError::Io)?;
+        return Err(io_error(error));
+    }
 
     Ok(WorkflowSaved {
         name: sanitized,
@@ -1539,7 +1547,10 @@ mod tests {
     #[test]
     fn sanitize_workflow_name_is_kebab_with_fallback() {
         // Oracle `lme`: lowercase, collapse non-alnum runs to '-', trim, fallback.
-        assert_eq!(sanitize_workflow_name("My Cool Workflow"), "my-cool-workflow");
+        assert_eq!(
+            sanitize_workflow_name("My Cool Workflow"),
+            "my-cool-workflow"
+        );
         assert_eq!(sanitize_workflow_name("  Deploy!! Site  "), "deploy-site");
         assert_eq!(sanitize_workflow_name("a__b--c"), "a-b-c");
         assert_eq!(sanitize_workflow_name("Review123"), "review123");
@@ -1582,7 +1593,12 @@ mod tests {
         let saved =
             save_dynamic_workflow("My WF", WorkflowScope::Project, script, false, &cwd).unwrap();
         assert_eq!(saved.name, "my-wf");
-        assert_eq!(saved.path, cwd.join(branding::DOT_DIR).join("workflows").join("my-wf.js"));
+        assert_eq!(
+            saved.path,
+            cwd.join(branding::DOT_DIR)
+                .join("workflows")
+                .join("my-wf.js")
+        );
         assert_eq!(saved.scope, WorkflowScope::Project);
         assert_eq!(saved.script_size_chars, script.encode_utf16().count());
         assert_eq!(std::fs::read_to_string(&saved.path).unwrap(), script);
@@ -1645,6 +1661,26 @@ mod tests {
             save_dynamic_workflow("dup", WorkflowScope::Project, "second", true, &cwd).unwrap();
         assert_eq!(std::fs::read_to_string(&saved.path).unwrap(), "second");
         let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_refuses_symlinked_project_state_directory() {
+        let cwd = unique_temp_path("save-symlink-root");
+        let victim = unique_temp_path("save-symlink-victim");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&victim).unwrap();
+        std::os::unix::fs::symlink(&victim, cwd.join(branding::DOT_DIR)).unwrap();
+
+        let err = save_dynamic_workflow("escaped", WorkflowScope::Project, "secret", true, &cwd)
+            .unwrap_err();
+        assert!(matches!(err, WorkflowSaveError::Io(_)));
+        assert!(
+            !victim.join("workflows/escaped.js").exists(),
+            "a project-local symlink must never redirect workflow output"
+        );
+        let _ = std::fs::remove_dir_all(&cwd);
+        let _ = std::fs::remove_dir_all(&victim);
     }
 
     #[test]

@@ -242,7 +242,10 @@ mod tests {
     fn failure_display_maps_every_error_class() {
         // Wrapped in the HandleError Display prefix, as the handler sees them.
         let f = |s: &str| compact_failure_display(&format!("handle action failed: {s}"));
-        assert_eq!(f("Not enough messages to compact."), "Not enough messages to compact.");
+        assert_eq!(
+            f("Not enough messages to compact."),
+            "Not enough messages to compact."
+        );
         assert_eq!(f("No messages to compact"), "No messages to compact");
         assert_eq!(
             f("Conversation too long. Press esc twice to go up a few messages and try again."),

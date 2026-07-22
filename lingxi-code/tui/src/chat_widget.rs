@@ -28,7 +28,7 @@ use ratatui::layout::Rect;
 use tokio_util::sync::CancellationToken;
 use tui_core::message::CurrentTodo;
 use tui_core::message::RenderedMessage;
-use tui_core::orchestrator_bridge::TurnEvent;
+use tui_core::orchestrator_bridge::{RunningAgentStatus, TurnEvent};
 use tui_core::permission_bridge::PermissionExchange;
 use tui_core::theme::{theme_for, Theme, ThemeName, ThemeSetting};
 
@@ -51,6 +51,8 @@ use crate::transcript::Transcript;
 pub enum ChatOutcome {
     /// Keep looping.
     Continue,
+    /// Clear the physical terminal and replay structured transcript history.
+    ForceRedraw,
     /// Exit the app.
     Quit,
     /// The user submitted `prompt`; the caller should drive a turn for it,
@@ -265,6 +267,13 @@ pub struct ChatWidget {
     /// Human label for what the turn is currently doing (e.g. `Running Bash`),
     /// set from `ToolUseStart` and shown by the spinner instead of a bare verb.
     activity: Option<String>,
+    /// Stable id of the tool currently driving the spinner. Heartbeats for an
+    /// older/completed invocation are ignored so delayed channel delivery cannot
+    /// resurrect stale activity after its result has arrived.
+    active_tool_id: Option<protocol::ToolUseId>,
+    /// Latest orchestrator-reported wall-clock age for [`Self::active_tool_id`].
+    /// This is live UI state only and is never appended to the transcript.
+    active_tool_elapsed_ms: Option<u64>,
     /// Running character length of the streamed response this turn (text +
     /// thinking deltas), reset on `TurnStarted`. Drives the spinner's live token
     /// estimate (`round(chars / 4)`, claude-code `Spinner.tsx:210`).
@@ -280,6 +289,10 @@ pub struct ChatWidget {
     /// instead of a generic tool-activity label (claude-code `Spinner.tsx:162`).
     /// `None` outside a turn or once no todo is in progress.
     current_todo: Option<CurrentTodo>,
+    /// Agent/Task tool calls that have started but not yet returned.
+    foreground_agents: Vec<RunningAgentStatus>,
+    /// Pending/running background agents from the task-registry snapshot pump.
+    background_agents: Vec<RunningAgentStatus>,
     /// Permission requests waiting for the currently open prompt to resolve
     /// (prompts are serialized: one owns the keyboard at a time).
     pending_permissions: VecDeque<PermissionExchange>,
@@ -448,9 +461,13 @@ impl ChatWidget {
             compacting_started_at: None,
             api_retry: None,
             activity: None,
+            active_tool_id: None,
+            active_tool_elapsed_ms: None,
             response_chars: 0,
             spinner_verb: spinner::sample_verb(),
             current_todo: None,
+            foreground_agents: Vec::new(),
+            background_agents: Vec::new(),
             pending_permissions: VecDeque::new(),
             pending_images: Vec::new(),
             start: std::time::Instant::now(),
@@ -645,6 +662,16 @@ impl ChatWidget {
     /// resolved the open prompt.
     pub fn handle_key(&mut self, key: KeyEvent) -> ChatOutcome {
         self.bottom_pane.set_task_running(self.pane_status());
+        // Ctrl-L is the conventional terminal redraw chord. The background
+        // attach server injects this once after acquiring the controller lease
+        // so committed history is rebuilt on the new terminal instead of
+        // replaying an arbitrary ANSI byte tail.
+        if key.kind == crossterm::event::KeyEventKind::Press
+            && key.modifiers == crossterm::event::KeyModifiers::CONTROL
+            && matches!(key.code, crossterm::event::KeyCode::Char('l' | 'L'))
+        {
+            return ChatOutcome::ForceRedraw;
+        }
         // Ctrl+V / Alt+V: paste an IMAGE from the system clipboard (codex
         // `chatwidget/interaction.rs`). Bracketed paste only carries text —
         // a copied screenshot never arrives as `Event::Paste`, so it needs an
@@ -693,6 +720,12 @@ impl ChatWidget {
     #[must_use]
     pub fn paste_burst_pending(&self) -> bool {
         self.bottom_pane.paste_burst_pending()
+    }
+
+    /// Reset only the native-terminal commit cursor; conversation state stays
+    /// intact and is emitted again on the next render tick.
+    pub(crate) fn reset_terminal_commit(&mut self) {
+        self.transcript.reset_terminal_commit();
     }
 
     /// Tick hook: flush a DUE non-bracketed paste burst (held first char or
@@ -826,8 +859,13 @@ impl ChatWidget {
                 self.finalize_collapse_group();
                 self.turn_started_at = Some(std::time::Instant::now());
                 self.activity = None;
+                self.active_tool_id = None;
+                self.active_tool_elapsed_ms = None;
                 self.api_retry = None;
                 self.response_chars = 0;
+                self.foreground_agents.clear();
+                self.sync_running_agents();
+                self.current_todo = current_todo_from_plan(self.bottom_pane.planned_tasks());
                 // Draw a fresh random verb for this turn (claude-code
                 // `useState(() => sample(getSpinnerVerbs()))` — one verb per
                 // turn, no rotation within it).
@@ -901,6 +939,8 @@ impl ChatWidget {
             }
             TurnEvent::ToolUseStart { id, tool, input } => {
                 self.activity = Some(activity_label(&tool));
+                self.active_tool_id = Some(id.clone());
+                self.active_tool_elapsed_ms = Some(0);
                 // (Gap B) A `TodoWrite` replaces the whole session todo list
                 // each call, so its input is the authoritative source for the
                 // spinner's "current todo" (claude-code derives `currentTodo`
@@ -911,7 +951,14 @@ impl ChatWidget {
                 // `None`) so a `TodoWrite` with no active task clears a
                 // stale one.
                 if tool == "TodoWrite" {
-                    self.current_todo = current_todo_from_todowrite_input(&input);
+                    let tasks = planned_tasks_from_todowrite_input(&input);
+                    self.current_todo = current_todo_from_plan(&tasks);
+                    self.bottom_pane.set_planned_tasks(tasks);
+                }
+                if is_agent_tool(&tool) {
+                    self.foreground_agents
+                        .push(agent_status_from_tool_start(&id, &input));
+                    self.sync_running_agents();
                 }
                 // Commit any streamed assistant text ABOVE the tool call, then
                 // render the tool-use header (`● {tool}` + input) into the
@@ -945,8 +992,43 @@ impl ChatWidget {
                 self.transcript
                     .push_message(RenderedMessage::AssistantToolUse { id, tool, input });
             }
+            TurnEvent::ToolHeartbeat {
+                id,
+                tool,
+                elapsed_ms,
+            } => {
+                // Heartbeats are live liveness state, not transcript history.
+                // Ignore a late heartbeat once the matching result (or a newer
+                // tool start) has moved the active id forward.
+                if self.active_tool_id.as_ref() == Some(&id) {
+                    self.activity = Some(activity_label(&tool));
+                    self.active_tool_elapsed_ms = Some(elapsed_ms);
+                }
+            }
+            TurnEvent::ToolHeartbeatBatch { heartbeats } => {
+                for heartbeat in heartbeats.drain() {
+                    self.apply_turn_event(TurnEvent::ToolHeartbeat {
+                        id: heartbeat.id,
+                        tool: heartbeat.tool,
+                        elapsed_ms: heartbeat.elapsed_ms,
+                    });
+                }
+            }
             TurnEvent::ToolUseResult { id, tool, result } => {
-                self.activity = None;
+                if is_plan_tool(&tool) {
+                    let input = self.tool_inputs.get(&id).cloned().unwrap_or_default();
+                    self.apply_plan_tool_result(&tool, &input, &result);
+                }
+                if is_agent_tool(&tool) {
+                    self.foreground_agents
+                        .retain(|agent| agent.id != id.to_string());
+                    self.sync_running_agents();
+                }
+                if self.active_tool_id.as_ref() == Some(&id) {
+                    self.activity = None;
+                    self.active_tool_id = None;
+                    self.active_tool_elapsed_ms = None;
+                }
                 // A result for a folded use is absorbed (keeps the fold active);
                 // any other result breaks a still-open fold.
                 if self.collapse_ids.remove(&id) {
@@ -981,6 +1063,10 @@ impl ChatWidget {
                 self.turn_started_at = None;
                 self.api_retry = None;
                 self.activity = None;
+                self.active_tool_id = None;
+                self.active_tool_elapsed_ms = None;
+                self.foreground_agents.clear();
+                self.sync_running_agents();
                 // A FAILED auto/reactive compaction emits `CompactStarted` but
                 // neither `CompactionCompleted` nor `CompactEnded` — the turn
                 // boundary is the backstop that stops the `Compacting
@@ -1065,14 +1151,14 @@ impl ChatWidget {
             TurnEvent::CompactionCompleted {
                 messages_before,
                 messages_after,
+                summary,
                 ..
             } => {
                 // M7-04 parity: fold a `CompactBoundary` marker (renders
-                // `✻ Conversation compacted (ctrl+o for history)`; counts are
-                // retained on the variant for debug/telemetry parity but not
-                // rendered). Consecutive boundaries de-dupe to one marker —
-                // the old backend's `push_compact_boundary` contract.
-                self.push_compact_boundary(messages_before, messages_after);
+                // the compact hint by default and the full summary under
+                // Ctrl-O; counts remain debug/telemetry-only). Consecutive
+                // boundaries de-dupe to one marker.
+                self.push_compact_boundary(messages_before, messages_after, summary);
                 // An AUTO/reactive compaction (mid-turn) has no `CompactEnded`
                 // sender (that's the manual `/compact` task's job), so a
                 // successful pass clears the `Compacting conversation…`
@@ -1154,6 +1240,25 @@ impl ChatWidget {
                     is_error,
                 });
             }
+            TurnEvent::CommandCatalogRefreshed { commands } => {
+                self.bottom_pane.set_registry_commands(
+                    commands
+                        .into_iter()
+                        .map(
+                            |command| crate::bottom_pane::completion_view::RegistrySlashRow {
+                                name: command.name,
+                                description: command.description,
+                                menu_description: command.menu_description,
+                                aliases: command.aliases,
+                            },
+                        )
+                        .collect(),
+                );
+            }
+            TurnEvent::AgentStatusSnapshot { agents } => {
+                self.background_agents = agents;
+                self.sync_running_agents();
+            }
             TurnEvent::BashOutput { stdout, stderr } => {
                 // `!`-command output: render inline as a bash-output cell
                 // (ANSI stdout + error-tinted stderr). No LLM turn involved.
@@ -1179,10 +1284,130 @@ impl ChatWidget {
         }
     }
 
+    /// Merge foreground Agent/Task calls with the registry-backed background
+    /// snapshot and publish one identity-safe below-composer list.
+    fn sync_running_agents(&mut self) {
+        let mut agents = self.background_agents.clone();
+        let foreground = self
+            .foreground_agents
+            .iter()
+            .filter(|foreground| {
+                !agents
+                    .iter()
+                    .any(|background| background.id == foreground.id)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        agents.extend(foreground);
+        self.bottom_pane.set_running_agents(agents);
+    }
+
+    /// Fold successful V2 Task tool results into the plan displayed above the
+    /// composer. TodoWrite V1 is handled from its authoritative full-list input
+    /// at tool start; V2 mutators are applied only after success.
+    fn apply_plan_tool_result(
+        &mut self,
+        tool: &str,
+        input: &serde_json::Value,
+        result: &serde_json::Value,
+    ) {
+        use crate::bottom_pane::input_status::{PlanTask, PlanTaskState};
+
+        let mut tasks = self.bottom_pane.planned_tasks().to_vec();
+        match tool {
+            "TaskList" => {
+                let Some(rows) = result.get("tasks").and_then(serde_json::Value::as_array) else {
+                    return;
+                };
+                tasks = rows.iter().filter_map(plan_task_from_v2_value).collect();
+            }
+            "TaskGet" => {
+                let Some(task) = result.get("task").and_then(plan_task_from_v2_value) else {
+                    return;
+                };
+                if let Some(existing) = tasks.iter_mut().find(|row| row.id == task.id) {
+                    *existing = task;
+                } else {
+                    tasks.push(task);
+                }
+            }
+            "TaskCreate" => {
+                let Some(created) = result.get("task") else {
+                    return;
+                };
+                let Some(id) = created.get("id").and_then(serde_json::Value::as_str) else {
+                    return;
+                };
+                let subject = created
+                    .get("subject")
+                    .and_then(serde_json::Value::as_str)
+                    .or_else(|| input.get("subject").and_then(serde_json::Value::as_str))
+                    .unwrap_or("Task")
+                    .to_string();
+                let task = PlanTask {
+                    id: Some(id.to_string()),
+                    subject,
+                    active_form: input
+                        .get("activeForm")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                    state: PlanTaskState::Pending,
+                };
+                if let Some(existing) = tasks.iter_mut().find(|row| row.id == task.id) {
+                    *existing = task;
+                } else {
+                    tasks.push(task);
+                }
+            }
+            "TaskUpdate" => {
+                if result.get("success").and_then(serde_json::Value::as_bool) != Some(true) {
+                    return;
+                }
+                let Some(id) = input
+                    .get("taskId")
+                    .and_then(serde_json::Value::as_str)
+                    .or_else(|| result.get("taskId").and_then(serde_json::Value::as_str))
+                else {
+                    return;
+                };
+                if input.get("status").and_then(serde_json::Value::as_str) == Some("deleted") {
+                    tasks.retain(|task| task.id.as_deref() != Some(id));
+                } else if let Some(task) =
+                    tasks.iter_mut().find(|task| task.id.as_deref() == Some(id))
+                {
+                    if let Some(subject) = input.get("subject").and_then(serde_json::Value::as_str)
+                    {
+                        task.subject = subject.to_string();
+                    }
+                    if let Some(active_form) =
+                        input.get("activeForm").and_then(serde_json::Value::as_str)
+                    {
+                        task.active_form = Some(active_form.to_string());
+                    }
+                    if let Some(state) = input
+                        .get("status")
+                        .and_then(serde_json::Value::as_str)
+                        .and_then(PlanTaskState::from_wire)
+                    {
+                        task.state = state;
+                    }
+                }
+            }
+            _ => return,
+        }
+        self.current_todo = current_todo_from_plan(&tasks);
+        self.bottom_pane.set_planned_tasks(tasks);
+    }
+
     /// Fold a compaction boundary into the transcript, de-duping consecutive
     /// boundaries (exactly one marker renders even if two sources report the
     /// same compaction — the old backend's `push_compact_boundary`).
-    fn push_compact_boundary(&mut self, messages_before: u32, messages_after: u32) {
+    fn push_compact_boundary(
+        &mut self,
+        messages_before: u32,
+        messages_after: u32,
+        summary: String,
+    ) {
         if self
             .transcript
             .committed_cells()
@@ -1199,6 +1424,7 @@ impl ChatWidget {
             .push_message(RenderedMessage::CompactBoundary {
                 messages_before,
                 messages_after,
+                summary,
             });
     }
 
@@ -2424,6 +2650,10 @@ impl ChatWidget {
         // (review M1) Reset per-turn side-tables so `/clear` starts clean.
         self.tool_inputs.clear();
         self.current_todo = None;
+        self.foreground_agents.clear();
+        self.background_agents.clear();
+        self.bottom_pane.set_planned_tasks(Vec::new());
+        self.bottom_pane.set_running_agents(Vec::new());
         // The queued-image cells just vanished from the screen; keeping the
         // paths would silently attach them to a later unrelated message.
         self.pending_images.clear();
@@ -3205,6 +3435,8 @@ impl ChatWidget {
                 self.turn_started_at = None;
                 self.activity = None;
                 self.current_todo = None;
+                self.foreground_agents.clear();
+                self.sync_running_agents();
                 // (review) An interrupt IS a turn boundary — clear the tool
                 // correlation map here too (a cancelled turn future may be
                 // dropped before the bridge emits `TurnEnded`), matching the
@@ -3224,7 +3456,10 @@ impl ChatWidget {
             BottomPaneOutcome::ToggleVerbose => {
                 self.transcript.toggle_verbose();
                 self.bottom_pane.set_verbose(self.transcript.verbose());
-                ChatOutcome::Continue
+                // Committed cells already live in native terminal scrollback.
+                // Replaying is required for the verbose state to reveal their
+                // thinking/tool/compact-summary bodies.
+                ChatOutcome::ForceRedraw
             }
             BottomPaneOutcome::Submitted(text) => self.dispatch_submission(text),
             BottomPaneOutcome::SubmitPrompt(prompt) => self.submit_prompt(prompt),
@@ -3310,7 +3545,7 @@ impl ChatWidget {
     /// Record `text` as the user's prompt and hand it to the caller with a
     /// fresh per-turn cancellation token. Shared by the composer submit path
     /// and [`BottomPaneOutcome::SubmitPrompt`].
-    fn submit_prompt(&mut self, text: String) -> ChatOutcome {
+    pub(crate) fn submit_prompt(&mut self, text: String) -> ChatOutcome {
         self.transcript.push_message(RenderedMessage::UserText {
             body: text.clone(),
             timestamp: 0,
@@ -3432,7 +3667,10 @@ impl ChatWidget {
         // binary). `receiving` (↓) once any delta/tool has arrived, else
         // requesting (↑). The interrupt hint is NOT here — it lives in the status
         // row (`status_indicator_line`).
-        let elapsed_ms = self.turn_started_at.map_or(0, |t| t.elapsed().as_millis());
+        let elapsed_ms = self.active_tool_elapsed_ms.map_or_else(
+            || self.turn_started_at.map_or(0, |t| t.elapsed().as_millis()),
+            u128::from,
+        );
         let receiving = self.response_chars > 0 || self.activity.is_some();
         let paren = crate::spinner_status::status_paren(elapsed_ms, self.response_chars, receiving);
         format!("{frame} {verb}… {paren}")
@@ -3537,38 +3775,117 @@ fn activity_label(tool: &str) -> String {
     }
 }
 
-/// (Gap B) Resolve the spinner's "current todo" from a `TodoWrite` tool
-/// input. A `TodoWrite` call replaces the entire session todo list; the
-/// spinner shows the first todo that is neither `pending` nor `completed`
-/// (claude-code `Spinner.tsx:162` — `tasksV2?.find(t => t.status !==
-/// 'pending' && t.status !== 'completed')`). Returns `None` when the input is
-/// malformed, the `todos` array is missing/empty, or every todo is
-/// pending/completed.
-///
-/// The TodoWrite wire shape is `{ todos: [{ content, status, activeForm }] }`;
-/// `content` is the spinner's `subject` fallback and `activeForm` (camelCase)
-/// its preferred verb.
-fn current_todo_from_todowrite_input(input: &serde_json::Value) -> Option<CurrentTodo> {
-    let todos = input.get("todos")?.as_array()?;
-    let item = todos.iter().find(|t| {
-        let status = t.get("status").and_then(serde_json::Value::as_str);
-        // Anything not pending/completed is "active" (in_progress, or any
-        // other forward state). A missing status is treated as active too,
-        // matching the `!==` semantics of the TS predicate.
-        !matches!(status, Some("pending" | "completed"))
-    })?;
-    let subject = item
-        .get("content")
-        .and_then(serde_json::Value::as_str)?
-        .to_string();
-    let active_form = item
-        .get("activeForm")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string);
-    Some(CurrentTodo {
-        subject,
-        active_form,
+/// Whether a tool mutates or snapshots the V2 model-managed task plan.
+fn is_plan_tool(tool: &str) -> bool {
+    matches!(tool, "TaskCreate" | "TaskGet" | "TaskList" | "TaskUpdate")
+}
+
+/// Whether a tool invokes a foreground/background subagent.
+fn is_agent_tool(tool: &str) -> bool {
+    matches!(tool, "Agent" | "Task")
+}
+
+fn agent_status_from_tool_start(
+    id: &protocol::ToolUseId,
+    input: &serde_json::Value,
+) -> RunningAgentStatus {
+    RunningAgentStatus {
+        id: id.to_string(),
+        task_type: "local_agent".to_string(),
+        agent_type: input
+            .get("subagent_type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("Agent")
+            .to_string(),
+        description: input
+            .get("description")
+            .and_then(serde_json::Value::as_str)
+            .filter(|description| !description.trim().is_empty())
+            .unwrap_or("Running task")
+            .to_string(),
+        status: "running".to_string(),
+    }
+}
+
+/// Parse TodoWrite's authoritative full-list input for the persistent plan
+/// block above the composer.
+fn planned_tasks_from_todowrite_input(
+    input: &serde_json::Value,
+) -> Vec<crate::bottom_pane::input_status::PlanTask> {
+    use crate::bottom_pane::input_status::{PlanTask, PlanTaskState};
+
+    input
+        .get("todos")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            let subject = item
+                .get("content")
+                .and_then(serde_json::Value::as_str)?
+                .to_string();
+            let state = match item.get("status").and_then(serde_json::Value::as_str) {
+                Some("pending") => PlanTaskState::Pending,
+                Some("completed") => PlanTaskState::Completed,
+                // Matches Spinner.tsx's forward-compatible `!== pending && !==
+                // completed` active predicate for in_progress/unknown states.
+                _ => PlanTaskState::InProgress,
+            };
+            Some(PlanTask {
+                id: None,
+                subject,
+                active_form: item
+                    .get("activeForm")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+                state,
+            })
+        })
+        .collect()
+}
+
+fn plan_task_from_v2_value(
+    value: &serde_json::Value,
+) -> Option<crate::bottom_pane::input_status::PlanTask> {
+    use crate::bottom_pane::input_status::{PlanTask, PlanTaskState};
+
+    Some(PlanTask {
+        id: value
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        subject: value
+            .get("subject")
+            .and_then(serde_json::Value::as_str)?
+            .to_string(),
+        active_form: value
+            .get("activeForm")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        state: value
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .and_then(PlanTaskState::from_wire)?,
     })
+}
+
+fn current_todo_from_plan(
+    tasks: &[crate::bottom_pane::input_status::PlanTask],
+) -> Option<CurrentTodo> {
+    use crate::bottom_pane::input_status::PlanTaskState;
+
+    let task = tasks
+        .iter()
+        .find(|task| task.state == PlanTaskState::InProgress)?;
+    Some(CurrentTodo {
+        subject: task.subject.clone(),
+        active_form: task.active_form.clone(),
+    })
+}
+
+/// (Gap B) Resolve the spinner's current todo from TodoWrite input.
+fn current_todo_from_todowrite_input(input: &serde_json::Value) -> Option<CurrentTodo> {
+    current_todo_from_plan(&planned_tasks_from_todowrite_input(input))
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -4537,6 +4854,7 @@ mod tests {
             messages_before: 40,
             messages_after: 8,
             bytes_saved: 1024,
+            summary: "Summary:\nauto compact".to_string(),
         });
         assert!(
             w1.pane_status().compact_percent.is_none(),
@@ -4645,6 +4963,33 @@ mod tests {
             systext.body()
         );
         assert!(!systext.is_error());
+    }
+
+    #[test]
+    fn command_catalog_refresh_event_updates_open_popup_without_losing_input() {
+        let mut widget = widget();
+        for ch in "/pla".chars() {
+            let _ = widget.bottom_pane.handle_key(press(KeyCode::Char(ch)));
+        }
+        widget.apply_turn_event(TurnEvent::CommandCatalogRefreshed {
+            commands: vec![tui_core::orchestrator_bridge::CommandCatalogEntry {
+                name: "/plan-plugin".to_string(),
+                description: "plugin plan command".to_string(),
+                menu_description: Some("plugin command".to_string()),
+                aliases: vec!["/pp".to_string()],
+            }],
+        });
+
+        assert_eq!(widget.bottom_pane.composer().text(), "/pla");
+        let candidates = widget
+            .bottom_pane
+            .completion()
+            .expect("completion remains open")
+            .items()
+            .iter()
+            .map(|item| item.insert.as_str())
+            .collect::<Vec<_>>();
+        assert!(candidates.contains(&"/plan-plugin"));
     }
 
     /// A registry-backed command (`/loop`, a user command, a skill) that is NOT
@@ -6120,6 +6465,42 @@ mod tests {
     }
 
     #[test]
+    fn tool_heartbeat_updates_live_elapsed_without_transcript_growth() {
+        let mut widget = widget();
+        widget.apply_turn_event(TurnEvent::TurnStarted);
+        let id = protocol::ToolUseId::from("heartbeat-tool");
+        widget.apply_turn_event(TurnEvent::ToolUseStart {
+            id: id.clone(),
+            tool: "Bash".to_string(),
+            input: serde_json::json!({ "command": "sleep 60" }),
+        });
+        let before = widget.transcript.committed_cells().len();
+        widget.apply_turn_event(TurnEvent::ToolHeartbeat {
+            id: id.clone(),
+            tool: "Bash".to_string(),
+            elapsed_ms: 42_000,
+        });
+        assert_eq!(widget.transcript.committed_cells().len(), before);
+        let running = widget.spinner_text();
+        assert!(running.contains("Running Bash…"), "{running}");
+        assert!(running.contains("(42s"), "{running}");
+
+        widget.apply_turn_event(TurnEvent::ToolUseResult {
+            id: id.clone(),
+            tool: "Bash".to_string(),
+            result: serde_json::json!({ "ok": true }),
+        });
+        widget.apply_turn_event(TurnEvent::ToolHeartbeat {
+            id,
+            tool: "Bash".to_string(),
+            elapsed_ms: 99_000,
+        });
+        let completed = widget.spinner_text();
+        assert!(!completed.contains("Running Bash…"), "{completed}");
+        assert!(!completed.contains("(1m 39s"), "{completed}");
+    }
+
+    #[test]
     fn todowrite_in_progress_task_drives_spinner_verb_via_active_form() {
         // Gap B: a `TodoWrite` marking a task `in_progress` should show that
         // task's `activeForm` instead of the generic "Running TodoWrite"
@@ -6158,8 +6539,8 @@ mod tests {
             input: serde_json::json!({}),
         });
         assert!(widget.spinner_text().contains("Compiling the project…"));
-        // `TurnEnded` clears the per-turn todo so a later turn with no
-        // `TodoWrite` doesn't keep showing the stale `activeForm`.
+        // The active task is session plan state, so it remains visible across
+        // turn boundaries until a later authoritative TodoWrite completes it.
         widget.apply_turn_event(TurnEvent::ToolUseResult {
             id: protocol::ToolUseId::from("t2"),
             tool: "Bash".to_string(),
@@ -6167,7 +6548,28 @@ mod tests {
         });
         widget.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
         widget.apply_turn_event(TurnEvent::TurnStarted);
+        assert!(widget.spinner_text().contains("Compiling the project…"));
+
+        widget.apply_turn_event(TurnEvent::ToolUseStart {
+            id: protocol::ToolUseId::from("t3"),
+            tool: "TodoWrite".to_string(),
+            input: serde_json::json!({
+                "todos": [
+                    {
+                        "content": "Build the project",
+                        "status": "completed",
+                        "activeForm": "Compiling the project",
+                    },
+                    {
+                        "content": "Write docs",
+                        "status": "completed",
+                        "activeForm": "Writing docs",
+                    },
+                ],
+            }),
+        });
         assert!(!widget.spinner_text().contains("Compiling the project"));
+        assert!(widget.bottom_pane().planned_tasks().is_empty());
     }
 
     #[test]
@@ -6196,6 +6598,155 @@ mod tests {
         let todo = current_todo_from_todowrite_input(&active).expect("an active todo");
         assert_eq!(todo.subject, "Run tests");
         assert_eq!(todo.active_form.as_deref(), Some("Running tests"));
+    }
+
+    #[test]
+    fn todowrite_plan_persists_above_input_after_turn_end() {
+        use crate::bottom_pane::input_status::PlanTaskState;
+
+        let mut widget = widget();
+        widget.apply_turn_event(TurnEvent::TurnStarted);
+        widget.apply_turn_event(TurnEvent::ToolUseStart {
+            id: protocol::ToolUseId::from("todo-plan"),
+            tool: "TodoWrite".into(),
+            input: serde_json::json!({
+                "todos": [
+                    { "content": "Inspect UI", "status": "completed", "activeForm": "Inspecting UI" },
+                    { "content": "Implement panel", "status": "in_progress", "activeForm": "Implementing panel" },
+                    { "content": "Build CLI", "status": "pending", "activeForm": "Building CLI" }
+                ]
+            }),
+        });
+        let tasks = widget.bottom_pane().planned_tasks();
+        assert_eq!(tasks.len(), 3);
+        assert_eq!(tasks[0].state, PlanTaskState::Completed);
+        assert_eq!(tasks[1].state, PlanTaskState::InProgress);
+        assert_eq!(tasks[2].state, PlanTaskState::Pending);
+
+        widget.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
+        assert_eq!(
+            widget.bottom_pane().planned_tasks().len(),
+            3,
+            "working plan remains visible between turns"
+        );
+    }
+
+    #[test]
+    fn v2_task_results_build_and_advance_the_visible_plan() {
+        use crate::bottom_pane::input_status::PlanTaskState;
+
+        let mut widget = widget();
+        widget.apply_turn_event(TurnEvent::TurnStarted);
+        let create = protocol::ToolUseId::from("task-create");
+        widget.apply_turn_event(TurnEvent::ToolUseStart {
+            id: create.clone(),
+            tool: "TaskCreate".into(),
+            input: serde_json::json!({
+                "subject": "Implement status panel",
+                "description": "Render plan state",
+                "activeForm": "Implementing status panel"
+            }),
+        });
+        widget.apply_turn_event(TurnEvent::ToolUseResult {
+            id: create,
+            tool: "TaskCreate".into(),
+            result: serde_json::json!({
+                "task": { "id": "1", "subject": "Implement status panel" }
+            }),
+        });
+        assert_eq!(widget.bottom_pane().planned_tasks().len(), 1);
+        assert_eq!(
+            widget.bottom_pane().planned_tasks()[0].state,
+            PlanTaskState::Pending
+        );
+
+        let update = protocol::ToolUseId::from("task-update");
+        widget.apply_turn_event(TurnEvent::ToolUseStart {
+            id: update.clone(),
+            tool: "TaskUpdate".into(),
+            input: serde_json::json!({ "taskId": "1", "status": "in_progress" }),
+        });
+        widget.apply_turn_event(TurnEvent::ToolUseResult {
+            id: update,
+            tool: "TaskUpdate".into(),
+            result: serde_json::json!({ "success": true, "taskId": "1" }),
+        });
+        assert_eq!(
+            widget.bottom_pane().planned_tasks()[0].state,
+            PlanTaskState::InProgress
+        );
+        assert_eq!(
+            widget
+                .current_todo
+                .as_ref()
+                .map(|todo| todo.subject.as_str()),
+            Some("Implement status panel")
+        );
+    }
+
+    #[test]
+    fn agent_status_combines_foreground_and_background_lifecycles() {
+        let mut widget = widget();
+        widget.apply_turn_event(TurnEvent::TurnStarted);
+        let foreground = protocol::ToolUseId::from("agent-tool");
+        widget.apply_turn_event(TurnEvent::ToolUseStart {
+            id: foreground.clone(),
+            tool: "Agent".into(),
+            input: serde_json::json!({
+                "subagent_type": "Explore",
+                "description": "Map task flow",
+                "prompt": "inspect"
+            }),
+        });
+        assert_eq!(widget.bottom_pane().running_agents().len(), 1);
+        assert_eq!(
+            widget.bottom_pane().running_agents()[0].agent_type,
+            "Explore"
+        );
+
+        widget.apply_turn_event(TurnEvent::AgentStatusSnapshot {
+            agents: vec![RunningAgentStatus {
+                id: "a12345678".into(),
+                task_type: "local_agent".into(),
+                agent_type: "Explore".into(),
+                description: "Map task flow".into(),
+                status: "running".into(),
+            }],
+        });
+        assert_eq!(widget.bottom_pane().running_agents().len(), 2);
+
+        widget.apply_turn_event(TurnEvent::AgentStatusSnapshot {
+            agents: vec![
+                RunningAgentStatus {
+                    id: "a12345678".into(),
+                    task_type: "local_agent".into(),
+                    agent_type: "Explore".into(),
+                    description: "Map task flow".into(),
+                    status: "running".into(),
+                },
+                RunningAgentStatus {
+                    id: "a87654321".into(),
+                    task_type: "local_agent".into(),
+                    agent_type: "Explore".into(),
+                    description: "Map task flow".into(),
+                    status: "running".into(),
+                },
+            ],
+        });
+        assert_eq!(
+            widget.bottom_pane().running_agents().len(),
+            3,
+            "distinct agents with the same label remain visible"
+        );
+
+        widget.apply_turn_event(TurnEvent::ToolUseResult {
+            id: foreground,
+            tool: "Agent".into(),
+            result: serde_json::json!({ "status": "async_launched" }),
+        });
+        assert_eq!(widget.bottom_pane().running_agents().len(), 2);
+        widget.apply_turn_event(TurnEvent::AgentStatusSnapshot { agents: vec![] });
+        assert!(widget.bottom_pane().running_agents().is_empty());
     }
 
     #[test]
@@ -6412,15 +6963,18 @@ mod tests {
             messages_before: 40,
             messages_after: 8,
             bytes_saved: 1024,
+            summary: "Summary:\nimportant context".to_string(),
         });
         assert_eq!(cells(&widget).len(), 1);
-        let _ = cell::<CompactBoundaryCell>(&widget, 0);
+        let boundary = cell::<CompactBoundaryCell>(&widget, 0);
+        assert_eq!(boundary.summary(), "Summary:\nimportant context");
         // A duplicate report of the same compaction de-dupes to ONE marker
         // (the old backend's `push_compact_boundary` contract).
         widget.apply_turn_event(TurnEvent::CompactionCompleted {
             messages_before: 40,
             messages_after: 8,
             bytes_saved: 1024,
+            summary: "Summary:\nimportant context".to_string(),
         });
         assert_eq!(cells(&widget).len(), 1, "consecutive boundaries de-dupe");
         // A NON-boundary message in between makes the next boundary render.
@@ -6433,6 +6987,7 @@ mod tests {
             messages_before: 12,
             messages_after: 4,
             bytes_saved: 2048,
+            summary: "Summary:\nnew context".to_string(),
         });
         assert_eq!(cells(&widget).len(), 3);
         let _ = cell::<CompactBoundaryCell>(&widget, 2);

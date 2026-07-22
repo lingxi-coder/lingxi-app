@@ -765,6 +765,14 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
             output_tokens = response.usage.billable_tokens.output,
             body = %text,
         );
+        telemetry::otel::emit_assistant_response_log(
+            orch.api.last_request_id().as_deref().unwrap_or_default(),
+            &model,
+            response.stop_reason.as_deref().unwrap_or(""),
+            response.usage.billable_tokens.input,
+            response.usage.billable_tokens.output,
+            &text,
+        );
     }
 
     // 5. If there are tool_use blocks, dispatch them and feed results back.
@@ -2377,6 +2385,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             event = orch_events::HOOK_PRE_STARTED,
             tool_name = %name,
         );
+        telemetry::otel::emit_hook_lifecycle("pre", "started", &name, None);
         let pre_agg = orch.hooks.execute(pre_event, hook_ctx.clone()).await;
         // hook duration bounded by tokio timeout — u128 ms cannot exceed u64::MAX
         #[allow(clippy::cast_possible_truncation)]
@@ -2622,6 +2631,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             },
             duration_ms = pre_dur_ms,
         );
+        telemetry::otel::emit_hook_lifecycle("pre", "completed", &name, Some(pre_dur_ms));
 
         // HOOK.3: a PreToolUse hook's permissionDecision "allow" (legacy
         // `decision: "approve"`) bypasses the permission gate for this tool call
@@ -3105,6 +3115,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             event = orch_events::HOOK_POST_STARTED,
             tool_name = %name,
         );
+        telemetry::otel::emit_hook_lifecycle("post", "started", &name, None);
         let post_agg = orch.hooks.execute(post_event, hook_ctx.clone()).await;
         // hook duration bounded by tokio timeout — u128 ms cannot exceed u64::MAX
         #[allow(clippy::cast_possible_truncation)]
@@ -3244,6 +3255,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             duration_ms = post_dur_ms,
             mutated_response = mutated,
         );
+        telemetry::otel::emit_hook_lifecycle("post", "completed", &name, Some(post_dur_ms));
 
         // Worktree-creation hook (parity with claude-code `executeWorktreeCreateHook`,
         // `utils/hooks.ts:4928`). claude-code fires `WorktreeCreate` from the

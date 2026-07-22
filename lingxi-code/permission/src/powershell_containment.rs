@@ -2301,8 +2301,9 @@ const ZBU_LITERALPATH: [&str; 2] = ["pspath", "lp"];
 /// 2.1.211 `X0g` — common switch parameters (exact).
 const ZBU_SWITCH_EXACT: [&str; 5] = ["cf", "wi", "vb", "db", "usetx"];
 /// 2.1.211 `Q0g` — common value parameters (exact).
-const ZBU_VALUE_EXACT: [&str; 10] =
-    ["ea", "ev", "wa", "wv", "infa", "iv", "proga", "ov", "ob", "pv"];
+const ZBU_VALUE_EXACT: [&str; 10] = [
+    "ea", "ev", "wa", "wv", "infa", "iv", "proga", "ov", "ob", "pv",
+];
 /// 2.1.211 `Z0g` — switch parameters (prefix-matched).
 const ZBU_SWITCH_PREFIX: [&str; 9] = [
     "container",
@@ -2340,9 +2341,7 @@ const ZBU_VALUE_PREFIX: [&str; 16] = [
 /// alias resolution — deliberately different from [`normalize_cmdlet`].
 fn battery_basename_lower(name: &str) -> String {
     let lower = name.to_lowercase();
-    let cut = lower
-        .rfind(['\\', '/'])
-        .map_or(0, |i| i + 1);
+    let cut = lower.rfind(['\\', '/']).map_or(0, |i| i + 1);
     lower[cut..].to_string()
 }
 
@@ -2778,8 +2777,10 @@ fn battery_zbu_analyze(args: &[String], has_siblings: bool, ctx: &PsCtx) -> bool
         let is_dest = "destination".starts_with(&g);
         let is_literal = ZBU_LITERALPATH.contains(&g.as_str()) || "literalpath".starts_with(&g);
         let is_path = is_literal || any_prefix_of(&ZBU_PATH, &g);
-        let is_switch = ZBU_SWITCH_EXACT.contains(&g.as_str()) || any_prefix_of(&ZBU_SWITCH_PREFIX, &g);
-        let is_value = ZBU_VALUE_EXACT.contains(&g.as_str()) || any_prefix_of(&ZBU_VALUE_PREFIX, &g);
+        let is_switch =
+            ZBU_SWITCH_EXACT.contains(&g.as_str()) || any_prefix_of(&ZBU_SWITCH_PREFIX, &g);
+        let is_value =
+            ZBU_VALUE_EXACT.contains(&g.as_str()) || any_prefix_of(&ZBU_VALUE_PREFIX, &g);
         let categories =
             i32::from(is_dest) + i32::from(is_path) + i32::from(is_switch) + i32::from(is_value);
         if categories != 1 {
@@ -2822,8 +2823,7 @@ fn battery_zbu_analyze(args: &[String], has_siblings: bool, ctx: &PsCtx) -> bool
         p += 1;
     }
 
-    let expected_positionals =
-        i32::from(!has_path_param) + i32::from(dest.is_none());
+    let expected_positionals = i32::from(!has_path_param) + i32::from(dest.is_none());
     if positionals.len() as i32 > expected_positionals {
         return true;
     }
@@ -2984,8 +2984,7 @@ pub fn powershell_git_battery(
             if !WRITE_CMDLETS.contains(&canon.as_str()) {
                 return false;
             }
-            if j
-                .args
+            if j.args
                 .iter()
                 .flat_map(|a| battery_peo(a))
                 .any(|a| battery_xt_git_internal(&a, ctx))

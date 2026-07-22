@@ -258,7 +258,7 @@ pub async fn run_stream_json_print(
     // 1M context beta is effectively active and the modelUsage key should
     // reflect the real contextWindow = 1_000_000. The `context_window_for_model`
     // helper already handles the "[1m]" substring check — no beta list needed.
-    let betas: Vec<String> = vec![];
+    let betas = argv.betas.clone().unwrap_or_default();
 
     if turn_result.is_err() {
         let err_msg = turn_result.unwrap_err().to_string();
@@ -993,7 +993,7 @@ pub async fn run_stream_json_input_loop(
     });
 
     // ④ Consume user turns sequentially through the orchestrator.
-    let betas: Vec<String> = vec![];
+    let betas = argv.betas.clone().unwrap_or_default();
     let mut last_turn_err: Option<String> = None;
     let mut had_any_turn = false;
     // Per-toolUseID orphaned-permission dedup (twin of claude-code's
@@ -1046,7 +1046,13 @@ pub async fn run_stream_json_input_loop(
             // Route through the single-writer drain queue (`outbound_tx`, bound
             // above): a direct stdout write here would let the ack overtake data
             // frames still queued in the outbound channel mid-turn.
-            emit_replay_ack_queued(&outbound_tx, &ack_uuid, &turn.content, None, &session_id_str);
+            emit_replay_ack_queued(
+                &outbound_tx,
+                &ack_uuid,
+                &turn.content,
+                None,
+                &session_id_str,
+            );
         }
 
         // Phase 1: use cancel-aware turn entry point so `interrupt` can abort
@@ -1593,6 +1599,39 @@ async fn mount_resumed_tui(
     messages: Vec<JsonlMessage>,
     carried_state: Option<crate::mode::RemountState>,
 ) -> crate::mode::RunOutcome {
+    mount_resumed_tui_inner(argv, session_id, messages, carried_state, None, None).await
+}
+
+/// Mount a resumed conversation inside a background worker's real PTY.
+/// Reuses the standard resume construction and replay path while threading the
+/// background registration and its one-shot initial prompt into the normal TUI
+/// mount.
+pub(crate) async fn mount_background_resumed_tui(
+    argv: &Argv,
+    session_id: uuid::Uuid,
+    messages: Vec<JsonlMessage>,
+    registration: std::sync::Arc<crate::agents_registry::SessionRegistration>,
+    initial_prompt: Option<String>,
+) -> crate::mode::RunOutcome {
+    mount_resumed_tui_inner(
+        argv,
+        session_id,
+        messages,
+        None,
+        Some(registration),
+        initial_prompt,
+    )
+    .await
+}
+
+async fn mount_resumed_tui_inner(
+    argv: &Argv,
+    session_id: uuid::Uuid,
+    messages: Vec<JsonlMessage>,
+    carried_state: Option<crate::mode::RemountState>,
+    registration: Option<std::sync::Arc<crate::agents_registry::SessionRegistration>>,
+    initial_prompt: Option<String>,
+) -> crate::mode::RunOutcome {
     // A cold resume inherits the last persisted assistant effort unless the
     // caller explicitly supplied a new `--effort`. Resolve this before build:
     // both the provider adapter and the orchestrator config are immutable once
@@ -1600,20 +1639,19 @@ async fn mount_resumed_tui(
     // display only while requests silently fell back to the default effort.
     let mut resumed_argv = argv.clone();
     if resumed_argv.effort.is_none() {
-        resumed_argv.effort =
-            orchestrator::runtime_metadata_from_messages(&messages).effort;
+        resumed_argv.effort = orchestrator::runtime_metadata_from_messages(&messages).effort;
     }
     // Build with the RESUMED session id as the JSONL writer's file name, so new
     // turns append to `<session_id>.jsonl` (the loaded file) instead of forking a
     // fresh-uuid file — the fix for resume splitting a conversation across files.
     let mut tui_build =
         match crate::init::build_runtime_for_tui_inner(&resumed_argv, Some(session_id)).await {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("lingxi-cli: tui init failed: {e}");
-            return crate::mode::RunOutcome::Exit(exit_codes::RUNTIME_ERROR);
-        }
-    };
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("lingxi-cli: tui init failed: {e}");
+                return crate::mode::RunOutcome::Exit(exit_codes::RUNTIME_ERROR);
+            }
+        };
     // ENGINE seed: replay the transcript into the orchestrator's session so a
     // live turn continues the prior conversation.
     seed_orchestrator_session(&tui_build.runtime.orchestrator, session_id, &messages).await;
@@ -1676,7 +1714,13 @@ async fn mount_resumed_tui(
             is_error: false,
         });
     }
-    crate::mode::run_ratatui(tui_build, None, resumed_messages).await
+    crate::mode::run_ratatui_with_initial_prompt(
+        tui_build,
+        registration,
+        resumed_messages,
+        initial_prompt,
+    )
+    .await
 }
 
 /// Drive a mounted TUI, following any in-session `/resume` switch by re-mounting
@@ -1707,6 +1751,36 @@ pub(crate) async fn drive_tui_switch_loop(
     first: crate::mode::RunOutcome,
     initial_session_id: Option<uuid::Uuid>,
 ) -> i32 {
+    drive_tui_switch_loop_inner(argv, first, initial_session_id, None).await
+}
+
+/// Background variant that preserves the worker registration across every
+/// `/resume`, `/branch`, and `/rewind` remount.
+pub(crate) async fn drive_background_tui_switch_loop(
+    argv: &Argv,
+    first: crate::mode::RunOutcome,
+    initial_session_id: Option<uuid::Uuid>,
+    registration: std::sync::Arc<crate::agents_registry::SessionRegistration>,
+) -> i32 {
+    drive_tui_switch_loop_inner(argv, first, initial_session_id, Some(registration)).await
+}
+
+async fn remount_tui(
+    argv: &Argv,
+    session_id: uuid::Uuid,
+    messages: Vec<JsonlMessage>,
+    state: Option<crate::mode::RemountState>,
+    registration: Option<std::sync::Arc<crate::agents_registry::SessionRegistration>>,
+) -> crate::mode::RunOutcome {
+    mount_resumed_tui_inner(argv, session_id, messages, state, registration, None).await
+}
+
+async fn drive_tui_switch_loop_inner(
+    argv: &Argv,
+    first: crate::mode::RunOutcome,
+    initial_session_id: Option<uuid::Uuid>,
+    registration: Option<std::sync::Arc<crate::agents_registry::SessionRegistration>>,
+) -> i32 {
     let mut outcome = first;
     // The session currently driving the loop — the fallback for a failed switch.
     let mut current = initial_session_id;
@@ -1717,7 +1791,8 @@ pub(crate) async fn drive_tui_switch_loop(
                 match load_resume_session(target).await {
                     Ok(messages) => {
                         current = Some(target);
-                        outcome = mount_resumed_tui(argv, target, messages, state).await;
+                        outcome =
+                            remount_tui(argv, target, messages, state, registration.clone()).await;
                     }
                     Err(e) => {
                         // The outgoing runtime is already unwound, so we cannot just
@@ -1730,9 +1805,14 @@ pub(crate) async fn drive_tui_switch_loop(
                                 eprintln!("lingxi-cli: staying in current session {fallback}");
                                 match load_resume_session(fallback).await {
                                     Ok(messages) => {
-                                        outcome =
-                                            mount_resumed_tui(argv, fallback, messages, state)
-                                                .await;
+                                        outcome = remount_tui(
+                                            argv,
+                                            fallback,
+                                            messages,
+                                            state,
+                                            registration.clone(),
+                                        )
+                                        .await;
                                     }
                                     Err(e2) => {
                                         // Double failure: even the known-good session
@@ -1814,7 +1894,9 @@ pub(crate) async fn drive_tui_switch_loop(
                 match load_resume_session(mount_target).await {
                     Ok(messages) => {
                         current = Some(mount_target);
-                        outcome = mount_resumed_tui(argv, mount_target, messages, state).await;
+                        outcome =
+                            remount_tui(argv, mount_target, messages, state, registration.clone())
+                                .await;
                     }
                     Err(e) => {
                         // The branch (or fallback) target won't load. Fall back to
@@ -1824,9 +1906,14 @@ pub(crate) async fn drive_tui_switch_loop(
                             SwitchRecovery::Remount(fallback) => {
                                 match load_resume_session(fallback).await {
                                     Ok(messages) => {
-                                        outcome =
-                                            mount_resumed_tui(argv, fallback, messages, state)
-                                                .await;
+                                        outcome = remount_tui(
+                                            argv,
+                                            fallback,
+                                            messages,
+                                            state,
+                                            registration.clone(),
+                                        )
+                                        .await;
                                     }
                                     Err(e2) => {
                                         eprintln!(
@@ -1889,7 +1976,9 @@ pub(crate) async fn drive_tui_switch_loop(
                 match load_resume_session(mount_target).await {
                     Ok(messages) => {
                         current = Some(mount_target);
-                        outcome = mount_resumed_tui(argv, mount_target, messages, state).await;
+                        outcome =
+                            remount_tui(argv, mount_target, messages, state, registration.clone())
+                                .await;
                     }
                     // A conversation-scope rewind can legitimately truncate the
                     // transcript to EMPTY (rewinding to before the FIRST turn).
@@ -1903,7 +1992,14 @@ pub(crate) async fn drive_tui_switch_loop(
                     Err(LoaderError::EmptyDirectory) if scope != RewindScope::CodeOnly => {
                         eprintln!("lingxi-cli: rewound to the start — empty conversation");
                         current = Some(mount_target);
-                        outcome = mount_resumed_tui(argv, mount_target, Vec::new(), state).await;
+                        outcome = remount_tui(
+                            argv,
+                            mount_target,
+                            Vec::new(),
+                            state,
+                            registration.clone(),
+                        )
+                        .await;
                     }
                     Err(e) => {
                         eprintln!("lingxi-cli: couldn't open {mount_target} after rewind: {e}");
@@ -1911,9 +2007,14 @@ pub(crate) async fn drive_tui_switch_loop(
                             SwitchRecovery::Remount(fallback) => {
                                 match load_resume_session(fallback).await {
                                     Ok(messages) => {
-                                        outcome =
-                                            mount_resumed_tui(argv, fallback, messages, state)
-                                                .await;
+                                        outcome = remount_tui(
+                                            argv,
+                                            fallback,
+                                            messages,
+                                            state,
+                                            registration.clone(),
+                                        )
+                                        .await;
                                     }
                                     Err(e2) => {
                                         eprintln!(
@@ -1988,6 +2089,7 @@ pub(crate) async fn seed_orchestrator_session(
     session.history = replayed.history;
     session.transcript_only_messages = replayed.transcript_only_messages;
     session.compact_summary_messages = replayed.compact_summary_messages;
+    session.active_goal = replayed.active_goal;
     // Restore the saved model (recovered from the last assistant line by
     // `state_from_messages`) so a resumed session continues on — and shows — its
     // saved model, not the launch default. `state_from_messages` yields
@@ -2006,8 +2108,9 @@ pub(crate) async fn seed_orchestrator_session(
     session.model_profile = None;
     drop(session);
     orchestrator
-        .restore_resume_runtime_metadata(messages)
+        .sync_active_goal_stop_hook_for_current_state()
         .await;
+    orchestrator.restore_resume_runtime_metadata(messages).await;
 }
 
 /// `--resume` (no id) under `--no-tui` / non-TTY — the UNCHANGED M5-08 stdio

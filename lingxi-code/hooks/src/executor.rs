@@ -440,6 +440,49 @@ impl HookExecutorImpl {
         self.registry.write().await.clear_agent_hooks(agent_id)
     }
 
+    /// Insert or replace one named runtime hook scoped to `session_id`.
+    pub async fn upsert_session_named_hook(
+        &self,
+        session_id: protocol::SessionId,
+        name: String,
+        hook: HookDefinition,
+    ) -> Option<HookDefinition> {
+        self.registry
+            .write()
+            .await
+            .upsert_session_named_hook(session_id, name, hook)
+    }
+
+    /// Borrow a named runtime hook scoped to `session_id`, if present.
+    pub async fn get_session_named_hook(
+        &self,
+        session_id: protocol::SessionId,
+        name: &str,
+    ) -> Option<HookDefinition> {
+        self.registry
+            .read()
+            .await
+            .get_session_named_hook(session_id, name)
+            .cloned()
+    }
+
+    /// Remove one named runtime hook scoped to `session_id`.
+    pub async fn remove_session_named_hook(
+        &self,
+        session_id: protocol::SessionId,
+        name: &str,
+    ) -> Option<HookDefinition> {
+        self.registry
+            .write()
+            .await
+            .remove_session_named_hook(session_id, name)
+    }
+
+    /// Remove every named runtime hook scoped to `session_id`.
+    pub async fn clear_session_hooks(&self, session_id: protocol::SessionId) -> usize {
+        self.registry.write().await.clear_session_hooks(session_id)
+    }
+
     /// Fire the `SessionEnd` hook batch against a *batch-wide shutdown deadline*
     /// (claude-code `lje` → `cH({…, signal: AbortSignal.timeout(Wqt())})`,
     /// BIN off 205706285 / 205715763).
@@ -1103,12 +1146,13 @@ impl Dispatcher {
                             let hook_owned = hook.clone();
                             let hook_id = hook.id;
                             let work: HookWork = Box::pin(async move {
-                                let out = output_rx.await.unwrap_or_else(|_| traits::ProcessOutput {
-                                    stdout: String::new(),
-                                    stderr: "async hook output channel closed".to_string(),
-                                    exit_code: -1,
-                                    timed_out: true,
-                                });
+                                let out =
+                                    output_rx.await.unwrap_or_else(|_| traits::ProcessOutput {
+                                        stdout: String::new(),
+                                        stderr: "async hook output channel closed".to_string(),
+                                        exit_code: -1,
+                                        timed_out: true,
+                                    });
                                 map_command_output(&hook_owned, Ok(out), expected_event).0
                             });
                             // Bound the registration by the SAME async timeout the
@@ -1116,8 +1160,7 @@ impl Dispatcher {
                             // the (biased) `work` arm wins and publishes the mapped
                             // output; on overrun the registry publishes a timeout
                             // result, matching claude's `asyncTimeout` semantics.
-                            if let Err(e) =
-                                registry.spawn(hook_id, Some(async_timeout), work).await
+                            if let Err(e) = registry.spawn(hook_id, Some(async_timeout), work).await
                             {
                                 tracing::warn!(
                                     hook_id = %hook_id,
@@ -1197,8 +1240,9 @@ impl Dispatcher {
                         outcome: HookOutcome::Error,
                         stdout: String::new(),
                         stderr: format!(
-                            "Hook {} failed: Prompt arm only supports PreToolUse / PostToolUse",
-                            hook.id
+                            "Hook {} failed: Prompt arm does not support {:?}",
+                            hook.id,
+                            event.event_type()
                         ),
                         exit_code: None,
                         response: None,

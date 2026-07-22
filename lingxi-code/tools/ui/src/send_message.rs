@@ -1274,7 +1274,11 @@ mod tests {
         let expected_preview = format!("{}\u{2026}", "a".repeat(49));
         assert_eq!(res.data["routing"]["content"], expected_preview);
         assert_eq!(
-            res.data["routing"]["content"].as_str().unwrap().chars().count(),
+            res.data["routing"]["content"]
+                .as_str()
+                .unwrap()
+                .chars()
+                .count(),
             50
         );
 

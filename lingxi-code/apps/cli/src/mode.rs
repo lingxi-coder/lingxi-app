@@ -109,6 +109,9 @@ async fn run_stdio_repl(argv: &Argv) -> i32 {
 
 async fn run_tui(argv: &Argv) -> i32 {
     crate::startup_trace::mark("tui_start");
+    if !startup_preflight(argv).await {
+        return exit_codes::RUNTIME_ERROR;
+    }
     let tui_build = match crate::init::build_runtime_for_tui(argv).await {
         Ok(b) => b,
         Err(e) => {
@@ -116,56 +119,6 @@ async fn run_tui(argv: &Argv) -> i32 {
             return exit_codes::RUNTIME_ERROR;
         }
     };
-    // (Task 3) Startup project-trust dialog (`TrustDialog`, shown by
-    // `showSetupScreens` BEFORE the REPL/session and BEFORE any tool/hook/plugin
-    // runs). TTY-only — this `Mode::Tui` arm is only reached when stdin+stdout
-    // are terminals (`mode::decide_mode_with` falls back to `StdioRepl`
-    // otherwise), so the raw-mode mount is safe AND "non-interactive ⇒ no
-    // dialog" is satisfied for free. Placed BEFORE the bypass gate: trust is the
-    // outermost "may I touch this folder at all" gate. Already-accepted (incl.
-    // parent-walk-trusted) ⇒ skip ⇒ byte-identical to today.
-    match trust_gate().await {
-        TrustGateOutcome::Proceed => {}
-        TrustGateOutcome::Decline => {
-            // "No, exit" / Esc → exit 1 (`TrustDialog.tsx:158-160`
-            // `gracefulShutdownSync(1)`; matches the REPL gate).
-            return exit_codes::RUNTIME_ERROR;
-        }
-    }
-    // (Task 8) Startup bypass-permissions confirmation dialog
-    // (`BypassPermissionsModeDialog`, shown by `showSetupScreens` BEFORE the
-    // REPL). TTY-only — this arm is only reached when stdin+stdout are terminals
-    // (`mode::decide_mode`), so the raw-mode mount is safe here. Gated on
-    // bypass-mode resolved AND no settings tier already carrying
-    // `skipDangerousModePermissionPrompt`.
-    let (bypass_mode, _) = crate::resolve_permission_mode(argv);
-    let is_bypass = bypass_mode == permission::PermissionMode::BypassPermissions;
-    let skip_set = read_skip_dangerous_prompt();
-    if tui::startup_bypass::should_show_bypass_dialog(is_bypass, skip_set) {
-        match tui::startup_bypass::mount_bypass_dialog().await {
-            Ok(tui::startup_bypass::BypassDialogOutcome::Accept) => {
-                // Persist so subsequent launches skip the prompt
-                // (`onConfirm` → `saveCurrentProjectConfig`). Best-effort.
-                persist_skip_dangerous_prompt();
-                // TELEMETRY (`tengu_bypass_permissions_mode_dialog_accept`,
-                // registered in Task 6): DEFERRED. There is no pre-session
-                // analytics sink wired at this seam (same situation as the
-                // startup migrations, which emit with `bus: None`). Emitting here
-                // would buffer onto a bus that is never flushed pre-REPL — an
-                // honest no-op is preferable to a call that looks wired but
-                // silently drops. The event name is registered and the emit lands
-                // once a pre-session sink exists.
-            }
-            Ok(tui::startup_bypass::BypassDialogOutcome::Decline) => {
-                // User declined (or pressed Esc): exit 1 (TS `process.exit(1)`).
-                return exit_codes::RUNTIME_ERROR;
-            }
-            Err(e) => {
-                eprintln!("lingxi-cli: bypass dialog failed: {e}");
-                return exit_codes::RUNTIME_ERROR;
-            }
-        }
-    }
     // (M7 cc2.1.198) Register this interactive session in the cross-process
     // live-session registry (`~/.lingxi/sessions/<pid>.json`) so
     // `lingxi-cli agents --json` and the agents view can list it — the binary
@@ -288,6 +241,19 @@ pub(crate) async fn run_ratatui(
     tui_build: crate::init::TuiBuild,
     registration: Option<Arc<crate::agents_registry::SessionRegistration>>,
     resumed_messages: Vec<tui::RenderedMessage>,
+) -> RunOutcome {
+    run_ratatui_with_initial_prompt(tui_build, registration, resumed_messages, None).await
+}
+
+/// Mount the normal interactive TUI and submit one prompt after the terminal
+/// and widget are live. Background PTY children use this rather than placing a
+/// prompt on their argv, because argv prompt routing intentionally selects
+/// print mode before the TUI can mount.
+pub(crate) async fn run_ratatui_with_initial_prompt(
+    tui_build: crate::init::TuiBuild,
+    registration: Option<Arc<crate::agents_registry::SessionRegistration>>,
+    resumed_messages: Vec<tui::RenderedMessage>,
+    initial_prompt: Option<String>,
 ) -> RunOutcome {
     let orchestrator: Arc<dyn OrchestratorHandle> = tui_build.runtime.orchestrator.clone();
     // Boot permission mode + bypass-cycle availability for the indicator (Copy,
@@ -413,6 +379,8 @@ pub(crate) async fn run_ratatui(
         tui_build.runtime.task_registry.clone();
     let task_handle = handle.clone();
     let task_turn_tx = turn_tx.clone();
+    let agent_status_registry = task_registry_handle.clone();
+    let agent_status_turn_tx = turn_tx.clone();
     let sandbox_paths = permission_paths.clone();
     let sandbox_handle = handle.clone();
     let sandbox_turn_tx = turn_tx.clone();
@@ -490,13 +458,15 @@ pub(crate) async fn run_ratatui(
     // off-loop shape as `on_plugin_action`, but a READ+RECONCILE against the
     // engine's live `PluginManager` rather than a settings-file write.
     let reload_plugin_runtime = tui_build.runtime.plugin_runtime.clone();
+    let reload_command_registry = command_registry.clone();
     let reload_handle = handle.clone();
     let reload_turn_tx = turn_tx.clone();
     let on_reload_plugins = move || {
         let rt = reload_plugin_runtime.clone();
+        let registry = reload_command_registry.clone();
         let tx = reload_turn_tx.clone();
         reload_handle.spawn(async move {
-            run_reload_plugins(rt, tx).await;
+            run_reload_plugins(rt, registry, tx).await;
         });
     };
     // (/resume) Preload the recent-session rows for the interactive picker.
@@ -937,9 +907,58 @@ pub(crate) async fn run_ratatui(
             }
         }
     });
+    // Live Agent/Task status below the composer. The task registry is the
+    // authoritative lifecycle source for detached agents; send full snapshots
+    // only on change so the blocking render loop does no async polling itself.
+    let agent_status_pump = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(250));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut previous = Vec::new();
+        loop {
+            interval.tick().await;
+            let Ok(records) = agent_status_registry
+                .list(traits::task_registry::TaskListFilter::default())
+                .await
+            else {
+                continue;
+            };
+            let mut agents = records
+                .into_iter()
+                .filter(|record| {
+                    is_agent_task_type(&record.task_type)
+                        && matches!(record.status.as_str(), "pending" | "running")
+                })
+                .map(|record| tui_core::orchestrator_bridge::RunningAgentStatus {
+                    id: record.task_id,
+                    task_type: record.task_type.clone(),
+                    agent_type: record.agent_type.unwrap_or_else(|| {
+                        if record.task_type == "in_process_teammate" {
+                            "teammate".to_string()
+                        } else {
+                            "Agent".to_string()
+                        }
+                    }),
+                    description: record.description,
+                    status: record.status,
+                })
+                .collect::<Vec<_>>();
+            agents.sort_by(|left, right| left.id.cmp(&right.id));
+            if agents == previous {
+                continue;
+            }
+            previous.clone_from(&agents);
+            if agent_status_turn_tx
+                .send(tui_core::orchestrator_bridge::TurnEvent::AgentStatusSnapshot { agents })
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
     let run_result = tokio::task::spawn_blocking(move || {
         tui::app::run_app(
             initial,
+            initial_prompt,
             session,
             bridge_rx,
             permission_rx,
@@ -978,6 +997,7 @@ pub(crate) async fn run_ratatui(
     })
     .await;
     status_pump.abort();
+    agent_status_pump.abort();
     // (/stop, and clean shutdown) The render loop has torn down; close the
     // responses websocket + set `should_exit` on the LIVE handle HERE — on the
     // OUTER runtime where those sockets are registered — rather than on the
@@ -1060,6 +1080,13 @@ pub(crate) async fn run_ratatui(
             RunOutcome::Exit(exit_codes::RUNTIME_ERROR)
         }
     }
+}
+
+fn is_agent_task_type(task_type: &str) -> bool {
+    matches!(
+        task_type,
+        "local_agent" | "remote_agent" | "in_process_teammate"
+    )
 }
 
 /// (companyAnnouncements) Build the startup-banner announcement block from the
@@ -1244,6 +1271,7 @@ async fn run_plugin_action(
 /// disabled for the session (safe mode / `--bare`).
 async fn run_reload_plugins(
     plugin_runtime: Option<std::sync::Arc<engine_desktop::PluginRuntime>>,
+    command_registry: std::sync::Arc<tokio::sync::RwLock<command_api::CommandRegistry>>,
     turn_tx: tokio::sync::mpsc::UnboundedSender<tui_core::orchestrator_bridge::TurnEvent>,
 ) {
     use tui_core::orchestrator_bridge::TurnEvent;
@@ -1267,6 +1295,41 @@ async fn run_reload_plugins(
     };
 
     let c = rt.refresh().await;
+    let registry_rows = {
+        use command_api::SlashCommandKind;
+        let with_slash = |name: &str| {
+            if name.starts_with('/') {
+                name.to_string()
+            } else {
+                format!("/{name}")
+            }
+        };
+        command_registry
+            .read()
+            .await
+            .list_all()
+            .into_iter()
+            .filter(|cmd| {
+                matches!(
+                    cmd.kind,
+                    SlashCommandKind::Markdown { .. }
+                        | SlashCommandKind::Plugin { .. }
+                        | SlashCommandKind::Bundled { .. }
+                        | SlashCommandKind::Mcp { .. }
+                )
+            })
+            .filter(|cmd| cmd.user_invocable != Some(false))
+            .map(|cmd| tui_core::orchestrator_bridge::CommandCatalogEntry {
+                name: with_slash(&cmd.name),
+                description: cmd.description.clone(),
+                menu_description: cmd.menu_description.clone(),
+                aliases: cmd.aliases.iter().map(|alias| with_slash(alias)).collect(),
+            })
+            .collect()
+    };
+    let _ = turn_tx.send(TurnEvent::CommandCatalogRefreshed {
+        commands: registry_rows,
+    });
     // claude-code labels plugin COMMANDS "skills" in this line (`n(command_count,
     // 'skill')`); `agent_count`/hooks/MCP/LSP mirror the same result struct.
     let parts = [
@@ -2248,6 +2311,34 @@ pub(crate) fn persist_skip_dangerous_prompt() {
     }
 }
 
+/// Run the foreground-only trust and dangerous-bypass setup gates.
+///
+/// Background dispatch calls this before daemonising and records the approval
+/// in its owner-only launch spec. The hidden PTY child must consume that bit
+/// rather than mounting setup dialogs on an unattended pseudo-terminal.
+pub(crate) async fn startup_preflight(argv: &Argv) -> bool {
+    if trust_gate().await == TrustGateOutcome::Decline {
+        return false;
+    }
+    let (bypass_mode, _) = crate::resolve_permission_mode(argv);
+    let is_bypass = bypass_mode == permission::PermissionMode::BypassPermissions;
+    let skip_set = read_skip_dangerous_prompt();
+    if !tui::startup_bypass::should_show_bypass_dialog(is_bypass, skip_set) {
+        return true;
+    }
+    match tui::startup_bypass::mount_bypass_dialog().await {
+        Ok(tui::startup_bypass::BypassDialogOutcome::Accept) => {
+            persist_skip_dangerous_prompt();
+            true
+        }
+        Ok(tui::startup_bypass::BypassDialogOutcome::Decline) => false,
+        Err(e) => {
+            eprintln!("lingxi-cli: bypass dialog failed: {e}");
+            false
+        }
+    }
+}
+
 /// Outcome of the startup trust gate ([`trust_gate`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TrustGateOutcome {
@@ -2623,5 +2714,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(read_startup_config_from(&no_org), (3, None));
+    }
+
+    #[test]
+    fn agent_status_filter_covers_every_agent_task_type() {
+        assert!(is_agent_task_type("local_agent"));
+        assert!(is_agent_task_type("remote_agent"));
+        assert!(is_agent_task_type("in_process_teammate"));
+        assert!(!is_agent_task_type("local_bash"));
+        assert!(!is_agent_task_type("local_workflow"));
     }
 }

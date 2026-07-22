@@ -32,7 +32,7 @@ pub use autonomous_loop::{
     mark_loop_rescheduled, read_loop_file, reset_autonomous_loop_delivered,
     reset_loop_runtime_state, resolve_autonomous_loop_fire, resolve_loop_default_fire,
     resolve_loop_file_fire, set_loop_consecutive_keepalives, take_loop_rescheduled,
-    take_loop_tick_in_flight_prompt, LoopFile, AUTONOMOUS_LOOP_DYNAMIC_SENTINEL,
+    take_loop_tick_in_flight_prompt, LoopFile, LoopRuntime, AUTONOMOUS_LOOP_DYNAMIC_SENTINEL,
     AUTONOMOUS_LOOP_PREAMBLE, AUTONOMOUS_LOOP_SENTINEL, LOOP_FILE_DYNAMIC_SENTINEL,
     LOOP_FILE_SENTINEL,
 };
@@ -44,6 +44,7 @@ pub use run_due::{
 pub use schedule::{parse_cron, CronExpression, CronField, CronParseError};
 pub use scheduler::{CronScheduler, CronTaskDef};
 pub use tasks_file::{
-    parse_tasks, scheduled_tasks_lock_path, scheduled_tasks_path, serialize_tasks, CronTask,
-    ScheduledTasks,
+    lock_scheduled_tasks, parse_tasks, project_root_from_tasks_path, read_tasks_body,
+    scheduled_tasks_lock_path, scheduled_tasks_lock_relative_path, scheduled_tasks_path,
+    scheduled_tasks_relative_path, serialize_tasks, write_tasks_body, CronTask, ScheduledTasks,
 };

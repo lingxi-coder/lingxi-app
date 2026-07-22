@@ -355,7 +355,7 @@ mod tests {
 
         let m = measure(&body);
         assert_eq!(m.line_count, 100); // well under the 200-line cap
-        // trim() strips the trailing '\n', so both totals drop by 1.
+                                       // trim() strips the trailing '\n', so both totals drop by 1.
         assert_eq!(m.byte_count, 19_100 - 1);
         // A UTF-8 `.len()` measure would be over the 20_000 (0.8) threshold.
         assert!(body.trim().len() >= 20_000);

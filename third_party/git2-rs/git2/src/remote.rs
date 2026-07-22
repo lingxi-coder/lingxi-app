@@ -130,7 +130,9 @@ impl<'repo> Remote<'repo> {
     /// Returns `Ok(None)` if this remote has not yet been named.
     pub fn name(&self) -> Result<Option<&str>, Error> {
         match self.name_bytes() {
-            Some(nb) => std::str::from_utf8(nb).map(|s| Some(s)).map_err(|e| e.into()),
+            Some(nb) => std::str::from_utf8(nb)
+                .map(|s| Some(s))
+                .map_err(|e| e.into()),
             None => Ok(None),
         }
     }
@@ -157,7 +159,9 @@ impl<'repo> Remote<'repo> {
     /// Returns `Ok(None)` if no special url for pushing is set.
     pub fn pushurl(&self) -> Result<Option<&str>, Error> {
         match self.pushurl_bytes() {
-            Some(pb) => std::str::from_utf8(pb).map(|s| Some(s)).map_err(|e| e.into()),
+            Some(pb) => std::str::from_utf8(pb)
+                .map(|s| Some(s))
+                .map_err(|e| e.into()),
             None => Ok(None),
         }
     }

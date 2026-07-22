@@ -301,7 +301,9 @@ fn auto_memory_enabled() -> bool {
         })
     }
     fn is_set(name: &str) -> bool {
-        std::env::var(name).ok().is_some_and(|v| !v.trim().is_empty())
+        std::env::var(name)
+            .ok()
+            .is_some_and(|v| !v.trim().is_empty())
     }
     !(truthy("CLAUDE_CODE_DISABLE_AUTO_MEMORY")
         || truthy("LINGXI_DISABLE_AUTO_MEMORY")
@@ -818,10 +820,7 @@ mod tests {
     use crate::definition::AgentMemoryScope;
 
     /// Set an agent's memory scope on top of the spawn-path defaults.
-    fn agent_def_with_memory(
-        tools: AgentToolPolicy,
-        memory: AgentMemoryScope,
-    ) -> AgentDefinition {
+    fn agent_def_with_memory(tools: AgentToolPolicy, memory: AgentMemoryScope) -> AgentDefinition {
         AgentDefinition {
             memory: Some(memory),
             ..agent_def(tools)
@@ -840,10 +839,22 @@ mod tests {
         let resolved = AgentToolResolver::resolve(&def, &parent, &[], 0, false);
         let got = names(&resolved);
         assert!(got.contains(&"Bash".to_string()));
-        assert!(got.contains(&"Read".to_string()), "Read injected for memory");
-        assert!(got.contains(&"Write".to_string()), "Write injected for memory");
-        assert!(got.contains(&"Edit".to_string()), "Edit injected for memory");
-        assert!(!got.contains(&"Grep".to_string()), "Grep not part of memory set");
+        assert!(
+            got.contains(&"Read".to_string()),
+            "Read injected for memory"
+        );
+        assert!(
+            got.contains(&"Write".to_string()),
+            "Write injected for memory"
+        );
+        assert!(
+            got.contains(&"Edit".to_string()),
+            "Edit injected for memory"
+        );
+        assert!(
+            !got.contains(&"Grep".to_string()),
+            "Grep not part of memory set"
+        );
     }
 
     #[test]
@@ -906,10 +917,8 @@ mod tests {
             AgentMemoryScope::Project,
             AgentMemoryScope::Local,
         ] {
-            let def = agent_def_with_memory(
-                AgentToolPolicy::Explicit(vec!["Bash".to_string()]),
-                scope,
-            );
+            let def =
+                agent_def_with_memory(AgentToolPolicy::Explicit(vec!["Bash".to_string()]), scope);
             let got = names(&AgentToolResolver::resolve(&def, &parent, &[], 0, false));
             for want in ["Read", "Write", "Edit"] {
                 assert!(
@@ -949,7 +958,10 @@ mod tests {
         let got = names(&AgentToolResolver::resolve(&def, &parent, &[], 0, false));
         assert!(got.contains(&"Read".to_string()));
         assert!(got.contains(&"Edit".to_string()));
-        assert!(!got.contains(&"Write".to_string()), "explicit disallow wins");
+        assert!(
+            !got.contains(&"Write".to_string()),
+            "explicit disallow wins"
+        );
     }
 
     #[test]
@@ -964,8 +976,14 @@ mod tests {
         };
         let got = names(&AgentToolResolver::resolve(&def, &parent, &[], 0, false));
         assert!(got.contains(&"Read".to_string()), "read-only Read survives");
-        assert!(!got.contains(&"Write".to_string()), "Write stripped in plan mode");
-        assert!(!got.contains(&"Edit".to_string()), "Edit stripped in plan mode");
+        assert!(
+            !got.contains(&"Write".to_string()),
+            "Write stripped in plan mode"
+        );
+        assert!(
+            !got.contains(&"Edit".to_string()),
+            "Edit stripped in plan mode"
+        );
     }
 
     #[test]

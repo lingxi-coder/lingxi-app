@@ -13,6 +13,7 @@
  * pending.
  */
 
+import { useEffect, useRef } from 'react';
 import type { PermissionRequest } from '@lingxi/bridge-client';
 import { useT } from '../theme/ThemeContext';
 
@@ -71,6 +72,39 @@ export interface PermissionPromptProps {
 
 export function PermissionPrompt({ request, onApprove, onDeny }: PermissionPromptProps) {
   const t = useT();
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const primaryRef = useRef<HTMLButtonElement>(null);
+  const onDenyRef = useRef(onDeny);
+  onDenyRef.current = onDeny;
+  useEffect(() => {
+    if (!request) return;
+    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    primaryRef.current?.focus();
+    const keyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        onDenyRef.current(request.request_id);
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      const focusable = [...(dialogRef.current?.querySelectorAll<HTMLElement>('button:not([disabled])') ?? [])];
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable.at(-1);
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last?.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first?.focus();
+      }
+    };
+    document.addEventListener('keydown', keyDown);
+    return () => {
+      document.removeEventListener('keydown', keyDown);
+      previouslyFocused?.focus();
+    };
+  }, [request]);
   if (!request) return null;
 
   const { title, detail } = describe(request);
@@ -81,6 +115,7 @@ export function PermissionPrompt({ request, onApprove, onDeny }: PermissionPromp
       role="dialog"
       aria-modal="true"
       aria-label={title}
+      aria-describedby={detail ? 'lingxi-permission-detail lingxi-permission-scope' : 'lingxi-permission-scope'}
       style={{
         position: 'absolute', inset: 0, zIndex: 60,
         display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -88,6 +123,7 @@ export function PermissionPrompt({ request, onApprove, onDeny }: PermissionPromp
       }}
     >
       <div
+        ref={dialogRef}
         style={{
           width: 420, maxWidth: '90%', borderRadius: 14, overflow: 'hidden',
           background: t.windowBg, border: `0.5px solid ${t.border}`,
@@ -117,6 +153,7 @@ export function PermissionPrompt({ request, onApprove, onDeny }: PermissionPromp
           </div>
           {detail && (
             <div
+              id="lingxi-permission-detail"
               className="mono"
               style={{
                 fontSize: 12, color: t.text2, lineHeight: 1.5, maxHeight: 180, overflow: 'auto',
@@ -157,9 +194,10 @@ export function PermissionPrompt({ request, onApprove, onDeny }: PermissionPromp
               border: `0.5px solid ${t.border}`,
             }}
           >
-            Allow always
+            Allow matching actions
           </button>
           <button
+            ref={primaryRef}
             type="button"
             onClick={() => onApprove(request.request_id, { type: 'allow_once' })}
             style={{
@@ -171,6 +209,9 @@ export function PermissionPrompt({ request, onApprove, onDeny }: PermissionPromp
           >
             Allow once
           </button>
+        </div>
+        <div id="lingxi-permission-scope" style={{ padding: '0 16px 12px', background: t.surface, color: t.text3, fontSize: 10.5, lineHeight: 1.45 }}>
+          “Allow matching actions” saves a narrowed rule for this workspace when the engine supports it.
         </div>
       </div>
     </div>

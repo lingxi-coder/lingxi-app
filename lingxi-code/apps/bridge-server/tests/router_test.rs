@@ -32,20 +32,24 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bridge::wire::Frame;
-use bridge::McpEndpoint;
-use bridge_server::router::{CommandRouter, EngineCommandRouter};
+use bridge::{BridgeRequest, Capabilities, ClientHello, McpEndpoint, BRIDGE_PROTOCOL_VERSION};
+use bridge_server::router::{CommandRouter, EngineCommandRouter, SessionStoreContext};
 use bridge_server::server::BridgeConnection;
 use client_adapter::{AdapterPermissionGate, ClientEventSink, PermissionRequestSink};
 use client_protocol::commands::{ClientCommand, ListingKindDto};
-use client_protocol::events::ClientEvent;
+use client_protocol::events::{ClientEvent, ErrorKindDto};
 use client_protocol::permission::PermissionRequest;
 use futures_util::{SinkExt, StreamExt};
 use orchestrator::test_support::MockOrchestratorHandle;
+use platform_posix::PosixFileSystem;
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::tungstenite::Message;
 use traits::auth::{AuthError, AuthHandle, LoginInfo};
-use traits::orchestrator::{McpServerInfo, McpStatus, StatusSnapshot};
+use traits::orchestrator::{
+    AgentInfo, CompactionSummary, CostSnapshot, DoctorReport, HandleError, HookInfo, McpServerInfo,
+    McpStatus, MemoryEditorOutcome, StatusSnapshot,
+};
 use traits::task_registry::{
     TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryError,
     TaskRegistryHandle, TaskUpdatePatch,
@@ -104,6 +108,91 @@ impl AuthHandle for MockAuth {
 /// no-op success default.
 struct MockTaskRegistry {
     rows: Vec<TaskRecord>,
+}
+
+/// Minimal handle that records the history adopted by `ResumeSession`.
+struct ResumingHandle {
+    session_id: protocol::SessionId,
+    resumed: Mutex<
+        Option<(
+            protocol::SessionId,
+            Vec<protocol::ConversationMessage>,
+            Option<String>,
+            Option<traits::ActiveGoalSnapshot>,
+            traits::ResumeRuntimeSnapshot,
+        )>,
+    >,
+}
+
+impl ResumingHandle {
+    fn new() -> Self {
+        Self {
+            session_id: protocol::SessionId::new(),
+            resumed: Mutex::new(None),
+        }
+    }
+}
+
+#[async_trait]
+impl traits::OrchestratorHandle for ResumingHandle {
+    async fn current_session_id(&self) -> protocol::SessionId {
+        self.session_id
+    }
+    async fn clear_session(&self) -> Result<(), HandleError> {
+        Ok(())
+    }
+    async fn force_compact(&self) -> Result<CompactionSummary, HandleError> {
+        Ok(CompactionSummary::default())
+    }
+    async fn snapshot_cost(&self) -> CostSnapshot {
+        CostSnapshot::default()
+    }
+    async fn switch_model(&self, _model: &str, _profile: Option<&str>) -> Result<(), HandleError> {
+        Ok(())
+    }
+    async fn request_exit(&self) {}
+    async fn current_should_exit(&self) -> bool {
+        false
+    }
+    async fn open_memory_editor(&self) -> Result<MemoryEditorOutcome, HandleError> {
+        Err(HandleError::Unimplemented("test".into()))
+    }
+    async fn list_mcp_servers(&self) -> Vec<McpServerInfo> {
+        Vec::new()
+    }
+    async fn list_hooks(&self) -> Vec<HookInfo> {
+        Vec::new()
+    }
+    async fn list_agents(&self) -> Vec<AgentInfo> {
+        Vec::new()
+    }
+    async fn run_doctor_checks(&self) -> DoctorReport {
+        DoctorReport::default()
+    }
+    async fn get_status_snapshot(&self) -> StatusSnapshot {
+        StatusSnapshot::default()
+    }
+    async fn edit_config_file(&self) -> Result<MemoryEditorOutcome, HandleError> {
+        Err(HandleError::Unimplemented("test".into()))
+    }
+    async fn edit_permissions_file(&self) -> Result<MemoryEditorOutcome, HandleError> {
+        Err(HandleError::Unimplemented("test".into()))
+    }
+    async fn list_available_models(&self) -> Vec<String> {
+        Vec::new()
+    }
+    async fn resume_session(
+        &self,
+        session_id: protocol::SessionId,
+        history: Vec<protocol::ConversationMessage>,
+        last_jsonl_uuid: Option<String>,
+        active_goal: Option<traits::ActiveGoalSnapshot>,
+        runtime: traits::ResumeRuntimeSnapshot,
+    ) -> Result<(), HandleError> {
+        *self.resumed.lock().await =
+            Some((session_id, history, last_jsonl_uuid, active_goal, runtime));
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -165,6 +254,132 @@ fn router_with(
         None,
         None,
     )
+}
+
+fn router_with_store(
+    handle: Arc<MockOrchestratorHandle>,
+    root: &std::path::Path,
+) -> EngineCommandRouter {
+    let cwd = root.to_string_lossy().into_owned();
+    EngineCommandRouter::new(
+        handle as Arc<dyn traits::orchestrator::OrchestratorHandle>,
+        Arc::new(MockAuth) as Arc<dyn AuthHandle>,
+        Arc::new(MockTaskRegistry { rows: vec![] }) as Arc<dyn TaskRegistryHandle>,
+        None,
+        None,
+    )
+    .with_session_store(SessionStoreContext::new(
+        root.join(".lingxi"),
+        cwd,
+        Arc::new(PosixFileSystem::new(root.to_path_buf())),
+    ))
+}
+
+fn seed_session_file(root: &std::path::Path) -> String {
+    seed_session_file_with_ids(
+        root,
+        "11111111-2222-4333-8444-555555555555",
+        "aaaaaaaa-2222-4333-8444-555555555555",
+        "prior session",
+    )
+}
+
+fn seed_session_file_with_ids(
+    root: &std::path::Path,
+    session_id: &str,
+    message_id: &str,
+    prompt: &str,
+) -> String {
+    let cwd = root.to_string_lossy().into_owned();
+    let lingxi_home = root.join(".lingxi");
+    let project_dir = lingxi_home
+        .join("projects")
+        .join(session::jsonl::project_dir_name(&cwd));
+    std::fs::create_dir_all(&project_dir).unwrap();
+    let uuid = session_id.to_string();
+    let line = serde_json::json!({
+        "type": "user",
+        "uuid": message_id,
+        "parentUuid": serde_json::Value::Null,
+        "sessionId": uuid,
+        "timestamp": "2026-05-25T12:00:00.000Z",
+        "cwd": cwd,
+        "version": "0.9.0",
+        "isSidechain": false,
+        "userType": "external",
+        "message": {"role": "user", "content": prompt}
+    });
+    std::fs::write(
+        project_dir.join(format!("{uuid}.jsonl")),
+        format!("{}\n", serde_json::to_string(&line).unwrap()),
+    )
+    .unwrap();
+    uuid
+}
+
+fn seed_replay_session(root: &std::path::Path) -> String {
+    let cwd = root.to_string_lossy().into_owned();
+    let project_dir = root
+        .join(".lingxi")
+        .join("projects")
+        .join(session::jsonl::project_dir_name(&cwd));
+    std::fs::create_dir_all(&project_dir).unwrap();
+    let session_id = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa".to_string();
+    let user_id = "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb";
+    let assistant_id = "cccccccc-3333-4333-8333-cccccccccccc";
+    let boundary_id = "dddddddd-4444-4444-8444-dddddddddddd";
+    // Persist the real post-compaction chain shape: the boundary resets the
+    // parent chain, the transcript-only summary chains from it, and the next
+    // assistant response becomes the resumable tip.
+    let boundary = serde_json::json!({
+        "type": "system",
+        "subtype": "compact_boundary",
+        "uuid": boundary_id,
+        "parentUuid": serde_json::Value::Null,
+        "logicalParentUuid": serde_json::Value::Null,
+        "sessionId": session_id,
+        "timestamp": "2026-05-25T12:00:00.000Z",
+        "cwd": cwd,
+        "version": "0.9.0",
+        "isSidechain": false,
+        "content": "Conversation compacted",
+        "level": "info",
+        "compactMetadata": {
+            "cumulativeDroppedTokens": 4321,
+            "preCompactDiscoveredTools": ["DeferredTool"]
+        }
+    });
+    let user = serde_json::json!({
+        "type": "user",
+        "uuid": user_id,
+        "parentUuid": boundary_id,
+        "sessionId": session_id,
+        "timestamp": "2026-05-25T12:00:01.000Z",
+        "cwd": cwd,
+        "version": "0.9.0",
+        "isSidechain": false,
+        "userType": "external",
+        "isCompactSummary": true,
+        "isVisibleInTranscriptOnly": true,
+        "message": {"role": "user", "content": "resume from disk"}
+    });
+    let assistant = serde_json::json!({
+        "type": "assistant",
+        "uuid": assistant_id,
+        "parentUuid": user_id,
+        "sessionId": session_id,
+        "timestamp": "2026-05-25T12:00:02.000Z",
+        "cwd": cwd,
+        "version": "0.9.0",
+        "isSidechain": false,
+        "message": {"role": "assistant", "content": [{"type": "text", "text": "restored"}]}
+    });
+    std::fs::write(
+        project_dir.join(format!("{session_id}.jsonl")),
+        format!("{boundary}\n{user}\n{assistant}\n"),
+    )
+    .unwrap();
+    session_id
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -449,6 +664,256 @@ async fn clear_session_rejected_mid_turn() {
     );
 }
 
+#[tokio::test]
+async fn list_sessions_reads_jsonl_metadata_and_empty_store_replies() {
+    let populated = tempfile::tempdir().unwrap();
+    let uuid = seed_session_file(populated.path());
+    let router = router_with_store(Arc::new(MockOrchestratorHandle::new()), populated.path());
+    let sink = CapturingSink::arc();
+    router
+        .route(ClientCommand::ListSessions { limit: None }, sink.clone())
+        .await;
+
+    let events = sink.events().await;
+    let sessions = events
+        .iter()
+        .find_map(|event| match event {
+            ClientEvent::SessionList { sessions } => Some(sessions),
+            _ => None,
+        })
+        .expect("list must always emit SessionList");
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].uuid, uuid);
+    assert_eq!(sessions[0].message_count, 1);
+    assert!(sessions[0].path.ends_with(&format!("{uuid}.jsonl")));
+
+    let empty = tempfile::tempdir().unwrap();
+    let empty_router = router_with_store(Arc::new(MockOrchestratorHandle::new()), empty.path());
+    let empty_sink = CapturingSink::arc();
+    empty_router
+        .route(
+            ClientCommand::RefreshListings {
+                which: vec![ListingKindDto::Sessions],
+            },
+            empty_sink.clone(),
+        )
+        .await;
+    assert_eq!(
+        empty_sink.events().await,
+        vec![ClientEvent::SessionList {
+            sessions: Vec::new()
+        }]
+    );
+}
+
+#[tokio::test]
+async fn list_sessions_reports_corrupt_catalog_as_error() {
+    let root = tempfile::tempdir().unwrap();
+    let cwd = root.path().to_string_lossy().into_owned();
+    let project_dir = root
+        .path()
+        .join(".lingxi")
+        .join("projects")
+        .join(session::jsonl::project_dir_name(&cwd));
+    std::fs::create_dir_all(&project_dir).unwrap();
+
+    let corrupt_session_id = "99999999-2222-4333-8444-555555555555";
+    std::fs::write(project_dir.join(format!("{corrupt_session_id}.jsonl")), "{").unwrap();
+
+    let router = router_with_store(Arc::new(MockOrchestratorHandle::new()), root.path());
+    let sink = CapturingSink::arc();
+    router
+        .route(ClientCommand::ListSessions { limit: None }, sink.clone())
+        .await;
+
+    let events = sink.events().await;
+    assert!(
+        matches!(
+            events.as_slice(),
+            [ClientEvent::Error { kind, message }]
+                if *kind == ErrorKindDto::Internal
+                    && message.contains("session catalog")
+                    && message.contains("retry")
+                    && !message.contains(&root.path().display().to_string())
+                    && !message.contains(corrupt_session_id)
+        ),
+        "unexpected corrupt-catalog response: {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn list_sessions_preserves_readable_rows_when_one_transcript_is_corrupt() {
+    let root = tempfile::tempdir().unwrap();
+    let first = seed_session_file(root.path());
+    let second = seed_session_file_with_ids(
+        root.path(),
+        "22222222-3333-4444-8555-666666666666",
+        "bbbbbbbb-3333-4444-8555-666666666666",
+        "second session",
+    );
+    let cwd = root.path().to_string_lossy().into_owned();
+    let project_dir = root
+        .path()
+        .join(".lingxi")
+        .join("projects")
+        .join(session::jsonl::project_dir_name(&cwd));
+    let corrupt_session_id = "99999999-2222-4333-8444-555555555555";
+    std::fs::write(project_dir.join(format!("{corrupt_session_id}.jsonl")), "{").unwrap();
+
+    let router = router_with_store(Arc::new(MockOrchestratorHandle::new()), root.path());
+    let sink = CapturingSink::arc();
+    router
+        .route(ClientCommand::ListSessions { limit: None }, sink.clone())
+        .await;
+
+    let events = sink.events().await;
+    assert_eq!(events.len(), 2, "expected rows plus a recoverable warning");
+    let ClientEvent::SessionList { sessions } = &events[0] else {
+        panic!("expected session list first, got {events:?}");
+    };
+    assert_eq!(sessions.len(), 2);
+    assert!(sessions.iter().any(|session| session.uuid == first));
+    assert!(sessions.iter().any(|session| session.uuid == second));
+    assert!(matches!(
+        &events[1],
+        ClientEvent::Error { kind, message }
+            if *kind == ErrorKindDto::Internal
+                && message.contains("unreadable sessions were skipped")
+                && message.contains("retry")
+                && !message.contains(&root.path().display().to_string())
+                && !message.contains(corrupt_session_id)
+    ));
+}
+
+#[tokio::test]
+async fn new_session_clears_applies_model_and_emits_started() {
+    let handle = Arc::new(MockOrchestratorHandle::new());
+    let expected_id = traits::OrchestratorHandle::current_session_id(&*handle)
+        .await
+        .to_string();
+    let router = router_with(handle.clone(), Arc::new(MockTaskRegistry { rows: vec![] }));
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::NewSession {
+                cwd: None,
+                model: Some("claude-opus-4-8".into()),
+            },
+            sink.clone(),
+        )
+        .await;
+
+    assert!(handle.was_clear_session_called());
+    assert_eq!(
+        handle.last_switched_model().as_deref(),
+        Some("claude-opus-4-8")
+    );
+    assert_eq!(
+        sink.events().await,
+        vec![ClientEvent::SessionStarted {
+            session_id: expected_id
+        }]
+    );
+}
+
+#[tokio::test]
+async fn new_and_resume_are_rejected_mid_turn_and_bad_resume_is_honest() {
+    let handle = Arc::new(MockOrchestratorHandle::new());
+    let router = router_with(handle.clone(), Arc::new(MockTaskRegistry { rows: vec![] }));
+    router.set_turn_active(true);
+
+    for command in [
+        ClientCommand::NewSession {
+            cwd: None,
+            model: None,
+        },
+        ClientCommand::ResumeSession {
+            session_id: "not-a-uuid".into(),
+            cwd: None,
+        },
+    ] {
+        let sink = CapturingSink::arc();
+        router.route(command, sink.clone()).await;
+        assert!(matches!(
+            sink.events().await.as_slice(),
+            [ClientEvent::Error { .. }]
+        ));
+    }
+    assert!(!handle.was_clear_session_called());
+
+    router.set_turn_active(false);
+    let sink = CapturingSink::arc();
+    router
+        .route(
+            ClientCommand::ResumeSession {
+                session_id: "not-a-uuid".into(),
+                cwd: None,
+            },
+            sink.clone(),
+        )
+        .await;
+    let events = sink.events().await;
+    assert!(matches!(
+        events.as_slice(),
+        [ClientEvent::Error { message, .. }] if message.contains("malformed session id")
+    ));
+}
+
+#[tokio::test]
+async fn resume_session_replays_adopts_and_emits_full_transcript() {
+    let root = tempfile::tempdir().unwrap();
+    let session_id = seed_replay_session(root.path());
+    let handle = Arc::new(ResumingHandle::new());
+    let cwd = root.path().to_string_lossy().into_owned();
+    let router = EngineCommandRouter::new(
+        handle.clone() as Arc<dyn traits::OrchestratorHandle>,
+        Arc::new(MockAuth) as Arc<dyn AuthHandle>,
+        Arc::new(MockTaskRegistry { rows: vec![] }) as Arc<dyn TaskRegistryHandle>,
+        None,
+        None,
+    )
+    .with_session_store(SessionStoreContext::new(
+        root.path().join(".lingxi"),
+        cwd,
+        Arc::new(PosixFileSystem::new(root.path().to_path_buf())),
+    ));
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::ResumeSession {
+                session_id: session_id.clone(),
+                cwd: None,
+            },
+            sink.clone(),
+        )
+        .await;
+
+    let adopted = handle
+        .resumed
+        .lock()
+        .await
+        .clone()
+        .expect("resume_session must adopt replayed state");
+    assert_eq!(adopted.0.as_uuid().to_string(), session_id);
+    assert_eq!(adopted.1.len(), 2);
+    assert_eq!(
+        adopted.2.as_deref(),
+        Some("cccccccc-3333-4333-8333-cccccccccccc")
+    );
+    assert_eq!(adopted.4.cumulative_dropped_tokens, 4_321);
+    assert!(adopted.4.compacted);
+    assert_eq!(adopted.4.loaded_tool_names, vec!["DeferredTool"]);
+    assert_eq!(adopted.4.transcript_only_message_ids.len(), 1);
+    assert_eq!(adopted.4.compact_summary_message_ids.len(), 1);
+    assert!(matches!(
+        sink.events().await.as_slice(),
+        [ClientEvent::SessionResumed { session_id: emitted_id, messages }]
+            if emitted_id == &session_id && messages.len() == 2
+    ));
+}
+
 // ── End-to-end: routing over the real WebSocket transport ─────────────────────
 //
 // The unit tests above exercise the router directly; this proves the connection
@@ -526,6 +991,31 @@ where
     ws.send(Message::Text(text)).await.expect("send command");
 }
 
+async fn send_hello<S>(ws: &mut S)
+where
+    S: SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error>
+        + StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
+        + Unpin,
+{
+    let frame = Frame::Request(BridgeRequest {
+        id: 1,
+        method: "hello".into(),
+        params: serde_json::to_value(ClientHello {
+            protocol_version: BRIDGE_PROTOCOL_VERSION.into(),
+            client_name: "router-test".into(),
+            capabilities: Capabilities::default(),
+        })
+        .unwrap(),
+    });
+    ws.send(Message::Text(serde_json::to_string(&frame).unwrap()))
+        .await
+        .expect("send hello");
+    match next_frame(ws).await {
+        Frame::Response(response) => assert!(response.error.is_none()),
+        other => panic!("expected ServerHello response, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn set_model_routes_over_ws() {
     // A connection bound to BOTH the (unused) turn/permission path and the F2-08
@@ -548,8 +1038,9 @@ async fn set_model_routes_over_ws() {
     endpoint.set_auth_token(E2E_TOKEN.to_string());
     let mut ws = connect(endpoint.port()).await;
 
-    // Drive a `SetModel` command over the wire (no `hello` first — the trusted
-    // local-child skeleton routes a command without a mandatory handshake).
+    send_hello(&mut ws).await;
+
+    // Drive a `SetModel` command over the wire after the mandatory handshake.
     send_command(
         &mut ws,
         &ClientCommand::SetModel {

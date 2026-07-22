@@ -9,23 +9,16 @@
 //! 2. INITIAL ADOPT — [`daemon_roster::read_roster`] + [`retain_adoptable`] to
 //!    reap dead/recycled workers, then re-persist with our `supervisorPid` +
 //!    bumped `updatedAt`.
-//! 3. SUPERVISE LOOP — a minimal heartbeat that re-reads `roster.json` (the
-//!    file the `--bg` CLI appends dispatch rows to — the roster IS the dispatch
-//!    channel), reaps, and re-persists `updatedAt` every [`HEARTBEAT_MS`].
-//!    "Adopt new pending dispatches" in the coherent minimum = persisting the
-//!    rows re-read from disk; NO worker spawn (spawn needs pty/control.sock,
-//!    which is out of scope).
+//! 3. SUPERVISE LOOP — re-read `roster.json` plus durable job state, spawn one
+//!    detached PTY supervisor for each unclaimed background dispatch, reap
+//!    dead/recycled identities, and re-persist `updatedAt` every
+//!    [`HEARTBEAT_MS`].
 //! 4. SHUTDOWN — on SIGTERM/SIGINT, break the loop and [`daemon_lock::release`]
 //!    our lock.
 //!
-//! The supervisor now spawns headless workers with the dispatch environment
-//! (`bg_worker_env`) plus a live attach socket/token in the roster. Vanished
-//! workers still fail closed instead of pseudo-resuming and re-running the
-//! original prompt, which avoids duplicate side effects.
-//!
-//! Remaining higher-risk follow-ons: full control-message IPC, actual
-//! pty-backed worker input, the PTY-owned attach-stall watchdog, low-memory
-//! handling, orphan reap beyond `retain_adoptable`, and upgrade takeover.
+//! Each worker owns a real PTY/ConPTY TUI child and protocol-v2 live attach
+//! endpoint. Vanished workers fail closed instead of pseudo-resuming and
+//! re-running the original prompt, which avoids duplicate side effects.
 //!
 //! The literal `daemon` token in `argv[1..4]` is what lets
 //! [`daemon_lock::classify_cmdline`] recognise this child as one of *our* daemon
@@ -53,7 +46,7 @@ const HEARTBEAT_MS: u64 = 2000;
 /// [`crate::background_dispatch::DaemonSpawner`]) so the supervise loop's
 /// spawn decisions are testable without launching a real process.
 pub trait WorkerSpawner {
-    /// Spawn the detached headless worker for job `short` with `env` layered
+    /// Spawn the detached PTY supervisor for job `short` with `env` layered
     /// onto the inherited process environment, returning its pid.
     fn spawn_worker(&mut self, short: &str, env: &BTreeMap<String, String>)
         -> std::io::Result<i32>;
@@ -97,6 +90,14 @@ impl WorkerSpawner for RealWorkerSpawner {
         {
             use std::os::unix::process::CommandExt;
             cmd.process_group(0);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const DETACHED_PROCESS: u32 = 0x0000_0008;
+            const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
         }
         let child = cmd.spawn()?;
         Ok(i32::try_from(child.id()).unwrap_or(i32::MAX))
@@ -248,9 +249,10 @@ pub async fn run(_cli: &Cli) -> i32 {
     spawn_child_reaper(stop.clone());
 
     let stop_for_loop = stop.clone();
+    let loop_runtime_dir = runtime_dir.clone();
     let result = tokio::task::spawn_blocking(move || {
         run_supervisor(
-            &runtime_dir,
+            &loop_runtime_dir,
             pid,
             version,
             &SystemLockProbe,
@@ -262,8 +264,73 @@ pub async fn run(_cli: &Cli) -> i32 {
         )
     })
     .await;
+    let code = result.unwrap_or(exit_codes::RUNTIME_ERROR);
+    if stop.load(Ordering::Relaxed) {
+        stop_all_workers(&runtime_dir);
+    }
+    code
+}
 
-    result.unwrap_or(exit_codes::RUNTIME_ERROR)
+/// Graceful daemon shutdown owns the workers it supervised. Ask each worker to
+/// unwind first (so its PTY handle closes normally), then use the persisted PTY
+/// identity as a process-tree fallback.
+fn stop_all_workers(runtime_dir: &Path) {
+    let probe = SystemProbe;
+    for (short, job) in agents_registry::read_jobs(&agents_registry::jobs_dir(runtime_dir)) {
+        if agents_registry::job_is_terminal(&job) {
+            continue;
+        }
+        let stopped = crate::commands::rm::stop_worker(&job);
+        cleanup_orphaned_pty(runtime_dir, &short, &probe);
+        #[cfg(unix)]
+        if !stopped {
+            if let Some(pid) = job.worker_pid {
+                let _ = nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(pid),
+                    Some(nix::sys::signal::Signal::SIGKILL),
+                );
+            }
+        }
+        let _ = agents_registry::update_job_state(runtime_dir, &short, "stopped", None);
+    }
+}
+
+/// Kill a PTY tree left behind by a vanished worker. Numeric identities are
+/// used only while the recorded creation time still matches, preventing stale
+/// `pty.json` files from targeting a recycled PID.
+fn cleanup_orphaned_pty<PP: ProcProbe>(runtime_dir: &Path, short: &str, probe: &PP) {
+    let Ok(runtime) = crate::background_launch::read_pty_runtime(runtime_dir, short) else {
+        return;
+    };
+    let Ok(child_pid) = i32::try_from(runtime.child_pid) else {
+        crate::background_launch::remove_pty_runtime(runtime_dir, short);
+        return;
+    };
+    let identity_matches = runtime
+        .child_proc_start
+        .as_deref()
+        .is_some_and(|expected| probe.start_time(child_pid).as_deref() == Some(expected));
+    if identity_matches && probe.is_alive(child_pid) {
+        #[cfg(unix)]
+        {
+            let group = runtime.process_group_id.unwrap_or(runtime.child_pid);
+            if let Ok(group) = i32::try_from(group) {
+                let target = nix::unistd::Pid::from_raw(-group);
+                let _ = nix::sys::signal::kill(target, Some(nix::sys::signal::Signal::SIGTERM));
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                if probe.is_alive(child_pid) {
+                    let _ = nix::sys::signal::kill(target, Some(nix::sys::signal::Signal::SIGKILL));
+                }
+            }
+        }
+        #[cfg(windows)]
+        {
+            let _ = std::process::Command::new("taskkill.exe")
+                .args(["/PID", &child_pid.to_string(), "/T", "/F"])
+                .status();
+        }
+    }
+    crate::background_launch::remove_pty_runtime(runtime_dir, short);
 }
 
 /// Trip `stop` on the next SIGTERM or SIGINT (Ctrl-C). Best-effort: if the
@@ -484,6 +551,46 @@ fn spawn_pending_workers<PP: ProcProbe, WS: WorkerSpawner>(
         if job.state != "working" {
             continue;
         }
+        // A worker can be fully registered in the owner-only roster even when
+        // the subsequent `state.json` workerPid update was lost (for example,
+        // ENOSPC followed by a daemon restart).  Adopt that authenticated live
+        // endpoint and repair the job instead of launching the initial prompt a
+        // second time.  Placeholder foreground dispatch records never carry a
+        // PTY endpoint/auth pair, so they are deliberately ineligible here.
+        if job.worker_pid.is_none() {
+            let adoptable_pid = roster.workers.get(&short).and_then(|record| {
+                let has_endpoint = record
+                    .pty_sock
+                    .as_deref()
+                    .is_some_and(|value| !value.is_empty())
+                    && record
+                        .pty_auth
+                        .as_deref()
+                        .is_some_and(|value| !value.is_empty());
+                let identity_verified = record.proc_start.as_deref().is_some_and(|stored| {
+                    proc_probe.is_alive(record.pid)
+                        && proc_probe
+                            .start_time(record.pid)
+                            .as_deref()
+                            .is_some_and(|live| live == stored)
+                });
+                (has_endpoint && identity_verified).then_some(record.pid)
+            });
+            if let Some(worker_pid) = adoptable_pid {
+                if let Err(e) = agents_registry::update_job_state(
+                    runtime_dir,
+                    &short,
+                    "working",
+                    Some(worker_pid),
+                ) {
+                    tracing::warn!(
+                        "lingxi-cli daemon: could not repair workerPid for adopted job {short}: {e}"
+                    );
+                }
+                claimed.insert(short);
+                continue;
+            }
+        }
         // OWNED job: it has a recorded worker pid, or we spawned it this
         // supervisor lifetime (`claimed`). Its next step depends on whether
         // that worker is still alive.
@@ -499,6 +606,7 @@ fn spawn_pending_workers<PP: ProcProbe, WS: WorkerSpawner>(
             // cannot yet live-attach/continue that process, and re-running the
             // recorded prompt would duplicate side effects. Fail closed.
             emit_worker_vanished(&short);
+            cleanup_orphaned_pty(runtime_dir, &short, proc_probe);
             // The vanished worker is failed closed and never respawns, so the
             // offline reply queue's only in-worker drain site never runs for this
             // job again. Drain + surface any follow-up replies the attach
@@ -538,11 +646,11 @@ fn spawn_pending_workers<PP: ProcProbe, WS: WorkerSpawner>(
         }
 
         // CWD-GONE guard: never spawn a worker into a working directory that no
-        // longer exists. A detached headless worker would otherwise `chdir` into
-        // the dead cwd, crash opaquely, and (having no live transport) fail
-        // closed anyway. CC's `settleCwdGone` fails such a dispatch closed with a
-        // specific detail + `tengu_bg_spawn_cwd_gone{short, attempt, via}`; we
-        // mirror that, keeping the failure legible in the agent view.
+        // longer exists. The detached PTY child would otherwise fail before it
+        // can mount a usable attach transport. CC's `settleCwdGone` fails such a
+        // dispatch closed with a specific detail +
+        // `tengu_bg_spawn_cwd_gone{short, attempt, via}`; mirror that so the
+        // failure remains legible in the agent view.
         if let Some(cwd) = job.cwd.as_deref() {
             if !cwd.is_empty() && !Path::new(cwd).exists() {
                 let attempt = read_respawn_count(runtime_dir, &short);
@@ -580,8 +688,46 @@ fn spawn_pending_workers<PP: ProcProbe, WS: WorkerSpawner>(
             crate::bg_attach::ATTACH_AUTH_ENV.to_string(),
             attach_auth.clone(),
         );
+        let previous_dispatch = roster
+            .workers
+            .get(&short)
+            .map(|record| record.dispatch.clone());
         match spawner.spawn_worker(&short, &worker_env) {
             Ok(child_pid) => {
+                // Persist the authenticated endpoint before the separate job
+                // workerPid update. If that second write fails, a restarted
+                // daemon can adopt this record and repair state.json instead of
+                // executing the initial prompt again.
+                let proc_start = proc_probe.start_time(child_pid);
+                let record = worker_record_for_job(
+                    &short,
+                    &job,
+                    child_pid,
+                    proc_start,
+                    version,
+                    runtime_dir,
+                    previous_dispatch,
+                    attach_sock_s,
+                    attach_auth,
+                );
+                if let Some(worktree) = record.dispatch.worktree.as_ref() {
+                    if let Err(e) = crate::daemon_roster::write_worktree_ownership_marker(
+                        Path::new(&worktree.path),
+                        &short,
+                        &record.session_id,
+                        &worktree.ownership_token,
+                    ) {
+                        tracing::warn!(
+                            "lingxi-cli daemon: could not write worktree ownership marker for {short}: {e}"
+                        );
+                    }
+                }
+                roster.workers.insert(short.clone(), record);
+                if let Err(e) = daemon_roster::write_roster(runtime_dir, roster) {
+                    tracing::warn!(
+                        "lingxi-cli daemon: could not persist live endpoint for {short}: {e}"
+                    );
+                }
                 // Durable pid record (state stays "working").
                 if let Err(e) = agents_registry::update_job_state(
                     runtime_dir,
@@ -593,20 +739,6 @@ fn spawn_pending_workers<PP: ProcProbe, WS: WorkerSpawner>(
                         "lingxi-cli daemon: could not record workerPid for {short}: {e}"
                     );
                 }
-                // Live-worker roster record so retain_adoptable keeps it.
-                let proc_start = proc_probe.start_time(child_pid);
-                roster.workers.insert(
-                    short.clone(),
-                    worker_record_for_job(
-                        &short,
-                        &job,
-                        child_pid,
-                        proc_start,
-                        version,
-                        attach_sock_s,
-                        attach_auth,
-                    ),
-                );
                 claimed.insert(short);
             }
             Err(e) => {
@@ -628,13 +760,140 @@ fn worker_record_for_job(
     pid: i32,
     proc_start: Option<String>,
     version: &str,
+    runtime_dir: &Path,
+    previous_dispatch: Option<Dispatch>,
     attach_sock: String,
     attach_auth: String,
 ) -> WorkerRecord {
     let session_id = job.session_id.clone().unwrap_or_default();
-    let cwd = job.cwd.clone().unwrap_or_default();
+    let launch_spec = crate::background_launch::read_launch_spec(runtime_dir, short).ok();
+    let previous_worktree = previous_dispatch
+        .as_ref()
+        .and_then(|dispatch| dispatch.worktree.clone());
+    let cwd = launch_spec
+        .as_ref()
+        .map(|spec| spec.cwd.clone())
+        .or_else(|| job.cwd.clone())
+        .unwrap_or_default();
+    let worktree_path = launch_spec
+        .as_ref()
+        .and_then(|spec| spec.worktree_path.clone())
+        .or_else(|| {
+            previous_worktree
+                .as_ref()
+                .map(|worktree| worktree.path.clone())
+        });
+    let canonical_launch = launch_spec
+        .as_ref()
+        .map(|spec| match spec.launch {
+            crate::background_launch::BackgroundLaunchKind::Fresh => Launch::Prompt {
+                args: vec!["--background".to_string()],
+            },
+            crate::background_launch::BackgroundLaunchKind::Resume
+            | crate::background_launch::BackgroundLaunchKind::Fork => Launch::Resume {
+                session_id: spec.session_id.clone(),
+                transcript_path: Some(spec.transcript_path.clone()),
+                fork: spec.launch == crate::background_launch::BackgroundLaunchKind::Fork,
+                flag_args: Vec::new(),
+            },
+        })
+        .or_else(|| {
+            previous_dispatch
+                .as_ref()
+                .map(|dispatch| dispatch.launch.clone())
+        })
+        .unwrap_or_else(|| Launch::Prompt {
+            args: vec!["--background".to_string()],
+        });
+    let canonical_launch_spec = launch_spec
+        .as_ref()
+        .map(|spec| spec.reference(runtime_dir))
+        .or_else(|| {
+            previous_dispatch
+                .as_ref()
+                .and_then(|dispatch| dispatch.launch_spec.clone())
+        });
+    let canonical_worktree = worktree_path.as_ref().map(|path| {
+        previous_worktree
+            .filter(|worktree| worktree.path == *path)
+            .unwrap_or_else(|| crate::daemon_roster::Worktree {
+                path: path.clone(),
+                ownership_token: launch_spec
+                    .as_ref()
+                    .and_then(|spec| spec.worktree_ownership_token.clone())
+                    .or_else(|| {
+                        previous_dispatch.as_ref().and_then(|dispatch| {
+                            dispatch
+                                .worktree
+                                .as_ref()
+                                .filter(|worktree| worktree.path == *path)
+                                .map(|worktree| worktree.ownership_token.clone())
+                        })
+                    })
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            })
+    });
+    let (cols, rows) = launch_spec
+        .as_ref()
+        .map(|spec| {
+            (
+                Some(u32::from(spec.terminal.cols)),
+                Some(u32::from(spec.terminal.rows)),
+            )
+        })
+        .unwrap_or_else(|| {
+            previous_dispatch
+                .as_ref()
+                .map(|dispatch| (dispatch.cols, dispatch.rows))
+                .unwrap_or((None, None))
+        });
     let now = now_millis();
-    let prompt = job.initial_prompt.clone().unwrap_or_default();
+    let mut dispatch = previous_dispatch.unwrap_or_else(|| Dispatch {
+        proto: PROTO,
+        short: short.to_string(),
+        nonce: None,
+        session_id: session_id.clone(),
+        created_at: now,
+        source: DispatchSource::Shell,
+        cwd: cwd.clone(),
+        launch: canonical_launch.clone(),
+        launch_spec: canonical_launch_spec.clone(),
+        env: BTreeMap::new(),
+        reattach_env: None,
+        worktree: canonical_worktree.clone(),
+        isolation: if canonical_worktree.is_some() {
+            Isolation::Worktree
+        } else {
+            Isolation::None
+        },
+        respawn_flags: Vec::new(),
+        attach_stall_respawns: None,
+        agent: None,
+        routine: None,
+        seed: job.intent.clone().map(|intent| Seed { intent, name: None }),
+        cols,
+        rows,
+    });
+    // Canonicalize the fresh/resume/fork launch and worktree from the owner-only
+    // launch spec. The foreground handoff record normally disappears when its
+    // short-lived PID exits before daemon adoption, so relying on that record
+    // would silently downgrade resume/fork jobs to a generic prompt launch.
+    dispatch.proto = PROTO;
+    dispatch.short = short.to_string();
+    dispatch.session_id.clone_from(&session_id);
+    dispatch.cwd.clone_from(&cwd);
+    dispatch.launch = canonical_launch;
+    dispatch.launch_spec = canonical_launch_spec;
+    dispatch.worktree = canonical_worktree;
+    dispatch.isolation = if dispatch.worktree.is_some() {
+        Isolation::Worktree
+    } else {
+        Isolation::None
+    };
+    dispatch.cols = cols;
+    dispatch.rows = rows;
+    dispatch.env.clear();
+
     WorkerRecord {
         pid,
         proc_start,
@@ -646,30 +905,8 @@ fn worker_record_for_job(
         started_at: now,
         attempt: 0,
         cwd: cwd.clone(),
-        worktree_path: None,
-        dispatch: Dispatch {
-            proto: PROTO,
-            short: short.to_string(),
-            nonce: None,
-            session_id,
-            created_at: now,
-            source: DispatchSource::Shell,
-            cwd,
-            launch: Launch::Prompt {
-                args: vec!["--background".to_string(), prompt],
-            },
-            env: BTreeMap::new(),
-            reattach_env: None,
-            worktree: None,
-            isolation: Isolation::None,
-            respawn_flags: Vec::new(),
-            attach_stall_respawns: None,
-            agent: None,
-            routine: None,
-            seed: job.intent.clone().map(|intent| Seed { intent, name: None }),
-            cols: None,
-            rows: None,
-        },
+        worktree_path,
+        dispatch,
         pending_respawn: None,
         dec_modes: None,
         rv_auth: Some(attach_auth.clone()),
@@ -861,6 +1098,7 @@ mod tests {
                 launch: Launch::Prompt {
                     args: vec!["hi".to_string()],
                 },
+                launch_spec: None,
                 env: std::collections::BTreeMap::new(),
                 reattach_env: None,
                 worktree: None,
@@ -1061,6 +1299,121 @@ mod tests {
         let roster = read_roster(&dir, 0, false).into_roster();
         let rec = roster.workers.get("bc7c6b33").expect("worker record");
         assert_eq!(rec.pid, 90_000);
+    }
+
+    #[test]
+    fn spawned_worker_restores_resume_worktree_and_terminal_from_launch_spec() {
+        use crate::background_launch::{
+            self, BackgroundLaunchKind, BackgroundLaunchOptions, BackgroundLaunchSpec,
+            TerminalSize, LAUNCH_SPEC_VERSION,
+        };
+
+        let dir = tmpdir();
+        let short = "bc7c6b34";
+        seed_working_job(&dir, short);
+        let worktree = dir.join("worktrees").join(short);
+        std::fs::create_dir_all(&worktree).unwrap();
+        let transcript = dir.join("exact-resume.jsonl");
+        let spec = BackgroundLaunchSpec {
+            schema_version: LAUNCH_SPEC_VERSION,
+            short: short.to_string(),
+            created_at: 1_700_000_000_000,
+            preflight_approved: true,
+            launch: BackgroundLaunchKind::Fork,
+            session_id: "11111111-1111-1111-1111-111111111111".to_string(),
+            transcript_path: transcript.display().to_string(),
+            cwd: worktree.display().to_string(),
+            origin_cwd: dir.display().to_string(),
+            worktree_path: Some(worktree.display().to_string()),
+            worktree_ownership_token: Some("token-123".to_string()),
+            initial_prompt: Some("continue in the worktree".to_string()),
+            options: BackgroundLaunchOptions::default(),
+            env: BTreeMap::new(),
+            terminal: TerminalSize {
+                cols: 151,
+                rows: 47,
+            },
+        };
+        background_launch::write_launch_spec(&dir, short, &spec).unwrap();
+
+        let proc = FakeProc {
+            alive: HashMap::new(),
+            start: HashMap::new(),
+        };
+        let lockp = FakeLockProbe {
+            alive_daemon: HashMap::new(),
+        };
+        let mut spawner = FakeWorkerSpawner::default();
+        let code = run_supervisor(
+            &dir,
+            4242,
+            "0.0.0",
+            &lockp,
+            &proc,
+            &mut spawner,
+            HEARTBEAT_MS,
+            &mut no_sleep(),
+            &mut || true,
+        );
+        assert_eq!(code, exit_codes::SUCCESS);
+
+        let roster = read_roster(&dir, 0, false).into_roster();
+        let rec = roster.workers.get(short).expect("worker record");
+        assert_eq!(rec.cwd, worktree.display().to_string());
+        assert_eq!(rec.worktree_path.as_deref(), worktree.to_str());
+        assert_eq!(rec.dispatch.cols, Some(151));
+        assert_eq!(rec.dispatch.rows, Some(47));
+        assert_eq!(rec.dispatch.isolation, Isolation::Worktree);
+        assert_eq!(
+            rec.dispatch
+                .worktree
+                .as_ref()
+                .map(|value| value.path.as_str()),
+            worktree.to_str()
+        );
+        let marker = crate::daemon_roster::read_worktree_ownership_marker(&worktree).unwrap();
+        assert_eq!(marker.short, short);
+        assert_eq!(marker.session_id, rec.session_id);
+        assert_eq!(
+            marker.ownership_token,
+            rec.dispatch
+                .worktree
+                .as_ref()
+                .expect("dispatch has worktree")
+                .ownership_token
+        );
+        assert_eq!(
+            marker.canonical_worktree_path,
+            std::fs::canonicalize(&worktree)
+                .unwrap()
+                .display()
+                .to_string()
+        );
+        assert_eq!(
+            marker.schema_version,
+            crate::daemon_roster::WORKTREE_OWNERSHIP_MARKER_SCHEMA_VERSION
+        );
+        assert_eq!(
+            rec.dispatch.launch_spec,
+            Some(spec.reference(&dir)),
+            "daemon adoption must retain the exact owner-only launch file"
+        );
+        match &rec.dispatch.launch {
+            Launch::Resume {
+                session_id,
+                transcript_path,
+                fork,
+                ..
+            } => {
+                assert_eq!(session_id, &spec.session_id);
+                assert_eq!(
+                    transcript_path.as_deref(),
+                    Some(spec.transcript_path.as_str())
+                );
+                assert!(*fork);
+            }
+            other => panic!("expected canonical fork resume launch, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1497,5 +1850,48 @@ mod tests {
         assert_eq!(job.state, "working", "live worker's job untouched");
         assert_eq!(job.worker_pid, Some(7777), "live worker pid preserved");
         assert!(!agents_registry::job_is_terminal(&job));
+    }
+
+    #[test]
+    fn restart_adopts_live_roster_worker_when_job_pid_write_was_lost() {
+        let dir = tmpdir();
+        seed_working_job(&dir, "cafe0003");
+
+        let mut roster = empty_roster(999);
+        let mut live_record = worker(7778);
+        live_record.dispatch.short = "cafe0003".to_string();
+        live_record.rendezvous_sock = "/tmp/cafe0003.sock".to_string();
+        live_record.pty_sock = Some(live_record.rendezvous_sock.clone());
+        live_record.rv_auth = Some("attach-token".to_string());
+        live_record.pty_auth = live_record.rv_auth.clone();
+        live_record.proc_start = Some("START-7778".to_string());
+        roster.workers.insert("cafe0003".to_string(), live_record);
+        daemon_roster::write_roster(&dir, &roster).unwrap();
+
+        let mut alive = HashMap::new();
+        alive.insert(7778, true);
+        let proc = FakeProc {
+            alive,
+            start: HashMap::from([(7778, "START-7778".to_string())]),
+        };
+        let lockp = FakeLockProbe {
+            alive_daemon: HashMap::new(),
+        };
+
+        let code = run_supervisor(
+            &dir,
+            4242,
+            "0.0.0",
+            &lockp,
+            &proc,
+            &mut NeverSpawner,
+            HEARTBEAT_MS,
+            &mut no_sleep(),
+            &mut || true,
+        );
+        assert_eq!(code, exit_codes::SUCCESS);
+        let job = agents_registry::read_job(&dir, "cafe0003").unwrap();
+        assert_eq!(job.worker_pid, Some(7778));
+        assert_eq!(job.state, "working");
     }
 }

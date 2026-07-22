@@ -604,8 +604,12 @@ mod tests {
             PermissionRuleSource::UserSettings.priority()
                 > PermissionRuleSource::Session.priority()
         );
-        assert!(!is_shared_setting_source(PermissionRuleSource::ToolsNarrowing));
-        assert!(!is_shared_setting_source(PermissionRuleSource::McpServerPolicy));
+        assert!(!is_shared_setting_source(
+            PermissionRuleSource::ToolsNarrowing
+        ));
+        assert!(!is_shared_setting_source(
+            PermissionRuleSource::McpServerPolicy
+        ));
         assert_eq!(
             PermissionRuleSource::ToolsNarrowing.lingxi_settings_source(),
             "toolsNarrowing"

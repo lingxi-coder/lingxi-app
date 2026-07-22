@@ -17,8 +17,9 @@ use engine::SessionState;
 use hooks::events::HookEvent;
 use hooks::registry::HookContext;
 use llm_client::{LlmError, LlmEvent, LlmResponse};
-use protocol::{ConversationMessage, MessageId, SessionId};
+use protocol::{ConversationMessage, HookId, MessageId, SessionId};
 use session::JsonlWriter;
+use std::time::Duration;
 
 /// Re-export of the canonical image-source shape (FROZEN in `protocol`) so callers
 /// that do NOT depend on the `protocol` crate — notably the desktop bridge's
@@ -420,6 +421,11 @@ enum StopHookDisposition {
     /// `String` is the hook's blocking reason (`blockingError.blockingError`,
     /// TS `query/stopHooks.ts:257-262`), NOT the transcript-only systemMessage.
     Continue(String),
+    /// A session-scoped `/goal` Stop Prompt hook blocked natural completion.
+    /// Unlike a generic Stop-hook block, this bypasses the dedicated
+    /// stop-hook block-cap logic; the normal turn-loop boundaries (cancel,
+    /// hard budget, max_turns at loop top) remain the only escapes.
+    GoalContinue(String),
     /// A Stop hook requested `continue: false` — terminate the agent loop
     /// (TS `query.ts:1278`); the turn ends as `StopHookPrevented`. The carried
     /// `String` is the hook's `stopReason` (defaulted to
@@ -432,6 +438,27 @@ enum StopHookDisposition {
 /// Driver control-flow directive produced by `handle_stop_at_end` (hooks B4) so
 /// the three turn drivers (batched / streaming / cancelable) translate the Stop
 /// disposition into their own loop mechanics uniformly.
+
+const GOAL_PROMPT_TIMEOUT_SECS: u64 = 30;
+const GOAL_STATE_SUBTYPE: &str = "thread_goal_updated";
+const GOAL_STOP_HOOK_NAME: &str = "__session_goal_stop";
+const GOAL_STOP_HOOK_PRIORITY: i32 = 1_000_000;
+
+fn goal_stop_hook_prompt(condition: &str) -> String {
+    format!(
+        "Evaluate whether the active session goal has been fully met.\nGoal condition:\n{condition}\nUse this Stop hook payload JSON as the current stop state:\n$ARGUMENTS"
+    )
+}
+
+fn strip_goal_prompt_block_reason(reason: &str) -> String {
+    if let Some(stripped) = reason.strip_prefix('[') {
+        if let Some((_, tail)) = stripped.split_once("]: ") {
+            return tail.to_string();
+        }
+    }
+    reason.to_string()
+}
+
 enum StopHookFlow {
     /// Terminate the turn loop, returning this outcome (`emit_end_turn` already
     /// fired inside the helper).
@@ -1037,8 +1064,7 @@ pub struct ConversationOrchestrator {
     /// session. `None` (tests / non-desktop roots) ⇒ that handle method fails
     /// with a clear `ActionFailed`. Mirrors the `fork_spawner`/`fork_budget`
     /// optional-seam pattern above.
-    pub(crate) bg_session_forker:
-        Option<Arc<dyn traits::bg_session_forker::BgSessionForker>>,
+    pub(crate) bg_session_forker: Option<Arc<dyn traits::bg_session_forker::BgSessionForker>>,
     /// `/recap` side-query runner — the SAME single-turn
     /// [`sidequery::ForkedAgentRunner`] the autocompact summarizer uses (cloned
     /// from the composition root's `forked_runner` before it moves into the
@@ -2815,6 +2841,11 @@ impl ConversationOrchestrator {
         compact_started: std::time::Instant,
         cancel: Option<&tokio_util::sync::CancellationToken>,
     ) -> Option<traits::CompactionSummary> {
+        // Preserve the transcript-only summary before `result.messages` is
+        // consumed into the replacement history. The TUI carries this on the
+        // compact boundary so Ctrl-O can reveal the same summary sent to the
+        // continuation turn.
+        let visible_summary = Self::compaction_summary_text(&result);
         // Modern automatic/reactive compaction (`kio`) stamps boundary
         // duration before attachment restoration. Manual full compaction
         // (`hio`) stamps it afterwards. Preserve that observable distinction.
@@ -2949,6 +2980,7 @@ impl ConversationOrchestrator {
         // Swap history under the same lock.
         {
             let mut s = self.session.lock().await;
+            metadata.active_goal = s.active_goal.clone();
             s.history = history_after;
         }
 
@@ -2993,7 +3025,12 @@ impl ConversationOrchestrator {
 
         // Best-effort emit so the TUI hears about it.
         self.output
-            .emit_compaction_completed(messages_before, messages_after, bytes_saved)
+            .emit_compaction_completed(
+                messages_before,
+                messages_after,
+                bytes_saved,
+                &visible_summary,
+            )
             .await;
 
         Some(traits::CompactionSummary {
@@ -4444,6 +4481,141 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         }
     }
 
+    /// Persist the latest active-goal snapshot as a transcript metadata line.
+    ///
+    /// This keeps `/goal` resumable on non-compacted transcripts; compact
+    /// boundaries also snapshot the active goal in `compactMetadata` so a later
+    /// compaction cannot summarize away the only copy.
+    pub(crate) async fn persist_active_goal_state_to_jsonl(
+        &self,
+        active_goal: Option<&engine::session::ActiveGoalState>,
+    ) {
+        let Some(writer) = self.jsonl_writer.as_ref() else {
+            return;
+        };
+        let session_id_str = self.session.lock().await.session_id.to_string();
+        let parent_uuid = self.last_jsonl_uuid.lock().await.clone();
+        let git_branch = self.resolve_git_branch().await;
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "subtype".to_string(),
+            serde_json::Value::String(GOAL_STATE_SUBTYPE.to_string()),
+        );
+        extra.insert(
+            "goalState".to_string(),
+            active_goal
+                .map(|goal| serde_json::to_value(goal).unwrap_or(serde_json::Value::Null))
+                .unwrap_or(serde_json::Value::Null),
+        );
+
+        let jmsg = session::JsonlMessage {
+            message_type: "system".to_string(),
+            uuid: uuid::Uuid::new_v4().to_string(),
+            parent_uuid,
+            session_id: session_id_str.clone(),
+            timestamp: chrono::Utc::now()
+                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+                .to_string(),
+            cwd: self.current_cwd().to_string_lossy().into_owned(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            message: serde_json::Value::Null,
+            is_sidechain: false,
+            user_type: Some("external".to_string()),
+            git_branch,
+            entrypoint: Some(entrypoint_value()),
+            slug: None,
+            prompt_id: None,
+            logical_parent_uuid: None,
+            extra,
+        };
+        let line_uuid = jmsg.uuid.clone();
+        match writer.append(&jmsg).await {
+            Ok(()) => {
+                *self.last_jsonl_uuid.lock().await = Some(line_uuid.clone());
+                telemetry::emit_session_appended(&session_id_str, &line_uuid);
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to persist active goal state");
+                telemetry::emit_session_corrupted(&session_id_str, &e.to_string());
+            }
+        }
+    }
+
+    pub(crate) async fn upsert_active_goal_stop_hook_for_session(
+        &self,
+        session_id: SessionId,
+        condition: &str,
+    ) {
+        let hook = hooks::HookDefinition {
+            id: protocol::HookId::new(),
+            name: GOAL_STOP_HOOK_NAME.to_string(),
+            events: vec![hooks::HookEventType::Stop],
+            if_condition: None,
+            executor: hooks::HookExecutor::Prompt {
+                prompt: goal_stop_hook_prompt(condition),
+                model: None,
+                continue_on_block: true,
+            },
+            source: hooks::HookSource::Session,
+            blocking: true,
+            timeout: Some(Duration::from_secs(GOAL_PROMPT_TIMEOUT_SECS)),
+            priority: GOAL_STOP_HOOK_PRIORITY,
+            once: false,
+            status_message: None,
+        };
+        let _ = self
+            .hooks
+            .upsert_session_named_hook(session_id, GOAL_STOP_HOOK_NAME.to_string(), hook)
+            .await;
+    }
+
+    pub(crate) async fn remove_active_goal_stop_hook_for_session(
+        &self,
+        session_id: SessionId,
+    ) -> bool {
+        self.hooks
+            .remove_session_named_hook(session_id, GOAL_STOP_HOOK_NAME)
+            .await
+            .is_some()
+    }
+
+    pub async fn sync_active_goal_stop_hook_for_current_state(&self) {
+        let (session_id, active_goal) = {
+            let s = self.session.lock().await;
+            (s.session_id, s.active_goal.clone())
+        };
+        match active_goal {
+            Some(goal) => {
+                self.upsert_active_goal_stop_hook_for_session(session_id, &goal.condition)
+                    .await;
+            }
+            None => {
+                let _ = self
+                    .remove_active_goal_stop_hook_for_session(session_id)
+                    .await;
+            }
+        }
+    }
+
+    pub(crate) async fn clear_active_goal_state_and_hook(
+        &self,
+    ) -> Option<traits::ActiveGoalSnapshot> {
+        let (session_id, cleared) = {
+            let mut s = self.session.lock().await;
+            let cleared = s.active_goal.take().map(|goal| traits::ActiveGoalSnapshot {
+                condition: goal.condition,
+                set_at: goal.set_at,
+                last_reason: goal.last_reason,
+            });
+            (s.session_id, cleared)
+        };
+        self.persist_active_goal_state_to_jsonl(None).await;
+        let _ = self
+            .remove_active_goal_stop_hook_for_session(session_id)
+            .await;
+        cleared
+    }
+
     /// Shared append body for [`Self::persist_message_to_jsonl_with_parent`],
     /// [`Self::persist_api_error_message_to_jsonl`] and
     /// [`Self::persist_compact_summary_to_jsonl`].
@@ -5112,6 +5284,11 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     async fn fire_stop_hooks(&self, reason: &str, stop_hook_active: bool) -> StopHookDisposition {
         tracing::debug!(event = "hook_stop_started", reason, stop_hook_active);
         let mut ctx = self.lifecycle_hook_ctx(stop_hook_active).await;
+        let goal_hook_id = self
+            .hooks
+            .get_session_named_hook(ctx.session_id, GOAL_STOP_HOOK_NAME)
+            .await
+            .map(|hook| hook.id);
         // claude-code stamps `background_tasks` + `session_crons` onto the Stop
         // payload whenever the tool-use context is present (`...m`). The
         // orchestrator's main-loop Stop firing always runs inside a tool-use
@@ -5126,6 +5303,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 ctx,
             )
             .await;
+        let goal_disposition = self.goal_stop_hook_disposition(goal_hook_id, &agg).await;
         let disposition = if agg.prevent_continuation {
             // FIX C: carry the hook's `stopReason` (parsed into `agg.reason`,
             // `hook_payload.rs:1113`) so `handle_stop_at_end` can persist the
@@ -5137,6 +5315,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 .clone()
                 .unwrap_or_else(|| "Stop hook prevented continuation".to_string());
             StopHookDisposition::Prevent(reason)
+        } else if let Some(disposition) = goal_disposition {
+            disposition
         } else if matches!(agg.decision, Some(hooks::response::HookDecision::Block)) {
             // #2: ANY Block yields Continue — the consecutive-block CAP is no
             // longer the old `!stop_hook_active` boolean (which let a blocking
@@ -5166,6 +5346,53 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             blocked = matches!(agg.decision, Some(hooks::response::HookDecision::Block)),
         );
         disposition
+    }
+
+    async fn goal_stop_hook_disposition(
+        &self,
+        goal_hook_id: Option<HookId>,
+        agg: &hooks::AggregateHookResult,
+    ) -> Option<StopHookDisposition> {
+        let goal_hook_id = goal_hook_id?;
+        let Some((_, result)) = agg
+            .all_results
+            .iter()
+            .find(|(hook_id, _)| *hook_id == goal_hook_id)
+        else {
+            return Some(StopHookDisposition::GoalContinue(
+                "Goal completion hook did not run".to_string(),
+            ));
+        };
+
+        match result.outcome {
+            hooks::HookOutcome::Success => {
+                if let Some(response) = &result.response {
+                    if matches!(response.decision, Some(hooks::HookDecision::Block)) {
+                        let reason = response
+                            .reason
+                            .as_deref()
+                            .map(strip_goal_prompt_block_reason)
+                            .filter(|reason| !reason.is_empty())
+                            .unwrap_or_else(|| "Goal not met yet".to_string());
+                        return Some(StopHookDisposition::GoalContinue(reason));
+                    }
+                }
+                let _ = self.clear_active_goal_state_and_hook().await;
+                None
+            }
+            hooks::HookOutcome::Timeout
+            | hooks::HookOutcome::Error
+            | hooks::HookOutcome::Cancelled => {
+                let reason = if !result.stderr.is_empty() {
+                    result.stderr.clone()
+                } else if !result.stdout.is_empty() {
+                    result.stdout.clone()
+                } else {
+                    "Goal completion check failed".to_string()
+                };
+                Some(StopHookDisposition::GoalContinue(reason))
+            }
+        }
     }
 
     /// Fire the `StopFailure` lifecycle hooks when a turn ends on an API error
@@ -5295,6 +5522,12 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 self.append_stop_hook_feedback(&reason).await;
                 *stop_hook_active = true;
                 *stop_hook_blocking_count = next_count;
+                StopHookFlow::LoopAgain
+            }
+            StopHookDisposition::GoalContinue(reason) => {
+                *stop_hook_active = false;
+                *stop_hook_blocking_count = 0;
+                self.append_stop_hook_feedback(&reason).await;
                 StopHookFlow::LoopAgain
             }
             StopHookDisposition::Pass => {
@@ -5523,8 +5756,9 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     /// Fire SessionStart and append its model-facing additional context, then
     /// honor a `SessionStart` hook's `initialUserMessage` (injected as a non-meta
     /// user prompt — claude-code `if(p.initialUserMessage)$os=p.initialUserMessage`)
-    /// and `reloadSkills`.
-    pub async fn fire_session_start(&self, source: &str) {
+    /// and return the folded hook aggregate so the composition root can apply
+    /// host-owned follow-up actions such as `reloadSkills`.
+    pub async fn fire_session_start(&self, source: &str) -> hooks::response::AggregateHookResult {
         let agg = self.run_session_start_hooks(source).await;
         let messages = Self::session_start_context_messages(&agg);
         if !messages.is_empty() {
@@ -5534,16 +5768,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         if let Some(initial) = &agg.initial_user_message {
             self.inject_user_message(initial).await;
         }
-        // `reloadSkills` → re-scan skill/command dirs. The port loads these once
-        // at boot and has no hot-reload seam yet, so the request is captured but
-        // its action is a documented follow-up (surfaced here so the drop is not
-        // silent).
-        if agg.reload_skills {
-            tracing::warn!(
-                event = "session_start_reload_skills_unsupported",
-                "SessionStart hook requested reloadSkills; skill/command hot-reload is not yet implemented"
-            );
-        }
+        agg
     }
 
     /// Fire the `InstructionsLoaded` hooks once per loaded instruction file at
@@ -9459,6 +9684,54 @@ As you answer the user's questions, you can use the following context:\n\
         // a tool loaded via a prior `ToolSearch` call is no longer deferred here.
         tool_api::wire::apply_defer_loading(&mut wire, &tools, self.tools.deferral());
         wire
+    }
+
+    /// Return the live, policy-filtered tool catalog in MCP's 2025-06-18
+    /// `tools/list` shape. This deliberately reuses the normal model-facing
+    /// schema builder so tool enablement, permission-wide denies, active-agent
+    /// restrictions, descriptions, and ordering cannot drift between hosts.
+    pub async fn mcp_tool_definitions(&self) -> Vec<serde_json::Value> {
+        self.build_wire_tools()
+            .await
+            .into_iter()
+            .filter_map(|wire| {
+                let object = wire.as_object()?;
+                let mut tool = serde_json::Map::new();
+                tool.insert("name".into(), object.get("name")?.clone());
+                if let Some(description) = object.get("description") {
+                    tool.insert("description".into(), description.clone());
+                }
+                tool.insert(
+                    "inputSchema".into(),
+                    object
+                        .get("input_schema")
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!({ "type": "object" })),
+                );
+                Some(serde_json::Value::Object(tool))
+            })
+            .collect()
+    }
+
+    /// Execute one host-originated tool request through the same dispatcher as
+    /// a model-originated tool use: schema validation, PreToolUse hooks,
+    /// permission policy, sandbox-backed tool execution, PostToolUse hooks, and
+    /// result shaping. `None` identifies an unknown tool before dispatch.
+    pub async fn call_tool_from_host(
+        &self,
+        tool_use_id: protocol::ToolUseId,
+        name: String,
+        input: serde_json::Value,
+        cancel: Option<tokio_util::sync::CancellationToken>,
+    ) -> Result<Option<protocol::ContentBlock>, OrchestratorError> {
+        if self.tools.find_by_name(&name).is_none() {
+            return Ok(None);
+        }
+        let tool_uses = vec![(tool_use_id, name, input, None)];
+        let (mut results, _prevent_continuation, _injected, modifiers) =
+            crate::turn_loop::dispatch_tool_uses_tracked(self, &tool_uses, cancel).await?;
+        crate::turn_loop::apply_model_context_modifiers(self, modifiers).await;
+        Ok(results.pop())
     }
 
     /// Borrow the in-memory session (read-write lock surrogate). Useful for tests.

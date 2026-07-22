@@ -37,6 +37,7 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use crossterm::cursor::SetCursorStyle;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -58,6 +59,12 @@ struct QuestionState {
     highlighted: usize,
     /// Checkmarks, one per option — only meaningful for `multi_select`.
     checked: Vec<bool>,
+    /// Whether the synthetic free-text "Other" row is selected.
+    other_selected: bool,
+    /// The free-text value captured for the synthetic "Other" row.
+    other_text: String,
+    /// Whether the view is currently editing the free-text value.
+    editing_other: bool,
 }
 
 impl QuestionState {
@@ -65,7 +72,14 @@ impl QuestionState {
         Self {
             highlighted: 0,
             checked: vec![false; option_count],
+            other_selected: false,
+            other_text: String::new(),
+            editing_other: false,
         }
+    }
+
+    fn pop_other_char(&mut self) {
+        self.other_text.pop();
     }
 }
 
@@ -91,6 +105,8 @@ pub struct AskUserQuestionView {
 }
 
 impl AskUserQuestionView {
+    const OTHER_LABEL: &str = "Other";
+
     /// Build the widget for `exchange` (questions + optional timeout + the
     /// answer channel).
     #[must_use]
@@ -120,6 +136,60 @@ impl AskUserQuestionView {
     /// The active question.
     fn question(&self) -> &AskQuestion {
         &self.questions[self.current]
+    }
+
+    fn state(&self) -> &QuestionState {
+        &self.states[self.current]
+    }
+
+    fn state_mut(&mut self) -> &mut QuestionState {
+        &mut self.states[self.current]
+    }
+
+    fn option_row_count(&self) -> usize {
+        self.question().options.len() + 1
+    }
+
+    fn other_index(&self) -> usize {
+        self.question().options.len()
+    }
+
+    fn editing_other(&self) -> bool {
+        self.state().editing_other
+    }
+
+    fn other_answer_text(&self) -> Option<String> {
+        let trimmed = self.state().other_text.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    }
+
+    fn open_other_editor(&mut self) -> ViewOutcome {
+        let other_index = self.other_index();
+        let multi = self.question().multi_select;
+        let st = self.state_mut();
+        st.highlighted = other_index;
+        st.editing_other = true;
+        if multi {
+            st.other_selected = true;
+        }
+        ViewOutcome::Pending
+    }
+
+    fn confirm_other_editor(&mut self) -> ViewOutcome {
+        let multi = self.question().multi_select;
+        {
+            let st = self.state_mut();
+            if st.other_text.trim().is_empty() {
+                return ViewOutcome::Pending;
+            }
+            st.editing_other = false;
+            st.other_selected = true;
+        }
+        if multi {
+            ViewOutcome::Pending
+        } else {
+            self.confirm_and_advance()
+        }
     }
 
     /// Seconds remaining before auto-continue at `now` (`None` when there is no
@@ -163,7 +233,7 @@ impl AskUserQuestionView {
     /// nothing is checked, so a question is never answered blank).
     fn active_answer(&self) -> String {
         let q = self.question();
-        let st = &self.states[self.current];
+        let st = self.state();
         if q.multi_select {
             let picked: Vec<String> = q
                 .options
@@ -171,11 +241,26 @@ impl AskUserQuestionView {
                 .zip(&st.checked)
                 .filter_map(|(opt, on)| on.then(|| opt.label.clone()))
                 .collect();
+            let mut picked = picked;
+            if st.other_selected {
+                picked.push(
+                    self.other_answer_text()
+                        .unwrap_or_else(|| Self::OTHER_LABEL.to_string()),
+                );
+            }
             if picked.is_empty() {
-                q.options[st.highlighted].label.clone()
+                if st.highlighted == self.other_index() {
+                    self.other_answer_text()
+                        .unwrap_or_else(|| Self::OTHER_LABEL.to_string())
+                } else {
+                    q.options[st.highlighted].label.clone()
+                }
             } else {
                 join_answer_labels(&picked)
             }
+        } else if st.highlighted == self.other_index() {
+            self.other_answer_text()
+                .unwrap_or_else(|| Self::OTHER_LABEL.to_string())
         } else {
             q.options[st.highlighted].label.clone()
         }
@@ -229,6 +314,14 @@ impl AskUserQuestionView {
             *slot = !*slot;
         }
     }
+
+    fn append_other_text(&mut self, text: &str) {
+        let normalized = text.trim_end_matches(['\n', '\r']);
+        if normalized.is_empty() {
+            return;
+        }
+        self.state_mut().other_text.push_str(normalized);
+    }
 }
 
 impl AskUserQuestionView {
@@ -236,7 +329,7 @@ impl AskUserQuestionView {
     /// text, option rows, then the countdown line when armed).
     fn body_lines(&self, remaining: Option<u64>) -> Vec<Line<'static>> {
         let q = self.question();
-        let st = &self.states[self.current];
+        let st = self.state();
         let mut lines: Vec<Line<'static>> = Vec::new();
 
         // Header chip + progress ("[Library] 1/2") then the question text.
@@ -252,11 +345,45 @@ impl AskUserQuestionView {
         lines.push(Line::from(q.question.clone()));
         lines.push(Line::from(""));
 
-        for (i, opt) in q.options.iter().enumerate() {
-            let focused = i == st.highlighted;
+        if st.editing_other {
+            lines.push(Line::from("Custom response"));
+            lines.push(Line::from(Span::styled(
+                format!("Other: {}", st.other_text),
+                Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED),
+            )));
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "Type a custom response · Enter confirm · Esc back",
+                Style::default().add_modifier(Modifier::DIM),
+            )));
+        } else {
+            for (i, opt) in q.options.iter().enumerate() {
+                let focused = i == st.highlighted;
+                let marker = if focused { "›" } else { " " };
+                let checkbox = if q.multi_select {
+                    if st.checked[i] {
+                        "[x] "
+                    } else {
+                        "[ ] "
+                    }
+                } else {
+                    ""
+                };
+                let style = if focused {
+                    Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)
+                } else {
+                    Style::default()
+                };
+                lines.push(Line::from(Span::styled(
+                    format!("{marker} {checkbox}{}", opt.label),
+                    style,
+                )));
+            }
+
+            let focused = st.highlighted == self.other_index();
             let marker = if focused { "›" } else { " " };
             let checkbox = if q.multi_select {
-                if st.checked[i] {
+                if st.other_selected {
                     "[x] "
                 } else {
                     "[ ] "
@@ -264,13 +391,18 @@ impl AskUserQuestionView {
             } else {
                 ""
             };
+            let other_label = if st.other_text.is_empty() {
+                Self::OTHER_LABEL.to_string()
+            } else {
+                format!("{}: {}", Self::OTHER_LABEL, st.other_text)
+            };
             let style = if focused {
                 Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)
             } else {
                 Style::default()
             };
             lines.push(Line::from(Span::styled(
-                format!("{marker} {checkbox}{}", opt.label),
+                format!("{marker} {checkbox}{other_label}"),
                 style,
             )));
         }
@@ -287,9 +419,11 @@ impl AskUserQuestionView {
 
     /// Modal box height: body rows + border chrome.
     fn modal_height(&self) -> u16 {
-        // header + question + blank + options (+ blank + countdown when armed)
-        let q = self.question();
-        let mut rows = 3 + q.options.len();
+        let mut rows = if self.editing_other() {
+            7
+        } else {
+            3 + self.option_row_count()
+        };
         if self.armed && self.timeout.is_some() {
             rows += 2;
         }
@@ -324,6 +458,46 @@ impl Renderable for AskUserQuestionView {
     fn desired_height(&self, _width: u16) -> u16 {
         self.modal_height()
     }
+
+    fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
+        if !self.editing_other() {
+            return None;
+        }
+        let rect = centered_rect(
+            u16::try_from(
+                self.body_lines(self.remaining_secs_at(Instant::now()))
+                    .iter()
+                    .map(Line::width)
+                    .max()
+                    .unwrap_or(20)
+                    + 4,
+            )
+            .unwrap_or(u16::MAX)
+            .min(area.width.saturating_sub(4))
+            .max(20),
+            self.modal_height().min(area.height),
+            area,
+        );
+        let inner = Block::new().borders(Borders::ALL).inner(rect);
+        if inner.width == 0 || inner.height < 4 {
+            return None;
+        }
+        let typed = u16::try_from(self.state().other_text.chars().count()).unwrap_or(u16::MAX);
+        let x = inner
+            .x
+            .saturating_add(7)
+            .saturating_add(typed)
+            .min(inner.right().saturating_sub(1));
+        Some((x, inner.y + 3))
+    }
+
+    fn cursor_style(&self, _area: Rect) -> SetCursorStyle {
+        if self.editing_other() {
+            SetCursorStyle::SteadyBar
+        } else {
+            SetCursorStyle::DefaultUserShape
+        }
+    }
 }
 
 impl BottomPaneView for AskUserQuestionView {
@@ -338,8 +512,26 @@ impl BottomPaneView for AskUserQuestionView {
             // ownership, matching the permission view).
             return ViewOutcome::Pending;
         }
+        if self.editing_other() {
+            return match key.code {
+                KeyCode::Enter => self.confirm_other_editor(),
+                KeyCode::Esc => {
+                    self.state_mut().editing_other = false;
+                    ViewOutcome::Pending
+                }
+                KeyCode::Backspace => {
+                    self.state_mut().pop_other_char();
+                    ViewOutcome::Pending
+                }
+                KeyCode::Char(c) => {
+                    self.state_mut().other_text.push(c);
+                    ViewOutcome::Pending
+                }
+                _ => ViewOutcome::Pending,
+            };
+        }
         let multi = self.question().multi_select;
-        let opt_count = self.question().options.len();
+        let opt_count = self.option_row_count();
 
         match key.code {
             KeyCode::Up | KeyCode::BackTab => {
@@ -357,8 +549,18 @@ impl BottomPaneView for AskUserQuestionView {
             // Space toggles the highlighted option (multi-select only).
             KeyCode::Char(' ') if multi => {
                 let idx = self.states[self.current].highlighted;
-                self.toggle(idx);
-                ViewOutcome::Pending
+                if idx == self.other_index() {
+                    let next = !self.state().other_selected;
+                    self.state_mut().other_selected = next;
+                    if next {
+                        self.open_other_editor()
+                    } else {
+                        ViewOutcome::Pending
+                    }
+                } else {
+                    self.toggle(idx);
+                    ViewOutcome::Pending
+                }
             }
             // Number shortcuts: multi-select toggles that option; single-select
             // picks it and advances (permission-view parity).
@@ -368,14 +570,34 @@ impl BottomPaneView for AskUserQuestionView {
                     return ViewOutcome::Pending;
                 }
                 if multi {
-                    self.toggle(idx);
-                    ViewOutcome::Pending
+                    if idx == self.other_index() {
+                        self.state_mut().other_selected = true;
+                        self.open_other_editor()
+                    } else {
+                        self.toggle(idx);
+                        ViewOutcome::Pending
+                    }
                 } else {
                     self.states[self.current].highlighted = idx;
+                    if idx == self.other_index() && self.other_answer_text().is_none() {
+                        self.open_other_editor()
+                    } else {
+                        self.confirm_and_advance()
+                    }
+                }
+            }
+            KeyCode::Enter => {
+                if self.state().highlighted == self.other_index()
+                    && self.other_answer_text().is_none()
+                    && (!multi
+                        || self.state().other_selected
+                        || self.state().checked.iter().all(|on| !on))
+                {
+                    self.open_other_editor()
+                } else {
                     self.confirm_and_advance()
                 }
             }
-            KeyCode::Enter => self.confirm_and_advance(),
             // Esc cancels: drop resp_tx unsent (host maps a closed channel to a
             // skip/error, mirroring the permission gate's dropped-channel deny).
             KeyCode::Esc => {
@@ -388,6 +610,13 @@ impl BottomPaneView for AskUserQuestionView {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn handle_paste(&mut self, text: &str) -> ViewOutcome {
+        if self.editing_other() {
+            self.append_other_text(text);
+        }
+        ViewOutcome::Pending
     }
 }
 
@@ -472,6 +701,7 @@ mod tests {
         );
         let text = buffer_text(&view, Rect::new(0, 0, 60, view.desired_height(60)));
         assert!(text.contains("[ ] A"), "unchecked box: {text}");
+        assert!(text.contains("Other"), "synthetic other row: {text}");
     }
 
     #[test]
@@ -497,8 +727,9 @@ mod tests {
         assert_eq!(view.states[0].highlighted, 0);
         view.handle_key(press(KeyCode::Down));
         view.handle_key(press(KeyCode::Down));
+        view.handle_key(press(KeyCode::Down)); // synthetic Other row
         view.handle_key(press(KeyCode::Down)); // clamp at last
-        assert_eq!(view.states[0].highlighted, 2);
+        assert_eq!(view.states[0].highlighted, 3);
     }
 
     #[test]
@@ -527,6 +758,37 @@ mod tests {
         ));
         let answers = rx.blocking_recv().expect("submitted");
         assert_eq!(answers.get("Pick?").map(String::as_str), Some("Gamma"));
+    }
+
+    #[test]
+    fn single_select_other_accepts_paste_and_unicode() {
+        let (mut view, rx) = exchange(vec![q("Pick?", "H", &["Alpha", "Beta"], false)], None);
+        assert!(matches!(
+            view.handle_key(press(KeyCode::Char('3'))),
+            ViewOutcome::Pending
+        ));
+        let area = Rect::new(0, 0, 70, view.desired_height(70));
+        assert!(
+            view.cursor_pos(area).is_some(),
+            "other editor claims cursor"
+        );
+        assert!(matches!(
+            view.handle_paste("自由输入"),
+            ViewOutcome::Pending
+        ));
+        assert!(matches!(
+            view.handle_paste(" paste\n"),
+            ViewOutcome::Pending
+        ));
+        assert!(matches!(
+            view.handle_key(press(KeyCode::Enter)),
+            ViewOutcome::Accepted(_)
+        ));
+        let answers = rx.blocking_recv().expect("submitted");
+        assert_eq!(
+            answers.get("Pick?").map(String::as_str),
+            Some("自由输入 paste")
+        );
     }
 
     #[test]
@@ -574,6 +836,30 @@ mod tests {
         ));
         assert!(view.states[0].checked[1]);
         assert!(view.resp_tx.is_some(), "multi-select number never submits");
+    }
+
+    #[test]
+    fn multi_select_other_can_mix_with_fixed_options() {
+        let (mut view, rx) = exchange(vec![q("Which?", "H", &["A", "B"], true)], None);
+        assert!(matches!(
+            view.handle_key(press(KeyCode::Char('1'))),
+            ViewOutcome::Pending
+        ));
+        assert!(matches!(
+            view.handle_key(press(KeyCode::Char('3'))),
+            ViewOutcome::Pending
+        ));
+        assert!(matches!(view.handle_paste("自定义"), ViewOutcome::Pending));
+        assert!(matches!(
+            view.handle_key(press(KeyCode::Enter)),
+            ViewOutcome::Pending
+        ));
+        assert!(matches!(
+            view.handle_key(press(KeyCode::Enter)),
+            ViewOutcome::Accepted(_)
+        ));
+        let answers = rx.blocking_recv().expect("submitted");
+        assert_eq!(answers.get("Which?").map(String::as_str), Some("A, 自定义"));
     }
 
     #[test]

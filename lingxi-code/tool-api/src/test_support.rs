@@ -10,11 +10,11 @@ use crate::progress::{progress_channel, ToolProgressSender};
 use async_trait::async_trait;
 use std::sync::Arc;
 
-/// A stub `FileSystem` that panics on every method.
+/// A stub `FileSystem` that panics on general-purpose methods.
 ///
-/// All 6 M4-01 builtin tools go through `tokio::fs` directly and never call
-/// the FS trait, so it's safe to hand them a panicking stub. M5 sandbox
-/// wiring will swap this for a real `FileSystem` impl.
+/// Security-sensitive root-confined methods use the production on-disk helper
+/// so cron/workflow-style tests exercise real no-follow/atomic behavior. Other
+/// methods remain fail-fast to expose accidental test dependencies.
 pub struct PanickingFs;
 
 #[async_trait]
@@ -71,6 +71,51 @@ impl traits::filesystem::FileSystem for PanickingFs {
     }
     async fn fsync(&self, _: &str) -> Result<(), traits::filesystem::FsError> {
         panic!("not called")
+    }
+    async fn read_file_rooted_no_follow(
+        &self,
+        root: &std::path::Path,
+        relative: &std::path::Path,
+    ) -> Result<traits::filesystem::FileContent, traits::filesystem::FsError> {
+        let content = traits::rooted_fs::read_to_string(root, relative)?;
+        Ok(traits::filesystem::FileContent {
+            total_lines: content.lines().count() as u64,
+            content,
+            truncated: false,
+        })
+    }
+    async fn write_file_rooted_atomic(
+        &self,
+        root: &std::path::Path,
+        relative: &std::path::Path,
+        content: &str,
+    ) -> Result<(), traits::filesystem::FsError> {
+        traits::rooted_fs::atomic_write(
+            root,
+            relative,
+            content.as_bytes(),
+            traits::AtomicWriteOptions::default(),
+        )
+    }
+    async fn flock_exclusive_rooted(
+        &self,
+        root: &std::path::Path,
+        relative: &std::path::Path,
+    ) -> Result<Box<dyn traits::filesystem::FlockGuard>, traits::filesystem::FsError> {
+        traits::rooted_fs::lock_exclusive(
+            root,
+            relative,
+            traits::rooted_fs::PRIVATE_DIR_MODE,
+            traits::rooted_fs::PRIVATE_FILE_MODE,
+        )
+        .map(|guard| Box::new(guard) as Box<dyn traits::filesystem::FlockGuard>)
+    }
+    async fn delete_file_rooted_no_follow(
+        &self,
+        root: &std::path::Path,
+        relative: &std::path::Path,
+    ) -> Result<(), traits::filesystem::FsError> {
+        traits::rooted_fs::remove_file(root, relative)
     }
 }
 

@@ -30,8 +30,8 @@ use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use telemetry::tengu::tool::{
     LIST_MCP_RESOURCES_COMPLETED, LIST_MCP_RESOURCES_FAILED, LIST_MCP_RESOURCES_STARTED,
     MCP_AUTH_COMPLETED, MCP_AUTH_FAILED, MCP_AUTH_STARTED, MCP_COMPLETED, MCP_FAILED, MCP_STARTED,
-    MCP_TOOL_AUTO_BACKGROUNDED,
-    READ_MCP_RESOURCE_COMPLETED, READ_MCP_RESOURCE_FAILED, READ_MCP_RESOURCE_STARTED,
+    MCP_TOOL_AUTO_BACKGROUNDED, READ_MCP_RESOURCE_COMPLETED, READ_MCP_RESOURCE_FAILED,
+    READ_MCP_RESOURCE_STARTED,
 };
 use telemetry::AnalyticsBus;
 use traits::McpTransportSpec;
@@ -666,8 +666,8 @@ async fn process_mcp_call_result(
             // result) or the bare string here via `ToolCallResult.model_content`
             // (a non-text array carries its structure via the egress
             // `content_blocks` instead, leaving `model_content` as `None`).
-            let model_content = mcp_all_text_content_to_string(&data)
-                .or_else(|| data.as_str().map(str::to_string));
+            let model_content =
+                mcp_all_text_content_to_string(&data).or_else(|| data.as_str().map(str::to_string));
             Ok(ToolCallResult {
                 data,
                 model_content,
@@ -2340,11 +2340,7 @@ mod auto_background_race_tests {
         ) -> Result<TaskRecord, TaskRegistryError> {
             unreachable!()
         }
-        async fn set_status(
-            &self,
-            _id: &str,
-            _s: &str,
-        ) -> Result<TaskRecord, TaskRegistryError> {
+        async fn set_status(&self, _id: &str, _s: &str) -> Result<TaskRecord, TaskRegistryError> {
             unreachable!()
         }
         async fn kill(&self, _id: &str) -> Result<TaskRecord, TaskRegistryError> {
@@ -2427,14 +2423,17 @@ mod auto_background_race_tests {
         // Peer never responds; the router timeout is set well above the 120s
         // auto-background deadline so the tool's race — not the transport's —
         // decides the outcome.
-        let (conn, _peer_tx, _peer_rx) =
-            paired_with_timeout(std::time::Duration::from_secs(600));
-        let client = Arc::new(mcp::McpClient::new("slow", std::path::PathBuf::from("/tmp"), conn).await);
+        let (conn, _peer_tx, _peer_rx) = paired_with_timeout(std::time::Duration::from_secs(600));
+        let client =
+            Arc::new(mcp::McpClient::new("slow", std::path::PathBuf::from("/tmp"), conn).await);
         let registry = Arc::new(McpRegistry::new(Arc::new(StubTransport)));
         registry.register_client("slow", client).await;
 
         let recorder = Arc::new(RecordingRegistry::default());
-        let ctx = ctx_with(registry, Some(recorder.clone() as Arc<dyn TaskRegistryHandle>));
+        let ctx = ctx_with(
+            registry,
+            Some(recorder.clone() as Arc<dyn TaskRegistryHandle>),
+        );
         let tool = MCPTool::new(ctx);
 
         let mut use_ctx = tool_api::test_support::fresh_ctx();
@@ -2469,13 +2468,17 @@ mod auto_background_race_tests {
     #[tokio::test]
     async fn disabled_threshold_awaits_directly() {
         let (conn, peer_tx, peer_rx) = paired();
-        let client = Arc::new(mcp::McpClient::new("slow", std::path::PathBuf::from("/tmp"), conn).await);
+        let client =
+            Arc::new(mcp::McpClient::new("slow", std::path::PathBuf::from("/tmp"), conn).await);
         let registry = Arc::new(McpRegistry::new(Arc::new(StubTransport)));
         registry.register_client("slow", client).await;
         spawn_responder(peer_rx, peer_tx);
 
         let recorder = Arc::new(RecordingRegistry::default());
-        let ctx = ctx_with(registry, Some(recorder.clone() as Arc<dyn TaskRegistryHandle>));
+        let ctx = ctx_with(
+            registry,
+            Some(recorder.clone() as Arc<dyn TaskRegistryHandle>),
+        );
         let tool = MCPTool::new(ctx);
 
         let mut use_ctx = tool_api::test_support::fresh_ctx();
@@ -2499,7 +2502,8 @@ mod auto_background_race_tests {
     #[tokio::test]
     async fn unwired_registry_awaits_directly() {
         let (conn, peer_tx, peer_rx) = paired();
-        let client = Arc::new(mcp::McpClient::new("slow", std::path::PathBuf::from("/tmp"), conn).await);
+        let client =
+            Arc::new(mcp::McpClient::new("slow", std::path::PathBuf::from("/tmp"), conn).await);
         let registry = Arc::new(McpRegistry::new(Arc::new(StubTransport)));
         registry.register_client("slow", client).await;
         spawn_responder(peer_rx, peer_tx);
@@ -2534,15 +2538,17 @@ mod auto_background_race_tests {
 
         // Large router timeout so the tool's 120s auto-bg race, not the
         // transport's, decides the outcome.
-        let (conn, peer_tx, mut peer_rx) =
-            paired_with_timeout(std::time::Duration::from_secs(600));
+        let (conn, peer_tx, mut peer_rx) = paired_with_timeout(std::time::Duration::from_secs(600));
         let client =
             Arc::new(mcp::McpClient::new("slow", std::path::PathBuf::from("/tmp"), conn).await);
         let registry = Arc::new(McpRegistry::new(Arc::new(StubTransport)));
         registry.register_client("slow", client).await;
 
         let recorder = Arc::new(RecordingRegistry::default());
-        let ctx = ctx_with(registry, Some(recorder.clone() as Arc<dyn TaskRegistryHandle>));
+        let ctx = ctx_with(
+            registry,
+            Some(recorder.clone() as Arc<dyn TaskRegistryHandle>),
+        );
         let sink = Arc::new(InMemorySink::new());
         ctx.bus.attach_sink(sink.clone()).await;
         let tool = MCPTool::new(ctx);
@@ -2694,15 +2700,17 @@ mod auto_background_race_tests {
     async fn backgrounded_call_completed_emits_feature_ok() {
         use telemetry::InMemorySink;
 
-        let (conn, peer_tx, mut peer_rx) =
-            paired_with_timeout(std::time::Duration::from_secs(600));
+        let (conn, peer_tx, mut peer_rx) = paired_with_timeout(std::time::Duration::from_secs(600));
         let client =
             Arc::new(mcp::McpClient::new("slow", std::path::PathBuf::from("/tmp"), conn).await);
         let registry = Arc::new(McpRegistry::new(Arc::new(StubTransport)));
         registry.register_client("slow", client).await;
 
         let recorder = Arc::new(RecordingRegistry::default());
-        let ctx = ctx_with(registry, Some(recorder.clone() as Arc<dyn TaskRegistryHandle>));
+        let ctx = ctx_with(
+            registry,
+            Some(recorder.clone() as Arc<dyn TaskRegistryHandle>),
+        );
         let sink = Arc::new(InMemorySink::new());
         ctx.bus.attach_sink(sink.clone()).await;
         let tool = MCPTool::new(ctx);
@@ -2759,15 +2767,17 @@ mod auto_background_race_tests {
     async fn backgrounded_call_tool_error_emits_feature_sad() {
         use telemetry::InMemorySink;
 
-        let (conn, peer_tx, mut peer_rx) =
-            paired_with_timeout(std::time::Duration::from_secs(600));
+        let (conn, peer_tx, mut peer_rx) = paired_with_timeout(std::time::Duration::from_secs(600));
         let client =
             Arc::new(mcp::McpClient::new("slow", std::path::PathBuf::from("/tmp"), conn).await);
         let registry = Arc::new(McpRegistry::new(Arc::new(StubTransport)));
         registry.register_client("slow", client).await;
 
         let recorder = Arc::new(RecordingRegistry::default());
-        let ctx = ctx_with(registry, Some(recorder.clone() as Arc<dyn TaskRegistryHandle>));
+        let ctx = ctx_with(
+            registry,
+            Some(recorder.clone() as Arc<dyn TaskRegistryHandle>),
+        );
         let sink = Arc::new(InMemorySink::new());
         ctx.bus.attach_sink(sink.clone()).await;
         let tool = MCPTool::new(ctx);

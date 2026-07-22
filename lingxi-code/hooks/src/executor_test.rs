@@ -2358,8 +2358,7 @@ mod async_path_tests {
     /// nowhere to fold its eventual output back) — never a Block, never a panic.
     #[tokio::test]
     async fn runtime_marker_without_registry_is_a_noop() {
-        let runner =
-            MarkerBackgroundingRunner::new(out("ignored", "", 0), Duration::from_secs(30));
+        let runner = MarkerBackgroundingRunner::new(out("ignored", "", 0), Duration::from_secs(30));
         let mut registry = HookRegistry::new();
         registry.register(command_hook(true));
         let exec = HookExecutorImpl::new(
@@ -3322,7 +3321,7 @@ mod prompt_dispatch_tests {
     use crate::events::{HookEvent, HookEventType};
     use crate::prompt_executor::{HookPromptRunner, PromptHookError, PromptHookRequest};
     use crate::response::HookDecision;
-    use protocol::{HookId, ToolUseId};
+    use protocol::{HookId, SessionId, ToolUseId};
     use serde_json::json;
     use std::sync::Mutex;
 
@@ -3388,6 +3387,12 @@ mod prompt_dispatch_tests {
             tool_name: "Bash".into(),
             tool_input: json!({"command": "rm -rf /"}),
             tool_use_id: ToolUseId::new(),
+        }
+    }
+
+    fn stop_event() -> HookEvent {
+        HookEvent::Stop {
+            reason: "end_turn".into(),
         }
     }
 
@@ -3477,6 +3482,52 @@ mod prompt_dispatch_tests {
         assert!(!agg.prevent_continuation);
         let (_, r) = &agg.all_results[0];
         assert!(matches!(r.outcome, HookOutcome::Success));
+    }
+
+    #[tokio::test]
+    async fn prompt_hook_supports_stop_event() {
+        let runner = Arc::new(RecordingRunner {
+            recorded: Mutex::new(Vec::new()),
+            result: Mutex::new(Some(Ok(r#"{"ok": false, "reason": "not yet"}"#.into()))),
+        });
+        let mut hook = prompt_hook();
+        hook.events = vec![HookEventType::Stop];
+        hook.executor = DefHookExecutor::Prompt {
+            prompt: "Is this safe? $ARGUMENTS".into(),
+            model: Some("claude-sonnet-4-6".into()),
+            continue_on_block: true,
+        };
+        let mut registry = HookRegistry::new();
+        registry.register(hook);
+        let exec = HookExecutorImpl::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(UnusedHttp),
+            Arc::new(UnusedRuntime),
+        )
+        .with_prompt_runner(runner.clone());
+
+        let agg = exec
+            .execute(
+                stop_event(),
+                HookContext {
+                    session_id: SessionId::new(),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+        let recorded = runner.recorded.lock().unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert!(
+            recorded[0].prompt.contains(r#""hook_event_name":"Stop""#),
+            "Stop payload must be serialized into the prompt"
+        );
+        drop(recorded);
+        assert_eq!(agg.decision, Some(HookDecision::Block));
+        assert!(
+            !agg.prevent_continuation,
+            "continueOnBlock=true is caller-controlled"
+        );
     }
 
     #[tokio::test]

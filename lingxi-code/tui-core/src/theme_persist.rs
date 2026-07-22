@@ -445,10 +445,8 @@ mod tests {
 
         // "a\u{0327}" (a + combining cedilla) has no precomposed form, so it
         // stays 2 code points after NFC but is a single grapheme -> dropped.
-        let combined = canonicalize_vim_insert_mode_remaps([(
-            "a\u{0327}".to_string(),
-            "<Esc>".to_string(),
-        )]);
+        let combined =
+            canonicalize_vim_insert_mode_remaps([("a\u{0327}".to_string(), "<Esc>".to_string())]);
         assert!(combined.is_empty());
     }
 }

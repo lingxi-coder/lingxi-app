@@ -253,6 +253,10 @@ impl<'cb> RataApp<'cb> {
                 };
                 match outcome {
                     ChatOutcome::Quit => return Ok(AppExit::Quit),
+                    ChatOutcome::ForceRedraw => {
+                        self.chat_widget.reset_terminal_commit();
+                        terminal.reset_for_replay()?;
+                    }
                     // `/resume`: the picker resolved a session uuid. UNWIND the
                     // loop carrying it — the embedder re-mounts that session
                     // in-process (writer retargeted) rather than swapping the
@@ -529,6 +533,7 @@ impl<'cb> RataApp<'cb> {
 #[allow(clippy::too_many_arguments)]
 pub fn run_app(
     messages: Vec<RenderedMessage>,
+    initial_prompt: Option<String>,
     session: SessionInfo,
     events_rx: UnboundedReceiver<TurnEvent>,
     permission_rx: Receiver<PermissionExchange>,
@@ -572,15 +577,22 @@ pub fn run_app(
     // hermetic for tests): OSC-11 background detection first — it manages
     // raw mode itself, so it runs BEFORE the session guard — then the
     // persisted preference (default `Auto`, resolved against the detection).
-    tui_core::theme_detect::detect_terminal_theme();
+    let detached_pty = std::env::var_os("LINGXI_BG_PTY_CHILD").is_some();
+    if !detached_pty {
+        tui_core::theme_detect::detect_terminal_theme();
+    }
     let startup_theme = tui_core::theme_persist::load_theme_setting()
         .unwrap_or(tui_core::theme::ThemeSetting::Auto);
     // Guard first, terminal second: locals drop in reverse order, so the
     // terminal resets the cursor while raw mode is still active, then the
     // guard restores cooked mode + bracketed paste.
     let _session_guard = TerminalSession::new()?;
-    let mut terminal =
-        crate::terminal::Terminal::with_options(CrosstermBackend::new(io::stdout()))?;
+    let backend = CrosstermBackend::new(io::stdout());
+    let mut terminal = if detached_pty {
+        crate::terminal::Terminal::with_options_at_origin(backend)?
+    } else {
+        crate::terminal::Terminal::with_options(backend)?
+    };
     let mut app = RataApp::new(
         messages,
         session,
@@ -660,6 +672,18 @@ pub fn run_app(
     // snapshot. `None` (tests / no engine) keeps `/tasks` a graceful no-op.
     if let Some(handle) = task_registry {
         app.chat_widget.set_task_registry(handle);
+    }
+    // A background PTY session can carry an initial prompt even though its
+    // hidden child is deliberately launched without a positional prompt (a
+    // positional prompt selects print mode at the CLI router). Submit it only
+    // after the terminal and the complete interactive widget are mounted, and
+    // route it through the same ChatWidget submission path as pressing Enter:
+    // the user row, cancellation token and running-state bookkeeping must all
+    // remain identical to an ordinary interactive turn.
+    if let Some(prompt) = initial_prompt.filter(|value| !value.trim().is_empty()) {
+        if let ChatOutcome::Submit(prompt, images, token) = app.chat_widget.submit_prompt(prompt) {
+            (app.callbacks.on_submit)(prompt, images, token);
+        }
     }
     app.run(&mut terminal)
 }
@@ -908,9 +932,15 @@ mod tests {
     fn ctrl_o_toggles_verbose() {
         let mut app = test_app(Vec::new());
         assert!(!app.chat_widget.transcript().verbose());
-        app.on_key(ctrl(KeyCode::Char('o')));
+        assert!(matches!(
+            app.on_key(ctrl(KeyCode::Char('o'))),
+            ChatOutcome::ForceRedraw
+        ));
         assert!(app.chat_widget.transcript().verbose());
-        app.on_key(ctrl(KeyCode::Char('o')));
+        assert!(matches!(
+            app.on_key(ctrl(KeyCode::Char('o'))),
+            ChatOutcome::ForceRedraw
+        ));
         assert!(!app.chat_widget.transcript().verbose());
     }
 

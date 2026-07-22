@@ -4617,14 +4617,15 @@ pub async fn build(
     //       `budget_enforcer` to be `Some` — wiring the spawner alone is inert.
     //
     //       The pool is the production `StateMachinePool` driven by the posix
-    //       `RuntimeSpawner`; `max_concurrent = 4` matches the agent-crate
-    //       fixtures. `with_api_client(subagent_api)` hands the child runner the
+    //       `RuntimeSpawner`; the capacity mirrors Claude Code 2.1.217's
+    //       `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS` (default 20).
+    //       `with_api_client(subagent_api)` hands the child runner the
     //       real model seam so spawned subagents drive the multi-turn
     //       `run_subagent_loop` (gated on `ctx.api_client.is_some()`) instead of
     //       the legacy stub completion.
     let subagent_pool = Arc::new(agent::StateMachinePool::new(
         Arc::new(PosixRuntime::new()),
-        4,
+        traits::subagent_spawn::max_concurrent_subagents(),
     ));
     // Clone the subagent model seam BEFORE it is moved into the spawner — the
     // M10 coordinator teammate handler (T13) hands the SAME seam to every
@@ -4736,20 +4737,19 @@ pub async fn build(
         subagent_spawner_arc.clone();
     let subagent_streaming_spawner: Arc<dyn agent::StreamingSubagentSpawner> = subagent_spawner_arc;
 
-    //       The budget enforcer is an unlimited / non-blocking config (every
-    //       limit `None`, no warning thresholds, `WarnOnly` policy) so it never
-    //       halts a turn — `BudgetConfig` has no production `Default`, so all
-    //       five fields are spelled out. It shares the process `CostTracker`
-    //       (cloned because the tracker is also moved into `.with_cost_tracker`
-    //       below).
+    //       The budget enforcer shares both the process `CostTracker` and the
+    //       CLI `--max-budget` ceiling with the main orchestrator. Claude Code
+    //       2.1.217 stops background subagents when that ceiling is reached;
+    //       `Halt` makes each child runner's turn-boundary budget check enforce
+    //       the same limit. With no CLI ceiling this remains unlimited.
     let budget_enforcer: Arc<dyn traits::budget::BudgetEnforcerHandle> =
         Arc::new(cost::BudgetEnforcer::new(
             cost::BudgetConfig {
-                max_session_nano_usd: None,
+                max_session_nano_usd: orch_cfg.max_budget_nano_usd,
                 max_turn_nano_usd: None,
                 max_turn_tokens: None,
                 warning_thresholds: Vec::new(),
-                on_exceed: cost::BudgetExceedPolicy::WarnOnly,
+                on_exceed: cost::BudgetExceedPolicy::Halt,
             },
             cost_tracker.clone(),
         ));

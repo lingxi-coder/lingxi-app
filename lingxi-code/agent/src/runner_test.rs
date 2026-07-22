@@ -244,6 +244,10 @@ impl traits::budget::BudgetEnforcerHandle for MockBudget {
     async fn snapshot_total_nano_usd(&self) -> u64 {
         1_500_000_000
     }
+
+    fn max_session_nano_usd(&self) -> Option<u64> {
+        Some(1_000_000_000)
+    }
 }
 
 /// Build an `LlmResponse` carrying a single text block.
@@ -1289,8 +1293,8 @@ async fn loop_budget_exhausted_stops_before_any_round_trip() {
     // Test A: the inherited budget is already over the limit. The per-turn
     // gate fires BEFORE the first model round-trip, so the loop emits a
     // single budget-exhausted Failed and makes ZERO model calls. The error
-    // is the M3-05 byte-locked denial string formatted from the enforcer's
-    // current_nano_usd (1.5e9 -> "$1.50").
+    // is the 2.1.217 byte-locked background-agent halt string formatted from
+    // current_nano_usd (1.5e9 -> "$1.50") and the $1 ceiling.
     let api = MockSubagentApiClient::new(vec![Ok(text_response("unused", Some("end_turn")))]);
     let mut ctx = loop_ctx(api.clone(), None, 4);
     ctx.budget = Some(Arc::new(MockBudget { exceeded: true }));
@@ -1311,8 +1315,8 @@ async fn loop_budget_exhausted_stops_before_any_round_trip() {
     });
     assert_eq!(
         failed.as_deref(),
-        Some("Budget exceeded ($1.50); stopped."),
-        "byte-locked M3-05 denial string; got events: {evs:?}"
+        Some("Budget limit reached ($1.50 of $1); stopping background agents."),
+        "byte-locked 2.1.217 denial string; got events: {evs:?}"
     );
     assert!(
         !evs.iter()

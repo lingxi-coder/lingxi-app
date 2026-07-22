@@ -853,29 +853,35 @@ async fn run_subagent_loop(
             // agent crate can't depend on lingxi-cost; the enforcer tracks cost
             // globally, exactly like TS reading `getTotalCost()`).
             //
-            // It intentionally diverges from QueryEngine in two ways, both forced
-            // by the frozen `BudgetEnforcerHandle` surface: (1) PLACEMENT — checked
-            // at the TOP of the turn (stop before spending) rather than TS's
-            // post-message check, so an already-over budget makes zero round-trips;
-            // (2) STRING — the denial reports the *current* cost (`format_budget_denied`
-            // byte-for-byte), not TS's "Reached maximum budget ($limit)", because the
-            // handle exposes the cumulative total but never the configured limit.
+            // Placement remains at the TOP of the turn (stop before spending)
+            // rather than TS's post-message check, so an already-over-budget
+            // child makes zero additional round-trips. The denial string uses
+            // the same current/maximum bytes as Claude Code 2.1.217's background
+            // task budget halt when the configured ceiling is available.
             if let Some(b) = &budget {
                 if let Err(traits::budget::BudgetError::Exceeded { current_nano_usd }) =
                     b.check_and_charge(0).await
                 {
-                    // Stop with a budget-exhausted terminal carrying the M3-05
-                    // byte-locked denial string (matches `format_budget_denied`:
-                    // nano_usd / 1e9, `{:.2}`). Reproduced inline because the agent
-                    // crate cannot depend on lingxi-tools / lingxi-cost.
+                    // Stop with the 2.1.217 background-agent budget string.
                     #[allow(clippy::cast_precision_loss)]
                     let dollars = current_nano_usd as f64 / 1_000_000_000.0;
-                    let _ = out_tx
-                        .send(SubagentEvent::Failed {
-                            agent_id,
-                            error: format!("Budget exceeded (${dollars:.2}); stopped."),
-                        })
-                        .await;
+                    let error = b.max_session_nano_usd().map_or_else(
+                        || format!("Budget exceeded (${dollars:.2}); stopped."),
+                        |limit_nano_usd| {
+                            let whole = limit_nano_usd / 1_000_000_000;
+                            let fractional = limit_nano_usd % 1_000_000_000;
+                            let maximum = if fractional == 0 {
+                                whole.to_string()
+                            } else {
+                                let fraction = format!("{fractional:09}");
+                                format!("{whole}.{}", fraction.trim_end_matches('0'))
+                            };
+                            format!(
+                                "Budget limit reached (${dollars:.2} of ${maximum}); stopping background agents."
+                            )
+                        },
+                    );
+                    let _ = out_tx.send(SubagentEvent::Failed { agent_id, error }).await;
                     return;
                 }
                 // `Ok` and `BudgetError::Internal` fall through to the round-trip:
@@ -1207,7 +1213,7 @@ async fn run_subagent_loop(
                         // This subagent's own recursion depth (claude `agentContext.depth`)
                         // → mapped into the dispatched tool's `ToolUseContext.depth`, so a
                         // nested `Agent` call computes the grandchild's depth (`depth+1`)
-                        // and the resolver gates `Agent` at `depth < 5`.
+                        // and the resolver applies the configured spawn-depth cap.
                         depth: ctx.depth,
                         // This subagent's OWN resolved main-loop model — so a NESTED
                         // `Agent` tool call resolves its child's model against THIS

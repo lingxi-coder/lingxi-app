@@ -17,11 +17,11 @@
 //!
 //! `TaskStop` is NOT in that set — it is allowed to subagents. And `Agent` is
 //! NOT flat-denied either: it is DEPTH-GATED in [`AgentToolResolver::resolve`]
-//! per claude's `if(isAgentTool(a)) return s < e9t` (`e9t = 5`, verified vs
-//! 2.1.195). A subagent at recursion `depth` keeps `Agent` iff `depth < 5`, so
-//! the agent tree is bounded to depth 5 (main=0 → … → depth-4 spawns depth-5 →
-//! depth-5 cannot spawn). The fork `use_exact_tools` bypass is exempt (fork
-//! recursion is governed by `AgentTool`'s `is_in_fork_child` message guard).
+//! per claude's `if(isAgentTool(a)) return depth < maxSpawnDepth`. As of 2.1.217
+//! the default maximum depth is 1, with
+//! `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` providing the same override as
+//! Claude Code. The fork `use_exact_tools` bypass is exempt (fork recursion is
+//! governed by `AgentTool`'s `is_in_fork_child` message guard).
 //!
 //! ## Per-definition `disallowedTools` subtraction (claude `resolveAgentTools`)
 //!
@@ -101,9 +101,8 @@ impl AgentToolResolver {
             "ScheduleWakeup",
             // NOTE: the binary's `_qd` set excludes `TaskStop` AND `Agent`.
             // `TaskStop` is allowed to subagents (so it is NOT listed here), and
-            // `Agent` is NOT flat-denied — it is depth-GATED in `resolve()` per
-            // claude's `if(isAgentTool(a)) return s < e9t` (`e9t = 5`). See
-            // [`AGENT_MAX_SPAWN_DEPTH`] and the `resolve()` gate.
+            // `Agent` is NOT flat-denied — it is depth-GATED in `resolve()` via
+            // Claude's configured maximum spawn depth.
         ];
         // claude: `...(USER_TYPE !== 'ant' ? [WORKFLOW_TOOL_NAME] : [])` (`av`,
         // non-ant only) — ant subagents keep `Workflow`. `Agent` is depth-gated
@@ -159,8 +158,8 @@ impl AgentToolResolver {
         parent_tools: &[Arc<dyn Tool>],
         agent_mcp_tools: &[Arc<dyn Tool>],
         // The resolved subagent's own recursion depth (claude `agentContext.depth`
-        // / `spawnDepth`): the main thread spawns depth-1 children, … . Gates the
-        // `Agent` tool at `depth < AGENT_MAX_SPAWN_DEPTH` below.
+        // / `spawnDepth`): the main thread spawns depth-1 children. Gates the
+        // `Agent` tool against the configured maximum spawn depth below.
         depth: u32,
         _coordinator_mode: bool,
     ) -> Vec<Arc<dyn Tool>> {
@@ -231,16 +230,14 @@ impl AgentToolResolver {
         let disallowed = Self::all_agent_disallowed_tools(Self::is_user_ant());
         tools.retain(|t| !disallowed.contains(&t.name()));
 
-        // (2b) Agent recursion depth-gate — claude `if(isAgentTool(a)) return
-        // s < e9t` (`e9t = 5`, confirmed vs 2.1.195): a subagent at `depth`
-        // keeps the `Agent` tool iff `depth < AGENT_MAX_SPAWN_DEPTH`, so a
-        // depth-5 agent cannot spawn further and the agent tree is bounded to
-        // depth 5 (main=0 → … → depth-4 spawns depth-5 → depth-5 cannot spawn).
+        // (2b) Agent recursion depth-gate — claude 2.1.217
+        // `if(isAgentTool(a)) return depth < getMaxSubagentSpawnDepth()`.
+        // The default is 1 (top-level depth 0 may spawn; a depth-1 child may
+        // not), with `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` as the override.
         // Applies to ALL subagents (ant + non-ant). The `use_exact_tools` fork
         // bypass (returned above) is exempt — fork recursion is governed by the
         // `is_in_fork_child` message guard in `AgentTool`.
-        const AGENT_MAX_SPAWN_DEPTH: u32 = 5;
-        if depth >= AGENT_MAX_SPAWN_DEPTH {
+        if depth >= traits::subagent_spawn::max_subagent_spawn_depth() {
             tools.retain(|t| t.name() != "Agent");
         }
 
@@ -332,8 +329,8 @@ pub async fn resolve_subagent_tools(
     agent_def: &AgentDefinition,
     tool_wide_deny: &[String],
     default_model: Option<&str>,
-    // The resolved subagent's own recursion depth — gates its `Agent` tool at
-    // `depth < 5` (claude `e9t`). Threaded from `SubagentSpawnRequest::depth`.
+    // The resolved subagent's own recursion depth — gates its `Agent` tool
+    // against Claude's configured maximum. Threaded from the spawn request.
     depth: u32,
 ) -> Result<(Vec<serde_json::Value>, Vec<String>), ToolResolutionError> {
     use tool_api::tool_trait::{PromptOptions, ToolStaticContext};
@@ -576,14 +573,13 @@ mod tests {
 
     #[test]
     fn all_policy_keeps_agent_at_depth_0() {
-        // `Agent` is no longer flat-denied: a depth-0 subagent keeps it (gated at
-        // depth < 5). See the depth-gate tests for the >= 5 drop.
+        // `Agent` is no longer flat-denied: a depth-0 caller keeps it.
         let parent = pool(&["Read", "Bash", "Agent"]);
         let resolved = AgentToolResolver::resolve(&agent_def(all_policy()), &parent, &[], 0, false);
         let got = names(&resolved);
         assert!(
             got.contains(&"Agent".to_string()),
-            "Agent kept at depth 0 (< 5)"
+            "Agent kept at depth 0 (< default 1)"
         );
         assert!(got.contains(&"Read".to_string()));
         assert!(got.contains(&"Bash".to_string()));
@@ -640,7 +636,7 @@ mod tests {
     #[test]
     fn explicit_policy_keeps_agent_when_below_depth() {
         // An agent that explicitly lists `Agent` keeps it at depth 0 (no longer
-        // flat-denied; depth-gated at < 5). At depth >= 5 the gate drops it.
+        // flat-denied). At the default depth 1 the gate drops it.
         let parent = pool(&["Read", "Agent"]);
         let def = agent_def(AgentToolPolicy::Explicit(vec![
             "Read".to_string(),
@@ -648,11 +644,11 @@ mod tests {
         ]));
         let kept = AgentToolResolver::resolve(&def, &parent, &[], 0, false);
         assert_eq!(names(&kept), vec!["Read".to_string(), "Agent".to_string()]);
-        let gated = AgentToolResolver::resolve(&def, &parent, &[], 5, false);
+        let gated = AgentToolResolver::resolve(&def, &parent, &[], 1, false);
         assert_eq!(
             names(&gated),
             vec!["Read".to_string()],
-            "Agent gated at depth 5"
+            "Agent gated at depth 1"
         );
     }
 
@@ -781,34 +777,27 @@ mod tests {
         );
     }
 
-    // ── Agent recursion depth-gate (claude `if(isAgentTool(a)) return s<e9t`, e9t=5) ──
+    // ── Agent recursion depth-gate (claude 2.1.217, default max depth 1) ──
 
     #[test]
-    fn agent_tool_kept_below_depth_5() {
-        // A subagent below depth 5 keeps `Agent` so it can spawn further
-        // subagents (main=0 → … → depth-4 can still spawn depth-5).
+    fn agent_tool_kept_for_top_level_caller() {
+        // The top-level caller (depth 0) keeps `Agent` and may spawn a child.
         let parent = pool(&["Read", "Agent", "Bash"]);
-        for depth in [0u32, 1, 4] {
-            let resolved =
-                AgentToolResolver::resolve(&agent_def(all_policy()), &parent, &[], depth, false);
-            assert!(
-                names(&resolved).contains(&"Agent".to_string()),
-                "Agent must be present at depth {depth} (< 5)"
-            );
-        }
+        let resolved = AgentToolResolver::resolve(&agent_def(all_policy()), &parent, &[], 0, false);
+        assert!(names(&resolved).contains(&"Agent".to_string()));
     }
 
     #[test]
-    fn agent_tool_dropped_at_depth_5_and_beyond() {
-        // depth-5 (and deeper) agents cannot spawn further — bounds the agent
-        // tree to depth 5 (the gate `depth < 5` is false).
+    fn agent_tool_dropped_at_default_depth_1_and_beyond() {
+        // Claude 2.1.217 defaults the maximum spawn depth to 1, so a child at
+        // depth 1 (and every deeper context) does not advertise `Agent`.
         let parent = pool(&["Read", "Agent", "Bash"]);
-        for depth in [5u32, 6, 12] {
+        for depth in [1u32, 5, 12] {
             let resolved =
                 AgentToolResolver::resolve(&agent_def(all_policy()), &parent, &[], depth, false);
             assert!(
                 !names(&resolved).contains(&"Agent".to_string()),
-                "Agent must be dropped at depth {depth} (>= 5)"
+                "Agent must be dropped at depth {depth} (>= 1 by default)"
             );
             // Non-Agent tools are unaffected by the depth-gate.
             assert!(names(&resolved).contains(&"Read".to_string()));

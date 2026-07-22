@@ -8,7 +8,7 @@
 use async_trait::async_trait;
 use serde_json::json;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use traits::budget::{BudgetEnforcerHandle, BudgetError};
@@ -55,6 +55,8 @@ pub struct MockSubagentSpawner {
     /// surfaces an error, not a silent sync fallback" invariant stays testable.
     /// Default `false` (wired — returns an `AsyncLaunch`).
     async_unwired: Mutex<bool>,
+    /// Scripted active-subagent count for the 2.1.217 concurrency-cap gate.
+    concurrent_subagents: AtomicUsize,
 }
 
 #[derive(Clone)]
@@ -76,6 +78,7 @@ enum MockSpawnResponse {
     },
     Failed(String),
     Killed,
+    PoolFull,
 }
 
 impl MockSubagentSpawner {
@@ -89,7 +92,13 @@ impl MockSubagentSpawner {
             selection: Mutex::new(None),
             registered_names: Mutex::new(Vec::new()),
             async_unwired: Mutex::new(false),
+            concurrent_subagents: AtomicUsize::new(0),
         }
+    }
+
+    /// Set the active-subagent count returned at the pre-spawn boundary.
+    pub fn set_concurrent_subagents(&self, count: usize) {
+        self.concurrent_subagents.store(count, Ordering::SeqCst);
     }
 
     /// Make `spawn_async` behave as the DEFAULT unwired stub (clear error, no
@@ -181,6 +190,11 @@ impl MockSubagentSpawner {
         *self.response.lock().unwrap() = MockSpawnResponse::Killed;
     }
 
+    /// Force allocation to lose a concurrent pool-cap race.
+    pub fn script_pool_full(&self) {
+        *self.response.lock().unwrap() = MockSpawnResponse::PoolFull;
+    }
+
     /// Drain and return every captured invocation.
     #[must_use]
     pub fn invocations(&self) -> Vec<MockSpawnInvocation> {
@@ -247,7 +261,12 @@ impl SubagentSpawner for MockSubagentSpawner {
             MockSpawnResponse::Killed => SubagentResult::Killed {
                 agent_id: protocol::AgentId::new(),
             },
+            MockSpawnResponse::PoolFull => return Err(SubagentSpawnError::PoolFull),
         })
+    }
+
+    async fn concurrent_subagent_count(&self) -> usize {
+        self.concurrent_subagents.load(Ordering::SeqCst)
     }
 
     /// Records the spawn request (so tests can assert the threaded
@@ -265,6 +284,9 @@ impl SubagentSpawner for MockSubagentSpawner {
             return Err(SubagentSpawnError::Internal(
                 "async subagent spawn (run_in_background) is not wired in this build".to_string(),
             ));
+        }
+        if matches!(&*self.response.lock().unwrap(), MockSpawnResponse::PoolFull) {
+            return Err(SubagentSpawnError::PoolFull);
         }
         self.invocations
             .lock()
@@ -407,6 +429,22 @@ impl TaskRegistryHandle for MockTaskRegistryHandle {
 
     fn increment_total_agent_spawns(&self) {
         self.spawns.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn try_reserve_total_agent_spawn(&self, cap: u64) -> Result<u64, u64> {
+        self.spawns
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                (current < cap).then(|| current + 1)
+            })
+            .map(|previous| previous + 1)
+    }
+
+    fn release_total_agent_spawn_reservation(&self) {
+        let _ = self
+            .spawns
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                current.checked_sub(1)
+            });
     }
 
     async fn create(&self, input: TaskCreateInput) -> Result<TaskRecord, TaskRegistryError> {
@@ -560,7 +598,7 @@ impl MailboxRouterHandle for MockMailboxRouterHandle {
 // =========================================================================
 
 /// Atomic-counter mock for `BudgetEnforcerHandle`. Returns `Exceeded`
-/// when the running total surpasses the configured cap.
+/// when the running total reaches the configured cap.
 pub struct MockBudgetEnforcerHandle {
     /// Cumulative nano-USD charged.
     pub total_nano_usd: AtomicU64,
@@ -596,7 +634,7 @@ impl BudgetEnforcerHandle for MockBudgetEnforcerHandle {
     async fn check_and_charge(&self, nano_usd: u64) -> Result<(), BudgetError> {
         let prev = self.total_nano_usd.fetch_add(nano_usd, Ordering::SeqCst);
         let post = prev.saturating_add(nano_usd);
-        if post > self.cap_nano_usd {
+        if post >= self.cap_nano_usd {
             Err(BudgetError::Exceeded {
                 current_nano_usd: post,
             })
@@ -607,6 +645,10 @@ impl BudgetEnforcerHandle for MockBudgetEnforcerHandle {
 
     async fn snapshot_total_nano_usd(&self) -> u64 {
         self.total_nano_usd.load(Ordering::SeqCst)
+    }
+
+    fn max_session_nano_usd(&self) -> Option<u64> {
+        (self.cap_nano_usd != u64::MAX).then_some(self.cap_nano_usd)
     }
 }
 

@@ -252,6 +252,14 @@ impl TaskRegistryHandle for TaskRegistry {
         TaskRegistry::increment_total_agent_spawns(self);
     }
 
+    fn try_reserve_total_agent_spawn(&self, cap: u64) -> Result<u64, u64> {
+        TaskRegistry::try_reserve_total_agent_spawn(self, cap)
+    }
+
+    fn release_total_agent_spawn_reservation(&self) {
+        TaskRegistry::release_total_agent_spawn_reservation(self);
+    }
+
     async fn create(&self, input: TaskCreateInput) -> Result<TaskRecord, TaskRegistryError> {
         let task_type = task_type_from_wire(&input.task_type)?;
         let id = self

@@ -432,8 +432,8 @@ pub trait TaskRegistryHandle: Send + Sync {
     /// `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION` (default 200). Default impl returns
     /// `0` so existing mock handles compile unchanged and stay uncapped
     /// (frozen-trait defaulted-method idiom); the concrete `TaskRegistry`
-    /// overrides both this and [`increment_total_agent_spawns`] with a real
-    /// per-session counter.
+    /// overrides this and the reservation methods below with a real per-session
+    /// atomic counter.
     ///
     /// [`increment_total_agent_spawns`]: Self::increment_total_agent_spawns
     fn get_total_agent_spawns(&self) -> u64 {
@@ -445,6 +445,26 @@ pub trait TaskRegistryHandle: Send + Sync {
     /// once a spawn clears the cap gate. Default impl is a no-op so existing mock
     /// handles compile unchanged.
     fn increment_total_agent_spawns(&self) {}
+
+    /// Atomically reserve one per-session subagent-spawn slot, returning the new
+    /// count on success or the already-reached count on failure. The default
+    /// preserves legacy mock behavior; the production registry overrides it
+    /// with a compare/update loop so parallel `Agent` calls cannot race past the
+    /// session cap.
+    fn try_reserve_total_agent_spawn(&self, cap: u64) -> Result<u64, u64> {
+        let current = self.get_total_agent_spawns();
+        if current >= cap {
+            Err(current)
+        } else {
+            self.increment_total_agent_spawns();
+            Ok(current.saturating_add(1))
+        }
+    }
+
+    /// Release a reservation when the runtime rejects the launch before a
+    /// subagent slot is allocated (for example, a concurrent pool-cap race).
+    /// Default no-op keeps legacy stateless handles source-compatible.
+    fn release_total_agent_spawn_reservation(&self) {}
 
     /// Session-wide count of WebSearch calls executed so far — 1:1 with
     /// claude-code's `taskRegistry.getWebSearchCalls(){return n}` (parity

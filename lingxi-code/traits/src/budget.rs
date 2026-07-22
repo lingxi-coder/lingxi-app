@@ -39,6 +39,13 @@ pub trait BudgetEnforcerHandle: Send + Sync {
     /// [`BudgetError::Exceeded`] in a context where the caller needs the
     /// number directly.
     async fn snapshot_total_nano_usd(&self) -> u64;
+
+    /// Configured session ceiling, when one exists. Claude Code's Agent tool
+    /// includes both the current spend and maximum in its pre-spawn denial.
+    /// Defaulted for legacy mocks and unlimited implementations.
+    fn max_session_nano_usd(&self) -> Option<u64> {
+        None
+    }
 }
 
 #[cfg(test)]

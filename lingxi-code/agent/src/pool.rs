@@ -10,7 +10,7 @@ use crate::runner::SubagentEvent;
 use protocol::AgentId;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, OwnedSemaphorePermit, RwLock, Semaphore};
 use traits::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
 
 /// One slot in the [`StateMachinePool`].
@@ -25,6 +25,8 @@ pub struct StateMachineSlot {
     pub task: BackgroundTaskHandle,
     /// Sender used by the host to deliver `Event`s into the slot.
     pub event_tx: mpsc::Sender<engine::Event>,
+    /// Capacity permit held for the entire lifetime of this slot.
+    _capacity_permit: OwnedSemaphorePermit,
 }
 
 /// Fixed-capacity table of active subagent slots.
@@ -34,7 +36,7 @@ pub struct StateMachineSlot {
 /// runner emits as it processes the conversation.
 pub struct StateMachinePool {
     slots: Arc<RwLock<HashMap<AgentId, StateMachineSlot>>>,
-    max_concurrent: usize,
+    capacity: Arc<Semaphore>,
     runtime: Arc<dyn RuntimeSpawner>,
 }
 
@@ -45,7 +47,7 @@ impl StateMachinePool {
     pub fn new(runtime: Arc<dyn RuntimeSpawner>, max_concurrent: usize) -> Self {
         Self {
             slots: Arc::new(RwLock::new(HashMap::new())),
-            max_concurrent,
+            capacity: Arc::new(Semaphore::new(max_concurrent)),
             runtime,
         }
     }
@@ -58,9 +60,14 @@ impl StateMachinePool {
         &self,
         ctx: SubagentContext,
     ) -> Result<(AgentId, mpsc::Receiver<SubagentEvent>), PoolError> {
-        if self.slots.read().await.len() >= self.max_concurrent {
-            return Err(PoolError::TooManyAgents);
-        }
+        // Reserve capacity atomically before spawning the runner. A len/read
+        // check can race when multiple parallel Agent tool calls allocate at
+        // once and let all of them pass the same stale count.
+        let capacity_permit = self
+            .capacity
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| PoolError::TooManyAgents)?;
         let agent_id = ctx.agent_id;
         let (event_tx, event_rx) = mpsc::channel::<engine::Event>(100);
         let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(100);
@@ -79,6 +86,7 @@ impl StateMachinePool {
                 agent_id,
                 task,
                 event_tx,
+                _capacity_permit: capacity_permit,
             },
         );
         Ok((agent_id, out_rx))
@@ -284,6 +292,19 @@ mod tests {
         let err = pool.allocate(make_ctx()).await.unwrap_err();
         assert!(matches!(err, PoolError::TooManyAgents), "got {err:?}");
         assert_eq!(pool.slot_count().await, 1, "rejected spawn left no slot");
+    }
+
+    #[tokio::test]
+    async fn parallel_allocations_cannot_race_past_capacity() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 1));
+        let (left, right) = tokio::join!(pool.allocate(make_ctx()), pool.allocate(make_ctx()));
+        assert_eq!(usize::from(left.is_ok()) + usize::from(right.is_ok()), 1);
+        assert!(
+            matches!(left, Err(PoolError::TooManyAgents))
+                || matches!(right, Err(PoolError::TooManyAgents))
+        );
+        assert_eq!(pool.slot_count().await, 1);
     }
 
     /// `send_event` to a slot whose runner has dropped its inbound receiver

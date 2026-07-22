@@ -106,6 +106,12 @@ impl BudgetEnforcer {
         self.cost_tracker.clone()
     }
 
+    /// Configured session-wide ceiling, if budget enforcement is enabled.
+    #[must_use]
+    pub fn max_session_nano_usd(&self) -> Option<u64> {
+        self.config.max_session_nano_usd
+    }
+
     /// Construct a new enforcer bound to `cost_tracker`.
     #[must_use]
     pub fn new(config: BudgetConfig, cost_tracker: Arc<CostTracker>) -> Self {
@@ -129,7 +135,7 @@ impl BudgetEnforcer {
         let current = self.cost_tracker.total_nano_usd().await;
         let after = current.saturating_add(estimated_cost_nano_usd);
         if let Some(max) = self.config.max_session_nano_usd {
-            if after > max {
+            if after >= max {
                 return match self.config.on_exceed {
                     BudgetExceedPolicy::Halt => BudgetCheckResult::Halt {
                         current,
@@ -172,7 +178,7 @@ impl BudgetEnforcer {
     pub async fn check_post_api_call(&self, _realized_cost: u64) {
         let total = self.cost_tracker.total_nano_usd().await;
         if let Some(max) = self.config.max_session_nano_usd {
-            if total > max {
+            if total >= max {
                 self.realized_exceeded.store(true, Ordering::Release);
             }
         }
@@ -352,6 +358,25 @@ mod tests {
         assert!(matches!(
             e.check_pre_api_call(10_000).await,
             BudgetCheckResult::Halt { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn reaching_budget_exactly_halts() {
+        let cfg = BudgetConfig {
+            max_session_nano_usd: Some(1_000),
+            max_turn_nano_usd: None,
+            max_turn_tokens: None,
+            warning_thresholds: vec![],
+            on_exceed: BudgetExceedPolicy::Halt,
+        };
+        let e = BudgetEnforcer::new(cfg, make_tracker());
+        assert!(matches!(
+            e.check_pre_api_call(1_000).await,
+            BudgetCheckResult::Halt {
+                current: 0,
+                limit: 1_000
+            }
         ));
     }
 

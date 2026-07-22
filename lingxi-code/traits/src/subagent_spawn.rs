@@ -168,8 +168,8 @@ pub struct SubagentSpawnRequest {
     pub additional_disallowed_tools: Vec<String>,
     /// The CHILD's recursion depth = the spawning agent's depth + 1 (claude
     /// `spawnDepth = z6(parentContext) + 1`). The spawner stamps it onto the
-    /// child's `SubagentContext.depth`, which the tool-resolver consults to gate
-    /// the `Agent` tool at `depth < 5` (claude `e9t = 5`). `#[serde(default)]` ⇒
+    /// child's `SubagentContext.depth`, which the tool-resolver consults against
+    /// `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` (default 1). `#[serde(default)]` ⇒
     /// `0` for legacy/serialized payloads, so a child that deserializes without
     /// it behaves like a top-level spawn (the conservative direction).
     #[serde(default)]
@@ -456,6 +456,44 @@ pub fn should_inject_agent_list_in_messages() -> bool {
 /// this key, so the two payload kinds never collide.
 pub const FORWARD_SUBAGENT_MESSAGE_SENTINEL: &str = "__forward_subagent_message__";
 
+/// Claude Code 2.1.217's default number of concurrently-running subagents.
+pub const DEFAULT_MAX_CONCURRENT_SUBAGENTS: usize = 20;
+
+/// Claude Code 2.1.217's default subagent nesting depth. A top-level caller has
+/// depth 0, so the default permits that caller to spawn a depth-1 child while
+/// preventing the child from spawning another agent.
+pub const DEFAULT_MAX_SUBAGENT_SPAWN_DEPTH: u32 = 1;
+
+fn max_concurrent_subagents_from(raw: Option<&str>) -> usize {
+    raw.and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(DEFAULT_MAX_CONCURRENT_SUBAGENTS)
+}
+
+fn max_subagent_spawn_depth_from(raw: Option<&str>) -> u32 {
+    raw.and_then(|value| value.trim().parse::<u32>().ok())
+        .unwrap_or(DEFAULT_MAX_SUBAGENT_SPAWN_DEPTH)
+}
+
+/// Resolve `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS`, defaulting to 20.
+#[must_use]
+pub fn max_concurrent_subagents() -> usize {
+    max_concurrent_subagents_from(
+        std::env::var("CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS")
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// Resolve `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH`, defaulting to 1.
+#[must_use]
+pub fn max_subagent_spawn_depth() -> u32 {
+    max_subagent_spawn_depth_from(
+        std::env::var("CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH")
+            .ok()
+            .as_deref(),
+    )
+}
+
 /// Spawn-a-subagent seam used by `AgentTool`.
 #[async_trait]
 pub trait SubagentSpawner: Send + Sync {
@@ -488,6 +526,13 @@ pub trait SubagentSpawner: Send + Sync {
         _progress: Option<tokio::sync::mpsc::Sender<String>>,
     ) -> Result<SubagentResult, SubagentSpawnError> {
         self.spawn(request, inherit).await
+    }
+
+    /// Number of subagents currently occupying this spawner's runtime pool.
+    /// The default keeps legacy/mock spawners uncapped; the production pool
+    /// overrides it so `AgentTool` can reject at Claude's pre-spawn boundary.
+    async fn concurrent_subagent_count(&self) -> usize {
+        0
     }
 
     /// The resolved subagent catalog (built-ins + any wired user/project
@@ -595,6 +640,19 @@ mod tests {
             format_agent_line(&entry),
             "- Explore: Read-only search agent (Tools: All tools except Edit, Write)"
         );
+    }
+
+    #[test]
+    fn claude_2_1_217_agent_limits_resolve_defaults_and_overrides() {
+        assert_eq!(max_concurrent_subagents_from(None), 20);
+        assert_eq!(max_concurrent_subagents_from(Some(" 7 ")), 7);
+        assert_eq!(max_concurrent_subagents_from(Some("0")), 0);
+        assert_eq!(max_concurrent_subagents_from(Some("invalid")), 20);
+
+        assert_eq!(max_subagent_spawn_depth_from(None), 1);
+        assert_eq!(max_subagent_spawn_depth_from(Some(" 3 ")), 3);
+        assert_eq!(max_subagent_spawn_depth_from(Some("0")), 0);
+        assert_eq!(max_subagent_spawn_depth_from(Some("invalid")), 1);
     }
 
     /// The gate defaults ON in v2.1.193 (catalog always externalized). Guarded by

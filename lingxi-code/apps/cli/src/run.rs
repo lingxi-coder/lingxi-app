@@ -31,6 +31,14 @@ use traits::{
     FileSystem, McpStatus, OrchestratorHandle, SlashCommandDispatcher, SlashDispatchResult,
 };
 
+fn stream_json_error_subtype(err: &orchestrator::OrchestratorError) -> &'static str {
+    match err {
+        orchestrator::OrchestratorError::MaxTurnsReached { .. } => "error_max_turns",
+        orchestrator::OrchestratorError::MaxBudgetReached { .. } => "error_max_budget_usd",
+        _ => "error_during_execution",
+    }
+}
+
 /// Install the print/SDK-mode process-tree cleanup (parity 2.1.212 — "Fixed
 /// SIGTERM during Bash tool orphaning process trees in print/SDK mode").
 ///
@@ -260,17 +268,11 @@ pub async fn run_stream_json_print(
     // helper already handles the "[1m]" substring check — no beta list needed.
     let betas = argv.betas.clone().unwrap_or_default();
 
-    if turn_result.is_err() {
-        let err_msg = turn_result.unwrap_err().to_string();
+    if let Err(err) = turn_result {
+        let err_msg = err.to_string();
+        let subtype = stream_json_error_subtype(&err);
         stream
-            .emit_result_error(
-                "error_during_execution",
-                vec![err_msg],
-                &cost,
-                &model,
-                "off",
-                &betas,
-            )
+            .emit_result_error(subtype, vec![err_msg], &cost, &model, "off", &betas)
             .await;
         stream.flush().await;
         exit_codes::RUNTIME_ERROR
@@ -994,7 +996,7 @@ pub async fn run_stream_json_input_loop(
 
     // ④ Consume user turns sequentially through the orchestrator.
     let betas = argv.betas.clone().unwrap_or_default();
-    let mut last_turn_err: Option<String> = None;
+    let mut last_turn_err: Option<orchestrator::OrchestratorError> = None;
     let mut had_any_turn = false;
     // Per-toolUseID orphaned-permission dedup (twin of claude-code's
     // `handledOrphanedToolUseIds` Set, print.ts:2766/5272/5287): each DISTINCT
@@ -1084,7 +1086,7 @@ pub async fn run_stream_json_input_loop(
             Err(e) => {
                 // Reset cancel state regardless.
                 let _ = cancel_tx.send(false);
-                last_turn_err = Some(e.to_string());
+                last_turn_err = Some(e);
                 break;
             }
         }
@@ -1115,16 +1117,11 @@ pub async fn run_stream_json_input_loop(
         session.model.clone()
     };
 
-    if let Some(err_msg) = last_turn_err {
+    if let Some(err) = last_turn_err {
+        let err_msg = err.to_string();
+        let subtype = stream_json_error_subtype(&err);
         stream
-            .emit_result_error(
-                "error_during_execution",
-                vec![err_msg],
-                &cost,
-                &model,
-                "off",
-                &betas,
-            )
+            .emit_result_error(subtype, vec![err_msg], &cost, &model, "off", &betas)
             .await;
         stream.flush().await;
         exit_codes::RUNTIME_ERROR
@@ -2395,6 +2392,26 @@ mod tests {
             recover_from_failed_switch(None),
             SwitchRecovery::Exit(exit_codes::RUNTIME_ERROR),
             "only the no-session-at-all case exits"
+        );
+    }
+
+    #[test]
+    fn stream_json_terminal_limits_keep_their_specific_error_subtypes() {
+        assert_eq!(
+            stream_json_error_subtype(&orchestrator::OrchestratorError::MaxTurnsReached {
+                max_turns: 3,
+            }),
+            "error_max_turns"
+        );
+        assert_eq!(
+            stream_json_error_subtype(&orchestrator::OrchestratorError::MaxBudgetReached {
+                budget_nano_usd: 1_500_000_000,
+            }),
+            "error_max_budget_usd"
+        );
+        assert_eq!(
+            stream_json_error_subtype(&orchestrator::OrchestratorError::Internal("boom".into())),
+            "error_during_execution"
         );
     }
 

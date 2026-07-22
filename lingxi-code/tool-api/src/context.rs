@@ -77,7 +77,7 @@ pub struct ToolUseContext {
     /// This agent's recursion depth — claude's `agentContext.depth` (`z6`:
     /// `"main"` ⇒ 0, else this value). The `Agent` tool reads it to set a
     /// spawned child's depth (`child = depth + 1`), and the subagent
-    /// tool-resolver gates the `Agent` tool at `depth < 5` (claude `e9t = 5`).
+    /// tool-resolver applies `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` (default 1).
     /// `0` for the main thread and every non-subagent call; the dispatch invoker
     /// overwrites it from [`crate::SubagentInvocationContext::depth`] for a
     /// subagent's own tool calls.

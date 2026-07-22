@@ -5,9 +5,8 @@
 //! taking a cyclic dep on `lingxi-cost`.
 //!
 //! The `BudgetError::Exceeded { current_nano_usd }` branch flows the
-//! cumulative cost back to the caller, which then formats the M3-05
-//! byte-locked denial string (`"Budget exceeded ($X.YZ); stopped."`) via
-//! `agent::format_budget_denied`.
+//! cumulative cost back to the caller together with the configured ceiling,
+//! allowing AgentTool to render Claude's pre-spawn budget-limit denial.
 
 use crate::budget::{BudgetCheckResult, BudgetEnforcer};
 use async_trait::async_trait;
@@ -29,6 +28,10 @@ impl BudgetEnforcerHandle for BudgetEnforcer {
 
     async fn snapshot_total_nano_usd(&self) -> u64 {
         self.cost_tracker_arc().total_nano_usd().await
+    }
+
+    fn max_session_nano_usd(&self) -> Option<u64> {
+        BudgetEnforcer::max_session_nano_usd(self)
     }
 }
 

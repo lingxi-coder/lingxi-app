@@ -276,10 +276,10 @@ mod tests {
     }
 
     // =====================================================================
-    // M3-05 byte-locked denial format flows through Budget -> AgentTool.
+    // Claude 2.1.217 max-budget denial flows through Budget -> AgentTool.
     // =====================================================================
     #[tokio::test]
-    async fn budget_exceeded_yields_m3_05_byte_locked_denial_string() {
+    async fn budget_exceeded_rejects_new_agent_with_exact_limit_message() {
         let budget = Arc::new(MockBudgetEnforcerHandle::new(1_500_000_000)); // $1.50 cap
         budget.set_total(2_000_000_000); // $2.00 already spent
 
@@ -290,8 +290,9 @@ mod tests {
             vec![PathBuf::from("/tmp")],
         );
         bctx.subagent_spawner = Some(spawner.clone() as Arc<dyn SubagentSpawner>);
+        let registry = arc_mock_task_registry();
         bctx.task_registry =
-            Some(arc_mock_task_registry() as Arc<dyn traits::task_registry::TaskRegistryHandle>);
+            Some(registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>);
         bctx.mailbox_router =
             Some(arc_mock_mailbox() as Arc<dyn traits::mailbox::MailboxRouterHandle>);
         bctx.budget_enforcer = Some(budget.clone() as Arc<dyn BudgetEnforcerHandle>);
@@ -307,18 +308,140 @@ mod tests {
             .call(input, ctx, fresh_tx())
             .await
             .expect_err("budget gate must trip and surface denial");
-        let msg = format!("{err}");
-        // M3-05 byte-locked: "Budget exceeded ($X.YZ); stopped."
-        assert!(
-            msg.contains(SUBAGENT_BUDGET_DENIED_PREFIX),
-            "denial msg must start with M3-05 byte-locked prefix: {msg}"
-        );
-        assert!(msg.contains("); stopped."));
+        match err {
+            ToolError::InvalidInput(message) => assert_eq!(
+                message,
+                "Budget limit reached ($2.00 spent of the $1.5 maximum). New agents cannot be started. Complete the remaining work directly with your tools, or wrap up with the results you already have."
+            ),
+            other => panic!("expected InvalidInput, got {other}"),
+        }
         // Spawner must NOT have been called.
         assert!(
             spawner.invocations().is_empty(),
             "spawner must not be invoked once budget gate trips"
         );
+        assert_eq!(
+            traits::task_registry::TaskRegistryHandle::get_total_agent_spawns(registry.as_ref()),
+            0,
+            "budget rejection must not consume a lifetime spawn slot"
+        );
+    }
+
+    // =====================================================================
+    // Claude Code 2.1.217 concurrent + nested subagent caps.
+    // =====================================================================
+
+    #[tokio::test]
+    async fn nested_spawn_rejects_at_configured_depth_with_exact_message() {
+        use traits::task_registry::TaskRegistryHandle;
+
+        let spawner = arc_mock_spawner();
+        let registry = arc_mock_task_registry();
+        let bctx = wired_ctx(
+            spawner.clone(),
+            registry.clone(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let tool = AgentTool::new(bctx);
+        let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        let limit = traits::subagent_spawn::max_subagent_spawn_depth();
+        ctx.depth = limit;
+        let err = tool
+            .call(
+                serde_json::json!({
+                    "description": "nested work",
+                    "subagent_type": "general-purpose",
+                    "prompt": "hi"
+                }),
+                ctx,
+                fresh_tx(),
+            )
+            .await
+            .expect_err("spawn at the configured depth must be rejected");
+        match err {
+            ToolError::InvalidInput(message) => {
+                assert_eq!(message, subagent_depth_limit_error(limit, limit));
+            }
+            other => panic!("expected InvalidInput, got {other}"),
+        }
+        assert!(spawner.invocations().is_empty());
+        assert_eq!(registry.get_total_agent_spawns(), 0);
+    }
+
+    #[tokio::test]
+    async fn concurrent_spawn_cap_rejects_before_consuming_session_slot() {
+        use traits::task_registry::TaskRegistryHandle;
+
+        let spawner = arc_mock_spawner();
+        spawner.set_concurrent_subagents(usize::MAX);
+        let registry = arc_mock_task_registry();
+        let bctx = wired_ctx(
+            spawner.clone(),
+            registry.clone(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let tool = AgentTool::new(bctx);
+        let ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        let cap = traits::subagent_spawn::max_concurrent_subagents();
+        let err = tool
+            .call(
+                serde_json::json!({
+                    "description": "parallel work",
+                    "subagent_type": "general-purpose",
+                    "prompt": "hi"
+                }),
+                ctx,
+                fresh_tx(),
+            )
+            .await
+            .expect_err("active count above cap must be rejected");
+        match err {
+            ToolError::InvalidInput(message) => {
+                assert_eq!(message, concurrent_subagent_limit_error(cap));
+            }
+            other => panic!("expected InvalidInput, got {other}"),
+        }
+        assert!(spawner.invocations().is_empty());
+        assert_eq!(registry.get_total_agent_spawns(), 0);
+    }
+
+    #[tokio::test]
+    async fn pool_full_races_roll_back_session_spawn_reservations() {
+        use traits::task_registry::TaskRegistryHandle;
+
+        for run_in_background in [false, true] {
+            let spawner = arc_mock_spawner();
+            spawner.script_pool_full();
+            let registry = arc_mock_task_registry();
+            let bctx = wired_ctx(
+                spawner,
+                registry.clone(),
+                arc_mock_mailbox(),
+                arc_mock_budget(u64::MAX),
+            );
+            let tool = AgentTool::new(bctx);
+            let err = tool
+                .call(
+                    serde_json::json!({
+                        "description": "racing work",
+                        "subagent_type": "general-purpose",
+                        "prompt": "hi",
+                        "run_in_background": run_in_background
+                    }),
+                    fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                    fresh_tx(),
+                )
+                .await
+                .expect_err("pool-full allocation race must be rejected");
+            assert!(matches!(err, ToolError::InvalidInput(_)));
+            assert_eq!(
+                registry.get_total_agent_spawns(),
+                0,
+                "a failed pool allocation must release its lifetime reservation"
+            );
+        }
     }
 
     // =====================================================================

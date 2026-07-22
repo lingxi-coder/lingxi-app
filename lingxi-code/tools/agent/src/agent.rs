@@ -343,6 +343,26 @@ pub fn format_budget_denied(current_nano_usd: u64) -> String {
     format!("Budget exceeded (${dollars:.2}); stopped.")
 }
 
+fn format_nano_usd_compact(nano_usd: u64) -> String {
+    let whole = nano_usd / 1_000_000_000;
+    let fractional = nano_usd % 1_000_000_000;
+    if fractional == 0 {
+        whole.to_string()
+    } else {
+        let fraction = format!("{fractional:09}");
+        format!("{whole}.{}", fraction.trim_end_matches('0'))
+    }
+}
+
+fn budget_limit_reached_error(current_nano_usd: u64, limit_nano_usd: u64) -> String {
+    #[allow(clippy::cast_precision_loss)]
+    let spent = current_nano_usd as f64 / 1_000_000_000.0;
+    let maximum = format_nano_usd_compact(limit_nano_usd);
+    format!(
+        "Budget limit reached (${spent:.2} spent of the ${maximum} maximum). New agents cannot be started. Complete the remaining work directly with your tools, or wrap up with the results you already have."
+    )
+}
+
 /// Extract claude's `content: [{type:'text', text}]` array from a subagent's
 /// terminal result JSON.
 ///
@@ -464,6 +484,18 @@ fn max_subagents_per_session() -> u64 {
     )
 }
 
+fn subagent_depth_limit_error(depth: u32, limit: u32) -> String {
+    format!(
+        "Subagent nesting limit reached (depth {depth} of {limit}). Complete this task directly using your tools instead of spawning another agent. If the user explicitly requested deeper nesting, ask them to raise CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH."
+    )
+}
+
+fn concurrent_subagent_limit_error(limit: usize) -> String {
+    format!(
+        "Concurrent subagent limit reached. You can run {limit} subagents at once. Do not retry. If the user wants more concurrent subagents, ask them to increase CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS."
+    )
+}
+
 /// The parent / main-loop model a spawn's `AgentModel::Inherit` + bare family
 /// aliases resolve against — claude-code `AgentTool.tsx:418`
 /// `getAgentModel(selectedAgent.model, toolUseContext.options.mainLoopModel, …)`.
@@ -488,6 +520,12 @@ fn main_loop_model_parent(ctx: &ToolUseContext) -> Option<String> {
 }
 
 impl AgentTool {
+    fn release_spawn_reservation(&self) {
+        if let Some(registry) = &self.ctx.task_registry {
+            registry.release_total_agent_spawn_reservation();
+        }
+    }
+
     /// Construct.
     #[must_use]
     pub fn new(ctx: BuiltinToolContext) -> Self {
@@ -1062,7 +1100,7 @@ Reach for this when the task matches an available agent type, when you have inde
             additional_disallowed_tools: Vec::new(),
             // Child depth = this agent's depth + 1 (claude `spawnDepth =
             // z6(parentContext) + 1`). The spawner stamps it onto the child's
-            // SubagentContext; the resolver gates the child's `Agent` at depth<5.
+            // SubagentContext; the resolver applies the configured depth cap.
             depth: ctx.depth + 1,
             // Parent / main-loop model for this child's `Inherit` + family aliases
             // (claude `getAgentModel(…, toolUseContext.options.mainLoopModel, …)`,
@@ -1129,6 +1167,19 @@ Reach for this when the task matches an available agent type, when you have inde
                     is_error: false,
                     mcp_meta: None,
                 })
+            }
+            Err(traits::subagent_spawn::SubagentSpawnError::PoolFull) => {
+                self.release_spawn_reservation();
+                Self::emit_failed(
+                    bus,
+                    invocation_id,
+                    "subagent_concurrency_cap",
+                    started.elapsed().as_millis() as u64,
+                )
+                .await;
+                Err(ToolError::InvalidInput(concurrent_subagent_limit_error(
+                    traits::subagent_spawn::max_concurrent_subagents(),
+                )))
             }
             Err(e) => {
                 Self::emit_failed(
@@ -1316,11 +1367,6 @@ impl Tool for AgentTool {
                 )));
             }
         };
-        // Binary `AgentTool.call`: `n=n.replace(/\s+/g," ").trim()` — normalize the
-        // `description` ONCE at entry so every downstream use (the spawn request,
-        // the async-launch payload, the completed `data.description`) carries the
-        // collapsed/trimmed value.
-        parsed.description = normalize_description_ws(&parsed.description);
 
         // `name` zod chain `z.string().regex(uZc).refine(t=>t!==K9)` (binary
         // `exy`). The wire `pattern` (on the advertised `name` property) covers
@@ -1341,6 +1387,30 @@ impl Tool for AgentTool {
                 return Err(ToolError::InvalidInput(msg));
             }
         }
+
+        // Claude Code 2.1.217 defaults the nesting cap to 1: the main thread
+        // (depth 0) may spawn a child, while that child may not spawn another
+        // unless CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH raises the limit.
+        let depth_limit = traits::subagent_spawn::max_subagent_spawn_depth();
+        if ctx.depth >= depth_limit {
+            Self::emit_failed(
+                &bus,
+                &invocation_id,
+                "subagent_depth_cap",
+                started.elapsed().as_millis() as u64,
+            )
+            .await;
+            return Err(ToolError::InvalidInput(subagent_depth_limit_error(
+                ctx.depth,
+                depth_limit,
+            )));
+        }
+
+        // Binary `AgentTool.call`: `n=n.replace(/\s+/g," ").trim()` — normalize the
+        // `description` ONCE at entry so every downstream use (the spawn request,
+        // the async-launch payload, the completed `data.description`) carries the
+        // collapsed/trimmed value.
+        parsed.description = normalize_description_ws(&parsed.description);
 
         // (G7) NO empty-prompt validation: claude-code has no such guard — a
         // `prompt: ""` spawn must succeed (AgentTool.call accepts any prompt).
@@ -1527,6 +1597,49 @@ impl Tool for AgentTool {
             }
         };
 
+        // Claude Code 2.1.217 rejects rather than queues a launch once the
+        // runtime already has the configured number of active subagents. Keep
+        // this before the session-total counter so a rejected concurrent spawn
+        // does not consume one of the 200 lifetime slots.
+        let concurrent_cap = traits::subagent_spawn::max_concurrent_subagents();
+        if spawner.concurrent_subagent_count().await >= concurrent_cap {
+            Self::emit_failed(
+                &bus,
+                &invocation_id,
+                "subagent_concurrency_cap",
+                started.elapsed().as_millis() as u64,
+            )
+            .await;
+            return Err(ToolError::InvalidInput(concurrent_subagent_limit_error(
+                concurrent_cap,
+            )));
+        }
+
+        // Share the main session's max-budget gate with every foreground and
+        // background child. Keep this before the lifetime-spawn counter and MCP
+        // wait, matching Claude's pre-spawn budget boundary.
+        let budget = self.ctx.budget_enforcer.clone().ok_or_else(|| {
+            ToolError::Internal(
+                "AgentTool: BudgetEnforcerHandle not wired into BuiltinToolContext".into(),
+            )
+        })?;
+        if let Err(BudgetError::Exceeded { current_nano_usd }) = budget.check_and_charge(0).await {
+            Self::emit_failed(
+                &bus,
+                &invocation_id,
+                "budget_exceeded",
+                started.elapsed().as_millis() as u64,
+            )
+            .await;
+            return Err(match budget.max_session_nano_usd() {
+                Some(limit_nano_usd) => ToolError::InvalidInput(budget_limit_reached_error(
+                    current_nano_usd,
+                    limit_nano_usd,
+                )),
+                None => ToolError::Internal(format_budget_denied(current_nano_usd)),
+            });
+        }
+
         // Per-session subagent spawn cap (claude 2.1.212 `AgentTool.call` `N()`):
         // before every spawn, reject the launch once the session has already
         // spawned `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION` agents (default 200),
@@ -1535,12 +1648,12 @@ impl Tool for AgentTool {
         // it is shared across every `AgentTool::call` in the session and across
         // the fork / regular / teammate spawn paths. Matches the binary's
         // placement: after type resolution, before the required-MCP gate and the
-        // sync/async dispatch. When no registry is wired (defaulted seam) the cap
-        // is inert.
+        // sync/async dispatch. The Rust seam reserves atomically because tool
+        // calls can execute on parallel tasks; a pool-full allocation race rolls
+        // that reservation back. When no registry is wired the cap is inert.
         if let Some(registry) = &self.ctx.task_registry {
             let cap = max_subagents_per_session();
-            let spawned = registry.get_total_agent_spawns();
-            if spawned >= cap {
+            if let Err(spawned) = registry.try_reserve_total_agent_spawn(cap) {
                 Self::emit_failed(
                     &bus,
                     &invocation_id,
@@ -1554,7 +1667,6 @@ Complete the remaining work directly with your tools instead of spawning more ag
 If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION."
                 )));
             }
-            registry.increment_total_agent_spawns();
         }
 
         // 4. (G3) Required-MCP-servers gate (claude AgentTool.tsx:367-409): if the
@@ -1640,12 +1752,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
             }
         }
 
-        // 5. Wiring guard: budget + registry must be present.
-        let budget = self.ctx.budget_enforcer.clone().ok_or_else(|| {
-            ToolError::Internal(
-                "AgentTool: BudgetEnforcerHandle not wired into BuiltinToolContext".into(),
-            )
-        })?;
+        // 5. The parent registry must be present for recursive dispatch.
         let parent_registry = ctx.subagent_registry.clone().ok_or_else(|| {
             ToolError::Internal(
                 "AgentTool: parent ToolRegistry not threaded via ToolUseContext.subagent_registry"
@@ -1653,20 +1760,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
             )
         })?;
 
-        // 6. M3-05 byte-locked budget gate. `check_and_charge(0)` re-runs the
-        // pre-call gate; on Exceeded we surface the locked denial string.
-        if let Err(BudgetError::Exceeded { current_nano_usd }) = budget.check_and_charge(0).await {
-            Self::emit_failed(
-                &bus,
-                &invocation_id,
-                "budget_exceeded",
-                started.elapsed().as_millis() as u64,
-            )
-            .await;
-            return Err(ToolError::Internal(format_budget_denied(current_nano_usd)));
-        }
-
-        // 7. Emit started (telemetry keys on the EFFECTIVE type, not the raw
+        // 6. Emit started (telemetry keys on the EFFECTIVE type, not the raw
         // optional input).
         Self::emit_started(
             &bus,
@@ -1918,7 +2012,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
             additional_disallowed_tools: Vec::new(),
             // Child depth = this agent's depth + 1 (claude `spawnDepth =
             // z6(parentContext) + 1`). The spawner stamps it onto the child's
-            // SubagentContext; the resolver gates the child's `Agent` at depth<5.
+            // SubagentContext; the resolver applies the configured depth cap.
             depth: ctx.depth + 1,
             // The parent / main-loop model this child's `Inherit` + family aliases
             // resolve against (claude `getAgentModel(selectedAgent.model,
@@ -2124,6 +2218,19 @@ Use /mcp to configure and authenticate the required MCP servers.",
             Ok(SubagentResult::Killed { .. }) => {
                 Self::emit_failed(&bus, &invocation_id, "killed", duration_ms).await;
                 Err(ToolError::Internal("Agent: subagent was killed".into()))
+            }
+            Err(traits::subagent_spawn::SubagentSpawnError::PoolFull) => {
+                self.release_spawn_reservation();
+                Self::emit_failed(
+                    &bus,
+                    &invocation_id,
+                    "subagent_concurrency_cap",
+                    duration_ms,
+                )
+                .await;
+                Err(ToolError::InvalidInput(concurrent_subagent_limit_error(
+                    traits::subagent_spawn::max_concurrent_subagents(),
+                )))
             }
             Err(e) => {
                 Self::emit_failed(&bus, &invocation_id, "spawn_error", duration_ms).await;

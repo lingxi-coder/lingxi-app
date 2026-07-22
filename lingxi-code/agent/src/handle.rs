@@ -679,7 +679,8 @@ impl PoolSubagentSpawner {
         &self,
         agent_def: &AgentDefinition,
         // The resolved subagent's own recursion depth — gates its `Agent` tool
-        // at `depth < 5` (claude `e9t`). Threaded from `request.depth`.
+        // against Claude's configured maximum spawn depth. Threaded from
+        // `request.depth`.
         depth: u32,
     ) -> Result<(Vec<serde_json::Value>, Vec<String>), SubagentSpawnError> {
         let Some(registry) = self.tool_registry.get() else {
@@ -1112,11 +1113,10 @@ impl StreamingSubagentSpawner for PoolSubagentSpawner {
     ) -> Result<(AgentId, tokio::sync::mpsc::Receiver<SubagentEvent>), SubagentSpawnError> {
         let ctx = self.build_subagent_context(&request, inherit, true).await?;
         let agent_id = ctx.agent_id;
-        let (_aid, rx) = self
-            .pool
-            .allocate(ctx)
-            .await
-            .map_err(|e| SubagentSpawnError::Runtime(e.to_string()))?;
+        let (_aid, rx) = self.pool.allocate(ctx).await.map_err(|e| match e {
+            crate::pool::PoolError::TooManyAgents => SubagentSpawnError::PoolFull,
+            other => SubagentSpawnError::Runtime(other.to_string()),
+        })?;
         Ok((agent_id, rx))
     }
 
@@ -1275,11 +1275,10 @@ impl SubagentSpawner for PoolSubagentSpawner {
             .build_subagent_context(&request, inherit, false)
             .await?;
         let agent_id = ctx.agent_id;
-        let (_aid, mut rx) = self
-            .pool
-            .allocate(ctx)
-            .await
-            .map_err(|e| SubagentSpawnError::Runtime(e.to_string()))?;
+        let (_aid, mut rx) = self.pool.allocate(ctx).await.map_err(|e| match e {
+            crate::pool::PoolError::TooManyAgents => SubagentSpawnError::PoolFull,
+            other => SubagentSpawnError::Runtime(other.to_string()),
+        })?;
 
         // Cancel-safety: deallocate the detached runner if THIS future is
         // dropped before reaching a terminal event (disarmed on the normal
@@ -1407,6 +1406,10 @@ impl SubagentSpawner for PoolSubagentSpawner {
         // result.
         let _ = self.pool.deallocate(&agent_id).await;
         Ok(result)
+    }
+
+    async fn concurrent_subagent_count(&self) -> usize {
+        self.pool.slot_count().await
     }
 
     /// Surface the resolved subagent catalog (built-ins + user/project agents)
@@ -2004,9 +2007,9 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_tools_gates_agent_by_depth() {
-        // `Agent` is depth-gated (claude `s < e9t`, e9t=5), not flat-denied: a
-        // depth-0 subagent keeps it; a depth-5 subagent has it stripped. With
-        // ONLY an Agent tool registered, the depth-5 pool is empty.
+        // `Agent` is depth-gated, not flat-denied: a depth-0 caller keeps it;
+        // under Claude 2.1.217's default cap, a depth-1 child has it stripped.
+        // With ONLY an Agent tool registered, the depth-1 pool is empty.
         let mut reg = ToolRegistry::new();
         reg.register_builtin(Arc::new(StubTool {
             name: "Agent",
@@ -2024,7 +2027,7 @@ mod tests {
                 use_exact_tools: false,
             })
         };
-        // depth 0: Agent kept (0 < 5).
+        // depth 0: Agent kept (0 < default 1).
         let (schemas0, allowed0) = spawner
             .resolve_tools(&policy(), 0)
             .await
@@ -2039,14 +2042,14 @@ mod tests {
             allowed0.contains(&"Task".to_string()),
             "alias in allow-list"
         );
-        // depth 5: Agent gated → empty pool.
-        let (schemas5, allowed5) = spawner
-            .resolve_tools(&policy(), 5)
+        // depth 1: Agent gated → empty pool.
+        let (schemas1, allowed1) = spawner
+            .resolve_tools(&policy(), 1)
             .await
-            .expect("depth 5 should resolve");
-        assert!(schemas5.is_empty(), "Agent gated at depth 5 → no schemas");
+            .expect("depth 1 should resolve");
+        assert!(schemas1.is_empty(), "Agent gated at depth 1 → no schemas");
         assert!(
-            allowed5.is_empty(),
+            allowed1.is_empty(),
             "Agent (and alias Task) gated → empty allow-list"
         );
     }

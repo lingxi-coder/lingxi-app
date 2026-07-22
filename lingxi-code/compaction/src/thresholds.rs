@@ -391,6 +391,25 @@ mod tests {
     }
 
     #[test]
+    fn opus_4_8_bedrock_id_uses_the_same_auto_compact_boundary() {
+        // Claude Code 2.1.217 fixed Opus 4.8 Bedrock sessions never reaching
+        // auto-compact. Provider-shaped IDs must canonicalize to the same 1M
+        // window / 64k output tier as the first-party model id.
+        with_clean_env(|| {
+            let first_party = "claude-opus-4-8";
+            let bedrock = "us.anthropic.claude-opus-4-8-v1:0";
+            assert_eq!(
+                effective_context_window_size(bedrock, &[]),
+                effective_context_window_size(first_party, &[])
+            );
+            assert_eq!(
+                auto_compact_threshold(bedrock, &[]),
+                auto_compact_threshold(first_party, &[])
+            );
+        });
+    }
+
+    #[test]
     fn is_auto_compact_enabled_env_gates() {
         with_clean_env(|| {
             assert!(is_auto_compact_enabled(true));

@@ -139,6 +139,24 @@ impl TaskRegistry {
         self.total_agent_spawns.fetch_add(1, Ordering::SeqCst);
     }
 
+    /// Reserve one lifetime spawn atomically, rejecting once `cap` is reached.
+    pub fn try_reserve_total_agent_spawn(&self, cap: u64) -> Result<u64, u64> {
+        self.total_agent_spawns
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                (current < cap).then(|| current + 1)
+            })
+            .map(|previous| previous + 1)
+    }
+
+    /// Roll back a reservation for a launch rejected before pool allocation.
+    pub fn release_total_agent_spawn_reservation(&self) {
+        let _ =
+            self.total_agent_spawns
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                    current.checked_sub(1)
+                });
+    }
+
     /// Current session-wide WebSearch call count — `getWebSearchCalls(){return n}`
     /// (parity 2.1.212).
     #[must_use]

@@ -70,7 +70,7 @@ pub struct SubagentInvocationContext {
     /// The DISPATCHING agent's recursion depth (claude `agentContext.depth`).
     /// The dispatch invoker maps it into `ToolUseContext.depth`, so a recursive
     /// `Agent` call inside the dispatched tool computes the child's depth and the
-    /// subagent tool-resolver can gate `Agent` at `depth < 5`. `0` for the main
+    /// subagent tool-resolver can apply the configured spawn-depth cap. `0` for the main
     /// thread / a top-level dispatch (and every legacy/test call site).
     pub depth: u32,
     /// The DISPATCHING subagent's OWN resolved main-loop model (claude-code

@@ -182,7 +182,7 @@ pub struct SubagentContext {
     /// [`traits::tool_invoker::SubagentInvocationContext::depth`] →
     /// `ToolUseContext.depth`, and the spawner passes it to
     /// [`crate::tool_resolver::AgentToolResolver`] to gate the `Agent` tool at
-    /// `depth < 5` (claude `e9t = 5`).
+    /// `depth < CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` (default 1).
     pub depth: u32,
     /// The child's EFFECTIVE permission-context mode as a WIRE string
     /// (`"plan"`/`"acceptEdits"`/…), computed by [`crate::handle`] from the Agent

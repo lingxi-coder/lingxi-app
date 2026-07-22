@@ -1844,6 +1844,11 @@ impl ChatWidget {
         &self.bottom_pane
     }
 
+    /// Feed the full terminal height into input-adjacent responsive surfaces.
+    pub fn set_terminal_rows(&mut self, rows: u16) {
+        self.bottom_pane.set_terminal_rows(rows);
+    }
+
     /// Whether a turn is currently in flight.
     #[must_use]
     pub fn turn_running(&self) -> bool {

@@ -493,8 +493,9 @@ impl<'cb> RataApp<'cb> {
     ) -> io::Result<()> {
         terminal.begin_sync_update()?;
         let result = (|| {
-            let width = terminal.size()?.width;
-            terminal.set_bottom_viewport_height(self.viewport_height(width))?;
+            let size = terminal.size()?;
+            self.chat_widget.set_terminal_rows(size.height);
+            terminal.set_bottom_viewport_height(self.viewport_height(size.width))?;
             self.flush_scrollback(terminal)?;
             self.draw(terminal)
         })();

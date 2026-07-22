@@ -247,6 +247,9 @@ pub struct BottomPane {
     /// Foreground + background agents currently running, rendered directly
     /// below the composer.
     running_agents: Vec<RunningAgentStatus>,
+    /// Full terminal height supplied by the app before sizing/rendering. Claude
+    /// uses it to hide or cap the inline task list on short terminals.
+    terminal_rows: Option<u16>,
     /// Owner-fed context-pressure banner (`TurnEvent::ContextPressure` — the
     /// claude-code `<TokenWarning>` line). Rendered as its own row between the
     /// status row and the composer; `None` renders nothing.
@@ -294,6 +297,7 @@ impl BottomPane {
             pending_input_preview: PendingInputPreview::new(),
             planned_tasks: Vec::new(),
             running_agents: Vec::new(),
+            terminal_rows: None,
             context_pressure: None,
             theme,
             accent: None,
@@ -688,6 +692,11 @@ impl BottomPane {
     /// reflect the owner's current turn state.
     pub fn set_task_running(&mut self, status: BottomPaneStatus) {
         self.status = status;
+    }
+
+    /// Supply the full terminal row count for Claude-compatible task capping.
+    pub fn set_terminal_rows(&mut self, rows: u16) {
+        self.terminal_rows = Some(rows);
     }
 
     /// Mirror the transcript's verbose mode for the status hint text.
@@ -1385,6 +1394,18 @@ impl BottomPane {
         ))
     }
 
+    fn planned_task_lines(&self) -> Vec<Line<'static>> {
+        if let Some(rows) = self.terminal_rows {
+            input_status::task_lines_with_limit(
+                &self.planned_tasks,
+                &self.theme,
+                input_status::max_visible_tasks(rows),
+            )
+        } else {
+            input_status::task_lines(&self.planned_tasks, &self.theme)
+        }
+    }
+
     /// The pane's vertical zones within `area`: running status, context banner,
     /// queued-input preview, planned tasks, composer, live agents, permission
     /// mode, then the completion/footer slot.
@@ -1396,9 +1417,7 @@ impl BottomPane {
         };
         let mode_row =
             permission_mode_indicator::indicator_height(self.permission_mode, &self.theme);
-        let task_rows =
-            u16::try_from(input_status::task_lines(&self.planned_tasks, &self.theme).len())
-                .unwrap_or(u16::MAX);
+        let task_rows = u16::try_from(self.planned_task_lines().len()).unwrap_or(u16::MAX);
         let agent_rows =
             u16::try_from(input_status::agent_lines(&self.running_agents, &self.theme).len())
                 .unwrap_or(u16::MAX);
@@ -1441,9 +1460,7 @@ impl BottomPane {
             .desired_height(width);
         let preview = self.pending_input_preview.desired_height(width);
         let banner = u16::from(self.context_pressure.is_some());
-        let task_rows =
-            u16::try_from(input_status::task_lines(&self.planned_tasks, &self.theme).len())
-                .unwrap_or(u16::MAX);
+        let task_rows = u16::try_from(self.planned_task_lines().len()).unwrap_or(u16::MAX);
         let agent_rows =
             u16::try_from(input_status::agent_lines(&self.running_agents, &self.theme).len())
                 .unwrap_or(u16::MAX);
@@ -1518,8 +1535,7 @@ impl Renderable for BottomPane {
             Paragraph::new(self.context_pressure_line(banner)).render(zones[1], buf);
         }
         self.pending_input_preview.render(zones[2], buf);
-        Paragraph::new(input_status::task_lines(&self.planned_tasks, &self.theme))
-            .render(zones[3], buf);
+        Paragraph::new(self.planned_task_lines()).render(zones[3], buf);
         ComposerView::new(&self.composer)
             .with_attached_images(&self.attached_image_labels)
             .with_accent(self.accent.map(crate::style_adapter::to_ratatui))
@@ -2411,6 +2427,33 @@ mod tests {
             .expect("agent status");
         assert!(tasks < input, "tasks must be above input: {rows:?}");
         assert!(input < agent, "agents must be below input: {rows:?}");
+    }
+
+    #[test]
+    fn terminal_height_controls_inline_task_rows() {
+        use input_status::{PlanTask, PlanTaskState};
+
+        let mut pane = pane();
+        let base_height = pane.desired_height(80);
+        pane.set_planned_tasks(
+            (0..6)
+                .map(|index| PlanTask {
+                    id: Some(index.to_string()),
+                    subject: format!("Task {index}"),
+                    active_form: None,
+                    state: PlanTaskState::Pending,
+                })
+                .collect(),
+        );
+
+        pane.set_terminal_rows(10);
+        assert_eq!(pane.desired_height(80), base_height);
+        pane.set_terminal_rows(11);
+        assert_eq!(pane.desired_height(80), base_height + 4);
+        pane.set_terminal_rows(18);
+        assert_eq!(pane.desired_height(80), base_height + 5);
+        pane.set_terminal_rows(19);
+        assert_eq!(pane.desired_height(80), base_height + 6);
     }
 
     #[test]

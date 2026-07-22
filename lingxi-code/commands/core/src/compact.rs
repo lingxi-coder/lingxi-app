@@ -81,7 +81,7 @@ impl BuiltinCommandHandler for CompactHandler {
     }
 }
 
-/// Map an orchestrator compaction-failure message onto CC 2.1.211's per-class
+/// Map an orchestrator compaction-failure message onto CC 2.1.217's per-class
 /// user-visible display (binary-verified, shared by the headless `/compact`
 /// handler here and the TUI's off-loop compact closure):
 ///
@@ -96,6 +96,9 @@ impl BuiltinCommandHandler for CompactHandler {
 ///   `Xl("Compaction canceled.")`). Matched on the full sentinel, not a bare
 ///   `cancelled`, so an upstream error that merely CONTAINS the word (e.g.
 ///   `request cancelled by upstream`) is not misreported as a user abort.
+/// - A failed compaction stream surfaces CC's fixed interruption notice:
+///   `Compaction interrupted · This may be due to network issues — please try
+///   again.` (`Oks` in the 2.1.217 binary).
 /// - `Error during compaction: <detail>` (manual-path `tz` errors, `Juy`'s
 ///   catch) surfaces verbatim from that substring on.
 /// - The auto path's `Failed to generate conversation summary…` surfaces
@@ -120,6 +123,10 @@ pub fn compact_failure_display(msg: &str) -> String {
     if msg.contains("compaction cancelled") {
         return "Compaction canceled.".to_string();
     }
+    if msg.contains("Compaction interrupted") {
+        return "Compaction interrupted · This may be due to network issues — please try again."
+            .to_string();
+    }
     if let Some(i) = msg.find("Error during compaction:") {
         return msg[i..].to_string();
     }
@@ -128,6 +135,15 @@ pub fn compact_failure_display(msg: &str) -> String {
             .to_string();
     }
     "Error compacting conversation".to_string()
+}
+
+/// Whether Claude renders a `/compact` failure result at error severity.
+///
+/// Its short-history sentinel is returned as ordinary text; the remaining
+/// failure classes use the error presentation path.
+#[must_use]
+pub fn compact_failure_is_error(msg: &str) -> bool {
+    !msg.contains("Not enough messages to compact.")
 }
 
 #[cfg(test)]
@@ -258,6 +274,10 @@ mod tests {
         );
         // Exact user-abort sentinel → CC's canceled string…
         assert_eq!(f("compaction cancelled"), "Compaction canceled.");
+        assert_eq!(
+            f("Compaction interrupted · This may be due to network issues — please try again."),
+            "Compaction interrupted · This may be due to network issues — please try again."
+        );
         // …but an upstream error merely CONTAINING 'cancelled' is NOT an abort.
         assert_eq!(
             f("compaction failed: request cancelled by upstream"),
@@ -273,6 +293,17 @@ mod tests {
             "Failed to generate conversation summary - response did not contain valid text content"
         );
         assert_eq!(f("anything else"), "Error compacting conversation");
+    }
+
+    #[test]
+    fn short_history_is_the_only_non_error_failure_notice() {
+        assert!(!compact_failure_is_error(
+            "handle action failed: Not enough messages to compact."
+        ));
+        assert!(compact_failure_is_error(
+            "handle action failed: Compaction interrupted · This may be due to network issues — please try again."
+        ));
+        assert!(compact_failure_is_error("handle action failed: model 429"));
     }
 
     #[tokio::test]

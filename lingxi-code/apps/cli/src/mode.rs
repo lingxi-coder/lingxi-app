@@ -662,14 +662,17 @@ pub(crate) async fn run_ratatui_with_initial_prompt(
                 .await
             {
                 Ok(_summary) => ("Compacted (ctrl+o to see full summary)".to_string(), false),
-                // The per-class CC 2.1.211 failure display (hook reason
+                // The per-class CC 2.1.217 failure display (hook reason
                 // verbatim, exact cancel sentinel → `Compaction canceled.`,
                 // `Error during compaction: …` passthrough) — shared with the
                 // headless `/compact` handler.
-                Err(e) => (
-                    command_core::compact::compact_failure_display(&e.to_string()),
-                    true,
-                ),
+                Err(e) => {
+                    let raw = e.to_string();
+                    (
+                        command_core::compact::compact_failure_display(&raw),
+                        command_core::compact::compact_failure_is_error(&raw),
+                    )
+                }
             };
             // Clear the spinner/bar first, then land the terminal line.
             let _ = tx.send(tui_core::orchestrator_bridge::TurnEvent::CompactEnded);

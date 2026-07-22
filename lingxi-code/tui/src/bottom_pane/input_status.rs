@@ -12,6 +12,17 @@ use tui_core::theme::Theme;
 /// Maximum task rows shown before a compact overflow line.
 const MAX_VISIBLE_TASKS: usize = 5;
 
+/// Claude's terminal-height-dependent task-list cap (`rows <= 10 ? 0 :
+/// min(5, max(3, rows - 14))`). Tiny terminals hide the list completely;
+/// normal terminals show three to five task rows.
+#[must_use]
+pub fn max_visible_tasks(terminal_rows: u16) -> usize {
+    if terminal_rows <= 10 {
+        return 0;
+    }
+    usize::from(terminal_rows.saturating_sub(14).clamp(3, 5))
+}
+
 /// Presentation state for one item in the model-managed working plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlanTaskState {
@@ -79,17 +90,27 @@ fn task_row(task: &PlanTask, theme: &Theme) -> Line<'static> {
 /// Render the bounded plan block shown immediately above the composer.
 #[must_use]
 pub fn task_lines(tasks: &[PlanTask], theme: &Theme) -> Vec<Line<'static>> {
-    if tasks.is_empty() {
+    task_lines_with_limit(tasks, theme, MAX_VISIBLE_TASKS)
+}
+
+/// Render the plan block with the caller-supplied Claude task-row cap.
+#[must_use]
+pub fn task_lines_with_limit(
+    tasks: &[PlanTask],
+    theme: &Theme,
+    max_visible: usize,
+) -> Vec<Line<'static>> {
+    if tasks.is_empty() || max_visible == 0 {
         return Vec::new();
     }
     let dim = crate::style_adapter::to_ratatui(theme.dim);
     let mut lines = tasks
         .iter()
-        .take(MAX_VISIBLE_TASKS)
+        .take(max_visible)
         .map(|task| task_row(task, theme))
         .collect::<Vec<_>>();
-    if tasks.len() > MAX_VISIBLE_TASKS {
-        let hidden = &tasks[MAX_VISIBLE_TASKS..];
+    if tasks.len() > max_visible {
+        let hidden = &tasks[max_visible..];
         let mut counts = Vec::new();
         let in_progress = hidden
             .iter()
@@ -208,10 +229,20 @@ mod tests {
                 state: PlanTaskState::Pending,
             },
         ];
-        let lines = plain(&task_lines(&tasks, &Theme::dark()));
+        let rendered = task_lines(&tasks, &Theme::dark());
+        let lines = plain(&rendered);
         assert_eq!(lines[0], "  ✔ Inspect layout");
         assert_eq!(lines[1], "  ◼ Implement status");
         assert_eq!(lines[2], "  ◻ Build CLI");
+        assert!(rendered[0].spans[2]
+            .style
+            .add_modifier
+            .contains(Modifier::CROSSED_OUT));
+        assert!(rendered[1].spans[2]
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD));
+        assert!(rendered[2].spans[2].style.add_modifier.is_empty());
     }
 
     #[test]
@@ -231,6 +262,24 @@ mod tests {
         let lines = plain(&task_lines(&tasks, &Theme::dark()));
         assert_eq!(lines.len(), MAX_VISIBLE_TASKS + 1);
         assert_eq!(lines.last().unwrap(), "  … +1 in progress, 1 pending");
+    }
+
+    #[test]
+    fn task_cap_tracks_claude_terminal_height_thresholds() {
+        assert_eq!(max_visible_tasks(10), 0);
+        assert_eq!(max_visible_tasks(11), 3);
+        assert_eq!(max_visible_tasks(17), 3);
+        assert_eq!(max_visible_tasks(18), 4);
+        assert_eq!(max_visible_tasks(19), 5);
+        assert_eq!(max_visible_tasks(80), 5);
+
+        let task = PlanTask {
+            id: None,
+            subject: "Hidden on tiny terminals".into(),
+            active_form: None,
+            state: PlanTaskState::Pending,
+        };
+        assert!(task_lines_with_limit(&[task], &Theme::dark(), 0).is_empty());
     }
 
     #[test]

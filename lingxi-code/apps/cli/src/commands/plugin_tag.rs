@@ -53,7 +53,18 @@ pub fn run_tag(
     remote: &str,
 ) -> Result<String, String> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    run_tag_from_cwd(&cwd, path, dry_run, force, message, push, remote)
+}
 
+fn run_tag_from_cwd(
+    cwd: &Path,
+    path: Option<&str>,
+    dry_run: bool,
+    force: bool,
+    message: Option<&str>,
+    push: bool,
+    remote: &str,
+) -> Result<String, String> {
     // Resolve the plugin root (absolute, canonicalized when it exists so paths
     // match the oracle's `/private/...` realpaths).
     let arg = path.unwrap_or(".");
@@ -66,7 +77,7 @@ pub fn run_tag(
 
     let plugin_json = plugin_root.join(PLUGIN_MANIFEST_DIR).join("plugin.json");
     let abs_json = plugin_json.display().to_string();
-    let rel_json = display_path(&path_relative(&cwd, &plugin_json));
+    let rel_json = display_path(&path_relative(cwd, &plugin_json));
 
     if !plugin_json.exists() {
         return Err(format!("✘ No plugin manifest found. Expected {abs_json}."));
@@ -173,7 +184,7 @@ pub fn run_tag(
     let tag = format!("{name}--v{version}");
 
     // --- (7) enclosing marketplace cross-check (best-effort filesystem walk) ---
-    let market = find_enclosing_marketplace(&plugin_root, name, &cwd);
+    let market = find_enclosing_marketplace(&plugin_root, name, cwd);
     if let Some(entry) = &market {
         if let Some(ev) = &entry.version {
             if ev.as_str() != version {
@@ -645,30 +656,12 @@ mod tests {
             .success()
     }
 
-    // Run with cwd set to the plugin root, restoring it afterwards (the module
-    // resolves default `path` and relative displays against the process cwd).
-    // The process cwd is global, so serialize these tests with a mutex to avoid
-    // parallel test threads clobbering each other's cwd (poison-tolerant).
-    fn with_cwd<T>(dir: &Path, f: impl FnOnce() -> T) -> T {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let prev = std::env::current_dir().unwrap();
-        std::env::set_current_dir(dir).unwrap();
-        let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-        std::env::set_current_dir(prev).unwrap();
-        out.unwrap_or_else(|e| std::panic::resume_unwind(e))
-    }
-
     #[test]
     fn creates_annotated_tag_with_push_hint() {
         let r = repo_with(
             r#"{ "name":"myplug","version":"1.2.3","description":"d","author":{"name":"x"} }"#,
         );
-        let out = with_cwd(&r.root, || {
-            run_tag(None, false, false, None, false, "origin").unwrap()
-        });
+        let out = run_tag_from_cwd(&r.root, None, false, false, None, false, "origin").unwrap();
         assert!(out.contains("Plugin:  myplug"), "{out}");
         assert!(out.contains("Version: 1.2.3 (from plugin.json)"), "{out}");
         assert!(out.contains("Tag:     myplug--v1.2.3"), "{out}");
@@ -718,9 +711,7 @@ mod tests {
         let r = repo_with(
             r#"{ "name":"p","version":"1.2.3","description":"d","author":{"name":"x"} }"#,
         );
-        let out = with_cwd(&r.root, || {
-            run_tag(None, true, false, None, false, "origin").unwrap()
-        });
+        let out = run_tag_from_cwd(&r.root, None, true, false, None, false, "origin").unwrap();
         assert!(
             out.contains("✔ Dry run — would create tag p--v1.2.3 at HEAD in "),
             "{out}"
@@ -750,9 +741,7 @@ mod tests {
         let r = repo_with(
             r#"{ "name":"p","version":"1.2.3","description":"d","author":{"name":"x"} }"#,
         );
-        let out = with_cwd(&r.root, || {
-            run_tag(None, true, true, None, true, "upstream").unwrap()
-        });
+        let out = run_tag_from_cwd(&r.root, None, true, true, None, true, "upstream").unwrap();
         assert!(
             out.contains(&format!(
                 "  git -C {} tag -f -a p--v1.2.3 -m \"p 1.2.3\"",
@@ -774,17 +763,16 @@ mod tests {
         let r = repo_with(
             r#"{ "name":"p","version":"1.2.3","description":"d","author":{"name":"x"} }"#,
         );
-        with_cwd(&r.root, || {
-            run_tag(
-                None,
-                false,
-                false,
-                Some("Release %s of plugin"),
-                false,
-                "origin",
-            )
-            .unwrap()
-        });
+        run_tag_from_cwd(
+            &r.root,
+            None,
+            false,
+            false,
+            Some("Release %s of plugin"),
+            false,
+            "origin",
+        )
+        .unwrap();
         let ann = Command::new("git")
             .arg("-C")
             .arg(&r.root)
@@ -803,15 +791,13 @@ mod tests {
         let r = repo_with(
             r#"{ "name":"p","version":"1.2.3","description":"d","author":{"name":"x"} }"#,
         );
-        with_cwd(&r.root, || {
-            run_tag(None, false, false, None, false, "origin").unwrap();
-            let err = run_tag(None, false, false, None, false, "origin").unwrap_err();
-            assert_eq!(
-                err,
-                "✘ Tag \"p--v1.2.3\" already exists locally. Bump the version in plugin.json, or \
-                 re-run with --force to move the tag."
-            );
-        });
+        run_tag_from_cwd(&r.root, None, false, false, None, false, "origin").unwrap();
+        let err = run_tag_from_cwd(&r.root, None, false, false, None, false, "origin").unwrap_err();
+        assert_eq!(
+            err,
+            "✘ Tag \"p--v1.2.3\" already exists locally. Bump the version in plugin.json, or \
+             re-run with --force to move the tag."
+        );
     }
 
     #[test]
@@ -819,15 +805,13 @@ mod tests {
         let r = repo_with(
             r#"{ "name":"p","version":"1.2.3","description":"d","author":{"name":"x"} }"#,
         );
-        with_cwd(&r.root, || {
-            run_tag(None, false, false, None, false, "origin").unwrap();
-            let out = run_tag(None, false, true, None, false, "origin").unwrap();
-            assert!(out.contains("✔ Created tag p--v1.2.3"), "{out}");
-            assert!(
-                out.contains("push --force origin refs/tags/p--v1.2.3"),
-                "{out}"
-            );
-        });
+        run_tag_from_cwd(&r.root, None, false, false, None, false, "origin").unwrap();
+        let out = run_tag_from_cwd(&r.root, None, false, true, None, false, "origin").unwrap();
+        assert!(out.contains("✔ Created tag p--v1.2.3"), "{out}");
+        assert!(
+            out.contains("push --force origin refs/tags/p--v1.2.3"),
+            "{out}"
+        );
     }
 
     #[test]
@@ -848,9 +832,16 @@ mod tests {
 
         // dirty only outside → succeeds
         std::fs::write(root.join("other").join("dirty.txt"), "x").unwrap();
-        let out = with_cwd(&root, || {
-            run_tag(Some("plugins/myplug"), false, false, None, false, "origin").unwrap()
-        });
+        let out = run_tag_from_cwd(
+            &root,
+            Some("plugins/myplug"),
+            false,
+            false,
+            None,
+            false,
+            "origin",
+        )
+        .unwrap();
         assert!(out.contains("✔ Created tag myplug--v1.2.3"), "{out}");
         Command::new("git")
             .arg("-C")
@@ -861,9 +852,16 @@ mod tests {
 
         // dirty inside → blocks, listing the repo-relative path
         std::fs::write(plug.join("inside.txt"), "x").unwrap();
-        let err = with_cwd(&root, || {
-            run_tag(Some("plugins/myplug"), false, false, None, false, "origin").unwrap_err()
-        });
+        let err = run_tag_from_cwd(
+            &root,
+            Some("plugins/myplug"),
+            false,
+            false,
+            None,
+            false,
+            "origin",
+        )
+        .unwrap_err();
         assert!(
             err.starts_with(
                 "✘ Uncommitted changes affecting this release — commit them first so the tag \
@@ -882,9 +880,7 @@ mod tests {
         for i in 1..=15 {
             std::fs::write(r.root.join(format!("f{i}.txt")), "x").unwrap();
         }
-        let err = with_cwd(&r.root, || {
-            run_tag(None, false, false, None, false, "origin").unwrap_err()
-        });
+        let err = run_tag_from_cwd(&r.root, None, false, false, None, false, "origin").unwrap_err();
         assert!(err.contains("\n  …and 10 more"), "{err}");
         // Only 5 file lines before the "…and N more".
         let listed = err.matches("\n  f").count();
@@ -894,9 +890,7 @@ mod tests {
     #[test]
     fn no_version_warns_and_errors() {
         let r = repo_with(r#"{ "name":"p" }"#);
-        let err = with_cwd(&r.root, || {
-            run_tag(None, false, false, None, false, "origin").unwrap_err()
-        });
+        let err = run_tag_from_cwd(&r.root, None, false, false, None, false, "origin").unwrap_err();
         assert!(
             err.contains(".lingxi-plugin/plugin.json: No version specified."),
             "{err}"
@@ -915,9 +909,7 @@ mod tests {
     fn invalid_semver_errors() {
         let r =
             repo_with(r#"{ "name":"p","version":"nope","description":"d","author":{"name":"x"} }"#);
-        let err = with_cwd(&r.root, || {
-            run_tag(None, false, false, None, false, "origin").unwrap_err()
-        });
+        let err = run_tag_from_cwd(&r.root, None, false, false, None, false, "origin").unwrap_err();
         assert!(
             err.contains(
                 "✘ Version \"nope\" is not valid semver. Dependency resolution (resolveVersionRange) \
@@ -931,9 +923,7 @@ mod tests {
     #[test]
     fn name_type_validation_short_circuits() {
         let r = repo_with(r#"{ "name": 5, "version":"1.0.0" }"#);
-        let err = with_cwd(&r.root, || {
-            run_tag(None, false, false, None, false, "origin").unwrap_err()
-        });
+        let err = run_tag_from_cwd(&r.root, None, false, false, None, false, "origin").unwrap_err();
         assert!(err.starts_with("✘ Plugin validation failed for "), "{err}");
         assert!(
             err.ends_with(":\n  name: Invalid input: expected string, received number"),
@@ -946,9 +936,7 @@ mod tests {
     #[test]
     fn empty_name_errors() {
         let r = repo_with(r#"{ "name": "", "version":"1.0.0" }"#);
-        let err = with_cwd(&r.root, || {
-            run_tag(None, false, false, None, false, "origin").unwrap_err()
-        });
+        let err = run_tag_from_cwd(&r.root, None, false, false, None, false, "origin").unwrap_err();
         assert!(
             err.ends_with(":\n  name: Plugin name cannot be empty"),
             "{err}"
@@ -958,9 +946,7 @@ mod tests {
     #[test]
     fn space_name_errors() {
         let r = repo_with(r#"{ "name": "my plug", "version":"1.0.0" }"#);
-        let err = with_cwd(&r.root, || {
-            run_tag(None, false, false, None, false, "origin").unwrap_err()
-        });
+        let err = run_tag_from_cwd(&r.root, None, false, false, None, false, "origin").unwrap_err();
         assert!(
             err.ends_with(
                 ":\n  name: Plugin name cannot contain spaces. Use kebab-case (e.g., \"my-plugin\")"
@@ -979,9 +965,7 @@ mod tests {
             r#"{ "name":"p","version":"1.2.3","description":"d","author":{"name":"x"} }"#,
         )
         .unwrap();
-        let err = with_cwd(&root, || {
-            run_tag(None, false, false, None, false, "origin").unwrap_err()
-        });
+        let err = run_tag_from_cwd(&root, None, false, false, None, false, "origin").unwrap_err();
         assert!(
             err.contains(&format!(
                 "✘ {} is not inside a git repository. Dependency tags are resolved via git \
@@ -1012,9 +996,16 @@ mod tests {
         .unwrap();
         git_init(&root);
         commit(&root, "init");
-        let err = with_cwd(&root, || {
-            run_tag(Some("plugins/myplug"), false, false, None, false, "origin").unwrap_err()
-        });
+        let err = run_tag_from_cwd(
+            &root,
+            Some("plugins/myplug"),
+            false,
+            false,
+            None,
+            false,
+            "origin",
+        )
+        .unwrap_err();
         assert!(
             err.contains(
                 "✘ Version mismatch: plugin.json says \"1.2.3\" but \
@@ -1045,9 +1036,16 @@ mod tests {
         .unwrap();
         git_init(&root);
         commit(&root, "init");
-        let out = with_cwd(&root, || {
-            run_tag(Some("plugins/myplug"), true, false, None, false, "origin").unwrap()
-        });
+        let out = run_tag_from_cwd(
+            &root,
+            Some("plugins/myplug"),
+            true,
+            false,
+            None,
+            false,
+            "origin",
+        )
+        .unwrap();
         assert!(
             out.contains(&format!(
                 "Marketplace entry: plugins[0] in {}/marketplace.json (version: 1.2.3)",
@@ -1091,9 +1089,7 @@ mod tests {
             .arg(&bare)
             .output()
             .unwrap();
-        let out = with_cwd(&r.root, || {
-            run_tag(None, false, false, None, true, "origin").unwrap()
-        });
+        let out = run_tag_from_cwd(&r.root, None, false, false, None, true, "origin").unwrap();
         assert!(out.contains("✔ Created tag p--v1.2.3"), "{out}");
         assert!(out.contains("✔ Pushed to origin"), "{out}");
         // Remote actually has the tag.
@@ -1111,9 +1107,7 @@ mod tests {
         let r = repo_with(
             r#"{ "name":"p","version":"1.2.3","description":"d","author":{"name":"x"} }"#,
         );
-        let err = with_cwd(&r.root, || {
-            run_tag(None, false, false, None, true, "origin").unwrap_err()
-        });
+        let err = run_tag_from_cwd(&r.root, None, false, false, None, true, "origin").unwrap_err();
         assert!(
             err.contains("✘ Tag created locally but push failed (exit "),
             "{err}"

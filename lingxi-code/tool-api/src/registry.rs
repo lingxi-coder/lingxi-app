@@ -22,7 +22,7 @@ use crate::tool_search_view::{SharedToolSearchView, ToolSearchEntry};
 use crate::tool_trait::{Tool, ToolStaticContext};
 use crate::wire::locale_cmp;
 use protocol::{McpConnectionId, PluginId};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 /// Registry of all [`Tool`] instances available to the dispatcher.
 ///
@@ -33,7 +33,11 @@ use std::sync::Arc;
 /// dedup/sort that produces the wire order is applied in [`Self::available_tools`].
 pub struct ToolRegistry {
     builtin: Vec<Arc<dyn Tool>>,
-    mcp_tools: Vec<(McpConnectionId, Vec<Arc<dyn Tool>>)>,
+    // MCP servers may send `notifications/tools/list_changed` after startup.
+    // Keep only this dynamic partition behind an interior lock so the shared
+    // `Arc<ToolRegistry>` can replace one server's tools without rebuilding the
+    // immutable builtin/LSP/plugin partitions.
+    mcp_tools: RwLock<Vec<(McpConnectionId, Vec<Arc<dyn Tool>>)>>,
     lsp_tools: Vec<Arc<dyn Tool>>,
     plugin_tools: Vec<(PluginId, Vec<Arc<dyn Tool>>)>,
     /// Shared Tool Search deferral state (mode + loaded-set). Disabled by
@@ -53,7 +57,7 @@ impl ToolRegistry {
     pub fn new() -> Self {
         Self {
             builtin: Vec::new(),
-            mcp_tools: Vec::new(),
+            mcp_tools: RwLock::new(Vec::new()),
             lsp_tools: Vec::new(),
             plugin_tools: Vec::new(),
             deferral: Arc::new(DeferralState::disabled()),
@@ -81,25 +85,61 @@ impl ToolRegistry {
         self.tool_search_view.clone()
     }
 
-    /// Recompute the searchable view from the registry's DEFERRED tool set and
+    /// Recompute the searchable view from the registry's deferred-candidate set and
     /// publish it to the shared cell. Call once after the registry (including MCP
     /// tools) is fully assembled. When the deferral state is disabled the
     /// deferred set is empty, so the view is emptied — the correct behavior for a
     /// non-tool-search session.
     ///
-    /// The entry `description` is left empty (the tool's long-form prompt is
-    /// async); `ToolSearch`'s select / exact-name / `mcp__` prefix paths need
-    /// only the name, and keyword scoring still ranks on name-parts + searchHint.
+    /// The entry `description` is left empty here because the tool prompt is
+    /// async. Request assembly calls [`Self::refresh_tool_search_view_from_wire`]
+    /// after serialization to publish the actual descriptions.
     pub fn refresh_tool_search_view(&self) {
         let ctx = ToolStaticContext::default();
         let entries: Vec<ToolSearchEntry> = self
             .available_tools(&ctx)
             .iter()
-            .filter(|t| self.deferral.should_defer_tool(t.as_ref()))
+            .filter(|t| {
+                self.deferral.wants_defer(t.name(), t.should_defer()) && self.deferral.is_enabled()
+            })
             .map(|t| ToolSearchEntry {
                 name: t.name().to_string(),
                 description: String::new(),
                 search_hint: t.search_hint().map(str::to_string),
+            })
+            .collect();
+        self.tool_search_view.set_entries(entries);
+    }
+
+    /// Refresh the deferred search view and fill descriptions from the complete
+    /// pre-filter wire schema list. This keeps ToolSearch keyword scoring on the
+    /// same long-form descriptions the model would receive after discovery.
+    pub fn refresh_tool_search_view_from_wire(&self, wire: &[serde_json::Value]) {
+        let descriptions: std::collections::HashMap<&str, &str> = wire
+            .iter()
+            .filter_map(|entry| {
+                Some((
+                    entry.get("name")?.as_str()?,
+                    entry.get("description")?.as_str()?,
+                ))
+            })
+            .collect();
+        let ctx = ToolStaticContext::default();
+        let entries = self
+            .available_tools(&ctx)
+            .iter()
+            .filter(|tool| {
+                self.deferral.is_enabled()
+                    && self.deferral.wants_defer(tool.name(), tool.should_defer())
+            })
+            .map(|tool| ToolSearchEntry {
+                name: tool.name().to_string(),
+                description: descriptions
+                    .get(tool.name())
+                    .copied()
+                    .unwrap_or_default()
+                    .to_string(),
+                search_hint: tool.search_hint().map(str::to_string),
             })
             .collect();
         self.tool_search_view.set_entries(entries);
@@ -135,7 +175,11 @@ impl ToolRegistry {
 
         // Dynamic partition: MCP + LSP + plugin, locale-sorted by name.
         let mut dynamic: Vec<Arc<dyn Tool>> = Vec::new();
-        for (_id, ts) in &self.mcp_tools {
+        let mcp_tools = self
+            .mcp_tools
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (_id, ts) in mcp_tools.iter() {
             dynamic.extend(ts.iter().cloned());
         }
         dynamic.extend(self.lsp_tools.iter().cloned());
@@ -161,10 +205,28 @@ impl ToolRegistry {
     /// matching tool in iteration order (builtin first).
     #[must_use]
     pub fn find_by_name(&self, name: &str) -> Option<Arc<dyn Tool>> {
-        self.builtin
+        if let Some(tool) = self
+            .builtin
             .iter()
-            .chain(self.mcp_tools.iter().flat_map(|(_id, ts)| ts.iter()))
-            .chain(self.lsp_tools.iter())
+            .find(|t| t.name() == name || t.aliases().contains(&name))
+        {
+            return Some(tool.clone());
+        }
+        {
+            let mcp_tools = self
+                .mcp_tools
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(tool) = mcp_tools
+                .iter()
+                .flat_map(|(_id, tools)| tools.iter())
+                .find(|t| t.name() == name || t.aliases().contains(&name))
+            {
+                return Some(tool.clone());
+            }
+        }
+        self.lsp_tools
+            .iter()
             .chain(self.plugin_tools.iter().flat_map(|(_id, ts)| ts.iter()))
             .find(|t| t.name() == name || t.aliases().contains(&name))
             .cloned()
@@ -174,17 +236,24 @@ impl ToolRegistry {
     /// connection id was already registered, its tool set is replaced in place
     /// (preserving its insertion position), matching the prior `HashMap::insert`
     /// upsert semantics.
-    pub fn register_mcp_tools(&mut self, conn_id: McpConnectionId, tools: Vec<Arc<dyn Tool>>) {
-        if let Some(entry) = self.mcp_tools.iter_mut().find(|(id, _)| *id == conn_id) {
+    pub fn register_mcp_tools(&self, conn_id: McpConnectionId, tools: Vec<Arc<dyn Tool>>) {
+        let mut mcp_tools = self
+            .mcp_tools
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(entry) = mcp_tools.iter_mut().find(|(id, _)| *id == conn_id) {
             entry.1 = tools;
         } else {
-            self.mcp_tools.push((conn_id, tools));
+            mcp_tools.push((conn_id, tools));
         }
     }
 
     /// Drop every tool sourced from the given MCP connection.
-    pub fn unregister_mcp_tools(&mut self, conn_id: McpConnectionId) {
-        self.mcp_tools.retain(|(id, _)| *id != conn_id);
+    pub fn unregister_mcp_tools(&self, conn_id: McpConnectionId) {
+        self.mcp_tools
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|(id, _)| *id != conn_id);
     }
 
     /// Register all tools exposed by a freshly-loaded plugin. Re-registering an
@@ -217,13 +286,27 @@ impl ToolRegistry {
     /// order; the assembler re-sorts alphabetically for byte stability.
     #[must_use]
     pub fn all_names(&self) -> Vec<String> {
-        self.builtin
+        let mut names = self
+            .builtin
             .iter()
-            .chain(self.mcp_tools.iter().flat_map(|(_id, ts)| ts.iter()))
-            .chain(self.lsp_tools.iter())
-            .chain(self.plugin_tools.iter().flat_map(|(_id, ts)| ts.iter()))
             .map(|t| t.name().to_string())
-            .collect()
+            .collect::<Vec<_>>();
+        names.extend(
+            self.mcp_tools
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .flat_map(|(_id, tools)| tools.iter())
+                .map(|t| t.name().to_string()),
+        );
+        names.extend(self.lsp_tools.iter().map(|t| t.name().to_string()));
+        names.extend(
+            self.plugin_tools
+                .iter()
+                .flat_map(|(_id, tools)| tools.iter())
+                .map(|t| t.name().to_string()),
+        );
+        names
     }
 }
 
@@ -606,9 +689,10 @@ mod tests {
         assert_eq!(names, vec!["mcp__srv__do".to_string()]);
     }
 
-    /// A tool loaded via `ToolSearch` drops out of the deferred view on refresh.
+    /// A tool loaded via `ToolSearch` remains searchable; Claude Code allows an
+    /// already-discovered schema to be selected again.
     #[test]
-    fn tool_search_view_excludes_loaded_tool() {
+    fn tool_search_view_keeps_loaded_tool() {
         let mut r = ToolRegistry::new();
         r.register_builtin(Arc::new(DeferNamedTool {
             name: "Task",
@@ -625,13 +709,14 @@ mod tests {
         // Simulate a ToolSearch load, then refresh again.
         defer.mark_loaded(["Task".to_string()]);
         r.refresh_tool_search_view();
-        assert!(r.tool_search_view().is_empty());
+        assert_eq!(r.tool_search_view().len(), 1);
     }
 
-    /// Re-registering an MCP connection upserts in place; unregister drops it.
+    /// Re-registering through the shared registry upserts in place; unregister
+    /// drops it. This is the runtime `tools/list_changed` mutation path.
     #[test]
-    fn mcp_register_is_order_preserving_upsert() {
-        let mut r = ToolRegistry::new();
+    fn shared_mcp_register_is_order_preserving_upsert() {
+        let r = Arc::new(ToolRegistry::new());
         let conn = McpConnectionId::new();
         r.register_mcp_tools(conn, vec![Arc::new(NamedTool("mcp__x")) as Arc<dyn Tool>]);
         assert!(r.find_by_name("mcp__x").is_some());

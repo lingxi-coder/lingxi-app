@@ -619,6 +619,10 @@ pub struct ToolDeclaration {
     /// unchanged until a tool opts in.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub strict: bool,
+    /// Anthropic dynamic-tool-loading marker. Only discovered deferred tools
+    /// carry this; unsupported codecs ignore it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub defer_loading: bool,
 }
 
 /// Tool-choice policy.

@@ -117,6 +117,26 @@ test('error event records lastError, appends a strong line, and stops running', 
   assert.equal(last.strong, true);
 });
 
+test('system_notice remains non-terminal while surfacing its severity', () => {
+  let s = reduceEvent(emptyConversation(), { type: 'turn_started' });
+  s = reduceEvent(s, {
+    type: 'system_notice',
+    message: 'Conversation changes could not be saved.',
+    is_error: true,
+  });
+  assert.equal(s.running, true);
+  assert.equal(s.lastError, 'Conversation changes could not be saved.');
+  assert.equal((s.items.at(-1) as Narration).strong, true);
+
+  s = reduceEvent(s, {
+    type: 'system_notice',
+    message: 'Recovered persisted state.',
+    is_error: false,
+  });
+  assert.equal(s.running, true);
+  assert.equal((s.items.at(-1) as Narration).text, 'Recovered persisted state.');
+});
+
 test('failing tool_use_result surfaces an error line', () => {
   let s = emptyConversation();
   s = reduceEvent(s, { type: 'tool_use_started', id: 't', tool: 'Bash', input_json: '{"command":"x"}' });

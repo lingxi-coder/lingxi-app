@@ -24,10 +24,10 @@
 //! # Platform
 //!
 //! The Linux and macOS `wrap_with_sandbox` branches are wired (bwrap and
-//! Seatbelt `sandbox-exec` respectively). Windows returns a shell string and is
-//! a documented P9 seam — callers must use the argv path instead (see
-//! [`SandboxManager::wrap_with_sandbox`]). Proxy/CA initialization and the
-//! filter run on every platform; the `socat` bridge is Linux-only.
+//! Seatbelt `sandbox-exec` respectively). Windows deliberately uses the
+//! structured [`SandboxManager::wrap_with_sandbox_argv`] path so command bytes
+//! are never reparsed by a host shell. Proxy/CA initialization and the filter
+//! run on every platform; the `socat` bridge is Linux-only.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -54,6 +54,10 @@ use crate::path_utils::{
 };
 use crate::socks_proxy::{serve_socks, SocksOptions};
 use crate::violation_store::SandboxViolationStore;
+use crate::windows::{
+    check_windows_dependencies, get_srt_win_path, wrap_command_with_sandbox_windows,
+    WindowsGroupRef, WindowsInvocation, WindowsWrapParams,
+};
 
 /// The host OS the manager is running on. Mirrors the TS `getPlatform()` (the
 /// Rust [`Platform`] enum only carries the two variants the proxy-env generator
@@ -88,6 +92,15 @@ fn resolve_tmpdir() -> String {
     std::env::var("LINGXI_TMPDIR")
         .or_else(|_| std::env::var("LINGXI_TMPDIR"))
         .unwrap_or_else(|_| "/tmp/claude".to_string())
+}
+
+/// Build-time workspace/package root used as the fallback search base for the
+/// vendored `srt-win.exe`. `SRT_WIN_PATH` remains the first-priority runtime
+/// override, so packaged installations can place the helper anywhere.
+fn windows_repo_root() -> &'static std::path::Path {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
 }
 
 /// The live network infrastructure produced by [`SandboxManager::initialize`]
@@ -138,8 +151,8 @@ pub enum ManagerError {
     DependenciesMissing(String),
     /// An I/O failure (proxy bind, bridge spawn, or the bwrap wrap).
     Io(String),
-    /// `wrap_with_sandbox` was called on an unsupported platform branch
-    /// (macOS/Windows — the P9 seams) or before [`SandboxManager::initialize`].
+    /// A platform-inappropriate wrapping API was used, the platform is not
+    /// supported, or wrapping was requested before initialization.
     Unsupported(String),
 }
 
@@ -236,10 +249,9 @@ impl SandboxManager {
     /// [`check_linux_dependencies`] (reading `bwrapPath`/`socatPath`/`seccomp`
     /// from the active config); macOS needs no external dependencies (Seatbelt
     /// is built in) and returns no errors — matching the TS, which only runs the
-    /// Linux/Windows branches and returns an empty result on macOS. Windows'
-    /// dependency check (group + WFP) is part of the tracked Windows admin gap,
-    /// so it currently reports the platform as unsupported. Truly unsupported
-    /// platforms also report `Unsupported platform`.
+    /// Linux/Windows branches and returns an empty result on macOS. Windows
+    /// checks the discriminator group and WFP filter state through `srt-win`.
+    /// Truly unsupported platforms report `Unsupported platform`.
     #[must_use]
     pub fn check_dependencies(&self) -> LinuxDependencyCheck {
         match host_os() {
@@ -258,9 +270,27 @@ impl SandboxManager {
                 errors: vec![],
                 warnings: vec![],
             },
-            // Windows dep check (group/WFP status) is the tracked admin gap;
-            // `Other` is genuinely unsupported.
-            HostOs::Windows | HostOs::Other => LinuxDependencyCheck {
+            HostOs::Windows => {
+                let win = self
+                    .config
+                    .as_ref()
+                    .and_then(|c| c.windows.clone())
+                    .unwrap_or_default();
+                let group = WindowsGroupRef {
+                    group_name: Some(win.group_name),
+                    group_sid: win.group_sid,
+                };
+                let report = check_windows_dependencies(
+                    &group,
+                    win.wfp_sublayer_guid.as_deref(),
+                    windows_repo_root(),
+                );
+                LinuxDependencyCheck {
+                    errors: report.errors,
+                    warnings: report.warnings,
+                }
+            }
+            HostOs::Other => LinuxDependencyCheck {
                 errors: vec!["Unsupported platform".to_string()],
                 warnings: vec![],
             },
@@ -467,9 +497,9 @@ impl SandboxManager {
     /// caller runs that string via `sh -c` (the TS `spawn(cmd, {shell:true})`).
     ///
     /// # Errors
-    /// [`ManagerError::Unsupported`] on Windows (the argv path; documented P9
-    /// seam) or an unsupported platform; [`ManagerError::Io`] from the
-    /// platform wrap (e.g. the macOS shell resolution).
+    /// [`ManagerError::Unsupported`] when the shell-string API is used on
+    /// Windows (call [`Self::wrap_with_sandbox_argv`] instead) or on an
+    /// unsupported platform; [`ManagerError::Io`] from the platform wrap.
     pub fn wrap_with_sandbox(
         &self,
         command: &str,
@@ -481,14 +511,57 @@ impl SandboxManager {
             HostOs::Linux => self.wrap_linux(command, bin_shell, custom_config, cwd),
             HostOs::Macos => self.wrap_macos(command, bin_shell, custom_config),
             HostOs::Windows => Err(ManagerError::Unsupported(
-                "wrap_with_sandbox: Windows is a P9 seam (use the argv wrapper; \
-                 wrapCommandWithSandboxWindows not ported)"
-                    .to_string(),
+                "wrap_with_sandbox: Windows requires wrap_with_sandbox_argv".to_string(),
             )),
             HostOs::Other => Err(ManagerError::Unsupported(
                 "wrap_with_sandbox: unsupported platform".to_string(),
             )),
         }
+    }
+
+    /// Windows argv-form twin of [`Self::wrap_with_sandbox`].
+    ///
+    /// `srt-win.exe` must be spawned directly (never through a shell), so the
+    /// Windows backend exposes a structured argv/environment descriptor.  The
+    /// descriptor inherits the caller's environment; its proxy variables are
+    /// applied as overrides by the spawn site.
+    ///
+    /// # Errors
+    /// Returns [`ManagerError::Unsupported`] off Windows or before
+    /// initialization, and [`ManagerError::Io`] when `srt-win.exe` cannot be
+    /// resolved.
+    pub fn wrap_with_sandbox_argv(
+        &self,
+        command: &str,
+        bin_shell: Option<&str>,
+        custom_config: Option<&SandboxRuntimeConfig>,
+    ) -> Result<WindowsInvocation, ManagerError> {
+        if host_os() != HostOs::Windows {
+            return Err(ManagerError::Unsupported(
+                "wrap_with_sandbox_argv: Windows-only".to_string(),
+            ));
+        }
+        let active = custom_config.or(self.config.as_ref()).ok_or_else(|| {
+            ManagerError::Unsupported(
+                "wrap_with_sandbox_argv: sandbox is not initialized".to_string(),
+            )
+        })?;
+        let win = active.windows.clone().unwrap_or_default();
+        let running = self.running.as_ref();
+        let srt_win =
+            get_srt_win_path(windows_repo_root()).map_err(|e| ManagerError::Io(e.to_string()))?;
+        Ok(wrap_command_with_sandbox_windows(&WindowsWrapParams {
+            command: command.to_string(),
+            group: WindowsGroupRef {
+                group_name: Some(win.group_name),
+                group_sid: win.group_sid,
+            },
+            http_proxy_port: running.map(|r| r.http_port),
+            socks_proxy_port: running.map(|r| r.socks_port),
+            bin_shell: bin_shell.map(str::to_string),
+            system_root: std::env::var("SystemRoot").ok(),
+            srt_win_path: srt_win.to_string_lossy().into_owned(),
+        }))
     }
 
     /// The Linux `wrap_with_sandbox` branch (`sandbox-manager.js:632-662`).
@@ -979,25 +1052,26 @@ mod tests {
         mgr.reset();
     }
 
-    /// `wrap_with_sandbox` on Windows returns the documented P9 seam error (it
-    /// returns a shell string and is not supported on Windows — callers use the
-    /// argv path). Gated to Windows only.
+    /// The shell-string API stays unavailable on Windows because callers must
+    /// use the direct-spawn argv API.
     #[cfg(target_os = "windows")]
     #[test]
-    fn wrap_on_windows_is_p9_seam() {
+    fn wrap_on_windows_requires_argv_api() {
         let mgr = SandboxManager::new();
         let err = mgr
             .wrap_with_sandbox("echo hi", Some("bash"), None, "C:\\")
             .unwrap_err();
         match err {
-            ManagerError::Unsupported(msg) => assert!(msg.contains("P9")),
-            other => panic!("expected Unsupported P9 seam, got {other:?}"),
+            ManagerError::Unsupported(msg) => {
+                assert!(msg.contains("wrap_with_sandbox_argv"));
+            }
+            other => panic!("expected Unsupported argv guidance, got {other:?}"),
         }
     }
 
     /// The FS-config mapping is host-independent in its glob/default-write/CA
     /// shape, but `wrap_with_sandbox` only runs the mapping on Linux (else it
-    /// returns the P9 seam). This Linux-gated test drives the full lifecycle:
+    /// is platform-specific). This Linux-gated test drives the full lifecycle:
     /// initialize → proxies bound → wrap string shape → denied host blocked →
     /// reset. It runtime-skips when bwrap/socat are unavailable so it is a no-op
     /// on a Linux box without the sandbox deps (and the body always compiles).

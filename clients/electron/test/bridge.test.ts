@@ -38,6 +38,31 @@ test('restart exposes an explicit restarting state and structured connection dia
   );
 });
 
+test('restart surfaces launch failures instead of remaining stuck in restarting', async () => {
+  const diagnostics = new DiagnosticBuffer();
+  const manager = new BridgeManager({
+    diagnostics,
+    launchConfig: () => ({ workspace: '/workspace', trusted: true }),
+  });
+  const states: string[] = [];
+  (manager as any).registerIpc = () => undefined;
+  (manager as any).broadcast = (_channel: string, payload: { status?: string }) => {
+    if (payload?.status) states.push(payload.status);
+  };
+  (manager as any).stopBridge = async () => undefined;
+  (manager as any).startInternal = async () => {
+    throw new Error('macOS login keychain is locked or access is denied (deepseek)');
+  };
+
+  await assert.rejects(manager.restart(), /login keychain is locked/);
+
+  assert.deepEqual(states, ['restarting', 'error']);
+  assert.deepEqual(manager.connectionState, {
+    status: 'error',
+    message: 'macOS login keychain is locked or access is denied (deepseek)',
+  });
+});
+
 test('lockfile polling ignores invalid candidates until a valid private lockfile appears', async () => {
   const diagnostics = new DiagnosticBuffer();
   const workspace = temporaryDirectory();
@@ -81,7 +106,7 @@ test('privileged bridge access re-checks current workspace trust before use', ()
   let trusted = true;
   const client = { sendCommand: () => undefined };
   const manager = new BridgeManager({
-    launchConfig: () => ({ workspace: '/workspace', trusted, apiKey: 'credential' }),
+    launchConfig: () => ({ workspace: '/workspace', trusted }),
   });
   (manager as any).client = client;
   (manager as any).activeWorkspace = '/workspace';
@@ -91,6 +116,113 @@ test('privileged bridge access re-checks current workspace trust before use', ()
   assert.equal((manager as any).requireClient(), client);
   trusted = false;
   assert.throws(() => (manager as any).requireClient(), /workspace trust is required/);
+});
+
+test('provider credential status is sourced from the engine secure store', async () => {
+  const commands: Array<Record<string, unknown>> = [];
+  const manager = new BridgeManager({
+    providerIds: ['deepseek'],
+    launchConfig: () => ({ workspace: '/workspace', trusted: true }),
+  });
+  (manager as any).client = { sendCommand: (command: Record<string, unknown>) => commands.push(command) };
+  (manager as any).state = { status: 'connected' };
+  (manager as any).broadcast = () => undefined;
+
+  const pending = manager.listProviderCredentials(['deepseek']);
+  const command = commands[0]!;
+  assert.equal(command['type'], 'list_provider_credentials');
+  assert.deepEqual(command['provider_ids'], ['deepseek']);
+
+  (manager as any).handleProviderCredentialStatus({
+    type: 'provider_credential_status',
+    operation_id: command['operation_id'],
+    configured_provider_ids: ['deepseek'],
+    storage_encrypted: true,
+  });
+
+  await pending;
+  assert.deepEqual(manager.persistedCredentialProviderIds, ['deepseek']);
+  assert.deepEqual(manager.activeCredentialProviderIds, ['deepseek']);
+  assert.equal(manager.providerCredentialStorageEncrypted, true);
+});
+
+test('provider credential writes cross only the authenticated bridge command path', async () => {
+  const commands: Array<Record<string, unknown>> = [];
+  const manager = new BridgeManager({
+    launchConfig: () => ({ workspace: '/workspace', trusted: true }),
+  });
+  (manager as any).client = { sendCommand: (command: Record<string, unknown>) => commands.push(command) };
+
+  const pending = manager.setProviderCredential('deepseek', 'sk-test-secret');
+  const command = commands[0]!;
+  assert.equal(command['type'], 'set_provider_credential');
+  assert.equal(command['provider_id'], 'deepseek');
+  assert.equal(command['credential'], 'sk-test-secret');
+
+  (manager as any).handleProviderCredentialStatus({
+    type: 'provider_credential_status',
+    operation_id: command['operation_id'],
+    configured_provider_ids: ['deepseek'],
+    storage_encrypted: true,
+  });
+  await pending;
+});
+
+test('partial credential read failures preserve unavailable providers and publish successful status', async () => {
+  const commands: Array<Record<string, unknown>> = [];
+  const broadcasts: unknown[] = [];
+  const manager = new BridgeManager({
+    launchConfig: () => ({ workspace: '/workspace', trusted: true }),
+  });
+  (manager as any).client = { sendCommand: (command: Record<string, unknown>) => commands.push(command) };
+  (manager as any).state = { status: 'connected' };
+  (manager as any).persistedCredentialProviders.add('openrouter');
+  (manager as any).broadcast = (_channel: string, payload: unknown) => broadcasts.push(payload);
+
+  const pending = manager.listProviderCredentials(['deepseek', 'openrouter']);
+  const command = commands[0]!;
+  (manager as any).handleProviderCredentialStatus({
+    type: 'provider_credential_status',
+    operation_id: command['operation_id'],
+    configured_provider_ids: ['deepseek'],
+    unavailable_provider_ids: ['openrouter'],
+    storage_encrypted: true,
+    error: 'openrouter: macOS login keychain is locked',
+  });
+
+  await assert.rejects(pending, /login keychain is locked/);
+  assert.deepEqual([...manager.persistedCredentialProviderIds].sort(), ['deepseek', 'openrouter']);
+  assert.equal(broadcasts.length, 1, 'successful partial status must reach the renderer');
+});
+
+test('legacy desktop credentials migrate only when the shared store has no value', async () => {
+  const migrated: string[] = [];
+  const writes: Array<[string, string]> = [];
+  const manager = new BridgeManager({
+    providerIds: ['deepseek', 'openrouter'],
+    launchConfig: () => ({ workspace: '/workspace', trusted: true }),
+    onProviderCredentialMigrated: (providerId) => migrated.push(providerId),
+  });
+  (manager as any).generation = 7;
+  (manager as any).listProviderCredentials = async () => {
+    (manager as any).persistedCredentialProviders.add('openrouter');
+  };
+  (manager as any).setProviderCredential = async (providerId: string, credential: string) => {
+    writes.push([providerId, credential]);
+    (manager as any).persistedCredentialProviders.add(providerId);
+  };
+
+  await (manager as any).refreshAndMigrateProviderCredentials({
+    workspace: '/workspace',
+    trusted: true,
+    providerCredentialsToMigrate: {
+      deepseek: 'sk-legacy-deepseek',
+      openrouter: 'sk-legacy-openrouter',
+    },
+  }, 7);
+
+  assert.deepEqual(writes, [['deepseek', 'sk-legacy-deepseek']]);
+  assert.deepEqual(migrated, ['deepseek', 'openrouter']);
 });
 
 test('clean child exit clears the SIGKILL timer so the process group is not signalled twice', async () => {

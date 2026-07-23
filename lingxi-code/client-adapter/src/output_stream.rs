@@ -14,6 +14,7 @@
 //! | callback                    | emitted `ClientEvent`(s)            |
 //! |-----------------------------|-------------------------------------|
 //! | `emit_text`                 | `TextDelta`                         |
+//! | `emit_system_notice`        | `SystemNotice`                     |
 //! | `emit_tool_call`            | `ToolUseStarted`                    |
 //! | `emit_tool_heartbeat`       | `ToolHeartbeat`                     |
 //! | `emit_tool_result`          | `ToolUseResult`                     |
@@ -106,6 +107,15 @@ impl OutputStream for AdapterOutputStream {
         self.sink
             .emit(ClientEvent::TextDelta {
                 text: text.to_string(),
+            })
+            .await;
+    }
+
+    async fn emit_system_notice(&self, message: &str, is_error: bool) {
+        self.sink
+            .emit(ClientEvent::SystemNotice {
+                message: message.to_string(),
+                is_error,
             })
             .await;
     }
@@ -285,6 +295,26 @@ mod tests {
             ClientEvent::TextDelta {
                 text: "hello world".to_string()
             }
+        );
+    }
+
+    /// Non-terminal persistence diagnostics must cross the adapter boundary;
+    /// silently accepting the trait default would hide them from clients.
+    #[tokio::test]
+    async fn emit_system_notice_produces_system_notice() {
+        let sink = MockSink::arc();
+        let stream = AdapterOutputStream::new(sink.clone());
+
+        stream
+            .emit_system_notice("Conversation changes could not be saved.", true)
+            .await;
+
+        assert_eq!(
+            sink.events().await,
+            vec![ClientEvent::SystemNotice {
+                message: "Conversation changes could not be saved.".to_string(),
+                is_error: true,
+            }]
         );
     }
 

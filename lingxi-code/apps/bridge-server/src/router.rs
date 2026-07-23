@@ -25,6 +25,7 @@
 //! | command | engine entry | reply event |
 //! |---|---|---|
 //! | `SetModel` | `OrchestratorHandle::switch_model` | `ModelChanged` |
+//! | `SetPermissionMode` | `OrchestratorHandle::set_permission_mode` | `PermissionModeChanged` |
 //! | `ListModels` / `RefreshListings{Models}` | `list_available_models` + status | `ModelList` |
 //! | `RefreshListings{Mcp}` | `list_mcp_servers` | `McpServers` |
 //! | `RefreshListings{Hooks}` | `list_hooks` | `Hooks` |
@@ -166,6 +167,9 @@ pub struct EngineCommandRouter {
     /// Optional persisted-session catalog/replay context. Production boot wires
     /// it; lightweight users of the routing seam can omit it.
     session_store: Option<SessionStoreContext>,
+    /// Shared provider credential manager. Production bridge boot wires the
+    /// exact manager used by the runtime; tests/embedded clients may omit it.
+    credentials: Option<Arc<secret::CredentialManager>>,
     /// Set while a turn is in flight — `ClearSession` is rejected in this window
     /// (plan §2 mid-turn semantics).
     turn_active: AtomicBool,
@@ -188,8 +192,17 @@ impl EngineCommandRouter {
             dispatcher,
             slash_registry,
             session_store: None,
+            credentials: None,
             turn_active: AtomicBool::new(false),
         }
+    }
+
+    /// Attach the runtime's shared credential manager so Desktop credential
+    /// operations use the same secure-store entries as CLI and TUI.
+    #[must_use]
+    pub fn with_credentials(mut self, credentials: Arc<secret::CredentialManager>) -> Self {
+        self.credentials = Some(credentials);
+        self
     }
 
     /// Attach the persisted JSONL session store used by list/resume commands.
@@ -210,6 +223,67 @@ impl EngineCommandRouter {
     #[must_use]
     pub fn is_turn_active(&self) -> bool {
         self.turn_active.load(Ordering::SeqCst)
+    }
+
+    async fn emit_provider_credential_status(
+        &self,
+        operation_id: u64,
+        provider_ids: &[String],
+        operation_error: Option<String>,
+        sink: &dyn ClientEventSink,
+    ) {
+        let Some(credentials) = self.credentials.as_ref() else {
+            sink.emit(ClientEvent::ProviderCredentialStatus {
+                operation_id,
+                configured_provider_ids: Vec::new(),
+                unavailable_provider_ids: provider_ids.to_vec(),
+                storage_encrypted: false,
+                error: Some("provider credential storage is unavailable".to_string()),
+            })
+            .await;
+            return;
+        };
+
+        if let Some(error) = operation_error {
+            sink.emit(ClientEvent::ProviderCredentialStatus {
+                operation_id,
+                configured_provider_ids: Vec::new(),
+                unavailable_provider_ids: provider_ids.to_vec(),
+                storage_encrypted: credentials.provider_key_storage_is_encrypted(),
+                error: Some(error),
+            })
+            .await;
+            return;
+        }
+
+        let mut configured_provider_ids = Vec::new();
+        let mut unavailable_provider_ids = Vec::new();
+        let mut failures = Vec::new();
+        for provider_id in provider_ids {
+            match credentials.get_provider_key(provider_id).await {
+                Ok(Some(_)) => configured_provider_ids.push(provider_id.clone()),
+                Ok(None) => {}
+                Err(failure) => {
+                    unavailable_provider_ids.push(provider_id.clone());
+                    failures.push(format!("{provider_id}: {failure}"));
+                }
+            }
+        }
+        let error = (!failures.is_empty()).then(|| {
+            format!(
+                "provider credential storage is unavailable ({})",
+                failures.join("; ")
+            )
+        });
+
+        sink.emit(ClientEvent::ProviderCredentialStatus {
+            operation_id,
+            configured_provider_ids,
+            unavailable_provider_ids,
+            storage_encrypted: credentials.provider_key_storage_is_encrypted(),
+            error,
+        })
+        .await;
     }
 
     /// Spawn the background-task poll loop (matches the TUI: `TaskRegistryHandle::list`
@@ -308,6 +382,7 @@ impl EngineCommandRouter {
         let mut commands: Vec<SlashCommandDto> = reg
             .list_all()
             .into_iter()
+            .filter(|cmd| !is_palette_hidden(&cmd.name))
             .map(|cmd| SlashCommandDto {
                 name: cmd.name.clone(),
                 description: cmd.description.clone(),
@@ -482,6 +557,123 @@ impl CommandRouter for EngineCommandRouter {
     #[allow(clippy::too_many_lines)]
     async fn route(&self, command: ClientCommand, sink: Arc<dyn ClientEventSink>) {
         match command {
+            // ── Provider credentials ────────────────────────────────────────
+            ClientCommand::ListProviderCredentials {
+                operation_id,
+                provider_ids,
+            } => {
+                let validation_error = if provider_ids.len() > 32
+                    || provider_ids.iter().any(|id| !provider_id_is_valid(id))
+                {
+                    Some("invalid provider credential query".to_string())
+                } else {
+                    None
+                };
+                self.emit_provider_credential_status(
+                    operation_id,
+                    &provider_ids,
+                    validation_error,
+                    &*sink,
+                )
+                .await;
+            }
+            ClientCommand::SetProviderCredential {
+                operation_id,
+                provider_id,
+                credential,
+            } => {
+                let error = if !provider_id_is_valid(&provider_id)
+                    || credential.expose_secret().is_empty()
+                    || credential.expose_secret().len() > 16_384
+                    || credential.expose_secret().contains('\0')
+                {
+                    Some("invalid provider credential".to_string())
+                } else if let Some(credentials) = self.credentials.as_ref() {
+                    credentials
+                        .set_provider_key(&provider_id, credential.expose_secret())
+                        .await
+                        .err()
+                        .map(|failure| format!("failed to store provider credential: {failure}"))
+                } else {
+                    Some("provider credential storage is unavailable".to_string())
+                };
+                let applied = error.is_none();
+                sink.emit(ClientEvent::ProviderCredentialStatus {
+                    operation_id,
+                    configured_provider_ids: applied
+                        .then_some(provider_id.clone())
+                        .into_iter()
+                        .collect(),
+                    unavailable_provider_ids: (!applied)
+                        .then_some(provider_id)
+                        .into_iter()
+                        .collect(),
+                    storage_encrypted: self
+                        .credentials
+                        .as_ref()
+                        .is_some_and(|credentials| credentials.provider_key_storage_is_encrypted()),
+                    error,
+                })
+                .await;
+            }
+            ClientCommand::DeleteProviderCredential {
+                operation_id,
+                provider_id,
+            } => {
+                let error = if !provider_id_is_valid(&provider_id) {
+                    Some("invalid provider id".to_string())
+                } else if let Some(credentials) = self.credentials.as_ref() {
+                    credentials
+                        .delete_provider_key(&provider_id)
+                        .await
+                        .err()
+                        .map(|failure| format!("failed to delete provider credential: {failure}"))
+                } else {
+                    Some("provider credential storage is unavailable".to_string())
+                };
+                let applied = error.is_none();
+                sink.emit(ClientEvent::ProviderCredentialStatus {
+                    operation_id,
+                    configured_provider_ids: Vec::new(),
+                    unavailable_provider_ids: (!applied)
+                        .then_some(provider_id)
+                        .into_iter()
+                        .collect(),
+                    storage_encrypted: self
+                        .credentials
+                        .as_ref()
+                        .is_some_and(|credentials| credentials.provider_key_storage_is_encrypted()),
+                    error,
+                })
+                .await;
+            }
+
+            // ── Permission mode ────────────────────────────────────────────
+            ClientCommand::SetPermissionMode { mode } => {
+                if self.is_turn_active() {
+                    sink.emit(ClientEvent::Error {
+                        kind: ErrorKindDto::Rejected,
+                        message: "cannot change permission mode while a turn is active".to_string(),
+                    })
+                    .await;
+                    return;
+                }
+                match self.handle.set_permission_mode(&mode).await {
+                    Ok(()) => {
+                        let active = self.handle.permission_mode().await.unwrap_or(mode);
+                        sink.emit(ClientEvent::PermissionModeChanged { mode: active })
+                            .await;
+                    }
+                    Err(e) => {
+                        sink.emit(ClientEvent::Error {
+                            kind: ErrorKindDto::Rejected,
+                            message: format!("set_permission_mode failed: {e}"),
+                        })
+                        .await;
+                    }
+                }
+            }
+
             // ── Model ──────────────────────────────────────────────────────
             ClientCommand::SetModel { model } => {
                 let listings = self.handle.list_model_listings().await;
@@ -809,6 +1001,16 @@ impl CommandRouter for EngineCommandRouter {
             }
         }
     }
+}
+
+fn provider_id_is_valid(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value.chars().enumerate().all(|(index, ch)| {
+            ch.is_ascii_lowercase()
+                || ch.is_ascii_digit()
+                || (index > 0 && matches!(ch, '-' | '_' | '.'))
+        })
 }
 
 fn command_source_string(source: CommandSource) -> &'static str {

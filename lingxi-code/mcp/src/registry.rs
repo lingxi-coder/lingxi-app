@@ -14,10 +14,13 @@ use crate::raw_conn::RawConnectionProvider;
 use indexmap::IndexMap;
 use protocol::{AgentId, McpConnectionId};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, SystemTime};
-use tokio::sync::RwLock;
-use traits::{Clock, HttpTransport, McpError, McpTransport, McpTransportSpec, SecureStorage};
+use tokio::sync::{broadcast, Mutex, RwLock};
+use traits::{
+    Clock, HttpTransport, McpError, McpRawConnection, McpTransport, McpTransportSpec,
+    SecureStorage, ServerCapabilitiesDto,
+};
 
 /// OAuth seam injected into the registry for remote (SSE/HTTP) MCP servers that
 /// declare an `oauth` config. When unset, OAuth-configured servers fall back to
@@ -104,6 +107,32 @@ const INITIAL_BACKOFF: Duration = Duration::from_millis(1000);
 /// Ceiling on reconnect backoff (claude-code `MAX_BACKOFF_MS = 30000`).
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
+/// MCP server catalog affected by an inbound `notifications/*/list_changed`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpCatalogKind {
+    /// The server's `tools/list` result changed.
+    Tools,
+    /// The server's `prompts/list` result changed.
+    Prompts,
+    /// The server's `resources/list` result changed.
+    Resources,
+}
+
+/// One list-changed notification associated with the connection that emitted it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpCatalogChanged {
+    /// Raw configured server name.
+    pub server_name: String,
+    /// Connection generation that emitted the notification.
+    pub connection_id: McpConnectionId,
+    /// Previous connection partition to remove before applying this change.
+    /// Set on disconnect; ordinary list invalidations and fresh connections
+    /// leave it `None`.
+    pub retired_connection_id: Option<McpConnectionId>,
+    /// Catalog to refresh.
+    pub kind: McpCatalogKind,
+}
+
 /// In-memory registry of every known MCP connection.
 pub struct McpRegistry {
     /// Map of server name to current state.
@@ -112,6 +141,10 @@ pub struct McpRegistry {
     /// `Disconnected` entries read from `.mcp.json` before the engine
     /// connects, and so engine-side tests can seed states directly.
     pub connections: RwLock<HashMap<String, McpConnectionState>>,
+    /// Serializes connect/disconnect/reconnect for each logical server without
+    /// holding the public connection-state lock across transport or OAuth I/O.
+    /// Different servers still progress independently.
+    lifecycle_locks: StdMutex<HashMap<String, Arc<Mutex<()>>>>,
     /// Side-channel cache of [`McpClient`] handles per server name.
     ///
     /// Populated by [`Self::register_client`] (M4-07) — production wiring
@@ -126,6 +159,10 @@ pub struct McpRegistry {
     /// (`AgentTool.tsx:394-405`). A plain `HashMap` would make the required-MCP
     /// gate error text non-deterministic.
     clients: RwLock<IndexMap<String, Arc<McpClient>>>,
+    /// Fan-out for inbound server catalog invalidations. The engine subscribes
+    /// once and refreshes the shared tool registry after a successful
+    /// `tools/list`; lagged consumers can safely refresh from the latest state.
+    catalog_changes: broadcast::Sender<McpCatalogChanged>,
     /// Per-agent connection scoping (subagent isolation).
     #[allow(dead_code)] // populated by `register_for_agent` in Plan 13
     agent_scoped: RwLock<HashMap<AgentId, HashMap<String, McpConnectionId>>>,
@@ -183,9 +220,12 @@ impl McpRegistry {
     /// a live [`McpClient`] — use [`Self::with_raw_conn`] for that.
     #[must_use]
     pub fn new(transport: Arc<dyn McpTransport>) -> Self {
+        let (catalog_changes, _unused_rx) = broadcast::channel(64);
         Self {
             connections: RwLock::new(HashMap::new()),
+            lifecycle_locks: StdMutex::new(HashMap::new()),
             clients: RwLock::new(IndexMap::new()),
+            catalog_changes,
             agent_scoped: RwLock::new(HashMap::new()),
             transport,
             raw_conn: None,
@@ -195,6 +235,160 @@ impl McpRegistry {
             health_check_interval: Duration::from_secs(30),
             max_retry_count: 5,
         }
+    }
+
+    fn lifecycle_lock(&self, name: &str) -> Arc<Mutex<()>> {
+        let mut locks = self
+            .lifecycle_locks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Arc::clone(
+            locks
+                .entry(name.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(()))),
+        )
+    }
+
+    /// Subscribe to inbound MCP catalog invalidations.
+    #[must_use]
+    pub fn subscribe_catalog_changes(&self) -> broadcast::Receiver<McpCatalogChanged> {
+        self.catalog_changes.subscribe()
+    }
+
+    /// Return one refresh request for every catalog currently advertised by
+    /// every connected server. Consumers use this to recover deterministically
+    /// after a lagged broadcast receiver instead of leaving a missed
+    /// `list_changed` notification stale until the server happens to emit
+    /// another one.
+    pub async fn catalog_refresh_snapshot(&self) -> Vec<McpCatalogChanged> {
+        let conns = self.connections.read().await;
+        let mut changes = Vec::new();
+        for (server_name, state) in conns.iter() {
+            let McpConnectionState::Connected {
+                connection_id,
+                capabilities,
+                ..
+            } = state
+            else {
+                continue;
+            };
+            for (supported, kind) in [
+                (capabilities.tools, McpCatalogKind::Tools),
+                (capabilities.prompts, McpCatalogKind::Prompts),
+                (capabilities.resources, McpCatalogKind::Resources),
+            ] {
+                if supported {
+                    changes.push(McpCatalogChanged {
+                        server_name: server_name.clone(),
+                        connection_id: *connection_id,
+                        retired_connection_id: None,
+                        kind,
+                    });
+                }
+            }
+        }
+        changes
+    }
+
+    /// Re-query the catalog named by `change` and atomically replace only that
+    /// slice of the connected-state snapshot. A stale connection generation is
+    /// ignored. The old catalog remains intact on RPC/decode failure.
+    pub async fn refresh_catalog(
+        &self,
+        change: &McpCatalogChanged,
+    ) -> Result<Option<McpConnectionId>, McpError> {
+        let current_id = {
+            let conns = self.connections.read().await;
+            match conns.get(&change.server_name) {
+                Some(McpConnectionState::Connected { connection_id, .. })
+                    if *connection_id == change.connection_id =>
+                {
+                    *connection_id
+                }
+                _ => return Ok(None),
+            }
+        };
+        let Some(client) = self.get_client(&change.server_name).await else {
+            return Err(McpError::Internal(format!(
+                "MCP server \"{}\" has no live client for catalog refresh",
+                change.server_name
+            )));
+        };
+
+        enum Refreshed {
+            Tools(Vec<traits::McpToolDto>),
+            Prompts(Vec<traits::McpPromptDto>),
+            Resources(Vec<traits::McpResourceDto>),
+        }
+        let refreshed = match change.kind {
+            McpCatalogKind::Tools => client
+                .list_tools()
+                .await
+                .map(Refreshed::Tools)
+                .map_err(|e| McpError::Internal(e.to_string()))?,
+            McpCatalogKind::Prompts => client
+                .list_prompts()
+                .await
+                .map(Refreshed::Prompts)
+                .map_err(|e| McpError::Internal(e.to_string()))?,
+            McpCatalogKind::Resources => client
+                .list_resources()
+                .await
+                .map(Refreshed::Resources)
+                .map_err(|e| McpError::Internal(e.to_string()))?,
+        };
+
+        let mut conns = self.connections.write().await;
+        let Some(McpConnectionState::Connected {
+            connection_id,
+            tools,
+            prompts,
+            resources,
+            ..
+        }) = conns.get_mut(&change.server_name)
+        else {
+            return Ok(None);
+        };
+        if *connection_id != current_id {
+            return Ok(None);
+        }
+        match refreshed {
+            Refreshed::Tools(next) => *tools = next,
+            Refreshed::Prompts(next) => *prompts = next,
+            Refreshed::Resources(next) => *resources = next,
+        }
+        Ok(Some(current_id))
+    }
+
+    fn spawn_catalog_change_listener(
+        &self,
+        server_name: String,
+        connection_id: McpConnectionId,
+        connection: Arc<jsonrpc::Connection>,
+    ) {
+        let mut notifications = connection.notifications();
+        let changes = self.catalog_changes.clone();
+        tokio::spawn(async move {
+            loop {
+                let notification = match notifications.recv().await {
+                    Ok(notification) => notification,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                };
+                let kind = match notification.method.as_str() {
+                    "notifications/tools/list_changed" => McpCatalogKind::Tools,
+                    "notifications/prompts/list_changed" => McpCatalogKind::Prompts,
+                    "notifications/resources/list_changed" => McpCatalogKind::Resources,
+                    _ => continue,
+                };
+                let _ = changes.send(McpCatalogChanged {
+                    server_name: server_name.clone(),
+                    connection_id,
+                    retired_connection_id: None,
+                    kind,
+                });
+            }
+        });
     }
 
     /// Build a registry bound to a platform transport AND a bridge to its live
@@ -412,6 +606,32 @@ impl McpRegistry {
     /// Re-uses the existing connection if `config.name` is already in the
     /// `Connected` state.
     pub async fn connect(&self, config: McpServerConfig) -> Result<McpConnectionId, McpError> {
+        let lifecycle = self.lifecycle_lock(&config.name);
+        let _guard = lifecycle.lock().await;
+        self.connect_locked(config).await
+    }
+
+    async fn connect_locked(&self, config: McpServerConfig) -> Result<McpConnectionId, McpError> {
+        let result = self.connect_locked_inner(config.clone()).await;
+        if let Err(error) = &result {
+            // A failed public connect must never strand the registry in
+            // `Connecting`. Reconnect scheduling only considers disconnected
+            // states, and `/mcp` should expose the actual last failure.
+            self.connections.write().await.insert(
+                config.name.clone(),
+                McpConnectionState::Disconnected {
+                    config,
+                    last_error: Some(error.to_string()),
+                },
+            );
+        }
+        result
+    }
+
+    async fn connect_locked_inner(
+        &self,
+        config: McpServerConfig,
+    ) -> Result<McpConnectionId, McpError> {
         if let Some(McpConnectionState::Connected { connection_id, .. }) =
             self.connections.read().await.get(&config.name)
         {
@@ -441,80 +661,63 @@ impl McpRegistry {
         // resolve to the spec unchanged with no server key.
         let (connect_spec, oauth_key) = self.resolve_oauth_spec(&config).await?;
 
-        let attempt = |spec: McpTransportSpec| {
-            let transport = Arc::clone(&self.transport);
-            async move {
-                let conn = transport.connect(&spec).await?;
-                let caps = transport.initialize(&conn).await?;
-                Ok::<_, McpError>((conn, caps))
-            }
-        };
+        let attempt =
+            |spec: McpTransportSpec| self.connect_attempt(spec, connect_timeout, &config.name);
 
-        let (conn, caps) =
-            match tokio::time::timeout(connect_timeout, attempt(connect_spec.clone()))
-                .await
-                .map_err(|_elapsed| {
-                    McpError::Connection(format!(
-                        "MCP server \"{}\" connection timed out after {}ms",
-                        config.name,
-                        connect_timeout.as_millis()
-                    ))
-                })? {
-                Ok(pair) => pair,
-                // 403 `insufficient_scope` for an OAuth server → step-up: the AS
-                // requires an elevated scope (RFC 6750). Re-run the interactive flow
-                // requesting that scope (RFC 6749 §6 forbids scope elevation via
-                // refresh, so we MUST do a fresh PKCE flow), re-inject the Bearer,
-                // and retry ONCE. Mirrors auth.ts `wrapFetchWithStepUpDetection`
-                // (1354-1374) + `markStepUpPending`/`cachedStepUpScope` persistence.
-                // Checked BEFORE the 401 branch so a 403 never falls into refresh.
-                Err(e) if oauth_key.is_some() => {
-                    if let Some(scope) = error_is_403_insufficient_scope(&e) {
-                        let stepped = self.step_up_oauth_spec(&config, &scope).await?;
-                        tokio::time::timeout(connect_timeout, attempt(stepped))
-                            .await
-                            .map_err(|_elapsed| {
-                                McpError::Connection(format!(
-                                    "MCP server \"{}\" connection timed out after {}ms",
-                                    config.name,
-                                    connect_timeout.as_millis()
-                                ))
-                            })??
-                    } else if error_is_401(&e) {
-                        // 401 → the access token is stale: force a refresh (or a
-                        // fresh interactive flow), re-inject the Bearer, retry ONCE.
-                        // Faithful-core 401 detection: the transport flattens errors
-                        // to strings (structured status is a noted residual).
-                        let refreshed = self.reauth_oauth_spec(&config).await?;
-                        tokio::time::timeout(connect_timeout, attempt(refreshed))
-                            .await
-                            .map_err(|_elapsed| {
-                                McpError::Connection(format!(
-                                    "MCP server \"{}\" connection timed out after {}ms",
-                                    config.name,
-                                    connect_timeout.as_millis()
-                                ))
-                            })??
-                    } else {
-                        return Err(e);
-                    }
+        let (conn, caps) = match attempt(connect_spec.clone()).await {
+            Ok(pair) => pair,
+            // 403 `insufficient_scope` for an OAuth server → step-up: the AS
+            // requires an elevated scope (RFC 6750). Re-run the interactive flow
+            // requesting that scope (RFC 6749 §6 forbids scope elevation via
+            // refresh, so we MUST do a fresh PKCE flow), re-inject the Bearer,
+            // and retry ONCE. Mirrors auth.ts `wrapFetchWithStepUpDetection`
+            // (1354-1374) + `markStepUpPending`/`cachedStepUpScope` persistence.
+            // Checked BEFORE the 401 branch so a 403 never falls into refresh.
+            Err(e) if oauth_key.is_some() => {
+                if let Some(scope) = error_is_403_insufficient_scope(&e) {
+                    let stepped = self.step_up_oauth_spec(&config, &scope).await?;
+                    attempt(stepped).await?
+                } else if error_is_401(&e) {
+                    // 401 → the access token is stale: force a refresh (or a
+                    // fresh interactive flow), re-inject the Bearer, retry ONCE.
+                    // Faithful-core 401 detection: the transport flattens errors
+                    // to strings (structured status is a noted residual).
+                    let refreshed = self.reauth_oauth_spec(&config).await?;
+                    attempt(refreshed).await?
+                } else {
+                    return Err(e);
                 }
-                Err(e) => return Err(e),
+            }
+            Err(e) => return Err(e),
+        };
+        let catalog = async {
+            let tools = if caps.tools {
+                self.transport.list_tools(&conn).await?
+            } else {
+                Vec::new()
             };
-        let mut tools = if caps.tools {
-            self.transport.list_tools(&conn).await?
-        } else {
-            Vec::new()
-        };
-        let resources = if caps.resources {
-            self.transport.list_resources(&conn).await?
-        } else {
-            Vec::new()
-        };
-        let prompts = if caps.prompts {
-            self.transport.list_prompts(&conn).await?
-        } else {
-            Vec::new()
+            let resources = if caps.resources {
+                self.transport.list_resources(&conn).await?
+            } else {
+                Vec::new()
+            };
+            let prompts = if caps.prompts {
+                self.transport.list_prompts(&conn).await?
+            } else {
+                Vec::new()
+            };
+            Ok::<_, McpError>((tools, resources, prompts))
+        }
+        .await;
+        let (mut tools, resources, prompts) = match catalog {
+            Ok(catalog) => catalog,
+            Err(error) => {
+                // `initialize` succeeded, so the transport is live. A catalog
+                // failure must retire it before the state falls back to
+                // Disconnected; otherwise stdio children/sockets leak.
+                let _ = self.transport.disconnect(conn.connection_id).await;
+                return Err(error);
+            }
         };
 
         // Rewrite the empty `<server>` token the transport emits (it has no
@@ -576,6 +779,11 @@ impl McpRegistry {
         // `/mcp` display stays raw; `get_client` matches by normalized key.
         if let Some(raw_conn) = &self.raw_conn {
             if let Some(connection) = raw_conn.connection_for(connection_id) {
+                self.spawn_catalog_change_listener(
+                    server_name.clone(),
+                    connection_id,
+                    connection.clone(),
+                );
                 let cwd = std::env::current_dir().unwrap_or_default();
                 // Forward the optional hook dispatcher so this server's
                 // `elicitation/create` handler can fire the `Elicitation` hook.
@@ -606,7 +814,50 @@ impl McpRegistry {
             }
         }
 
+        // Drive the engine's already-Arc-wrapped ToolRegistry for both startup
+        // and reconnects. The startup event is an idempotent replacement; a
+        // reconnect needs it because its new connection id did not exist in the
+        // boot-time MCP partition.
+        let _ = self.catalog_changes.send(McpCatalogChanged {
+            server_name,
+            connection_id,
+            retired_connection_id: None,
+            kind: McpCatalogKind::Tools,
+        });
+
         Ok(connection_id)
+    }
+
+    /// Connect and initialize under one deadline. If initialization fails or
+    /// times out after a transport was opened, retire that transport before
+    /// returning so callers never leak a live stdio child/socket.
+    async fn connect_attempt(
+        &self,
+        spec: McpTransportSpec,
+        timeout: Duration,
+        server_name: &str,
+    ) -> Result<(McpRawConnection, ServerCapabilitiesDto), McpError> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        let timeout_error = || {
+            McpError::Connection(format!(
+                "MCP server \"{server_name}\" connection timed out after {}ms",
+                timeout.as_millis()
+            ))
+        };
+        let conn = tokio::time::timeout_at(deadline, self.transport.connect(&spec))
+            .await
+            .map_err(|_| timeout_error())??;
+        match tokio::time::timeout_at(deadline, self.transport.initialize(&conn)).await {
+            Ok(Ok(capabilities)) => Ok((conn, capabilities)),
+            Ok(Err(error)) => {
+                let _ = self.transport.disconnect(conn.connection_id).await;
+                Err(error)
+            }
+            Err(_) => {
+                let _ = self.transport.disconnect(conn.connection_id).await;
+                Err(timeout_error())
+            }
+        }
     }
 
     /// Resolve the spec to connect with, attaching a Bearer token for OAuth
@@ -1132,39 +1383,160 @@ impl McpRegistry {
 
     /// Drop the named connection and transition it to `Stopped`.
     pub async fn disconnect(&self, name: &str) -> Result<(), McpError> {
-        let mut conns = self.connections.write().await;
-        if let Some(McpConnectionState::Connected {
-            connection_id,
-            config,
-            ..
-        }) = conns.remove(name)
-        {
-            self.transport.disconnect(connection_id).await?;
-            // Drop any cached `McpClient` so `get_client(name)` stops returning
-            // a handle to the now-dead connection (registered under the raw
-            // `config.name` in `connect`). `shift_remove` preserves the
-            // insertion order of the remaining entries (discovery order).
-            self.clients.write().await.shift_remove(name);
-            // Token revocation (RFC 7009) on the disconnect/logout path
-            // (auth.ts `revokeServerTokens`). Best-effort: discover the AS
-            // revocation_endpoint and POST a revoke for the refresh then access
-            // token, then unconditionally clear the local blob. Only fires for
-            // OAuth-configured servers when the OAuth seam is wired; static-token
-            // and oauth-unwired servers are untouched. Never fails the disconnect.
-            if let (Some(deps), Some(oauth_cfg)) = (self.oauth.as_ref(), spec_oauth(&config.spec)) {
-                let key = oauth::server_key(&config.name, &config.spec);
-                oauth::revoke_server_tokens(
-                    &deps.storage,
-                    &deps.http,
-                    &key,
-                    spec_url(&config.spec),
-                    oauth_cfg,
-                )
-                .await;
+        let lifecycle = self.lifecycle_lock(name);
+        let _guard = lifecycle.lock().await;
+        self.disconnect_locked(name).await
+    }
+
+    async fn disconnect_locked(&self, name: &str) -> Result<(), McpError> {
+        let Some((connection_id, config)) = ({
+            let conns = self.connections.read().await;
+            match conns.get(name) {
+                Some(McpConnectionState::Connected {
+                    connection_id,
+                    config,
+                    ..
+                }) => Some((*connection_id, config.clone())),
+                _ => None,
             }
-            conns.insert(name.into(), McpConnectionState::Stopped { config });
+        }) else {
+            return Ok(());
+        };
+
+        // Do not remove the state before the transport confirms teardown. If
+        // teardown fails, callers keep the still-live state and cached client.
+        // The per-server lifecycle lock prevents a concurrent connect from
+        // racing this await, while snapshots for every server remain unblocked.
+        self.transport.disconnect(connection_id).await?;
+
+        let transitioned = {
+            let mut conns = self.connections.write().await;
+            let same_generation = matches!(
+                conns.get(name),
+                Some(McpConnectionState::Connected {
+                    connection_id: current,
+                    ..
+                }) if *current == connection_id
+            );
+            if same_generation {
+                conns.insert(
+                    name.to_string(),
+                    McpConnectionState::Stopped {
+                        config: config.clone(),
+                    },
+                );
+            }
+            same_generation
+        };
+        if !transitioned {
+            return Ok(());
+        }
+
+        // Drop any cached `McpClient` so `get_client(name)` stops returning a
+        // handle to the now-dead connection. `shift_remove` preserves discovery
+        // order for the remaining entries.
+        self.clients.write().await.shift_remove(name);
+        // Remove this connection's dynamic tool partition immediately. A later
+        // reconnect emits a fresh Tools event with its new connection id.
+        let _ = self.catalog_changes.send(McpCatalogChanged {
+            server_name: name.to_string(),
+            connection_id,
+            retired_connection_id: Some(connection_id),
+            kind: McpCatalogKind::Tools,
+        });
+
+        // Token revocation (RFC 7009) is best-effort and intentionally runs
+        // after local state/catalog retirement, so slow network I/O cannot make
+        // a dead server continue to appear live.
+        if let (Some(deps), Some(oauth_cfg)) = (self.oauth.as_ref(), spec_oauth(&config.spec)) {
+            let key = oauth::server_key(&config.name, &config.spec);
+            oauth::revoke_server_tokens(
+                &deps.storage,
+                &deps.http,
+                &key,
+                spec_url(&config.spec),
+                oauth_cfg,
+            )
+            .await;
         }
         Ok(())
+    }
+
+    /// Toggle one registered server immediately and retain the updated config
+    /// for subsequent reconnects/startups. Disabling retires the live transport
+    /// and dynamic tool partition without revoking OAuth credentials; enabling
+    /// performs a fresh connect in the current session.
+    ///
+    /// Returns `false` when the config was already in the requested state.
+    pub async fn set_disabled(&self, name: &str, disabled: bool) -> Result<bool, McpError> {
+        let lifecycle = self.lifecycle_lock(name);
+        let _guard = lifecycle.lock().await;
+
+        let (mut config, live_connection) = {
+            let conns = self.connections.read().await;
+            let Some(state) = conns.get(name) else {
+                return Err(McpError::Internal(format!(
+                    "no MCP server named \"{name}\""
+                )));
+            };
+            if state.config().disabled == disabled {
+                return Ok(false);
+            }
+            let live_connection = match state {
+                McpConnectionState::Connected { connection_id, .. }
+                | McpConnectionState::HealthChecking { connection_id, .. } => Some(*connection_id),
+                _ => None,
+            };
+            (state.config().clone(), live_connection)
+        };
+
+        if disabled {
+            // Keep the live state/client until the transport confirms teardown.
+            // This makes a failed disable visible and safely retryable.
+            if let Some(connection_id) = live_connection {
+                self.transport.disconnect(connection_id).await?;
+            }
+            config.disabled = true;
+            self.connections.write().await.insert(
+                name.to_string(),
+                McpConnectionState::Disconnected {
+                    config,
+                    last_error: None,
+                },
+            );
+            self.clients.write().await.shift_remove(name);
+            if let Some(connection_id) = live_connection {
+                let _ = self.catalog_changes.send(McpCatalogChanged {
+                    server_name: name.to_string(),
+                    connection_id,
+                    retired_connection_id: Some(connection_id),
+                    kind: McpCatalogKind::Tools,
+                });
+            }
+            return Ok(true);
+        }
+
+        config.disabled = false;
+        self.connections.write().await.insert(
+            name.to_string(),
+            McpConnectionState::Disconnected {
+                config: config.clone(),
+                last_error: None,
+            },
+        );
+        match self.connect_locked(config.clone()).await {
+            Ok(_) => Ok(true),
+            Err(error) => {
+                self.connections.write().await.insert(
+                    name.to_string(),
+                    McpConnectionState::Disconnected {
+                        config,
+                        last_error: Some(error.to_string()),
+                    },
+                );
+                Err(error)
+            }
+        }
     }
 
     /// Reconnect a single known server by name (`/mcp reconnect <server>`):
@@ -1173,6 +1545,8 @@ impl McpRegistry {
     /// when no server by that name is registered (callers pre-check via
     /// [`Self::server_names`] for the user-facing "no server named" message).
     pub async fn reconnect(&self, name: &str) -> Result<(), McpError> {
+        let lifecycle = self.lifecycle_lock(name);
+        let _guard = lifecycle.lock().await;
         // Every connection state carries its originating config; pull it out so
         // we can re-`connect` after tearing the live connection down.
         let config = {
@@ -1187,8 +1561,8 @@ impl McpRegistry {
         // Best-effort teardown (a never-connected server is a no-op), then a
         // fresh connect. `connect` early-returns the existing id if already
         // connected, so the disconnect must land first.
-        let _ = self.disconnect(name).await;
-        self.connect(config).await.map(|_| ())
+        self.disconnect_locked(name).await?;
+        self.connect_locked(config).await.map(|_| ())
     }
 
     /// The names of every registered server (any connection state), sorted —
@@ -1234,21 +1608,6 @@ impl McpRegistry {
         out
     }
 
-    /// The set of MCP server names that currently expose at least one tool —
-    /// i.e. servers that are connected AND authenticated (an unauthenticated
-    /// server has no tools). Port of claude-code's `serversWithTools` derivation
-    /// in `AgentTool.call` (`AgentTool.tsx:394-405`): claude scans
-    /// `appState.mcp.tools` for `mcp__<server>__<tool>` and collects the distinct
-    /// `<server>` part. Here we ask each registered [`McpClient`] for its tools
-    /// and extract the server segment from each tool's `full_name`
-    /// (`mcp__<server>__<tool>`), so a server with zero tools (e.g. still
-    /// awaiting OAuth) is correctly absent.
-    ///
-    /// Used by `AgentTool`'s pre-spawn `required_mcp_servers` gate
-    /// (`AgentTool.tsx:367-409`). Returned list is in DISCOVERY (insertion)
-    /// order and deduplicated — claude builds `serversWithTools` by iterating
-    /// `appState.mcp.tools` in order and pushing first-seen server names, with
-    /// NO sort, so the required-MCP error lists servers in that same order.
     /// Names of servers currently in a PENDING (still-connecting) state —
     /// `Connecting` / `AwaitingOAuth` / `Reconnecting` (claude-code's MCP client
     /// `type === "pending"`). These may yet expose tools, so the `AgentTool`
@@ -1288,6 +1647,21 @@ impl McpRegistry {
             .collect()
     }
 
+    /// The set of MCP server names that currently expose at least one tool —
+    /// i.e. servers that are connected AND authenticated (an unauthenticated
+    /// server has no tools). Port of claude-code's `serversWithTools` derivation
+    /// in `AgentTool.call` (`AgentTool.tsx:394-405`): claude scans
+    /// `appState.mcp.tools` for `mcp__<server>__<tool>` and collects the distinct
+    /// `<server>` part. Here we ask each registered [`McpClient`] for its tools
+    /// and extract the server segment from each tool's `full_name`
+    /// (`mcp__<server>__<tool>`), so a server with zero tools (e.g. still
+    /// awaiting OAuth) is correctly absent.
+    ///
+    /// Used by `AgentTool`'s pre-spawn `required_mcp_servers` gate
+    /// (`AgentTool.tsx:367-409`). Returned list is in DISCOVERY (insertion)
+    /// order and deduplicated — claude builds `serversWithTools` by iterating
+    /// `appState.mcp.tools` in order and pushing first-seen server names, with
+    /// NO sort, so the required-MCP error lists servers in that same order.
     pub async fn servers_with_tools(&self) -> Vec<String> {
         let clients: Vec<Arc<McpClient>> = self.clients.read().await.values().cloned().collect();
         let mut out: Vec<String> = Vec::new();
@@ -1702,8 +2076,9 @@ mod tests {
     use jsonrpc::{Connection, Mode};
     use protocol::McpConnectionId as ConnId;
     use serde_json::Value;
-    use std::sync::Mutex as StdMutex;
-    use tokio::sync::mpsc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex as TestMutex;
+    use tokio::sync::{mpsc, Notify};
     use traits::{
         ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
         McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto,
@@ -1723,6 +2098,23 @@ mod tests {
         ))
     }
 
+    /// Paired connection retaining the mock-server ends for notification and
+    /// request/response catalog-refresh tests.
+    #[allow(clippy::type_complexity)]
+    fn drivable_connection() -> (Arc<Connection>, mpsc::Sender<Bytes>, mpsc::Receiver<Bytes>) {
+        let (peer_to_us_tx, peer_to_us_rx) = mpsc::channel::<Bytes>(8);
+        let (us_to_peer_tx, us_to_peer_rx) = mpsc::channel::<Bytes>(8);
+        (
+            Arc::new(Connection::new_streams(
+                peer_to_us_rx,
+                us_to_peer_tx,
+                Mode::Lines,
+            )),
+            peer_to_us_tx,
+            us_to_peer_rx,
+        )
+    }
+
     /// Functional mock transport that ALSO bridges a paired in-memory
     /// `jsonrpc::Connection` through [`RawConnectionProvider`].
     ///
@@ -1731,7 +2123,12 @@ mod tests {
     /// transport emits, so the registry's rewrite is exercised).
     struct BridgeMock {
         tools: Vec<McpToolDto>,
-        conns: StdMutex<HashMap<ConnId, Arc<Connection>>>,
+        conns: TestMutex<HashMap<ConnId, Arc<Connection>>>,
+        list_tools_fails: AtomicBool,
+        disconnect_fails: AtomicBool,
+        block_disconnect: AtomicBool,
+        disconnect_started: Notify,
+        disconnect_release: Notify,
     }
 
     impl BridgeMock {
@@ -1752,7 +2149,12 @@ mod tests {
                 .collect();
             Self {
                 tools,
-                conns: StdMutex::new(HashMap::new()),
+                conns: TestMutex::new(HashMap::new()),
+                list_tools_fails: AtomicBool::new(false),
+                disconnect_fails: AtomicBool::new(false),
+                block_disconnect: AtomicBool::new(false),
+                disconnect_started: Notify::new(),
+                disconnect_release: Notify::new(),
             }
         }
     }
@@ -1777,6 +2179,9 @@ mod tests {
             })
         }
         async fn list_tools(&self, _c: &McpRawConnection) -> Result<Vec<McpToolDto>, McpError> {
+            if self.list_tools_fails.load(Ordering::SeqCst) {
+                return Err(McpError::Internal("list tools failed".into()));
+            }
             Ok(self.tools.clone())
         }
         async fn list_resources(
@@ -1826,6 +2231,13 @@ mod tests {
             Err(McpError::Internal("not implemented".into()))
         }
         async fn disconnect(&self, id: ConnId) -> Result<(), McpError> {
+            self.disconnect_started.notify_one();
+            if self.block_disconnect.load(Ordering::SeqCst) {
+                self.disconnect_release.notified().await;
+            }
+            if self.disconnect_fails.load(Ordering::SeqCst) {
+                return Err(McpError::Internal("disconnect failed".into()));
+            }
             self.conns.lock().unwrap().remove(&id);
             Ok(())
         }
@@ -1869,6 +2281,283 @@ mod tests {
             registry.get_client("mock").await.is_some(),
             "a live McpClient must be registered when raw_conn is present"
         );
+    }
+
+    #[tokio::test]
+    async fn catalog_failure_disconnects_transport_and_records_retryable_state() {
+        let mock = Arc::new(BridgeMock::new(&["read"]));
+        mock.list_tools_fails.store(true, Ordering::SeqCst);
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock.clone() as Arc<dyn RawConnectionProvider>,
+        );
+
+        let error = registry.connect(cfg("mock")).await.unwrap_err();
+        assert!(error.to_string().contains("list tools failed"));
+        assert!(mock.conns.lock().unwrap().is_empty());
+        let states = registry.connections.read().await;
+        assert!(matches!(
+            states.get("mock"),
+            Some(McpConnectionState::Disconnected {
+                last_error: Some(message),
+                ..
+            }) if message.contains("list tools failed")
+        ));
+    }
+
+    #[tokio::test]
+    async fn connect_and_disconnect_publish_tool_partition_lifecycle() {
+        let mock = Arc::new(BridgeMock::new(&["read"]));
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock as Arc<dyn RawConnectionProvider>,
+        );
+        let mut changes = registry.subscribe_catalog_changes();
+
+        let connection_id = registry.connect(cfg("mock")).await.unwrap();
+        let connected = tokio::time::timeout(Duration::from_secs(2), changes.recv())
+            .await
+            .expect("connect catalog event within timeout")
+            .expect("catalog sender remains live");
+        assert_eq!(
+            connected,
+            McpCatalogChanged {
+                server_name: "mock".into(),
+                connection_id,
+                retired_connection_id: None,
+                kind: McpCatalogKind::Tools,
+            }
+        );
+
+        registry.disconnect("mock").await.unwrap();
+        let disconnected = tokio::time::timeout(Duration::from_secs(2), changes.recv())
+            .await
+            .expect("disconnect catalog event within timeout")
+            .expect("catalog sender remains live");
+        assert_eq!(
+            disconnected,
+            McpCatalogChanged {
+                server_name: "mock".into(),
+                connection_id,
+                retired_connection_id: Some(connection_id),
+                kind: McpCatalogKind::Tools,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_disconnect_preserves_live_state_client_and_catalog() {
+        let mock = Arc::new(BridgeMock::new(&["read"]));
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock.clone() as Arc<dyn RawConnectionProvider>,
+        );
+        let mut changes = registry.subscribe_catalog_changes();
+
+        let connection_id = registry.connect(cfg("mock")).await.unwrap();
+        changes.recv().await.unwrap();
+        mock.disconnect_fails.store(true, Ordering::SeqCst);
+
+        let error = registry.disconnect("mock").await.unwrap_err();
+        assert!(error.to_string().contains("disconnect failed"));
+        assert!(registry.get_client("mock").await.is_some());
+        let conns = registry.connections.read().await;
+        assert!(matches!(
+            conns.get("mock"),
+            Some(McpConnectionState::Connected {
+                connection_id: current,
+                ..
+            }) if *current == connection_id
+        ));
+        drop(conns);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), changes.recv())
+                .await
+                .is_err(),
+            "a failed teardown must not retire the live tool partition"
+        );
+    }
+
+    #[tokio::test]
+    async fn live_disable_retires_connection_without_revoking_reconnect_config() {
+        let mock = Arc::new(BridgeMock::new(&["read"]));
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock as Arc<dyn RawConnectionProvider>,
+        );
+        let mut changes = registry.subscribe_catalog_changes();
+        let connection_id = registry.connect(cfg("mock")).await.unwrap();
+        changes.recv().await.unwrap();
+
+        assert!(registry.set_disabled("mock", true).await.unwrap());
+        assert!(registry.get_client("mock").await.is_none());
+        assert_eq!(
+            registry.action_states().await,
+            vec![("mock".to_string(), traits::McpActionState::Disabled)]
+        );
+        let retired = changes.recv().await.unwrap();
+        assert_eq!(retired.retired_connection_id, Some(connection_id));
+
+        assert!(registry.set_disabled("mock", false).await.unwrap());
+        assert!(registry.get_client("mock").await.is_some());
+        assert_eq!(
+            registry.action_states().await,
+            vec![("mock".to_string(), traits::McpActionState::Connected)]
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_live_disable_preserves_connected_generation() {
+        let mock = Arc::new(BridgeMock::new(&["read"]));
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock.clone() as Arc<dyn RawConnectionProvider>,
+        );
+        let connection_id = registry.connect(cfg("mock")).await.unwrap();
+        mock.disconnect_fails.store(true, Ordering::SeqCst);
+
+        assert!(registry.set_disabled("mock", true).await.is_err());
+        assert!(registry.get_client("mock").await.is_some());
+        let conns = registry.connections.read().await;
+        assert!(matches!(
+            conns.get("mock"),
+            Some(McpConnectionState::Connected {
+                connection_id: current,
+                config,
+                ..
+            }) if *current == connection_id && !config.disabled
+        ));
+    }
+
+    #[tokio::test]
+    async fn slow_disconnect_does_not_block_registry_snapshots() {
+        let mock = Arc::new(BridgeMock::new(&["read"]));
+        let registry = Arc::new(McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock.clone() as Arc<dyn RawConnectionProvider>,
+        ));
+        registry.connect(cfg("mock")).await.unwrap();
+        mock.block_disconnect.store(true, Ordering::SeqCst);
+
+        let disconnect = {
+            let registry = Arc::clone(&registry);
+            tokio::spawn(async move { registry.disconnect("mock").await })
+        };
+        mock.disconnect_started.notified().await;
+
+        let snapshot = tokio::time::timeout(Duration::from_millis(50), registry.snapshot())
+            .await
+            .expect("transport teardown must not hold the connection-state lock");
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].status, traits::McpStatus::Connected);
+
+        mock.disconnect_release.notify_one();
+        disconnect.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn inbound_tools_list_changed_is_forwarded_with_connection_generation() {
+        let mock = Arc::new(BridgeMock::new(&[]));
+        let registry = McpRegistry::new(mock as Arc<dyn McpTransport>);
+        let (connection, peer_tx, _peer_rx) = drivable_connection();
+        let connection_id = ConnId::new();
+        let mut changes = registry.subscribe_catalog_changes();
+        registry.spawn_catalog_change_listener("srv".into(), connection_id, connection);
+
+        let mut frame = serde_json::to_vec(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/tools/list_changed",
+            "params": {}
+        }))
+        .unwrap();
+        frame.push(b'\n');
+        peer_tx.send(Bytes::from(frame)).await.unwrap();
+
+        let change = tokio::time::timeout(Duration::from_secs(2), changes.recv())
+            .await
+            .expect("catalog notification within timeout")
+            .expect("catalog sender remains live");
+        assert_eq!(
+            change,
+            McpCatalogChanged {
+                server_name: "srv".into(),
+                connection_id,
+                retired_connection_id: None,
+                kind: McpCatalogKind::Tools,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_tools_catalog_replaces_connected_snapshot_after_success() {
+        let mock = Arc::new(BridgeMock::new(&[]));
+        let registry = Arc::new(McpRegistry::new(mock as Arc<dyn McpTransport>));
+        let (connection, peer_tx, mut peer_rx) = drivable_connection();
+        let client = Arc::new(
+            McpClient::new("srv", std::path::PathBuf::from("/tmp/work"), connection).await,
+        );
+        let connection_id = ConnId::new();
+        registry.clients.write().await.insert("srv".into(), client);
+        registry.connections.write().await.insert(
+            "srv".into(),
+            McpConnectionState::Connected {
+                config: cfg("srv"),
+                connection_id,
+                capabilities: ServerCapabilitiesDto {
+                    tools: true,
+                    resources: false,
+                    prompts: false,
+                    logging: false,
+                    experimental: HashMap::new(),
+                },
+                tools: BridgeMock::new(&["old"]).tools,
+                resources: Vec::new(),
+                prompts: Vec::new(),
+                connected_at: SystemTime::now(),
+            },
+        );
+
+        let change = McpCatalogChanged {
+            server_name: "srv".into(),
+            connection_id,
+            retired_connection_id: None,
+            kind: McpCatalogKind::Tools,
+        };
+        let refresh_registry = registry.clone();
+        let refresh = tokio::spawn(async move { refresh_registry.refresh_catalog(&change).await });
+        let request_frame = tokio::time::timeout(Duration::from_secs(2), peer_rx.recv())
+            .await
+            .expect("tools/list request within timeout")
+            .expect("tools/list frame");
+        let request: Value = serde_json::from_slice(&request_frame).unwrap();
+        assert_eq!(request["method"], "tools/list");
+        let mut response = serde_json::to_vec(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": request["id"].clone(),
+            "result": {
+                "tools": [{
+                    "name": "new tool",
+                    "description": "fresh",
+                    "inputSchema": {"type": "object"}
+                }]
+            }
+        }))
+        .unwrap();
+        response.push(b'\n');
+        peer_tx.send(Bytes::from(response)).await.unwrap();
+
+        assert_eq!(
+            refresh.await.unwrap().unwrap(),
+            Some(connection_id),
+            "current connection generation must be refreshed"
+        );
+        let conns = registry.connections.read().await;
+        let McpConnectionState::Connected { tools, .. } = conns.get("srv").unwrap() else {
+            panic!("server must remain connected")
+        };
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].tool_name, "new tool");
+        assert_eq!(tools[0].full_name, "mcp__srv__new_tool");
     }
 
     #[tokio::test]

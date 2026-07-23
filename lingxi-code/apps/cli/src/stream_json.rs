@@ -359,11 +359,11 @@ pub struct StreamJsonStream {
     include_hook_events: AtomicBool,
     /// `--forward-subagent-text` (or `CLAUDE_CODE_FORWARD_SUBAGENT_TEXT`): forward
     /// subagent text/thinking blocks as assistant/user frames with a non-null
-    /// `parent_tool_use_id`. Carried onto the stream so the emitter can consult
-    /// it once the subagent→parent forwarding pipeline lands (currently inert —
-    /// subagent blocks are not yet re-emitted here). AtomicBool so it can be set
-    /// after Arc construction.
+    /// `parent_tool_use_id`. AtomicBool so it can be set after Arc construction.
     forward_subagent_text: AtomicBool,
+    /// Live thinking-display mode. `true` drops thinking blocks while keeping
+    /// them in the model-facing transcript.
+    omit_thinking: AtomicBool,
     /// Latest-value mailbox that prevents an unbounded backlog of replaceable
     /// tool heartbeat frames when stdout is slow.
     heartbeat_lines: Arc<CoalescedHeartbeatLines>,
@@ -391,6 +391,7 @@ impl StreamJsonStream {
             include_partial_messages: AtomicBool::new(false),
             include_hook_events: AtomicBool::new(false),
             forward_subagent_text: AtomicBool::new(false),
+            omit_thinking: AtomicBool::new(false),
             heartbeat_lines: Arc::new(CoalescedHeartbeatLines::default()),
         }
     }
@@ -861,6 +862,11 @@ impl StreamJsonStream {
             for row in &cost.by_model {
                 let ctx_window = context_window_for_model(&row.model, betas);
                 let max_output = max_output_tokens_for_model(&row.model);
+                // (cc 2.1.218) `n.canonicalModel = yo(r)` — the canonical id the
+                // PRICING lookup used. It may differ from the raw model string
+                // this entry is keyed by (provider-specific ids, aliases, `[1m]`
+                // suffixes), so a host can group cost across those spellings.
+                let canonical = cost::pricing::first_party_name_to_canonical(&row.model);
                 #[allow(clippy::cast_precision_loss)]
                 let cost_usd = row.total_nano_usd as f64 / 1_000_000_000.0;
                 model_usage.insert(
@@ -873,7 +879,8 @@ impl StreamJsonStream {
                         "webSearchRequests": 0_u64,
                         "costUSD": cost_usd,
                         "contextWindow": ctx_window,
-                        "maxOutputTokens": max_output
+                        "maxOutputTokens": max_output,
+                        "canonicalModel": canonical
                     }),
                 );
             }
@@ -888,7 +895,8 @@ impl StreamJsonStream {
                     "webSearchRequests": 0_u64,
                     "costUSD": cost.total_usd,
                     "contextWindow": context_window_for_model(model_id, betas),
-                    "maxOutputTokens": max_output_tokens_for_model(model_id)
+                    "maxOutputTokens": max_output_tokens_for_model(model_id),
+                    "canonicalModel": cost::pricing::first_party_name_to_canonical(model_id)
                 }),
             );
         }
@@ -1024,6 +1032,21 @@ impl OutputStream for StreamJsonStream {
         }
     }
 
+    async fn emit_system_notice(&self, body: &str, is_error: bool) {
+        if self.suppress_frames {
+            return;
+        }
+        let session_id = self.session_id.lock().await.clone();
+        self.enqueue(&json!({
+            "type": "system",
+            "subtype": "notice",
+            "message": body,
+            "is_error": is_error,
+            "uuid": uuid::Uuid::new_v4().to_string(),
+            "session_id": session_id,
+        }));
+    }
+
     async fn emit_tool_call(
         &self,
         id: &protocol::ToolUseId,
@@ -1124,7 +1147,7 @@ impl OutputStream for StreamJsonStream {
     }
 
     async fn emit_thinking(&self, thinking: &str, signature: Option<&str>) {
-        if self.suppress_frames {
+        if self.suppress_frames || self.omit_thinking.load(Ordering::Relaxed) {
             return;
         }
         let mut acc = self.accum.lock().await;
@@ -1143,6 +1166,11 @@ impl OutputStream for StreamJsonStream {
                 signature: signature.map(String::from),
             });
         }
+    }
+
+    fn set_thinking_display(&self, mode: Option<&str>) {
+        self.omit_thinking
+            .store(mode == Some("omitted"), Ordering::Relaxed);
     }
 
     async fn emit_usage(
@@ -1426,7 +1454,10 @@ pub fn build_init_params(
         // (`o_()`); the former surface isn't ported and the latter is a LingXi
         // accepted divergence (multi-provider), so only the F$e() term is wired.
         analytics_disabled: traits::traffic_mode::is_telemetry_disabled(),
-        product_feedback_disabled: false,
+        // `productFeedbackDisabled` follows the essential-traffic privacy gate:
+        // with non-essential traffic disabled, the product feedback surface is
+        // unavailable and the init frame must advertise that fact.
+        product_feedback_disabled: traits::traffic_mode::is_essential_traffic_only(),
         memory_paths,
         fast_mode_state: fast_mode_state.to_string(),
     }
@@ -1458,6 +1489,61 @@ pub fn permission_mode_str(mode: permission::PermissionMode) -> &'static str {
 }
 
 #[cfg(test)]
+mod canonical_model_tests {
+    use super::*;
+
+    /// (cc 2.1.218) The per-model usage block carries `canonicalModel` — the id
+    /// the PRICING lookup used. It must collapse the spellings a raw model string
+    /// can take (date suffix, `[1m]`, Bedrock ARN / inference profile) onto one
+    /// canonical id, so a host can group cost across them.
+    #[test]
+    fn canonical_model_collapses_provider_spellings() {
+        for (raw, want) in [
+            ("claude-opus-4-7", "claude-opus-4-7"),
+            ("claude-opus-4-7-20251101", "claude-opus-4-7"),
+            ("us.anthropic.claude-opus-4-7-v1:0", "claude-opus-4-7"),
+        ] {
+            assert_eq!(
+                cost::pricing::first_party_name_to_canonical(raw),
+                want,
+                "{raw} must canonicalize to {want}"
+            );
+        }
+    }
+
+    /// The field is present on BOTH emission branches (per-model rows and the
+    /// legacy aggregate fallback) and sits alongside contextWindow/maxOutputTokens.
+    #[test]
+    fn usage_block_emits_canonical_model_on_both_branches() {
+        let mut per_model = traits::orchestrator::CostSnapshot::default();
+        per_model.by_model = vec![traits::orchestrator::ModelUsageRow {
+            model: "us.anthropic.claude-opus-4-7-v1:0".into(),
+            total_nano_usd: 1_000_000_000,
+            input_tokens: 10,
+            output_tokens: 20,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        }];
+        let block = StreamJsonStream::build_model_usage_block(&per_model, "ignored", &[]);
+        let row = block
+            .get("us.anthropic.claude-opus-4-7-v1:0")
+            .expect("per-model row");
+        assert_eq!(row["canonicalModel"], "claude-opus-4-7");
+        assert!(row.get("contextWindow").is_some(), "existing keys retained");
+
+        // Legacy aggregate fallback (no per-model rows).
+        let mut agg = traits::orchestrator::CostSnapshot::default();
+        agg.input_tokens = 5;
+        let block2 =
+            StreamJsonStream::build_model_usage_block(&agg, "claude-opus-4-7-20251101", &[]);
+        let row2 = block2
+            .get("claude-opus-4-7-20251101")
+            .expect("aggregate row");
+        assert_eq!(row2["canonicalModel"], "claude-opus-4-7");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1476,6 +1562,21 @@ mod tests {
             None,
             "off",
         )
+    }
+
+    #[tokio::test]
+    async fn thinking_display_can_omit_and_restore_stream_blocks() {
+        let stream = StreamJsonStream::new(make_params("thinking-display"));
+        stream.set_thinking_display(Some("omitted"));
+        stream.emit_thinking("hidden", None).await;
+        assert!(stream.accum.lock().await.blocks.is_empty());
+
+        stream.set_thinking_display(Some("summarized"));
+        stream.emit_thinking("visible", None).await;
+        assert!(matches!(
+            stream.accum.lock().await.blocks.as_slice(),
+            [AccBlock::Thinking { thinking, .. }] if thinking == "visible"
+        ));
     }
 
     /// Verify that the init frame includes the 20 mandatory keys in the correct
@@ -1538,6 +1639,43 @@ mod tests {
         );
 
         std::env::remove_var("DO_NOT_TRACK");
+    }
+
+    #[tokio::test]
+    async fn product_feedback_disabled_tracks_essential_traffic_only() {
+        use std::sync::Mutex;
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for v in [
+            "DO_NOT_TRACK",
+            "DISABLE_TELEMETRY",
+            "LINGXI_DISABLE_NONESSENTIAL_TRAFFIC",
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+        ] {
+            std::env::remove_var(v);
+        }
+
+        let params = make_params("sess");
+        assert!(
+            !params.product_feedback_disabled,
+            "clean env ⇒ product feedback enabled"
+        );
+
+        std::env::set_var("DO_NOT_TRACK", "1");
+        let params = make_params("sess");
+        assert!(
+            !params.product_feedback_disabled,
+            "DO_NOT_TRACK only disables telemetry, not product feedback"
+        );
+        std::env::remove_var("DO_NOT_TRACK");
+
+        std::env::set_var("LINGXI_DISABLE_NONESSENTIAL_TRAFFIC", "1");
+        let params = make_params("sess");
+        assert!(
+            params.product_feedback_disabled,
+            "essential-traffic ⇒ product feedback disabled"
+        );
+        std::env::remove_var("LINGXI_DISABLE_NONESSENTIAL_TRAFFIC");
     }
 
     /// Verify text accumulation — multiple `emit_text` calls on the same
@@ -1668,6 +1806,31 @@ mod tests {
         let frame: Value = serde_json::from_str(&lines[0]).expect("valid heartbeat json");
         assert_eq!(frame["elapsed_ms"], 3_000);
         assert!(rx.try_recv().is_err(), "only one wake-up may be queued");
+    }
+
+    #[tokio::test]
+    async fn system_notice_is_visible_as_a_sanitized_system_frame() {
+        let stream = StreamJsonStream::new(make_params("sess-notice"));
+        let mut rx = stream
+            .drain_rx
+            .lock()
+            .await
+            .take()
+            .expect("drain receiver available");
+
+        stream
+            .emit_system_notice("transcript persistence failed", true)
+            .await;
+
+        let OutboundMsg::Line(line) = rx.try_recv().expect("notice frame") else {
+            panic!("expected a Line frame");
+        };
+        let frame: Value = serde_json::from_str(&line).expect("valid notice json");
+        assert_eq!(frame["type"], "system");
+        assert_eq!(frame["subtype"], "notice");
+        assert_eq!(frame["message"], "transcript persistence failed");
+        assert_eq!(frame["is_error"], true);
+        assert_eq!(frame["session_id"], "sess-notice");
     }
 
     /// Verify U+2028/U+2029 escaping.

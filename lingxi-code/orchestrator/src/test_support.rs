@@ -343,6 +343,12 @@ impl OutputStream for MockOutputStream {
             text: text.to_string(),
         });
     }
+    async fn emit_system_notice(&self, body: &str, is_error: bool) {
+        self.events.lock().await.push(OutputEvent::SystemNotice {
+            body: body.to_string(),
+            is_error,
+        });
+    }
     async fn emit_terminal_sequence(&self, seq: &str) {
         self.events
             .lock()
@@ -683,6 +689,12 @@ pub struct MockOrchestratorHandle {
     switch_model_last_profile: StdMutex<Option<Option<String>>>,
     /// If `Some`, `switch_model` returns `ActionFailed(_)`.
     switch_model_error: StdMutex<Option<String>>,
+    /// Live permission-mode wire id used by bridge/mobile routing tests.
+    permission_mode: StdMutex<Option<String>>,
+    /// Live effort value used by `/effort` command tests.
+    effort: StdMutex<Option<String>>,
+    /// If `Some`, the next `set_permission_mode` call returns `ActionFailed(_)`.
+    permission_mode_error: StdMutex<Option<String>>,
     /// Set by `request_exit`. Readable via `was_exit_requested`.
     exit_requested: AtomicBool,
     /// Pre-loaded path for `open_memory_editor`.
@@ -741,6 +753,9 @@ impl MockOrchestratorHandle {
             switch_model_last: StdMutex::new(None),
             switch_model_last_profile: StdMutex::new(None),
             switch_model_error: StdMutex::new(None),
+            permission_mode: StdMutex::new(Some("default".to_string())),
+            effort: StdMutex::new(None),
+            permission_mode_error: StdMutex::new(None),
             exit_requested: AtomicBool::new(false),
             memory_path: StdMutex::new(None),
             editor_exit_code: AtomicI32::new(0),
@@ -823,6 +838,14 @@ impl MockOrchestratorHandle {
     /// Make the next `switch_model` call return `ActionFailed(reason)`.
     pub fn set_switch_model_error(&self, reason: String) {
         *self.switch_model_error.lock().unwrap() = Some(reason);
+    }
+    /// The mock's current live permission-mode wire id.
+    pub fn current_permission_mode(&self) -> Option<String> {
+        self.permission_mode.lock().unwrap().clone()
+    }
+    /// Make the next `set_permission_mode` call return `ActionFailed(reason)`.
+    pub fn set_permission_mode_error(&self, reason: String) {
+        *self.permission_mode_error.lock().unwrap() = Some(reason);
     }
     /// Pre-load the full `CostSnapshot` returned by `snapshot_cost`. If set,
     /// the snapshot is returned verbatim (with `session_id` overwritten to
@@ -983,6 +1006,27 @@ impl OrchestratorHandle for MockOrchestratorHandle {
         if let Some(reason) = self.switch_model_error.lock().unwrap().take() {
             return Err(HandleError::ActionFailed(reason));
         }
+        Ok(())
+    }
+
+    async fn permission_mode(&self) -> Option<String> {
+        self.permission_mode.lock().unwrap().clone()
+    }
+
+    async fn current_effort(&self) -> Option<String> {
+        self.effort.lock().unwrap().clone()
+    }
+
+    async fn set_effort_level(&self, effort: Option<String>) -> Result<(), HandleError> {
+        *self.effort.lock().unwrap() = effort;
+        Ok(())
+    }
+
+    async fn set_permission_mode(&self, mode: &str) -> Result<(), HandleError> {
+        if let Some(reason) = self.permission_mode_error.lock().unwrap().take() {
+            return Err(HandleError::ActionFailed(reason));
+        }
+        *self.permission_mode.lock().unwrap() = Some(mode.to_string());
         Ok(())
     }
 

@@ -13,11 +13,12 @@ export interface KeychainCredentialStore {
 }
 
 /**
- * Store provider secrets as generic-password items instead of encrypting a
- * blob with Electron Safe Storage. Safe Storage's per-app ACL asks for the
- * login password again whenever an ad-hoc packaged helper is launched. The
- * `security` item trusts the security CLI, so the desktop can read the item
- * without spawning a second Electron process or showing a prompt every run.
+ * Compatibility reader for credentials written by older Electron releases.
+ *
+ * New credentials are persisted by the Rust engine. This class stays wired
+ * only so launch can read the old `lingxi-code-desktop` generic-password item,
+ * pass it to the engine for the current process, and migrate it to the shared
+ * CLI/TUI store after the bridge is connected.
  */
 export class MacKeychainCredentialStore implements KeychainCredentialStore {
   readonly available = process.platform === 'darwin';
@@ -53,17 +54,12 @@ export class MacKeychainCredentialStore implements KeychainCredentialStore {
 
   write(providerId: string, value: string): void {
     if (!this.available) throw new Error('macOS Keychain is unavailable');
-    // Hex keeps the secret out of argv and avoids quoting/newline ambiguity
-    // in `security -i`; the keychain stores the decoded bytes.
     const hex = Buffer.from(value, 'utf8').toString('hex');
     const command = [
       'add-generic-password', '-U',
       '-a', shellQuote(accountFor(providerId)),
       '-s', shellQuote(KEYCHAIN_SERVICE),
       '-X', shellQuote(hex),
-      // The read path is intentionally a short-lived security CLI process.
-      // Trusting that binary avoids Electron Safe Storage's per-launch ACL
-      // prompt while keeping the item protected by the user's login keychain.
       '-T', shellQuote('/usr/bin/security'),
       '\n',
     ].join(' ');
@@ -88,8 +84,6 @@ export class MacKeychainCredentialStore implements KeychainCredentialStore {
         timeout: SECURITY_TIMEOUT_MS,
       });
     } catch {
-      // Missing items are already cleared. Other errors are surfaced so the
-      // UI never reports a successful delete that left a secret behind.
       if (this.has(providerId)) throw new Error('secure credential storage is unavailable');
     }
   }

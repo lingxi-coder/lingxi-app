@@ -118,6 +118,7 @@ impl ModelPickerView {
 
     /// The rows currently shown (grouped by provider), for inspection/tests.
     #[must_use]
+    #[cfg(test)]
     pub(crate) fn rows(&self) -> &[ModelRow] {
         &self.rows
     }

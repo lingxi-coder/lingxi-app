@@ -304,13 +304,14 @@ impl Tool for GlobTool {
         }
         // Read(deny) exclusions (`glob.ts` `lLa()`: `for(_ of l) d.push("--glob",
         // `!${_}`)`). Each active `Read`-`deny` rule (resolved at boot by
-        // `permission::read_deny_exclude_globs`) is added as a negated override
-        // so a denied/sensitive path is never listed. The reference prefixes a
+        // `permission::read_deny_exclude_globs`) is read from the live policy
+        // gate on every call and added as a negated override so a
+        // denied/sensitive path is never listed. The reference prefixes a
         // bare `!` to every entry — `F4e` already prepends a leading `/` to the
         // rooted entries (and unrooted entries pass through relative), so we
         // mirror that with `!{p}` verbatim. A `!`-prefixed `OverrideBuilder`
         // pattern is an ignore.
-        for p in &self.ctx.read_deny_exclude_globs {
+        for p in self.ctx.effective_read_deny_exclude_globs(&canon_base) {
             let _ = ob.add(&format!("!{p}"));
         }
         let overrides = match ob.build() {

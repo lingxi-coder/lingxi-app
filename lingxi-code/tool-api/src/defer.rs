@@ -1,38 +1,37 @@
 //! Deferred-tool loading state — the shared spine of the Tool Search pipeline.
 //!
-//! claude-code 2.1.207 runs a "tool search" mode in which tools whose
-//! `shouldDefer === true` are serialized on the wire WITH their schema plus
-//! `defer_loading: true`, and the model pulls them into context on demand via
-//! the `ToolSearch` tool. Two facts drive this port:
+//! claude-code 2.1.216 runs a "tool search" mode in which undiscovered tools
+//! whose `shouldDefer === true` are omitted from the request tool list and the
+//! model pulls matching definitions into context via the `ToolSearch` tool.
+//! Once discovered, a definition returns to the wire with
+//! `defer_loading: true` so the provider can retain dynamic-tool semantics.
+//! Two facts drive this port:
 //!
 //! - the DEFERRAL PREDICATE (binary): `if (e.name === "EnterWorktree" &&
 //!   process.env.CLAUDE_CODE_SESSION_KIND === "bg") return false; return
 //!   e.shouldDefer === true` — every tool that reports `should_defer()` is
 //!   deferred, EXCEPT `EnterWorktree` inside a `bg` session.
-//! - the LIFECYCLE: once the model loads a deferred tool (via `ToolSearch`), it
-//!   is no longer deferred on subsequent turns — its full schema stays present.
+//! - the LIFECYCLE: once the model discovers a deferred tool (via
+//!   `ToolSearch`), its full schema stays present on subsequent turns and the
+//!   discovered name survives resume/compaction.
 //!
 //! [`DeferralState`] is the single object shared between the wire serializer
 //! ([`crate::wire::apply_defer_loading`]) and the `ToolSearch` consumer so both
-//! ends stay consistent: the wire defers exactly the set `ToolSearch` searches,
-//! and marking a tool loaded in `ToolSearch` un-defers it on the next turn's
-//! wire. It is OWNED by the [`ToolRegistry`](crate::registry::ToolRegistry),
+//! ends stay consistent: the wire omits exactly the undiscovered set
+//! `ToolSearch` searches, and marking a tool loaded makes it visible on the
+//! next turn's wire. It is OWNED by the
+//! [`ToolRegistry`](crate::registry::ToolRegistry),
 //! which already flows to the orchestrator's wire assembly and to the tool.
 //!
-//! ACTIVATION divergence (documented): [`mode_from_env`] reads
-//! `LINGXI_ENABLE_TOOL_SEARCH` / `ENABLE_TOOL_SEARCH` (claude-code's env name)
-//! and the `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` kill switch. Unlike
-//! claude-code — which defaults tool search ON (`"tst"`) for supporting models —
-//! this port keeps the pipeline DISABLED unless the enable var is explicitly
-//! truthy. Reason: the in-turn `tool_reference` discovery blocks (which let the
-//! model load a deferred tool's schema WITHIN a turn) are a documented
-//! follow-up; the cross-turn "search → mark loaded → next turn present"
-//! lifecycle IS wired here, but defaulting on without the in-turn blocks would
-//! strand deferred tools for a full turn. When disabled every method is inert
-//! and the wire bytes are byte-identical to the pre-pipeline build.
+//! [`mode_from_env`] reads `LINGXI_ENABLE_TOOL_SEARCH` /
+//! `ENABLE_TOOL_SEARCH` (claude-code's env name) and the
+//! `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` kill switch. Like claude-code, an
+//! unset enable variable selects `tst`; request assembly subsequently disables
+//! it for unsupported models/providers or when `ToolSearch` was denied.
 
 use crate::tool_trait::Tool;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::RwLock;
 
 /// Byte-locked name of the worktree-entry tool (claude-code `k9e`), the sole
@@ -40,34 +39,38 @@ use std::sync::RwLock;
 pub const ENTER_WORKTREE_TOOL_NAME: &str = "EnterWorktree";
 
 /// Tool-search mode (claude-code `e$r()` result: `standard` / `tst` /
-/// `tst-auto`). This port collapses `tst` and `tst-auto` into a single ENABLED
-/// state — the `auto:N` estimated-token-savings threshold decision is not ported
-/// (treated as a plain enable); see module docs.
+/// `tst-auto`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolSearchMode {
     /// Tool search off — nothing is deferred (claude-code `"standard"`).
     Standard,
     /// Tool search on (claude-code `"tst"` / `"tst-auto"`).
     Enabled,
+    /// Enable only when deferred schemas are estimated to save at least this
+    /// percentage of the active model context window.
+    Auto {
+        /// Minimum estimated context-window percentage saved by deferral.
+        percentage: u8,
+    },
 }
 
 impl ToolSearchMode {
     /// Whether deferral is active in this mode.
     #[must_use]
     pub fn is_enabled(self) -> bool {
-        matches!(self, ToolSearchMode::Enabled)
+        !matches!(self, ToolSearchMode::Standard)
     }
 }
 
 /// Parse the tool-search mode from an enable value and the experimental-betas
-/// kill switch. Mirrors the shape of claude-code `e$r()` with the documented
-/// default-off divergence (see module docs).
+/// kill switch. Mirrors the shape of claude-code `e$r()`.
 ///
 /// - kill switch set → `Standard`.
-/// - enable unset → `Standard` (DIVERGES from claude-code default `tst`).
+/// - enable unset → `Enabled` (claude-code default `tst`).
 /// - enable defined-falsy (`0`/`false`/`no`/`off`) → `Standard`.
-/// - enable truthy (`1`/`true`/`yes`/`on`), or one of `tst` / `tst-auto` /
-///   `auto` / `auto:N` → `Enabled`.
+/// - `tst` or a truthy value → `Enabled`.
+/// - `tst-auto` / `auto` → `Auto { percentage: 10 }`.
+/// - `auto:N` clamps N to 0..100; 0 is always enabled and 100 is standard.
 /// - anything else → `Standard`.
 #[must_use]
 pub fn mode_from_values(enable: Option<&str>, disable_experimental_betas: bool) -> ToolSearchMode {
@@ -75,11 +78,28 @@ pub fn mode_from_values(enable: Option<&str>, disable_experimental_betas: bool) 
         return ToolSearchMode::Standard;
     }
     let Some(raw) = enable else {
-        return ToolSearchMode::Standard;
+        return ToolSearchMode::Enabled;
     };
     let v = raw.trim().to_lowercase();
-    if v == "tst" || v == "tst-auto" || v == "auto" || v.starts_with("auto:") {
+    if v == "tst" {
         return ToolSearchMode::Enabled;
+    }
+    if v == "tst-auto" || v == "auto" {
+        return ToolSearchMode::Auto { percentage: 10 };
+    }
+    if let Some(raw_percentage) = v.strip_prefix("auto:") {
+        let mut chars = raw_percentage.trim_start().chars().peekable();
+        let mut numeric = String::new();
+        if chars.peek().is_some_and(|c| matches!(c, '+' | '-')) {
+            numeric.push(chars.next().expect("peeked sign"));
+        }
+        numeric.extend(chars.take_while(char::is_ascii_digit));
+        let signed = numeric.parse::<i16>().unwrap_or(10).clamp(0, 100) as u8;
+        return match signed {
+            0 => ToolSearchMode::Enabled,
+            100 => ToolSearchMode::Standard,
+            percentage => ToolSearchMode::Auto { percentage },
+        };
     }
     if traits::env::is_env_defined_falsy(Some(&v)) {
         return ToolSearchMode::Standard;
@@ -109,11 +129,13 @@ pub fn mode_from_env() -> ToolSearchMode {
 
 /// Shared deferral state for a session: the tool-search mode, the `bg`-session
 /// flag (for the `EnterWorktree` exception), and the set of tool names the model
-/// has loaded via `ToolSearch` this session.
+/// has discovered via `ToolSearch` this session.
 pub struct DeferralState {
     mode: ToolSearchMode,
     session_kind_bg: bool,
     loaded: RwLock<HashSet<String>>,
+    auto_active: AtomicBool,
+    request_supported: AtomicBool,
 }
 
 impl DeferralState {
@@ -124,6 +146,8 @@ impl DeferralState {
             mode,
             session_kind_bg,
             loaded: RwLock::new(HashSet::new()),
+            auto_active: AtomicBool::new(false),
+            request_supported: AtomicBool::new(true),
         }
     }
 
@@ -151,39 +175,90 @@ impl DeferralState {
     /// Whether deferral is active.
     #[must_use]
     pub fn is_enabled(&self) -> bool {
-        self.mode.is_enabled()
+        if !self.request_supported.load(Ordering::Acquire) {
+            return false;
+        }
+        match self.mode {
+            ToolSearchMode::Enabled => true,
+            ToolSearchMode::Auto { .. } => self.auto_active.load(Ordering::Acquire),
+            ToolSearchMode::Standard => false,
+        }
     }
 
-    /// Mark a set of tool names as loaded (pulled into context via `ToolSearch`),
-    /// so they stop being deferred on subsequent turns.
+    /// Publish whether the active request can carry `defer_loading` and
+    /// `tool_reference` blocks. This is recomputed on every model/profile/tool
+    /// change, so switching away from Anthropic (or denying `ToolSearch`)
+    /// immediately restores the complete inline tool list.
+    pub fn set_request_supported(&self, supported: bool) {
+        self.request_supported.store(supported, Ordering::Release);
+    }
+
+    /// Configured automatic threshold, if this session is in auto mode.
+    #[must_use]
+    pub fn auto_percentage(&self) -> Option<u8> {
+        match self.mode {
+            ToolSearchMode::Auto { percentage } => Some(percentage),
+            ToolSearchMode::Standard | ToolSearchMode::Enabled => None,
+        }
+    }
+
+    /// Publish the current turn's auto-threshold result before building the
+    /// searchable view and applying wire markers.
+    pub fn set_auto_active(&self, active: bool) {
+        if matches!(self.mode, ToolSearchMode::Auto { .. }) {
+            self.auto_active.store(active, Ordering::Release);
+        }
+    }
+
+    /// Mark tool names as discovered (pulled into context via `ToolSearch`), so
+    /// their definitions become visible on subsequent turns.
     pub fn mark_loaded<I, S>(&self, names: I)
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        let mut g = self.loaded.write().expect("deferral loaded-set poisoned");
+        let mut g = self
+            .loaded
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for n in names {
             g.insert(n.into());
         }
     }
 
-    /// Whether a tool has been loaded this session.
+    /// Replace the session's discovered-tool snapshot atomically. Resume and
+    /// `/clear` must not merge a previous conversation's ToolSearch state into
+    /// the newly adopted session.
+    pub fn replace_loaded<I, S>(&self, names: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let mut g = self
+            .loaded
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        g.clear();
+        g.extend(names.into_iter().map(Into::into));
+    }
+
+    /// Whether a tool has been discovered this session.
     #[must_use]
     pub fn is_loaded(&self, name: &str) -> bool {
         self.loaded
             .read()
-            .expect("deferral loaded-set poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .contains(name)
     }
 
-    /// Snapshot deferred-tool names already loaded in this session, sorted for
+    /// Snapshot deferred-tool names already discovered in this session, sorted for
     /// compact-boundary persistence (`preCompactDiscoveredTools`).
     #[must_use]
     pub fn loaded_tool_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self
             .loaded
             .read()
-            .expect("deferral loaded-set poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .cloned()
             .collect();
@@ -199,17 +274,23 @@ impl DeferralState {
     }
 
     /// The claude-code deferral predicate by name + `should_defer` flag:
-    /// `enabled && wants_defer && !loaded`, with the `EnterWorktree`/`bg`
-    /// exception applied first.
+    /// `enabled && candidate && !loaded`, with the `EnterWorktree`/`bg`
+    /// exception applied first. This identifies schemas not yet discovered.
     #[must_use]
     pub fn should_defer(&self, name: &str, wants_defer: bool) -> bool {
         if !self.is_enabled() {
             return false;
         }
+        self.wants_defer(name, wants_defer) && !self.is_loaded(name)
+    }
+
+    /// Candidate predicate independent of the current auto-threshold decision.
+    #[must_use]
+    pub fn wants_defer(&self, name: &str, wants_defer: bool) -> bool {
         if name == ENTER_WORKTREE_TOOL_NAME && self.session_kind_bg {
             return false;
         }
-        wants_defer && !self.is_loaded(name)
+        wants_defer
     }
 }
 
@@ -224,22 +305,43 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mode_defaults_off_when_unset() {
-        // Divergence from claude-code's default-on: unset ⇒ Standard.
-        assert_eq!(mode_from_values(None, false), ToolSearchMode::Standard);
+    fn mode_defaults_on_when_unset() {
+        assert_eq!(mode_from_values(None, false), ToolSearchMode::Enabled);
     }
 
     #[test]
     fn mode_truthy_enables() {
-        for v in [
-            "1", "true", "on", "yes", "TST", "tst", "tst-auto", "auto", "auto:0", "auto:100",
-        ] {
+        for v in ["1", "true", "on", "yes", "TST", "tst", "auto:0"] {
             assert_eq!(
                 mode_from_values(Some(v), false),
                 ToolSearchMode::Enabled,
                 "{v:?} should enable"
             );
         }
+    }
+
+    #[test]
+    fn auto_mode_parses_threshold_edges_and_starts_inactive() {
+        assert_eq!(
+            mode_from_values(Some("auto"), false),
+            ToolSearchMode::Auto { percentage: 10 }
+        );
+        assert_eq!(
+            mode_from_values(Some("tst-auto"), false),
+            ToolSearchMode::Auto { percentage: 10 }
+        );
+        assert_eq!(
+            mode_from_values(Some("auto:35junk"), false),
+            ToolSearchMode::Auto { percentage: 35 }
+        );
+        assert_eq!(
+            mode_from_values(Some("auto:100"), false),
+            ToolSearchMode::Standard
+        );
+        let state = DeferralState::new(ToolSearchMode::Auto { percentage: 10 }, false);
+        assert!(!state.is_enabled());
+        state.set_auto_active(true);
+        assert!(state.is_enabled());
     }
 
     #[test]
@@ -287,6 +389,17 @@ mod tests {
         d.mark_loaded(["Task".to_string()]);
         assert!(d.is_loaded("Task"));
         assert!(!d.should_defer("Task", true));
+        assert!(d.wants_defer("Task", true));
+    }
+
+    #[test]
+    fn unsupported_request_temporarily_disables_deferral() {
+        let d = DeferralState::new(ToolSearchMode::Enabled, false);
+        d.set_request_supported(false);
+        assert!(!d.is_enabled());
+        assert!(!d.should_defer("Task", true));
+        d.set_request_supported(true);
+        assert!(d.is_enabled());
     }
 
     #[test]
@@ -298,6 +411,8 @@ mod tests {
         );
         d.mark_loaded(["Zed", "Read", "Zed"]);
         assert_eq!(d.loaded_tool_names(), vec!["Read", "Zed"]);
+        d.replace_loaded(["Task", "Task"]);
+        assert_eq!(d.loaded_tool_names(), vec!["Task"]);
     }
 
     #[test]

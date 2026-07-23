@@ -51,6 +51,42 @@ pub(crate) fn normalize_lexically(path: &Path) -> PathBuf {
     out
 }
 
+fn canonical_or_normalize(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| normalize_lexically(path))
+}
+
+fn resolve_tool_file_path(tool_input: &serde_json::Value, cwd: &Path) -> Option<PathBuf> {
+    let raw = tool_input
+        .get("file_path")
+        .or_else(|| tool_input.get("path"))
+        .and_then(serde_json::Value::as_str)?;
+    let path = Path::new(raw);
+    Some(if path.is_absolute() {
+        normalize_lexically(path)
+    } else {
+        normalize_lexically(&cwd.join(path))
+    })
+}
+
+fn memdir_index_notice_for_tool(
+    orch: &ConversationOrchestrator,
+    tool_name: &str,
+    tool_input: &serde_json::Value,
+    is_error: bool,
+) -> Option<memory::MemoryIndexNotice> {
+    if is_error || !matches!(tool_name, "Write" | "Edit" | "MultiEdit") {
+        return None;
+    }
+    let memdir = orch.memory_prefetch.as_ref()?.user_memdir()?;
+    let memory_index = canonical_or_normalize(&memdir.join("MEMORY.md"));
+    let target = resolve_tool_file_path(tool_input, &orch.current_cwd())?;
+    if canonical_or_normalize(&target) != memory_index {
+        return None;
+    }
+    let content = std::fs::read_to_string(&memory_index).ok()?;
+    memory::memory_index_cap_notice(&content)
+}
+
 /// #40: apply a hook's folded `terminalSequence` (claude-code `szn`, BIN off
 /// 205755390) via the allowlist validator
 /// ([`hooks::terminal_seq::validate_terminal_sequence`], the `NEo` port):
@@ -95,13 +131,8 @@ pub(crate) const MAX_OUTPUT_TOKENS_RECOVERY_LIMIT: u32 = 3;
 
 /// Escalated output-token cap for the single-shot 8k→64k retry. 1:1 with TS
 /// `utils/context.ts:25` `ESCALATED_MAX_TOKENS = 64_000`.
-///
-/// DEFERRED (A1): not wired into any API call yet. The api-client
-/// `messages_create` signature carries no `max_tokens` override argument, so
-/// the escalation retry cannot be performed crate-locally without editing
-/// api-client (out of scope). [`RecoveryState::max_output_tokens_override`]
-/// and [`crate::OrchestratorConfig::escalate_max_output_tokens`] are wired so
-/// a follow-up can plumb this through without further config/struct churn.
+/// [`RecoveryState::max_output_tokens_override`] carries this value into the
+/// next `messages_create_with_opts` request.
 pub(crate) const ESCALATED_MAX_TOKENS: u32 = 64_000;
 
 /// The byte-exact meta "resume directly" nudge injected as a user message on a
@@ -357,7 +388,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // ...attachmentMessages]`). `None` for the default style ⇒ no extra message,
     // keeping the locked turn-loop fixtures byte-identical. See
     // [`ConversationOrchestrator::output_style_reminder_message`].
-    if let Some(reminder) = orch.output_style_reminder_message() {
+    if let Some(reminder) = orch.output_style_reminder_message().await {
         history_snapshot.push(reminder);
     }
 
@@ -486,6 +517,9 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     //    `PROMPT_TOO_LONG_ERROR_MESSAGE` assistant message instead of bubbling a
     //    hard error.
     let tools = orch.build_wire_tools().await;
+    if let Some(reminder) = orch.deferred_tools_reminder_message() {
+        history_snapshot.insert(0, reminder);
+    }
     // REC.A1: consume the one-shot escalated `max_tokens` override (armed by a
     // prior `max_tokens` recovery via `handle_max_output_tokens`). TAKE it so it
     // applies to EXACTLY this call and never leaks to the next turn.
@@ -981,9 +1015,10 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
             Some(other @ ("model_context_window_exceeded" | "refusal")) => {
                 // Pass the response's refusal `stop_details` so the cyber/bio
                 // variant fires (no-op for model_context_window_exceeded).
-                surface_terminal_api_error(orch, other, response.stop_details.as_ref()).await;
+                let surfaced_id =
+                    surface_terminal_api_error(orch, other, response.stop_details.as_ref()).await;
                 TurnStepOutcome::Ended {
-                    final_message_id: assistant_id,
+                    final_message_id: surfaced_id.unwrap_or(assistant_id),
                     stop_reason: other.to_string(),
                 }
             }
@@ -1053,7 +1088,6 @@ pub(crate) enum PtlCallOutcome {
 /// (`CLAUDE_CODE_REACTIVE_COMPACT`, opt-in). v2.1.186 binary: `recoverFromOverflow`
 /// /`tryReactiveCompact`/`isContextCollapseEnabled` are 0-hit (DCE'd). Porting it
 /// would DIVERGE. Evidence: memory `mainloop-parity-2026-06-23`. `betas` for the
-/// window math is `&[]` (conservative; default 200k) — documented divergence.
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn call_api_with_ptl_recovery(
     orch: &ConversationOrchestrator,
@@ -1069,7 +1103,8 @@ pub(crate) async fn call_api_with_ptl_recovery(
     // (`autoCompact.ts` `calculateTokenWarningState`). `auto_compact_enabled`
     // is `true` to mirror the always-on default of this port (no GrowthBook).
     let estimate = compaction::grouping::estimate_tokens_for_range(&history_snapshot);
-    let warning = compaction::calculate_token_warning_state(estimate, model, &[], true);
+    let active_betas = orch.api.active_betas();
+    let warning = compaction::calculate_token_warning_state(estimate, model, &active_betas, true);
 
     // Push the live context-pressure banner to the UI — the orchestrator-side
     // twin of claude-code's `<TokenWarning>` render
@@ -1097,9 +1132,9 @@ pub(crate) async fn call_api_with_ptl_recovery(
     // (claude-code `calculateContextPercentages(currentUsage, contextWindowSize)`),
     // emitted every turn — even when no warning banner shows — so the custom
     // statusline's `context_window.used_percentage` is always live. Reuses the
-    // SAME `estimate` the banner/auto-compact gate uses; `betas` is empty here
-    // to match the banner computation above.
-    let context_window = compaction::thresholds::effective_context_window_size(model, &[]);
+    // SAME `estimate` and active request betas as the banner/auto-compact gate.
+    let context_window =
+        compaction::thresholds::effective_context_window_size(model, &active_betas);
     let used_fraction = if context_window == 0 {
         0.0
     } else {
@@ -1818,9 +1853,9 @@ async fn handle_max_output_tokens(
 
     // Recovery exhausted — surface the byte-locked `API Error: …` cap message
     // (the streaming twin does this in its terminal arm), then end the turn.
-    surface_terminal_api_error(orch, "max_tokens", None).await;
+    let surfaced_id = surface_terminal_api_error(orch, "max_tokens", None).await;
     Ok(TurnStepOutcome::Ended {
-        final_message_id: assistant_id,
+        final_message_id: surfaced_id.unwrap_or(assistant_id),
         stop_reason: "max_tokens".to_string(),
     })
 }
@@ -1895,7 +1930,7 @@ fn is_tool_result_carrier(msg: &ConversationMessage) -> bool {
 /// completed (`stop_reason = "end_turn"`).
 async fn handle_malformed_tool_use(
     orch: &ConversationOrchestrator,
-    assistant_id: MessageId,
+    _assistant_id: MessageId,
     state: &mut RecoveryState,
 ) -> Result<TurnStepOutcome, OrchestratorError> {
     if state.malformed_tool_use_retried {
@@ -1924,7 +1959,7 @@ async fn handle_malformed_tool_use(
         orch.persist_api_error_message_to_jsonl(&failed_msg, ApiErrorEnvelope::default())
             .await;
         return Ok(TurnStepOutcome::Ended {
-            final_message_id: assistant_id,
+            final_message_id: failed_msg.id(),
             stop_reason: "end_turn".to_string(),
         });
     }
@@ -1981,10 +2016,18 @@ pub(crate) fn translate_response_blocks(content: &[LlmContentBlock]) -> Vec<Cont
                 // `call_…`) IS the canonical `ToolUseId`, so JSONL/resume bytes
                 // match upstream claude-code. The `provider_id` sidecar is left
                 // `None` (vestigial) — the id already carries the canonical value.
+                //
+                // (cc 2.1.218 `jYd`) Repair literal `\uXXXX` TEXT the model
+                // emitted instead of real characters, before the input is stored
+                // or dispatched — otherwise `Edit.old_string` never matches and
+                // paths don't resolve. Windows paths and genuinely-escaped
+                // sequences are left verbatim; `Workflow.script` is restored.
+                let (input, _stats) =
+                    llm_client::unicode_repair::repair_tool_input(name, input);
                 Some(ContentBlock::ToolUse {
                     id: ToolUseId::from(id.clone()),
                     name: name.clone(),
-                    input: input.clone(),
+                    input,
                     provider_id: None,
                 })
             }
@@ -2708,6 +2751,10 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             // overrides), plan mode already bound above, and a resolved `Ask` already
             // prompts. Precedence is therefore deny > ask > allow — matching the
             // binary, NOT a divergence. No-op unless a hook returned `ask`.
+            let requires_user_interaction = tool_handle.requires_user_interaction();
+            // This flag is metadata for an existing Ask/callback path; it must
+            // not create an Ask by itself. The normal TUI tool owns its question
+            // UI, and a generic permission prompt here would duplicate it.
             let resolution = if hook_ask && matches!(resolution, PermissionResolution::Allow) {
                 PermissionResolution::Ask
             } else {
@@ -2779,12 +2826,31 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                     let req_agg = orch.hooks.execute(req_event, hook_ctx.clone()).await;
                     match req_agg.decision {
                         Some(HookDecision::Approve | HookDecision::Allow) => {
+                            // (cc 2.1.218 `Fxy`) The headless PermissionRequest
+                            // rescue re-checks the rules ONLY when the hook
+                            // supplied `updatedInput` — and there an ask rule
+                            // becomes a HARD DENY (no prompt is available on this
+                            // surface). A rescue WITHOUT a rewrite keeps the
+                            // PreToolUse-style resolution.
+                            //
+                            // NOT WIRED: the oracle's second trigger
+                            // `e.requiresUserInteraction?.()`. The tool handle is
+                            // not in scope here; today only `AskUserQuestion`
+                            // returns true and it resolves Allow before reaching
+                            // this branch.
+                            let rewritten = req_agg.modified_input.is_some();
                             if let Some(updated) = req_agg.modified_input {
                                 effective_input = updated;
                             }
-                            orch.perms
-                                .check_after_hook_allow(name, &effective_input)
-                                .await
+                            if rewritten {
+                                orch.perms
+                                    .check_after_hook_allow_rewritten(name, &effective_input)
+                                    .await
+                            } else {
+                                orch.perms
+                                    .check_after_hook_allow(name, &effective_input)
+                                    .await
+                            }
                         }
                         Some(HookDecision::Block) => PermissionDecision::Deny {
                             reason: req_agg
@@ -2798,6 +2864,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                             // rewrite to the input the tool actually runs with.
                             let ctx = traits::permission_gate::PermissionCheckContext {
                                 tool_use_id: Some(tool_use_id.to_string()),
+                                requires_user_interaction,
                                 // HOOK-ASKFLOOR-03: a PreToolUse hook `ask` sets the
                                 // floor so the Auto classifier can't re-allow past it
                                 // (policy_gate Ask arm gates the classifier on this).
@@ -3120,6 +3187,20 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         // hook duration bounded by tokio timeout — u128 ms cannot exceed u64::MAX
         #[allow(clippy::cast_possible_truncation)]
         let post_dur_ms = post_started.elapsed().as_millis() as u64;
+        let mut post_additional_contexts = post_agg.additional_contexts.clone();
+        if let Some(notice) = memdir_index_notice_for_tool(orch, &name, &effective_input, is_error)
+        {
+            if let Some(bus) = orch.analytics_bus.as_ref() {
+                let mut metadata = telemetry::LogEventMetadata::new();
+                metadata.insert(
+                    "over_cap".into(),
+                    telemetry::AnalyticsValue::Bool(notice.over_cap),
+                );
+                bus.log_event(memory::TENGU_MEMDIR_ENTRYPOINT_NEAR_CAP, metadata)
+                    .await;
+            }
+            post_additional_contexts.push(notice.text);
+        }
 
         // #40 terminalSequence apply for the PostToolUse aggregate (claude-code
         // `szn` runs per hook result, all event types). Same as the PreToolUse
@@ -3160,7 +3241,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         // hookName prefix is `PostToolUse:{tool}`. `systemMessage` stays folded
         // (handled by `final_content` below); only additionalContext splits out.
         // Strict no-op when no PostToolUse hook returned additionalContext.
-        for ctx in &post_agg.additional_contexts {
+        for ctx in &post_additional_contexts {
             let wrapped = format!(
                 "<system-reminder>\nPostToolUse:{name} hook additional context: {ctx}\n</system-reminder>"
             );
@@ -3237,10 +3318,10 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         // returns `[]`, `messages.ts:4258`). A strict no-op when empty, so the
         // result text is byte-identical to before for the locked turn-loop
         // fixtures (noop hooks).
-        let mutated = !post_agg.additional_contexts.is_empty() || mcp_output_mutated;
+        let mutated = !post_additional_contexts.is_empty() || mcp_output_mutated;
         let final_content = if mutated {
             let mut out = content;
-            for msg in &post_agg.additional_contexts {
+            for msg in &post_additional_contexts {
                 out.push('\n');
                 out.push_str(msg);
             }
@@ -3426,6 +3507,8 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             None
         } else if tool_handle.is_mcp() {
             emit_payload.as_array().cloned()
+        } else if name == "ToolSearch" {
+            tool_search_reference_blocks(&emit_payload)
         } else {
             image_tool_result_blocks(&emit_payload)
                 .or_else(|| bash_image_tool_result_blocks(&emit_payload))
@@ -3580,6 +3663,26 @@ fn tool_result_to_model_text(data: &serde_json::Value) -> String {
             || serde_json::to_string(data).unwrap_or_else(|_| "<unserializable>".into()),
             std::string::ToString::to_string,
         )
+}
+
+/// Map ToolSearch's matched names to Anthropic `tool_reference` blocks. Empty
+/// results stay on the text path (`model_content` carries the upstream copy).
+fn tool_search_reference_blocks(data: &serde_json::Value) -> Option<Vec<serde_json::Value>> {
+    let matches = data.get("matches")?.as_array()?;
+    if matches.is_empty() {
+        return None;
+    }
+    let blocks: Vec<serde_json::Value> = matches
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .map(|name| {
+            serde_json::json!({
+                "type": "tool_reference",
+                "tool_name": name,
+            })
+        })
+        .collect();
+    (!blocks.is_empty()).then_some(blocks)
 }
 
 /// The binary result-mapper's `case "image"` (`mapToolResultToToolResultBlockParam`):

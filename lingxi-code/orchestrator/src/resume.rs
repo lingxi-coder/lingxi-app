@@ -61,6 +61,14 @@ impl ReplayedSession {
     pub fn handle_runtime_snapshot(&self) -> traits::ResumeRuntimeSnapshot {
         let tracking = &self.runtime_metadata.compaction_tracking;
         traits::ResumeRuntimeSnapshot {
+            model: self.state.model.clone(),
+            model_profile: self.state.model_profile.clone(),
+            effort: self.runtime_metadata.effort.clone(),
+            main_thread_agent_type: self.runtime_metadata.main_thread_agent_type.clone(),
+            main_thread_agent_definition: self
+                .runtime_metadata
+                .main_thread_agent_definition
+                .clone(),
             transcript_only_message_ids: self
                 .state
                 .transcript_only_messages
@@ -73,7 +81,12 @@ impl ReplayedSession {
                 .iter()
                 .copied()
                 .collect(),
-            loaded_tool_names: session::jsonl::pre_compact_discovered_tools(&self.messages),
+            loaded_tool_names: session::jsonl::discovered_tool_names(&self.messages),
+            post_compact_skill_attachments: post_compact_skill_attachments_from_messages(
+                &self.messages,
+            )
+            .into_iter()
+            .collect(),
             cumulative_dropped_tokens: self.runtime_metadata.cumulative_dropped_tokens,
             compacted: tracking.compacted,
             turn_counter: tracking.turn_counter,
@@ -89,6 +102,10 @@ impl ReplayedSession {
 pub struct ResumeRuntimeMetadata {
     /// Last real assistant response's top-level `effort` value.
     pub effort: Option<String>,
+    /// Persisted main-thread agent name, when the session selected one.
+    pub main_thread_agent_type: Option<String>,
+    /// Integrity-checked immutable resolved agent definition, when available.
+    pub main_thread_agent_definition: Option<serde_json::Value>,
     /// Latest compact boundary's `cumulativeDroppedTokens` value.
     pub cumulative_dropped_tokens: u64,
     /// Reconstructed rapid-refill/autocompact tracking state.
@@ -108,8 +125,13 @@ pub async fn replay_session_state(
     fs: Arc<dyn FileSystem>,
 ) -> Result<ReplayedSession, ResumeError> {
     let sid_str = session_id.to_string();
-    let messages = load_session(lingxi_home, cwd, session_id, fs).await?;
-    let (state, last_uuid, runtime_metadata) = build_state_from_jsonl(session_id, &messages);
+    let transcript_path = session::jsonl::session_path(lingxi_home, cwd, &sid_str);
+    let messages = load_session(lingxi_home, cwd, session_id, fs.clone()).await?;
+    let (state, last_uuid, mut runtime_metadata) = build_state_from_jsonl(session_id, &messages);
+    let (agent_type, agent_definition) =
+        session::jsonl::read_agent_resume_state(&transcript_path, fs, &sid_str).await;
+    runtime_metadata.main_thread_agent_type = agent_type;
+    runtime_metadata.main_thread_agent_definition = agent_definition;
     // claude emits a SINGLE `tengu_session_resumed` on resume (no started/
     // completed pair — those names have 0 hits in the 2.1.195 binary).
     tracing::info!(
@@ -149,6 +171,33 @@ pub fn state_from_messages(session_id: Uuid, messages: &[JsonlMessage]) -> Sessi
 #[must_use]
 pub fn runtime_metadata_from_messages(messages: &[JsonlMessage]) -> ResumeRuntimeMetadata {
     resume_runtime_metadata(messages)
+}
+
+/// Recover exact post-compact skill attachment bodies from version-tolerant
+/// JSONL envelope metadata. The contents are intentionally opaque: Markdown
+/// may contain any renderer separator, so resume must never reverse-parse the
+/// model-visible message body.
+#[must_use]
+pub fn post_compact_skill_attachments_from_messages(
+    messages: &[JsonlMessage],
+) -> std::collections::HashMap<MessageId, Vec<String>> {
+    messages
+        .iter()
+        .filter_map(|message| {
+            let uuid = Uuid::parse_str(&message.uuid).ok()?;
+            let contents = message
+                .extra
+                .get("invokedSkillContents")?
+                .as_array()?
+                .iter()
+                .map(serde_json::Value::as_str)
+                .collect::<Option<Vec<_>>>()?
+                .into_iter()
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>();
+            (!contents.is_empty()).then_some((MessageId::from_uuid(uuid), contents))
+        })
+        .collect()
 }
 
 /// Convert the replayed JSONL into a fresh [`SessionState`] + the UUID of
@@ -225,6 +274,13 @@ fn build_state_from_jsonl(
                     .filter(|s| !s.is_empty() && !(s.starts_with('<') && s.ends_with('>')))
                 {
                     state.model = model.to_string();
+                }
+                // Newer real-assistant rows record the provider profile beside
+                // the model. Presence is significant: JSON null intentionally
+                // clears a profile, while legacy rows omit the field and retain
+                // the most recently reconstructed value.
+                if let Some(profile) = m.extra.get("modelProfile") {
+                    state.model_profile = profile.as_str().map(str::to_owned);
                 }
                 state.history.push(ConversationMessage::Assistant {
                     id: MessageId::from_uuid(msg_uuid),
@@ -357,6 +413,8 @@ fn resume_runtime_metadata(messages: &[JsonlMessage]) -> ResumeRuntimeMetadata {
 
     ResumeRuntimeMetadata {
         effort,
+        main_thread_agent_type: None,
+        main_thread_agent_definition: None,
         cumulative_dropped_tokens,
         compaction_tracking: tracking,
     }
@@ -400,6 +458,11 @@ impl ConversationOrchestrator {
             std::sync::atomic::Ordering::Relaxed,
         );
         *self.compaction_tracking.lock().await = metadata.compaction_tracking;
+        *self
+            .post_compact_skill_attachments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            post_compact_skill_attachments_from_messages(messages);
     }
 
     /// Construct an orchestrator pre-populated with a replayed session.
@@ -431,20 +494,16 @@ impl ConversationOrchestrator {
     ) -> Result<Self, ResumeError> {
         config.resume_session_id = Some(session_id);
         let replayed = replay_session_state(&lingxi_home, &cwd_str, session_id, fs).await?;
+        let effort_was_explicit = config.effort.is_some();
         if config.effort.is_none() {
             config.effort.clone_from(&replayed.runtime_metadata.effort);
         }
 
-        // P2-10 (parity 2.1.208): re-seed the Tool-Search deferred-tool loaded-set
-        // from the transcript's compact boundaries, so a tool the model loaded via
-        // `ToolSearch` before a compaction stays non-deferred across this cold
-        // resume. Mirrors claude's resume loader `Age()` boundary scan
-        // (`for (s of i) t.add(s)`). No-op on any transcript without a Tool-Search
-        // compaction (the default-off common path yields an empty set).
-        let discovered = session::jsonl::pre_compact_discovered_tools(&replayed.messages);
-        if !discovered.is_empty() {
-            tools.deferral().mark_loaded(discovered);
-        }
+        // Re-seed dynamic-tool discovery from both surviving tool_reference
+        // blocks and compact-boundary carry metadata. Scanning only boundaries
+        // loses every tool discovered in a session that has not compacted yet.
+        let discovered = session::jsonl::discovered_tool_names(&replayed.messages);
+        tools.deferral().replace_loaded(discovered);
 
         let mut orch = Self::new_with_streaming(
             config,
@@ -457,6 +516,11 @@ impl ConversationOrchestrator {
             memory,
             cwd,
         );
+        // A transcript-inherited effort must remain inheritable if this
+        // runtime later hot-resumes another session. Only the caller's
+        // pre-resume launch choice pins the value.
+        orch.current_effort_explicit
+            .store(effort_was_explicit, std::sync::atomic::Ordering::Release);
         // Override the auto-generated session + chain pointer with the
         // replayed values. Both fields are `pub(crate)` so this is allowed
         // from a sibling module in the same crate.
@@ -467,6 +531,11 @@ impl ConversationOrchestrator {
             std::sync::atomic::Ordering::Relaxed,
         );
         orch.compaction_tracking = Mutex::new(replayed.runtime_metadata.compaction_tracking);
+        *orch
+            .post_compact_skill_attachments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            post_compact_skill_attachments_from_messages(&replayed.messages);
         if let Some(writer) = jsonl_writer {
             orch.jsonl_writer = Some(writer);
         }

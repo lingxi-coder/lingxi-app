@@ -650,13 +650,13 @@ pub async fn build_mobile_inner(
     let provider_adapter = Arc::new(ProviderApiAdapter::new(api_service.clone()));
     let api_client: Arc<dyn OrchestratorApiClient> = provider_adapter.clone();
     let streaming_api: Arc<dyn StreamingApiClient> =
-        streaming_override.unwrap_or(provider_adapter as Arc<dyn StreamingApiClient>);
+        streaming_override.unwrap_or(provider_adapter.clone() as Arc<dyn StreamingApiClient>);
     // WebSearch builds Anthropic `POST /v1/messages` requests via its own
     // provider (server-side web search is Anthropic-only in v1).
-    let tool_provider = Arc::new(AnthropicRequestBuilder::new(
-        cfg.api_key.clone(),
-        Some(cfg.api_base.clone()),
-    ));
+    let tool_provider = Arc::new(
+        AnthropicRequestBuilder::new(cfg.api_key.clone(), Some(cfg.api_base.clone()))
+            .with_mcp_token_counter(provider_adapter.clone()),
+    );
 
     // (3b) OAuth client (used by /login, /logout). Reuses the SAME `credentials`
     //      manager built above for the composite credential provider — one
@@ -1290,6 +1290,7 @@ pub async fn build_mobile_inner(
     );
     *shared_command_registry.write().await = reg;
     let dispatcher = RegistrySlashDispatcher::new(shared_command_registry.clone())
+        .with_skill_usage_home(cfg.lingxi_home.clone())
         // (#3) Real embedded-shell expansion for markdown/plugin + builtin
         // `InjectMessage` prompts. Non-MCP only.
         .with_shell_expansion(shell_expansion_provider);
@@ -1663,6 +1664,21 @@ impl MobileEngineHandle {
             }
             ClientCommand::DenyPermission { request_id } => {
                 self.resolve_permission(request_id, PermissionResponseDto::Deny)
+                    .await;
+                Ok(())
+            }
+
+            ClientCommand::SetPermissionMode { mode } => {
+                let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
+                handle
+                    .set_permission_mode(&mode)
+                    .await
+                    .map_err(|e| ClientError::Rejected {
+                        message: format!("set_permission_mode failed: {e}"),
+                    })?;
+                let active = handle.permission_mode().await.unwrap_or(mode);
+                self.event_sink
+                    .emit(ClientEvent::PermissionModeChanged { mode: active })
                     .await;
                 Ok(())
             }

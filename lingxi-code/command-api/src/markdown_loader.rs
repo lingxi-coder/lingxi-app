@@ -634,6 +634,30 @@ pub fn parse_command_markdown(
     }
 }
 
+/// Parse one directory-format skill markdown buffer that was discovered by an
+/// external loader (for example an installed plugin).
+///
+/// Keeping this primitive beside [`parse_command_markdown`] ensures plugin
+/// skills use the same frontmatter coercion, argument metadata, and body
+/// splitting as project/user skills instead of maintaining a second parser.
+#[must_use]
+pub fn parse_skill_command_markdown(
+    raw: &str,
+    file_path: PathBuf,
+    skill_root: PathBuf,
+    source: CommandSource,
+) -> SkillMarkdownCommandFile {
+    let (frontmatter, content) = parse_frontmatter(raw);
+    SkillMarkdownCommandFile {
+        file_path,
+        skill_root,
+        frontmatter,
+        content,
+        content_length: raw.len(),
+        source,
+    }
+}
+
 /// Split a raw markdown string into frontmatter + body. Mirrors the
 /// `skill-api::frontmatter::parse_skill_markdown` `---`/`\n---\n` splitter (the
 /// shape the spec asks to reuse without depending on `skill-api`). Malformed or

@@ -536,12 +536,7 @@ fn resolve_link_target(from: &str, link: &str) -> String {
 /// sandbox `deny_write` list.
 ///
 /// Applied by the composition root to each boot-seeded deny-write path so the
-/// hardening fires against symlinks that exist at boot. CC additionally
-/// reconciles symlinks that APPEAR mid-session (`bcg()` in sandbox-adapter.ts,
-/// re-scanning its `gRt` tracking list into a live, mutable sandbox config);
-/// lingxi builds the sandbox config once at boot into an immutable
-/// `SandboxRuntimeConfig` with no live-update / re-consult path, so that
-/// mid-session reconcile has no analog here and is intentionally not ported.
+/// hardening fires against symlinks that exist at boot.
 #[must_use]
 pub fn resolve_deny_write_symlink(path: &str) -> String {
     resolve_deny_write_symlink_with(
@@ -557,6 +552,20 @@ pub fn resolve_deny_write_symlink(path: &str) -> String {
                 .map(|c| c.to_string_lossy().into_owned())
         },
     )
+}
+
+/// Re-resolve a live sandbox config's deny-write list so symlinks that appear
+/// after boot are hardened before the next sandboxed command runs.
+pub fn reconcile_deny_write_symlinks(cfg: &mut SandboxRuntimeConfig) {
+    let mut seen = std::collections::HashSet::new();
+    let mut reconciled = Vec::with_capacity(cfg.filesystem.deny_write.len());
+    for path in &cfg.filesystem.deny_write {
+        let resolved = resolve_deny_write_symlink(path);
+        if seen.insert(resolved.clone()) {
+            reconciled.push(resolved);
+        }
+    }
+    cfg.filesystem.deny_write = reconciled;
 }
 
 fn apply_rule(
@@ -756,7 +765,8 @@ mod resolve_fs_path_tests {
 
 #[cfg(test)]
 mod deny_write_symlink_tests {
-    use super::resolve_deny_write_symlink_with;
+    use super::{reconcile_deny_write_symlinks, resolve_deny_write_symlink_with};
+    use crate::runtime_config::SandboxRuntimeConfig;
     use std::collections::HashMap;
 
     // Not a symlink (`readlink` returns None): the literal path is kept — the
@@ -835,6 +845,14 @@ mod deny_write_symlink_tests {
             |_| None,
         );
         assert_eq!(out, "/a/loop");
+    }
+
+    #[test]
+    fn reconcile_deny_write_symlinks_deduplicates_resolved_targets() {
+        let mut cfg = SandboxRuntimeConfig::default();
+        cfg.filesystem.deny_write = vec!["/a/loop".into(), "/a/loop".into(), "/b".into()];
+        reconcile_deny_write_symlinks(&mut cfg);
+        assert_eq!(cfg.filesystem.deny_write, vec!["/a/loop", "/b"]);
     }
 }
 

@@ -31,8 +31,11 @@ use telemetry::tengu::orchestrator as orch_events;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tool_api::registry::ToolRegistry;
+use tool_api::ToolRegistryView as _;
 use traits::orchestrator::ModelListing;
 use traits::OutputStream;
+
+const TRANSCRIPT_PERSISTENCE_WARNING: &str = "Session transcript could not be saved. Your current response can continue, but recent messages may be unavailable after restart.";
 
 /// Minimal contract the orchestrator needs from the API client.
 ///
@@ -169,6 +172,27 @@ pub trait OrchestratorApiClient: Send + Sync {
         Ok((bytes / crate::model::count_tokens::APPROX_CHARS_PER_TOKEN).max(1))
     }
 
+    /// Return an exact provider count when available. The default is `None`
+    /// so mocks and providers without Anthropic's count endpoint select their
+    /// caller-specific fallback instead of receiving the text-only estimate.
+    async fn count_tokens_exact(
+        &self,
+        _model: &str,
+        _profile: Option<&str>,
+        _system: Option<&str>,
+        _msgs: Vec<ConversationMessage>,
+        _tools: Vec<serde_json::Value>,
+    ) -> Result<Option<u64>, LlmError> {
+        Ok(None)
+    }
+
+    /// Host-validated beta additions applied to provider requests. The
+    /// orchestrator consumes these for the same context-window/compaction
+    /// calculations; default clients have none.
+    fn active_betas(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Enumerate available `provider/model` ids + `@aliases` for `/model`'s
     /// list mode. Default returns empty so non-routing impls (mocks / the
     /// no-streaming stub) need no override; `ProviderApiAdapter` overrides it
@@ -176,6 +200,15 @@ pub trait OrchestratorApiClient: Send + Sync {
     fn available_models(&self) -> Vec<String> {
         Vec::new()
     }
+
+    /// Replace the thinking policy used for subsequent provider requests.
+    /// Implementations without a mutable request layer may keep the default
+    /// no-op; the production provider adapter overrides it.
+    fn set_thinking_config(&self, _thinking: llm_client::model::thinking::ThinkingConfig) {}
+
+    /// Replace the main-loop effort used for subsequent provider requests.
+    /// `None` clears the live override.
+    fn set_effort(&self, _effort: Option<serde_json::Value>) {}
 
     /// Richer catalog listing for the grouped `/model` picker. Default returns
     /// empty (mocks / non-routing impls); `ProviderApiAdapter` overrides it.
@@ -661,6 +694,31 @@ fn node_platform_name(rust_os: &str) -> &str {
     }
 }
 
+/// Conservative provider gate for Anthropic's dynamic-tool-loading beta.
+/// Claude models routed through an Anthropic-family profile are eligible;
+/// Haiku is the upstream unsupported-model denylist. Project-specific
+/// non-Anthropic providers retain the complete inline tool list.
+fn tool_search_supported_for_request(model: &str, profile: Option<&str>) -> bool {
+    let model = model.to_ascii_lowercase();
+    if model.contains("haiku") {
+        return false;
+    }
+    profile.map_or_else(
+        // Claude uses a negative capability test: every current/future model is
+        // assumed to support tool_reference unless it matches the unsupported
+        // Haiku pattern. A missing profile is the built-in first-party route,
+        // not evidence that the model name must contain the word "claude".
+        || true,
+        |profile| {
+            let profile = profile.to_ascii_lowercase();
+            profile.contains("anthropic")
+                || profile.contains("bedrock")
+                || profile.contains("vertex-claude")
+                || profile.contains("foundry")
+        },
+    )
+}
+
 /// `getBranch()` (`sessionStorage.ts:1012-1019`) — resolve the cwd's current git
 /// branch via `git rev-parse --abbrev-ref HEAD`, or `None` on ANY failure (git
 /// missing / not a repo / non-zero exit / empty output). A detached HEAD prints
@@ -775,7 +833,7 @@ pub(crate) struct MainThreadAgentState {
     pub(crate) disallowed_tools: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct WireToolSchemaCacheKey {
     tool_names: Vec<String>,
     model: String,
@@ -787,6 +845,8 @@ struct WireToolSchemaCache {
     key: WireToolSchemaCacheKey,
     wire: Vec<serde_json::Value>,
 }
+
+const TOOL_TOKEN_COUNT_OVERHEAD: u64 = 500;
 
 pub struct ConversationOrchestrator {
     pub(crate) config: OrchestratorConfig,
@@ -801,6 +861,12 @@ pub struct ConversationOrchestrator {
     pub(crate) perms: Arc<dyn PermissionGate>,
     pub(crate) output: Arc<dyn OutputStream>,
     pub(crate) session: Arc<Mutex<SessionState>>,
+    /// Live main-loop effort. Unlike `config.effort`, this can change through
+    /// stream-json control requests and in-place resume.
+    pub(crate) current_effort: std::sync::RwLock<Option<String>>,
+    /// Whether the live effort came from an explicit launch/control choice.
+    /// Hot resume may inherit transcript effort only while this is false.
+    pub(crate) current_effort_explicit: std::sync::atomic::AtomicBool,
     /// `queryTracking.chainId` for analytics (claude-code `query.ts:347-358`): a
     /// random uuid grouping a query chain, stamped onto the `queryChainId` field
     /// of `tengu_query_error` / `tengu_auto_compact_*` events. In claude-code a
@@ -862,6 +928,10 @@ pub struct ConversationOrchestrator {
     /// Optional on-disk JSONL persistence (M5-07). `None` for in-memory
     /// tests; `Some` when the CLI binary wires `~/.lingxi/projects/.../<uuid>.jsonl`.
     pub(crate) jsonl_writer: Option<Arc<JsonlWriter>>,
+    /// Once-per-session latch for the user-visible transcript write warning.
+    /// Individual failures still reach telemetry, but repeated appends during
+    /// the same turn/session must not flood the transcript/status surface.
+    pub(crate) transcript_persistence_warning_emitted: std::sync::atomic::AtomicBool,
     /// Cached UUID of the last persisted JSONL entry — used to populate
     /// `parentUuid` on the next append. Reset to `None` for fresh sessions.
     pub(crate) last_jsonl_uuid: Mutex<Option<String>>,
@@ -924,12 +994,12 @@ pub struct ConversationOrchestrator {
     /// callers, which then silently skip the emission (the tracker still accrues
     /// totals).
     pub(crate) analytics_bus: Option<Arc<telemetry::AnalyticsBus>>,
-    /// Monotonic timestamp captured at orchestrator construction. Used by
+    /// Monotonic timestamp captured at the start of the current session. Used by
     /// `snapshot_cost` to compute the `session_duration` field of the
     /// returned [`traits::CostSnapshot`]. Stored as `std::time::Instant`
     /// (not `tokio::time::Instant`) so the orchestrator can be constructed
     /// outside a tokio runtime if needed.
-    pub(crate) session_started_at: std::time::Instant,
+    pub(crate) session_started_at: std::sync::Mutex<std::time::Instant>,
     /// Count of API responses successfully recorded into `cost_tracker`.
     /// Used to populate `CostSnapshot::api_calls`. Lives on the orchestrator
     /// (rather than `cost::CostState`) because `cost::Usage`
@@ -948,10 +1018,20 @@ pub struct ConversationOrchestrator {
     /// returns `vec![]`. The CLI binary populates from settings + plugin
     /// sources at startup.
     pub(crate) hook_registry: Option<Arc<tokio::sync::RwLock<hooks::HookRegistry>>>,
+    /// Live plugin output-style registry. Disk/builtin styles remain sourced
+    /// from [`OrchestratorConfig`]; this optional registry makes plugin reloads
+    /// visible to prompt assembly without rebuilding the orchestrator.
+    pub(crate) output_style_registry:
+        Option<Arc<tokio::sync::RwLock<outputstyles::OutputStyleRegistry>>>,
     /// Session-level cache for the expensive prompt/schema serialization of
     /// the post-filter tool pool. Dynamic per-turn marks (`strict`,
     /// `defer_loading`) are applied to a clone after cache lookup.
     wire_tool_schema_cache: Mutex<Option<WireToolSchemaCache>>,
+    /// Exact deferred-schema token counts, memoized by the same stable schema
+    /// key as `wire_tool_schema_cache`. `None` is cached too: unsupported
+    /// providers must not retry a doomed count endpoint every turn.
+    deferred_tool_token_cache:
+        Mutex<std::collections::HashMap<WireToolSchemaCacheKey, Option<u64>>>,
     /// Subagent catalog (M6-07). `None` when not wired — `list_agents`
     /// then returns `vec![]`. The CLI binary populates from
     /// `~/.lingxi/agents/` + project `.lingxi/agents/`.
@@ -972,6 +1052,11 @@ pub struct ConversationOrchestrator {
     /// `model` is applied eagerly to the session by [`Self::set_main_thread_agent`],
     /// not stored here.
     pub(crate) main_thread_agent: tokio::sync::RwLock<Option<MainThreadAgentState>>,
+    /// Registry bucket that owns the active main-thread agent's frontmatter
+    /// hooks. Unlike subagent buckets this normally lives for the session, but
+    /// hot resume must replace it so hooks from the previous session cannot
+    /// leak into the resumed one.
+    pub(crate) main_thread_agent_hook_id: Mutex<Option<protocol::AgentId>>,
     /// Compaction engine (M3-05) wired by `with_compaction`. `None` when
     /// not configured — `force_compact` then falls back to the legacy
     /// no-op semantics. The CLI binary (M6-08 init.rs) always populates
@@ -1114,6 +1199,15 @@ pub struct ConversationOrchestrator {
     /// (D/E/F) and Read dedup (A) are additional in-tool consumers of the SAME
     /// shared map.
     pub(crate) read_state_map: tool_api::read_file_state::ReadFileStateMap,
+    /// Skill contents carried by each post-compact `invoked_skills` message,
+    /// keyed by the message's stable identity.
+    ///
+    /// A skill body is arbitrary Markdown and may legally contain the renderer's
+    /// `\n\n---\n\n` separator. Keeping the structured association here avoids
+    /// reverse-parsing model-visible text when a later compaction deduplicates
+    /// attachments that survived in its preserved tail.
+    pub(crate) post_compact_skill_attachments:
+        std::sync::Mutex<std::collections::HashMap<MessageId, Vec<String>>>,
     /// Task 8 (llm-client future-work batch 3): the last rate-limit snapshot
     /// forwarded to [`traits::OutputStream::emit_rate_limit`], for the
     /// emit-on-change dedup in [`Self::emit_rate_limit_if_changed`]. Lives on
@@ -1352,6 +1446,34 @@ fn find_unresolved_tool_use_in_history(
         .cloned()
 }
 
+/// Recursively convert SDK snake_case compact-metadata keys to the JSONL
+/// lowerCamelCase spelling. Values and already-camelCase keys are preserved.
+fn camelize_json_keys(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(object) => serde_json::Value::Object(
+            object
+                .into_iter()
+                .map(|(key, value)| {
+                    let mut parts = key.split('_');
+                    let mut camel = parts.next().unwrap_or_default().to_string();
+                    for part in parts {
+                        let mut chars = part.chars();
+                        if let Some(first) = chars.next() {
+                            camel.extend(first.to_uppercase());
+                            camel.extend(chars);
+                        }
+                    }
+                    (camel, camelize_json_keys(value))
+                })
+                .collect(),
+        ),
+        serde_json::Value::Array(values) => {
+            serde_json::Value::Array(values.into_iter().map(camelize_json_keys).collect())
+        }
+        scalar => scalar,
+    }
+}
+
 impl ConversationOrchestrator {
     /// `tengu_api_success` `timeSinceLastApiCallMs`: ms since the previous
     /// successful API call, then record this call's timestamp. Returns `None`
@@ -1359,8 +1481,14 @@ impl ConversationOrchestrator {
     #[allow(clippy::cast_sign_loss)]
     pub(crate) fn record_api_call_gap_ms(&self) -> Option<u64> {
         use std::sync::atomic::Ordering;
-        let now_ms =
-            i64::try_from(self.session_started_at.elapsed().as_millis()).unwrap_or(i64::MAX);
+        let now_ms = i64::try_from(
+            self.session_started_at
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .elapsed()
+                .as_millis(),
+        )
+        .unwrap_or(i64::MAX);
         let prev = self.last_api_call_at_ms.swap(now_ms, Ordering::SeqCst);
         // `prev < 0` is the `-1` sentinel = no prior call → OMIT the field.
         (prev >= 0).then(|| (now_ms - prev).max(0) as u64)
@@ -1394,6 +1522,8 @@ impl ConversationOrchestrator {
         // own derivation).
         traits::session_flags::set_non_interactive_session(!config.interactive_permissions);
         let session = SessionState::empty(SessionId::new(), config.model.clone());
+        let current_effort = config.effort.clone();
+        let current_effort_explicit = current_effort.is_some();
         Self {
             config,
             api,
@@ -1404,6 +1534,8 @@ impl ConversationOrchestrator {
             perms,
             output,
             session: Arc::new(Mutex::new(session)),
+            current_effort: std::sync::RwLock::new(current_effort),
+            current_effort_explicit: std::sync::atomic::AtomicBool::new(current_effort_explicit),
             memory,
             current_cwd: Arc::new(std::sync::Mutex::new(cwd.clone())),
             session_cwd: tool_api::SessionCwd::new(cwd.clone(), vec![cwd.clone()]),
@@ -1412,6 +1544,7 @@ impl ConversationOrchestrator {
             workspace_trusted: true,
             hooks_restricted: false,
             jsonl_writer: None,
+            transcript_persistence_warning_emitted: std::sync::atomic::AtomicBool::new(false),
             last_jsonl_uuid: Mutex::new(None),
             git_branch_cache: Mutex::new(None),
             current_prompt_id: Mutex::new(None),
@@ -1420,14 +1553,17 @@ impl ConversationOrchestrator {
             refusal_fallback_latched: std::sync::atomic::AtomicBool::new(false),
             cost_tracker: None,
             analytics_bus: None,
-            session_started_at: std::time::Instant::now(),
+            session_started_at: std::sync::Mutex::new(std::time::Instant::now()),
             api_calls_recorded: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
             last_api_call_at_ms: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(-1)),
             mcp_registry: None,
             hook_registry: None,
+            output_style_registry: None,
             wire_tool_schema_cache: Mutex::new(None),
+            deferred_tool_token_cache: Mutex::new(std::collections::HashMap::new()),
             agent_catalog: None,
             main_thread_agent: tokio::sync::RwLock::new(None),
+            main_thread_agent_hook_id: Mutex::new(None),
             compaction: None,
             compaction_tracking: Mutex::new(compaction::AutoCompactTrackingState::default()),
             compaction_cumulative_dropped_tokens: std::sync::atomic::AtomicU64::new(0),
@@ -1444,6 +1580,7 @@ impl ConversationOrchestrator {
             file_history: None,
             orphan_forced_decisions: Mutex::new(std::collections::HashMap::new()),
             read_state_map: tool_api::read_file_state::new_read_file_state_map(),
+            post_compact_skill_attachments: std::sync::Mutex::new(std::collections::HashMap::new()),
             last_emitted_rate_limit: Mutex::new(None),
             last_emitted_raw_utilization: Mutex::new(None),
             skill_listing: None,
@@ -1676,6 +1813,16 @@ impl ConversationOrchestrator {
         hooks: Arc<tokio::sync::RwLock<hooks::HookRegistry>>,
     ) -> Self {
         self.hook_registry = Some(hooks);
+        self
+    }
+
+    /// Attach the host's live plugin output-style registry.
+    #[must_use]
+    pub fn with_output_style_registry(
+        mut self,
+        styles: Arc<tokio::sync::RwLock<outputstyles::OutputStyleRegistry>>,
+    ) -> Self {
+        self.output_style_registry = Some(styles);
         self
     }
 
@@ -2178,6 +2325,57 @@ impl ConversationOrchestrator {
             r = runner.run(req) => match r {
                 Ok(res) => Ok(traits::RecapOutcome::Text(res.final_text.trim().to_string())),
                 Err(e) => Err(traits::HandleError::ActionFailed(e.to_string())),
+            }
+        }
+    }
+
+    /// Claude Code 2.1.217's `rename_generate_name` prompt. The response is a
+    /// JSON object with a single `name` field; this side query is history-inert
+    /// and tool-less, sharing the same fork runner as `/recap`.
+    pub(crate) const SESSION_NAME_PROMPT: &str = "Generate a short kebab-case name (2-4 words) that captures the main topic of this conversation. Use lowercase words separated by hyphens. Examples: \"fix-login-bug\", \"add-auth-feature\", \"refactor-api-client\", \"debug-test-failures\". Return JSON with a \"name\" field.";
+
+    pub(crate) async fn generate_session_name_query(
+        &self,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<Option<String>, traits::HandleError> {
+        let runner = self.recap_runner.clone().ok_or_else(|| {
+            traits::HandleError::ActionFailed("session name generation unavailable".into())
+        })?;
+        let Some(params) = self
+            .cache_safe_slot
+            .as_ref()
+            .ok_or_else(|| {
+                traits::HandleError::ActionFailed("session name generation unavailable".into())
+            })?
+            .get_last()
+            .await
+        else {
+            return Ok(None);
+        };
+
+        if cancel.is_cancelled() {
+            return Ok(None);
+        }
+        let req = sidequery::ForkedAgentRequest {
+            prompt_messages: vec![ConversationMessage::user(
+                MessageId::new(),
+                Self::SESSION_NAME_PROMPT.to_string(),
+            )],
+            cache_safe_params: params,
+            fork_label: "rename".into(),
+            query_source: sidequery::QuerySource::Custom("rename_generate_name".into()),
+            max_output_tokens: Some(128),
+        };
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => Ok(None),
+            result = runner.run(req) => match result {
+                Ok(result) => parse_generated_session_name(&result.final_text)
+                    .map(Some)
+                    .ok_or_else(|| traits::HandleError::ActionFailed(
+                        "session name response did not contain a non-empty name".into()
+                    )),
+                Err(error) => Err(traits::HandleError::ActionFailed(error.to_string())),
             }
         }
     }
@@ -2693,12 +2891,15 @@ impl ConversationOrchestrator {
     /// (never cleared by `run_post_compact_cleanup`), so a skill invoked before
     /// compaction re-enters the model's context afterwards.
     ///
-    /// Residual: `LQn` already-present dedup runs against `&[]` here (no boundary
-    /// context is threaded, the same residual the file arm carries for
-    /// `already_attached`), so it degrades to a best-effort no-op — still a real
-    /// improvement (the skill content re-enters context; over-restoring an
-    /// already-visible skill is the only cost).
+    #[cfg(test)]
     async fn restore_post_compact_attachments(&self) -> Vec<protocol::ConversationMessage> {
+        self.restore_post_compact_attachments_against(&[]).await
+    }
+
+    async fn restore_post_compact_attachments_against(
+        &self,
+        boundary_context: &[protocol::ConversationMessage],
+    ) -> Vec<protocol::ConversationMessage> {
         // Snapshot then clear the ONE read-file-state registry (the `eOt`
         // snapshot + `readFileState.clear()` step), so the post-compact context
         // starts from the restored set only. `drain()` empties it.
@@ -2716,25 +2917,96 @@ impl ConversationOrchestrator {
         let mut out: Vec<protocol::ConversationMessage> = Vec::new();
 
         if !snapshot.is_empty() {
-            out.extend(self.restore_post_compact_files_arm(snapshot).await);
+            let already_attached = Self::post_compact_attached_file_paths(boundary_context);
+            let session_id = self.session.lock().await.session_id;
+            let plan_file = std::path::PathBuf::from(Self::plan_file_path(
+                &session_id,
+                &self.cwd,
+                self.config.plans_directory.as_deref(),
+            ));
+            out.extend(
+                self.restore_post_compact_files_arm(snapshot, &already_attached, &plan_file)
+                    .await,
+            );
         }
 
         // ── SKILL restoration (`rRg`) ──
         // Source candidates from the process-global invoked-skill registry
         // (`kGo` on the main thread, `agentId = None`), budget them (`rRg`), and
         // emit the survivors as ONE `isMeta` user message in the byte-faithful
-        // `invoked_skills` attachment shape. `already_attached = &[]` (see the
-        // doc-comment residual).
+        // `invoked_skills` attachment shape. Preserve the binary's LQn
+        // deduplication against both plain message bodies and skill content
+        // that already survived in an earlier invoked-skills attachment.
         let skill_candidates = compaction::invoked_skills::filter_for_agent(None);
-        let restored_skills = compaction::restore_post_compact_skills(skill_candidates, &[]);
+        let already_attached_skills = self.post_compact_attached_skill_contents(boundary_context);
+        let restored_skills =
+            compaction::restore_post_compact_skills(skill_candidates, &already_attached_skills);
         if let Some(body) = compaction::render_invoked_skills_attachment(&restored_skills) {
-            out.push(protocol::ConversationMessage::user_meta(
-                protocol::MessageId::new(),
-                body,
-            ));
+            let message_id = protocol::MessageId::new();
+            let contents = restored_skills
+                .iter()
+                .map(|skill| skill.content.clone())
+                .collect();
+            self.post_compact_skill_attachments
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(message_id, contents);
+            out.push(protocol::ConversationMessage::user_meta(message_id, body));
         }
 
         out
+    }
+
+    fn post_compact_attached_file_paths(
+        messages: &[protocol::ConversationMessage],
+    ) -> Vec<std::path::PathBuf> {
+        messages
+            .iter()
+            .flat_map(|message| {
+                message
+                    .text_content()
+                    .lines()
+                    .filter_map(|line| {
+                        line.strip_prefix("Referenced file ").map(|rest| {
+                            let path = rest
+                                .split_once(" (restored after compaction):")
+                                .map_or(rest, |(path, _)| path);
+                            crate::turn_loop::normalize_lexically(std::path::Path::new(path))
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    fn post_compact_attached_skill_contents(
+        &self,
+        messages: &[protocol::ConversationMessage],
+    ) -> Vec<compaction::AttachedSkillContent> {
+        let surviving_ids = messages
+            .iter()
+            .map(protocol::ConversationMessage::id)
+            .collect::<std::collections::HashSet<_>>();
+        let mut known_attachments = self
+            .post_compact_skill_attachments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        known_attachments.retain(|message_id, _| surviving_ids.contains(message_id));
+
+        let mut attached = Vec::new();
+        for message in messages {
+            let body = message.text_content();
+            attached.push(compaction::AttachedSkillContent::Body(body.clone()));
+            if let Some(contents) = known_attachments.get(&message.id()) {
+                attached.extend(
+                    contents
+                        .iter()
+                        .cloned()
+                        .map(compaction::AttachedSkillContent::Attachment),
+                );
+            }
+        }
+        attached
     }
 
     /// The FILE restoration arm of [`Self::restore_post_compact_attachments`]
@@ -2745,6 +3017,8 @@ impl ConversationOrchestrator {
     async fn restore_post_compact_files_arm(
         &self,
         snapshot: Vec<(std::path::PathBuf, tool_api::read_file_state::ReadFileEntry)>,
+        already_attached: &[std::path::PathBuf],
+        plan_file: &std::path::Path,
     ) -> Vec<protocol::ConversationMessage> {
         let candidates: Vec<compaction::FileRestoreCandidate> = snapshot
             .into_iter()
@@ -2755,11 +3029,17 @@ impl ConversationOrchestrator {
             })
             .collect();
 
-        // Selection half of `eRg`: filter already-attached + sort mtime DESC +
-        // top-5. `already_attached` is empty: this port does not thread the
-        // running attachment set into the boundary builder (the snapshot is the
-        // sole source), and the plan-file filter (`aRg`) has no seam here — both
-        // documented residuals.
+        // Selection half of `eRg`: filter the plan file (`aRg`) and files that
+        // already survived in the preserved boundary context, then sort mtime
+        // DESC and take the top five.
+        let plan_file = crate::turn_loop::normalize_lexically(plan_file);
+        let candidates = candidates
+            .into_iter()
+            .filter(|candidate| {
+                let path = crate::turn_loop::normalize_lexically(&candidate.path);
+                path != plan_file && !already_attached.iter().any(|attached| attached == &path)
+            })
+            .collect();
         let selected = compaction::select_post_compact_files(candidates, &[]);
 
         // RE-READ each selected file from disk (`XQn`), firing the restore
@@ -2910,7 +3190,9 @@ impl ConversationOrchestrator {
         // appended AFTER the summary, in the `messagesToKeep`/`attachments`
         // position of `buildPostCompactMessages` order
         // `[boundaryMarker, ...summaryMessages, ...attachments, ...]`.
-        let restored_attachments = self.restore_post_compact_attachments().await;
+        let restored_attachments = self
+            .restore_post_compact_attachments_against(&preserved_tail)
+            .await;
 
         // Claude Code 2.1.212 `gio(...)` builds the post-compact attachment
         // set before `executePostCompactHooks`: reload instruction files with
@@ -3548,7 +3830,11 @@ impl ConversationOrchestrator {
             .load(std::sync::atomic::Ordering::SeqCst);
         #[allow(clippy::cast_precision_loss)]
         let total_usd = (state.total_nano_usd as f64) / 1_000_000_000.0;
-        let session_duration = self.session_started_at.elapsed();
+        let session_duration = self
+            .session_started_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .elapsed();
         traits::CostSnapshot {
             session_id,
             total_nano_usd: state.total_nano_usd,
@@ -4027,6 +4313,18 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         if msg.is_meta() {
             extra.insert("isMeta".to_string(), serde_json::Value::Bool(true));
         }
+        if let Some(contents) = self
+            .post_compact_skill_attachments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&msg.id())
+            .cloned()
+        {
+            extra.insert(
+                "invokedSkillContents".to_string(),
+                serde_json::json!(contents),
+            );
+        }
         // Top-level `requestId` (the Anthropic `request-id` response header) —
         // claude-code persists it on REAL assistant lines only. The caller
         // passes `Some` from the per-block real-response path; `None` (synthetic
@@ -4048,7 +4346,12 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // with no effort — stay byte-identical. `None` effort omits the field,
         // matching claude's `!==void 0` guard.
         if kind == "assistant" && assistant_model.is_some() {
-            if let Some(effort) = &self.config.effort {
+            if let Some(effort) = self
+                .current_effort
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+            {
                 extra.insert(
                     "effort".to_string(),
                     serde_json::Value::String(effort.clone()),
@@ -4286,16 +4589,27 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // 4. Apply `updatedInput` on an allow (queryHelpers.ts:262-276): an allow
         //    carries the host's possibly-rewritten input; a deny keeps the
         //    original (it will not run anyway).
-        let (forced, final_input) = match decision {
-            traits::permission_gate::PermissionOutcome::Allow { updated_input, .. } => (
+        let (forced, final_input, permission_updates) = match decision {
+            traits::permission_gate::PermissionOutcome::Allow {
+                updated_input,
+                permission_updates,
+            } => (
                 crate::test_support::PermissionDecision::Allow,
                 updated_input.unwrap_or(input),
+                permission_updates,
             ),
             traits::permission_gate::PermissionOutcome::Deny { reason } => (
                 crate::test_support::PermissionDecision::Deny { reason },
                 input,
+                Vec::new(),
             ),
         };
+        if !permission_updates.is_empty() {
+            self.perms.apply_permission_updates(&permission_updates);
+            self.perms
+                .persist_permission_updates(&permission_updates)
+                .await;
+        }
 
         // The orphaned assistant message is ALREADY in history (we found it
         // there), so — like claude-code's `alreadyPresent` guard
@@ -4348,11 +4662,44 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     /// Persist a single message to the optional JSONL writer.
     ///
     /// Best-effort: write failures are logged via the telemetry
-    /// `tengu_session_corrupted` event but never fail the turn. On
-    /// success, emits `tengu_session_appended` and updates the
-    /// `last_jsonl_uuid` cache.
+    /// `tengu_session_corrupted` event and emit one sanitized user-visible
+    /// warning per session, but never fail the turn. On success, emits
+    /// `tengu_session_appended` and updates the `last_jsonl_uuid` cache.
     pub(crate) async fn persist_message_to_jsonl(&self, msg: &ConversationMessage) {
         self.persist_message_to_jsonl_with_parent(msg, None).await;
+    }
+
+    /// Append an SDK/stream-json supplied assistant or system history entry to
+    /// the live session and its transcript. This is intentionally not routed
+    /// through a model turn: the next user message observes the seeded history
+    /// exactly once and input ordering remains owned by the caller.
+    pub async fn append_external_history_message(&self, msg: ConversationMessage) {
+        {
+            let mut session = self.session.lock().await;
+            session.history.push(msg.clone());
+        }
+        self.persist_message_to_jsonl(&msg).await;
+    }
+
+    /// Append an SDK/stream-json compact boundary with its structured metadata.
+    ///
+    /// Claude's SDK uses snake_case inside `compact_metadata`, while the JSONL
+    /// transcript stores camelCase `compactMetadata`. Keeping this path
+    /// separate from generic system-history append prevents informational
+    /// system frames from masquerading as model context and preserves cold
+    /// resume semantics for externally replayed compacted sessions.
+    pub async fn append_external_compact_boundary(
+        &self,
+        marker: ConversationMessage,
+        sdk_compact_metadata: serde_json::Value,
+    ) {
+        {
+            let mut session = self.session.lock().await;
+            session.history.push(marker.clone());
+        }
+        let compact_metadata = camelize_json_keys(sdk_compact_metadata);
+        self.persist_compact_boundary_jsonl_value(&marker, compact_metadata)
+            .await;
     }
 
     /// Persist with an optional explicit `parentUuid` override.
@@ -4398,6 +4745,28 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             .await;
     }
 
+    /// Record a best-effort transcript write failure and surface one sanitized
+    /// warning per session. The raw error remains confined to logs/telemetry;
+    /// it can contain host paths or backend details and must never cross the
+    /// user-facing output seam.
+    async fn record_transcript_append_failure(
+        &self,
+        session_id: &str,
+        operation: &'static str,
+        error: &(impl std::fmt::Display + ?Sized),
+    ) {
+        tracing::error!(error = %error, operation, "jsonl writer append failed");
+        telemetry::emit_session_corrupted(session_id, &error.to_string());
+        if !self
+            .transcript_persistence_warning_emitted
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            self.output
+                .emit_system_notice(TRANSCRIPT_PERSISTENCE_WARNING, true)
+                .await;
+        }
+    }
+
     /// Persist the compact-boundary system line (P1-05) — claude 2.1.207's
     /// `insertMessageChain` chain reset: the boundary gets `parentUuid: null`
     /// (`CC(d)` ⇒ `{parentUuid: p?null:f, logicalParentUuid: p?i:void 0}`) with
@@ -4412,15 +4781,6 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         marker: &ConversationMessage,
         metadata: &compaction::CompactBoundaryMetadata,
     ) {
-        let Some(writer) = self.jsonl_writer.as_ref() else {
-            return;
-        };
-        let session_id_str = self.session.lock().await.session_id.to_string();
-        // The real parent this line WOULD have chained to — claude stashes it
-        // in `logicalParentUuid` and writes `parentUuid: null`.
-        let logical_parent = self.last_jsonl_uuid.lock().await.clone();
-        let git_branch = self.resolve_git_branch().await;
-
         // `compactMetadata` wire value: CompactBoundaryMetadata serializes
         // claude's camelCase keys; `logicalParentUuid` is a TOP-LEVEL line
         // field (`x9r` spreads it as a message-level sibling), never a
@@ -4430,6 +4790,24 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         if let Some(obj) = compact_metadata.as_object_mut() {
             obj.remove("logicalParentUuid");
         }
+        self.persist_compact_boundary_jsonl_value(marker, compact_metadata)
+            .await;
+    }
+
+    /// Shared compact-boundary JSONL writer for locally generated and SDK
+    /// replayed boundaries. The marker resets the physical chain and retains
+    /// the previous tail in `logicalParentUuid`, matching Claude's chain model.
+    async fn persist_compact_boundary_jsonl_value(
+        &self,
+        marker: &ConversationMessage,
+        compact_metadata: serde_json::Value,
+    ) {
+        let Some(writer) = self.jsonl_writer.as_ref() else {
+            return;
+        };
+        let session_id_str = self.session.lock().await.session_id.to_string();
+        let logical_parent = self.last_jsonl_uuid.lock().await.clone();
+        let git_branch = self.resolve_git_branch().await;
         let content = match marker {
             ConversationMessage::System { content, .. } => content.clone(),
             _ => compaction::BOUNDARY_CONTENT.to_string(),
@@ -4475,8 +4853,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 telemetry::emit_session_appended(&session_id_str, &uuid_for_chain);
             }
             Err(e) => {
-                tracing::error!(error = %e, "jsonl writer append failed");
-                telemetry::emit_session_corrupted(&session_id_str, &e.to_string());
+                self.record_transcript_append_failure(&session_id_str, "compact_boundary", &e)
+                    .await;
             }
         }
     }
@@ -4535,8 +4913,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 telemetry::emit_session_appended(&session_id_str, &line_uuid);
             }
             Err(e) => {
-                tracing::warn!(error = %e, "failed to persist active goal state");
-                telemetry::emit_session_corrupted(&session_id_str, &e.to_string());
+                self.record_transcript_append_failure(&session_id_str, "active_goal", &e)
+                    .await;
             }
         }
     }
@@ -4682,8 +5060,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 telemetry::emit_session_appended(&session_id_str, &uuid_for_chain);
             }
             Err(e) => {
-                tracing::error!(error = %e, "jsonl writer append failed");
-                telemetry::emit_session_corrupted(&session_id_str, &e.to_string());
+                self.record_transcript_append_failure(&session_id_str, "message", &e)
+                    .await;
             }
         }
     }
@@ -4746,9 +5124,13 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // Shared inner Anthropic `message.id` for every block of this turn.
         let inner_id = turn_id.as_uuid().to_string();
 
-        let (session_id_str, model) = {
+        let (session_id_str, model, model_profile) = {
             let s = self.session.lock().await;
-            (s.session_id.to_string(), s.model.clone())
+            (
+                s.session_id.to_string(),
+                s.model.clone(),
+                s.model_profile.clone(),
+            )
         };
         let git_branch = self.resolve_git_branch().await;
         let entrypoint = Some(entrypoint_value());
@@ -4763,7 +5145,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             };
             let parent_uuid = self.last_jsonl_uuid.lock().await.clone();
             // Assistant lines never carry a promptId (it is a user-only field).
-            let jmsg = self.to_jsonl_message_with_inner_id(
+            let mut jmsg = self.to_jsonl_message_with_inner_id(
                 &single,
                 &session_id_str,
                 parent_uuid,
@@ -4776,6 +5158,14 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 request_id,
                 None,
             );
+            jmsg.extra.insert(
+                "modelProfile".to_string(),
+                model_profile
+                    .as_ref()
+                    .map_or(serde_json::Value::Null, |profile| {
+                        serde_json::Value::String(profile.clone())
+                    }),
+            );
             let line_uuid = jmsg.uuid.clone();
             match writer.append(&jmsg).await {
                 Ok(()) => {
@@ -4783,8 +5173,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     telemetry::emit_session_appended(&session_id_str, &line_uuid);
                 }
                 Err(e) => {
-                    tracing::error!(error = %e, "jsonl writer append failed");
-                    telemetry::emit_session_corrupted(&session_id_str, &e.to_string());
+                    self.record_transcript_append_failure(&session_id_str, "assistant_block", &e)
+                        .await;
                     // Skip recording this block's uuid in the map — the caller's
                     // fallback (prior single-parent) will be used for any
                     // tool_result that can't find its parent.
@@ -4829,15 +5219,19 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             return;
         };
         let inner_id = turn_id.as_uuid().to_string();
-        let (session_id_str, model) = {
+        let (session_id_str, model, model_profile) = {
             let s = self.session.lock().await;
-            (s.session_id.to_string(), s.model.clone())
+            (
+                s.session_id.to_string(),
+                s.model.clone(),
+                s.model_profile.clone(),
+            )
         };
         let git_branch = self.resolve_git_branch().await;
         let entrypoint = Some(entrypoint_value());
         let parent_uuid = self.last_jsonl_uuid.lock().await.clone();
         let usage_json = usage.map(assistant_usage_value);
-        let jmsg = self.to_jsonl_message_with_inner_id(
+        let mut jmsg = self.to_jsonl_message_with_inner_id(
             msg,
             &session_id_str,
             parent_uuid,
@@ -4850,6 +5244,10 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             request_id,
             None,
         );
+        jmsg.extra.insert(
+            "modelProfile".to_string(),
+            model_profile.map_or(serde_json::Value::Null, serde_json::Value::String),
+        );
         let line_uuid = jmsg.uuid.clone();
         match writer.append(&jmsg).await {
             Ok(()) => {
@@ -4857,8 +5255,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 telemetry::emit_session_appended(&session_id_str, &line_uuid);
             }
             Err(e) => {
-                tracing::error!(error = %e, "jsonl writer append failed");
-                telemetry::emit_session_corrupted(&session_id_str, &e.to_string());
+                self.record_transcript_append_failure(&session_id_str, "assistant_merged", &e)
+                    .await;
             }
         }
     }
@@ -5052,8 +5450,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     async fn lifecycle_hook_ctx(&self, stop_hook_active: bool) -> HookContext {
         // FIX 2: populate `transcript_path` + `permission_mode` on the lifecycle
         // hook context, matching claude-code `createBaseHookInput` (always sets
-        // `transcript_path`, utils/hooks.ts:322) and the plan/default approximation
-        // of the session's permission mode. The lifecycle hooks (Stop /
+        // `transcript_path`, utils/hooks.ts:322) and the live permission mode.
+        // The lifecycle hooks (Stop /
         // UserPromptSubmit / SessionStart / …) thus carry a non-empty
         // `transcript_path` like the tool-use hooks do, instead of serializing `""`.
         //
@@ -5064,15 +5462,29 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // `transcript_path` EMPTY for every lifecycle hook. `computed_transcript_path`
         // is itself `""` only when neither a writer nor a `config_home` is present
         // (library/test builds), preserving the old behavior there.
-        let (session_id, plan_mode) = {
+        let (session_id, plan_mode, last_assistant_message) = {
             let s = self.session.lock().await;
-            (s.session_id, s.plan_mode)
+            (
+                s.session_id,
+                s.plan_mode,
+                Self::last_assistant_message_for_hooks(&s.history),
+            )
         };
         let transcript_path = self
             .jsonl_writer
             .as_ref()
             .map(|w| w.path().to_path_buf())
             .unwrap_or_else(|| self.computed_transcript_path(&session_id));
+        // LingXi keeps `/plan` as session state, while Shift+Tab/control
+        // requests mutate the enforcing permission gate. Prefer the explicit
+        // plan state when active; otherwise report the gate's authoritative
+        // live wire id instead of collapsing every non-plan mode to `default`.
+        let permission_mode = if plan_mode {
+            "plan".to_string()
+        } else {
+            self.permission_mode()
+                .unwrap_or_else(|| "default".to_string())
+        };
         // Main-thread lifecycle hooks (SessionStart / UserPromptSubmit / Stop /
         // expansion) carry the adopted `--agent`'s `agentType` — claude-code's
         // base hook-input builder `wf` uses `r?.agentType ?? MB()`, and these
@@ -5083,11 +5495,31 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             session_id,
             cwd: self.current_cwd(),
             transcript_path,
-            permission_mode: Some(if plan_mode { "plan" } else { "default" }.to_string()),
+            permission_mode: Some(permission_mode),
             stop_hook_active,
+            last_assistant_message,
             agent_type,
             ..Default::default()
         }
+    }
+
+    fn last_assistant_message_for_hooks(
+        history: &[protocol::ConversationMessage],
+    ) -> Option<String> {
+        let assistant = history.iter().rev().find_map(|message| match message {
+            protocol::ConversationMessage::Assistant { content, .. } => Some(content),
+            _ => None,
+        })?;
+        let joined = assistant
+            .iter()
+            .filter_map(|block| match block {
+                protocol::ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let trimmed = joined.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
     }
 
     /// Stamp the `Stop` / `SubagentStop` `background_tasks` + `session_crons`
@@ -5158,9 +5590,17 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             if !title.is_empty() {
                 if let Some(writer) = self.jsonl_writer.as_ref() {
                     let session_id = self.session.lock().await.session_id;
-                    let _ = writer
+                    if let Err(error) = writer
                         .append_custom_title(&session_id.as_uuid().to_string(), title)
+                        .await
+                    {
+                        self.record_transcript_append_failure(
+                            &session_id.to_string(),
+                            "hook_custom_title",
+                            &error,
+                        )
                         .await;
+                    }
                 }
             }
         }
@@ -6135,13 +6575,14 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     // it says `continue`, inject the meta nudge, reset the A1
                     // recovery count (per `query.ts:1332`), and loop again
                     // instead of breaking. When budget is off this is a no-op.
-                    if self
-                        .maybe_continue_for_budget(
-                            budget.as_mut(),
-                            &mut recovery,
-                            global_turn_tokens,
-                        )
-                        .await
+                    if stop_reason == "end_turn"
+                        && self
+                            .maybe_continue_for_budget(
+                                budget.as_mut(),
+                                &mut recovery,
+                                global_turn_tokens,
+                            )
+                            .await
                     {
                         continue;
                     }
@@ -6181,7 +6622,9 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         );
         // DEFERRED-3: the plain (non-cancelable) streaming entry has no granular
         // user-interrupt token → `None` (behaviour byte-identical to before).
-        let result = self.try_run_turn_streaming(prompt, Vec::new(), None).await;
+        let result = self
+            .try_run_turn_streaming(prompt, Vec::new(), None, None)
+            .await;
         self.emit_terminal_rate_limit_if_changed(&result).await;
         let result = result.map_err(|e| self.enrich_api_error(e));
         match &result {
@@ -6219,6 +6662,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // gracefully (no whole-turn drop) — mirroring claude-code's
         // `StreamingToolExecutor` user_interrupted path.
         user_cancel: Option<CancellationToken>,
+        message_id: Option<MessageId>,
     ) -> Result<ConversationOutcome, OrchestratorError> {
         use crate::streaming_loop::ExecutorPump;
         use protocol::ContentBlock;
@@ -6236,8 +6680,11 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // 1. Append the user prompt (+ any pasted images) to session history.
         // `images` arrives already decoded (path-based callers ran `load_images`
         // first; the bridge converts inline `ImageRefDto`s straight to sources).
-        let user_msg =
-            ConversationMessage::user_with_images(MessageId::new(), prompt.to_string(), images);
+        let user_msg = ConversationMessage::user_with_images(
+            message_id.unwrap_or_default(),
+            prompt.to_string(),
+            images,
+        );
         {
             let mut s = self.session.lock().await;
             s.history.push(user_msg.clone());
@@ -6265,10 +6712,6 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 final_message_id: user_msg.id(),
             });
         }
-
-        // Build the wire tool definitions once for the conversation (stable
-        // across turns; see `build_wire_tools`). Cloned into each turn's stream.
-        let wire_tools = self.build_wire_tools().await;
 
         // A1: per-conversation max_output_tokens recovery bookkeeping (streaming
         // twin of the batched driver). Carried across turn-steps so the 3-retry
@@ -6429,7 +6872,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // position mirrors TS; `None` for the default style ⇒ no extra
             // message, keeping the locked streaming fixtures byte-identical. See
             // [`Self::output_style_reminder_message`].
-            if let Some(reminder) = self.output_style_reminder_message() {
+            if let Some(reminder) = self.output_style_reminder_message().await {
                 snapshot.push(reminder);
             }
 
@@ -6555,6 +6998,15 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 snapshot.push(reminder);
             }
 
+            // Rebuild on every model step: a ToolSearch result marks schemas as
+            // discovered, so the immediately following request must include
+            // those schemas with `defer_loading:true`. The accompanying catalog
+            // is transient and prepended exactly once per outgoing request.
+            let wire_tools = self.build_wire_tools().await;
+            if let Some(reminder) = self.deferred_tools_reminder_message() {
+                snapshot.insert(0, reminder);
+            }
+
             // RECOV.1: blocking-limit preempt — the streaming twin of the batched
             // `call_api_with_ptl_recovery` step (1) (TS `query.ts:592-648`). If the
             // pre-call prompt is already at the hard blocking limit
@@ -6562,15 +7014,14 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // surface the byte-exact `PROMPT_TOO_LONG_ERROR_MESSAGE` and END the
             // turn WITHOUT opening the stream — mirroring the batched path (which
             // returns `PtlCallOutcome::PromptTooLong` ⇒ ends with stop_reason
-            // `"prompt_too_long"`). Same window math as the batched path: `betas`
-            // is `&[]` (the orchestrator does not thread the per-request beta set
-            // here) and `auto_compact_enabled = true` for this always-on port. A
-            // strict no-op below the limit, so the locked streaming fixtures are
-            // unaffected.
+            // `"prompt_too_long"`). Use the exact same custom beta set as the
+            // provider request so context-1m sessions are not preempted at the
+            // default 200k boundary.
+            let active_betas = self.api.active_betas();
             let warning = compaction::calculate_token_warning_state(
                 compaction::grouping::estimate_tokens_for_range(&snapshot),
                 &model,
-                &[],
+                &active_betas,
                 true,
             );
             if warning.is_at_blocking_limit {
@@ -6595,12 +7046,6 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                         id,
                     )
                     .await;
-                if self
-                    .maybe_continue_for_budget(budget.as_mut(), &mut recovery, global_turn_tokens)
-                    .await
-                {
-                    continue;
-                }
                 let cost = self.snapshot_cost_real().await;
                 self.output.emit_end_turn("blocking_limit", &cost).await;
                 final_message_id = id;
@@ -6717,6 +7162,9 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     if let Some(ctx_msg) = self.additional_context_message().await {
                         recov_snapshot.insert(0, ctx_msg);
                     }
+                    if let Some(reminder) = self.deferred_tools_reminder_message() {
+                        recov_snapshot.insert(0, reminder);
+                    }
                     match call_api_with_ptl_recovery(
                         self,
                         system_prompt.as_deref(),
@@ -6778,16 +7226,6 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                                     id,
                                 )
                                 .await;
-                            if self
-                                .maybe_continue_for_budget(
-                                    budget.as_mut(),
-                                    &mut recovery,
-                                    global_turn_tokens,
-                                )
-                                .await
-                            {
-                                continue;
-                            }
                             let cost = self.snapshot_cost_real().await;
                             self.output.emit_end_turn("prompt_too_long", &cost).await;
                             final_message_id = id;
@@ -6808,16 +7246,6 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                                     id,
                                 )
                                 .await;
-                            if self
-                                .maybe_continue_for_budget(
-                                    budget.as_mut(),
-                                    &mut recovery,
-                                    global_turn_tokens,
-                                )
-                                .await
-                            {
-                                continue;
-                            }
                             let cost = self.snapshot_cost_real().await;
                             self.output.emit_end_turn("blocking_limit", &cost).await;
                             final_message_id = id;
@@ -6964,6 +7392,9 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                                 if let Some(ctx_msg) = self.additional_context_message().await {
                                     re_snapshot.insert(0, ctx_msg);
                                 }
+                                if let Some(reminder) = self.deferred_tools_reminder_message() {
+                                    re_snapshot.insert(0, reminder);
+                                }
                                 match self
                                     .streaming_api
                                     .stream(
@@ -7103,6 +7534,9 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                             // non-streaming fallback. Prepend it to the re-snapshot too.
                             if let Some(ctx_msg) = self.additional_context_message().await {
                                 non_stream_snapshot.insert(0, ctx_msg);
+                            }
+                            if let Some(reminder) = self.deferred_tools_reminder_message() {
+                                non_stream_snapshot.insert(0, reminder);
                             }
                             let tools_for_fallback = wire_tools.clone();
 
@@ -7769,7 +8203,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                         self.persist_message_to_jsonl(&failed_msg).await;
                         let cost = self.snapshot_cost_real().await;
                         self.output.emit_end_turn("end_turn", &cost).await;
-                        final_message_id = assistant_id;
+                        final_message_id = failed_msg.id();
                         break;
                     }
                     self.inject_meta_user_message(MALFORMED_TOOL_USE_RETRY_NUDGE)
@@ -7861,7 +8295,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                             pumped.stop_details.as_ref(),
                         )
                     };
-                    if let Some(text) = api_error {
+                    let surfaced_id = if let Some(text) = api_error {
                         let err_msg = ConversationMessage::Assistant {
                             id: MessageId::new(),
                             content: vec![ContentBlock::Text { text: text.clone() }],
@@ -7870,10 +8304,13 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                         self.session.lock().await.history.push(err_msg.clone());
                         self.persist_message_to_jsonl(&err_msg).await;
                         self.output.emit_text(&text).await;
-                    }
+                        Some(err_msg.id())
+                    } else {
+                        None
+                    };
                     let cost = self.snapshot_cost_real().await;
                     self.output.emit_end_turn(other, &cost).await;
-                    final_message_id = assistant_id;
+                    final_message_id = surfaced_id.unwrap_or(assistant_id);
                     break;
                 }
                 None => {
@@ -7951,9 +8388,17 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             if let (Some(record), Some(writer)) =
                 (fh.snapshot_record(file_history_msg_id), &self.jsonl_writer)
             {
-                let session_uuid = self.session.lock().await.session_id.as_uuid().to_string();
+                let session_id = self.session.lock().await.session_id;
+                let session_uuid = session_id.as_uuid().to_string();
                 let line = session::file_history::snapshot_line_json(&session_uuid, &record);
-                let _ = writer.append_file_history_snapshot(&line).await;
+                if let Err(error) = writer.append_file_history_snapshot(&line).await {
+                    self.record_transcript_append_failure(
+                        &session_id.to_string(),
+                        "file_history_snapshot",
+                        &error,
+                    )
+                    .await;
+                }
             }
         }
 
@@ -8184,7 +8629,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         prompt: &str,
         cancel: CancellationToken,
     ) -> Result<TurnOutcome, OrchestratorError> {
-        self.run_turn_streaming_with_cancel_images(prompt, &[], cancel)
+        self.run_turn_streaming_with_cancel_images_and_message_id(prompt, &[], cancel, None)
             .await
     }
 
@@ -8198,13 +8643,28 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         image_paths: &[std::path::PathBuf],
         cancel: CancellationToken,
     ) -> Result<TurnOutcome, OrchestratorError> {
+        self.run_turn_streaming_with_cancel_images_and_message_id(prompt, image_paths, cancel, None)
+            .await
+    }
+
+    /// As [`Self::run_turn_streaming_with_cancel_images`], but allows the
+    /// caller to pin the persisted user-message UUID.
+    pub async fn run_turn_streaming_with_cancel_images_and_message_id(
+        &self,
+        prompt: &str,
+        image_paths: &[std::path::PathBuf],
+        cancel: CancellationToken,
+        message_id: Option<MessageId>,
+    ) -> Result<TurnOutcome, OrchestratorError> {
         // Decode the pasted PATHS into canonical sources first, then hand off to
         // the already-decoded entry below — so the path-based and bridge (inline
         // base64) flows share ONE cancel race + ONE turn core. A failed image read
         // aborts the turn with `Err` before any API call (unchanged).
         let images = Self::load_images(image_paths)?;
-        self.run_turn_streaming_with_cancel_image_sources(prompt, images, cancel)
-            .await
+        self.run_turn_streaming_with_cancel_image_sources_and_message_id(
+            prompt, images, cancel, message_id,
+        )
+        .await
     }
 
     /// As [`Self::run_turn_streaming_with_cancel_images`], but taking
@@ -8223,6 +8683,21 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         prompt: &str,
         images: Vec<protocol::ImageSource>,
         cancel: CancellationToken,
+    ) -> Result<TurnOutcome, OrchestratorError> {
+        self.run_turn_streaming_with_cancel_image_sources_and_message_id(
+            prompt, images, cancel, None,
+        )
+        .await
+    }
+
+    /// As [`Self::run_turn_streaming_with_cancel_image_sources`], but allows the
+    /// caller to pin the persisted user-message UUID.
+    pub async fn run_turn_streaming_with_cancel_image_sources_and_message_id(
+        &self,
+        prompt: &str,
+        images: Vec<protocol::ImageSource>,
+        cancel: CancellationToken,
+        message_id: Option<MessageId>,
     ) -> Result<TurnOutcome, OrchestratorError> {
         tracing::info!(
             event = orch_events::TURN_STREAMING_STARTED,
@@ -8253,7 +8728,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // and is still reported `Cancelled` here — faithful: claude-code only
         // aborts Cancel-behavior tools; Block tools / the stream finish.
         let r = self
-            .try_run_turn_streaming(prompt, images, Some(cancel.clone()))
+            .try_run_turn_streaming(prompt, images, Some(cancel.clone()), message_id)
             .await;
         match r {
             Ok(
@@ -8292,6 +8767,17 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 Err(self.enrich_api_error(e))
             }
         }
+    }
+
+    /// Whether the current in-memory session history already contains this raw
+    /// top-level JSONL UUID. Structured stdin replay uses this to suppress
+    /// duplicate user turns across process restarts / reattach flows.
+    pub async fn session_contains_message_uuid(&self, raw_uuid: &str) -> bool {
+        let Some(id) = MessageId::parse_prefixed(raw_uuid) else {
+            return false;
+        };
+        let session = self.session.lock().await;
+        session.history.iter().any(|message| message.id() == id)
     }
 
     /// Load + base64-encode each pasted image path into an [`ImageSource`].
@@ -8355,6 +8841,106 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             tool_policy,
             disallowed_tools,
         });
+    }
+
+    /// Replace the frontmatter-hook bucket owned by the main-thread agent.
+    /// Normal startup installs it once; hot resume calls this again so the
+    /// previous session's hooks are removed before the resumed agent's hooks
+    /// become visible.
+    pub async fn replace_main_thread_agent_hooks(&self, definitions: &[hooks::HookDefinition]) {
+        let previous = self.main_thread_agent_hook_id.lock().await.take();
+        if let Some(previous) = previous {
+            self.hooks.clear_agent_hooks(previous).await;
+        }
+        if definitions.is_empty() {
+            return;
+        }
+        let agent_id = protocol::AgentId::new();
+        self.hooks
+            .register_agent_hooks(agent_id, definitions, false)
+            .await;
+        *self.main_thread_agent_hook_id.lock().await = Some(agent_id);
+    }
+
+    /// Restore the main-thread agent selected by a resumed session. Prefer the
+    /// immutable, integrity-checked transcript snapshot; legacy transcripts
+    /// fall back to the current live catalog by agent type. A missing or
+    /// unresolvable selection explicitly restores default behavior instead of
+    /// retaining state from the session that was previously mounted.
+    pub(crate) async fn restore_main_thread_agent_from_resume(
+        &self,
+        wanted: Option<String>,
+        snapshot: Option<serde_json::Value>,
+    ) {
+        let mut resolved = match (wanted.as_deref(), snapshot) {
+            (Some(wanted), Some(value)) => serde_json::from_value::<agent::AgentDefinition>(value)
+                .ok()
+                .filter(|definition| definition.agent_type == wanted),
+            _ => None,
+        };
+
+        if resolved.is_none() {
+            if let (Some(wanted), Some(catalog)) = (wanted.as_deref(), self.agent_catalog.as_ref())
+            {
+                let catalog = catalog.read().await;
+                let suffix = format!(":{wanted}");
+                resolved = catalog
+                    .iter()
+                    .find(|definition| {
+                        definition.agent_type == wanted || definition.agent_type.ends_with(&suffix)
+                    })
+                    .cloned();
+            }
+        }
+
+        match resolved {
+            Some(definition) => {
+                // (cc 2.1.218 `mvo`) ORIGIN TRUST — the RESUME surface. The
+                // resumed `agent-setting` snapshot carries the definition's
+                // `frontmatter_hooks` verbatim, so without this check a
+                // definition whose hooks were correctly REFUSED at `--agent`
+                // time would be silently installed on the next resume of that
+                // session. Evaluated BEFORE the fields are moved below.
+                let hooks_trusted =
+                    agent::hooks_trust::agent_hooks_origin_trusted(&definition, &self.cwd);
+                if !hooks_trusted {
+                    agent::hooks_trust::report_untrusted_hooks(
+                        &definition,
+                        &self.cwd,
+                        agent::hooks_trust::HooksTrustSurface::MainThread,
+                        false,
+                    );
+                }
+                self.set_main_thread_agent(
+                    definition.agent_type,
+                    definition.system_prompt,
+                    definition.tools,
+                    definition.disallowed_tools,
+                    None,
+                )
+                .await;
+                if hooks_trusted {
+                    self.replace_main_thread_agent_hooks(&definition.frontmatter_hooks)
+                        .await;
+                } else {
+                    // `QEt`'s untrusted arm ends in `b1r(void 0)` — it CLEARS the
+                    // main-thread bucket rather than leaving it alone. Skipping
+                    // the clear would strand the PREVIOUS session's hooks: an
+                    // in-place resume from a trusted folder A into an untrusted
+                    // session B would keep A's hook commands firing under B.
+                    self.replace_main_thread_agent_hooks(&[]).await;
+                }
+            }
+            None => {
+                if let Some(wanted) = wanted {
+                    tracing::warn!(
+                        "Resumed session had agent \"{wanted}\" but it is no longer available. Using default behavior."
+                    );
+                }
+                *self.main_thread_agent.write().await = None;
+                self.replace_main_thread_agent_hooks(&[]).await;
+            }
+        }
     }
 
     /// The adopted main-thread agent's `agentType` (claude-code `MB()`), or
@@ -8548,6 +9134,22 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         }
     }
 
+    async fn resolve_active_output_style(&self) -> Option<outputstyles::ResolvedOutputStyle> {
+        if let Some(registry) = &self.output_style_registry {
+            if let Some(style) = registry
+                .read()
+                .await
+                .resolve(self.config.output_style.as_deref())
+            {
+                return Some(style);
+            }
+        }
+        outputstyles::resolve_output_style(
+            self.config.output_style.as_deref(),
+            &self.config.output_style_dirs,
+        )
+    }
+
     /// Assemble the full system-prompt STRING from [`Self::build_prompt_context`].
     /// Bypassed when `OrchestratorConfig::system_prompt_override` is `Some(_)`.
     async fn build_system_prompt(&self) -> String {
@@ -8559,10 +9161,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // `None`/`"default"`/unknown style resolves to `None`, leaving the prompt
         // byte-identical to the styleless path (empty `output_style_dirs` ⇒
         // builtin-only, as before).
-        let resolved = outputstyles::resolve_output_style(
-            self.config.output_style.as_deref(),
-            &self.config.output_style_dirs,
-        );
+        let resolved = self.resolve_active_output_style().await;
         let style = resolved.as_ref().map(|r| ActiveOutputStyle {
             name: r.name.as_str(),
             prompt: r.prompt.as_str(),
@@ -8748,11 +9347,8 @@ As you answer the user's questions, you can use the following context:\n\
     /// trailing meta user message after the user prompt / tool-results
     /// (`processTextPrompt` returns `[userMessage, ...attachmentMessages]`;
     /// `query.ts:1580-1590` pushes the attachment after `toolResults`).
-    pub(crate) fn output_style_reminder_message(&self) -> Option<ConversationMessage> {
-        let resolved = outputstyles::resolve_output_style(
-            self.config.output_style.as_deref(),
-            &self.config.output_style_dirs,
-        )?;
+    pub(crate) async fn output_style_reminder_message(&self) -> Option<ConversationMessage> {
+        let resolved = self.resolve_active_output_style().await?;
         let content = format!(
             "<system-reminder>\n{} output style is active. \
              Remember to follow the specific guidelines for this style.\n</system-reminder>",
@@ -8847,7 +9443,7 @@ As you answer the user's questions, you can use the following context:\n\
     /// not observable, the structure is). Uses the bare UUID (not the `sess:`
     /// display form) so the filename has no `:` separator, matching
     /// `computed_transcript_path`.
-    fn plan_file_path(
+    pub(crate) fn plan_file_path(
         session_id: &SessionId,
         project_root: &std::path::Path,
         plans_directory: Option<&str>,
@@ -8958,7 +9554,9 @@ As you answer the user's questions, you can use the following context:\n\
         // switch across a 200k↔1M window boundary re-sizes the budget correctly
         // (mirrors `build_prompt_context`).
         let model = self.session.lock().await.model.clone();
-        let window = compaction::context_window::context_window_for_model(&model, &[]) as usize;
+        let window =
+            compaction::context_window::context_window_for_model(&model, &self.api.active_betas())
+                as usize;
         let content = crate::prompt::skill_listing::render_reminder(&new_entries, Some(window))?;
         Some(ConversationMessage::user(MessageId::new(), content))
     }
@@ -9648,13 +10246,13 @@ As you answer the user's questions, you can use the following context:\n\
                     &tools,
                     &PromptOptions {
                         include_examples: true,
-                        model: Some(model),
-                        model_profile,
+                        model: Some(model.clone()),
+                        model_profile: model_profile.clone(),
                     },
                 )
                 .await;
                 *self.wire_tool_schema_cache.lock().await = Some(WireToolSchemaCache {
-                    key: cache_key,
+                    key: cache_key.clone(),
                     wire: wire.clone(),
                 });
                 wire
@@ -9677,13 +10275,144 @@ As you answer the user's questions, you can use the following context:\n\
                 }
             }
         }
-        // Tool Search (2.1.207): stamp `defer_loading: true` onto tools the
-        // shared `DeferralState` defers this turn (claude-code's deferred-tool
-        // wire form). Disabled by default ⇒ no-op ⇒ wire bytes unchanged. The
-        // `DeferralState` is owned by the registry, shared with `ToolSearch`, so
-        // a tool loaded via a prior `ToolSearch` call is no longer deferred here.
-        tool_api::wire::apply_defer_loading(&mut wire, &tools, self.tools.deferral());
+        let tool_search_present = tools.iter().any(|tool| tool.name() == "ToolSearch");
+        let has_deferred_candidates = tools.iter().any(|tool| {
+            self.tools
+                .deferral()
+                .wants_defer(tool.name(), tool.should_defer())
+        });
+        // Keep ToolSearch available while an MCP server is still connecting,
+        // even if the current catalog has no deferred definitions yet. Claude
+        // does this so a model can retry discovery after the pending server
+        // publishes its tools instead of permanently losing ToolSearch for the
+        // turn/session.
+        let has_pending_mcp_servers = if has_deferred_candidates {
+            false
+        } else if let Some(registry) = &self.mcp_registry {
+            !registry.servers_pending().await.is_empty()
+        } else {
+            false
+        };
+        let request_supported = tool_search_present
+            && (has_deferred_candidates || has_pending_mcp_servers)
+            && tool_search_supported_for_request(&model, model_profile.as_deref());
+        self.tools
+            .deferral()
+            .set_request_supported(request_supported);
+        let complete_wire = wire.clone();
+        // Tool Search (2.1.216): omit undiscovered deferred definitions and
+        // stamp discovered definitions with `defer_loading: true`. The shared
+        // `DeferralState` is owned by the registry and restored on resume, so a
+        // prior ToolSearch result remains available without exposing the rest
+        // of the deferred catalog.
+        let context_window =
+            compaction::context_window::context_window_for_model(&model, &self.api.active_betas());
+        let exact_deferred_tokens = if self.tools.deferral().auto_percentage().is_some()
+            && request_supported
+            && has_deferred_candidates
+        {
+            let cached = self
+                .deferred_tool_token_cache
+                .lock()
+                .await
+                .get(&cache_key)
+                .copied();
+            if let Some(cached) = cached {
+                cached
+            } else {
+                let deferred_names: std::collections::HashSet<&str> = tools
+                    .iter()
+                    .filter(|tool| {
+                        self.tools
+                            .deferral()
+                            .wants_defer(tool.name(), tool.should_defer())
+                    })
+                    .map(|tool| tool.name())
+                    .collect();
+                let deferred_wire: Vec<serde_json::Value> = complete_wire
+                    .iter()
+                    .filter(|tool| {
+                        tool.get("name")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|name| deferred_names.contains(name))
+                    })
+                    .cloned()
+                    .collect();
+                // Claude subtracts the fixed request/tool envelope from the
+                // exact count. A zero response means the endpoint is
+                // unavailable and selects the character fallback.
+                let counted = match self
+                    .api
+                    .count_tokens_exact(
+                        &model,
+                        model_profile.as_deref(),
+                        None,
+                        Vec::new(),
+                        deferred_wire,
+                    )
+                    .await
+                {
+                    Ok(Some(total)) if total != 0 => {
+                        Some(total.saturating_sub(TOOL_TOKEN_COUNT_OVERHEAD))
+                    }
+                    Ok(_) | Err(_) => None,
+                };
+                self.deferred_tool_token_cache
+                    .lock()
+                    .await
+                    .insert(cache_key.clone(), counted);
+                counted
+            }
+        } else {
+            None
+        };
+        tool_api::wire::apply_defer_loading_with_context_and_tokens(
+            &mut wire,
+            &tools,
+            self.tools.deferral(),
+            context_window,
+            exact_deferred_tokens,
+        );
+        // Auto mode learns whether it is active only after the schemas are
+        // serialized and measured. Publish the complete deferred candidate
+        // view (including descriptions), then hide ToolSearch itself whenever
+        // the resolved request does not support the beta.
+        self.tools
+            .refresh_tool_search_view_from_wire(&complete_wire);
+        if !self.tools.deferral().is_enabled() {
+            wire.retain(|tool| {
+                tool.get("name").and_then(serde_json::Value::as_str) != Some("ToolSearch")
+            });
+        }
         wire
+    }
+
+    /// Per-request deferred-tool catalog, prepended to the outgoing history and
+    /// never persisted. This is Claude Code's fallback
+    /// `<available-deferred-tools>` message when delta attachments are off.
+    pub(crate) fn deferred_tools_reminder_message(&self) -> Option<ConversationMessage> {
+        if !self.tools.deferral().is_enabled() {
+            return None;
+        }
+        let mut names: Vec<String> = self
+            .tools
+            .tool_search_view()
+            .entries()
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect();
+        names.sort();
+        names.dedup();
+        if names.is_empty() {
+            return None;
+        }
+        Some(ConversationMessage::user_meta(
+            MessageId::new(),
+            format!(
+                "<available-deferred-tools>\n{}\n</available-deferred-tools>",
+                names.join("\n")
+            ),
+        ))
     }
 
     /// Return the live, policy-filtered tool catalog in MCP's 2025-06-18
@@ -9758,6 +10487,45 @@ As you answer the user's questions, you can use the following context:\n\
         self.config.model.clone()
     }
 
+    /// Update the thinking policy for the next API request.
+    pub fn set_thinking_config(&self, thinking: llm_client::model::thinking::ThinkingConfig) {
+        self.api.set_thinking_config(thinking);
+    }
+
+    /// Update how the attached output sink presents subsequent thinking blocks.
+    pub fn set_thinking_display(&self, mode: Option<&str>) {
+        self.output.set_thinking_display(mode);
+    }
+
+    /// Update the effort carried by the next API request and by subsequently
+    /// persisted assistant transcript rows.
+    pub fn set_effort(&self, effort: Option<String>) {
+        self.current_effort_explicit
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.apply_effort(effort);
+    }
+
+    /// Restore transcript effort only when no launch/control override owns the
+    /// live value. Unlike [`Self::set_effort`], inheritance deliberately does
+    /// not pin the value, so a later resume can adopt or clear it again.
+    pub(crate) fn restore_effort_from_resume(&self, effort: Option<String>) {
+        if self
+            .current_effort_explicit
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return;
+        }
+        self.apply_effort(effort);
+    }
+
+    fn apply_effort(&self, effort: Option<String>) {
+        *self
+            .current_effort
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = effort.clone();
+        self.api.set_effort(effort.map(serde_json::Value::String));
+    }
+
     /// Apply a LIVE session permission-mode change (stream-json
     /// `set_permission_mode` control_request). Delegates to the gate's
     /// [`traits::PermissionGate::set_permission_mode`]; only the enforcing
@@ -9765,6 +10533,24 @@ As you answer the user's questions, you can use the following context:\n\
     /// gate's validation error string on an invalid / disallowed mode.
     pub async fn set_permission_mode(&self, mode: &str) -> Result<(), String> {
         self.perms.set_permission_mode(mode).await
+    }
+
+    /// Apply or clear the LIVE per-MCP-server permission-mode override
+    /// (stream-json `set_mcp_permission_mode_override` control_request).
+    pub async fn set_mcp_permission_mode_override(
+        &self,
+        server_name: &str,
+        mode: Option<&str>,
+    ) -> Result<(), String> {
+        self.perms
+            .set_mcp_permission_mode_override(server_name, mode)
+            .await
+    }
+
+    /// Return the enforcing gate's live permission-mode wire id.
+    #[must_use]
+    pub fn permission_mode(&self) -> Option<String> {
+        self.perms.permission_mode()
     }
 }
 
@@ -9864,6 +10650,49 @@ fn is_env_truthy(val: Option<&str>) -> bool {
     }
 }
 
+fn parse_generated_session_name(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    let candidate = trimmed
+        .strip_prefix("```json")
+        .or_else(|| trimmed.strip_prefix("```"))
+        .and_then(|body| body.strip_suffix("```"))
+        .map(str::trim)
+        .unwrap_or(trimmed);
+    let object = serde_json::from_str::<serde_json::Value>(candidate)
+        .ok()
+        .or_else(|| {
+            let start = candidate.find('{')?;
+            let end = candidate.rfind('}')?;
+            serde_json::from_str(&candidate[start..=end]).ok()
+        })?;
+    object
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+}
+
+#[cfg(test)]
+mod generated_session_name_tests {
+    use super::parse_generated_session_name;
+
+    #[test]
+    fn parses_plain_and_fenced_json_but_rejects_empty_or_prose() {
+        assert_eq!(
+            parse_generated_session_name(r#"{"name":"fix-login-bug"}"#).as_deref(),
+            Some("fix-login-bug")
+        );
+        assert_eq!(
+            parse_generated_session_name("```json\n{\"name\":\"add-auth-feature\"}\n```")
+                .as_deref(),
+            Some("add-auth-feature")
+        );
+        assert_eq!(parse_generated_session_name(r#"{"name":"  "}"#), None);
+        assert_eq!(parse_generated_session_name("not json"), None);
+    }
+}
+
 // NOTE: `AnthropicProviderAdapter` and `AnthropicProviderStreamingAdapter`
 // were removed in Task 5 — they drove `api_client::AnthropicProvider` directly.
 // The live path is now `ProviderApiAdapter` (provider_adapter.rs), retargeted
@@ -9922,6 +10751,26 @@ mod turn_recovery_tests {
                 .as_deref(),
             Some("focus on Rust\n\npreserve test output")
         );
+    }
+
+    #[test]
+    fn sdk_compact_metadata_keys_are_camelized_recursively() {
+        let metadata = camelize_json_keys(serde_json::json!({
+            "trigger": "manual",
+            "pre_tokens": 42,
+            "preserved_segment": {
+                "head_uuid": "head",
+                "anchor_uuid": "anchor",
+                "tail_uuid": "tail"
+            },
+            "pre_compact_discovered_tools": ["Read"]
+        }));
+        assert_eq!(metadata["trigger"], "manual");
+        assert_eq!(metadata["preTokens"], 42);
+        assert_eq!(metadata["preservedSegment"]["headUuid"], "head");
+        assert_eq!(metadata["preservedSegment"]["anchorUuid"], "anchor");
+        assert_eq!(metadata["preservedSegment"]["tailUuid"], "tail");
+        assert_eq!(metadata["preCompactDiscoveredTools"][0], "Read");
     }
     use crate::OrchestratorConfig;
     use hooks::definition::{HookDefinition, HookExecutor as DefHookExecutor, HookSource};
@@ -10471,6 +11320,66 @@ mod turn_recovery_tests {
         );
     }
 
+    #[tokio::test]
+    async fn recov1_streaming_blocking_limit_does_not_trigger_budget_continuation() {
+        let streaming = Arc::new(MockStreamingApiClient::with_turns(vec![vec![
+            message_start("m", "claude-opus-4-7"),
+            content_block_start_text(0),
+            text_delta(0, "should not be reached"),
+            content_block_stop(0),
+            message_delta_stop("end_turn"),
+            message_stop(),
+        ]]));
+        let output = Arc::new(MockOutputStream::new());
+        let orch = ConversationOrchestrator::new_with_streaming(
+            OrchestratorConfig {
+                enable_token_budget: true,
+                token_budget: Some(500_000),
+                ..OrchestratorConfig::default()
+            },
+            Arc::new(MockApiClient::new(vec![])),
+            streaming.clone(),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            output.clone(),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+        seed_over_blocking_limit(&orch).await;
+
+        let outcome = orch
+            .run_turn_streaming("go")
+            .await
+            .expect("turn ends without a hard error");
+        assert!(
+            matches!(outcome, ConversationOutcome::EndTurn { turn_count: 1, .. }),
+            "{outcome:?}"
+        );
+        assert!(
+            streaming.captured_calls().await.is_empty(),
+            "the blocking-limit preempt must still short-circuit before opening the stream"
+        );
+        let history = orch.session().lock().await.history.clone();
+        assert!(
+            !history.iter().any(|m| matches!(
+                m,
+                protocol::ConversationMessage::User { content, .. }
+                    if matches!(
+                        content.first(),
+                        Some(protocol::ContentBlock::Text { text }) if text.starts_with("Stopped at ")
+                    )
+            )),
+            "terminal API-error ends must not inject a budget-continuation nudge"
+        );
+        let events = output.snapshot().await;
+        let end = events.iter().rev().find_map(|e| match e {
+            OutputEvent::EndTurn { stop_reason, .. } => Some(stop_reason.as_str()),
+            _ => None,
+        });
+        assert_eq!(end, Some("blocking_limit"));
+    }
+
     // -------- terminal stop-reason API errors (claude.ts:2266-2292) --------
 
     #[tokio::test]
@@ -10607,6 +11516,55 @@ mod turn_recovery_tests {
             !seen.iter().any(|s| s.starts_with("Stop:")),
             "the normal Stop hooks must NOT fire on an api-error end: {seen:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn recov2_batched_blocking_limit_does_not_trigger_budget_continuation() {
+        let api = Arc::new(MockApiClient::new(vec![]));
+        let output = Arc::new(MockOutputStream::new());
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig {
+                enable_token_budget: true,
+                token_budget: Some(500_000),
+                ..OrchestratorConfig::default()
+            },
+            api.clone(),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            output.clone(),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+        seed_over_blocking_limit(&orch).await;
+
+        let outcome = orch.run_turn("go").await.expect("turn ends cleanly");
+        assert!(
+            matches!(outcome, ConversationOutcome::EndTurn { turn_count: 1, .. }),
+            "{outcome:?}"
+        );
+        assert!(
+            api.captured_msgs().await.is_empty(),
+            "the blocking-limit preempt must short-circuit before any batched API call"
+        );
+        let history = orch.session().lock().await.history.clone();
+        assert!(
+            !history.iter().any(|m| matches!(
+                m,
+                protocol::ConversationMessage::User { content, .. }
+                    if matches!(
+                        content.first(),
+                        Some(protocol::ContentBlock::Text { text }) if text.starts_with("Stopped at ")
+                    )
+            )),
+            "terminal API-error ends must not inject a budget-continuation nudge"
+        );
+        let events = output.snapshot().await;
+        let end = events.iter().rev().find_map(|e| match e {
+            OutputEvent::EndTurn { stop_reason, .. } => Some(stop_reason.as_str()),
+            _ => None,
+        });
+        assert_eq!(end, Some("blocking_limit"));
     }
 
     #[tokio::test]
@@ -10890,12 +11848,67 @@ mod turn_recovery_tests {
             std::env::temp_dir(),
         ));
 
+        orch.post_compact_skill_attachments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(MessageId::new(), vec!["skill body".to_string()]);
+        orch.tools.deferral().mark_loaded(["StaleTool"]);
+        orch.last_response_input_tokens
+            .store(42, std::sync::atomic::Ordering::Relaxed);
+        orch.output_token_pool
+            .store(7, std::sync::atomic::Ordering::Relaxed);
+        orch.last_api_call_at_ms
+            .store(100, std::sync::atomic::Ordering::Relaxed);
+        orch.sent_skill_names
+            .lock()
+            .await
+            .insert("old-skill".into());
+        tool_api::read_file_state::set(
+            &orch.read_state_map,
+            std::env::temp_dir().join("old-session-file"),
+            tool_api::read_file_state::ReadFileEntry {
+                content: "old".into(),
+                mtime_ms: 0,
+                offset: None,
+                limit: None,
+                from_read: true,
+            },
+        );
         orch.spawn_startup_responses_websocket_prewarm();
         <ConversationOrchestrator as traits::OrchestratorHandle>::clear_session(&*orch)
             .await
             .expect("clear session");
 
         assert_eq!(api.close_responses_ws_count().await, 1);
+        assert!(orch.tools.deferral().loaded_tool_names().is_empty());
+        assert!(orch.sent_skill_names.lock().await.is_empty());
+        assert!(orch
+            .read_state_map
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty());
+        assert_eq!(
+            orch.last_response_input_tokens
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            orch.output_token_pool
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            orch.last_api_call_at_ms
+                .load(std::sync::atomic::Ordering::Relaxed),
+            -1
+        );
+        assert!(
+            orch.post_compact_skill_attachments
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty(),
+            "clearing a session must not leak post-compact attachment identity into the new session"
+        );
     }
 
     // -------- SESSIONSTART.CTX — SessionStart additionalContext consumption ----
@@ -11204,8 +12217,8 @@ mod output_style_reminder_tests {
 
     // ----- direct unit coverage of the reminder builder -----
 
-    #[test]
-    fn builder_emits_byte_exact_explanatory_reminder() {
+    #[tokio::test]
+    async fn builder_emits_byte_exact_explanatory_reminder() {
         let orch = ConversationOrchestrator::new(
             config_with_style("Explanatory"),
             Arc::new(MockApiClient::new(vec![])),
@@ -11218,6 +12231,7 @@ mod output_style_reminder_tests {
         );
         let msg = orch
             .output_style_reminder_message()
+            .await
             .expect("Explanatory resolves to a reminder");
         assert!(matches!(msg, ConversationMessage::User { .. }));
         assert_eq!(text_of(&msg), EXPLANATORY_REMINDER);
@@ -11228,8 +12242,8 @@ mod output_style_reminder_tests {
         );
     }
 
-    #[test]
-    fn builder_emits_byte_exact_learning_reminder() {
+    #[tokio::test]
+    async fn builder_emits_byte_exact_learning_reminder() {
         let orch = ConversationOrchestrator::new(
             config_with_style("Learning"),
             Arc::new(MockApiClient::new(vec![])),
@@ -11244,14 +12258,15 @@ mod output_style_reminder_tests {
             text_of(
                 &orch
                     .output_style_reminder_message()
+                    .await
                     .expect("Learning resolves")
             ),
             LEARNING_REMINDER
         );
     }
 
-    #[test]
-    fn builder_returns_none_for_default_and_unknown_styles() {
+    #[tokio::test]
+    async fn builder_returns_none_for_default_and_unknown_styles() {
         for style in [None, Some("default"), Some(""), Some("Nonexistent")] {
             let cfg = OrchestratorConfig {
                 output_style: style.map(str::to_string),
@@ -11268,7 +12283,7 @@ mod output_style_reminder_tests {
                 std::env::temp_dir(),
             );
             assert!(
-                orch.output_style_reminder_message().is_none(),
+                orch.output_style_reminder_message().await.is_none(),
                 "style {style:?} must not produce a reminder"
             );
         }
@@ -13946,6 +14961,7 @@ mod refusal_fallback_tests {
         StaticMemoryProvider,
     };
     use crate::OrchestratorConfig;
+    use protocol::SessionId;
     use std::path::PathBuf;
     use std::sync::Arc;
     use tool_api::registry::ToolRegistry;
@@ -14041,6 +15057,61 @@ This sometimes happens with safe, normal conversations. Switched to Sonnet 4.6. 
 Send feedback with /feedback or learn more: https://support.claude.com/en/articles/15363606"
         );
     }
+
+    #[tokio::test]
+    async fn clear_session_resets_refusal_fallback_latch() {
+        let (orch, _out) = orch_with_refusal_fallback(Some("claude-sonnet-4-6"));
+        assert!(
+            orch.maybe_swap_to_refusal_fallback().await,
+            "first session swaps"
+        );
+
+        <ConversationOrchestrator as traits::OrchestratorHandle>::clear_session(&orch)
+            .await
+            .expect("clear_session succeeds");
+
+        assert!(
+            !orch
+                .refusal_fallback_latched
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "clear_session must reset the per-session refusal fallback latch"
+        );
+        assert!(
+            orch.maybe_swap_to_refusal_fallback().await,
+            "a fresh cleared session must be able to swap on its first refusal"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_session_resets_refusal_fallback_latch() {
+        let (orch, _out) = orch_with_refusal_fallback(Some("claude-sonnet-4-6"));
+        assert!(
+            orch.maybe_swap_to_refusal_fallback().await,
+            "first session swaps"
+        );
+
+        <ConversationOrchestrator as traits::OrchestratorHandle>::resume_session(
+            &orch,
+            SessionId::new(),
+            vec![],
+            None,
+            None,
+            traits::ResumeRuntimeSnapshot::default(),
+        )
+        .await
+        .expect("resume_session succeeds");
+
+        assert!(
+            !orch
+                .refusal_fallback_latched
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "resume_session must reset the per-session refusal fallback latch"
+        );
+        assert!(
+            orch.maybe_swap_to_refusal_fallback().await,
+            "a resumed session must be able to swap on its first refusal"
+        );
+    }
 }
 
 // ── `persist_message_to_jsonl_with_parent`: explicit parentUuid override ──────
@@ -14052,6 +15123,125 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
 //
 // Also proves the `None` path (default chain) is byte-identical to the old
 // `persist_message_to_jsonl` behaviour.
+#[cfg(test)]
+mod transcript_persistence_warning_tests {
+    use super::*;
+    use crate::test_support::{
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
+    };
+    use platform_posix::fs::PosixFileSystem;
+    use std::sync::Arc;
+    use tool_api::registry::ToolRegistry;
+
+    fn failing_orchestrator(
+        root: &std::path::Path,
+    ) -> (ConversationOrchestrator, MockOutputStream) {
+        // A directory at the transcript's file path deterministically makes
+        // every append fail without relying on platform permission semantics.
+        let transcript_path = root.join("transcript.jsonl");
+        std::fs::create_dir(&transcript_path).expect("create blocking directory");
+        let fs: Arc<dyn traits::FileSystem> = Arc::new(PosixFileSystem::new(root.to_path_buf()));
+        let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(
+            transcript_path,
+            fs,
+        ));
+        let output = MockOutputStream::new();
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(output.clone()),
+            Arc::new(StaticMemoryProvider::empty()),
+            root.to_path_buf(),
+        )
+        .with_jsonl_writer(writer);
+        (orch, output)
+    }
+
+    #[tokio::test]
+    async fn every_transcript_append_path_warns_once_without_leaking_the_io_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (orch, output) = failing_orchestrator(dir.path());
+
+        let user = ConversationMessage::user(MessageId::new(), "hello".into());
+        orch.persist_message_to_jsonl(&user).await;
+        orch.persist_active_goal_state_to_jsonl(None).await;
+
+        let (boundary, metadata) = compaction::create_compact_boundary(
+            compaction::CompactTrigger::Manual,
+            1,
+            None,
+            None,
+            Some(1),
+            &[],
+        );
+        orch.persist_compact_boundary_to_jsonl(&boundary, &metadata)
+            .await;
+
+        let per_block = ConversationMessage::Assistant {
+            id: MessageId::new(),
+            content: vec![
+                protocol::ContentBlock::Text {
+                    text: "first".into(),
+                },
+                protocol::ContentBlock::Text {
+                    text: "second".into(),
+                },
+            ],
+            stop_reason: Some("end_turn".into()),
+        };
+        orch.persist_assistant_per_block(&per_block, None, None)
+            .await;
+
+        let merged = ConversationMessage::Assistant {
+            id: MessageId::new(),
+            content: vec![protocol::ContentBlock::Text {
+                text: "merged".into(),
+            }],
+            stop_reason: Some("end_turn".into()),
+        };
+        orch.persist_assistant_merged(&merged, None, None).await;
+
+        let notices: Vec<_> = output
+            .snapshot()
+            .await
+            .into_iter()
+            .filter_map(|event| match event {
+                traits::OutputEvent::SystemNotice { body, is_error } => Some((body, is_error)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(notices.len(), 1, "append failures are deduped per session");
+        assert!(
+            notices[0].1,
+            "persistence failure is rendered as an error notice"
+        );
+        assert_eq!(notices[0].0, TRANSCRIPT_PERSISTENCE_WARNING);
+        assert!(
+            !notices[0].0.contains(dir.path().to_string_lossy().as_ref()),
+            "the user-facing notice must not expose the transcript path or raw I/O error"
+        );
+
+        <ConversationOrchestrator as traits::OrchestratorHandle>::clear_session(&orch)
+            .await
+            .expect("clear session remains fail-open");
+        orch.persist_message_to_jsonl(&user).await;
+        let notice_count = output
+            .snapshot()
+            .await
+            .into_iter()
+            .filter(|event| matches!(event, traits::OutputEvent::SystemNotice { .. }))
+            .count();
+        assert_eq!(
+            notice_count, 2,
+            "a new session receives its own warning after the latch resets"
+        );
+    }
+}
+
 #[cfg(test)]
 mod persist_with_parent_tests {
     use super::*;
@@ -14266,6 +15456,50 @@ mod persist_with_parent_tests {
             lines[2].parent_uuid.as_deref(),
             Some(overridden_uuid.as_str()),
             "subsequent non-overridden line must chain off the overridden line"
+        );
+    }
+
+    #[tokio::test]
+    async fn persist_message_to_jsonl_uses_the_supplied_message_uuid() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let session_path = dir.path().join("session.jsonl");
+        let orch = orch_with_writer(dir.path(), session_path.clone());
+
+        let raw_uuid = uuid::Uuid::new_v4();
+        let msg = ConversationMessage::user(
+            protocol::MessageId::from_uuid(raw_uuid),
+            "sdk replay prompt".into(),
+        );
+        orch.persist_message_to_jsonl(&msg).await;
+
+        let lines = read_jsonl(&session_path);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].uuid, raw_uuid.to_string());
+    }
+
+    #[tokio::test]
+    async fn session_contains_message_uuid_accepts_bare_and_prefixed_ids() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let session_path = dir.path().join("session.jsonl");
+        let orch = orch_with_writer(dir.path(), session_path);
+
+        let id = protocol::MessageId::new();
+        {
+            let mut session = orch.session.lock().await;
+            session
+                .history
+                .push(ConversationMessage::user(id, "seed".into()));
+        }
+
+        assert!(
+            orch.session_contains_message_uuid(&id.as_uuid().to_string())
+                .await
+        );
+        assert!(orch.session_contains_message_uuid(&id.to_string()).await);
+        assert!(
+            !orch
+                .session_contains_message_uuid(&uuid::Uuid::new_v4().to_string())
+                .await
         );
     }
 
@@ -14798,6 +16032,8 @@ mod persist_with_parent_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let session_path = dir.path().join("session.jsonl");
         let orch = orch_with_writer(dir.path(), session_path.clone());
+        let session = orch.session();
+        session.lock().await.model_profile = Some("deepseek".to_string());
 
         let id_a = protocol::ToolUseId::from("toolu_A");
         let id_b = protocol::ToolUseId::from("toolu_B");
@@ -14848,6 +16084,11 @@ mod persist_with_parent_tests {
                 .and_then(|c| c.as_array())
                 .unwrap_or_else(|| panic!("line {i} content must be an array"));
             assert_eq!(blocks.len(), 1, "line {i} must carry exactly one block");
+            assert_eq!(
+                l.extra.get("modelProfile").and_then(|value| value.as_str()),
+                Some("deepseek"),
+                "line {i} must persist the provider profile used for the response"
+            );
         }
 
         // (a) all three share ONE inner `message.id`.
@@ -14938,6 +16179,34 @@ mod persist_with_parent_tests {
         assert_ne!(
             tr_lines[0].parent_uuid, tr_lines[1].parent_uuid,
             "the two tool_results must NOT share one parent (per-tool reparenting)"
+        );
+    }
+
+    #[tokio::test]
+    async fn merged_assistant_persists_model_profile_for_resume() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let session_path = dir.path().join("session.jsonl");
+        let orch = orch_with_writer(dir.path(), session_path.clone());
+        let session = orch.session();
+        session.lock().await.model_profile = Some("openrouter".to_string());
+        let assistant = ConversationMessage::Assistant {
+            id: protocol::MessageId::new(),
+            content: vec![protocol::ContentBlock::Text {
+                text: "done".to_string(),
+            }],
+            stop_reason: Some("end_turn".to_string()),
+        };
+
+        orch.persist_assistant_merged(&assistant, None, None).await;
+
+        let lines = read_jsonl(&session_path);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(
+            lines[0]
+                .extra
+                .get("modelProfile")
+                .and_then(|value| value.as_str()),
+            Some("openrouter")
         );
     }
 }
@@ -15499,8 +16768,12 @@ mod post_compact_file_restore_tests {
     ) -> ConversationOrchestrator {
         let bus = Arc::new(telemetry::AnalyticsBus::new());
         bus.attach_sink(sink).await;
+        let config = OrchestratorConfig {
+            plans_directory: Some("plans".to_string()),
+            ..OrchestratorConfig::default()
+        };
         ConversationOrchestrator::new(
-            OrchestratorConfig::default(),
+            config,
             Arc::new(MockApiClient::new(vec![])),
             Arc::new(ToolRegistry::new()),
             noop_hook_executor(),
@@ -15551,6 +16824,53 @@ mod post_compact_file_restore_tests {
             restore_names(&sink.events().await),
             vec!["tengu_post_compact_file_restore_success".to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn preserved_file_attachment_is_not_restored_twice() {
+        let _rg = registry_guard();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("already.txt");
+        std::fs::write(&path, "current").expect("write file");
+        let map = tool_api::read_file_state::new_read_file_state_map();
+        set(&map, path.clone(), stale_entry("stale"));
+        let sink = Arc::new(telemetry::InMemorySink::new());
+        let orch = orch_with_bus(dir.path().to_path_buf(), map, sink.clone()).await;
+        let boundary = protocol::ConversationMessage::user_meta(
+            protocol::MessageId::new(),
+            format!(
+                "<system-reminder>\nReferenced file {} (restored after compaction):\ncurrent\n</system-reminder>",
+                path.display()
+            ),
+        );
+
+        let restored = orch
+            .restore_post_compact_attachments_against(&[boundary])
+            .await;
+        assert!(restored.is_empty());
+        assert!(restore_names(&sink.events().await).is_empty());
+    }
+
+    #[tokio::test]
+    async fn plan_file_is_excluded_from_post_compact_restore() {
+        let _rg = registry_guard();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let map = tool_api::read_file_state::new_read_file_state_map();
+        let sink = Arc::new(telemetry::InMemorySink::new());
+        let orch = orch_with_bus(dir.path().to_path_buf(), map.clone(), sink.clone()).await;
+        let session_id = orch.session.lock().await.session_id;
+        let path = std::path::PathBuf::from(ConversationOrchestrator::plan_file_path(
+            &session_id,
+            dir.path(),
+            Some("plans"),
+        ));
+        std::fs::create_dir_all(path.parent().expect("plans parent")).expect("create plans dir");
+        std::fs::write(&path, "secret plan").expect("write plan");
+        set(&map, path, stale_entry("stale plan"));
+
+        let restored = orch.restore_post_compact_attachments().await;
+        assert!(restored.is_empty());
+        assert!(restore_names(&sink.events().await).is_empty());
     }
 
     #[tokio::test]
@@ -15663,6 +16983,88 @@ mod post_compact_file_restore_tests {
     }
 
     #[tokio::test]
+    async fn invoked_skill_already_in_preserved_attachment_is_not_duplicated() {
+        let _rg = registry_guard();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let map = tool_api::read_file_state::new_read_file_state_map();
+        let sink = Arc::new(telemetry::InMemorySink::new());
+        let orch = orch_with_bus(dir.path().to_path_buf(), map, sink).await;
+
+        let content = "Deploy guidelines: run the pipeline.";
+        compaction::invoked_skills::register(
+            "deploy",
+            std::path::Path::new("/skills/deploy"),
+            content,
+            None,
+        );
+        let preserved = orch.restore_post_compact_attachments().await;
+        assert_eq!(preserved.len(), 1, "first compaction restores the skill");
+
+        let restored = orch
+            .restore_post_compact_attachments_against(&preserved)
+            .await;
+        assert!(
+            restored.is_empty(),
+            "preserved invoked-skills content must not be emitted twice"
+        );
+    }
+
+    #[tokio::test]
+    async fn invoked_skill_with_markdown_separator_is_deduped_without_parsing_its_content() {
+        let _rg = registry_guard();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let map = tool_api::read_file_state::new_read_file_state_map();
+        let sink = Arc::new(telemetry::InMemorySink::new());
+        let orch = orch_with_bus(dir.path().to_path_buf(), map, sink).await;
+
+        let content = "Deploy the first stage.\n\n---\n\nThen deploy the second stage.";
+        compaction::invoked_skills::register(
+            "deploy",
+            std::path::Path::new("/skills/deploy"),
+            content,
+            None,
+        );
+
+        let first = orch.restore_post_compact_attachments().await;
+        assert_eq!(first.len(), 1, "first compaction restores the skill");
+
+        let persisted = orch.to_jsonl_message(&first[0], "session", None, None, None, None);
+        let persisted: session::JsonlMessage = serde_json::from_str(
+            &serde_json::to_string(&persisted).expect("serialize attachment metadata"),
+        )
+        .expect("round-trip attachment metadata");
+        assert_eq!(
+            persisted
+                .extra
+                .get("invokedSkillContents")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|contents| contents.first())
+                .and_then(serde_json::Value::as_str),
+            Some(content),
+            "the opaque body must be persisted without delimiter parsing"
+        );
+
+        let resumed = orch_with_bus(
+            dir.path().to_path_buf(),
+            tool_api::read_file_state::new_read_file_state_map(),
+            Arc::new(telemetry::InMemorySink::new()),
+        )
+        .await;
+        resumed
+            .restore_resume_runtime_metadata(std::slice::from_ref(&persisted))
+            .await;
+        let replayed =
+            crate::state_from_messages(uuid::Uuid::new_v4(), std::slice::from_ref(&persisted));
+        let restored = resumed
+            .restore_post_compact_attachments_against(&replayed.history)
+            .await;
+        assert!(
+            restored.is_empty(),
+            "resume followed by compact must preserve structural dedup even when Markdown contains the renderer separator"
+        );
+    }
+
+    #[tokio::test]
     async fn no_invoked_skills_restores_no_skill_message() {
         let _rg = registry_guard();
         let dir = tempfile::tempdir().expect("tempdir");
@@ -15743,6 +17145,28 @@ mod main_thread_agent_tests {
             Arc::new(StaticMemoryProvider::with_files(vec![])),
             PathBuf::from("/work/repo"),
         )
+    }
+
+    struct LiveModeGate(std::sync::RwLock<String>);
+
+    #[async_trait]
+    impl PermissionGate for LiveModeGate {
+        async fn check(
+            &self,
+            _tool_name: &str,
+            _input: &serde_json::Value,
+        ) -> traits::PermissionDecision {
+            traits::PermissionDecision::Allow
+        }
+
+        async fn set_permission_mode(&self, mode: &str) -> Result<(), String> {
+            *self.0.write().expect("live mode write lock") = mode.to_string();
+            Ok(())
+        }
+
+        fn permission_mode(&self) -> Option<String> {
+            Some(self.0.read().expect("live mode read lock").clone())
+        }
     }
 
     /// A minimal builtin tool exposing a fixed `name()` — enough for the wire
@@ -15931,6 +17355,99 @@ mod main_thread_agent_tests {
         assert_eq!(
             orch.expansion_hook_context().await.agent_type,
             Some("code-reviewer".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_hook_ctx_reports_live_permission_mode() {
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(LiveModeGate(std::sync::RwLock::new("default".to_string()))),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::with_files(vec![])),
+            PathBuf::from("/work/repo"),
+        );
+
+        orch.set_permission_mode("acceptEdits")
+            .await
+            .expect("set live permission mode");
+        assert_eq!(
+            orch.expansion_hook_context().await.permission_mode,
+            Some("acceptEdits".to_string())
+        );
+
+        orch.session.lock().await.plan_mode = true;
+        assert_eq!(
+            orch.expansion_hook_context().await.permission_mode,
+            Some("plan".to_string()),
+            "explicit /plan state takes precedence over the gate's last mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_hook_ctx_uses_trimmed_last_assistant_text() {
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::with_files(vec![])),
+            PathBuf::from("/work/repo"),
+        );
+
+        {
+            let session_handle = orch.session();
+            let mut session = session_handle.lock().await;
+            session.history.push(protocol::ConversationMessage::user(
+                protocol::MessageId::new(),
+                "earlier user".to_string(),
+            ));
+            session
+                .history
+                .push(protocol::ConversationMessage::Assistant {
+                    id: protocol::MessageId::new(),
+                    content: vec![
+                        protocol::ContentBlock::Text {
+                            text: " first line ".to_string(),
+                        },
+                        protocol::ContentBlock::Thinking {
+                            thinking: "hidden".to_string(),
+                            signature: None,
+                        },
+                        protocol::ContentBlock::Text {
+                            text: "second line ".to_string(),
+                        },
+                    ],
+                    stop_reason: Some("end_turn".to_string()),
+                });
+        }
+
+        assert_eq!(
+            orch.expansion_hook_context().await.last_assistant_message,
+            Some("first line \nsecond line".to_string()),
+            "hook context must join the last assistant's text blocks with newlines and trim outer whitespace"
+        );
+
+        orch.session()
+            .lock()
+            .await
+            .history
+            .push(protocol::ConversationMessage::Assistant {
+                id: protocol::MessageId::new(),
+                content: vec![protocol::ContentBlock::Text {
+                    text: "   ".to_string(),
+                }],
+                stop_reason: Some("end_turn".to_string()),
+            });
+        assert_eq!(
+            orch.expansion_hook_context().await.last_assistant_message,
+            None,
+            "an all-whitespace final assistant message must surface as None"
         );
     }
 

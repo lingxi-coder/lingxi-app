@@ -43,6 +43,7 @@ orchestrator = { path = "../../orchestrator" }
 # the CLI/mobile hosts, then adopt the replayed protocol history in place.
 session = { path = "../../session" }
 protocol = { path = "../../protocol" }
+secret = { path = "../../secret" }
 platform-posix = { path = "../../platforms/posix" }
 uuid = "1.10"
 # Input message queue (spec §27). The connection's SendPrompt path enqueues a

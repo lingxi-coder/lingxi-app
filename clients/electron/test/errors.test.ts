@@ -4,6 +4,14 @@ import assert from 'node:assert/strict';
 import { classifyDesktopError } from '../src/renderer/bridge/errors';
 
 test('desktop errors distinguish credential, protocol, engine, workspace, and transport recovery', () => {
+  assert.deepEqual(
+    classifyDesktopError('macOS login keychain is locked or access is denied (deepseek)'),
+    {
+      title: 'Provider credential unavailable',
+      detail: 'This key was stored in the legacy login keychain. Reconnect the provider to use the modern store or this app session.',
+    },
+  );
+  assert.equal(classifyDesktopError('macOS Data Protection Keychain is unavailable for this app signature').title, 'Secure persistence unavailable');
   assert.equal(classifyDesktopError('Provider credential required; configure a trusted credential source').title, 'Provider credential missing');
   assert.equal(classifyDesktopError('stored provider credential could not be decrypted (deepseek); replace it in Settings').title, 'Provider credential unavailable');
   assert.equal(classifyDesktopError('HTTP 401 unauthorized').title, 'Provider credential rejected');

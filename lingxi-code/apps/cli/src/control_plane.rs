@@ -30,7 +30,8 @@ use permission::gate::{
     PermissionCheckContext, PermissionDecision, PermissionGate, PermissionOutcome, PromptWorker,
 };
 use permission::{
-    persist_permission_update, PermissionBehavior, PermissionPaths, PermissionRule,
+    persist_permission_mode, persist_permission_rule_set, persist_workspace_directories,
+    replace_permission_rules, PermissionBehavior, PermissionPaths, PermissionRule,
     PermissionRuleSource, PermissionRuleValue, PermissionUpdate, PermissionUpdateDestination,
 };
 
@@ -128,7 +129,7 @@ impl StdioControlPlane {
     /// (§1.4 outbound-emit): enqueue `control_cancel_request` to tell the host to
     /// drop its prompt, remove the pending entry locally (tracking its tool_use_id
     /// so a late response is deduped), and let the awaiting future fall through.
-    async fn cancel_request(&self, request_id: &str) {
+    pub async fn cancel_request(&self, request_id: &str) {
         let entry = {
             let mut pending = self.pending.lock().await;
             pending.remove(request_id)
@@ -349,6 +350,7 @@ impl StdioControlPlane {
 /// piggyback.
 pub struct StdioControlPermissionGate {
     plane: Arc<StdioControlPlane>,
+    persistence_enabled: std::sync::atomic::AtomicBool,
     /// Settings-file roots used to PERSIST the host's `updatedPermissions` rule
     /// updates carried by a `can_use_tool` ALLOW response (claude-code
     /// `persistPermissionUpdates`). `None` ⇒ persistence is skipped (the gate
@@ -364,6 +366,7 @@ impl StdioControlPermissionGate {
     pub fn new(plane: Arc<StdioControlPlane>) -> Self {
         Self {
             plane,
+            persistence_enabled: std::sync::atomic::AtomicBool::new(true),
             persist_paths: None,
         }
     }
@@ -436,20 +439,26 @@ impl StdioControlPermissionGate {
         if let Some(rt) = &ctx.decision_reason_type {
             request["decision_reason_type"] = json!(rt);
         }
-        // The remaining optional keys (`description`,
-        // `classifier_approvable`, `requires_user_interaction`) likewise await
-        // their producers, mirroring the `permission_suggestions`/`blocked_path`
-        // pattern above.
-        // permission_suggestions / blocked_path: forwarded only when the policy
-        // Ask supplies them. PARTIAL (stream-json P5 finding #9): LingXi's policy
-        // `PermissionResult::Ask` does not model claude-code's
-        // `PermissionAskDecision.suggestions` / `.blockedPath` (the per-tool
-        // ask-suggestion builders — e.g. `ruleSuggestionsForCommand` — and the
-        // path-block reason are unported), so `ctx.permission_suggestions` /
-        // `ctx.blocked_path` are always `None` today and these keys are OMITTED,
-        // byte-faithful to the oracle's `.optional()` shape. Emitting them is wired
-        // here so the request becomes byte-complete the moment those builders land
-        // on the policy Ask, with NO further control-plane change.
+        if let Some(approvable) = ctx.classifier_approvable {
+            request["classifier_approvable"] = json!(approvable);
+        }
+        if let Some(rule) = &ctx.matched_ask_rule {
+            let mut wire_rule = json!({
+                "source": rule.source,
+                "tool_name": rule.tool_name,
+            });
+            if let Some(content) = &rule.rule_content {
+                wire_rule["rule_content"] = json!(content);
+            }
+            request["matched_ask_rule"] = wire_rule;
+        }
+        // Upstream uses `requiresUserInteraction?.() || undefined`: false is
+        // represented by absence, never by a literal false field.
+        if ctx.requires_user_interaction {
+            request["requires_user_interaction"] = json!(true);
+        }
+        // Suggestions and blocked paths are emitted only when a structured
+        // producer supplied them; never parse either out of display text.
         if let Some(suggestions) = &ctx.permission_suggestions {
             request["permission_suggestions"] = suggestions.clone();
         }
@@ -481,16 +490,17 @@ impl StdioControlPermissionGate {
         match result {
             Ok(Ok(payload)) => {
                 let outcome = self.map_payload(payload).await;
-                // §2b: when the allow carried `updatedPermissions`, parse + persist
-                // them here (claude-code `persistPermissionUpdates`, fire-and-forget
-                // — a persist error never turns the allow into a deny). The in-memory
-                // `applyPermissionUpdates` is a documented PARTIAL (see below).
+                // §2b: persist every file-backed `updatedPermissions` union
+                // member here. The outer PolicyPermissionGate applies the same
+                // array to live state; persistence remains best-effort and can
+                // never turn the host's allow into a deny.
                 if let PermissionOutcome::Allow {
                     permission_updates, ..
                 } = &outcome
                 {
                     if !permission_updates.is_empty() {
-                        self.persist_permission_updates(permission_updates).await;
+                        self.persist_permission_updates_to_disk(permission_updates)
+                            .await;
                     }
                 }
                 outcome
@@ -514,37 +524,32 @@ impl StdioControlPermissionGate {
     /// Best-effort and fire-and-forget — 1:1 with the oracle, where
     /// `persistPermissionUpdates` is called without awaiting / surfacing errors:
     /// a parse skip or a [`permission::PersistError`] is logged and the allow
-    /// still stands. Only the `addRules` update type is persisted (the single
-    /// shape LingXi's [`PermissionUpdate`] models, per `persist.rs`); a
-    /// `replaceRules` / `removeRules` / `setMode` / `add|removeDirectories` entry
-    /// — or a malformed one — is skipped with a debug log, never an error
-    /// (mirroring the oracle's tolerant `.catch(undefined)`).
+    /// still stands. Every file-backed update variant is persisted; session and
+    /// CLI destinations remain live-only. A malformed entry is skipped without
+    /// partially applying its valid-looking members.
     ///
-    /// IN-MEMORY APPLY is a documented PARTIAL: claude-code's
-    /// `applyPermissionUpdates` mutates the live `toolPermissionContext` so the
-    /// SAME session's subsequent calls auto-allow. LingXi's enforcing
-    /// `PolicyPermissionGate` wraps an IMMUTABLE `Arc<PermissionPolicy>` (rule
-    /// buckets are baked at `from_rules`; only `mode_override` is interior-mutable),
-    /// so there is no runtime rule-injection seam reachable from this gate. The
-    /// PERSISTED rules take effect on the NEXT session load. Reaching live-apply
-    /// would require adding a session-rule `RwLock<Vec<PermissionRule>>` to
-    /// `PolicyPermissionGate` consulted in `effective_authorize` — a larger change
-    /// deferred with this exact reason.
-    async fn persist_permission_updates(&self, updates: &[Value]) {
+    /// Live application is owned by the outer `PolicyPermissionGate`; this
+    /// transport owns only the settings paths and therefore the durable half.
+    async fn persist_permission_updates_to_disk(&self, updates: &[Value]) {
+        if !self
+            .persistence_enabled
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return;
+        }
         let Some(paths) = &self.persist_paths else {
             // No settings tree wired (e.g. unit tests) — parse-only, no write.
             return;
         };
         for raw in updates {
-            for update in parse_add_rules_update(raw) {
-                match persist_permission_update(&update, paths).await {
-                    Ok(_) => {}
-                    Err(e) => {
-                        tracing::warn!(
-                            "Failed to persist permission update from can_use_tool response: {e}"
-                        );
-                    }
-                }
+            let Some(update) = parse_persistent_permission_update(raw) else {
+                tracing::debug!("Skipping malformed permission update from can_use_tool response");
+                continue;
+            };
+            if let Err(e) = persist_parsed_permission_update(update, paths).await {
+                tracing::warn!(
+                    "Failed to persist permission update from can_use_tool response: {e}"
+                );
             }
         }
     }
@@ -622,75 +627,151 @@ impl StdioControlPermissionGate {
     }
 }
 
-/// Parse one raw `updatedPermissions` wire entry (a `permissionUpdateSchema`
-/// discriminated union, keyed by `type`) into zero or more [`PermissionUpdate`]s.
-///
-/// Only the `addRules` variant is modeled — `{type:"addRules", rules:[{toolName,
-/// ruleContent?}], behavior, destination}` — because that is the single shape
-/// LingXi's [`PermissionUpdate`] persists (`persist.rs` notes `replaceRules` /
-/// `removeRules` / `setMode` / directory updates are unmodeled). Each element of
-/// `rules` becomes one [`PermissionUpdate`] (claude-code stores rules per behavior
-/// + destination). A non-`addRules` type, a missing/ill-typed field, or an
-/// unknown behavior/destination yields an EMPTY vec (the caller skips it with a
-/// debug log) — never an error, mirroring the oracle's tolerant validation.
-fn parse_add_rules_update(raw: &Value) -> Vec<PermissionUpdate> {
-    let Some(obj) = raw.as_object() else {
-        return Vec::new();
-    };
-    if obj.get("type").and_then(Value::as_str) != Some("addRules") {
-        tracing::debug!(
-            "Skipping non-addRules permission update from can_use_tool response: type={:?}",
-            obj.get("type")
-        );
-        return Vec::new();
-    }
-    let Some(behavior) = obj
-        .get("behavior")
-        .and_then(Value::as_str)
-        .and_then(parse_behavior)
-    else {
-        tracing::debug!("Skipping addRules update with missing/unknown behavior");
-        return Vec::new();
-    };
-    let Some(destination) = obj
+#[derive(Debug)]
+enum PersistentPermissionUpdate {
+    AddRules(Vec<PermissionUpdate>),
+    ReplaceRules {
+        behavior: PermissionBehavior,
+        rules: Vec<PermissionRule>,
+        destination: PermissionUpdateDestination,
+    },
+    RemoveRules(Vec<PermissionUpdate>),
+    SetMode {
+        mode: String,
+        destination: PermissionUpdateDestination,
+    },
+    Directories {
+        directories: Vec<String>,
+        add: bool,
+        destination: PermissionUpdateDestination,
+    },
+}
+
+/// Strictly parse one `permissionUpdateSchema` union member. A malformed rule
+/// makes the whole member invalid so persistence cannot apply a partial prefix.
+fn parse_persistent_permission_update(raw: &Value) -> Option<PersistentPermissionUpdate> {
+    let obj = raw.as_object()?;
+    let kind = obj.get("type").and_then(Value::as_str)?;
+    let destination = obj
         .get("destination")
         .and_then(Value::as_str)
-        .and_then(parse_destination)
-    else {
-        tracing::debug!("Skipping addRules update with missing/unknown destination");
-        return Vec::new();
-    };
-    // The settings-file rule SOURCE mirrors the destination (claude-code stores a
-    // persisted rule under the file its destination resolves to). Non-persistable
-    // destinations (session/cliArg) map to their nearest source; `persist` no-ops
-    // them anyway (`destination_path` returns `None`).
-    let source = source_for_destination(destination);
-    let Some(rules) = obj.get("rules").and_then(Value::as_array) else {
-        tracing::debug!("Skipping addRules update with missing rules array");
-        return Vec::new();
-    };
-    rules
-        .iter()
-        .filter_map(|rule_value| {
-            let tool_name = rule_value.get("toolName").and_then(Value::as_str)?;
-            // `ruleContent` is optional; a tool-wide rule omits it.
-            let rule_content = rule_value
-                .get("ruleContent")
+        .and_then(parse_destination)?;
+    match kind {
+        "addRules" | "replaceRules" | "removeRules" => {
+            let behavior = obj
+                .get("behavior")
                 .and_then(Value::as_str)
-                .map(str::to_string);
-            Some(PermissionUpdate {
-                rule: PermissionRule {
-                    value: PermissionRuleValue {
-                        tool_name: permission::rule::normalize_legacy_tool_name(tool_name),
-                        rule_content,
-                    },
+                .and_then(parse_behavior)?;
+            let source = source_for_destination(destination);
+            let rules = obj
+                .get("rules")
+                .and_then(Value::as_array)?
+                .iter()
+                .map(|rule_value| {
+                    let rule = rule_value.as_object()?;
+                    let tool_name = rule.get("toolName").and_then(Value::as_str)?;
+                    let rule_content = match rule.get("ruleContent") {
+                        None => None,
+                        Some(Value::String(content)) => Some(content.clone()),
+                        Some(_) => return None,
+                    };
+                    Some(PermissionRule {
+                        value: PermissionRuleValue {
+                            tool_name: permission::rule::normalize_legacy_tool_name(tool_name),
+                            rule_content,
+                        },
+                        behavior,
+                        source,
+                    })
+                })
+                .collect::<Option<Vec<_>>>()?;
+            if kind == "replaceRules" {
+                Some(PersistentPermissionUpdate::ReplaceRules {
                     behavior,
-                    source,
-                },
+                    rules,
+                    destination,
+                })
+            } else {
+                let updates = rules
+                    .into_iter()
+                    .map(|rule| PermissionUpdate { rule, destination })
+                    .collect();
+                if kind == "addRules" {
+                    Some(PersistentPermissionUpdate::AddRules(updates))
+                } else {
+                    Some(PersistentPermissionUpdate::RemoveRules(updates))
+                }
+            }
+        }
+        "setMode" => {
+            let mode = obj.get("mode").and_then(Value::as_str)?;
+            if !matches!(
+                mode,
+                "default" | "acceptEdits" | "bypassPermissions" | "plan" | "dontAsk" | "auto"
+            ) {
+                return None;
+            }
+            Some(PersistentPermissionUpdate::SetMode {
+                mode: mode.to_string(),
                 destination,
             })
-        })
-        .collect()
+        }
+        "addDirectories" | "removeDirectories" => {
+            let directories = obj
+                .get("directories")
+                .and_then(Value::as_array)?
+                .iter()
+                .map(Value::as_str)
+                .map(|value| value.map(str::to_string))
+                .collect::<Option<Vec<_>>>()?;
+            Some(PersistentPermissionUpdate::Directories {
+                directories,
+                add: kind == "addDirectories",
+                destination,
+            })
+        }
+        _ => None,
+    }
+}
+
+async fn persist_parsed_permission_update(
+    update: PersistentPermissionUpdate,
+    paths: &PermissionPaths,
+) -> Result<(), permission::PersistError> {
+    match update {
+        PersistentPermissionUpdate::AddRules(updates) => {
+            if let Some(first) = updates.first() {
+                let destination = first.destination;
+                let rules: Vec<_> = updates.into_iter().map(|update| update.rule).collect();
+                persist_permission_rule_set(&rules, true, destination, paths).await?;
+            }
+        }
+        PersistentPermissionUpdate::ReplaceRules {
+            behavior,
+            rules,
+            destination,
+        } => {
+            replace_permission_rules(behavior, &rules, destination, paths).await?;
+        }
+        PersistentPermissionUpdate::RemoveRules(updates) => {
+            if let Some(first) = updates.first() {
+                let destination = first.destination;
+                let rules: Vec<_> = updates.into_iter().map(|update| update.rule).collect();
+                persist_permission_rule_set(&rules, false, destination, paths).await?;
+            }
+        }
+        PersistentPermissionUpdate::SetMode { mode, destination } => {
+            persist_permission_mode(&mode, destination, paths).await?;
+        }
+        PersistentPermissionUpdate::Directories {
+            directories,
+            add,
+            destination,
+        } => {
+            persist_workspace_directories(&directories, add, destination, paths).await?;
+        }
+    }
+    Ok(())
 }
 
 /// Map the wire behavior string (`allow`/`deny`/`ask`) to a [`PermissionBehavior`].
@@ -762,6 +843,11 @@ fn permission_display_name(name: &str) -> String {
 
 #[async_trait]
 impl PermissionGate for StdioControlPermissionGate {
+    fn set_permission_persistence_enabled(&self, enabled: bool) {
+        self.persistence_enabled
+            .store(enabled, std::sync::atomic::Ordering::Release);
+    }
+
     async fn check(&self, name: &str, input: &Value) -> PermissionDecision {
         Self::outcome_to_decision(
             self.decide_outcome(name, input, &PermissionCheckContext::default())
@@ -790,11 +876,16 @@ impl PermissionGate for StdioControlPermissionGate {
     ) -> PermissionOutcome {
         self.decide_outcome(name, input, ctx).await
     }
+
+    async fn persist_permission_updates(&self, updates: &[Value]) {
+        self.persist_permission_updates_to_disk(updates).await;
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use permission::gate::MatchedAskRule;
     use tokio::sync::mpsc;
 
     /// Build a plane wired to an in-memory outbound channel; the receiver lets a
@@ -1281,20 +1372,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn context_emits_suggestions_and_blocked_path_when_present() {
-        // #9: when the policy Ask supplies permission_suggestions / blocked_path,
-        // the can_use_tool request carries them (claude-code
-        // `permission_suggestions` / `blocked_path`). The seam is forward-compatible
-        // even though the policy gate does not populate them yet (always None).
+    async fn context_emits_structured_optional_permission_metadata() {
         let (plane, mut rx) = plane_with_channel();
         let gate = StdioControlPermissionGate::new(plane.clone());
         let input = json!({});
         let ctx = PermissionCheckContext {
             tool_use_id: Some("toolu_9".to_string()),
             permission_suggestions: Some(json!([
-                {"type": "addRules", "rules": ["Bash(ls *)"], "behavior": "allow", "destination": "session"}
+                {"type": "addRules", "rules": [{"toolName": "Bash", "ruleContent": "ls *"}], "behavior": "allow", "destination": "session"}
             ])),
             blocked_path: Some("/etc/secret".to_string()),
+            classifier_approvable: Some(false),
+            requires_user_interaction: true,
+            matched_ask_rule: Some(MatchedAskRule {
+                source: "projectSettings".into(),
+                tool_name: "Bash".into(),
+                rule_content: Some("ls *".into()),
+            }),
             ..PermissionCheckContext::default()
         };
         let check =
@@ -1307,6 +1401,16 @@ mod tests {
             "addRules"
         );
         assert_eq!(frame["request"]["blocked_path"], "/etc/secret");
+        assert_eq!(frame["request"]["classifier_approvable"], false);
+        assert_eq!(frame["request"]["requires_user_interaction"], true);
+        assert_eq!(
+            frame["request"]["matched_ask_rule"],
+            json!({
+                "source": "projectSettings",
+                "tool_name": "Bash",
+                "rule_content": "ls *",
+            })
+        );
         let req_id = frame["request_id"].as_str().unwrap().to_string();
         plane
             .resolve_response(&success_response(
@@ -1321,9 +1425,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn context_omits_suggestions_and_blocked_path_when_absent() {
-        // The oracle's permission_suggestions / blocked_path are `.optional()`; with
-        // nothing in the ctx (the common ask) the keys must be ABSENT, not null.
+    async fn context_omits_optional_permission_metadata_when_absent() {
         let (plane, mut rx) = plane_with_channel();
         let gate = StdioControlPermissionGate::new(plane.clone());
         let input = json!({});
@@ -1343,6 +1445,16 @@ mod tests {
             frame["request"].get("decision_reason").is_none(),
             "no decision reason ⇒ key omitted"
         );
+        for key in [
+            "classifier_approvable",
+            "requires_user_interaction",
+            "matched_ask_rule",
+        ] {
+            assert!(
+                frame["request"].get(key).is_none(),
+                "absent {key} ⇒ key omitted"
+            );
+        }
         let req_id = frame["request_id"].as_str().unwrap().to_string();
         plane
             .resolve_response(&success_response(
@@ -1425,7 +1537,7 @@ mod tests {
     // ── §2b: updatedPermissions parse + persist ──────────────────────────────
 
     #[test]
-    fn parse_add_rules_update_models_each_rule() {
+    fn parse_persistent_add_rules_models_each_rule() {
         // The host's addRules wire entry → one PermissionUpdate per rule, carrying
         // the parsed behavior + destination and the destination-derived source.
         let raw = json!({
@@ -1437,7 +1549,11 @@ mod tests {
             "behavior": "allow",
             "destination": "localSettings",
         });
-        let updates = parse_add_rules_update(&raw);
+        let PersistentPermissionUpdate::AddRules(updates) =
+            parse_persistent_permission_update(&raw).unwrap()
+        else {
+            panic!("expected addRules");
+        };
         assert_eq!(updates.len(), 2);
         assert_eq!(updates[0].rule.value.tool_name, "Bash");
         assert_eq!(
@@ -1456,14 +1572,18 @@ mod tests {
     }
 
     #[test]
-    fn parse_add_rules_update_normalizes_legacy_tool_name() {
+    fn parse_persistent_rules_normalizes_legacy_tool_name() {
         let raw = json!({
             "type": "addRules",
             "rules": [{ "toolName": "Task", "ruleContent": "general-purpose" }],
             "behavior": "deny",
             "destination": "userSettings",
         });
-        let updates = parse_add_rules_update(&raw);
+        let PersistentPermissionUpdate::AddRules(updates) =
+            parse_persistent_permission_update(&raw).unwrap()
+        else {
+            panic!("expected addRules");
+        };
         assert_eq!(updates.len(), 1);
         // "Task" is the legacy alias for "Agent".
         assert_eq!(updates[0].rule.value.tool_name, "Agent");
@@ -1472,34 +1592,51 @@ mod tests {
     }
 
     #[test]
-    fn parse_add_rules_update_skips_unmodeled_and_malformed() {
-        // Non-addRules types are skipped (replaceRules/removeRules/setMode/dirs).
-        assert!(parse_add_rules_update(&json!({
+    fn parse_persistent_update_models_all_variants_and_rejects_malformed_atomically() {
+        assert!(matches!(
+            parse_persistent_permission_update(&json!({
             "type": "replaceRules", "rules": [{ "toolName": "Bash" }],
             "behavior": "allow", "destination": "localSettings"
-        }))
-        .is_empty());
-        assert!(parse_add_rules_update(&json!({
+            })),
+            Some(PersistentPermissionUpdate::ReplaceRules { .. })
+        ));
+        assert!(matches!(
+            parse_persistent_permission_update(&json!({
             "type": "setMode", "mode": "plan", "destination": "localSettings"
-        }))
-        .is_empty());
-        // Unknown behavior / destination / missing rules → empty (never error).
-        assert!(parse_add_rules_update(&json!({
+            })),
+            Some(PersistentPermissionUpdate::SetMode { .. })
+        ));
+        assert!(matches!(
+            parse_persistent_permission_update(&json!({
+                "type": "addDirectories", "directories": ["/extra"],
+                "destination": "projectSettings"
+            })),
+            Some(PersistentPermissionUpdate::Directories { add: true, .. })
+        ));
+
+        // Unknown behavior / destination / missing rules are ignored, and one
+        // malformed rule invalidates the complete union member.
+        assert!(parse_persistent_permission_update(&json!({
             "type": "addRules", "rules": [{ "toolName": "Bash" }],
             "behavior": "bogus", "destination": "localSettings"
         }))
-        .is_empty());
-        assert!(parse_add_rules_update(&json!({
+        .is_none());
+        assert!(parse_persistent_permission_update(&json!({
             "type": "addRules", "rules": [{ "toolName": "Bash" }],
             "behavior": "allow", "destination": "bogus"
         }))
-        .is_empty());
-        assert!(parse_add_rules_update(&json!({
+        .is_none());
+        assert!(parse_persistent_permission_update(&json!({
             "type": "addRules", "behavior": "allow", "destination": "localSettings"
         }))
-        .is_empty());
-        // A non-object entry is skipped.
-        assert!(parse_add_rules_update(&json!("nonsense")).is_empty());
+        .is_none());
+        assert!(parse_persistent_permission_update(&json!({
+            "type": "addRules",
+            "rules": [{ "toolName": "Read" }, { "toolName": "Bash", "ruleContent": 1 }],
+            "behavior": "allow", "destination": "localSettings"
+        }))
+        .is_none());
+        assert!(parse_persistent_permission_update(&json!("nonsense")).is_none());
     }
 
     #[tokio::test]
@@ -1572,6 +1709,7 @@ mod tests {
         // the resolved settings file (claude-code `persistPermissionUpdates`).
         let tmp = std::env::temp_dir().join(format!("lx-p5-2b-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("proj")).unwrap();
         let paths = PermissionPaths {
             lingxi_home: tmp.join("home/.lingxi"),
             cwd: tmp.join("proj"),
@@ -1610,6 +1748,67 @@ mod tests {
         let written = std::fs::read_to_string(&path).expect("settings.local.json written");
         let v: Value = serde_json::from_str(&written).unwrap();
         assert_eq!(v["permissions"]["allow"], json!(["Bash(npm install)"]));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn persist_updated_permissions_handles_every_file_backed_variant() {
+        let tmp =
+            std::env::temp_dir().join(format!("lx-p5-permission-union-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("proj")).unwrap();
+        let paths = PermissionPaths {
+            lingxi_home: tmp.join("home/.lingxi"),
+            cwd: tmp.join("proj"),
+        };
+        let (plane, _rx) = plane_with_channel();
+        let gate = StdioControlPermissionGate::new(plane).with_persist(paths);
+        gate.persist_permission_updates_to_disk(&[
+            json!({
+                "type": "replaceRules",
+                "rules": [{"toolName": "Read"}, {"toolName": "Edit", "ruleContent": "src/**"}],
+                "behavior": "allow",
+                "destination": "localSettings"
+            }),
+            json!({
+                "type": "removeRules",
+                "rules": [{"toolName": "Read"}],
+                "behavior": "allow",
+                "destination": "localSettings"
+            }),
+            json!({
+                "type": "addRules",
+                "rules": [{"toolName": "Bash", "ruleContent": "cargo test"}],
+                "behavior": "deny",
+                "destination": "localSettings"
+            }),
+            json!({
+                "type": "setMode",
+                "mode": "plan",
+                "destination": "localSettings"
+            }),
+            json!({
+                "type": "addDirectories",
+                "directories": ["/extra", "/removed"],
+                "destination": "localSettings"
+            }),
+            json!({
+                "type": "removeDirectories",
+                "directories": ["/removed"],
+                "destination": "localSettings"
+            }),
+        ])
+        .await;
+
+        let path = tmp.join("proj/.lingxi/settings.local.json");
+        let value: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(value["permissions"]["allow"], json!(["Edit(src/**)"]));
+        assert_eq!(value["permissions"]["deny"], json!(["Bash(cargo test)"]));
+        assert_eq!(value["permissions"]["defaultMode"], "plan");
+        assert_eq!(
+            value["permissions"]["additionalDirectories"],
+            json!(["/extra"])
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

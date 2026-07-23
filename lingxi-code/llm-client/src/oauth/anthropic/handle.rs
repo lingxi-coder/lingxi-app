@@ -11,11 +11,14 @@
 //!   6. persist via [`secret::CredentialManager::store_oauth_tokens`]
 //!   7. return [`LoginInfo`]
 //!
-//! The whole flow runs under a 60-second deadline (the trait contract);
+//! The whole flow runs under a five-minute deadline (the trait contract);
 //! exceeding it yields [`AuthError::Timeout`].
 
 use crate::oauth::anthropic::callback::{CallbackError, CallbackListener};
-use crate::oauth::anthropic::client::ClaudeAiOAuthClient;
+use crate::oauth::anthropic::client::{AuthorizeOptions, ClaudeAiOAuthClient, ExchangedTokens};
+use crate::oauth::anthropic::config::{
+    CLAUDE_CODE_INFERENCE_SCOPE, LONG_LIVED_OAUTH_TOKEN_TTL_SECONDS,
+};
 use async_trait::async_trait;
 use protocol::{HttpMethod, HttpRequest};
 use serde::Deserialize;
@@ -24,7 +27,7 @@ use std::time::Duration;
 use traits::{AuthError, AuthHandle, LoginInfo};
 
 /// Login-flow deadline (trait contract: §login docs).
-const LOGIN_TIMEOUT: Duration = Duration::from_secs(60);
+const LOGIN_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 /// Injectable browser opener. Production shells the platform "open" command;
 /// tests pass a no-op (optionally recording the URL).
@@ -54,6 +57,18 @@ pub struct OAuthHandle {
     browser_open: BrowserOpener,
 }
 
+/// Options shared by the top-level `auth login` flow and the interactive
+/// `/login` default.
+#[derive(Debug, Clone, Default)]
+pub struct OAuthLoginOptions {
+    /// Pre-populate the account email in the provider UI.
+    pub login_hint: Option<String>,
+    /// Force SSO in the provider UI.
+    pub sso: bool,
+    /// Managed organization UUID forwarded to the provider.
+    pub org_uuid: Option<String>,
+}
+
 impl OAuthHandle {
     /// Construct a handle that opens a real browser for the login redirect.
     #[must_use]
@@ -72,37 +87,61 @@ impl OAuthHandle {
         self
     }
 
-    /// Run steps 1-7 (without the outer timeout, which `login` applies).
-    async fn run_login(&self) -> Result<LoginInfo, AuthError> {
+    async fn run_code_flow(
+        &self,
+        authorize: AuthorizeOptions,
+        expires_in: Option<u64>,
+    ) -> Result<ExchangedTokens, AuthError> {
         // (1+) Bind the loopback listener first so the redirect target exists
         // before the browser opens. Port 0 → OS-assigned; read it back and bake
         // the real port into the redirect_uri so authorize + exchange agree.
         let listener = CallbackListener::bind(callback_port(&self.client.config().redirect_uri))
             .await
             .map_err(callback_to_auth_err)?;
-        let redirect_uri = format!("http://127.0.0.1:{}/callback", listener.port());
+        let redirect_uri = format!("http://localhost:{}/callback", listener.port());
 
-        let (url, verifier, state) = self.client.build_authorize_url_with_redirect(&redirect_uri);
-
-        // Start waiting for the callback BEFORE opening the browser.
-        let accept_state = state.clone();
-        let accept = tokio::spawn(async move { listener.accept(&accept_state).await });
+        let (url, verifier, state) = self
+            .client
+            .build_authorize_url_with_options(&redirect_uri, &authorize);
 
         // (2) Open the browser (no-op under test).
         (self.browser_open)(&url)?;
 
-        // (3) Await the redirect.
-        let params = accept
+        // (3) Await the redirect. The socket was already bound before the
+        // browser was opened, so the kernel backlog safely holds an immediate
+        // callback. Keeping the accept future in this task also means a caller
+        // timeout cancels and closes the listener instead of leaking a detached
+        // callback task.
+        let params = listener
+            .accept(&state)
             .await
-            .map_err(|e| AuthError::ServerError(format!("callback task: {e}")))?
             .map_err(callback_to_auth_err)?;
 
         // (4) Exchange the code for tokens.
-        let tokens = self
-            .client
-            .exchange_code_with_redirect(&params.code, &verifier, &params.state, &redirect_uri)
+        self.client
+            .exchange_code_with_options(
+                &params.code,
+                &verifier,
+                &params.state,
+                &redirect_uri,
+                expires_in,
+            )
             .await
-            .map_err(|e| AuthError::ServerError(e.to_string()))?;
+            .map_err(|e| AuthError::ServerError(e.to_string()))
+    }
+
+    /// Run the normal login flow and persist the resulting credential.
+    pub async fn login_with_options(
+        &self,
+        options: OAuthLoginOptions,
+    ) -> Result<LoginInfo, AuthError> {
+        let authorize = AuthorizeOptions {
+            org_uuid: options.org_uuid,
+            login_hint: options.login_hint,
+            login_method: options.sso.then(|| "sso".to_string()),
+            scopes: None,
+        };
+        let tokens = self.run_code_flow(authorize, None).await?;
 
         // (5) Resolve email + org. Prefer the exchange response; otherwise fetch
         //     the profile endpoint with the bearer token.
@@ -153,6 +192,26 @@ impl OAuthHandle {
         Ok(LoginInfo { email, org_id })
     }
 
+    /// Mint a one-year, inference-only token without persisting it locally.
+    /// The caller must print/store it exactly once.
+    pub async fn mint_long_lived_token(
+        &self,
+        org_uuid: Option<String>,
+    ) -> Result<protocol::Secret<String>, AuthError> {
+        let tokens = self
+            .run_code_flow(
+                AuthorizeOptions {
+                    scopes: Some(vec![CLAUDE_CODE_INFERENCE_SCOPE.to_string()]),
+                    org_uuid,
+                    login_hint: None,
+                    login_method: None,
+                },
+                Some(LONG_LIVED_OAUTH_TOKEN_TTL_SECONDS),
+            )
+            .await?;
+        Ok(tokens.access_token)
+    }
+
     /// GET the profile endpoint with `Authorization: Bearer <access>`.
     async fn fetch_profile(&self, access_token: &str) -> Result<(String, String), AuthError> {
         let req = HttpRequest {
@@ -195,7 +254,12 @@ impl OAuthHandle {
 #[async_trait]
 impl AuthHandle for OAuthHandle {
     async fn login(&self) -> Result<LoginInfo, AuthError> {
-        match tokio::time::timeout(LOGIN_TIMEOUT, self.run_login()).await {
+        match tokio::time::timeout(
+            LOGIN_TIMEOUT,
+            self.login_with_options(OAuthLoginOptions::default()),
+        )
+        .await
+        {
             Ok(result) => result,
             Err(_elapsed) => Err(AuthError::Timeout),
         }
@@ -299,7 +363,7 @@ mod tests {
             // Profile endpoint fallback (used only when the token body omits
             // account/org).
             (
-                "/me",
+                "/api/oauth/profile",
                 Canned {
                     status: 200,
                     body: r#"{"account":{"email":"profile@example.com"},"organization":{"uuid":"org-from-profile"}}"#

@@ -82,8 +82,9 @@ impl SlashCommand {
 /// Commands claude-code 2.1.205 dropped are dropped here too (`/doctor` — now
 /// a bundled skill, `/files`, `/commit`, `/init-verifiers`); `/stats` and
 /// `/cost` live on as `/usage` aliases, `/vim` as a hidden
-/// moved-to-`/config` redirect. `/web`, `/connect`, and `/image` are
-/// deliberate LingXi divergences (multi-provider support).
+/// moved-to-`/config` redirect. `/web`, `/connect`, `/image`, and `/worktree`
+/// are deliberate LingXi divergences (multi-provider support plus a slash
+/// façade over the existing worktree lifecycle tools).
 pub const BUILTIN: &[SlashCommand] = &[
     SlashCommand {
         name: "/help",
@@ -177,6 +178,20 @@ pub const BUILTIN: &[SlashCommand] = &[
         args: ArgSpec::Optional,
         advertised: true,
         run: ChatWidget::cmd_cd,
+    },
+    SlashCommand {
+        // LingXi project-specific convenience command. It routes through the
+        // desktop CommandRegistry to the existing EnterWorktree/ExitWorktree
+        // tools and is intentionally absent from command-api's byte-locked
+        // Claude Code builtin-name table.
+        name: "/worktree",
+        aliases: &[],
+        description: "Create, enter, inspect, or exit a worktree",
+        dynamic_description: None,
+        hint: "[status|create [name]|enter <path>|keep|remove [--discard]]",
+        args: ArgSpec::Optional,
+        advertised: true,
+        run: ChatWidget::cmd_worktree,
     },
     SlashCommand {
         name: "/rewind",
@@ -573,8 +588,7 @@ pub const BUILTIN: &[SlashCommand] = &[
         hint: "[open|share|<description>]",
         // Optional (NOT Required): a trailing `open`/`<description>` must reach
         // the handler (which enters plan mode) rather than falling through as an
-        // LLM prompt. LingXi has no plan store, so the description is not
-        // submitted and `open` does not launch an editor (documented gap).
+        // LLM prompt. The handler reuses the live plan store for view/open.
         args: ArgSpec::Optional,
         advertised: true,
         run: ChatWidget::cmd_plan,
@@ -648,8 +662,8 @@ pub const BUILTIN: &[SlashCommand] = &[
         dynamic_description: None,
         hint: "[name]",
         // Optional (NOT Required): a bare `/rename` must reach the handler so it
-        // renders "Usage: /rename <name>" rather than falling through as an LLM
-        // prompt (auto-name generation is deferred).
+        // runs the isolated auto-name generator rather than falling through as
+        // an LLM prompt.
         args: ArgSpec::Optional,
         advertised: true,
         run: ChatWidget::cmd_rename,
@@ -1041,6 +1055,18 @@ mod tests {
         assert_eq!(resolve("/tasks").expect("registered").0.name, "/tasks");
         assert_eq!(resolve("/bashes").expect("alias").0.name, "/tasks");
         assert!(BUILTIN.iter().any(|c| c.name == "/tasks"));
+    }
+
+    #[test]
+    fn worktree_command_is_advertised_with_lifecycle_hint() {
+        let (command, args) = resolve("/worktree status").expect("registered");
+        assert_eq!(command.name, "/worktree");
+        assert_eq!(args, "status");
+        assert!(command.advertised);
+        assert_eq!(
+            command.hint,
+            "[status|create [name]|enter <path>|keep|remove [--discard]]"
+        );
     }
 
     #[test]

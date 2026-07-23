@@ -14,15 +14,11 @@
 //! `coordinator/src/tool_send_message.rs`, adapted so `parse_recipient`
 //! resolves a teammate *name* (the TS contract) rather than a bare UUID.
 //!
-//! **Delivery is a `PARITY-GAP`.** claude-code's `writeToMailbox` appends to a
-//! name-keyed file mailbox, and the in-process router auto-resumes a paused
-//! teammate. Neither the UDS/bridge transport nor a team roster is reachable
-//! from `tool-ui`; the Rust port instead routes through the injected
-//! [`traits::mailbox::MailboxRouterHandle`] seam (which resolves recipients by
-//! `AgentId`). Name-keyed delivery is therefore best-effort / local-only here:
-//! the tool always *validates* and *shapes* the result faithfully, even when
-//! the underlying seam cannot resolve a name. Sites where the real transport
-//! would do more are marked `// PARITY-GAP:`.
+//! Delivery routes through the injected [`traits::mailbox::MailboxRouterHandle`]
+//! seam. The desktop host wires the same name-aware router used by coordinator
+//! teammates and background agents; its mailbox pump wakes a parked persistent
+//! agent on delivery. Cross-session `uds:`/`bridge:` transports remain outside
+//! this local tool (the richer coordinator tool rejects them explicitly).
 //!
 //! The LingXi-internal claim window stays byte-locked at
 //! `Duration::from_secs(30)` (spec §7 line 498), and the telemetry event names
@@ -238,28 +234,29 @@ impl SendMessageTool {
 
     /// Sender display name for `routing.sender`.
     ///
-    /// PARITY-GAP: the TS resolves `getAgentName()` (the human teammate name),
-    /// which the `tool-ui` [`ToolUseContext`] does not carry. We fall to the
-    /// TS `||` branch: a known agent id ⇒ a teammate (`"teammate"`); otherwise
-    /// the team lead (`TEAM_LEAD_NAME`).
+    /// Uses the human teammate name threaded on [`ToolUseContext`], falling to
+    /// the same `"teammate"` / `"team-lead"` labels as Claude when no display
+    /// name is available.
     fn sender_name(ctx: &ToolUseContext) -> String {
-        if ctx.agent_id.is_some() {
-            "teammate".to_string()
-        } else {
-            TEAM_LEAD_NAME.to_string()
-        }
+        ctx.agent_name.clone().unwrap_or_else(|| {
+            if ctx.agent_id.is_some() {
+                "teammate".to_string()
+            } else {
+                TEAM_LEAD_NAME.to_string()
+            }
+        })
     }
 
     /// `from` string handed to the mailbox seam.
     ///
-    /// PARITY-GAP: the seam resolves senders by `AgentId`, so unlike the TS
-    /// (which records the human name) we pass a UUID — the calling agent's, or
-    /// the nil id when the agent id is unknown (narrowly-scoped tests).
+    /// Prefer the display name because the mailbox router and Claude's mailbox
+    /// both key teammate attribution on it. An unnamed agent falls back to its
+    /// id so the concrete router can still retain teammate attribution.
     fn route_from(ctx: &ToolUseContext) -> String {
-        ctx.agent_id.map_or_else(
-            || protocol::AgentId::nil().as_uuid().to_string(),
-            |a| a.as_uuid().to_string(),
-        )
+        ctx.agent_name.clone().unwrap_or_else(|| {
+            ctx.agent_id
+                .map_or_else(|| TEAM_LEAD_NAME.to_string(), |a| a.to_string())
+        })
     }
 
     /// `generateRequestId('{request_type}', '{agent_id}')` from the TS —
@@ -272,21 +269,15 @@ impl SendMessageTool {
         format!("{request_type}-{millis}@{agent_id}")
     }
 
-    /// Best-effort delivery through the mailbox seam.
-    ///
-    /// PARITY-GAP: the production [`MailboxRouterHandle`] resolves recipients by
-    /// `AgentId` (UUID). claude-code's `writeToMailbox` appends to a name-keyed
-    /// file mailbox and auto-resumes a paused teammate — out of faithful reach
-    /// here. A UUID recipient (e.g. the coordinator-wiring path) delivers for
-    /// real; a teammate-name recipient is a local-only / no-op delivery. Either
-    /// way the caller shapes the result faithfully, so route errors are
-    /// swallowed rather than surfaced.
+    /// Deliver through the live mailbox seam. Delivery failures are surfaced;
+    /// returning a success result after `NotFound`/`Full` would falsely tell the
+    /// model that a background agent received a course correction.
     async fn deliver(
         router: &Arc<dyn MailboxRouterHandle>,
         from: &str,
         target: &str,
         content: String,
-    ) {
+    ) -> Result<(), ToolError> {
         let msg = MailboxMessage {
             message_id: tool_api::util::ids::ulid_or_uuid(),
             content,
@@ -295,7 +286,13 @@ impl SendMessageTool {
             // from the wire form (parity with claude-code `color: undefined`).
             color: None,
         };
-        let _ = router.route(from, target, msg).await;
+        router
+            .route(from, target, msg)
+            .await
+            .map(|_| ())
+            .map_err(|e| {
+                ToolError::Internal(format!("SendMessage: failed to deliver to '{target}': {e}"))
+            })
     }
 
     /// Build a `routing` object, omitting `summary`/`content` when absent
@@ -328,10 +325,10 @@ impl SendMessageTool {
         content: &str,
         summary: Option<&str>,
         sender: &str,
-    ) -> Value {
-        Self::deliver(router, from, recipient.route_target(), content.to_string()).await;
+    ) -> Result<Value, ToolError> {
+        Self::deliver(router, from, recipient.route_target(), content.to_string()).await?;
         let preview = truncate_preview(content, ROUTING_CONTENT_PREVIEW_CHARS);
-        json!({
+        Ok(json!({
             "success": true,
             "message": format!("Message sent to {to_display}'s inbox"),
             "routing": Self::routing(
@@ -340,22 +337,41 @@ impl SendMessageTool {
                 summary,
                 Some(&preview),
             ),
-        })
+        }))
     }
 
-    /// `handleBroadcast` — fan-out to every teammate.
-    ///
-    /// PARITY-GAP: claude-code reads the team file to enumerate recipients and
-    /// `writeToMailbox` to each. `tool-ui` has no team roster, so broadcast is
-    /// local-only (nothing is actually routed): we shape the empty-roster
-    /// `BroadcastOutput` variant faithfully rather than fabricate a recipient
-    /// list.
-    fn handle_broadcast() -> Value {
-        json!({
+    /// `handleBroadcast` — fan-out to every live teammate except the sender.
+    async fn handle_broadcast(
+        router: &Arc<dyn MailboxRouterHandle>,
+        from: &str,
+        content: &str,
+    ) -> Result<Value, ToolError> {
+        let recipients = router
+            .broadcast(
+                from,
+                MailboxMessage {
+                    message_id: tool_api::util::ids::ulid_or_uuid(),
+                    content: content.to_string(),
+                    timestamp: SystemTime::now(),
+                    color: None,
+                },
+            )
+            .await
+            .map_err(|e| ToolError::Internal(format!("SendMessage: failed to broadcast: {e}")))?;
+        let message = if recipients.is_empty() {
+            "No teammates to broadcast to (you are the only team member)".to_string()
+        } else {
+            format!(
+                "Message broadcast to {} teammate(s): {}",
+                recipients.len(),
+                recipients.join(", ")
+            )
+        };
+        Ok(json!({
             "success": true,
-            "message": "No teammates to broadcast to (you are the only team member)",
-            "recipients": [],
-        })
+            "message": message,
+            "recipients": recipients,
+        }))
     }
 
     /// `handleShutdownRequest` — ask a teammate to shut down.
@@ -366,7 +382,7 @@ impl SendMessageTool {
         to_display: &str,
         reason: Option<&str>,
         sender: &str,
-    ) -> Value {
+    ) -> Result<Value, ToolError> {
         let request_id = Self::generate_request_id("shutdown", to_display);
         // PARITY-GAP: claude-code wraps this in `createShutdownRequestMessage`
         // (adds `from`/ISO `timestamp`); we deliver an equivalent structured
@@ -383,28 +399,25 @@ impl SendMessageTool {
             recipient.route_target(),
             serde_json::to_string(&payload).unwrap_or_default(),
         )
-        .await;
-        json!({
+        .await?;
+        Ok(json!({
             "success": true,
             "message": format!("Shutdown request sent to {to_display}. Request ID: {request_id}"),
             "request_id": request_id,
             "target": to_display,
-        })
+        }))
     }
 
     /// `handleShutdownApproval` — a teammate approves its own shutdown.
     ///
-    /// PARITY-GAP: the TS aborts the in-process teammate's controller or calls
-    /// `gracefulShutdown(0)`. Host process control is out of reach here; we
-    /// deliver the approval to the team lead best-effort and return the result
-    /// shape.
     async fn handle_shutdown_approval(
+        &self,
         router: &Arc<dyn MailboxRouterHandle>,
         from: &str,
         request_id: &str,
-    ) -> Value {
-        // `getAgentName() || 'teammate'` in the TS — name unavailable here.
-        let agent_name = "teammate";
+        agent_name: &str,
+        ctx: &ToolUseContext,
+    ) -> Result<Value, ToolError> {
         let payload = json!({
             "type": "shutdown_approved",
             "requestId": request_id,
@@ -416,14 +429,30 @@ impl SendMessageTool {
             TEAM_LEAD_NAME,
             serde_json::to_string(&payload).unwrap_or_default(),
         )
-        .await;
-        json!({
+        .await?;
+        let task_address = ctx
+            .agent_id
+            .map(|id| id.to_string())
+            .or_else(|| ctx.agent_name.clone())
+            .ok_or_else(|| {
+                ToolError::Internal(
+                    "SendMessage: shutdown approval requires teammate context".into(),
+                )
+            })?;
+        let registry = self.ctx.task_registry.as_ref().ok_or_else(|| {
+            ToolError::Internal("SendMessage: task registry is not configured".into())
+        })?;
+        registry
+            .kill(&task_address)
+            .await
+            .map_err(|e| ToolError::Internal(format!("SendMessage: shutdown failed: {e}")))?;
+        Ok(json!({
             "success": true,
             "message": format!(
                 "Shutdown approved. Sent confirmation to team-lead. Agent {agent_name} is now exiting."
             ),
             "request_id": request_id,
-        })
+        }))
     }
 
     /// `handleShutdownRejection` — a teammate declines a shutdown request.
@@ -432,8 +461,8 @@ impl SendMessageTool {
         from: &str,
         request_id: &str,
         reason: &str,
-    ) -> Value {
-        let agent_name = "teammate";
+        agent_name: &str,
+    ) -> Result<Value, ToolError> {
         let payload = json!({
             "type": "shutdown_rejected",
             "requestId": request_id,
@@ -446,12 +475,12 @@ impl SendMessageTool {
             TEAM_LEAD_NAME,
             serde_json::to_string(&payload).unwrap_or_default(),
         )
-        .await;
-        json!({
+        .await?;
+        Ok(json!({
             "success": true,
             "message": format!("Shutdown rejected. Reason: \"{reason}\". Continuing to work."),
             "request_id": request_id,
-        })
+        }))
     }
 
     /// `handlePlanApproval` — the team lead approves a teammate's plan.
@@ -466,7 +495,7 @@ impl SendMessageTool {
         recipient: &Recipient,
         to_display: &str,
         request_id: &str,
-    ) -> Value {
+    ) -> Result<Value, ToolError> {
         let payload = json!({
             "type": "plan_approval_response",
             "requestId": request_id,
@@ -479,14 +508,14 @@ impl SendMessageTool {
             recipient.route_target(),
             serde_json::to_string(&payload).unwrap_or_default(),
         )
-        .await;
-        json!({
+        .await?;
+        Ok(json!({
             "success": true,
             "message": format!(
                 "Plan approved for {to_display}. They will receive the approval and can proceed with implementation."
             ),
             "request_id": request_id,
-        })
+        }))
     }
 
     /// `handlePlanRejection` — the team lead rejects a teammate's plan.
@@ -497,7 +526,7 @@ impl SendMessageTool {
         to_display: &str,
         request_id: &str,
         feedback: &str,
-    ) -> Value {
+    ) -> Result<Value, ToolError> {
         let payload = json!({
             "type": "plan_approval_response",
             "requestId": request_id,
@@ -511,12 +540,12 @@ impl SendMessageTool {
             recipient.route_target(),
             serde_json::to_string(&payload).unwrap_or_default(),
         )
-        .await;
-        json!({
+        .await?;
+        Ok(json!({
             "success": true,
             "message": format!("Plan rejected for {to_display} with feedback: \"{feedback}\""),
             "request_id": request_id,
-        })
+        }))
     }
 
     async fn emit_started(bus: &Arc<AnalyticsBus>, invocation_id: &str, message_chars: i64) {
@@ -634,13 +663,6 @@ impl Tool for SendMessageTool {
         let to = input.get("to").and_then(Value::as_str).unwrap_or("");
         if to.trim().is_empty() {
             return Err(ValidationError("to must not be empty".into()));
-        }
-        // Binary v2.1.186: broadcast is unconditionally rejected for ALL message
-        // types, not just structured — the check comes before string/object branch.
-        if to == "*" {
-            return Err(ValidationError(
-                "broadcast (to: \"*\") is no longer supported \u{2014} send a message per recipient".into(),
-            ));
         }
         if to.contains('@') {
             return Err(ValidationError(
@@ -852,9 +874,9 @@ Approving shutdown terminates your process. Rejecting plan sends the teammate ba
         } as i64;
         Self::emit_started(&bus, &invocation_id, message_chars).await;
 
-        let data = match message {
+        let data_result: Result<Value, ToolError> = match message {
             Value::String(content) => match recipient {
-                Recipient::Broadcast => Self::handle_broadcast(),
+                Recipient::Broadcast => Self::handle_broadcast(&router, &from, content).await,
                 _ => {
                     Self::handle_message(
                         &router,
@@ -905,13 +927,21 @@ Approving shutdown terminates your process. Rejecting plan sends the teammate ba
                     }
                     "shutdown_response" => {
                         if approve {
-                            Self::handle_shutdown_approval(&router, &from, &request_id_in).await
+                            self.handle_shutdown_approval(
+                                &router,
+                                &from,
+                                &request_id_in,
+                                &sender,
+                                &ctx,
+                            )
+                            .await
                         } else {
                             Self::handle_shutdown_rejection(
                                 &router,
                                 &from,
                                 &request_id_in,
                                 reason.unwrap_or(""),
+                                &sender,
                             )
                             .await
                         }
@@ -966,6 +996,20 @@ Approving shutdown terminates your process. Rejecting plan sends the teammate ba
             }
         };
 
+        let data = match data_result {
+            Ok(data) => data,
+            Err(error) => {
+                Self::emit_failed(
+                    &bus,
+                    &invocation_id,
+                    "delivery_failed",
+                    started.elapsed().as_millis() as u64,
+                )
+                .await;
+                return Err(error);
+            }
+        };
+
         Self::emit_completed(&bus, &invocation_id, started.elapsed().as_millis() as u64).await;
         // Model-facing content is the brief status string (`data["message"]`),
         // not the full routing/recipients JSON dump. claude-code surfaces the
@@ -994,6 +1038,10 @@ mod tests {
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
     use traits::mailbox::{MailboxError, RouteAck};
     use traits::process::ProcessOutput;
+    use traits::task_registry::{
+        TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryError,
+        TaskRegistryHandle, TaskUpdatePatch,
+    };
 
     fn dummy_out() -> ProcessOutput {
         ProcessOutput {
@@ -1009,12 +1057,84 @@ mod tests {
     /// observable in tests).
     struct RecordingRouter {
         routed: Mutex<Vec<(String, String, String)>>,
+        broadcasted: Mutex<Vec<(String, String)>>,
+    }
+
+    struct RejectingRouter;
+
+    #[derive(Default)]
+    struct RecordingTaskRegistry {
+        killed: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl TaskRegistryHandle for RecordingTaskRegistry {
+        async fn create(&self, _input: TaskCreateInput) -> Result<TaskRecord, TaskRegistryError> {
+            unreachable!("not used by SendMessage")
+        }
+
+        async fn get(&self, _id: &str) -> Result<Option<TaskRecord>, TaskRegistryError> {
+            Ok(None)
+        }
+
+        async fn list(
+            &self,
+            _filter: TaskListFilter,
+        ) -> Result<Vec<TaskRecord>, TaskRegistryError> {
+            Ok(Vec::new())
+        }
+
+        async fn update(
+            &self,
+            _id: &str,
+            _patch: TaskUpdatePatch,
+        ) -> Result<TaskRecord, TaskRegistryError> {
+            unreachable!("not used by SendMessage")
+        }
+
+        async fn set_status(
+            &self,
+            _id: &str,
+            _status: &str,
+        ) -> Result<TaskRecord, TaskRegistryError> {
+            unreachable!("not used by SendMessage")
+        }
+
+        async fn kill(&self, id: &str) -> Result<TaskRecord, TaskRegistryError> {
+            self.killed.lock().unwrap().push(id.to_string());
+            Ok(TaskRecord {
+                task_id: "t12345678".into(),
+                status: "killed".into(),
+                ..Default::default()
+            })
+        }
+
+        async fn output(
+            &self,
+            _id: &str,
+            _offset: Option<u64>,
+        ) -> Result<TaskOutputChunk, TaskRegistryError> {
+            unreachable!("not used by SendMessage")
+        }
+    }
+
+    #[async_trait]
+    impl MailboxRouterHandle for RejectingRouter {
+        async fn route(
+            &self,
+            _from_agent: &str,
+            to_agent: &str,
+            _message: MailboxMessage,
+        ) -> Result<RouteAck, MailboxError> {
+            Err(MailboxError::NotFound(to_agent.to_string()))
+        }
     }
 
     impl RecordingRouter {
         fn new() -> Self {
             Self {
                 routed: Mutex::new(Vec::new()),
+                broadcasted: Mutex::new(Vec::new()),
             }
         }
     }
@@ -1037,11 +1157,32 @@ mod tests {
                 claim_window_secs: SEND_MESSAGE_CLAIM_WINDOW.as_secs(),
             })
         }
+
+        async fn broadcast(
+            &self,
+            from_agent: &str,
+            message: MailboxMessage,
+        ) -> Result<Vec<String>, MailboxError> {
+            self.broadcasted
+                .lock()
+                .unwrap()
+                .push((from_agent.to_string(), message.content));
+            Ok(vec!["alpha".to_string(), "beta".to_string()])
+        }
     }
 
     fn ctx_with(router: Arc<RecordingRouter>) -> BuiltinToolContext {
         let mut ctx = shell_test_ctx(dummy_out());
         ctx.mailbox_router = Some(router as Arc<dyn MailboxRouterHandle>);
+        ctx
+    }
+
+    fn ctx_with_shutdown(
+        router: Arc<RecordingRouter>,
+        registry: Arc<RecordingTaskRegistry>,
+    ) -> BuiltinToolContext {
+        let mut ctx = ctx_with(router);
+        ctx.task_registry = Some(registry);
         ctx
     }
 
@@ -1145,35 +1286,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn validate_broadcast_rejected_unconditionally() {
+    async fn validate_accepts_plain_broadcast_and_rejects_structured_at_call() {
         let tool = SendMessageTool::new(shell_test_ctx(dummy_out()));
-        // Binary v2.1.186: `to: "*"` is rejected before the string/structured
-        // branch — the new top-level check fires for both plain and structured.
-        let err_structured = tool
-            .validate_input(
-                &json!({ "to": "*", "message": { "type": "shutdown_request" } }),
-                &fresh_ctx(),
-            )
-            .await
-            .expect_err("structured broadcast must reject");
-        assert!(
-            err_structured.0.contains("no longer supported"),
-            "structured: {}",
-            err_structured.0
-        );
-
-        let err_string = tool
-            .validate_input(
-                &json!({ "to": "*", "summary": "all hands", "message": "standup in 5" }),
-                &fresh_ctx(),
-            )
-            .await
-            .expect_err("string broadcast must also reject");
-        assert!(
-            err_string.0.contains("no longer supported"),
-            "string: {}",
-            err_string.0
-        );
+        tool.validate_input(
+            &json!({ "to": "*", "summary": "all hands", "message": "standup in 5" }),
+            &fresh_ctx(),
+        )
+        .await
+        .expect("plain broadcast is supported");
     }
 
     #[tokio::test]
@@ -1254,6 +1374,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn uses_spawned_agents_display_name_for_sender_identity() {
+        let router = Arc::new(RecordingRouter::new());
+        let tool = SendMessageTool::new(ctx_with(router.clone()));
+        let mut call_ctx = fresh_ctx();
+        call_ctx.agent_id = Some(protocol::AgentId::new());
+        call_ctx.agent_name = Some("researcher".to_string());
+
+        let res = tool
+            .call(
+                json!({ "to": "reviewer", "summary": "share findings", "message": "done" }),
+                call_ctx,
+                fresh_tx(),
+            )
+            .await
+            .expect("send must succeed");
+
+        assert_eq!(res.data["routing"]["sender"], "researcher");
+        assert_eq!(router.routed.lock().unwrap()[0].0, "researcher");
+    }
+
+    #[tokio::test]
+    async fn delivery_failure_is_not_reported_as_success() {
+        let mut ctx = shell_test_ctx(dummy_out());
+        ctx.mailbox_router = Some(Arc::new(RejectingRouter));
+        let tool = SendMessageTool::new(ctx);
+
+        let err = tool
+            .call(
+                json!({ "to": "missing", "summary": "send update", "message": "hello" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect_err("unknown recipient must fail");
+
+        assert!(format!("{err}").contains("failed to deliver to 'missing'"));
+    }
+
+    #[tokio::test]
     async fn routing_content_is_truncated_to_50_char_preview() {
         // 2.1.212: the sender's tool result carries only a 50-char preview of
         // the body (`Us(t, 50)`); the full body rides the mailbox delivery and
@@ -1303,7 +1462,7 @@ mod tests {
     #[tokio::test]
     async fn broadcast_returns_broadcast_shape() {
         let router = Arc::new(RecordingRouter::new());
-        let tool = SendMessageTool::new(ctx_with(router));
+        let tool = SendMessageTool::new(ctx_with(router.clone()));
         let res = tool
             .call(
                 json!({ "to": "*", "summary": "all hands", "message": "standup in 5" }),
@@ -1313,11 +1472,15 @@ mod tests {
             .await
             .expect("broadcast must succeed");
         assert_eq!(res.data["success"], true);
-        assert!(res.data["recipients"].is_array());
+        assert_eq!(res.data["recipients"], json!(["alpha", "beta"]));
         // Model-facing text is the brief broadcast status string, not the data dump.
         assert_eq!(
             res.model_content.as_deref(),
-            Some("No teammates to broadcast to (you are the only team member)")
+            Some("Message broadcast to 2 teammate(s): alpha, beta")
+        );
+        assert_eq!(
+            router.broadcasted.lock().unwrap().as_slice(),
+            &[("team-lead".to_string(), "standup in 5".to_string())]
         );
     }
 
@@ -1375,6 +1538,40 @@ mod tests {
         assert_eq!(
             res.data["message"],
             "Shutdown rejected. Reason: \"still mid-task\". Continuing to work."
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_approval_delivers_then_kills_the_calling_worker() {
+        let router = Arc::new(RecordingRouter::new());
+        let registry = Arc::new(RecordingTaskRegistry::default());
+        let tool = SendMessageTool::new(ctx_with_shutdown(router.clone(), registry.clone()));
+        let mut call_ctx = fresh_ctx();
+        let agent_id = protocol::AgentId::new();
+        call_ctx.agent_id = Some(agent_id);
+        call_ctx.agent_name = Some("researcher".into());
+
+        let result = tool
+            .call(
+                json!({
+                    "to": "team-lead",
+                    "message": {
+                        "type": "shutdown_response",
+                        "request_id": "shutdown-1@researcher",
+                        "approve": true
+                    }
+                }),
+                call_ctx,
+                fresh_tx(),
+            )
+            .await
+            .expect("approval is delivered and worker is stopped");
+
+        assert_eq!(result.data["success"], true);
+        assert_eq!(router.routed.lock().unwrap()[0].1, "team-lead");
+        assert_eq!(
+            registry.killed.lock().unwrap().as_slice(),
+            &[agent_id.to_string()]
         );
     }
 

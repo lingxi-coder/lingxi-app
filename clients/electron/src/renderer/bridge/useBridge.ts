@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type {
   ClientEvent,
+  PermissionModeId,
   PermissionRequest,
   PermissionResponseDto,
 } from '@lingxi/bridge-client';
@@ -25,6 +26,7 @@ import type {
   DiagnosticEntry,
   ProviderCredentialMetadata,
   ProviderCredentialUpdate,
+  WorkspaceFileSearchResult,
   WorkspaceMetadata,
 } from './lingxi';
 
@@ -42,11 +44,13 @@ export interface UseBridge {
   readonly error: string | null;
   clearError(): void;
   sendPrompt(text: string): Promise<void>;
+  runSlashCommand(raw: string): Promise<void>;
   cancel(turnId?: number): Promise<void>;
   approve(requestId: number, response?: PermissionResponseDto): Promise<void>;
   deny(requestId: number): Promise<void>;
   pickWorkspace(): Promise<WorkspaceMetadata | null>;
   selectRecentWorkspace(path: string): Promise<WorkspaceMetadata>;
+  searchWorkspaceFiles(query: string): Promise<WorkspaceFileSearchResult>;
   setWorkspaceTrusted(trusted: boolean): Promise<WorkspaceMetadata>;
   setCredential(credential: string): Promise<CredentialMetadata>;
   clearCredential(): Promise<CredentialMetadata>;
@@ -61,6 +65,7 @@ export interface UseBridge {
   newSession(): Promise<void>;
   resumeSession(sessionId: string): Promise<void>;
   setModel(model: string): Promise<void>;
+  setPermissionMode(mode: PermissionModeId): Promise<void>;
   refreshTasks(): Promise<void>;
   taskOutput(taskId: string): Promise<void>;
   stopTask(taskId: string): Promise<void>;
@@ -155,6 +160,11 @@ export function useBridge(): UseBridge {
       }
       if (state.status === 'error') setError(state.message);
       if (state.status === 'disconnected' && state.reason) setError(state.reason);
+      if (state.status === 'connected') {
+        void host.bootstrap()
+          .then((snapshot) => setBootstrap(snapshot))
+          .catch((cause: unknown) => setError(messageFrom(cause)));
+      }
     });
     const offPermission = host.onPermission((request: PermissionRequest) => {
       setPermissionQueue((previous) => [
@@ -184,7 +194,7 @@ export function useBridge(): UseBridge {
       host.command({ type: 'list_sessions', limit: 100 }),
       host.command({ type: 'list_models' }),
       requestTaskList(),
-      host.command({ type: 'refresh_listings', which: [{ type: 'status' }, { type: 'doctor' }] }),
+      host.command({ type: 'refresh_listings', which: [{ type: 'status' }, { type: 'doctor' }, { type: 'slash_commands' }] }),
     ]).catch((cause: unknown) => setError(messageFrom(cause)));
   }, [bootstrap?.workspace.trusted, host, connection.status, requestTaskList]);
 
@@ -203,6 +213,26 @@ export function useBridge(): UseBridge {
         type: 'error',
         kind: { type: 'transport' },
         message: 'Failed to send the prompt to the engine.',
+      }));
+      capture(cause);
+    }
+  }, [capture, host]);
+
+  const runSlashCommand = useCallback(async (raw: string) => {
+    const command = raw.trim();
+    if (!host || !command.startsWith('/')) return;
+    setConversation((previous) => appendUserPrompt(previous, command));
+    try {
+      await host.command({ type: 'run_slash_command', raw: command });
+      // Commands such as plugin/skill reloads can mutate the live registry.
+      // Refreshing is cheap and also covers bridge implementations that do not
+      // yet push the `commands_changed` event on the intercepted slash path.
+      await host.command({ type: 'refresh_listings', which: [{ type: 'slash_commands' }] });
+    } catch (cause) {
+      setConversation((previous) => reduceEvent(previous, {
+        type: 'error',
+        kind: { type: 'transport' },
+        message: 'Failed to run the slash command.',
       }));
       capture(cause);
     }
@@ -250,6 +280,11 @@ export function useBridge(): UseBridge {
       return workspace;
     } catch (cause) { return capture(cause); }
   }, [capture, host, patchBootstrap]);
+
+  const searchWorkspaceFiles = useCallback(async (query: string) => {
+    if (!host) return { files: [], truncated: false };
+    try { return await host.searchWorkspaceFiles(query); } catch (cause) { return capture(cause); }
+  }, [capture, host]);
 
   const setWorkspaceTrusted = useCallback(async (trusted: boolean) => {
     if (!host) throw new Error('Desktop host unavailable.');
@@ -346,7 +381,7 @@ export function useBridge(): UseBridge {
       command({ type: 'list_sessions', limit: 100 }),
       command({ type: 'list_models' }),
       requestTaskList(),
-      command({ type: 'refresh_listings', which: [{ type: 'status' }, { type: 'doctor' }] }),
+      command({ type: 'refresh_listings', which: [{ type: 'status' }, { type: 'doctor' }, { type: 'slash_commands' }] }),
       refreshDiagnostics(),
     ]);
   }, [command, refreshDiagnostics, requestTaskList]);
@@ -360,6 +395,10 @@ export function useBridge(): UseBridge {
     [command],
   );
   const setModel = useCallback((model: string) => command({ type: 'set_model', model }), [command]);
+  const setPermissionMode = useCallback(
+    (mode: PermissionModeId) => command({ type: 'set_permission_mode', mode }),
+    [command],
+  );
   const refreshTasks = useCallback(() => requestTaskList(), [requestTaskList]);
   const taskOutput = useCallback(
     (taskId: string) => command({ type: 'task_output', task_id: taskId, offset: 0 }),
@@ -381,11 +420,13 @@ export function useBridge(): UseBridge {
     error,
     clearError: () => setError(null),
     sendPrompt,
+    runSlashCommand,
     cancel,
     approve,
     deny,
     pickWorkspace,
     selectRecentWorkspace,
+    searchWorkspaceFiles,
     setWorkspaceTrusted,
     setCredential,
     clearCredential,
@@ -400,6 +441,7 @@ export function useBridge(): UseBridge {
     newSession,
     resumeSession,
     setModel,
+    setPermissionMode,
     refreshTasks,
     taskOutput,
     stopTask,

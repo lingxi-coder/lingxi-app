@@ -47,6 +47,10 @@ export function Icon({ name, size = 16, color = 'currentColor', stroke = 1.6, st
     case 'file': return <svg {...p}><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /></svg>;
     case 'folder': return <svg {...p}><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /></svg>;
     case 'terminal': return <svg {...p}><path d="m4 7 6 5-6 5M12 19h8" /></svg>;
+    case 'hand': return <svg {...p}><path d="M6.5 11V7.5a1.5 1.5 0 0 1 3 0V10M9.5 10V5.5a1.5 1.5 0 0 1 3 0V10M12.5 10V6.5a1.5 1.5 0 0 1 3 0v4M15.5 10V8.5a1.5 1.5 0 0 1 3 0V14c0 4.4-2.8 7-7 7-3.2 0-5-1.5-6.4-4L3.3 13.8a1.6 1.6 0 0 1 2.7-1.7l1.5 2" /></svg>;
+    case 'shieldCheck': return <svg {...p}><path d="M12 3 20 6v5c0 5.2-3.4 8.4-8 10-4.6-1.6-8-4.8-8-10V6l8-3Z" /><path d="m8.5 12 2.2 2.2 4.8-5" /></svg>;
+    case 'shieldAlert': return <svg {...p}><path d="M12 3 20 6v5c0 5.2-3.4 8.4-8 10-4.6-1.6-8-4.8-8-10V6l8-3Z" /><path d="M12 8v5M12 16.5v.1" /></svg>;
+    case 'lock': return <svg {...p}><rect x="5" y="10" width="14" height="11" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3" /></svg>;
     case 'cog': return <svg {...p}><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.9 2.9l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 0 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.9-2.9l.1-.1A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.5-1H3a2 2 0 0 1 0-4h.1A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.9-2.9l.1.1A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.5V3a2 2 0 0 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.9 2.9l-.1.1A1.7 1.7 0 0 0 19.4 9 1.7 1.7 0 0 0 21 10H21a2 2 0 0 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" /></svg>;
     case 'arrowU': return <svg {...p} fill={color} stroke="none"><path d="M12 4l-7 8h4v8h6v-8h4z" /></svg>;
     case 'play': return <svg {...p} fill={color} stroke="none"><path d="M6 4l14 8-14 8z" /></svg>;

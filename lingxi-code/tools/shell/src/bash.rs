@@ -9,11 +9,9 @@
 //! `BashTool/utils.ts`): a base64 `data:image/...;base64,...` stdout is
 //! returned as an IMAGE content block (riding on `new_messages` per the Rust
 //! image contract, mirroring FileRead) rather than truncated as text — see the
-//! short-circuit in `call`. PARTIALLY DEFERRED: claude-code
-//! `resizeShellImageOutput` (CC-304 image dimension/byte cap) is a follow-up —
-//! it needs an image-decode dep tool-shell doesn't pull in. The model still
-//! receives the image (the URI payload is already valid base64, emitted as-is);
-//! only the optional resize/re-encode is deferred.
+//! short-circuit in `call`. `resizeShellImageOutput` (CC-304 image
+//! dimension/byte cap) reuses the same image budget processor as FileRead
+//! before the data URI reaches the model.
 //!
 //! Timeout/interrupt handling (claude-code `BashTool.tsx` ~602-605 / 720):
 //! a timed-out (or interrupted) command is surfaced as a SUCCESSFUL
@@ -722,6 +720,31 @@ fn parse_data_uri(s: &str) -> Option<(String, String)> {
         return None;
     }
     Some((media_type.to_string(), payload.to_string()))
+}
+
+/// Validate a shell image data URI and resize it to the provider's byte and
+/// dimension budget. The returned tuple is `(normalized_uri, base64_payload)`.
+/// A magic-byte-valid but decoder-rejected image preserves the existing
+/// fail-later behavior instead of silently converting the command output to
+/// text.
+fn prepare_shell_image_output(content: &str) -> Option<(String, String)> {
+    use base64::Engine as _;
+
+    let (claimed_media_type, payload) = parse_data_uri(content)?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&payload)
+        .ok()?;
+    sniff_image_media_type(&bytes)?;
+    match tool_api::util::image_budget::process_image(bytes) {
+        Ok(processed) => {
+            let uri = format!("data:{};base64,{}", processed.media_type, processed.base64);
+            Some((uri, processed.base64))
+        }
+        Err(_) => Some((
+            format!("data:{claimed_media_type};base64,{payload}"),
+            payload,
+        )),
+    }
 }
 
 /// Image magic-byte sniff (claude `Wfe`) — shared impl in
@@ -1714,27 +1737,14 @@ impl Tool for BashTool {
                 // — truncated base64 would decode to a corrupt image. The image
                 // rides on `new_messages` via the Rust image contract (mirrors
                 // FileRead `read.rs:718-759`); `data` carries `isImage: true` +
-                // the `model_content` placeholder. NOTE: claude-code
-                // `resizeShellImageOutput` (CC-304 dimension/size cap) is a
-                // follow-up — it needs an image-decode dep tool-shell doesn't
-                // have. We emit the URI payload as-is (it is already valid
-                // base64), so the model still receives the image — the
-                // parity-critical behavior. Only the optional re-encode/resize
-                // is deferred.
+                // the `model_content` placeholder. Oversized images are resized
+                // before the untruncated URI is handed to the result mapper.
                 if is_image_output(&normalized) {
                     // Gate on the binary's FULL `hKn` predicate: data-URI parse
                     // AND magic-byte sniff of the decoded payload (`Wfe`). A
                     // URI whose payload is not a recognized image falls through
                     // to the normal TEXT path — exactly claude's `if(g)` miss.
-                    let sniffed = parse_data_uri(&normalized).and_then(|(_claimed, payload)| {
-                        use base64::Engine as _;
-                        base64::engine::general_purpose::STANDARD
-                            .decode(&payload)
-                            .ok()
-                            .and_then(|bytes| sniff_image_media_type(&bytes))
-                            .map(|_| payload)
-                    });
-                    if let Some(payload) = sniffed {
+                    if let Some((image_uri, payload)) = prepare_shell_image_output(&normalized) {
                         let mut meta: LogEventMetadata = HashMap::new();
                         meta.insert("request_id".into(), AnalyticsValue::String(request_id));
                         meta.insert(
@@ -1772,7 +1782,7 @@ impl Tool for BashTool {
                             // image therefore reaches the model INSIDE the
                             // tool_result content array — no injected message.
                             data: bash_result_data(
-                                &normalized,
+                                &image_uri,
                                 &stderr_clean,
                                 false,
                                 true,
@@ -3444,6 +3454,27 @@ mod tests {
         // NO injected message — the image reaches the model inside the
         // tool_result content array, byte-faithful to the binary's `hKn`.
         assert!(res.new_messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn oversized_image_stdout_is_resized_before_tool_result_delivery() {
+        const WIDE_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAC7gAAAABCAIAAADBtXRpAAAAH0lEQVR42u3BAQEAAACCIP+vbkhAAQAAAAAAAADAgQEjKQABp2QvZgAAAABJRU5ErkJggg==";
+        let original = format!("data:image/png;base64,{WIDE_PNG}");
+        let tool = BashTool::new(shell_test_ctx(ProcessOutput {
+            stdout: format!("{original}\n"),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        }));
+
+        let result = tool
+            .call(json!({"command": "python plot.py"}), use_ctx(), fresh_tx())
+            .await
+            .expect("image result");
+
+        let resized = result.data["stdout"].as_str().unwrap();
+        assert_ne!(resized, original);
+        assert!(resized.starts_with("data:image/jpeg;base64,"));
     }
 
     #[tokio::test]

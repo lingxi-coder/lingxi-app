@@ -175,49 +175,109 @@ pub async fn tool_to_wire_deferred(tool: &dyn Tool, opts: &PromptOptions, defer:
     v
 }
 
-/// Stamp `defer_loading: true` onto every already-serialized wire entry whose
-/// tool the [`DeferralState`] defers this turn (claude-code's deferred-tool wire
-/// form). Entries are matched to `tools` by name, so the caller may pass the
-/// same (deny-filtered, order-preserved) slice it serialized.
-///
-/// Two invariants from claude-code are honored:
-/// - When the state is DISABLED this is a no-op and the wire bytes are
-///   byte-identical to the pre-pipeline build (the common, default path).
-/// - At least one tool stays non-deferred: if EVERY wire entry would be
-///   deferred, the first one is left loaded (claude-code keeps ≥1 non-deferred
-///   tool so deferred loading stays active — normally the always-loaded
-///   `ToolSearch` / `Read` satisfy this, so the guard is a safety net).
-pub fn apply_defer_loading(wire: &mut [Value], tools: &[Arc<dyn Tool>], defer: &DeferralState) {
+/// Apply claude-code's dynamic tool pool to an already-serialized wire list.
+/// Undiscovered deferred tools are omitted; tools discovered through
+/// `tool_reference` are included with `defer_loading: true`; non-candidates are
+/// unchanged. Matching is by name and preserves the original partition order.
+pub fn apply_defer_loading(wire: &mut Vec<Value>, tools: &[Arc<dyn Tool>], defer: &DeferralState) {
+    // This compatibility entry point predates context-aware auto mode. With no
+    // model window available, preserve its historical eager-auto behavior;
+    // production turn assembly calls the context-aware variant below.
+    apply_defer_loading_with_context(wire, tools, defer, 0);
+}
+
+/// Context-aware variant used by callers without an exact token count. In
+/// automatic mode it applies Claude's 2.5-character fallback heuristic.
+pub fn apply_defer_loading_with_context(
+    wire: &mut Vec<Value>,
+    tools: &[Arc<dyn Tool>],
+    defer: &DeferralState,
+    context_window: u64,
+) {
+    apply_defer_loading_with_context_and_tokens(wire, tools, defer, context_window, None);
+}
+
+/// Context-aware ToolSearch deferral with an optional exact deferred-schema
+/// token count. Claude first uses its provider token-count endpoint and falls
+/// back to the 2.5-character heuristic only when that endpoint is unavailable.
+pub fn apply_defer_loading_with_context_and_tokens(
+    wire: &mut Vec<Value>,
+    tools: &[Arc<dyn Tool>],
+    defer: &DeferralState,
+    context_window: u64,
+    exact_deferred_tokens: Option<u64>,
+) {
+    if let Some(percentage) = defer.auto_percentage() {
+        let candidates: std::collections::HashSet<&str> = tools
+            .iter()
+            .filter(|tool| defer.wants_defer(tool.name(), tool.should_defer()))
+            .map(|tool| tool.name())
+            .collect();
+        let token_threshold =
+            u128::from(context_window).saturating_mul(u128::from(percentage)) / 100;
+        let active = exact_deferred_tokens.map_or_else(
+            || {
+                let chars: u128 = wire
+                    .iter()
+                    .filter(|entry| {
+                        entry
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .is_some_and(|name| candidates.contains(name))
+                    })
+                    .map(|entry| {
+                        // Claude's fallback sums exactly `name.length +
+                        // description.length + JSON.stringify(inputSchema).length`;
+                        // object field names/quotes are not counted. JavaScript length
+                        // is UTF-16 code units, so use `encode_utf16` for non-BMP text.
+                        let string_units = |value: &str| value.encode_utf16().count() as u128;
+                        let name = entry
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .map_or(0, string_units);
+                        let description = entry
+                            .get("description")
+                            .and_then(Value::as_str)
+                            .map_or(0, string_units);
+                        let schema = entry
+                            .get("input_schema")
+                            .map(|schema| string_units(&schema.to_string()))
+                            .unwrap_or(0);
+                        name + description + schema
+                    })
+                    .sum();
+                // TS: floor(context * percentage / 100) tokens, then
+                // floor(tokens * 2.5) chars. Preserve both flooring points.
+                let char_threshold = token_threshold.saturating_mul(5) / 2;
+                chars >= char_threshold
+            },
+            |tokens| u128::from(tokens) >= token_threshold,
+        );
+        defer.set_auto_active(active);
+    }
     if !defer.is_enabled() {
         return;
     }
-    let deferred: std::collections::HashSet<&str> = tools
+    let candidates: std::collections::HashSet<&str> = tools
         .iter()
-        .filter(|t| defer.should_defer_tool(t.as_ref()))
+        .filter(|t| defer.wants_defer(t.name(), t.should_defer()))
         .map(|t| t.name())
         .collect();
-    if deferred.is_empty() {
+    if candidates.is_empty() {
         return;
     }
-    let will_defer = wire
-        .iter()
-        .filter(|w| {
-            w.get("name")
-                .and_then(Value::as_str)
-                .is_some_and(|n| deferred.contains(n))
-        })
-        .count();
-    // ≥1 non-deferred invariant: only skip if literally every entry would defer.
-    let mut skip_one = !wire.is_empty() && will_defer >= wire.len();
+    // The API receives schemas only after ToolSearch returned a tool_reference.
+    wire.retain(|entry| {
+        let Some(name) = entry.get("name").and_then(Value::as_str) else {
+            return true;
+        };
+        !candidates.contains(name) || defer.is_loaded(name)
+    });
     for w in wire.iter_mut() {
         let Some(name) = w.get("name").and_then(Value::as_str) else {
             continue;
         };
-        if !deferred.contains(name) {
-            continue;
-        }
-        if skip_one {
-            skip_one = false;
+        if !candidates.contains(name) || !defer.is_loaded(name) {
             continue;
         }
         if let Some(obj) = w.as_object_mut() {
@@ -531,7 +591,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn apply_defer_loading_enabled_marks_only_should_defer_tools() {
+    async fn apply_defer_loading_hides_undiscovered_should_defer_tools() {
         let tools: Vec<Arc<dyn Tool>> = vec![
             Arc::new(DeferStub {
                 name: "Task",
@@ -545,14 +605,13 @@ mod tests {
         let mut wire = tools_to_wire(&tools, &opts()).await;
         let d = DeferralState::new(ToolSearchMode::Enabled, false);
         apply_defer_loading(&mut wire, &tools, &d);
-        let by_name = |n: &str| wire.iter().find(|w| w["name"] == json!(n)).unwrap();
-        assert_eq!(by_name("Task")["defer_loading"], json!(true));
-        assert!(by_name("Read").get("defer_loading").is_none());
+        let by_name = |n: &str| wire.iter().find(|w| w["name"] == json!(n));
+        assert!(by_name("Task").is_none());
+        assert!(by_name("Read").unwrap().get("defer_loading").is_none());
     }
 
     #[tokio::test]
-    async fn apply_defer_loading_keeps_at_least_one_non_deferred() {
-        // Every tool wants to defer → the first entry is left loaded.
+    async fn apply_defer_loading_can_hide_every_candidate() {
         let tools: Vec<Arc<dyn Tool>> = vec![
             Arc::new(DeferStub {
                 name: "Task",
@@ -566,15 +625,11 @@ mod tests {
         let mut wire = tools_to_wire(&tools, &opts()).await;
         let d = DeferralState::new(ToolSearchMode::Enabled, false);
         apply_defer_loading(&mut wire, &tools, &d);
-        let deferred = wire
-            .iter()
-            .filter(|w| w.get("defer_loading") == Some(&json!(true)))
-            .count();
-        assert_eq!(deferred, 1, "exactly one stays loaded when all would defer");
+        assert!(wire.is_empty());
     }
 
     #[tokio::test]
-    async fn apply_defer_loading_skips_already_loaded_tool() {
+    async fn apply_defer_loading_includes_discovered_tool_with_marker() {
         let tools: Vec<Arc<dyn Tool>> = vec![
             Arc::new(DeferStub {
                 name: "Task",
@@ -589,8 +644,80 @@ mod tests {
         let d = DeferralState::new(ToolSearchMode::Enabled, false);
         d.mark_loaded(["Task".to_string()]);
         apply_defer_loading(&mut wire, &tools, &d);
-        // Task was loaded via ToolSearch, so it is no longer deferred.
+        // A discovered tool is now present, but remains marked defer_loading.
         let task = wire.iter().find(|w| w["name"] == json!("Task")).unwrap();
-        assert!(task.get("defer_loading").is_none());
+        assert_eq!(task["defer_loading"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn automatic_defer_loading_uses_context_savings_threshold() {
+        let tools: Vec<Arc<dyn Tool>> = vec![
+            Arc::new(DeferStub {
+                name: "Task",
+                defer: true,
+            }),
+            Arc::new(DeferStub {
+                name: "Read",
+                defer: false,
+            }),
+        ];
+        let state = DeferralState::new(ToolSearchMode::Auto { percentage: 10 }, false);
+
+        let mut large_context = tools_to_wire(&tools, &opts()).await;
+        apply_defer_loading_with_context(&mut large_context, &tools, &state, 1_000_000);
+        assert!(!state.is_enabled());
+        assert!(large_context
+            .iter()
+            .all(|tool| tool.get("defer_loading").is_none()));
+
+        let mut small_context = tools_to_wire(&tools, &opts()).await;
+        apply_defer_loading_with_context(&mut small_context, &tools, &state, 1);
+        assert!(state.is_enabled());
+        assert!(small_context
+            .iter()
+            .all(|tool| tool["name"] != json!("Task")));
+    }
+
+    #[tokio::test]
+    async fn automatic_threshold_matches_claude_field_only_char_count_and_flooring() {
+        // "Task" name (4) + prompt (4) + {"type":"object"} schema (17)
+        // = 25 JS UTF-16 code units. At 10% of a 100-token context Claude's
+        // threshold is floor(10 * 2.5) = 25, so equality enables deferral.
+        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(DeferStub {
+            name: "Task",
+            defer: true,
+        })];
+        let state = DeferralState::new(ToolSearchMode::Auto { percentage: 10 }, false);
+        let mut at_threshold = tools_to_wire(&tools, &opts()).await;
+        apply_defer_loading_with_context(&mut at_threshold, &tools, &state, 100);
+        assert!(state.is_enabled());
+        assert!(at_threshold.is_empty());
+
+        // floor(11 * 2.5) = 27, which is above the same 25-char definition.
+        let mut below_threshold = tools_to_wire(&tools, &opts()).await;
+        apply_defer_loading_with_context(&mut below_threshold, &tools, &state, 110);
+        assert!(!state.is_enabled());
+        assert_eq!(below_threshold.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn automatic_threshold_prefers_exact_token_count_over_char_fallback() {
+        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(DeferStub {
+            name: "Task",
+            defer: true,
+        })];
+        let state = DeferralState::new(ToolSearchMode::Auto { percentage: 10 }, false);
+
+        // The 25-character fallback would enable at this 100-token context,
+        // but an exact count below the 10-token threshold must win.
+        let mut below = tools_to_wire(&tools, &opts()).await;
+        apply_defer_loading_with_context_and_tokens(&mut below, &tools, &state, 100, Some(9));
+        assert!(!state.is_enabled());
+        assert_eq!(below.len(), 1);
+
+        let mut equal = tools_to_wire(&tools, &opts()).await;
+        apply_defer_loading_with_context_and_tokens(&mut equal, &tools, &state, 100, Some(10));
+        assert!(state.is_enabled());
+        assert!(equal.is_empty());
     }
 }

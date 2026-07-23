@@ -9,7 +9,7 @@ mod tests {
     use crate::{
         AuthStrategy, BoxFuture, Capabilities, ClientConfig, CredentialConfig, LlmError,
         ModelProfile, PricingConfig, ProtocolFamily, ProviderId, ProviderProfile, ProviderRequest,
-        ProviderResponse, StreamingResponse,
+        ProviderResponse, StreamingResponse, ToolDeclaration,
     };
     use std::collections::BTreeMap;
     use std::sync::Mutex;
@@ -955,6 +955,50 @@ mod tests {
     }
 
     #[test]
+    fn live_thinking_update_applies_to_the_next_request() {
+        let _g = THINKING_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_thinking_env();
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let service = make_adapter(transport);
+
+        service.set_thinking(crate::model::thinking::ThinkingConfig::Enabled {
+            budget_tokens: 4_096,
+        });
+        let enabled = service
+            .build_request(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                vec![],
+                vec![],
+                false,
+                None,
+            )
+            .expect("enabled request");
+        assert_eq!(
+            enabled.reasoning,
+            Some(crate::ReasoningConfig::Enabled {
+                budget_tokens: 4_096
+            })
+        );
+
+        service.set_thinking(crate::model::thinking::ThinkingConfig::Disabled);
+        let disabled = service
+            .build_request(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                vec![],
+                vec![],
+                false,
+                None,
+            )
+            .expect("disabled request");
+        assert!(disabled.reasoning.is_none());
+        clear_thinking_env();
+    }
+
+    #[test]
     fn build_request_disable_thinking_env_drops_reasoning_sets_temperature() {
         let _g = THINKING_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_thinking_env();
@@ -1079,12 +1123,12 @@ mod tests {
         std::env::remove_var("CLAUDE_CODE_EXTRA_METADATA");
         // No extra → exactly the three canonical keys, in order, compact JSON.
         assert_eq!(
-            ApiService::build_api_metadata_user_id("dev123", "acct-9", "sess-1"),
+            ApiService::build_api_metadata_user_id("dev123", "acct-9", "sess-1", None),
             r#"{"device_id":"dev123","account_uuid":"acct-9","session_id":"sess-1"}"#
         );
         // Empty account_uuid (the `?? ''` branch) still emits the key.
         assert_eq!(
-            ApiService::build_api_metadata_user_id("d", "", "s"),
+            ApiService::build_api_metadata_user_id("d", "", "s", None),
             r#"{"device_id":"d","account_uuid":"","session_id":"s"}"#
         );
         // Valid extra object is spread FIRST; a colliding key keeps its first
@@ -1094,16 +1138,62 @@ mod tests {
             r#"{"team":"core","device_id":"override"}"#,
         );
         assert_eq!(
-            ApiService::build_api_metadata_user_id("dev", "acct", "sess"),
+            ApiService::build_api_metadata_user_id("dev", "acct", "sess", None),
             r#"{"team":"core","device_id":"dev","account_uuid":"acct","session_id":"sess"}"#
         );
         // Invalid extra (not a JSON object) is ignored.
         std::env::set_var("CLAUDE_CODE_EXTRA_METADATA", "not json");
         assert_eq!(
-            ApiService::build_api_metadata_user_id("d", "a", "s"),
+            ApiService::build_api_metadata_user_id("d", "a", "s", None),
             r#"{"device_id":"d","account_uuid":"a","session_id":"s"}"#
         );
+        assert_eq!(
+            ApiService::build_api_metadata_user_id("d", "a", "s", Some("parent")),
+            r#"{"device_id":"d","account_uuid":"a","session_id":"s","parent_session_id":"parent"}"#
+        );
         std::env::remove_var("CLAUDE_CODE_EXTRA_METADATA");
+    }
+
+    #[test]
+    fn fallback_signature_stripping_only_changes_assistant_authenticated_blocks() {
+        let text = || crate::ContentBlock::Text {
+            text: "keep".to_string(),
+            cache_control: None,
+        };
+        let mut messages = vec![
+            crate::Message {
+                role: "assistant".to_string(),
+                content: vec![
+                    text(),
+                    crate::ContentBlock::Reasoning {
+                        text: "secret".to_string(),
+                        signature: Some("sig".to_string()),
+                    },
+                    crate::ContentBlock::RedactedThinking {
+                        data: "opaque".to_string(),
+                    },
+                    crate::ContentBlock::ConnectorText {
+                        connector_text: "connector".to_string(),
+                        signature: Some("sig".to_string()),
+                    },
+                ],
+            },
+            crate::Message {
+                role: "user".to_string(),
+                content: vec![crate::ContentBlock::Reasoning {
+                    text: "leave non-assistant untouched".to_string(),
+                    signature: Some("sig".to_string()),
+                }],
+            },
+        ];
+
+        strip_signature_blocks(&mut messages);
+
+        assert_eq!(messages[0].content, vec![text()]);
+        assert!(matches!(
+            messages[1].content.as_slice(),
+            [crate::ContentBlock::Reasoning { .. }]
+        ));
     }
 
     // ── CLAUDE_CODE_EXTRA_BODY merge (claude-code B0t; parity 2.1.207) ────────
@@ -1285,6 +1375,38 @@ mod tests {
         assert!(r3.get("anthropic_beta").is_none());
 
         std::env::remove_var("CLAUDE_CODE_EXTRA_BODY");
+    }
+
+    #[tokio::test]
+    async fn bedrock_tool_search_beta_is_in_request_body() {
+        if traits::env::is_env_truthy(
+            std::env::var("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS")
+                .ok()
+                .as_deref(),
+        ) {
+            return;
+        }
+        let _g = THINKING_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("CLAUDE_CODE_EXTRA_BODY");
+        let adapter = make_adapter_for_protocol(
+            ProtocolFamily::BedrockClaude,
+            ProviderId::OpenAICompatible {
+                name: "bedrock-claude".to_string(),
+            },
+            "https://bedrock-runtime.us-east-1.amazonaws.com",
+        );
+        let mut request = LlmRequest::new("model").with_user_text("hi");
+        request.tools.push(ToolDeclaration {
+            name: "ToolSearch".to_string(),
+            description: "discover tools".to_string(),
+            input_schema: serde_json::json!({"type": "object"}),
+            ..Default::default()
+        });
+        let body = body_after_inject(&adapter, &request).await;
+        assert!(body["anthropic_beta"].as_array().is_some_and(|betas| betas
+            .iter()
+            .any(|beta| { beta.as_str() == Some(crate::model::betas::TOOL_SEARCH_TOOL_3P) })));
+        assert!(body.get("anthropic-beta").is_none());
     }
 
     #[tokio::test]
@@ -1528,7 +1650,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn anthropic_beta_header_is_protocol_scoped() {
+    async fn anthropic_beta_header_is_anthropic_family_and_provider_scoped() {
         let anthropic_headers = headers_after_inject_for_protocol(
             ProtocolFamily::AnthropicMessages,
             ProviderId::AnthropicFirstParty,
@@ -1536,6 +1658,32 @@ mod tests {
         )
         .await;
         assert!(anthropic_headers.contains_key("anthropic-beta"));
+
+        for (protocol, base_url, name) in [
+            (
+                ProtocolFamily::FoundryClaude,
+                "https://example.services.ai.azure.com/anthropic",
+                "foundry-claude",
+            ),
+            (
+                ProtocolFamily::VertexClaude,
+                "https://us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1",
+                "vertex-claude",
+            ),
+        ] {
+            let headers = headers_after_inject_for_protocol(
+                protocol,
+                ProviderId::OpenAICompatible {
+                    name: name.to_string(),
+                },
+                base_url,
+            )
+            .await;
+            assert!(
+                headers.contains_key("anthropic-beta"),
+                "{name} must receive its provider-specific beta header: {headers:?}"
+            );
+        }
 
         let routes = [
             (
@@ -1562,11 +1710,6 @@ mod tests {
                 ProtocolFamily::BedrockClaude,
                 "https://bedrock-runtime.us-east-1.amazonaws.com",
                 "bedrock-claude",
-            ),
-            (
-                ProtocolFamily::VertexClaude,
-                "https://us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1/publishers/anthropic/models/model:rawPredict",
-                "vertex-claude",
             ),
             (
                 ProtocolFamily::VertexGemini,
@@ -4286,5 +4429,53 @@ mod tests {
 
         // Never capped below the 4096 floor, even when input nearly fills context.
         assert_eq!(bound_output_to_context(64_000, 200_000, 199_000), 4_096);
+    }
+
+    #[test]
+    fn custom_context_beta_controls_request_output_bound() {
+        // 720k ASCII bytes ≈ 180k input tokens. In the default 200k window the
+        // model's 32k output allowance must be context-capped; with the 1M beta
+        // the complete model allowance fits unchanged.
+        let messages = vec![text_user_msg(&"x".repeat(720_000))];
+        let without = make_adapter(FakeTransport::always(ProviderResponse::json(
+            200,
+            ok_response_json(),
+        )));
+        let default_req = without
+            .build_request(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                messages.clone(),
+                Vec::new(),
+                false,
+                None,
+            )
+            .expect("default request");
+        assert!(default_req.max_tokens.expect("max tokens") < 32_000);
+
+        let with_beta = make_adapter(FakeTransport::always(ProviderResponse::json(
+            200,
+            ok_response_json(),
+        )))
+        .with_custom_cli_betas(vec![
+            crate::model::context_window::CONTEXT_1M_BETA_HEADER.to_string(),
+        ]);
+        assert_eq!(
+            with_beta.active_custom_betas(),
+            [crate::model::context_window::CONTEXT_1M_BETA_HEADER]
+        );
+        let beta_req = with_beta
+            .build_request(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                messages,
+                Vec::new(),
+                false,
+                None,
+            )
+            .expect("1m request");
+        assert_eq!(beta_req.max_tokens, Some(32_000));
     }
 }

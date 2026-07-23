@@ -215,6 +215,8 @@ fn agent_tool_request() -> SubagentSpawnRequest {
         model_profile: None,
         name: None,
         team_name: None,
+        creator_teammate_name: None,
+        creator_team_name: None,
         mode: None,
         isolation: None,
         cwd: None,
@@ -305,9 +307,9 @@ async fn pool_starvation_shared_pool_would_starve_agent_tool() {
         .await
         .expect_err("a shared, teammate-saturated pool rejects the subagent spawn");
 
-    // `PoolSubagentSpawner` maps the pool's `TooManyAgents` onto `Runtime`.
+    // `PoolSubagentSpawner` preserves the pool-capacity condition as PoolFull.
     assert!(
-        matches!(err, traits::subagent_spawn::SubagentSpawnError::Runtime(_)),
+        matches!(err, traits::subagent_spawn::SubagentSpawnError::PoolFull),
         "shared-pool spawn fails pool-full; got {err:?}"
     );
     // The spawn never reached the runner, so no model round-trip occurred.

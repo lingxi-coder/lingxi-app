@@ -113,6 +113,8 @@ impl SubagentSpawner for BackgroundAgentSpawner {
                     // Stamp the originating tool_use_id so the task-notification
                     // carries `<tool-use-id>` (claude-code parity).
                     tool_use_id: request.tool_use_id.clone(),
+                    creator_teammate_name: request.creator_teammate_name.clone(),
+                    creator_team_name: request.creator_team_name.clone(),
                     // LocalAgent is a lifecycle wrapper, not a second spawn
                     // surface: retain every resolved Agent option verbatim.
                     spawn_request: Some(request.clone()),
@@ -150,7 +152,13 @@ impl SubagentSpawner for BackgroundAgentSpawner {
             run_teammate_pump(mailbox, pump_task_id, seam).await;
             router.unregister(&agent_id).await;
         });
-        let _ = self.runtime.spawn("bg-agent-pump", pump).await;
+        if let Err(e) = self.runtime.spawn("bg-agent-pump", pump).await {
+            self.mailbox_router.unregister(&agent_id).await;
+            let _ = self.registry.kill(&task_id).await;
+            return Err(SubagentSpawnError::Runtime(format!(
+                "failed to start background agent pump: {e}"
+            )));
+        }
 
         // The spool the handler already allocated (deterministic from task_id).
         let output_file = self
@@ -171,7 +179,12 @@ impl SubagentSpawner for BackgroundAgentSpawner {
 mod tests {
     use super::*;
     use std::any::Any;
+    use std::collections::HashMap;
+    use std::future::Future;
     use std::path::PathBuf;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
 
     use platform_posix::PosixFileSystem;
@@ -180,8 +193,10 @@ mod tests {
     use tasks::task_trait::{Task, TaskContext, TaskError, TaskHandle};
     use tasks::TaskType;
     use test_harness::mocks::MockRuntimeSpawner;
+    use tokio::task::JoinHandle;
     use traits::budget::{BudgetEnforcerHandle, BudgetError};
     use traits::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
+    use traits::{BackgroundTaskHandle, RuntimeError};
 
     /// Records the `is_backgrounded` flag the decorator spawned with, returning
     /// a fixed task id (the spool path is pure `path_for`, so no I/O needed).
@@ -189,6 +204,7 @@ mod tests {
     /// [`TaskError`] so a test can drive the pump's terminal-stop path.
     struct RecordingHandler {
         seen_backgrounded: Arc<StdMutex<Option<bool>>>,
+        killed_ids: Arc<StdMutex<Vec<String>>>,
         /// When `true`, `send_message` returns [`TaskError::TerminatedTask`]
         /// (the "runner is gone" signal) so a delivered message drives the pump
         /// to stop → the decorator unregisters the mailbox.
@@ -218,7 +234,8 @@ mod tests {
                 cleanup: None,
             })
         }
-        async fn kill(&self, _task_id: &str, _ctx: TaskContext) -> Result<(), TaskError> {
+        async fn kill(&self, task_id: &str, _ctx: TaskContext) -> Result<(), TaskError> {
+            self.killed_ids.lock().unwrap().push(task_id.to_string());
             Ok(())
         }
         fn supports_messages(&self) -> bool {
@@ -234,6 +251,56 @@ mod tests {
                 Err(TaskError::TerminatedTask)
             } else {
                 Ok(())
+            }
+        }
+    }
+
+    /// Fails only the mailbox-pump spawn while otherwise behaving like the
+    /// tokio-backed mock runtime.
+    struct FailingPumpRuntime {
+        next_id: AtomicU64,
+        handles: StdMutex<HashMap<u64, JoinHandle<()>>>,
+    }
+
+    impl Default for FailingPumpRuntime {
+        fn default() -> Self {
+            Self {
+                next_id: AtomicU64::new(1),
+                handles: StdMutex::new(HashMap::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl RuntimeSpawner for FailingPumpRuntime {
+        async fn spawn(
+            &self,
+            name: &str,
+            task: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
+        ) -> Result<BackgroundTaskHandle, RuntimeError> {
+            if name == "bg-agent-pump" {
+                return Err(RuntimeError::Internal("pump spawn failed".into()));
+            }
+            let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+            let handle = tokio::spawn(task);
+            self.handles.lock().unwrap().insert(id, handle);
+            Ok(BackgroundTaskHandle {
+                task_name: name.to_string(),
+                task_id: id,
+            })
+        }
+
+        async fn sleep(&self, duration: std::time::Duration) {
+            tokio::time::sleep(duration).await;
+        }
+
+        async fn cancel(&self, handle: &BackgroundTaskHandle) -> Result<(), RuntimeError> {
+            let task = self.handles.lock().unwrap().remove(&handle.task_id);
+            if let Some(task) = task {
+                task.abort();
+                Ok(())
+            } else {
+                Err(RuntimeError::NotFound(handle.task_name.clone()))
             }
         }
     }
@@ -290,6 +357,8 @@ mod tests {
             run_in_background: true,
             name: name.map(str::to_string),
             team_name: None,
+            creator_teammate_name: None,
+            creator_team_name: None,
             mode: None,
             isolation: None,
             cwd: None,
@@ -325,6 +394,7 @@ mod tests {
             TaskType::LocalAgent,
             Arc::new(RecordingHandler {
                 seen_backgrounded: seen.clone(),
+                killed_ids: Arc::new(StdMutex::new(Vec::new())),
                 terminate_on_message: false,
             }),
         );
@@ -394,6 +464,7 @@ mod tests {
             TaskType::LocalAgent,
             Arc::new(RecordingHandler {
                 seen_backgrounded: seen.clone(),
+                killed_ids: Arc::new(StdMutex::new(Vec::new())),
                 // A delivered message ⇒ TerminatedTask ⇒ the pump stops.
                 terminate_on_message: true,
             }),
@@ -455,6 +526,68 @@ mod tests {
             mailbox_router.resolve_name("bg2").await,
             None,
             "name index cleared after the agent terminated"
+        );
+    }
+
+    /// If the mailbox pump cannot be started, async launch must roll back: no
+    /// success result, no lingering mailbox/name route, and the just-created
+    /// task is killed immediately.
+    #[tokio::test]
+    async fn spawn_async_rolls_back_when_pump_spawn_fails() {
+        let runtime: Arc<dyn RuntimeSpawner> = Arc::new(FailingPumpRuntime::default());
+        let dir = tempfile::tempdir().unwrap();
+        let fs = Arc::new(PosixFileSystem::new(PathBuf::from(dir.path())));
+        let output_manager = Arc::new(TaskOutputManager::new(
+            PathBuf::from(dir.path()),
+            fs.clone(),
+        ));
+        let mut reg = TaskRegistry::new(runtime.clone(), fs, output_manager);
+        let seen = Arc::new(StdMutex::new(None));
+        let killed = Arc::new(StdMutex::new(Vec::new()));
+        reg.register_handler(
+            TaskType::LocalAgent,
+            Arc::new(RecordingHandler {
+                seen_backgrounded: seen.clone(),
+                killed_ids: killed.clone(),
+                terminate_on_message: false,
+            }),
+        );
+        let registry = Arc::new(reg);
+        let mailbox_router = Arc::new(MailboxRouter::new());
+
+        let deco = BackgroundAgentSpawner {
+            inner: Arc::new(InertSpawner),
+            registry,
+            mailbox_router: mailbox_router.clone(),
+            runtime,
+        };
+        let inherit = SubagentInheritance {
+            tool_invoker: Arc::new(MockInvoker),
+            budget: Arc::new(MockBudget),
+        };
+
+        let err = deco
+            .spawn_async(request(Some("bg-fail")), inherit)
+            .await
+            .expect_err("pump spawn failure must roll back the async launch");
+
+        assert!(
+            err.to_string()
+                .contains("failed to start background agent pump"),
+            "error should explain the rollback cause: {err}"
+        );
+        assert_eq!(
+            *seen.lock().unwrap(),
+            Some(true),
+            "the task was created before rollback"
+        );
+        assert!(
+            mailbox_router.resolve_name("bg-fail").await.is_none(),
+            "name route rolled back on failure"
+        );
+        assert!(
+            killed.lock().unwrap().iter().any(|id| id == "a-bg-test-1"),
+            "rollback must kill the just-created task"
         );
     }
 }

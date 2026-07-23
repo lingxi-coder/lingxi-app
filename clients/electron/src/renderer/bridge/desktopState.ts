@@ -1,6 +1,8 @@
 import type {
   ClientEvent,
   DoctorReportDto,
+  SlashCommandDto,
+  PermissionModeId,
   SessionRowDto,
   StatusSnapshotDto,
   TaskRowDto,
@@ -17,6 +19,8 @@ export interface DesktopState {
   readonly activeSessionId: string | null;
   readonly models: string[];
   readonly currentModel: string | null;
+  readonly permissionMode: PermissionModeId;
+  readonly slashCommands: SlashCommandDto[];
   readonly tasks: Readonly<Record<string, TaskRowDto>>;
   readonly taskOutput: Readonly<Record<string, TaskOutputState>>;
   readonly status: StatusSnapshotDto | null;
@@ -29,6 +33,8 @@ export function emptyDesktopState(): DesktopState {
     activeSessionId: null,
     models: [],
     currentModel: null,
+    permissionMode: 'default',
+    slashCommands: [],
     tasks: {},
     taskOutput: {},
     status: null,
@@ -55,6 +61,8 @@ export function reduceDesktopEvent(state: DesktopState, event: ClientEvent): Des
       return { ...state, models: [...event.models], currentModel: event.current };
     case 'model_changed':
       return { ...state, currentModel: event.model };
+    case 'permission_mode_changed':
+      return { ...state, permissionMode: event.mode };
     case 'task_row':
       return { ...state, tasks: { ...state.tasks, [event.task.task_id]: event.task } };
     case 'task_status_changed': {
@@ -81,6 +89,9 @@ export function reduceDesktopEvent(state: DesktopState, event: ClientEvent): Des
       return { ...state, status: event.snapshot };
     case 'doctor_report':
       return { ...state, doctor: event.report };
+    case 'slash_command_catalog':
+    case 'commands_changed':
+      return { ...state, slashCommands: [...event.commands] };
     default:
       return state;
   }

@@ -59,7 +59,7 @@ pub enum AttachInput {
     Bytes(Vec<u8>),
     /// Terminal resize (`SIGWINCH`/ConPTY resize) from the attached client.
     Resize { cols: u16, rows: u16 },
-    /// The controller explicitly detached (Ctrl-]).
+    /// The controller explicitly detached (Ctrl-Z).
     Detach,
     /// The controller connection ended, cleanly or unexpectedly.
     ClientDetached,
@@ -152,7 +152,7 @@ mod unix {
     const ATTACH_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
     const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
     const CLIENT_POLL_INTERVAL: Duration = Duration::from_millis(40);
-    const DETACH_BYTE: u8 = 0x1d; // Ctrl-]
+    const DETACH_BYTE: u8 = 0x1a; // Ctrl-Z
 
     const FRAME_OUTPUT: u8 = 1;
     const FRAME_INPUT_BYTES: u8 = 2;
@@ -866,7 +866,7 @@ mod unix {
     }
 
     /// Connect to a live background PTY. Local stdin is read as raw bytes; the
-    /// only locally-consumed byte is Ctrl-] (`0x1d`).
+    /// only locally-consumed byte is Ctrl-Z (`0x1a`).
     pub fn attach_to_socket(
         path: &std::path::Path,
         auth: &str,
@@ -1336,7 +1336,7 @@ mod unix {
         }
 
         #[test]
-        fn ctrl_right_bracket_is_the_only_locally_consumed_byte() {
+        fn ctrl_z_is_the_only_locally_consumed_byte() {
             let bytes = [0x1b, 0x03, 0x04, b'a', DETACH_BYTE, b'b'];
             let (forwarded, detach) = split_at_detach(&bytes);
             assert_eq!(forwarded, &[0x1b, 0x03, 0x04, b'a']);
@@ -1402,7 +1402,7 @@ mod windows {
     const CLIENT_POLL_INTERVAL: Duration = Duration::from_millis(20);
     const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
     const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
-    const DETACH_BYTE: u8 = 0x1d;
+    const DETACH_BYTE: u8 = 0x1a; // Ctrl-Z
 
     const FRAME_OUTPUT: u8 = 1;
     const FRAME_INPUT_BYTES: u8 = 2;

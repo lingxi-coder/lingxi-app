@@ -20,7 +20,7 @@ pub mod auto_background;
 pub mod large_output;
 pub mod mcp_tool;
 pub mod transform_result;
-pub use large_output::process_mcp_result;
+pub use large_output::{process_mcp_result, process_mcp_result_with_exact_count};
 pub use mcp_tool::{
     build_registered_mcp_tools, ListMcpResourcesTool, MCPTool, McpAuthTool, ReadMcpResourceTool,
 };

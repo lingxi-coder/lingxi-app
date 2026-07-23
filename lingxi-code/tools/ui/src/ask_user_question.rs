@@ -29,18 +29,19 @@
 //! - [`DefaultTimeoutResolver`] — the **production** resolver wired at
 //!   `lib.rs` registration. It respects `askUserQuestionTimeout`: in an
 //!   interactive session `never` ⇒ do NOT synthesize an answer (returns a
-//!   `ToolError`, blocking pending the live TUI prompt), while a duration ⇒
+//!   `ToolError`, matching non-TUI hosts with no answering UI), while a duration ⇒
 //!   synthesize the afk auto-advance answer after the idle window elapses. In a
 //!   non-interactive (`--print`) session it falls back to first-option so
 //!   headless runs never block.
+//! - [`TuiBridgeResolver`] — a session-scoped interactive resolver for the
+//!   mounted Ratatui bottom-pane questionnaire view. It preserves the same
+//!   timeout semantics but routes the question set through the live UI.
 //! - Production hosts may still override via [`AskUserQuestionTool::with_resolver`].
 //!
-//! REMAINING (out of scope here): the live TUI countdown widget itself —
-//! rendering "auto-continue in Ns … any key to stay", collecting the user's
-//! real selections, and the `tengu_ask_user_question_afk_auto_advance` /
-//! `_accepted` / `_rejected` / `_skipped` telemetry. Until it lands, an
-//! interactive `never` prompt surfaces a `ToolError` rather than a live
-//! selection UI.
+//! The live TUI renders the countdown, collects real option/custom-text
+//! selections, and resolves the bridge. The remaining parity item is the
+//! `tengu_ask_user_question_afk_auto_advance` / `_accepted` / `_rejected` /
+//! `_skipped` telemetry.
 //!
 //! Fidelity notes / divergences (see Batch 5 spec):
 //! - TS `checkPermissions` uses `behavior:'ask'` ("Answer questions?"); the Rust
@@ -69,7 +70,9 @@ use telemetry::tengu::tool::{
     ASK_USER_QUESTION_COMPLETED, ASK_USER_QUESTION_FAILED, ASK_USER_QUESTION_STARTED,
 };
 use telemetry::AnalyticsBus;
+use tui_core::ask_user_question_bridge::{AskOption, AskQuestion, AskUserQuestionExchange};
 
+use tokio::sync::mpsc;
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
@@ -244,6 +247,26 @@ fn first_option_answers(questions: &[Question]) -> HashMap<String, String> {
 /// behavior, and the point that stops the old silent auto-continue.
 const ASK_USER_QUESTION_BLOCKED_MESSAGE: &str = "AskUserQuestion requires an interactive user selection but no live prompt UI is available in this session (askUserQuestionTimeout=never ⇒ no auto-continue)";
 
+fn to_bridge_questions(questions: &[Question]) -> Vec<AskQuestion> {
+    questions
+        .iter()
+        .map(|question| AskQuestion {
+            question: question.question.clone(),
+            header: question.header.clone(),
+            options: question
+                .options
+                .iter()
+                .map(|option| AskOption {
+                    label: option.label.clone(),
+                    description: option.description.clone(),
+                    preview: option.preview.clone(),
+                })
+                .collect(),
+            multi_select: question.multi_select,
+        })
+        .collect()
+}
+
 /// Resolver trait — production wraps the terminal/UI permission component that
 /// collects the user's answers; the headless default synthesizes them.
 ///
@@ -259,7 +282,7 @@ pub trait AskUserQuestionResolver: Send + Sync {
     ///
     /// # Errors
     /// Implementations may surface `ToolError` if the prompt fails or if an
-    /// interactive prompt has no answering UI (see [`DefaultTimeoutResolver`]).
+    /// interactive host has no answering UI (see [`DefaultTimeoutResolver`]).
     async fn resolve(
         &self,
         questions: &[Question],
@@ -292,7 +315,7 @@ impl AskUserQuestionResolver for FirstOptionResolver {
 ///   first-option so headless runs never hang.
 /// - **Interactive**, timeout `never`: return a `ToolError`
 ///   ([`ASK_USER_QUESTION_BLOCKED_MESSAGE`]) — the tool does NOT synthesize an
-///   answer, blocking pending the live TUI prompt (the residual work).
+///   answer when no live resolver is available.
 /// - **Interactive**, timeout `60s`/`5m`/`10m`: wait the idle window, then
 ///   synthesize the afk auto-advance answer (first option per question),
 ///   mirroring the oracle's "auto-continue with the answers selected so far".
@@ -326,6 +349,28 @@ impl DefaultTimeoutResolver {
     }
 }
 
+/// Production resolver that forwards interactive sessions into the mounted TUI
+/// questionnaire view through a session-scoped channel.
+pub struct TuiBridgeResolver {
+    event_tx: mpsc::Sender<AskUserQuestionExchange>,
+    timeout_secs: Option<u64>,
+}
+
+impl TuiBridgeResolver {
+    /// Build a resolver that forwards interactive questions to the provided
+    /// session-scoped TUI channel.
+    #[must_use]
+    pub fn new(
+        timeout: AskUserQuestionTimeout,
+        event_tx: mpsc::Sender<AskUserQuestionExchange>,
+    ) -> Self {
+        Self {
+            event_tx,
+            timeout_secs: timeout.idle_window().map(|window| window.as_secs()),
+        }
+    }
+}
+
 #[async_trait]
 impl AskUserQuestionResolver for DefaultTimeoutResolver {
     async fn resolve(
@@ -350,6 +395,32 @@ impl AskUserQuestionResolver for DefaultTimeoutResolver {
                 Ok(first_option_answers(questions))
             }
         }
+    }
+}
+
+#[async_trait]
+impl AskUserQuestionResolver for TuiBridgeResolver {
+    async fn resolve(
+        &self,
+        questions: &[Question],
+        non_interactive: bool,
+    ) -> Result<HashMap<String, String>, ToolError> {
+        if non_interactive {
+            return Ok(first_option_answers(questions));
+        }
+
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        let exchange = AskUserQuestionExchange {
+            questions: to_bridge_questions(questions),
+            timeout_secs: self.timeout_secs,
+            resp_tx,
+        };
+        self.event_tx.send(exchange).await.map_err(|_| {
+            ToolError::Internal("AskUserQuestion interactive prompt bridge closed".to_string())
+        })?;
+        resp_rx.await.map_err(|_| {
+            ToolError::Internal("AskUserQuestion interactive prompt dropped".to_string())
+        })
     }
 }
 

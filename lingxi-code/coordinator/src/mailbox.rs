@@ -166,6 +166,18 @@ impl MailboxRouter {
             .copied()
     }
 
+    /// Snapshot every display-name/address pair currently registered. Used by
+    /// the narrow mailbox trait's broadcast operation; the snapshot drops the
+    /// name-index lock before any mailbox delivery awaits.
+    pub async fn named_recipients(&self) -> Vec<(String, AgentId)> {
+        self.names
+            .read()
+            .await
+            .iter()
+            .map(|(name, id)| (name.clone(), *id))
+            .collect()
+    }
+
     /// Look up the mailbox registered for `agent_id`, if any.
     ///
     /// Returns a clone of the `Arc<TeammateMailbox>` so the caller (the

@@ -70,10 +70,9 @@ pub enum TokenClass {
     /// in the API response (binary `B2u`, offset 195362200). Billed at a higher rate
     /// than the standard 5-minute cache write tier (e.g. sonnet: $6/Mtok vs $3.75/Mtok).
     ///
-    /// The API field `cache_creation.ephemeral_1h_input_tokens` is parsed by the
-    /// llm-client Anthropic codec and mapped to this token class when present.
-    /// TODO: wire `ephemeral_1h_input_tokens` parsing in the Anthropic usage codec
-    /// (llm-client/src/providers/anthropic.rs) once the field is confirmed live.
+    /// The API field `cache_creation.ephemeral_1h_input_tokens` is retained by
+    /// the llm-client Anthropic codec and mapped to this token class by the
+    /// orchestrator cost bridge when present.
     CacheWrite1h,
 }
 
@@ -500,8 +499,8 @@ impl PricingCatalog {
         //   Voe ($5/$25 Opus tier):   6.25  → 1h-column = 10      → 10_000
         //   H6s ($30/$150 fast):      37.5  → 1h-column = 60      → 60_000
         //   Ypn ($10/$50):            12.5  → 1h-column = 20      → 20_000
-        // We store these here so the cost crate has the rate; actual API-field parsing
-        // of `ephemeral_1h_input_tokens` is TODO in llm-client (see `CacheWrite1h` doc).
+        // The orchestrator cost bridge maps Anthropic's retained
+        // `ephemeral_1h_input_tokens` metadata into this dedicated class.
         let cache_write_1h_per_mtok = match cache_write_per_mtok_milli_usd {
             // $3.75/Mtok → 5m tier → $6/Mtok 1h (sonnet/3-5/3-7/sonnet-4 tiers)
             3_750 => 6_000,

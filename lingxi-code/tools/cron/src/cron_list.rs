@@ -1,5 +1,5 @@
-//! `CronListTool` — list every scheduled cron job by reading the single
-//! project-relative `<root>/.lingxi/scheduled_tasks.json` file.
+//! `CronListTool` — list durable jobs from the project tasks file plus
+//! session-only jobs owned by the live scheduler.
 //!
 //! 1:1 parity port of claude-code `CronListTool.ts`. Returns a `jobs` array of
 //! `{id, cron, humanSchedule, prompt, recurring?, durable?}` plus a flattened
@@ -16,6 +16,8 @@ use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Map, Value};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use telemetry::tengu::tool::{CRON_LIST_COMPLETED, CRON_LIST_STARTED};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
@@ -46,21 +48,24 @@ static SCHEMA: Lazy<Value> = Lazy::new(|| {
 ///
 /// Port of claude-code `utils/truncate.ts` `truncateToWidth`.
 ///
-/// PARITY-GAP: TS uses `stringWidth` (terminal cell width — CJK glyphs count
-/// as 2) plus a grapheme segmenter; this seam has no ink/`stringWidth`
-/// dependency, so we count Unicode scalar values (chars). Equivalent for the
-/// ASCII prompts cron jobs carry in practice.
 fn truncate_to_width(s: &str, max_width: usize) -> String {
-    if s.chars().count() <= max_width {
+    if UnicodeWidthStr::width(s) <= max_width {
         return s.to_string();
     }
     if max_width <= 1 {
         return "\u{2026}".to_string();
     }
-    // TS walks graphemes accumulating `stringWidth`, breaking before exceeding
-    // `maxWidth - 1`. Counting each char as width 1 collapses that to taking
-    // the first `max_width - 1` chars, then appending the ellipsis.
-    let mut result: String = s.chars().take(max_width - 1).collect();
+    let available = max_width - 1;
+    let mut used = 0;
+    let mut result = String::new();
+    for grapheme in s.graphemes(true) {
+        let width = UnicodeWidthStr::width(grapheme);
+        if used + width > available {
+            break;
+        }
+        result.push_str(grapheme);
+        used += width;
+    }
     result.push('\u{2026}');
     result
 }
@@ -70,12 +75,12 @@ fn truncate_to_width(s: &str, max_width: usize) -> String {
 fn truncate_single_line(s: &str, max_width: usize) -> String {
     if let Some(idx) = s.find('\n') {
         let head = &s[..idx];
-        if head.chars().count() + 1 > max_width {
+        if UnicodeWidthStr::width(head) + 1 > max_width {
             return truncate_to_width(head, max_width);
         }
         return format!("{head}\u{2026}");
     }
-    if s.chars().count() <= max_width {
+    if UnicodeWidthStr::width(s) <= max_width {
         return s.to_string();
     }
     truncate_to_width(s, max_width)
@@ -86,7 +91,7 @@ fn truncate_single_line(s: &str, max_width: usize) -> String {
 /// jobs. Every persisted task is durable by definition, so the `durable:false`
 /// key (CronListTool.ts' `durable === false` spread, which only applies to the
 /// separate in-memory session tasks) is never emitted here.
-async fn read_all_jobs(fs: &dyn traits::FileSystem, project_root: &Path) -> Vec<Value> {
+async fn read_durable_jobs(fs: &dyn traits::FileSystem, project_root: &Path) -> Vec<Value> {
     let body = match cron::tasks_file::read_tasks_body(fs, project_root).await {
         Ok(b) => b,
         Err(_) => return Vec::new(), // file absent → no jobs
@@ -109,6 +114,57 @@ async fn read_all_jobs(fs: &dyn traits::FileSystem, project_root: &Path) -> Vec<
             Value::Object(obj)
         })
         .collect();
+    jobs.sort_by(|a, b| {
+        a.get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .cmp(b.get("id").and_then(Value::as_str).unwrap_or(""))
+    });
+    jobs
+}
+
+fn teammate_owner(ctx: &ToolUseContext) -> Option<String> {
+    ctx.agent_name.as_ref().map(|name| {
+        ctx.agent_id
+            .map_or_else(|| name.clone(), |agent_id| agent_id.to_string())
+    })
+}
+
+async fn read_all_jobs(
+    tool_ctx: &tool_api::BuiltinToolContext,
+    call_ctx: &ToolUseContext,
+) -> Vec<Value> {
+    let owner = teammate_owner(call_ctx);
+    let mut jobs = if owner.is_none() {
+        read_durable_jobs(tool_ctx.fs.as_ref(), &tool_ctx.cwd()).await
+    } else {
+        Vec::new()
+    };
+    if let Some(registry) = &tool_ctx.task_registry {
+        if let Ok(session) = cron::session_jobs(registry).await {
+            jobs.extend(
+                session
+                    .into_iter()
+                    .filter(|task| {
+                        owner
+                            .as_deref()
+                            .is_none_or(|owner| task.owner.as_deref() == Some(owner))
+                    })
+                    .map(|task| {
+                        let mut obj = Map::new();
+                        obj.insert("id".into(), json!(task.id));
+                        obj.insert("cron".into(), json!(task.cron));
+                        obj.insert("humanSchedule".into(), json!(cron_to_human(&task.cron)));
+                        obj.insert("prompt".into(), json!(task.prompt));
+                        if task.recurring {
+                            obj.insert("recurring".into(), json!(true));
+                        }
+                        obj.insert("durable".into(), json!(false));
+                        Value::Object(obj)
+                    }),
+            );
+        }
+    }
     jobs.sort_by(|a, b| {
         a.get("id")
             .and_then(Value::as_str)
@@ -226,7 +282,7 @@ impl Tool for CronListTool {
     async fn call(
         &self,
         _input: Value,
-        _ctx: ToolUseContext,
+        call_ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let started = Instant::now();
@@ -234,11 +290,7 @@ impl Tool for CronListTool {
 
         bus.log_event(CRON_LIST_STARTED, HashMap::new()).await;
 
-        // PARITY-GAP: TS filters to the calling teammate's own crons
-        // (`ctx ? allTasks.filter(t => t.agentId === ctx.agentId) : allTasks`).
-        // There is no teammate context in this Rust seam, so every persisted
-        // job is listed.
-        let jobs = read_all_jobs(self.ctx.fs.as_ref(), &self.ctx.cwd()).await;
+        let jobs = read_all_jobs(&self.ctx, &call_ctx).await;
         let content = render_result(&jobs);
 
         let mut md: LogEventMetadata = HashMap::new();
@@ -325,6 +377,24 @@ mod tests {
             truncate_single_line("line one\nline two", 80),
             "line one\u{2026}"
         );
+        // CJK occupies two terminal cells per glyph: 39 glyphs (78 cells) plus
+        // the one-cell ellipsis fit in the 80-column result.
+        let wide = "你".repeat(50);
+        let out = truncate_single_line(&wide, 80);
+        assert_eq!(UnicodeWidthStr::width(out.as_str()), 79);
+        assert_eq!(out.chars().filter(|ch| *ch == '你').count(), 39);
+        assert!(out.ends_with('\u{2026}'));
+
+        // Advance by grapheme cluster, matching Intl.Segmenter: never leave a
+        // dangling ZWJ/modifier when a complex emoji hits the width boundary.
+        let family = "👨\u{200d}\u{1f469}\u{200d}\u{1f467}\u{200d}\u{1f466}";
+        let clustered = format!("{}suffix", family.repeat(50));
+        let out = truncate_single_line(&clustered, 8);
+        assert!(out.ends_with('\u{2026}'));
+        assert!(out
+            .trim_end_matches('\u{2026}')
+            .graphemes(true)
+            .all(|grapheme| grapheme == family));
     }
 
     #[tokio::test]
@@ -364,13 +434,33 @@ mod tests {
         assert_eq!(jobs[1]["id"], json!("dbbbb1111"));
         // humanSchedule rendered.
         assert_eq!(jobs[0]["humanSchedule"], json!("Every 5 minutes"));
-        assert_eq!(jobs[1]["humanSchedule"], json!("Every day at 9:00am"));
+        assert_eq!(jobs[1]["humanSchedule"], json!("Every day at 9:00 AM"));
         // recurring present (true) on both. Every persisted task is durable, so
         // the `durable` key is never emitted.
         assert_eq!(jobs[0]["recurring"], json!(true));
         assert!(jobs[0].get("durable").is_none());
         assert_eq!(jobs[1]["recurring"], json!(true));
         assert!(jobs[1].get("durable").is_none());
+    }
+
+    #[tokio::test]
+    async fn teammate_list_hides_jobs_it_does_not_own() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_tasks(
+            tmp.path(),
+            vec![task("abcdef12", "0 9 * * *", "leader job", true)],
+        )
+        .await;
+        let tool = CronListTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
+        let mut call_ctx = fresh_ctx();
+        call_ctx.agent_name = Some("researcher".into());
+
+        let out = tool
+            .call(json!({}), call_ctx, fresh_tx())
+            .await
+            .expect("list");
+        assert_eq!(out.data["jobs"], json!([]));
+        assert_eq!(out.data["content"], json!("No scheduled jobs."));
     }
 
     #[tokio::test]
@@ -400,7 +490,7 @@ mod tests {
         );
         assert_eq!(
             lines[1],
-            "dbbbb1111 \u{2014} February 28 at 2:30pm (one-shot): remind me"
+            "dbbbb1111 \u{2014} 30 14 28 2 * (one-shot): remind me"
         );
     }
 

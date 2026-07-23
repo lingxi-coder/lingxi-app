@@ -111,12 +111,35 @@ pub struct ActiveGoalSnapshot {
 /// the JSONL loader.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResumeRuntimeSnapshot {
+    /// Resolved session model to adopt on in-place resume. Empty means "leave
+    /// the current live model unchanged" for legacy/default callers.
+    pub model: String,
+    /// Provider profile that resolved `model` when it was persisted. `None`
+    /// preserves compatibility with transcripts written before profile
+    /// metadata was recorded and lets the registry resolve globally by id.
+    pub model_profile: Option<String>,
+    /// Resolved transcript effort level, when the persisted session carried
+    /// one. Present for parity plumbing; runtimes that cannot live-mutate their
+    /// provider adapter may ignore it.
+    pub effort: Option<String>,
+    /// Persisted main-thread agent type for this session. `None` means the
+    /// resumed session used default main-thread behavior.
+    pub main_thread_agent_type: Option<String>,
+    /// Integrity-checked immutable agent definition restored from the
+    /// transcript. Hosts may leave this absent for legacy transcripts; the
+    /// orchestrator then falls back to its live catalog using
+    /// [`Self::main_thread_agent_type`].
+    pub main_thread_agent_definition: Option<serde_json::Value>,
     /// Message ids hidden from the normal conversation projection.
     pub transcript_only_message_ids: Vec<protocol::MessageId>,
     /// Message ids that are compact summaries.
     pub compact_summary_message_ids: Vec<protocol::MessageId>,
     /// Tool names restored from compact-boundary ToolSearch metadata.
     pub loaded_tool_names: Vec<String>,
+    /// Exact skill bodies associated with persisted post-compact attachment
+    /// messages. The message id keeps dedup structural across hot resume;
+    /// bodies remain opaque Markdown and are never delimiter-parsed.
+    pub post_compact_skill_attachments: Vec<(protocol::MessageId, Vec<String>)>,
     /// Persisted cumulative token count discarded by compaction.
     pub cumulative_dropped_tokens: u64,
     /// Whether this session has compacted at least once.
@@ -200,6 +223,15 @@ pub enum RecapOutcome {
     Text(String),
     /// The caller aborted the recap mid-flight → the fixed cancellation line.
     Cancelled,
+}
+
+/// The current session's on-disk plan, when the plan tool has written one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanSnapshot {
+    /// Resolved plan file path (including `plansDirectory` overrides).
+    pub path: PathBuf,
+    /// UTF-8 Markdown body.
+    pub content: String,
 }
 
 /// One `/rewind` restore-point row: a user turn that has a file-history
@@ -965,6 +997,42 @@ pub trait OrchestratorHandle: Send + Sync {
         Ok(())
     }
 
+    /// Read the current session's plan file through the same plan-store path
+    /// used by the plan-mode reminder. A missing file is `Ok(None)`.
+    async fn current_plan(&self) -> Result<Option<PlanSnapshot>, HandleError> {
+        Ok(None)
+    }
+
+    /// Open the current session's plan in the configured editor.
+    async fn open_plan_editor(&self) -> Result<MemoryEditorOutcome, HandleError> {
+        Err(HandleError::Unimplemented("open_plan_editor".into()))
+    }
+
+    /// Live effort sent on the next model request (`None` = automatic).
+    async fn current_effort(&self) -> Option<String> {
+        None
+    }
+
+    /// Change the live effort for this session as well as future transcript
+    /// rows. Persistence of the default remains the slash command's concern.
+    async fn set_effort_level(&self, _effort: Option<String>) -> Result<(), HandleError> {
+        Ok(())
+    }
+
+    /// Read the live permission-mode wire id. Engines without a policy-backed
+    /// permission gate return `None`; desktop and mobile production runtimes
+    /// override this with their enforcing gate's authoritative mode.
+    async fn permission_mode(&self) -> Option<String> {
+        None
+    }
+
+    /// Change the live permission mode used by subsequent tool checks. The
+    /// default is inert so lightweight embedders remain source-compatible.
+    async fn set_permission_mode(&self, mode: &str) -> Result<(), HandleError> {
+        let _ = mode;
+        Ok(())
+    }
+
     // M5-10 additions:
 
     /// Set the orchestrator's internal `should_exit` flag.
@@ -1025,10 +1093,9 @@ pub trait OrchestratorHandle: Send + Sync {
     }
 
     /// Enable/disable a project MCP server (`/mcp enable|disable [<server>|all]`)
-    /// by writing the global config's `projects[<cwd>].disabledMcpjsonServers`
-    /// list — the same list [`mcp::apply_project_server_gate`] reads at startup,
-    /// so the change round-trips (the disabled server is skipped on the next
-    /// launch). `server = None` (or `"all"`) applies to every configured server;
+    /// in the current session and write the global config's
+    /// `projects[<cwd>].disabledMcpjsonServers` list so the change survives a
+    /// restart. `server = None` (or `"all"`) applies to every configured server;
     /// otherwise just the named one. `disabled = true` disables, `false`
     /// re-enables. Returns the affected server names (empty when no server was
     /// changed). The default (no MCP registry / config path wired) is a no-op.
@@ -1231,6 +1298,12 @@ pub trait OrchestratorHandle: Send + Sync {
         Err(HandleError::Unimplemented("generate_recap".into()))
     }
 
+    /// Generate the kebab-case title used by a bare `/rename`, without adding
+    /// the query or response to the conversation transcript.
+    async fn generate_session_name(&self) -> Result<Option<String>, HandleError> {
+        Err(HandleError::Unimplemented("generate_session_name".into()))
+    }
+
     /// Build the `/rewind` restore-point rows LIVE from the session's user turns
     /// that have a file-history checkpoint. DEFAULT is empty so impls/mocks
     /// without checkpointing compile unchanged.
@@ -1356,6 +1429,13 @@ pub enum OutputEvent {
     Text {
         /// The text payload emitted.
         text: String,
+    },
+    /// A user-visible system notice that is not assistant/model output.
+    SystemNotice {
+        /// Sanitized notice text.
+        body: String,
+        /// Whether consumers should render the notice as an error.
+        is_error: bool,
     },
     /// An allowlisted terminal escape sequence to write to the terminal
     /// (#6 main-loop parity, [`OutputStream::emit_terminal_sequence`]).
@@ -1542,6 +1622,12 @@ pub trait OutputStream: Send + Sync {
     /// to per-SSE-delta emission without changing this signature.
     async fn emit_text(&self, text: &str);
 
+    /// Emit a user-visible system notice without adding model-facing text.
+    ///
+    /// This is a default no-op so embedded consumers that do not have a
+    /// transcript/status surface remain source-compatible.
+    async fn emit_system_notice(&self, _body: &str, _is_error: bool) {}
+
     /// Emit a tool-call notification immediately before dispatch.
     ///
     /// `id` is the `tool_use_id` echoed in the matching ToolResult. Added
@@ -1608,6 +1694,12 @@ pub trait OutputStream: Send + Sync {
     /// that don't render reasoning keep compiling unchanged. The
     /// client-adapter overrides this to surface a `ClientEvent::ThinkingDelta`.
     async fn emit_thinking(&self, _thinking: &str, _signature: Option<&str>) {}
+
+    /// Update how subsequent thinking blocks are presented. `"omitted"`
+    /// suppresses them; `"summarized"` restores the sink's normal collapsed or
+    /// structured representation. The default is a no-op for sinks that never
+    /// render thinking.
+    fn set_thinking_display(&self, _mode: Option<&str>) {}
 
     /// Emit one nested execution line from a RUNNING subagent (its tool calls,
     /// as they happen) so the UI can surface the subagent's work under its

@@ -8,6 +8,7 @@ pub mod in_process_teammate;
 pub mod local_agent;
 pub mod local_bash;
 pub mod local_workflow;
+pub mod monitor;
 pub mod monitor_mcp;
 pub mod remote_agent;
 
@@ -21,4 +22,5 @@ pub use in_process_teammate::{
 pub use local_agent::LocalAgentHandler;
 pub use local_bash::{LocalBashHandler, NoopStatusSink, TaskStatusSink};
 pub use local_workflow::LocalWorkflowHandler;
+pub use monitor::MonitorHandler;
 pub use monitor_mcp::MonitorMcpHandler;

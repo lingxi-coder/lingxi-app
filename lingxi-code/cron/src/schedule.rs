@@ -1,8 +1,8 @@
 //! 5-field cron expression parser and minute-boundary matcher.
 //!
-//! Supports `*`, `*/N`, `a-b`, `n,m,k`, and exact integers per field. UTC-only
-//! decomposition is intentionally simplified for M1.17 — production swaps in
-//! the `time` crate. See plan 11.
+//! Supports `*`, `*/N`, `a-b`, `n,m,k`, and exact integers per field. Live
+//! matching uses the platform's local UTC offset (including DST); the calendar
+//! decomposition core stays UTC-pure so tests can inject a deterministic offset.
 
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, SystemTime};
@@ -286,10 +286,56 @@ pub fn local_offset_seconds(unix_secs: i64) -> i64 {
     }
 }
 
-/// Non-Unix fallback: the platform `libc::tm` has no `tm_gmtoff`, so cron
-/// evaluates in UTC there (documented divergence; local-tz on Windows is a
-/// follow-up via `GetTimeZoneInformation`).
-#[cfg(not(unix))]
+/// Windows local UTC offset at `unix_secs`, including the historical DST rule
+/// Windows applies to that instant. `SystemTimeToTzSpecificLocalTimeEx` with a
+/// null timezone pointer selects the machine's current dynamic timezone.
+#[cfg(windows)]
+pub fn local_offset_seconds(unix_secs: i64) -> i64 {
+    use windows_sys::Win32::Foundation::{FILETIME, SYSTEMTIME};
+    use windows_sys::Win32::System::Time::{
+        FileTimeToSystemTime, SystemTimeToFileTime, SystemTimeToTzSpecificLocalTimeEx,
+    };
+
+    const WINDOWS_EPOCH_OFFSET_SECS: i128 = 11_644_473_600;
+    const TICKS_PER_SECOND: i128 = 10_000_000;
+    let ticks = (i128::from(unix_secs) + WINDOWS_EPOCH_OFFSET_SECS)
+        .checked_mul(TICKS_PER_SECOND)
+        .and_then(|ticks| u64::try_from(ticks).ok());
+    let Some(ticks) = ticks else {
+        return 0;
+    };
+    let utc_file = FILETIME {
+        dwLowDateTime: ticks as u32,
+        dwHighDateTime: (ticks >> 32) as u32,
+    };
+
+    // SAFETY: all pointers refer to initialized stack values with the exact
+    // Win32 ABI layouts. Each API returns zero on conversion failure; no
+    // pointers escape the call.
+    unsafe {
+        let mut utc_system: SYSTEMTIME = std::mem::zeroed();
+        if FileTimeToSystemTime(&utc_file, &mut utc_system) == 0 {
+            return 0;
+        }
+        let mut local_system: SYSTEMTIME = std::mem::zeroed();
+        if SystemTimeToTzSpecificLocalTimeEx(std::ptr::null(), &utc_system, &mut local_system) == 0
+        {
+            return 0;
+        }
+        let mut local_file: FILETIME = std::mem::zeroed();
+        if SystemTimeToFileTime(&local_system, &mut local_file) == 0 {
+            return 0;
+        }
+        let local_ticks =
+            (u64::from(local_file.dwHighDateTime) << 32) | u64::from(local_file.dwLowDateTime);
+        let delta = i128::from(local_ticks) - i128::from(ticks);
+        i64::try_from(delta / TICKS_PER_SECOND).unwrap_or(0)
+    }
+}
+
+/// Platforms without either POSIX `localtime_r` or Win32 timezone APIs retain
+/// the UTC fallback. Current desktop targets never use this branch.
+#[cfg(not(any(unix, windows)))]
 pub fn local_offset_seconds(_unix_secs: i64) -> i64 {
     0
 }

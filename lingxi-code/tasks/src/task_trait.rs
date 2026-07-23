@@ -58,6 +58,12 @@ pub enum TaskSpawnInput {
         /// `<tool-use-id>` line (claude-code parity). `None` when not launched
         /// from a tool call.
         tool_use_id: Option<String>,
+        /// DISPLAY name of the teammate / subagent that created this background
+        /// task. Distinct from the TARGET agent name on `spawn_request.name`.
+        creator_teammate_name: Option<String>,
+        /// Team name of the teammate / subagent that created this background
+        /// task. Distinct from the TARGET team on `spawn_request.team_name`.
+        creator_team_name: Option<String>,
         /// Complete spawn request for a background Agent invocation. The
         /// duplicated state fields above remain the compact task-index surface;
         /// this preserves model/cwd/context/isolation/schema/depth overrides for
@@ -129,6 +135,17 @@ pub enum TaskSpawnInput {
         server_name: String,
         /// Resources to watch.
         watch: Vec<String>,
+    },
+    /// Spawn a shell stdout event monitor.
+    Monitor {
+        /// Shell command to execute.
+        command: String,
+        /// Optional deadline; `None` is session-persistent.
+        timeout: Option<std::time::Duration>,
+        /// Working directory inherited from the tool invocation.
+        cwd: Option<std::path::PathBuf>,
+        /// Originating assistant tool-use id.
+        tool_use_id: Option<String>,
     },
     /// Spawn a backgrounded MCP tool call (claude-code 2.1.212 `mcp_task`).
     /// Created when a single `tools/call` exceeds `getMcpAutoBackgroundMs` and

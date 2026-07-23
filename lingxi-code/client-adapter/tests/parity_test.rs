@@ -66,6 +66,7 @@ fn session_metadata_parity() {
         created: UNIX_EPOCH + Duration::from_secs(1_748_113_392),
         message_count: 1,
         path: PathBuf::from("/tmp/x.jsonl"),
+        pr_number: None,
     };
 
     let dto = lower_session_metadata(&meta);

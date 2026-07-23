@@ -37,10 +37,9 @@
 //!   from the creating teammate's identity (TS `getAgentName()` / `getTeamName()`,
 //!   `TaskCreateTool.ts:97-98`) — matching
 //!   [`OrchestratorTaskCreatedFirer`](crate::OrchestratorTaskCreatedFirer).
-//! - `TaskCompleted`: a full `HookEvent::TaskCompleted` with
-//!   `teammate_name` / `team_name` = `None` (the M-surface task state has no
-//!   source for them) — matching
-//!   [`OrchestratorTaskCompletedFirer`](crate::OrchestratorTaskCompletedFirer).
+//! - `TaskCompleted`: a full `HookEvent::TaskCompleted`; the V2 TaskUpdate tool
+//!   threads the completing teammate identity from its live `ToolUseContext`,
+//!   matching claude-code's `getAgentName()` / `getTeamName()` arguments.
 //!
 //! [`OrchestratorTaskCreatedFirer`]: crate::OrchestratorTaskCreatedFirer
 //! [`OrchestratorTaskCompletedFirer`]: crate::OrchestratorTaskCompletedFirer
@@ -148,14 +147,16 @@ impl TaskLifecycleHookFirer for OrchestratorTaskLifecycleHookFirer {
         status: &str,
         subject: &str,
         description: Option<&str>,
+        teammate_name: Option<&str>,
+        team_name: Option<&str>,
     ) -> Result<(), String> {
         let event = HookEvent::TaskCompleted {
             task_id: task_id.to_string(),
             status: status.to_string(),
             task_subject: subject.to_string(),
             task_description: description.map(str::to_string),
-            teammate_name: None,
-            team_name: None,
+            teammate_name: teammate_name.map(str::to_string),
+            team_name: team_name.map(str::to_string),
         };
         self.run(event).await
     }
@@ -191,7 +192,14 @@ mod tests {
         );
         assert_eq!(
             firer
-                .fire_task_completed("t1", "completed", "ship it", Some("do the work"))
+                .fire_task_completed(
+                    "t1",
+                    "completed",
+                    "ship it",
+                    Some("do the work"),
+                    None,
+                    None,
+                )
                 .await,
             Ok(()),
             "no TaskCompleted hook → allow"
@@ -304,7 +312,7 @@ mod tests {
             PathBuf::from("/work/.t.jsonl"),
         );
         let res = firer
-            .fire_task_completed("t1", "completed", "ship it", Some("desc"))
+            .fire_task_completed("t1", "completed", "ship it", Some("desc"), None, None)
             .await;
         assert_eq!(
             res,

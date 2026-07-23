@@ -93,6 +93,11 @@ export type ClientCommand =
   // ── Permission resolution ───────────────────────────────────────────────────
   | { type: 'approve_permission'; request_id: number; response: PermissionResponseDto }
   | { type: 'deny_permission'; request_id: number }
+  | { type: 'set_permission_mode'; mode: PermissionModeId }
+  // ── Provider credentials (authenticated local bridge only) ──────────────────
+  | { type: 'list_provider_credentials'; operation_id: number; provider_ids: string[] }
+  | { type: 'set_provider_credential'; operation_id: number; provider_id: string; credential: string }
+  | { type: 'delete_provider_credential'; operation_id: number; provider_id: string }
   // ── Model ─────────────────────────────────────────────────────────────────
   | { type: 'set_model'; model: string }
   | { type: 'list_models' }
@@ -172,6 +177,15 @@ export type PermissionResponseDto =
   | { type: 'allow_once' }
   | { type: 'allow_always' }
   | { type: 'deny' };
+
+/** Live session permission modes accepted by the engine. */
+export type PermissionModeId =
+  | 'default'
+  | 'acceptEdits'
+  | 'plan'
+  | 'auto'
+  | 'dontAsk'
+  | 'bypassPermissions';
 
 /** Inbound resolution of a {@link PermissionRequest} (permission.rs `PermissionResolved`). */
 export interface PermissionResolved {
@@ -314,6 +328,7 @@ export type ErrorKindDto =
   | { type: 'protocol' }
   | { type: 'server' }
   | { type: 'max_turns' }
+  | { type: 'rejected' }
   | { type: 'internal' };
 
 /** How a turn ended (events.rs `TurnOutcomeDto`). */
@@ -341,9 +356,11 @@ export interface CostDto {
 export type ClientEvent =
   // ── Error ─────────────────────────────────────────────────────────────────
   | { type: 'error'; kind: ErrorKindDto; message: string }
+  | { type: 'system_notice'; message: string; is_error: boolean }
   // ── Live-turn streaming events ──────────────────────────────────────────────
   | { type: 'text_delta'; text: string }
   | { type: 'tool_use_started'; id: string; tool: string; input_json: string }
+  | { type: 'tool_heartbeat'; id: string; tool: string; elapsed_ms: number }
   | { type: 'tool_use_result'; id: string; tool: string; result_json: string; is_error: boolean }
   | { type: 'message_complete'; stop_reason?: string; message?: MessageDto }
   | { type: 'turn_started'; turn_id?: number }
@@ -371,6 +388,15 @@ export type ClientEvent =
   // ── Listing / screen events ─────────────────────────────────────────────────
   | { type: 'model_list'; models: string[]; current: string }
   | { type: 'model_changed'; model: string }
+  | { type: 'permission_mode_changed'; mode: PermissionModeId }
+  | {
+      type: 'provider_credential_status';
+      operation_id: number;
+      configured_provider_ids: string[];
+      unavailable_provider_ids?: string[];
+      storage_encrypted: boolean;
+      error?: string;
+    }
   | { type: 'mcp_servers'; servers: McpServerDto[] }
   | { type: 'hooks'; hooks: HookDto[] }
   | { type: 'agents'; agents: AgentDto[] }
@@ -389,6 +415,7 @@ export type ClientEvent =
       truncated: boolean;
     }
   | { type: 'task_status_changed'; task_id: string; status: TaskStatusDto }
+  | { type: 'commands_changed'; commands: SlashCommandDto[] }
   // ── Reserved / feed-deferred (round-trip only) ──────────────────────────────
   | { type: 'coordinator_status'; active_workers: number; team?: string }
   | {
@@ -402,6 +429,13 @@ export type ClientEvent =
       output_tokens: number;
       cache_read_tokens: number;
       cache_creation_tokens: number;
+    }
+  | {
+      type: 'api_retry';
+      message: string;
+      attempt: number;
+      max_retries: number;
+      delay_ms: number;
     };
 
 // ─────────────────────────────────────────────────────────────────────────────

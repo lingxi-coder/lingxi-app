@@ -15,6 +15,7 @@ use async_trait::async_trait;
 use hooks::events::{HookEvent, PromptExpansionType};
 use hooks::registry::HookContext;
 use hooks::HookExecutorImpl;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use traits::{SlashCommandDispatcher, SlashDispatchResult};
@@ -44,11 +45,11 @@ struct ExpansionHooks {
     context: ExpansionHookContextProvider,
 }
 
-/// Map LingXi's [`CommandSource`] to the lowercase `command_source` string
+/// Map `LingXi`'s [`CommandSource`] to the lowercase `command_source` string
 /// claude-code threads into the `UserPromptExpansion` payload (`r = e.source`,
 /// values `"builtin" | "user" | "project" | "local" | "plugin" | "mcp"`; the
 /// admin-managed tier is reported as `"managed"`). This is the per-command
-/// provenance string, distinct from the PascalCase serde encoding of the enum.
+/// provenance string, distinct from the `PascalCase` serde encoding of the enum.
 fn command_source_str(source: CommandSource) -> &'static str {
     match source {
         CommandSource::Builtin => "builtin",
@@ -120,6 +121,9 @@ pub struct RegistrySlashDispatcher {
     /// [`execute_shell_commands_in_prompt`], 1:1 with claude-code's
     /// `executeShellCommandsInPrompt` at the COMMAND layer.
     shell_expansion: Option<Arc<dyn ShellExpansionProvider>>,
+    /// Explicit config-home for persistent user/project skill usage counters.
+    /// `None` keeps embedders and tests side-effect free.
+    skill_usage_home: Option<PathBuf>,
 }
 
 impl RegistrySlashDispatcher {
@@ -130,11 +134,12 @@ impl RegistrySlashDispatcher {
             registry,
             expansion_hooks: None,
             shell_expansion: None,
+            skill_usage_home: None,
         }
     }
 
     /// Wire the embedded-shell-expansion provider (#3). After this, expanding a
-    /// markdown / plugin slash command runs its embedded `!`cmd`` / ` ```! `
+    /// markdown / plugin slash command runs its embedded shell substitutions
     /// bodies through the real host runner + policy-backed gate (that command's
     /// frontmatter `allowed_tools` injected), and the builtin `InjectMessage`
     /// commands (`/commit`, `/commit-push-pr`, `/security-review`) expand their
@@ -145,6 +150,13 @@ impl RegistrySlashDispatcher {
     #[must_use]
     pub fn with_shell_expansion(mut self, provider: Arc<dyn ShellExpansionProvider>) -> Self {
         self.shell_expansion = Some(provider);
+        self
+    }
+
+    /// Wire the same config home `/skill-doctor` reads.
+    #[must_use]
+    pub fn with_skill_usage_home(mut self, config_home: PathBuf) -> Self {
+        self.skill_usage_home = Some(config_home);
         self
     }
 
@@ -237,6 +249,7 @@ impl RegistrySlashDispatcher {
             // the shared dispatcher so every consumer expands `!`cmd`` bodies
             // identically.
             shell_expansion: self.shell_expansion.clone(),
+            skill_usage_home: self.skill_usage_home.clone(),
         }
     }
 
@@ -373,6 +386,21 @@ impl SlashCommandDispatcher for RegistrySlashDispatcher {
             };
             return match expand_markdown_command(&command, &parsed, &expand_ctx).await {
                 Ok(content) => {
+                    // `/skill-doctor` reads this persistent counter. Only the
+                    // same user/project/local sources it reports are counted;
+                    // bundled, managed, MCP, and plugin commands are excluded.
+                    if matches!(
+                        command.source,
+                        CommandSource::User | CommandSource::Project | CommandSource::Local
+                    ) {
+                        if let Some(config_home) = self.skill_usage_home.as_deref() {
+                            if let Err(error) =
+                                crate::skill_usage::record_skill_usage(config_home, &command.name)
+                            {
+                                tracing::warn!(command = %command.name, %error, "failed to record skill usage");
+                            }
+                        }
+                    }
                     // hooks #39: a markdown / MCP-prompt slash command WAS
                     // expanded — fire `UserPromptExpansion` (claude-code `WFa`
                     // →`b$t`) with the command metadata, at the same point the
@@ -909,6 +937,34 @@ mod tests {
             ..SlashCommand::default()
         });
         Arc::new(RwLock::new(reg))
+    }
+
+    #[tokio::test]
+    async fn successful_user_skill_expansion_records_usage() {
+        let root = std::env::temp_dir().join(format!(
+            "command-dispatch-skill-usage-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let dispatcher =
+            RegistrySlashDispatcher::new(registry_with_demo_markdown(CommandSource::User))
+                .with_skill_usage_home(root.clone());
+
+        assert!(matches!(
+            dispatcher.dispatch("/demo one").await,
+            SlashDispatchResult::RunAsTurn { .. }
+        ));
+        assert!(matches!(
+            dispatcher.dispatch("/demo two").await,
+            SlashDispatchResult::RunAsTurn { .. }
+        ));
+        let usage = crate::skill_usage::read_skill_usage(&root).unwrap();
+        assert_eq!(usage.get("demo").map(|entry| entry.count), Some(2));
+        std::fs::remove_dir_all(root).ok();
     }
 
     /// A wired dispatcher fires `UserPromptExpansion` when it expands a markdown

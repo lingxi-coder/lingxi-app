@@ -993,9 +993,17 @@ mod command_arm_tests {
     /// Dispatch `event` through a Command hook and return the stdin the child
     /// would have received (the serialized envelope). Empty if no hook fired.
     async fn dispatch_and_capture(event_type: HookEventType, event: HookEvent) -> String {
+        dispatch_and_capture_with_ctx(event_type, event, HookContext::default()).await
+    }
+
+    async fn dispatch_and_capture_with_ctx(
+        event_type: HookEventType,
+        event: HookEvent,
+        ctx: HookContext,
+    ) -> String {
         let runner = MockRunner::ok(output("", "", 0));
         let exec = executor_for(event_type, runner.clone());
-        let agg = exec.execute(event, HookContext::default()).await;
+        let agg = exec.execute(event, ctx).await;
         assert_eq!(agg.all_results.len(), 1, "exactly one hook must fire");
         let captured = runner.recorded_stdin.lock().unwrap().clone().unwrap();
         captured
@@ -1030,6 +1038,63 @@ mod command_arm_tests {
         assert!(stdin.contains(r#""hook_event_name":"SubagentStop""#));
         assert!(stdin.contains(&format!(r#""agent_id":"{agent_id}""#)));
         assert!(stdin.contains(r#""stop_hook_active":false"#));
+    }
+
+    #[tokio::test]
+    async fn stop_event_serializes_live_reentry_and_last_message() {
+        let stdin = dispatch_and_capture_with_ctx(
+            HookEventType::Stop,
+            HookEvent::Stop {
+                reason: "done".into(),
+            },
+            HookContext {
+                stop_hook_active: true,
+                last_assistant_message: Some("finished work".into()),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert!(stdin.contains(r#""stop_hook_active":true"#));
+        assert!(stdin.contains(r#""last_assistant_message":"finished work""#));
+    }
+
+    #[tokio::test]
+    async fn subagent_stop_serializes_live_context_fields() {
+        let agent_id = protocol::AgentId::new();
+        let stdin = dispatch_and_capture_with_ctx(
+            HookEventType::SubagentStop,
+            HookEvent::SubagentStop {
+                agent_id,
+                status: "completed".into(),
+                agent_type: "general-purpose".into(),
+            },
+            HookContext {
+                stop_hook_active: true,
+                last_assistant_message: Some("child done".into()),
+                agent_transcript_path: Some(std::path::PathBuf::from("/tmp/agent-7.jsonl")),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert!(stdin.contains(r#""stop_hook_active":true"#));
+        assert!(stdin.contains(r#""agent_transcript_path":"/tmp/agent-7.jsonl""#));
+        assert!(stdin.contains(r#""last_assistant_message":"child done""#));
+    }
+
+    #[tokio::test]
+    async fn stop_failure_serializes_last_assistant_message() {
+        let stdin = dispatch_and_capture_with_ctx(
+            HookEventType::StopFailure,
+            HookEvent::StopFailure {
+                error: "invalid_request".into(),
+            },
+            HookContext {
+                last_assistant_message: Some("API Error: prompt too long".into()),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert!(stdin.contains(r#""last_assistant_message":"API Error: prompt too long""#));
     }
 
     #[tokio::test]

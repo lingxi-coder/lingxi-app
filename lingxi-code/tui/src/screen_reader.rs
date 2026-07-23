@@ -345,7 +345,6 @@ fn wrap_line_into(line: &str, width: usize, out: &mut Vec<String>) {
         if word_len > width {
             if !current.is_empty() {
                 out.push(std::mem::take(&mut current));
-                current_width = 0;
             }
             let mut chunk = String::new();
             let mut chunk_width = 0usize;
@@ -424,10 +423,6 @@ pub fn diff_lines(previous: &[String], current: &[String]) -> Vec<LineChange> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn acc(a: Accessibility) -> Option<Accessibility> {
-        Some(a)
-    }
 
     // ---- (0) raw text leaf ----------------------------------------------
 

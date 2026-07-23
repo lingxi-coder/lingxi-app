@@ -10,6 +10,7 @@ pub mod anthropic;
 pub mod auth;
 pub mod aws_auth;
 pub mod catalog;
+pub mod unicode_repair;
 #[allow(missing_docs)]
 pub mod client;
 pub mod cloud_provider_env;

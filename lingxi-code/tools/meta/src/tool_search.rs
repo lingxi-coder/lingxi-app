@@ -18,16 +18,11 @@
 //! The candidate set is the DEFERRED tool set: the shared `ToolRegistryView`
 //! (a live cell owned by the `ToolRegistry` and refreshed from its deferred
 //! tools — see `ToolRegistry::refresh_tool_search_view`). On a successful search
-//! the matched tools are marked LOADED in the shared [`DeferralState`], so the
-//! wire serializer stops deferring them on the next turn (the cross-turn
-//! "search → load" lifecycle).
-//!
-//! Remaining Rust divergences from TS (documented follow-ups): the result is a
-//! plain `matches` name list rather than `tool_reference` content blocks (so a
-//! tool becomes callable on the NEXT turn, not mid-turn), and
-//! `getToolDescriptionMemoized` (`tool.prompt(...)`) is replaced by the stored
-//! `description`/`search_hint` carried on each entry (the registry refresh
-//! leaves `description` empty; scoring still ranks on name-parts + searchHint).
+//! the matched tools are marked discovered in the shared [`DeferralState`]. On
+//! the next model request their schemas are included with
+//! `defer_loading:true`, while the result itself is encoded as Anthropic
+//! `tool_reference` blocks. Descriptions/search hints come from the same
+//! serialized registry view used for request assembly.
 //!
 //! Avoids holding `Arc<ToolRegistry>` directly (which would cycle) by accepting
 //! a `ToolRegistryView` handle at construction time; the composition root
@@ -81,7 +76,7 @@ pub const TOOL_SEARCH_MAX_RESULTS: usize = 20;
 // escapes; the `\n\n` paragraph breaks are real newlines in the binary source.
 
 /// `UZh` — head paragraph (no unicode escapes; real `\n\n`).
-const TOOL_SEARCH_DESC_HEAD: &str = "Fetches full schema definitions for deferred tools so they can be called.\n\nDeferred tools appear by name in <system-reminder> messages.";
+const TOOL_SEARCH_DESC_HEAD: &str = "Fetches full schema definitions for deferred tools so they can be called.\n\nDeferred tools appear by name in <available-deferred-tools> messages.";
 
 /// `qZh` — default sentence appended when `Qbc()` is `false` (the binary
 /// default, and LingXi's fixed value).
@@ -120,9 +115,8 @@ pub struct ToolSearchTool {
     pub(crate) ctx: tool_api::BuiltinToolContext,
     pub(crate) view: Arc<dyn ToolRegistryView>,
     /// Shared session deferral state. On a successful search the matched tools
-    /// are marked LOADED here, so the wire serializer stops deferring them on
-    /// the next turn (the cross-turn "search → load" lifecycle). Disabled by
-    /// default (hermetic / test paths).
+    /// are marked discovered here, so the next request includes their schemas.
+    /// Disabled by default in hermetic/test constructors.
     pub(crate) defer: Arc<DeferralState>,
 }
 
@@ -621,8 +615,8 @@ impl Tool for ToolSearchTool {
             },
         };
 
-        // Lifecycle: the model has pulled these tools' schemas into context, so
-        // mark them LOADED — the wire serializer stops deferring them next turn.
+        // Lifecycle: record discovery so the next request includes each schema
+        // with `defer_loading:true` and resume/compaction retain the state.
         if !matches.is_empty() {
             self.defer.mark_loaded(matches.iter().cloned());
         }
@@ -643,14 +637,46 @@ impl Tool for ToolSearchTool {
         md.insert("query_type".into(), verified_str(query_type));
         bus.log_event(TOOL_SEARCH_COMPLETED, md).await;
 
+        let pending_mcp_servers: Vec<String> = if matches.is_empty() {
+            match &self.ctx.mcp_registry {
+                Some(registry) => registry
+                    .action_states()
+                    .await
+                    .into_iter()
+                    .filter_map(|(name, state)| {
+                        matches!(state, traits::McpActionState::Pending).then_some(name)
+                    })
+                    .collect(),
+                None => Vec::new(),
+            }
+        } else {
+            Vec::new()
+        };
+        let model_content = if matches.is_empty() {
+            let mut text = "No matching deferred tools found".to_string();
+            if !pending_mcp_servers.is_empty() {
+                text.push_str(". Some MCP servers are still connecting: ");
+                text.push_str(&pending_mcp_servers.join(", "));
+                text.push_str(". Their tools will become available shortly — try searching again.");
+            }
+            Some(text)
+        } else {
+            None
+        };
+
+        let mut data = json!({
+            "matches": matches,
+            "query": query,
+            "total_deferred_tools": entries.len(),
+            "max_results": max_results,
+        });
+        if !pending_mcp_servers.is_empty() {
+            data["pending_mcp_servers"] = json!(pending_mcp_servers);
+        }
+
         Ok(ToolCallResult {
-            data: json!({
-                "matches": matches,
-                "query": query,
-                "total_deferred_tools": entries.len(),
-                "max_results": max_results,
-            }),
-            model_content: None,
+            data,
+            model_content,
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
@@ -1084,7 +1110,7 @@ mod tests {
     /// Byte-exact CC 2.1.207 `FGn()` default (gate `Qbc()` == false): the
     /// concatenation `UZh + qZh + WZh`. Em-dashes are U+2014; blank lines are
     /// the `\n\n` paragraph breaks from the binary's template literals.
-    const EXPECTED_DEFAULT_DESC: &str = "Fetches full schema definitions for deferred tools so they can be called.\n\nDeferred tools appear by name in <system-reminder> messages. Until fetched, only the name is known \u{2014} there is no parameter schema, so the tool cannot be invoked. This tool takes a query, matches it against the deferred tool list, and returns the matched tools' complete JSONSchema definitions inside a <functions> block. Once a tool's schema appears in that result, it is callable exactly like any tool defined at the top of the prompt.\n\nResult format: each matched tool appears as one <function>{\"description\": \"...\", \"name\": \"...\", \"parameters\": {...}}</function> line inside the <functions> block \u{2014} the same encoding as the tool list at the top of this prompt.\n\nQuery forms:\n- \"select:Read,Edit,Grep\" \u{2014} fetch these exact tools by name\n- \"notebook jupyter\" \u{2014} keyword search, up to max_results best matches\n- \"+slack send\" \u{2014} require \"slack\" in the name, rank by remaining terms";
+    const EXPECTED_DEFAULT_DESC: &str = "Fetches full schema definitions for deferred tools so they can be called.\n\nDeferred tools appear by name in <available-deferred-tools> messages. Until fetched, only the name is known \u{2014} there is no parameter schema, so the tool cannot be invoked. This tool takes a query, matches it against the deferred tool list, and returns the matched tools' complete JSONSchema definitions inside a <functions> block. Once a tool's schema appears in that result, it is callable exactly like any tool defined at the top of the prompt.\n\nResult format: each matched tool appears as one <function>{\"description\": \"...\", \"name\": \"...\", \"parameters\": {...}}</function> line inside the <functions> block \u{2014} the same encoding as the tool list at the top of this prompt.\n\nQuery forms:\n- \"select:Read,Edit,Grep\" \u{2014} fetch these exact tools by name\n- \"notebook jupyter\" \u{2014} keyword search, up to max_results best matches\n- \"+slack send\" \u{2014} require \"slack\" in the name, rank by remaining terms";
 
     #[test]
     fn description_default_is_byte_exact() {

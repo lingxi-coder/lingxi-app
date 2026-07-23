@@ -17,7 +17,8 @@ move `LingXi Code.app` to `/Applications`.
 
 Verified artifact for this Beta run (2026-07-21):
 
-- ZIP SHA-256: `c4e85b5c79890b3df3ce2c78396d3334296c223fa99c4ec19773e80062ee5f5d`
+- ZIP SHA-256: use the adjacent `.zip.sha256` file generated after packaging
+  (the guide is bundled inside the ZIP, so it must not embed a stale ZIP hash)
 - bundled `bridge-server` SHA-256: `1d70c1d6bd597baa3b581d7117657e3f40a687673ba26a2a6d6eb7825c9735e4`
 
 The exact artifact passed the static package audit and packaged smoke gate.
@@ -33,20 +34,23 @@ Anyway**. Do not disable Gatekeeper globally.
 2. Review the repository before trusting it. Trust enables project hooks, MCP
    servers, agents, plugins, and local settings. A native warning requires a
    second confirmation. Changes to executable project settings revoke trust.
-3. Choose a provider and enter its API key. Each value is masked, encrypted by
-   macOS secure storage, and never displayed again. The picker follows the
-   CLI/TUI provider set; OAuth/device sign-in is currently labeled as a
+3. Choose a provider and enter its API key. Each value is masked and never
+   displayed again. A provisioned build stores it in the macOS Data Protection
+   Keychain. This ad-hoc internal build keeps it in main-process memory for the
+   current app session and never writes a plaintext fallback. The picker follows
+   the CLI/TUI provider set; OAuth/device sign-in is currently labeled as a
    CLI/TUI-only flow.
 4. Wait for **Engine ready**. Use **Settings & diagnostics → Restart engine** if
    startup was interrupted.
 
-Provider keys are stored as per-provider generic-password items in the macOS
-Keychain. Existing Beta installs with a legacy Safe Storage blob migrate it on
-the first successful launch and remove the old encrypted file. If macOS asks
-for the login-keychain password during that one-time migration, approve the
-item; subsequent launches read the Keychain item through `/usr/bin/security`
-without starting an Electron credential helper or prompting again. If the
-item is unavailable, re-enter the affected provider key in Settings.
+Generic application credentials intentionally do not appear in the macOS 15
+Passwords app, which is designed for website/app login passwords, passkeys,
+verification codes, and Wi-Fi credentials. Provisioned LingXi builds use the
+modern Data Protection Keychain directly and do not depend on the password of
+`~/Library/Keychains/login.keychain-db`. Older Beta generic-password items in
+that legacy file keychain are no longer treated as configured; reconnect the
+provider once. In this ad-hoc build the UI labels the credential **session
+only**, and it must be re-entered after LingXi exits.
 
 Send remains disabled until the workspace is trusted, at least one provider is
 connected, and the bundled engine is connected.
@@ -126,4 +130,6 @@ you intentionally want to erase that history.
 - No cloud account/billing, Chat/Cowork, voice, attachments, diff/plan editor,
   interactive shell, connectors, Windows, or Linux release build.
 - Ad-hoc internal signature; no Developer ID notarization.
+- Provider credentials are session-only in the ad-hoc artifact; persistent
+  Data Protection Keychain access requires a provisioned signed build.
 - One active workspace/engine at a time.

@@ -20,6 +20,7 @@ pub mod definition;
 pub mod display;
 pub mod fork;
 pub mod handle;
+pub mod hooks_trust;
 pub mod model_resolution;
 pub mod multi_dispatch;
 pub mod permission_mode;

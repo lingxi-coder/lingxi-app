@@ -1590,8 +1590,8 @@ fn build_lifecycle_envelope_body(
                 agent_id: b.agent_id,
                 agent_type: b.agent_type,
                 effort: b.effort,
-                stop_hook_active: false,
-                last_assistant_message: None,
+                stop_hook_active: ctx.stop_hook_active,
+                last_assistant_message: ctx.last_assistant_message.clone(),
                 background_tasks: ctx.background_tasks.clone(),
                 session_crons: ctx.session_crons.clone(),
             };
@@ -1608,9 +1608,12 @@ fn build_lifecycle_envelope_body(
                 transcript_path: b.transcript_path,
                 cwd: b.cwd,
                 permission_mode: b.permission_mode,
-                stop_hook_active: false,
+                stop_hook_active: ctx.stop_hook_active,
                 agent_id: agent_id.to_string(),
-                agent_transcript_path: String::new(),
+                agent_transcript_path: ctx
+                    .agent_transcript_path
+                    .as_ref()
+                    .map_or_else(String::new, |path| path.to_string_lossy().into_owned()),
                 // claude `agent_type: a ?? ""` — now carried on the event
                 // (mirrors SubagentStart); fall back to the context for older
                 // call paths that left the event's `agent_type` empty.
@@ -1620,7 +1623,7 @@ fn build_lifecycle_envelope_body(
                     agent_type.clone()
                 },
                 effort: b.effort,
-                last_assistant_message: None,
+                last_assistant_message: ctx.last_assistant_message.clone(),
                 background_tasks: ctx.background_tasks.clone(),
                 session_crons: ctx.session_crons.clone(),
             };
@@ -1726,7 +1729,7 @@ fn build_lifecycle_envelope_body(
                 effort: b.effort,
                 error: error.clone(),
                 error_details: None,
-                last_assistant_message: None,
+                last_assistant_message: ctx.last_assistant_message.clone(),
             };
             Some(("StopFailure", serde_json::to_string(&payload).ok()?))
         }

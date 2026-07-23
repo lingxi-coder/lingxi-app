@@ -25,6 +25,7 @@ pub mod denial_tracking;
 pub mod filesystem;
 pub mod gate;
 pub mod headless_gate;
+pub mod internal_writes;
 pub mod loader;
 pub mod mode;
 pub mod mode_policy;
@@ -79,6 +80,7 @@ pub use gate::{
     PromptDefault, PromptError, PromptingGate,
 };
 pub use headless_gate::DenyOnAskGate;
+pub use internal_writes::{consume_internal_write, mark_internal_write};
 pub use loader::{
     additional_directories_from_settings_json,
     allow_managed_permission_rules_only_from_settings_json, auto_mode_disabled_from_settings_json,
@@ -90,8 +92,9 @@ pub use mode::{next_permission_mode, PermissionMode};
 pub use mode_policy::is_plan_safe_tool;
 pub use path_constraints::{check_path_constraints, PathConstraintAsk};
 pub use persist::{
-    persist_permission_update, persist_workspace_directory, remove_permission_update,
-    PermissionPaths, PersistError,
+    persist_permission_mode, persist_permission_rule_set, persist_permission_update,
+    persist_workspace_directories, persist_workspace_directory, remove_permission_update,
+    replace_permission_rules, PermissionPaths, PersistError,
 };
 pub use policy::{tool_wide_name_matches, PermissionPolicy};
 pub use policy_gate::{LiveModelProvider, PolicyPermissionGate};

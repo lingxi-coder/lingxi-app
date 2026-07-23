@@ -59,6 +59,7 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
         use_noop_permission_gate: false,
         deny_unresolved_ask: false,
         injected_permission_gate: None,
+        ask_user_question_tx: None,
         session_started_as_coordinator: false,
         // Deterministic e2e: empty memory, never the real FS.
         memory_provider: None,
@@ -87,6 +88,7 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
         initial_effort: None,
         default_model_env_pinned: false,
         session_thinking: Default::default(),
+        parent_session_id: None,
         bg_session_forker: None,
         worktree_launch: None,
         tmux_launch: None,

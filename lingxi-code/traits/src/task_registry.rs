@@ -11,7 +11,7 @@ use thiserror::Error;
 /// Input to [`TaskRegistryHandle::create`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaskCreateInput {
-    /// Wire string for the task type — one of the 7 byte-locked variants.
+    /// Wire string for the task type — one of the 9 byte-locked variants.
     pub task_type: String,
     /// Human-readable description shown in UI listings.
     pub description: String,
@@ -28,6 +28,23 @@ pub struct McpTaskRegistration {
     /// MCP tool name (`toolName`).
     pub tool_name: String,
     /// Originating assistant `tool_use_id`, if any (`toolUseId`).
+    pub tool_use_id: Option<String>,
+}
+
+/// Launch input for a background stdout event monitor.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MonitorRegistration {
+    /// Shell command whose stdout lines become events.
+    pub command: String,
+    /// Human-readable description repeated in notifications.
+    pub description: String,
+    /// Effective timeout in milliseconds. `0` means session-persistent.
+    pub timeout_ms: u64,
+    /// Whether the monitor lives until TaskStop/session teardown.
+    pub persistent: bool,
+    /// Invocation working directory.
+    pub cwd: Option<String>,
+    /// Originating assistant tool-use id, when available.
     pub tool_use_id: Option<String>,
 }
 
@@ -48,7 +65,7 @@ pub struct TaskUpdatePatch {
 /// One task as surfaced to the tool layer.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaskRecord {
-    /// 9-char `[bartwmd][0-9a-z]{8}` task id.
+    /// 9-char `[bartwmdk][0-9a-z]{8}` task id.
     pub task_id: String,
     /// Task type wire string.
     pub task_type: String,
@@ -155,7 +172,7 @@ pub struct AgentRunUsage {
 pub struct TaskNotification {
     /// 9-char task id → `<task-id>`.
     pub task_id: String,
-    /// Task type wire string (one of the 7 byte-locked variants). Selects the
+    /// Task type wire string (one of the 9 byte-locked variants). Selects the
     /// per-type notification format (bash / agent / monitor / generic).
     pub task_type: String,
     /// Terminal status wire string — one of `completed` / `failed` / `killed`
@@ -169,16 +186,15 @@ pub struct TaskNotification {
     /// Absolute on-disk spool path → `<output-file>`. `None` ⇒ the renderer
     /// falls back to the bare `<task_id>.output` filename.
     pub output_path: Option<String>,
-    /// Process exit code for `local_bash` / `monitor_mcp` tasks, folded into the
+    /// Process exit code for `local_bash` / `monitor_ws` tasks, folded into the
     /// summary (e.g. `(exit code 1)`). `None` ⇒ the exit clause is omitted.
     pub exit_code: Option<i32>,
     /// Failure reason for a `local_agent` task, folded into the `failed`
     /// summary (`Agent "…" came to rest with an error: {error}`). `None` falls
     /// back to `Unknown error` (claude-code `error || 'Unknown error'`).
     pub error: Option<String>,
-    /// `local_agent` only: the agent's final text response → the optional
-    /// `<result>` section (escaped). `None` ⇒ the section is omitted (the
-    /// byte-faithful "no result" case — claude-code's `s ? <result>… : ''`).
+    /// `local_agent`: final text response; `monitor_ws` while running: batched
+    /// stdout event. Both render in an escaped `<result>` section.
     pub result: Option<String>,
     /// `local_agent` only: run usage → the optional `<usage>` section.
     /// `None` ⇒ omitted (claude-code's `i ? <usage>… : ''`).
@@ -318,6 +334,63 @@ pub trait TaskRegistryHandle: Send + Sync {
 
     /// Kill the task (cancels any background handle, marks status `killed`).
     async fn kill(&self, id: &str) -> Result<TaskRecord, TaskRegistryError>;
+
+    /// Spawn a real background monitor and return its registry task id.
+    /// Hosts without a task runtime fail closed rather than minting a fake id.
+    async fn spawn_monitor(&self, reg: MonitorRegistration) -> Result<String, TaskRegistryError> {
+        let _ = reg;
+        Err(TaskRegistryError::Internal(
+            "monitor registration unwired".into(),
+        ))
+    }
+
+    /// Enqueue one live stdout event for the next task-notification drain.
+    async fn notify_monitor_event(&self, _id: &str, _event: &str) {}
+
+    /// Stop the background agent work that Claude Code tears down when the
+    /// session reaches `--max-budget-usd`.
+    ///
+    /// Claude Code 2.1.217's `rcr` budget cleanup selects running
+    /// `local_agent` tasks unless `isBackgrounded === false`, plus running
+    /// `local_workflow` tasks. It deliberately leaves shell, MCP, remote-agent,
+    /// and foreground-agent tasks alone. Keep the selection here at the shared
+    /// registry boundary so the print and stream-json turn drivers cannot drift
+    /// from one another.
+    ///
+    /// `before_stop` is called exactly once, after at least one matching task is
+    /// found and before any cancellation begins. The print driver uses that
+    /// seam to preserve Claude's observable ordering: write the budget notice,
+    /// then tear down background work.
+    ///
+    /// Returns the number of matching tasks for which a stop was attempted.
+    /// Individual stop races are best-effort: one task finishing between the
+    /// list and kill calls must not prevent the remaining agents from stopping.
+    async fn stop_background_agents_for_budget(
+        &self,
+        before_stop: &(dyn Fn() + Send + Sync),
+    ) -> Result<usize, TaskRegistryError> {
+        let running = self
+            .list(TaskListFilter {
+                status: Some("running".to_string()),
+            })
+            .await?;
+        let ids: Vec<String> = running
+            .into_iter()
+            .filter(|task| match task.task_type.as_str() {
+                "local_agent" => task.is_backgrounded != Some(false),
+                "local_workflow" => true,
+                _ => false,
+            })
+            .map(|task| task.task_id)
+            .collect();
+        if !ids.is_empty() {
+            before_stop();
+        }
+        for id in &ids {
+            let _ = self.kill(id).await;
+        }
+        Ok(ids.len())
+    }
 
     /// Register a backgrounded MCP tool call and return the minted `k…` task id
     /// (claude-code 2.1.212 `callMcpToolWithAutoBackground`'s `i.register(g)`,

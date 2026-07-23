@@ -240,6 +240,42 @@ impl Composer {
         }
     }
 
+    /// If the whitespace-delimited token ending at the cursor is an emoji
+    /// shortcode (`:hea` / `:heart:`), return its start and filter fragment.
+    /// Tokens containing a second non-terminal `:` are not shortcode
+    /// candidates (for example URLs and `key:value` text).
+    #[must_use]
+    pub fn emoji_fragment(&self) -> Option<(usize, String)> {
+        let mut start = self.cursor;
+        while start > 0 && !self.chars[start - 1].is_whitespace() {
+            start -= 1;
+        }
+        if start >= self.cursor || self.chars[start] != ':' {
+            return None;
+        }
+        let fragment: String = self.chars[start + 1..self.cursor].iter().collect();
+        let core = fragment.strip_suffix(':').unwrap_or(&fragment);
+        if core.is_empty()
+            || core
+                .chars()
+                .any(|ch| !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | '+' | '-')))
+        {
+            return None;
+        }
+        Some((start, fragment))
+    }
+
+    /// Replace the complete shortcode token (including an optional trailing
+    /// `:`) with the selected emoji glyph.
+    pub fn complete_emoji(&mut self, start: usize, insert: &str) {
+        self.detach_history();
+        let end = self.cursor.min(self.chars.len());
+        if start <= end {
+            self.chars.splice(start..end, insert.chars());
+            self.cursor = start + insert.chars().count();
+        }
+    }
+
     /// Replace the current `@`-token's fragment (from just after the `@` at
     /// `at_index` up to the cursor) with `insert`, leaving the cursor after it.
     pub fn complete_at(&mut self, at_index: usize, insert: &str) {
@@ -1060,7 +1096,7 @@ mod tests {
 
     #[test]
     fn at_fragment_detects_at_token_before_cursor() {
-        let mut c = typed("see @src");
+        let c = typed("see @src");
         assert_eq!(c.at_fragment(), Some((4, "src".to_string())));
         // No @ token → None.
         let plain = typed("hello");

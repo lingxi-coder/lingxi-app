@@ -248,6 +248,7 @@ fn encode_request_hosted_computer_use_tool_passthrough_and_beta_header() {
         tool_type: Some("computer_use_20250124".to_string()),
         extra,
         strict: false,
+        defer_loading: false,
     });
 
     let provider_request = codec.encode_request(&request).unwrap();

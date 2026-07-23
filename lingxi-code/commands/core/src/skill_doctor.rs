@@ -50,23 +50,10 @@
 //! commands/skills are on disk" directly through [`command_api::markdown_loader`],
 //! bypassing both the handle and the live [`command_api::CommandRegistry`].
 //!
-//! ## The usage-log gap
-//!
-//! claude-code's `U_l(name, unqualifiedName)` reads a persistent per-command
-//! usage store (`usageCount`, `daysSinceUse`) that is updated on every real
-//! dispatch. No equivalent exists anywhere in this codebase yet. This port
-//! adds the smallest sensible substitute: a flat JSON log at
-//! `<lingxi_home>/skill_usage.json` (`{name: {count, last_used_unix}}`), read
-//! by the private `read_usage_log` helper and written by [`record_skill_usage`].
-//!
-//! **[`record_skill_usage`] is not called from anywhere yet** — wiring it
-//! into the dispatcher (so every real invocation of a `Markdown`/skill-kind
-//! [`command_api::SlashCommand`] increments its count) requires editing
-//! [`command_api::dispatcher`] / [`command_api::registry`], both shared files
-//! out of scope for this change. Until that wiring lands, every entry below
-//! renders with `usageCount: 0` / `daysSinceUse: never` — a materially
-//! misleading "gap note" (unlike e.g. [`crate::effort`]'s genuinely-unreachable
-//! stub branches), tracked here rather than silently accepted.
+//! Usage is read from the shared `command_api::skill_usage` store. The registry
+//! dispatcher records every successful user/project/local Markdown expansion,
+//! so interactive and headless invocations feed the same counters this handler
+//! reports.
 
 use async_trait::async_trait;
 use command_api::markdown_loader::{
@@ -75,7 +62,7 @@ use command_api::markdown_loader::{
 };
 use command_api::model::{BuiltinCommandHandler, CommandResult, CommandSource};
 use command_api::parser::ParsedSlashCommand;
-use serde::{Deserialize, Serialize};
+use command_api::skill_usage::{read_skill_usage, SkillUsageRecord};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -170,58 +157,10 @@ struct SkillDoctorEntry {
     days_since_use: Option<u64>,
 }
 
-/// A single `<lingxi_home>/skill_usage.json` record.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
-struct UsageRecord {
-    #[serde(default)]
-    count: u64,
-    #[serde(default)]
-    last_used_unix: Option<i64>,
-}
-
-fn usage_log_path(lingxi_home: &Path) -> PathBuf {
-    lingxi_home.join("skill_usage.json")
-}
-
-/// Read the usage log. A missing or empty file is "no usage recorded yet"
-/// (`Ok(empty map)`, not an error); malformed JSON is a genuine failure,
-/// surfaced through the byte-exact fallback string in [`SkillDoctorHandler::handle`].
-fn read_usage_log(lingxi_home: &Path) -> Result<HashMap<String, UsageRecord>, String> {
-    let path = usage_log_path(lingxi_home);
-    match std::fs::read_to_string(&path) {
-        Ok(content) if content.trim().is_empty() => Ok(HashMap::new()),
-        Ok(content) => serde_json::from_str(&content)
-            .map_err(|e| format!("invalid JSON in {}: {e}", path.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(HashMap::new()),
-        Err(e) => Err(format!("failed to read {}: {e}", path.display())),
-    }
-}
-
 /// Record one real dispatch of a Markdown/skill-kind command: increments its
 /// usage count and stamps `last_used_unix` to now.
-///
-/// **Not wired to anything yet** — see the module docs' "usage-log gap"
-/// section. Exists so the dispatcher wiring (a shared-file change, out of
-/// scope here) has a ready-made call target: `record_skill_usage(lingxi_home,
-/// &command.name)` at the point where [`command_api::dispatcher`] resolves a
-/// dispatch to a `Markdown`-kind [`command_api::SlashCommand`].
 pub fn record_skill_usage(lingxi_home: &Path, name: &str) -> Result<(), String> {
-    let path = usage_log_path(lingxi_home);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
-    }
-    let mut map = read_usage_log(lingxi_home)?;
-    let now_unix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
-    let entry = map.entry(name.to_string()).or_default();
-    entry.count += 1;
-    entry.last_used_unix = Some(now_unix);
-    let serialized = serde_json::to_string_pretty(&map)
-        .map_err(|e| format!("failed to serialize {}: {e}", path.display()))?;
-    std::fs::write(&path, serialized + "\n")
-        .map_err(|e| format!("failed to write {}: {e}", path.display()))
+    command_api::skill_usage::record_skill_usage(lingxi_home, name)
 }
 
 /// TS `a.source==="bundled"||a.source==="builtin"||a.source==="policySettings"||a.source==="plugin"`
@@ -268,7 +207,7 @@ fn days_between(last_used_unix: i64, now_unix: i64) -> u64 {
 fn make_entry(
     name: String,
     source: CommandSource,
-    usage: &HashMap<String, UsageRecord>,
+    usage: &HashMap<String, SkillUsageRecord>,
     now_unix: i64,
 ) -> SkillDoctorEntry {
     let record = usage.get(&name);
@@ -299,7 +238,7 @@ async fn load_entries(
     now_unix: i64,
 ) -> Result<Vec<SkillDoctorEntry>, String> {
     let home = derive_home(&roots.lingxi_home);
-    let usage = read_usage_log(&roots.lingxi_home)?;
+    let usage = read_skill_usage(&roots.lingxi_home)?;
 
     // `load_command_markdown_files` takes `managed_dir: &Path` (not
     // `Option`); when no managed root is configured, point it at a directory
@@ -622,7 +561,7 @@ mod tests {
 
         record_skill_usage(&lingxi_home, "foo").unwrap();
         record_skill_usage(&lingxi_home, "foo").unwrap();
-        let usage = read_usage_log(&lingxi_home).expect("read back");
+        let usage = read_skill_usage(&lingxi_home).expect("read back");
         assert_eq!(usage.get("foo").map(|r| r.count), Some(2));
         assert!(usage.get("foo").unwrap().last_used_unix.is_some());
         fs::remove_dir_all(root).ok();

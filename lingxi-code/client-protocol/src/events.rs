@@ -45,6 +45,16 @@ pub enum ClientEvent {
         message: String,
     },
 
+    /// A non-terminal diagnostic intended for the user. Unlike [`Self::Error`],
+    /// this does not end the turn or mark the connection failed. The
+    /// `is_error` flag only controls presentation severity.
+    SystemNotice {
+        /// Sanitized, human-readable notice text.
+        message: String,
+        /// Whether clients should render the notice with error severity.
+        is_error: bool,
+    },
+
     // ── Live-turn streaming events (F1-03) ────────────────────────────────
     /// Plain assistant text. 1:1 `OutputStream::emit_text`.
     TextDelta {
@@ -206,6 +216,35 @@ pub enum ClientEvent {
     ModelChanged {
         /// The model now active for subsequent turns.
         model: String,
+    },
+
+    /// The live permission mode changed after a successful
+    /// [`SetPermissionMode`](crate::commands::ClientCommand::SetPermissionMode)
+    /// command. Clients use this acknowledgement as the source of truth rather
+    /// than optimistically changing their local selector.
+    PermissionModeChanged {
+        /// Active permission-mode wire id.
+        mode: String,
+    },
+
+    /// Non-secret result of a provider-credential list/set/delete operation.
+    /// The configured ids are the authoritative snapshot from the same secure
+    /// store used by CLI and TUI; secret values never cross this response path.
+    ProviderCredentialStatus {
+        /// Correlator copied from the triggering credential command.
+        operation_id: u64,
+        /// Provider ids whose secure-store entries currently exist.
+        configured_provider_ids: Vec<String>,
+        /// Provider ids whose state could not be read. Clients must preserve
+        /// their last known state for these ids instead of treating them as
+        /// disconnected.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        unavailable_provider_ids: Vec<String>,
+        /// Whether the active storage backend encrypts persisted values.
+        storage_encrypted: bool,
+        /// Sanitized storage failure, if the operation could not complete.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
 
     /// The MCP server listing (`/mcp`). Maps `McpServerInfo`.
@@ -387,6 +426,8 @@ pub enum ErrorKindDto {
     Server,
     /// The orchestrator's `max_turns` budget was reached.
     MaxTurns,
+    /// A valid command was rejected by the active policy or runtime state.
+    Rejected,
     /// Any other internal failure.
     Internal,
 }

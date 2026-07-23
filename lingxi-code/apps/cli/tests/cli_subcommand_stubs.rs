@@ -97,3 +97,39 @@ fn ultrareview_unsupported_is_stable() {
             ));
     }
 }
+
+#[test]
+fn chrome_flag_is_explicitly_unavailable() {
+    Command::cargo_bin("lingxi-cli")
+        .unwrap()
+        .args(["--chrome", "hi"])
+        .assert()
+        .code(64) // exit_codes::NOT_IMPLEMENTED
+        .stderr(predicate::str::contains(
+            "lingxi-cli: --chrome requires the unavailable Anthropic Chrome extension protocol.",
+        ));
+}
+
+#[test]
+fn remote_control_top_level_flag_is_explicit_unavailable() {
+    Command::cargo_bin("lingxi-cli")
+        .unwrap()
+        .args(["--remote-control", "studio"])
+        .assert()
+        .code(64) // exit_codes::NOT_IMPLEMENTED
+        .stderr(predicate::str::contains(
+            "lingxi-cli: --remote-control requires the unavailable Anthropic relay/auth protocol.",
+        ));
+}
+
+#[test]
+fn remote_control_subcommand_reports_unavailable() {
+    Command::cargo_bin("lingxi-cli")
+        .unwrap()
+        .args(["remote-control"])
+        .assert()
+        .code(64) // exit_codes::NOT_IMPLEMENTED
+        .stderr(predicate::str::contains(
+            "lingxi-cli remote-control: unavailable because the Anthropic relay/auth protocol is not provided.",
+        ));
+}

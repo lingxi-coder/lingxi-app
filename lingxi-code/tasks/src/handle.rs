@@ -14,9 +14,10 @@ use crate::registry::TaskRegistry;
 use crate::state::{TaskState, TaskStatus};
 use crate::task_trait::{TaskError, TaskSpawnInput};
 use async_trait::async_trait;
+use std::path::PathBuf;
 use traits::task_registry::{
-    TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryError,
-    TaskRegistryHandle, TaskUpdatePatch, WorkflowRecord,
+    MonitorRegistration, TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord,
+    TaskRegistryError, TaskRegistryHandle, TaskUpdatePatch, WorkflowRecord,
 };
 
 fn task_type_from_wire(s: &str) -> Result<TaskType, TaskRegistryError> {
@@ -27,6 +28,7 @@ fn task_type_from_wire(s: &str) -> Result<TaskType, TaskRegistryError> {
         "in_process_teammate" => TaskType::InProcessTeammate,
         "local_workflow" => TaskType::LocalWorkflow,
         "monitor_mcp" => TaskType::MonitorMcp,
+        "monitor" | "monitor_ws" => TaskType::Monitor,
         "mcp_task" => TaskType::McpTask,
         "dream" => TaskType::Dream,
         other => {
@@ -45,6 +47,7 @@ pub(crate) fn task_type_to_wire(t: TaskType) -> &'static str {
         TaskType::InProcessTeammate => "in_process_teammate",
         TaskType::LocalWorkflow => "local_workflow",
         TaskType::MonitorMcp => "monitor_mcp",
+        TaskType::Monitor => "monitor_ws",
         TaskType::McpTask => "mcp_task",
         TaskType::Dream => "dream",
     }
@@ -77,11 +80,13 @@ pub(crate) fn status_to_wire(s: TaskStatus) -> &'static str {
 
 fn state_to_record(s: &TaskState) -> TaskRecord {
     let b = s.base();
-    // Mirror claude-code `LocalShellTaskState.command`: only `local_bash` tasks
-    // carry a shell command. `TaskStop` prefers `command` over `description` for
-    // `local_bash` (`stopTask.ts:97`); every other task type reports `None`.
+    // Mirror claude-code `LocalShellTaskState.command`: `local_bash` and the
+    // shell-event monitor (`monitor_ws`) both carry a shell command. `TaskStop`
+    // prefers `command` over `description` for shell-backed tasks
+    // (`stopTask.ts:97`); every other task type reports `None`.
     let command = match s {
         TaskState::LocalBash(bash) => Some(bash.command.clone()),
+        TaskState::Monitor(monitor) => Some(monitor.command.clone()),
         _ => None,
     };
     // Per-task-type extras consumed by the `Stop` / `SubagentStop` hook
@@ -102,6 +107,7 @@ fn state_to_record(s: &TaskState) -> TaskRecord {
             Some(a.is_backgrounded),
         ),
         TaskState::MonitorMcp(m) => (None, Some(m.server_name.clone()), None, None, None),
+        TaskState::Monitor(_) => (None, None, None, None, None),
         // `mcp_task` surfaces BOTH the server and the single tool it detached
         // (claude-code `Lic` `switch(n.type)`), unlike `monitor_mcp`.
         TaskState::McpTask(m) => (
@@ -200,6 +206,8 @@ fn placeholder_input(task_type: TaskType) -> TaskSpawnInput {
             prompt: String::new(),
             is_backgrounded: false,
             tool_use_id: None,
+            creator_teammate_name: None,
+            creator_team_name: None,
             spawn_request: None,
             inheritance: None,
         },
@@ -226,6 +234,12 @@ fn placeholder_input(task_type: TaskType) -> TaskSpawnInput {
         TaskType::MonitorMcp => TaskSpawnInput::MonitorMcp {
             server_name: String::new(),
             watch: vec![],
+        },
+        TaskType::Monitor => TaskSpawnInput::Monitor {
+            command: String::new(),
+            timeout: None,
+            cwd: None,
+            tool_use_id: None,
         },
         TaskType::McpTask => TaskSpawnInput::McpTask {
             server_name: String::new(),
@@ -362,7 +376,7 @@ impl TaskRegistryHandle for TaskRegistry {
     }
 
     async fn set_exit_code(&self, id: &str, exit_code: i32) -> Result<(), TaskRegistryError> {
-        // (M8 cc2.1.198) `local_bash` worker exit-code write-through — see
+        // Shell-backed worker exit-code write-through — see
         // `TaskRegistry::set_bash_exit_code`.
         self.set_bash_exit_code(id, exit_code)
             .await
@@ -376,6 +390,31 @@ impl TaskRegistryHandle for TaskRegistry {
             Some(state) => Ok(state_to_record(&state)),
             None => Err(TaskRegistryError::NotFound(id.into())),
         }
+    }
+
+    async fn spawn_monitor(&self, reg: MonitorRegistration) -> Result<String, TaskRegistryError> {
+        let timeout = if reg.persistent || reg.timeout_ms == 0 {
+            None
+        } else {
+            Some(std::time::Duration::from_millis(reg.timeout_ms))
+        };
+        TaskRegistry::spawn(
+            self,
+            TaskType::Monitor,
+            TaskSpawnInput::Monitor {
+                command: reg.command,
+                timeout,
+                cwd: reg.cwd.map(PathBuf::from),
+                tool_use_id: reg.tool_use_id,
+            },
+            reg.description,
+        )
+        .await
+        .map_err(task_err_to_registry_err)
+    }
+
+    async fn notify_monitor_event(&self, id: &str, event: &str) {
+        let _ = TaskRegistry::enqueue_monitor_event(self, id, event).await;
     }
 
     async fn register_mcp_task(
@@ -419,6 +458,7 @@ impl TaskRegistryHandle for TaskRegistry {
         // a process exit code; other task types report `None`.
         let exit_code = match &state {
             TaskState::LocalBash(s) => s.exit_code,
+            TaskState::Monitor(s) => s.exit_code,
             _ => None,
         };
         // Mirror the TS poll predicate `status !== 'running' && status !==
@@ -671,6 +711,56 @@ mod tests {
         assert_eq!(handle.web_search_calls(), 0);
     }
 
+    #[tokio::test]
+    async fn monitor_event_is_drained_as_a_live_notification() {
+        let (_dir, registry) = make_registry();
+        let task_id = crate::id::generate_task_id(crate::id::TaskType::Monitor);
+        let spool = registry.output_manager.allocate(&task_id).await.unwrap();
+        registry
+            .insert_state_for_test(TaskState::Monitor(crate::state::MonitorTaskState {
+                base: crate::state::TaskStateBase {
+                    id: task_id.clone(),
+                    task_type: crate::id::TaskType::Monitor,
+                    status: TaskStatus::Running,
+                    description: "watch build".into(),
+                    tool_use_id: Some("toolu_monitor".into()),
+                    start_time: std::time::SystemTime::UNIX_EPOCH,
+                    end_time: None,
+                    total_paused_ms: 0,
+                    output_file: spool.clone(),
+                    output_offset: 0,
+                    notified: false,
+                    creator_teammate_name: None,
+                    creator_team_name: None,
+                },
+                command: "tail -f build.log".into(),
+                exit_code: None,
+            }))
+            .await;
+
+        let handle: &dyn TaskRegistryHandle = registry.as_ref();
+        handle
+            .notify_monitor_event(&task_id, "step <2> complete")
+            .await;
+        let events = handle.take_pending_task_notifications().await.unwrap();
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert_eq!(event.task_id, task_id);
+        assert_eq!(event.task_type, "monitor_ws");
+        assert_eq!(event.status, "running");
+        assert_eq!(event.result.as_deref(), Some("step <2> complete"));
+        assert_eq!(event.tool_use_id.as_deref(), Some("toolu_monitor"));
+        assert_eq!(event.output_path.as_deref(), spool.to_str());
+        assert!(
+            handle
+                .take_pending_task_notifications()
+                .await
+                .unwrap()
+                .is_empty(),
+            "live event is consumed once"
+        );
+    }
+
     // ── agent-specific output helpers (T3) ───────────────────────────────
 
     #[test]
@@ -736,6 +826,8 @@ mod tests {
                 output_file: spool.clone(),
                 output_offset: 0,
                 notified: false,
+                creator_teammate_name: None,
+                creator_team_name: None,
             };
             let state = TaskState::LocalAgent(crate::state::LocalAgentTaskState {
                 base,
@@ -790,6 +882,8 @@ mod tests {
                     output_file: PathBuf::from(format!("/tmp/{id}.output")),
                     output_offset: 0,
                     notified: false,
+                    creator_teammate_name: None,
+                    creator_team_name: None,
                 },
                 workflow_id: format!("wf-{id}"),
                 script: String::new(),
@@ -818,6 +912,8 @@ mod tests {
             output_file: PathBuf::from("/tmp/bash.output"),
             output_offset: 0,
             notified: false,
+            creator_teammate_name: None,
+            creator_team_name: None,
         };
         registry
             .insert_state_for_test(TaskState::LocalBash(crate::state::LocalBashTaskState {
@@ -869,6 +965,8 @@ mod tests {
             output_file: spool,
             output_offset: 0,
             notified: false,
+            creator_teammate_name: None,
+            creator_team_name: None,
         };
         let state = TaskState::LocalBash(crate::state::LocalBashTaskState {
             base,
@@ -907,6 +1005,8 @@ mod tests {
             output_file: spool,
             output_offset: 0,
             notified: false,
+            creator_teammate_name: None,
+            creator_team_name: None,
         };
         let state = TaskState::LocalAgent(crate::state::LocalAgentTaskState {
             base,

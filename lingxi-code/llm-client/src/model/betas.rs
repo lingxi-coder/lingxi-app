@@ -157,6 +157,9 @@ pub struct BetaContext {
     /// The request body sets `output_config.effort`. Gates the [`EFFORT`] beta.
     /// Defaults to `false`.
     pub effort: bool,
+    /// Request uses ToolSearch/deferred schemas. Appends the first-party
+    /// `advanced-tool-use` beta after the ordinary model betas.
+    pub tool_search: bool,
 }
 
 impl BetaContext {
@@ -170,6 +173,7 @@ impl BetaContext {
             show_thinking_summaries: false,
             fast_mode: false,
             effort: false,
+            tool_search: false,
         }
     }
 
@@ -198,6 +202,13 @@ impl BetaContext {
     #[must_use]
     pub fn with_effort(mut self, on: bool) -> Self {
         self.effort = on;
+        self
+    }
+
+    /// Builder: set dynamic ToolSearch usage for this request.
+    #[must_use]
+    pub fn with_tool_search(mut self, on: bool) -> Self {
+        self.tool_search = on;
         self
     }
 
@@ -323,6 +334,11 @@ fn first_party_betas(ctx: &BetaContext) -> Vec<&'static str> {
     if ctx.effort {
         betas.push(EFFORT);
     }
+    // claude.ts appends the provider-specific tool-search header after the
+    // ordinary model/request beta list once `useToolSearch` is resolved.
+    if ctx.tool_search && exp {
+        betas.push(ADVANCED_TOOL_USE_1P);
+    }
     betas
 }
 
@@ -349,6 +365,9 @@ pub fn assemble_beta_header(provider: Provider, endpoint: Endpoint, ctx: &BetaCo
         Provider::Anthropic => {}
         Provider::Vertex => {
             betas.retain(|b| *b != ADVANCED_TOOL_USE_1P);
+            if ctx.tool_search && ctx.experimental_on() {
+                betas.push(TOOL_SEARCH_TOOL_3P);
+            }
         }
         Provider::Bedrock => {
             betas.retain(|b| {
@@ -358,6 +377,21 @@ pub fn assemble_beta_header(provider: Provider, endpoint: Endpoint, ctx: &BetaCo
     }
 
     betas.join(",")
+}
+
+/// Beta identifiers Bedrock requires in the request body's
+/// `anthropic_beta` array rather than the HTTP header.
+#[must_use]
+pub fn bedrock_extra_body_betas(ctx: &BetaContext) -> Vec<String> {
+    let mut betas: Vec<String> = first_party_betas(ctx)
+        .into_iter()
+        .filter(|beta| BEDROCK_EXTRA_PARAMS_HEADERS.contains(beta))
+        .map(str::to_string)
+        .collect();
+    if ctx.tool_search && ctx.experimental_on() {
+        betas.push(TOOL_SEARCH_TOOL_3P.to_string());
+    }
+    betas
 }
 
 /// Inject the assembled `anthropic-beta` header into a prepared request,
@@ -753,6 +787,26 @@ mod tests {
                 "Bedrock must not carry {excluded}; got: {h}"
             );
         }
+    }
+
+    #[test]
+    fn tool_search_uses_provider_specific_beta_locations() {
+        if env_truthy("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS") {
+            return;
+        }
+        let ctx = BetaContext::for_model("claude-sonnet-4-5").with_tool_search(true);
+        let first_party = assemble_beta_header(Provider::Anthropic, Endpoint::MessagesCreate, &ctx);
+        assert!(first_party
+            .split(',')
+            .any(|beta| beta == ADVANCED_TOOL_USE_1P));
+
+        let vertex = assemble_beta_header(Provider::Vertex, Endpoint::MessagesCreate, &ctx);
+        assert!(vertex.split(',').any(|beta| beta == TOOL_SEARCH_TOOL_3P));
+        assert!(!vertex.split(',').any(|beta| beta == ADVANCED_TOOL_USE_1P));
+
+        let bedrock = bedrock_extra_body_betas(&ctx);
+        assert!(bedrock.iter().any(|beta| beta == TOOL_SEARCH_TOOL_3P));
+        assert!(!bedrock.iter().any(|beta| beta == ADVANCED_TOOL_USE_1P));
     }
 
     /// A pre-existing `anthropic-beta` value (e.g. auth-injected oauth) is

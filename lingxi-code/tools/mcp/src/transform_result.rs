@@ -11,31 +11,21 @@
 //!   (`client.ts:2490-2502`).
 //! - `image`         → `{type:"image", source:{type:"base64", data, media_type}}`
 //!   with `media_type = "image/<ext>"` where `<ext>` is the segment of `mimeType`
-//!   after the `/` (default `png`). claude-code runs the buffer through
-//!   `maybeResizeAndDownsampleImageBuffer` first; here that is a PASSTHROUGH
-//!   (see [`maybe_resize`]) — `client.ts:2503-2523`.
+//!   after the `/` (default `png`). The buffer is run through the shared image
+//!   resize/downsample ladder first — `client.ts:2503-2523`.
 //! - `resource` with `text` → a `{type:"text"}` block prefixed
 //!   `[Resource from <server> at <uri>] ` (`client.ts:2528-2534`).
 //! - `resource` with `blob` + an image `mimeType` (in [`IMAGE_MIME_TYPES`]) →
-//!   a `{type:"text"}` prefix block + an `{type:"image"}` block (same passthrough
-//!   resize as `image`) — `client.ts:2538-2563`.
+//!   a `{type:"text"}` prefix block + an `{type:"image"}` block (same resize
+//!   path as `image`) — `client.ts:2538-2563`.
 //! - `resource` with `blob` + a non-image `mimeType` → [`persist_blob_to_text_block`]
 //!   with the `[Resource from <server> at <uri>] ` prefix (`client.ts:2564-2571`).
 //! - `resource_link` → a `{type:"text"}` block `[Resource link: <name>] <uri>`
 //!   plus optional ` (<description>)` (`client.ts:2575-2587`).
 //!
-//! ## Resize divergence (the ONLY non-byte-faithful case)
-//!
-//! [`maybe_resize`] is a PASSTHROUGH: it returns the ORIGINAL buffer and the
-//! extension derived from `mimeType`, with NO resize and NO codec dependency.
-//! The WITHIN-LIMIT case is byte-faithful — claude-code decodes the base64 to a
-//! Buffer, the resize is a no-op when the image is under the API dimension
-//! limit, and re-encoding the unchanged bytes yields the same canonical base64,
-//! so the data string is identical (we keep the original base64 string directly,
-//! avoiding a decode/re-encode round-trip). The OVER-LIMIT downsample is the
-//! only divergence: claude-code (Sharp/libvips) shrinks oversized images, while
-//! this port forwards them unchanged. Faithfully downsampling needs an image
-//! codec — a `5e-resize` follow-up — so large images are NOT downsampled here.
+//! Image processing reuses `tool-file`'s API-budget implementation. Images
+//! already within the byte/dimension budget keep their original base64 spelling;
+//! oversized images are resized/re-encoded before they reach the model.
 //!
 //! Persistence (audio + non-image resource blobs) REUSES the MCP-5d
 //! [`mcp::mcp_output_storage`] helpers (`decode_base64` + `persist_binary_content`
@@ -197,7 +187,7 @@ fn transform_block(block: &Value, server_name: &str, ctx: PersistContext) -> Vec
 /// Transform a `resource` block. Mirrors `client.ts:2524-2573`:
 /// - `text` in resource → a single prefixed text block;
 /// - `blob` with an image mimeType (in [`IMAGE_MIME_TYPES`]) → a prefix text
-///   block + an image block (`maybeResize` passthrough);
+///   block + an image block;
 /// - `blob` with a non-image mimeType → [`persist_blob_to_text_block`].
 fn transform_resource(block: &Value, server_name: &str, ctx: PersistContext) -> Vec<Value> {
     let Some(resource) = block.get("resource") else {
@@ -244,9 +234,8 @@ fn transform_resource(block: &Value, server_name: &str, ctx: PersistContext) -> 
 /// `media_type` is `"image/<ext>"` where `<ext>` is the part of `mimeType`
 /// after the first `/` (default `png`), reproducing
 /// `` `image/${resized.mediaType}` `` with `resized.mediaType = ext`
-/// (`client.ts:2506,2517-2518`). The base64 `data` is the ORIGINAL string —
-/// [`maybe_resize`] is a passthrough, so within the API limit this is
-/// byte-faithful; the over-limit downsample is the documented divergence.
+/// (`client.ts:2506,2517-2518`). Within-budget bytes keep the original base64
+/// spelling; oversized images use the shared resize/downsample result.
 fn image_block(data: &str, mime_type: Option<&str>) -> Value {
     let (resized_data, media_ext) = maybe_resize(data, mime_type);
     json!({
@@ -259,15 +248,10 @@ fn image_block(data: &str, mime_type: Option<&str>) -> Value {
     })
 }
 
-/// PASSTHROUGH analogue of claude-code's `maybeResizeAndDownsampleImageBuffer`
-/// (`utils/imageResizer.ts:169`). Returns `(original_base64, ext)` where `ext`
-/// is `mimeType.split('/')[1] || "png"` (`client.ts:2506`).
-///
-/// NO resize, NO codec, NO new dependency. The within-limit case is
-/// byte-faithful (the base64 is unchanged); large images are NOT downsampled —
-/// faithfully downsampling needs an image codec, a `5e-resize` follow-up. This
-/// is the ONLY divergence from claude-code in the 5e transform.
-fn maybe_resize<'a>(data: &'a str, mime_type: Option<&str>) -> (&'a str, String) {
+/// Analogue of claude-code's `maybeResizeAndDownsampleImageBuffer`
+/// (`utils/imageResizer.ts:169`). Invalid image data is left untouched so the
+/// normal provider validation remains the source of the eventual error.
+fn maybe_resize(data: &str, mime_type: Option<&str>) -> (String, String) {
     let raw_ext = mime_type
         .and_then(|m| m.split(';').next())
         .and_then(|m| m.split('/').nth(1))
@@ -282,7 +266,23 @@ fn maybe_resize<'a>(data: &'a str, mime_type: Option<&str>) -> (&'a str, String)
     } else {
         raw_ext
     };
-    (data, ext)
+    let Ok(original_bytes) = decode_base64(data) else {
+        return (data.to_string(), ext);
+    };
+    let Ok(processed) = tool_api::util::image_budget::process_image(original_bytes.clone()) else {
+        return (data.to_string(), ext);
+    };
+    // Preserve the exact original base64 spelling on the no-op path, including
+    // harmless whitespace accepted from MCP servers.
+    if decode_base64(&processed.base64).ok().as_deref() == Some(original_bytes.as_slice()) {
+        return (data.to_string(), ext);
+    }
+    let processed_ext = processed
+        .media_type
+        .strip_prefix("image/")
+        .unwrap_or("jpeg")
+        .to_string();
+    (processed.base64, processed_ext)
 }
 
 /// Decode base64 `data`, persist the bytes to disk, and return a `{type:"text"}`
@@ -618,6 +618,26 @@ mod tests {
         let got = transform_result_content(&content, "s", ctx(dir.path()));
         assert_eq!(got.as_array().unwrap().len(), 2);
         assert_eq!(got[1]["source"]["media_type"], json!("image/webp"));
+    }
+
+    #[test]
+    fn oversized_image_is_resized_before_model_delivery() {
+        // Valid 3000x1 RGB PNG. Its dimensions exceed the 2000px API cap even
+        // though the compressed fixture is tiny.
+        const WIDE_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAC7gAAAABCAIAAADBtXRpAAAAH0lEQVR42u3BAQEAAACCIP+vbkhAAQAAAAAAAADAgQEjKQABp2QvZgAAAABJRU5ErkJggg==";
+        let dir = tempfile::tempdir().unwrap();
+        let content = json!([{
+            "type": "image",
+            "data": WIDE_PNG,
+            "mimeType": "image/png"
+        }]);
+
+        let got = transform_result_content(&content, "images", ctx(dir.path()));
+
+        assert_eq!(got[0]["source"]["media_type"], json!("image/jpeg"));
+        let resized = got[0]["source"]["data"].as_str().unwrap();
+        assert_ne!(resized, WIDE_PNG);
+        assert_eq!(&decode_base64(resized).unwrap()[..2], &[0xff, 0xd8]);
     }
 
     #[test]

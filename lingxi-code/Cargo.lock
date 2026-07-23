@@ -26,18 +26,21 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "boon",
+ "branding",
  "engine",
  "futures",
  "hooks",
  "llm-client",
  "mcp",
  "memory",
+ "migrations",
  "permission",
  "protocol",
  "serde",
  "serde_json",
  "serde_yaml",
  "sidequery",
+ "telemetry",
  "tempfile",
  "test-harness",
  "thiserror 2.0.18",
@@ -617,6 +620,7 @@ dependencies = [
  "permission",
  "platform-posix",
  "protocol",
+ "secret",
  "serde",
  "serde_json",
  "session",
@@ -838,6 +842,7 @@ dependencies = [
  "client-protocol",
  "command-api",
  "command-core",
+ "cost",
  "crossterm",
  "dirs",
  "engine",
@@ -1130,7 +1135,6 @@ dependencies = [
  "futures",
  "libc",
  "protocol",
- "rand 0.9.4",
  "serde",
  "serde_json",
  "tasks",
@@ -5839,8 +5843,10 @@ version = "0.12.0"
 dependencies = [
  "arc-swap",
  "async-trait",
+ "base64 0.22.1",
  "engine",
  "futures",
+ "image 0.24.9",
  "lsp",
  "mcp",
  "once_cell",
@@ -5893,6 +5899,8 @@ dependencies = [
  "tool-api",
  "tracing",
  "traits",
+ "unicode-segmentation",
+ "unicode-width 0.1.14",
 ]
 
 [[package]]
@@ -6175,6 +6183,7 @@ dependencies = [
  "tokio",
  "tool-api",
  "traits",
+ "tui-core",
 ]
 
 [[package]]

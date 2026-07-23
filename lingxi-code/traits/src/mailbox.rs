@@ -67,6 +67,21 @@ pub trait MailboxRouterHandle: Send + Sync {
         to_agent: &str,
         message: MailboxMessage,
     ) -> Result<RouteAck, MailboxError>;
+
+    /// Fan one message out to every registered teammate except the sender.
+    /// Returns the display names of mailboxes that accepted the message.
+    ///
+    /// The default fails closed so hosts that only implement point-to-point
+    /// routing never report a fabricated broadcast success.
+    async fn broadcast(
+        &self,
+        _from_agent: &str,
+        _message: MailboxMessage,
+    ) -> Result<Vec<String>, MailboxError> {
+        Err(MailboxError::Internal(
+            "broadcast routing is not available on this host".to_string(),
+        ))
+    }
 }
 
 #[cfg(test)]

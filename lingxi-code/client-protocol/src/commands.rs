@@ -35,6 +35,39 @@ use crate::listings::TaskStatusDto;
 use crate::permission::PermissionResponseDto;
 use serde::{Deserialize, Serialize};
 
+/// A provider credential carried over the authenticated local bridge.
+///
+/// The wire representation is a plain JSON string for TypeScript/UniFFI
+/// compatibility, while the Rust `Debug` surface is always redacted so tracing
+/// or assertion output cannot accidentally print the secret.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(transparent)]
+pub struct ProviderCredentialSecretDto {
+    /// Secret wire value. Callers should keep its lifetime as short as possible.
+    pub value: String,
+}
+
+impl ProviderCredentialSecretDto {
+    /// Wrap a provider credential for transport.
+    #[must_use]
+    pub fn new(value: String) -> Self {
+        Self { value }
+    }
+
+    /// Borrow the credential at the audited persistence boundary.
+    #[must_use]
+    pub fn expose_secret(&self) -> &str {
+        &self.value
+    }
+}
+
+impl std::fmt::Debug for ProviderCredentialSecretDto {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ProviderCredentialSecretDto(<redacted>)")
+    }
+}
+
 /// The inbound command envelope a client sends to the engine.
 ///
 /// `#[non_exhaustive]` (mirrors `traits::OutputEvent`) so adding a command is
@@ -97,6 +130,42 @@ pub enum ClientCommand {
         /// Correlator with the originating
         /// [`PermissionRequest`](crate::permission::PermissionRequest).
         request_id: u64,
+    },
+
+    /// Change the live permission mode for subsequent tool checks. Confirmed
+    /// by a [`PermissionModeChanged`](crate::events::ClientEvent::PermissionModeChanged)
+    /// event carrying the authoritative mode after engine-side validation.
+    SetPermissionMode {
+        /// Permission-mode wire id (`default`, `acceptEdits`, `plan`, `auto`,
+        /// `dontAsk`, or `bypassPermissions`).
+        mode: String,
+    },
+
+    // ── Provider credentials ─────────────────────────────────────────────
+    /// Return non-secret availability for the requested provider ids.
+    ListProviderCredentials {
+        /// Main-process correlator echoed by `ProviderCredentialStatus`.
+        operation_id: u64,
+        /// Provider/keychain ids to inspect. Secret values are never returned.
+        provider_ids: Vec<String>,
+    },
+
+    /// Persist a provider credential through the engine's shared secure store.
+    SetProviderCredential {
+        /// Main-process correlator echoed by `ProviderCredentialStatus`.
+        operation_id: u64,
+        /// Provider/keychain id used by CLI, TUI, and Desktop.
+        provider_id: String,
+        /// Secret received only over the authenticated loopback bridge.
+        credential: ProviderCredentialSecretDto,
+    },
+
+    /// Delete a provider credential from the engine's shared secure store.
+    DeleteProviderCredential {
+        /// Main-process correlator echoed by `ProviderCredentialStatus`.
+        operation_id: u64,
+        /// Provider/keychain id used by CLI, TUI, and Desktop.
+        provider_id: String,
     },
 
     // ── Model ─────────────────────────────────────────────────────────────

@@ -11,8 +11,8 @@ export type ConnectionState =
 
 export type AllowedClientCommand = Extract<ClientCommand, {
   type: 'set_model' | 'list_models' | 'new_session' | 'resume_session' | 'list_sessions' |
-    'task_list' | 'task_output' | 'task_stop';
-}> | { type: 'refresh_listings'; which: Array<{ type: 'status' | 'doctor' }> };
+    'task_list' | 'task_output' | 'task_stop' | 'set_permission_mode' | 'run_slash_command';
+}> | { type: 'refresh_listings'; which: Array<{ type: 'status' | 'doctor' | 'slash_commands' }> };
 export interface PublicSettings {
   version: 1;
   theme?: 'dark' | 'light';
@@ -30,7 +30,7 @@ export interface WorkspaceMetadata {
     message: string;
   };
 }
-export interface CredentialMetadata { configured: boolean; encryptionAvailable: boolean }
+export interface CredentialMetadata { configured: boolean; encryptionAvailable: boolean; sessionOnly?: true; runtimeOnly?: true }
 export interface ProviderCredentialMetadata extends CredentialMetadata { providerId: string }
 export interface ProviderCredentialUpdate { credential: ProviderCredentialMetadata; settings: PublicSettings }
 export interface DiagnosticEntry {
@@ -47,6 +47,7 @@ export interface BootstrapState {
   connection: ConnectionState;
   diagnostics: DiagnosticEntry[];
 }
+export interface WorkspaceFileSearchResult { files: string[]; truncated: boolean }
 export type Unsubscribe = () => void;
 
 export interface LingxiApi {
@@ -57,6 +58,7 @@ export interface LingxiApi {
   updateSettings(patch: { theme?: 'dark' | 'light'; model?: string | null; apiBaseUrl?: string | null }): Promise<PublicSettings>;
   pickWorkspace(): Promise<WorkspaceMetadata | null>;
   setWorkspace(path: string): Promise<WorkspaceMetadata>;
+  searchWorkspaceFiles(query: string): Promise<WorkspaceFileSearchResult>;
   setWorkspaceTrusted(trusted: boolean): Promise<WorkspaceMetadata>;
   credential(): Promise<CredentialMetadata>;
   setCredential(credential: string): Promise<CredentialMetadata>;

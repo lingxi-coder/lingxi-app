@@ -19,11 +19,13 @@ test('session and model events replace authoritative host state', () => {
     { type: 'session_resumed', session_id: 's1', messages: [] },
     { type: 'model_list', models: ['m1', 'm2'], current: 'm1' },
     { type: 'model_changed', model: 'm2' },
+    { type: 'permission_mode_changed', mode: 'auto' },
   ]);
   assert.deepEqual(state.sessions, sessions);
   assert.equal(state.activeSessionId, 's1');
   assert.deepEqual(state.models, ['m1', 'm2']);
   assert.equal(state.currentModel, 'm2');
+  assert.equal(state.permissionMode, 'auto');
 });
 
 test('task rows, output and status updates remain correlated by id', () => {
@@ -51,6 +53,20 @@ test('unknown task status update is ignored without inventing mock rows', () => 
     type: 'task_status_changed', task_id: 'missing', status: { type: 'failed' },
   });
   assert.equal(after, before);
+});
+
+test('slash command catalogs replace stale commands for initial and live updates', () => {
+  const initial = reduceDesktopEvent(emptyDesktopState(), {
+    type: 'slash_command_catalog',
+    commands: [{ name: 'model', description: 'Switch model', source: 'builtin' }],
+  });
+  assert.deepEqual(initial.slashCommands.map((command) => command.name), ['model']);
+
+  const changed = reduceDesktopEvent(initial, {
+    type: 'commands_changed',
+    commands: [{ name: 'review-pr', description: 'Review a pull request', source: 'plugin' }],
+  });
+  assert.deepEqual(changed.slashCommands.map((command) => command.name), ['review-pr']);
 });
 
 test('task refresh replaces stale rows and outputs instead of merging forever', () => {

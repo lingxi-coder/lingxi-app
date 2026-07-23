@@ -101,6 +101,7 @@ impl ToolInvoker for RegistryToolInvoker {
             let check_ctx = traits::permission_gate::PermissionCheckContext {
                 worker,
                 tool_use_id: ctx.tool_use_id.clone(),
+                requires_user_interaction: tool.requires_user_interaction(),
                 // Per-call permission-mode override (claude-code 2.1.207 Agent
                 // `mode` → the child's `toolPermissionContext.mode`): a
                 // `mode:"plan"` subagent's dispatch authorizes under Plan so
@@ -232,7 +233,9 @@ mod tests {
 
     /// Minimal Tool impl returning input under {"echo": <input>}.
     /// Lives entirely under `#[cfg(test)]`.
-    struct TestEchoTool;
+    struct TestEchoTool {
+        requires_user_interaction: bool,
+    }
 
     #[async_trait]
     impl Tool for TestEchoTool {
@@ -244,6 +247,9 @@ mod tests {
         }
         fn is_enabled(&self, _: &ToolStaticContext) -> bool {
             true
+        }
+        fn requires_user_interaction(&self) -> bool {
+            self.requires_user_interaction
         }
         fn max_result_size_chars(&self) -> usize {
             1024
@@ -366,7 +372,17 @@ mod tests {
 
     fn registry_with_echo() -> Arc<ToolRegistry> {
         let mut r = ToolRegistry::new();
-        r.register_builtin(Arc::new(TestEchoTool));
+        r.register_builtin(Arc::new(TestEchoTool {
+            requires_user_interaction: false,
+        }));
+        Arc::new(r)
+    }
+
+    fn registry_with_interactive_echo() -> Arc<ToolRegistry> {
+        let mut r = ToolRegistry::new();
+        r.register_builtin(Arc::new(TestEchoTool {
+            requires_user_interaction: true,
+        }));
         Arc::new(r)
     }
 
@@ -896,12 +912,37 @@ mod tests {
             Some("toolu_abc123"),
             "the dispatching call's real tool_use_id reaches PermissionCheckContext.tool_use_id"
         );
+        assert!(!ctx.requires_user_interaction);
         let worker = ctx
             .worker
             .expect("a named, prompt-eligible worker is attributed");
         assert_eq!(worker.name, "researcher");
         assert_eq!(worker.team.as_deref(), Some("alpha"));
         assert!(worker.is_async);
+    }
+
+    #[tokio::test]
+    async fn dispatch_threads_tool_interaction_requirement_into_context_gate() {
+        let seen = Arc::new(StdMutex::new(None));
+        let gate = Arc::new(ContextRecordingGate {
+            seen: seen.clone(),
+            outcome: traits::permission_gate::PermissionOutcome::Allow {
+                updated_input: None,
+                permission_updates: Vec::new(),
+            },
+        });
+        RegistryToolInvoker::new(registry_with_interactive_echo())
+            .with_gate(gate)
+            .invoke("TestEcho", json!({}), ctx_with_tool_use_id("toolu_ui"))
+            .await
+            .expect("allow dispatches");
+
+        let ctx = seen
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("context gate consulted");
+        assert!(ctx.requires_user_interaction);
     }
 
     #[tokio::test]

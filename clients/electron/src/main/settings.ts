@@ -29,6 +29,10 @@ export interface CredentialKeychain {
 export interface CredentialMetadata {
   configured: boolean;
   encryptionAvailable: boolean;
+  /** The credential exists only in main-process memory and is lost on app exit. */
+  sessionOnly?: true;
+  /** The running engine received a credential from an external runtime source. */
+  runtimeOnly?: true;
 }
 
 export interface ProviderCredentialMetadata extends CredentialMetadata {
@@ -41,6 +45,8 @@ export class SettingsStore {
   private settings: PersistedSettings;
   /** Plaintext exists only for the lifetime of this main-process instance. */
   private readonly sessionCredentials = new Map<string, string>();
+  /** Providers that have no persisted ciphertext or Keychain item. */
+  private readonly sessionOnlyCredentials = new Set<string>();
 
   constructor(
     userData: string,
@@ -137,8 +143,12 @@ export class SettingsStore {
   }
 
   providerCredentialMetadata(providerId: string): ProviderCredentialMetadata {
+    const normalized = validateProviderId(providerId);
+    if (this.sessionOnlyCredentials.has(normalized)) {
+      return { providerId: normalized, configured: true, encryptionAvailable: false, sessionOnly: true };
+    }
     const path = this.providerCredentialPath(providerId);
-    let configured = Boolean(this.keychain?.available && this.keychain.has(providerId));
+    let configured = Boolean(this.keychain?.available && this.keychain.has(normalized));
     try {
       readFileSync(path);
       configured = true;
@@ -148,7 +158,11 @@ export class SettingsStore {
     // Metadata must stay non-blocking. Checking the generic-password item does
     // not read its value; legacy Safe Storage decryption is deferred until the
     // launch path needs a real credential and can migrate it.
-    return { providerId, configured, encryptionAvailable: true };
+    return {
+      providerId: normalized,
+      configured,
+      encryptionAvailable: this.keychain ? this.keychain.available : true,
+    };
   }
 
   providerCredentialMetadataFor(providerIds: readonly string[]): ProviderCredentialMetadata[] {
@@ -158,15 +172,20 @@ export class SettingsStore {
   setProviderCredential(providerId: string, value: string): ProviderCredentialMetadata {
     const credential = validateString(value, 'credential', 16_384);
     const normalized = validateProviderId(providerId);
-    if (this.keychain?.available) {
-      try {
+    if (this.keychain) {
+      if (this.keychain.available) try {
         this.keychain.write(normalized, credential);
         if (this.keychain.read(normalized) !== credential) throw new Error('keychain verification failed');
         this.removeLegacyCredential(normalized);
+        this.sessionCredentials.set(normalized, credential);
+        this.sessionOnlyCredentials.delete(normalized);
+        return this.providerCredentialMetadata(normalized);
       } catch {
-        throw new Error('secure credential storage is unavailable');
+        // A temporarily unavailable secure store must not prevent the current
+        // desktop session from starting. Never persist a plaintext fallback.
       }
       this.sessionCredentials.set(normalized, credential);
+      this.sessionOnlyCredentials.add(normalized);
       return this.providerCredentialMetadata(normalized);
     }
     const path = this.providerCredentialPath(providerId);
@@ -181,13 +200,14 @@ export class SettingsStore {
     writeFileSync(temporary, encrypted, { mode: 0o600 });
     renameSync(temporary, path);
     this.sessionCredentials.set(normalized, credential);
+    this.sessionOnlyCredentials.delete(normalized);
     return this.providerCredentialMetadata(normalized);
   }
 
   clearProviderCredential(providerId: string): ProviderCredentialMetadata {
     const normalized = validateProviderId(providerId);
-    if (this.keychain?.available) {
-      this.keychain.clear(normalized);
+    if (this.keychain) {
+      if (this.keychain.available) this.keychain.clear(normalized);
       this.removeLegacyCredential(normalized);
     } else {
       const path = this.providerCredentialPath(normalized);
@@ -198,6 +218,7 @@ export class SettingsStore {
       }
     }
     this.sessionCredentials.delete(normalized);
+    this.sessionOnlyCredentials.delete(normalized);
     return this.providerCredentialMetadata(normalized);
   }
 
@@ -206,7 +227,11 @@ export class SettingsStore {
     const normalized = validateProviderId(providerId);
     const sessionValue = this.sessionCredentials.get(normalized);
     if (sessionValue !== undefined) return sessionValue;
-    if (this.keychain?.available) {
+    // Query item metadata before requesting its secret. On macOS, reading a
+    // generic-password value can trigger Keychain authorization; probing every
+    // supported provider during startup would serialize those prompts/timeouts
+    // even though nearly every legacy item is absent.
+    if (this.keychain?.available && this.keychain.has(normalized)) {
       const value = this.keychain.read(normalized);
       if (value !== undefined) {
         this.sessionCredentials.set(normalized, value);
@@ -214,15 +239,9 @@ export class SettingsStore {
       }
     }
     const legacy = this.readLegacyCredential(normalized);
-    if (legacy !== undefined && this.keychain?.available) {
-      try {
-        this.keychain.write(normalized, legacy);
-        if (this.keychain.read(normalized) === legacy) this.removeLegacyCredential(normalized);
-      } catch {
-        // The legacy value still works for this launch; retry migration on a
-        // later save/restart without exposing it to the renderer.
-      }
-    }
+    // Do not write this value back into Electron's compatibility Keychain.
+    // BridgeManager migrates it directly into the engine-owned store after the
+    // connection is ready and clears this file only after that write succeeds.
     return legacy;
   }
 

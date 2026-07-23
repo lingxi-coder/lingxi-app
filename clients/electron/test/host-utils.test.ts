@@ -247,6 +247,84 @@ test('provider credentials survive a fresh settings store through the keychain b
   assert.equal(first.clearProviderCredential('deepseek').configured, false);
 });
 
+test('legacy credential discovery reads only keychain items that exist', () => {
+  const userData = temporaryDirectory();
+  const reads: string[] = [];
+  const keychain = {
+    available: true,
+    has: (providerId: string) => providerId === 'deepseek',
+    read: (providerId: string) => {
+      reads.push(providerId);
+      return providerId === 'deepseek' ? 'deepseek-secret' : undefined;
+    },
+    write: () => { throw new Error('migration write is not expected'); },
+    clear: () => undefined,
+  };
+  const encryption: EncryptionProvider = {
+    isEncryptionAvailable: () => true,
+    encryptString: (value) => Buffer.from(value),
+    decryptString: (value) => value.toString(),
+  };
+
+  const store = new SettingsStore(userData, encryption, keychain);
+  assert.deepEqual(store.readProviderCredentials(['openai', 'deepseek', 'openrouter']), {
+    deepseek: 'deepseek-secret',
+  });
+  assert.deepEqual(reads, ['deepseek']);
+});
+
+test('legacy encrypted credentials wait for direct engine migration', () => {
+  const userData = temporaryDirectory();
+  mkdirSync(join(userData, 'provider-credentials'), { recursive: true });
+  writeFileSync(join(userData, 'provider-credentials', 'deepseek.bin'), 'encrypted:deepseek-secret');
+  let compatibilityWrites = 0;
+  const store = new SettingsStore(userData, {
+    isEncryptionAvailable: () => true,
+    encryptString: (value) => Buffer.from(`encrypted:${value}`),
+    decryptString: (value) => value.toString().slice('encrypted:'.length),
+  }, {
+    available: true,
+    has: () => false,
+    read: () => undefined,
+    write: () => { compatibilityWrites += 1; },
+    clear: () => undefined,
+  });
+
+  assert.equal(store.readProviderCredential('deepseek'), 'deepseek-secret');
+  assert.equal(compatibilityWrites, 0);
+  assert.equal(readFileSync(join(userData, 'provider-credentials', 'deepseek.bin'), 'utf8'), 'encrypted:deepseek-secret');
+});
+
+test('macOS keeps a replacement credential in memory when secure persistence is unavailable', () => {
+  const keychain = {
+    available: false,
+    has: () => false,
+    read: () => undefined,
+    write: () => { throw new Error('must not write an unavailable keychain'); },
+    clear: () => undefined,
+  };
+  const encryption: EncryptionProvider = {
+    isEncryptionAvailable: () => { throw new Error('legacy Safe Storage must not be used on macOS'); },
+    encryptString: () => { throw new Error('legacy Safe Storage must not be used on macOS'); },
+    decryptString: () => { throw new Error('legacy Safe Storage must not be used on macOS'); },
+  };
+  const userData = temporaryDirectory();
+  const store = new SettingsStore(userData, encryption, keychain);
+
+  assert.deepEqual(store.setProviderCredential('deepseek', 'replacement-secret'), {
+    providerId: 'deepseek',
+    configured: true,
+    encryptionAvailable: false,
+    sessionOnly: true,
+  });
+  assert.equal(store.readProviderCredential('deepseek'), 'replacement-secret');
+  assert.deepEqual(new SettingsStore(userData, encryption, keychain).providerCredentialMetadata('deepseek'), {
+    providerId: 'deepseek',
+    configured: false,
+    encryptionAvailable: false,
+  });
+});
+
 test('unavailable persisted provider storage fails closed without exposing a secret', () => {
   const userData = temporaryDirectory();
   mkdirSync(join(userData, 'provider-credentials'), { recursive: true });

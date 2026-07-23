@@ -25,13 +25,23 @@ pub struct ClaudeAiOAuthConfig {
     pub scopes: Vec<String>,
 }
 
-/// Spec §7 line 720 — claude-code's authoritative scope list.
-///
-/// Order is preserved when joined into the `scope=` parameter; tests assert
-/// the exact `read:user write:messages read:projects` byte sequence.
-pub const CLAUDE_CODE_OAUTH_SCOPES: &[&str] = &["read:user", "write:messages", "read:projects"];
+/// Claude Code 2.1.217's normal interactive OAuth scopes, in wire order.
+pub const CLAUDE_CODE_OAUTH_SCOPES: &[&str] = &[
+    "org:create_api_key",
+    "user:profile",
+    "user:inference",
+    "user:sessions:claude_code",
+    "user:mcp_servers",
+    "user:file_upload",
+];
 
-/// Spec §7 line 715 — refresh `grant_type`. Locked byte-for-byte.
+/// Scope used by `setup-token`'s deliberately restricted one-year token.
+pub const CLAUDE_CODE_INFERENCE_SCOPE: &str = "user:inference";
+
+/// Claude Code's long-lived OAuth token duration (one year).
+pub const LONG_LIVED_OAUTH_TOKEN_TTL_SECONDS: u64 = 31_536_000;
+
+/// Refresh-token grant value used by Anthropic's OAuth endpoint.
 pub const REFRESH_GRANT_TYPE: &str = "refresh_token";
 
 impl ClaudeAiOAuthConfig {
@@ -40,16 +50,25 @@ impl ClaudeAiOAuthConfig {
     #[must_use]
     pub fn default_with_port(port: u16) -> Self {
         Self {
-            authorization_endpoint: "https://claude.ai/oauth/authorize".into(),
-            token_endpoint: "https://console.anthropic.com/v1/oauth/token".into(),
-            revocation_endpoint: "https://console.anthropic.com/v1/oauth/revoke".into(),
-            profile_endpoint: "https://api.claude.ai/v1/me".into(),
-            client_id: "lingxi-core".into(),
-            redirect_uri: format!("http://127.0.0.1:{port}/callback"),
+            authorization_endpoint: "https://claude.com/cai/oauth/authorize".into(),
+            token_endpoint: "https://platform.claude.com/v1/oauth/token".into(),
+            revocation_endpoint: "https://platform.claude.com/v1/oauth/token/revoke".into(),
+            profile_endpoint: "https://api.anthropic.com/api/oauth/profile".into(),
+            client_id: "9d1c250a-e61b-44d9-88ed-5944d1962f5e".into(),
+            redirect_uri: format!("http://localhost:{port}/callback"),
             scopes: CLAUDE_CODE_OAUTH_SCOPES
                 .iter()
                 .map(|s| (*s).into())
                 .collect(),
+        }
+    }
+
+    /// Anthropic Console/API-billing variant of the same OAuth application.
+    #[must_use]
+    pub fn console_with_port(port: u16) -> Self {
+        Self {
+            authorization_endpoint: "https://platform.claude.com/oauth/authorize".into(),
+            ..Self::default_with_port(port)
         }
     }
 }

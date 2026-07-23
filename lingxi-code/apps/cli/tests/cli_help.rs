@@ -92,6 +92,37 @@ fn help_lists_debug_flag() {
 }
 
 #[test]
+fn help_documents_the_attach_v2_detach_chord() {
+    Command::cargo_bin("lingxi-cli")
+        .unwrap()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "attach          Open a background session here; Ctrl+Z returns to the shell",
+        ));
+}
+
+#[test]
+fn help_renders_public_aliases_in_the_option_heading() {
+    Command::cargo_bin("lingxi-cli")
+        .unwrap()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "--allowedTools, --allowed-tools <tools>...",
+        ))
+        .stdout(predicate::str::contains(
+            "--disallowedTools, --disallowed-tools <tools>...",
+        ))
+        .stdout(predicate::str::contains("--bg, --background"))
+        .stdout(predicate::str::contains("[aliases: allowed-tools]").not())
+        .stdout(predicate::str::contains("[aliases: disallowed-tools]").not())
+        .stdout(predicate::str::contains("[aliases: background]").not());
+}
+
+#[test]
 fn help_omits_leaked_engineering_notes() {
     // Regression lock: internal engineering/impl notes (plan-mission tags,
     // binary offsets, reference source paths) must never render in user-facing

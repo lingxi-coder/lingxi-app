@@ -223,7 +223,7 @@ fn invalid_reason(entry: &Value, ty: &str) -> String {
 /// values; other types expand nothing). Deduped, first-seen order (`Fo`).
 fn collect_missing_env_vars(entry: &Value, ty: &str) -> Vec<String> {
     let mut all: Vec<String> = Vec::new();
-    let mut push = |s: &str, all: &mut Vec<String>| {
+    let push = |s: &str, all: &mut Vec<String>| {
         all.extend(crate::env_expansion::expand_env_vars_in_string(s).missing_vars);
     };
     match ty {

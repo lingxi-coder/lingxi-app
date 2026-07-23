@@ -13,6 +13,21 @@ pub async fn count_tokens(
     transport: &dyn Transport,
     request: &LlmRequest,
 ) -> Result<u64, LlmError> {
+    match try_count_tokens_exact(client, transport, request).await? {
+        Some(tokens) => Ok(tokens),
+        None => Ok(approximate_tokens(request)),
+    }
+}
+
+/// Count tokens only when the resolved route exposes Anthropic's exact
+/// `count_tokens` endpoint. `None` means callers must use their documented
+/// fallback rather than mistaking the generic text approximation for an exact
+/// tool-schema count.
+pub async fn try_count_tokens_exact(
+    client: &DefaultLlmClient,
+    transport: &dyn Transport,
+    request: &LlmRequest,
+) -> Result<Option<u64>, LlmError> {
     match client.prepare_count_tokens(request).await {
         Ok(mut provider_request) => {
             // Gate on the resolved request model in the prepared body (the
@@ -34,11 +49,10 @@ pub async fn count_tokens(
             // base_url-independent.
             AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01")
                 .decode_count_tokens_response(&response)
+                .map(Some)
         }
         // Coupled to prepare_count_tokens' error message ("count_tokens is only available on AnthropicMessages routes").
-        Err(LlmError::InvalidRequest { message }) if message.contains("count_tokens") => {
-            Ok(approximate_tokens(request))
-        }
+        Err(LlmError::InvalidRequest { message }) if message.contains("count_tokens") => Ok(None),
         Err(other) => Err(other),
     }
 }
@@ -324,6 +338,24 @@ mod tests {
             transport.seen.lock().unwrap().is_none(),
             "transport should not be called"
         );
+    }
+
+    #[tokio::test]
+    async fn exact_count_reports_unavailable_for_non_anthropic_route() {
+        let transport = ScriptedTransport::returning(ProviderResponse::json(
+            200,
+            serde_json::json!({ "input_tokens": 9999 }),
+        ));
+        let client = openai_client();
+        let req = LlmRequest::new("gpt").with_user_text("hello");
+
+        assert_eq!(
+            try_count_tokens_exact(&client, &transport, &req)
+                .await
+                .expect("route resolution"),
+            None
+        );
+        assert!(transport.seen.lock().unwrap().is_none());
     }
 
     // ----------------------------------------------------------------

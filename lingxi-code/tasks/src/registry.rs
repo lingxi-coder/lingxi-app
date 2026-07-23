@@ -4,7 +4,8 @@
 //! the [`BackgroundTaskHandle`]s returned by the [`RuntimeSpawner`].
 
 use crate::handlers::{
-    DreamHandler, InProcessTeammateHandler, LocalAgentHandler, LocalBashHandler, MonitorMcpHandler,
+    DreamHandler, InProcessTeammateHandler, LocalAgentHandler, LocalBashHandler, MonitorHandler,
+    MonitorMcpHandler,
 };
 use crate::id::{generate_task_id, TaskType};
 use crate::output_manager::TaskOutputManager;
@@ -69,6 +70,10 @@ pub struct TaskRegistry {
     /// out of [`TaskStateBase`] to avoid a workspace-wide exhaustive-initializer
     /// churn for a field only this path reads.
     pending_rest: Arc<RwLock<std::collections::HashMap<String, RestPayload>>>,
+    /// Bounded live `monitor_ws` stdout events waiting for the next turn.
+    pending_monitor_events: Arc<
+        tokio::sync::Mutex<std::collections::VecDeque<traits::task_registry::TaskNotification>>,
+    >,
     /// Per-session running total of subagents spawned through the `Agent` tool
     /// (claude 2.1.212 `taskRegistry` `getTotalAgentSpawns` /
     /// `incrementTotalAgentSpawns`). The tool reads this before every spawn and
@@ -120,6 +125,9 @@ impl TaskRegistry {
             task_completed_firer: None,
             task_created_firer: None,
             pending_rest: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            pending_monitor_events: Arc::new(tokio::sync::Mutex::new(
+                std::collections::VecDeque::new(),
+            )),
             total_agent_spawns: AtomicU64::new(0),
             web_search_calls: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
@@ -282,6 +290,8 @@ impl TaskRegistry {
             output_file: path,
             output_offset: 0,
             notified: false,
+            creator_teammate_name: None,
+            creator_team_name: None,
         };
         // Build a default state per type; production stores real fields.
         #[allow(clippy::match_same_arms)]
@@ -296,6 +306,11 @@ impl TaskRegistry {
                 base,
                 iteration_count: 0,
                 max_iterations: None,
+            }),
+            TaskType::Monitor => TaskState::Monitor(crate::state::MonitorTaskState {
+                base,
+                command: String::new(),
+                exit_code: None,
             }),
             _ => TaskState::LocalBash(crate::state::LocalBashTaskState {
                 base,
@@ -324,13 +339,24 @@ impl TaskRegistry {
     /// ride as `None` (the same documented gap as the `TaskCompleted` fire).
     async fn fire_task_created(&self, task_id: &str, task_type: TaskType, description: &str) {
         if let Some(firer) = &self.task_created_firer {
+            let (teammate_name, team_name) = self
+                .get(task_id)
+                .await
+                .map(|state| {
+                    let base = state.base();
+                    (
+                        base.creator_teammate_name.clone(),
+                        base.creator_team_name.clone(),
+                    )
+                })
+                .unwrap_or((None, None));
             firer
                 .fire(hooks::TaskCreatedFire {
                     task_id: task_id.to_string(),
                     task_subject: format!("{task_type:?}"),
                     task_description: Some(description.to_string()),
-                    teammate_name: None,
-                    team_name: None,
+                    teammate_name,
+                    team_name,
                 })
                 .await;
         }
@@ -374,6 +400,8 @@ impl TaskRegistry {
             output_file: path,
             output_offset: 0,
             notified: false,
+            creator_teammate_name: None,
+            creator_team_name: None,
         };
         let state = TaskState::McpTask(crate::state::McpTaskState {
             base,
@@ -487,8 +515,8 @@ impl TaskRegistry {
                     status: status_str.to_string(),
                     task_subject: settled_base.description.clone(),
                     task_description: Some(settled_base.description.clone()),
-                    teammate_name: None,
-                    team_name: None,
+                    teammate_name: settled_base.creator_teammate_name.clone(),
+                    team_name: settled_base.creator_team_name.clone(),
                 })
                 .await;
         }
@@ -571,6 +599,8 @@ impl TaskRegistry {
             output_file: path,
             output_offset: 0,
             notified: false,
+            creator_teammate_name: None,
+            creator_team_name: None,
         };
         let state = state_for_spawn(base, &input);
         self.tasks.write().await.insert(id.clone(), state);
@@ -623,11 +653,11 @@ impl TaskRegistry {
         })
     }
 
-    /// Record a `local_bash` task's child exit code (M8 cc2.1.198 "Task
+    /// Record a shell-backed task's child exit code (M8 cc2.1.198 "Task
     /// panels: no stuck Running"): the worker's status sink reports the exit
     /// code alongside the terminal status once the process ends; `output()`
     /// projects it as `exit_code`/`done`. Non-bash variants are a benign
-    /// no-op (only bash children carry an OS exit code). `NotFound` for an
+    /// no-op (only bash and monitor children carry an OS exit code). `NotFound` for an
     /// unknown id — the sink swallows it (racing teardown tolerance).
     pub async fn set_bash_exit_code(&self, task_id: &str, exit_code: i32) -> Result<(), TaskError> {
         let task_id = self.canonical_or_raw(task_id).await;
@@ -635,9 +665,50 @@ impl TaskRegistry {
         let entry = map
             .get_mut(&task_id)
             .ok_or_else(|| TaskError::NotFound(task_id.clone()))?;
-        if let TaskState::LocalBash(b) = entry {
-            b.exit_code = Some(exit_code);
+        match entry {
+            TaskState::LocalBash(b) => b.exit_code = Some(exit_code),
+            TaskState::Monitor(m) => m.exit_code = Some(exit_code),
+            _ => {}
         }
+        Ok(())
+    }
+
+    /// Queue one live `monitor_ws` stdout event for the next turn-boundary
+    /// drain. The queue is deliberately bounded: a detached/high-volume
+    /// producer must not grow session memory without limit while the model is
+    /// busy. The monitor handler performs its own token-bucket suppression;
+    /// this final cap protects the registry boundary as well.
+    pub async fn enqueue_monitor_event(&self, task_id: &str, event: &str) -> Result<(), TaskError> {
+        const MAX_PENDING_MONITOR_EVENTS: usize = 1_024;
+
+        let task_id = self.canonical_or_raw(task_id).await;
+        let notification = {
+            let tasks = self.tasks.read().await;
+            let state = tasks
+                .get(&task_id)
+                .ok_or_else(|| TaskError::NotFound(task_id.clone()))?;
+            let TaskState::Monitor(monitor) = state else {
+                return Err(TaskError::Unsupported);
+            };
+            if monitor.base.status.is_terminal() {
+                return Ok(());
+            }
+            traits::task_registry::TaskNotification {
+                task_id: monitor.base.id.clone(),
+                task_type: "monitor_ws".to_string(),
+                status: "running".to_string(),
+                description: monitor.base.description.clone(),
+                tool_use_id: monitor.base.tool_use_id.clone(),
+                output_path: Some(monitor.base.output_file.to_string_lossy().into_owned()),
+                result: Some(event.to_string()),
+                ..Default::default()
+            }
+        };
+        let mut queue = self.pending_monitor_events.lock().await;
+        if queue.len() >= MAX_PENDING_MONITOR_EVENTS {
+            queue.pop_front();
+        }
+        queue.push_back(notification);
         Ok(())
     }
 
@@ -695,6 +766,7 @@ impl TaskRegistry {
                 TaskState::InProcessTeammate(t) => t.base.status = status,
                 TaskState::LocalWorkflow(w) => w.base.status = status,
                 TaskState::MonitorMcp(m) => m.base.status = status,
+                TaskState::Monitor(m) => m.base.status = status,
                 TaskState::McpTask(m) => m.base.status = status,
                 TaskState::Dream(d) => d.base.status = status,
             }
@@ -729,8 +801,8 @@ impl TaskRegistry {
                         status: status_str.to_string(),
                         task_subject: base.description.clone(),
                         task_description: Some(base.description.clone()),
-                        teammate_name: None,
-                        team_name: None,
+                        teammate_name: base.creator_teammate_name.clone(),
+                        team_name: base.creator_team_name.clone(),
                     })
                     .await;
             }
@@ -815,6 +887,7 @@ impl TaskRegistry {
         &self,
     ) -> Vec<traits::task_registry::TaskNotification> {
         use crate::handle::{status_to_wire, task_type_to_wire};
+        let mut out: Vec<_> = self.pending_monitor_events.lock().await.drain(..).collect();
         let mut map = self.tasks.write().await;
         // Collect ids first (terminal + not-notified) so the per-id remove below
         // doesn't fight the iteration borrow.
@@ -826,7 +899,7 @@ impl TaskRegistry {
             })
             .map(|(id, _)| id.clone())
             .collect();
-        let mut out = Vec::with_capacity(drain_ids.len());
+        out.reserve(drain_ids.len());
         for id in drain_ids {
             let Some(state) = map.get(&id) else {
                 continue;
@@ -835,6 +908,7 @@ impl TaskRegistry {
             // Per-type fields the renderer needs beyond the shared base.
             let exit_code = match state {
                 TaskState::LocalBash(bash) => bash.exit_code,
+                TaskState::Monitor(monitor) => monitor.exit_code,
                 _ => None,
             };
             let error = match state {
@@ -976,6 +1050,7 @@ impl TaskRegistry {
                     match s {
                         TaskState::LocalBash(b) => b.base.status = TaskStatus::Killed,
                         TaskState::LocalAgent(a) => a.base.status = TaskStatus::Killed,
+                        TaskState::Monitor(m) => m.base.status = TaskStatus::Killed,
                         // A backgrounded MCP call: mark killed + `mcpStatus:"cancelled"`
                         // (the poll loop's `status==="killed"` → `cancelTask` branch).
                         TaskState::McpTask(m) => {
@@ -1007,6 +1082,7 @@ impl TaskRegistry {
                 match s {
                     TaskState::LocalBash(b) => b.base.status = TaskStatus::Killed,
                     TaskState::LocalAgent(a) => a.base.status = TaskStatus::Killed,
+                    TaskState::Monitor(m) => m.base.status = TaskStatus::Killed,
                     // A backgrounded MCP call: the stored cancel cleanup aborts the
                     // in-flight call; reflect the kill + `mcpStatus:"cancelled"`.
                     TaskState::McpTask(m) => {
@@ -1154,9 +1230,21 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
     // Stamp the originating `tool_use_id` onto the task so a backgrounded agent's
     // `<task-notification>` carries the `<tool-use-id>` line (claude-code parity).
     // Only `LocalAgent` threads it today; other types keep the caller's `None`.
-    if let TaskSpawnInput::LocalAgent { tool_use_id, .. } = input {
+    if let TaskSpawnInput::LocalAgent {
+        tool_use_id,
+        creator_teammate_name,
+        creator_team_name,
+        ..
+    } = input
+    {
         if base.tool_use_id.is_none() {
             base.tool_use_id = tool_use_id.clone();
+        }
+        if base.creator_teammate_name.is_none() {
+            base.creator_teammate_name = creator_teammate_name.clone();
+        }
+        if base.creator_team_name.is_none() {
+            base.creator_team_name = creator_team_name.clone();
         }
     }
     match input {
@@ -1223,6 +1311,21 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
                 base,
                 server_name: server_name.clone(),
                 watch_resources: watch.clone(),
+            })
+        }
+        TaskSpawnInput::Monitor {
+            command,
+            timeout: _,
+            cwd: _,
+            tool_use_id,
+        } => {
+            if base.tool_use_id.is_none() {
+                base.tool_use_id = tool_use_id.clone();
+            }
+            TaskState::Monitor(crate::state::MonitorTaskState {
+                base,
+                command: command.clone(),
+                exit_code: None,
             })
         }
         TaskSpawnInput::McpTask {
@@ -1292,7 +1395,8 @@ fn aliases_for_spawn(input: &TaskSpawnInput) -> Vec<String> {
 /// Register the M2 *self-contained* per-type handlers — the ones whose only
 /// dependencies are platform traits already available at boot (no agent /
 /// subagent pool, mailbox, or budget enforcer). Today that is
-/// [`TaskType::LocalBash`] and [`TaskType::MonitorMcp`].
+/// [`TaskType::LocalBash`], [`TaskType::Monitor`], and
+/// [`TaskType::MonitorMcp`].
 ///
 /// `process` + `sandbox` are required because they are absent from
 /// [`crate::task_trait::TaskContext`] yet [`LocalBashHandler`] cannot run a
@@ -1324,7 +1428,14 @@ pub fn register_self_contained_handlers(
     reg.register_handler(
         TaskType::LocalBash,
         Arc::new(
-            LocalBashHandler::new(process, sandbox, output_manager.clone())
+            LocalBashHandler::new(process.clone(), sandbox.clone(), output_manager.clone())
+                .with_status_sink(bash_status_sink.clone()),
+        ),
+    );
+    reg.register_handler(
+        TaskType::Monitor,
+        Arc::new(
+            MonitorHandler::new(process, sandbox, output_manager.clone())
                 .with_status_sink(bash_status_sink),
         ),
     );

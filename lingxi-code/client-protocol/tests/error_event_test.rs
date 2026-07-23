@@ -46,6 +46,7 @@ fn error_kind_variants_round_trip() {
         (ErrorKindDto::Protocol, "protocol"),
         (ErrorKindDto::Server, "server"),
         (ErrorKindDto::MaxTurns, "max_turns"),
+        (ErrorKindDto::Rejected, "rejected"),
         (ErrorKindDto::Internal, "internal"),
     ];
     for (kind, tag) in cases {

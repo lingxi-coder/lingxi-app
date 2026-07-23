@@ -182,6 +182,34 @@ fn route_lines_keeps_only_transcript_messages_and_skips_malformed() {
     );
 }
 
+#[test]
+fn route_lines_projects_pr_link_metadata() {
+    let routed = route_lines(
+        r#"{"type":"pr-link","sessionId":"sid-1","prNumber":"42","prUrl":"https://github.com/acme/repo/pull/42","prRepository":"acme/repo"}"#,
+    );
+    assert_eq!(routed.pr_numbers.get("sid-1"), Some(&42));
+    assert_eq!(
+        routed.pr_urls.get("sid-1").map(String::as_str),
+        Some("https://github.com/acme/repo/pull/42")
+    );
+    assert_eq!(
+        routed.pr_repositories.get("sid-1").map(String::as_str),
+        Some("acme/repo")
+    );
+}
+
+#[test]
+fn route_lines_backfills_pr_number_from_legacy_url_only_record() {
+    let routed = route_lines(
+        r#"{"type":"pr-link","sessionId":"sid-legacy","prUrl":"https://github.com/acme/repo/pull/73"}"#,
+    );
+    assert_eq!(routed.pr_numbers.get("sid-legacy"), Some(&73));
+    assert_eq!(
+        routed.pr_urls.get("sid-legacy").map(String::as_str),
+        Some("https://github.com/acme/repo/pull/73")
+    );
+}
+
 #[tokio::test]
 async fn read_all_is_tolerant_of_metadata_and_malformed_lines() {
     // Same mixed content, but exercised through the public `JsonlReader::read_all`

@@ -743,8 +743,11 @@ mod wire_and_persist_tests {
             serde_json::from_str(req.body.as_deref().unwrap()).expect("json body");
         assert_eq!(sent["grant_type"], "refresh_token");
         assert_eq!(sent["refresh_token"], "OLD_REFRESH");
-        assert_eq!(sent["client_id"], "lingxi-core");
-        assert_eq!(sent["scope"], "read:user write:messages read:projects");
+        assert_eq!(sent["client_id"], "9d1c250a-e61b-44d9-88ed-5944d1962f5e");
+        assert_eq!(
+            sent["scope"],
+            crate::oauth::anthropic::config::CLAUDE_CODE_OAUTH_SCOPES.join(" ")
+        );
 
         // Persisted: rotated tokens written, identity preserved.
         let persisted = cm.get_oauth_tokens().await.expect("get").expect("present");
@@ -899,7 +902,10 @@ mod wire_and_persist_tests {
         let sent: serde_json::Value =
             serde_json::from_str(req.body.as_deref().unwrap()).expect("json body");
         // Canonical default (config.scopes), NOT the narrow "read:user" held.
-        assert_eq!(sent["scope"], "read:user write:messages read:projects");
+        assert_eq!(
+            sent["scope"],
+            crate::oauth::anthropic::config::CLAUDE_CODE_OAUTH_SCOPES.join(" ")
+        );
     }
 
     /// OAUTHREF.2: the refresh POST uses a 15s timeout, matching claude-code's

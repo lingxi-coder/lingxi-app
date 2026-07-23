@@ -28,7 +28,7 @@
     "max_skill_descriptor_len": 1024,
     "cron_subdir": "cron",
     "cron_file_suffix": ".json",
-    "cron_task_id_prefix": "d",
+    "cron_task_id_length": 8,
     "six_field_rejection": "ScheduleCron: 6-field cron (with seconds) is not supported; use 5-field cron (minute hour day month weekday)",
     "tool_search_max_results": 20
   },

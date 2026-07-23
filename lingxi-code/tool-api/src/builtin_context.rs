@@ -227,14 +227,15 @@ pub struct BuiltinToolContext {
     // ===== Read(deny) search-exclusion seam =====
     /// Ripgrep `--glob` exclude strings (WITHOUT the leading `!`) derived from
     /// the active `Read`-`deny` permission rules — 1:1 with claude-code
-    /// `F4e(U4e(toolPermissionContext), cwd)`, computed once at engine boot via
-    /// [`permission::read_deny_exclude_globs`]. The `Grep` and `Glob` tools turn
+    /// `F4e(U4e(toolPermissionContext), cwd)`, used as a construction-time
+    /// fallback when no live rule-evaluating permission gate is wired. The
+    /// `Grep` and `Glob` tools turn
     /// each entry into a negated `ignore`-crate override so a denied/sensitive
     /// path never appears in search results (`GrepTool.ts:417-427`, `glob.ts`
     /// `lLa()`). Empty by default — every non-live construction site (tests,
     /// other tools) leaves it `vec![]`, so behavior is unchanged when no
-    /// `Read`-deny rule applies. Populated only at the two live engine roots
-    /// (`engine-desktop` + `engine-mobile`) from the boot `PermissionPolicy`.
+    /// `Read`-deny rule applies. A live [`Self::permission_gate`] supersedes it
+    /// on every search call so runtime `updatedPermissions` are observed.
     pub read_deny_exclude_globs: Vec<String>,
 
     // ===== Android-sandbox P3 seam =====
@@ -346,9 +347,21 @@ impl BuiltinToolContext {
         self.session_cwd.snapshot()
     }
 
+    /// Current `Read`-deny search exclusions rebased to `cwd`. A live policy
+    /// gate wins; static contexts and tests retain the boot-time vector.
+    #[must_use]
+    pub fn effective_read_deny_exclude_globs(&self, cwd: &std::path::Path) -> Vec<String> {
+        self.permission_gate
+            .as_ref()
+            .and_then(|gate| gate.read_deny_exclude_globs(cwd))
+            .unwrap_or_else(|| self.read_deny_exclude_globs.clone())
+    }
+
     /// The sandbox config the shell tools should actually use: the frozen
     /// [`Self::sandbox_runtime`] with its `enabled` flag overridden live by the
-    /// `/sandbox` toggle cell when one is wired.
+    /// `/sandbox` toggle cell when one is wired, plus a per-call reconcile of
+    /// deny-write symlink seeds so mid-session symlink replacements are
+    /// hardened before the next sandboxed command runs.
     ///
     /// Only `enabled` is overridden — every other field (excluded commands,
     /// allow-unsandboxed, platform, …) rides the frozen config, and the cell is
@@ -356,14 +369,16 @@ impl BuiltinToolContext {
     /// the frozen config until `/sandbox` actually flips the toggle.
     #[must_use]
     pub fn effective_sandbox_runtime(&self) -> SandboxRuntimeConfig {
-        match &self.sandbox_enabled_override {
+        let mut cfg = match &self.sandbox_enabled_override {
             Some(cell) => {
                 let mut cfg = self.sandbox_runtime.clone();
                 cfg.enabled = cell.load(std::sync::atomic::Ordering::Relaxed);
                 cfg
             }
             None => self.sandbox_runtime.clone(),
-        }
+        };
+        sandbox::policy_convert::reconcile_deny_write_symlinks(&mut cfg);
+        cfg
     }
 }
 
@@ -411,14 +426,25 @@ pub trait TaskLifecycleHookFirer: Send + Sync {
     /// claude-code `executeTaskCompletedHooks` BLOCKING path. `Ok(())` = allow
     /// completion; `Err(reason)` = a hook BLOCKED completion (the tool returns
     /// `success:false` carrying `reason` and does NOT apply the status).
+    /// `teammate_name` / `team_name` identify the completing teammate, matching
+    /// TaskUpdateTool's live `getAgentName()` / `getTeamName()` arguments.
     async fn fire_task_completed(
         &self,
         task_id: &str,
         status: &str,
         subject: &str,
         description: Option<&str>,
+        teammate_name: Option<&str>,
+        team_name: Option<&str>,
     ) -> Result<(), String> {
-        let _ = (task_id, status, subject, description);
+        let _ = (
+            task_id,
+            status,
+            subject,
+            description,
+            teammate_name,
+            team_name,
+        );
         Ok(())
     }
 }
@@ -539,8 +565,40 @@ impl std::fmt::Debug for AndroidGitSecret {
 mod tests {
     use super::*;
     use crate::test_support::{ctx_for_file_tools, make_dummy_fs};
+    use serde_json::Value;
     use std::sync::Arc;
     use telemetry::AnalyticsBus;
+    use traits::permission_gate::PermissionDecision;
+
+    struct LiveReadDenyGate;
+
+    #[async_trait::async_trait]
+    impl PermissionGate for LiveReadDenyGate {
+        async fn check(&self, _name: &str, _input: &Value) -> PermissionDecision {
+            PermissionDecision::Allow
+        }
+
+        fn read_deny_exclude_globs(&self, _cwd: &std::path::Path) -> Option<Vec<String>> {
+            Some(vec!["/live/**".to_string()])
+        }
+    }
+
+    #[test]
+    fn effective_read_deny_globs_prefer_live_gate_with_static_fallback() {
+        let mut ctx =
+            ctx_for_file_tools(make_dummy_fs(), Arc::new(AnalyticsBus::new()), Vec::new());
+        ctx.read_deny_exclude_globs = vec!["/boot/**".to_string()];
+        assert_eq!(
+            ctx.effective_read_deny_exclude_globs(std::path::Path::new("/proj")),
+            vec!["/boot/**".to_string()]
+        );
+
+        ctx.permission_gate = Some(Arc::new(LiveReadDenyGate));
+        assert_eq!(
+            ctx.effective_read_deny_exclude_globs(std::path::Path::new("/proj")),
+            vec!["/live/**".to_string()]
+        );
+    }
 
     /// `/sandbox`: `effective_sandbox_runtime` overrides ONLY `enabled` from the
     /// live toggle cell, observing later flips, and is byte-identical to the
@@ -568,6 +626,37 @@ mod tests {
         // A later flip of the SAME cell is observed live (next command sees it).
         cell.store(frozen_enabled, Ordering::Relaxed);
         assert_eq!(ctx.effective_sandbox_runtime().enabled, frozen_enabled);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn effective_sandbox_runtime_reconciles_mid_session_deny_write_symlinks() {
+        let mut ctx = ctx_for_file_tools(make_dummy_fs(), Arc::new(AnalyticsBus::new()), vec![]);
+        let tmp = tempfile::tempdir().unwrap();
+        let escaped = tmp.path().join("escaped");
+        let retargeted = tmp.path().join("retargeted");
+        let seeded = tmp.path().join("seeded");
+        std::fs::create_dir_all(&escaped).unwrap();
+        std::fs::create_dir_all(&retargeted).unwrap();
+        std::os::unix::fs::symlink(&escaped, &seeded).unwrap();
+        ctx.sandbox_runtime.filesystem.deny_write = vec![seeded.to_string_lossy().into_owned()];
+
+        let eff = ctx.effective_sandbox_runtime();
+        let resolved = std::fs::canonicalize(&escaped).unwrap();
+        assert_eq!(
+            eff.filesystem.deny_write,
+            vec![resolved.to_string_lossy().into_owned()],
+            "live sandbox config must re-resolve deny-write symlink seeds"
+        );
+
+        std::fs::remove_file(&seeded).unwrap();
+        std::os::unix::fs::symlink(&retargeted, &seeded).unwrap();
+        let retargeted = std::fs::canonicalize(&retargeted).unwrap();
+        assert_eq!(
+            ctx.effective_sandbox_runtime().filesystem.deny_write,
+            vec![retargeted.to_string_lossy().into_owned()],
+            "the lexical seed must survive so a later symlink retarget is observed"
+        );
     }
 
     /// A mock provider for tests — counts calls and returns fixed secrets.

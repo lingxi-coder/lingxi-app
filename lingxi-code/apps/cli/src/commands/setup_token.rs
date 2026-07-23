@@ -17,25 +17,12 @@
 //! positional) would make our usage line diverge from the oracle's
 //! `setup-token [options]`.
 //!
-//! The action itself is the interactive OAuth *long-lived-token mint* flow:
-//! claude opens a browser to the Claude-subscription authorize endpoint, the
-//! user pastes back the authorization code, and an `sk-ant-oat…` long-lived
-//! token is minted and printed for use in headless/CI environments. The
-//! Anthropic OAuth subsystem present in `llm-client`
-//! (`oauth::anthropic::OAuthHandle`) only exposes the *interactive* PKCE
-//! Authorization-Code `login` flow — it binds a loopback listener, shells a
-//! real browser, and awaits a redirect callback; it does **not** expose a
-//! clean, verifiable, non-interactive long-lived-token setup routine that we
-//! could wire here without guessing an OAuth API. Per the conservative parity
-//! policy we therefore parse the surface faithfully and emit a clear
-//! not-implemented notice instead of starting an interactive flow or faking a
-//! mint.
-//!
-//! The KEY fix this layer delivers: `setup-token` now dispatches to this
-//! handler instead of being swallowed as a chat prompt — it never starts a
-//! billable model turn.
+//! The action drives the same PKCE client as `auth login`, but requests only
+//! `user:inference`, asks the token endpoint for the public one-year lifetime,
+//! does not persist the token, and prints it once for headless/CI use.
 
 use clap::Args;
+use engine::settings::enterprise::{ForceLoginMethod, ForceLoginOrgPin};
 
 /// `setup-token` payload — no children, no options beyond the clap-provided
 /// `-h/--help` (matches the byte oracle exactly).
@@ -44,10 +31,70 @@ pub struct Cli {}
 
 /// Run the `setup-token` family.
 ///
-/// Minting a long-lived Claude-subscription token is an interactive browser
-/// flow that is not wired here (see module docs). We print a clear notice and
-/// exit `NOT_IMPLEMENTED` — never a chat turn, never a faked success.
 pub async fn run(_cli: &Cli) -> i32 {
-    eprintln!("lingxi-cli setup-token: not yet implemented");
-    crate::exit_codes::NOT_IMPLEMENTED
+    let forced_method = super::auth::effective_force_login_method().await;
+    if matches!(
+        forced_method,
+        Some(ForceLoginMethod::Console | ForceLoginMethod::Gateway)
+    ) {
+        eprintln!(
+            "setup-token creates a long-lived Claude.ai subscription token, which this policy does not permit."
+        );
+        return crate::exit_codes::RUNTIME_ERROR;
+    }
+
+    let org_pin = engine_desktop::managed_force_login_org_pin().await;
+    let org_uuid = match &org_pin {
+        ForceLoginOrgPin::Pinned(ids) if ids.len() == 1 => ids.first().cloned(),
+        ForceLoginOrgPin::Invalid => {
+            eprintln!(
+                "{}",
+                engine::settings::enterprise::FORCE_LOGIN_ORG_UUID_INVALID
+            );
+            return crate::exit_codes::RUNTIME_ERROR;
+        }
+        ForceLoginOrgPin::EmptyArray => {
+            eprintln!(
+                "{}",
+                engine::settings::enterprise::FORCE_LOGIN_ORG_UUID_EMPTY_ARRAY
+            );
+            return crate::exit_codes::RUNTIME_ERROR;
+        }
+        _ => None,
+    };
+
+    let auth = match super::auth::build_oauth_handle(false).await {
+        Ok(auth) => auth,
+        Err(error) => {
+            eprintln!("Failed to start token setup: {error}");
+            return crate::exit_codes::RUNTIME_ERROR;
+        }
+    };
+
+    println!(
+        "This will guide you through long-lived (1-year) auth token setup for your Claude account. Claude subscription required."
+    );
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(300),
+        auth.mint_long_lived_token(org_uuid),
+    )
+    .await;
+    let token = match result {
+        Ok(Ok(token)) => token,
+        Ok(Err(error)) => {
+            eprintln!("OAuth error: {error}");
+            return crate::exit_codes::RUNTIME_ERROR;
+        }
+        Err(_) => {
+            eprintln!("OAuth error: token setup timed out.");
+            return crate::exit_codes::RUNTIME_ERROR;
+        }
+    };
+
+    println!("✓ Long-lived authentication token created successfully!");
+    println!("Your OAuth token (valid for 1 year):");
+    println!("{}", token.expose_secret());
+    println!("Store this token securely. You won't be able to see it again.");
+    println!("Use this token by setting: export CLAUDE_CODE_OAUTH_TOKEN=<token>");
+    crate::exit_codes::SUCCESS
 }

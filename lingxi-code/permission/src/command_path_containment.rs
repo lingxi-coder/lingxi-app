@@ -1085,6 +1085,7 @@ pub fn check_command_path_containment(
             return Some(PathConstraintAsk {
                 message: msg,
                 reason: format!("{base} command with flags requires manual approval"),
+                blocked_path: None,
             });
         }
 
@@ -1095,6 +1096,7 @@ pub fn check_command_path_containment(
             return Some(PathConstraintAsk {
                 message: "Commands that change directories and perform write operations require explicit approval to ensure paths are evaluated correctly. For security, LingXi cannot automatically determine the final working directory when 'cd' is used in compound commands.".to_string(),
                 reason: "Compound command contains cd with write operation - manual approval required to prevent path resolution bypass".to_string(),
+                blocked_path: None,
             });
         }
 
@@ -1115,6 +1117,7 @@ pub fn check_command_path_containment(
                     return Some(PathConstraintAsk {
                         message: reason.clone(),
                         reason,
+                        blocked_path: Some(path.clone()),
                     });
                 }
                 PathGuard::Check(resolved) => {
@@ -1135,6 +1138,7 @@ pub fn check_command_path_containment(
                         return Some(PathConstraintAsk {
                             reason: message.clone(),
                             message,
+                            blocked_path: Some(resolved_disp.into_owned()),
                         });
                     }
                 }

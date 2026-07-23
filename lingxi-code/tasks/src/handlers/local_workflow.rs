@@ -563,6 +563,8 @@ fn make_request(
         // `agent(prompt, { label })` → the subagent's display label.
         name: opt_str("label"),
         team_name: None,
+        creator_teammate_name: None,
+        creator_team_name: None,
         mode: None,
         isolation: opt_str("isolation"),
         cwd: None,

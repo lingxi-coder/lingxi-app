@@ -8,6 +8,7 @@
 //! fixtures still cover them.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -154,21 +155,44 @@ fn is_image_path(path: &str) -> bool {
         .any(|ext| lower.ends_with(ext))
 }
 
-/// Best-effort port of TS `resolveAttachments` — `{ path, size, isImage }`.
+/// Port of TS `resolveAttachments` — `{ path, size, isImage }`.
 ///
 /// PARITY-GAP: TS additionally uploads each attachment in `BRIDGE_MODE` and
-/// attaches a `file_uuid`; we omit `file_uuid` (no bridge/upload seam here).
-/// `path` is taken as provided by the model (TS expands `~`/cwd-relative);
-/// `size` comes from `std::fs` metadata when the file exists, else `0`.
-fn resolve_attachments(paths: &[String]) -> Vec<Value> {
+/// attaches a `file_uuid`; that belongs to Anthropic's private bridge protocol
+/// and is intentionally not emulated. Local attachment paths still follow the
+/// public behavior: `~` and cwd-relative inputs become absolute paths before
+/// metadata is read and before the result reaches the UI.
+fn resolve_attachment_path(path: &str, cwd: &Path) -> PathBuf {
+    if path == "~" {
+        return std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(PathBuf::from)
+            .unwrap_or_else(|| cwd.join(path));
+    }
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+            return PathBuf::from(home).join(rest);
+        }
+    }
+    let path = Path::new(path);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    }
+}
+
+fn resolve_attachments(paths: &[String], cwd: &Path) -> Vec<Value> {
     paths
         .iter()
         .map(|p| {
-            let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+            let resolved = resolve_attachment_path(p, cwd);
+            let size = std::fs::metadata(&resolved).map(|m| m.len()).unwrap_or(0);
+            let rendered = resolved.to_string_lossy();
             json!({
-                "path": p,
+                "path": rendered,
                 "size": size,
-                "isImage": is_image_path(p),
+                "isImage": is_image_path(&rendered),
             })
         })
         .collect()
@@ -288,7 +312,7 @@ impl Tool for BriefTool {
     async fn call(
         &self,
         input: Value,
-        _ctx: ToolUseContext,
+        ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let started = Instant::now();
@@ -353,7 +377,8 @@ impl Tool for BriefTool {
             "sentAt": sent_at,
         });
         if n > 0 {
-            data["attachments"] = Value::Array(resolve_attachments(&attachment_paths));
+            let cwd = ctx.cwd.clone().unwrap_or_else(|| self.ctx.cwd());
+            data["attachments"] = Value::Array(resolve_attachments(&attachment_paths, &cwd));
         }
         // `mapToolResultToToolResultBlockParam`: tool-result content text
         // (`BriefTool.ts:175-181`). We surface it on `data` so hosts can read it.
@@ -578,6 +603,32 @@ mod tests {
             out.data["content"].as_str().unwrap(),
             "Message delivered to user. (1 attachment included)"
         );
+    }
+
+    #[tokio::test]
+    async fn resolves_relative_attachment_against_invocation_cwd() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("notes.log");
+        std::fs::write(&file, b"hello").unwrap();
+        let tool = BriefTool::new(shell_test_ctx(dummy_out()));
+        let mut call_ctx = fresh_ctx();
+        call_ctx.cwd = Some(tmp.path().to_path_buf());
+
+        let out = tool
+            .call(
+                json!({
+                    "message": "see attached",
+                    "status": "normal",
+                    "attachments": ["notes.log"],
+                }),
+                call_ctx,
+                fresh_tx(),
+            )
+            .await
+            .expect("ok");
+
+        assert_eq!(out.data["attachments"][0]["path"].as_str(), file.to_str());
+        assert_eq!(out.data["attachments"][0]["size"], 5);
     }
 
     #[tokio::test]

@@ -43,8 +43,9 @@ pub struct TelemetryGuard {
 }
 
 impl TelemetryGuard {
+    /// Construct an inert guard with no installed runtime.
     #[must_use]
-    fn disabled() -> Self {
+    pub fn disabled() -> Self {
         TelemetryGuard { runtime: None }
     }
 }
@@ -391,7 +392,15 @@ pub fn install_process(entrypoint: &'static str, record_session_metric: bool) ->
     let Some(config) = super::init_from_env() else {
         return TelemetryGuard::disabled();
     };
+    install_process_with_config(entrypoint, record_session_metric, config)
+}
 
+/// Install the process-scoped OTEL runtime from an already-resolved config.
+pub fn install_process_with_config(
+    entrypoint: &'static str,
+    record_session_metric: bool,
+    config: OtelConfig,
+) -> TelemetryGuard {
     match OtelRuntime::new(config, entrypoint, record_session_metric) {
         Ok(runtime) => {
             let runtime = Arc::new(runtime);
@@ -1673,6 +1682,65 @@ mod tests {
             );
             assert!(!request.body.is_empty());
         }
+    }
+
+    #[test]
+    fn managed_generic_endpoint_keeps_all_signals_on_managed_collector() {
+        let (port, captured, handle) = spawn_http_collector();
+        let config = OtelConfig::from_lookup_with_source(|key| match key {
+            super::super::config::ENV_ENABLE_TELEMETRY => Some(super::super::config::ConfigValue {
+                value: "1".to_string(),
+                source: super::super::config::ConfigValueSource::Runtime,
+            }),
+            "OTEL_EXPORTER_OTLP_ENDPOINT" => Some(super::super::config::ConfigValue {
+                value: format!("http://127.0.0.1:{port}"),
+                source: super::super::config::ConfigValueSource::Managed,
+            }),
+            "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT" => Some(super::super::config::ConfigValue {
+                value: "http://127.0.0.1:1".to_string(),
+                source: super::super::config::ConfigValueSource::Runtime,
+            }),
+            "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT" => Some(super::super::config::ConfigValue {
+                value: "http://127.0.0.1:1".to_string(),
+                source: super::super::config::ConfigValueSource::Runtime,
+            }),
+            "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT" => Some(super::super::config::ConfigValue {
+                value: "http://127.0.0.1:1".to_string(),
+                source: super::super::config::ConfigValueSource::Runtime,
+            }),
+            "OTEL_METRICS_EXPORTER" => Some(super::super::config::ConfigValue {
+                value: "otlp".to_string(),
+                source: super::super::config::ConfigValueSource::Runtime,
+            }),
+            "OTEL_LOGS_EXPORTER" => Some(super::super::config::ConfigValue {
+                value: "otlp".to_string(),
+                source: super::super::config::ConfigValueSource::Runtime,
+            }),
+            "OTEL_TRACES_EXPORTER" => Some(super::super::config::ConfigValue {
+                value: "otlp".to_string(),
+                source: super::super::config::ConfigValueSource::Runtime,
+            }),
+            "OTEL_LOG_ASSISTANT_RESPONSES" => Some(super::super::config::ConfigValue {
+                value: "1".to_string(),
+                source: super::super::config::ConfigValueSource::Runtime,
+            }),
+            _ => None,
+        });
+        let runtime = OtelRuntime::new(config, "test-entry", true).expect("runtime");
+        runtime.record_counter(metrics::SESSION_COUNT, 1.0, &Attributes::new());
+        runtime.emit_log_event(
+            "assistant_response",
+            &attrs_from_pairs(&[("body", AttrValue::from("ok"))]),
+        );
+        runtime.emit_span("test.span", vec![KeyValue::new("entrypoint", "test-entry")]);
+        runtime.shutdown();
+
+        handle.join().expect("collector join");
+        let requests = captured.lock().unwrap().clone();
+        assert_eq!(requests.len(), 3);
+        assert!(requests.iter().any(|request| request.path == "/v1/metrics"));
+        assert!(requests.iter().any(|request| request.path == "/v1/logs"));
+        assert!(requests.iter().any(|request| request.path == "/v1/traces"));
     }
 
     #[test]

@@ -3,6 +3,7 @@ import type { IpcMainInvokeEvent, WebContents } from 'electron';
 import { writeFileSync } from 'node:fs';
 
 import type { BridgeManager, ConnectionState } from './bridge.js';
+import { WorkspaceFileSearch } from './file-search.js';
 import { canonicalWorkspace, DiagnosticBuffer, sanitizeDiagnostic, type DiagnosticEntry, type PublicSettings } from './host-utils.js';
 import { PROVIDER_IDS, providerById } from '../shared/providers.js';
 import type { CredentialMetadata, ProviderCredentialMetadata, SettingsStore } from './settings.js';
@@ -12,6 +13,7 @@ export const CH_SETTINGS_GET = 'lingxi:settings:get';
 export const CH_SETTINGS_UPDATE = 'lingxi:settings:update';
 export const CH_WORKSPACE_PICK = 'lingxi:workspace:pick';
 export const CH_WORKSPACE_SET = 'lingxi:workspace:set';
+export const CH_WORKSPACE_FILES_SEARCH = 'lingxi:workspace-files:search';
 export const CH_TRUST_SET = 'lingxi:trust:set';
 export const CH_CREDENTIAL_GET = 'lingxi:credential:get';
 export const CH_CREDENTIAL_SET = 'lingxi:credential:set';
@@ -76,6 +78,7 @@ function workspaceRecovery(workspace: string, error: unknown): NonNullable<Works
 export class HostController {
   private registered = false;
   private readonly targets = new Map<WebContents, Set<string>>();
+  private readonly workspaceFiles = new WorkspaceFileSearch();
 
   constructor(
     private readonly settings: SettingsStore,
@@ -121,6 +124,12 @@ export class HostController {
       if (!this.settings.isRecentWorkspace(canonical)) throw new Error('workspace is not in the recent list');
       return this.selectWorkspace(canonical);
     });
+    ipcMain.handle(CH_WORKSPACE_FILES_SEARCH, async (event: IpcMainInvokeEvent, query: unknown) => {
+      this.assertSender(event);
+      const workspace = this.requireWorkspace();
+      if (!this.settings.getTrust(workspace).trusted) throw new Error('workspace trust is required before searching files');
+      return this.workspaceFiles.search(workspace, query);
+    });
     ipcMain.handle(CH_TRUST_SET, async (event: IpcMainInvokeEvent, trusted: unknown) => {
       this.assertSender(event);
       if (typeof trusted !== 'boolean') throw new Error('invalid trust value');
@@ -140,46 +149,57 @@ export class HostController {
         if (confirmation.response !== 1) return { path: workspace, ...this.settings.getTrust(workspace) };
       }
       const result = this.settings.setTrust(workspace, trusted);
+      this.workspaceFiles.invalidate();
       await this.restartIfConfigured();
       return { path: workspace, ...result };
     });
-    ipcMain.handle(CH_CREDENTIAL_GET, (event: IpcMainInvokeEvent) => { this.assertSender(event); return this.settings.credentialMetadata(); });
+    ipcMain.handle(CH_CREDENTIAL_GET, (event: IpcMainInvokeEvent) => { this.assertSender(event); return this.credentialSnapshot(); });
     ipcMain.handle(CH_CREDENTIAL_SET, async (event: IpcMainInvokeEvent, credential: unknown) => {
       this.assertSender(event);
       if (typeof credential !== 'string') throw new Error('invalid credential');
       this.assertNoActiveTurn();
-      const metadata = this.settings.setCredential(credential);
+      this.requireWorkspace();
+      await this.bridge.setProviderCredential('anthropic', credential);
+      // Remove any legacy Electron-owned copy only after the shared engine
+      // keychain write has succeeded.
+      this.settings.clearCredential();
       await this.restartIfConfigured();
-      return metadata;
+      return this.credentialSnapshot();
     });
     ipcMain.handle(CH_CREDENTIAL_CLEAR, async (event: IpcMainInvokeEvent) => {
       this.assertSender(event);
       this.assertNoActiveTurn();
-      const metadata = this.settings.clearCredential();
+      this.requireWorkspace();
+      await this.bridge.deleteProviderCredential('anthropic');
+      this.settings.clearCredential();
       await this.restartIfConfigured();
-      return metadata;
+      return this.credentialSnapshot();
     });
     ipcMain.handle(CH_PROVIDER_CREDENTIALS_GET, (event: IpcMainInvokeEvent) => {
       this.assertSender(event);
-      return this.settings.providerCredentialMetadataFor(PROVIDER_IDS);
+      return this.providerCredentialSnapshot();
     });
     ipcMain.handle(CH_PROVIDER_CREDENTIAL_SET, async (event: IpcMainInvokeEvent, providerId: unknown, credential: unknown) => {
       this.assertSender(event);
       const provider = this.requireProvider(providerId);
       if (typeof credential !== 'string') throw new Error('invalid credential');
       this.assertNoActiveTurn();
-      const metadata = this.settings.setProviderCredential(provider.id, credential);
+      this.requireWorkspace();
+      await this.bridge.setProviderCredential(provider.id, credential);
+      this.settings.clearProviderCredential(provider.id);
       if (provider.defaultModel) this.settings.update({ model: provider.defaultModel });
       await this.restartIfConfigured();
-      return { credential: metadata, settings: this.settings.getPublic() };
+      return { credential: this.providerCredentialMetadata(provider.id), settings: this.settings.getPublic() };
     });
     ipcMain.handle(CH_PROVIDER_CREDENTIAL_CLEAR, async (event: IpcMainInvokeEvent, providerId: unknown) => {
       this.assertSender(event);
       const provider = this.requireProvider(providerId);
       this.assertNoActiveTurn();
-      const metadata = this.settings.clearProviderCredential(provider.id);
+      this.requireWorkspace();
+      await this.bridge.deleteProviderCredential(provider.id);
+      this.settings.clearProviderCredential(provider.id);
       await this.restartIfConfigured();
-      return metadata;
+      return this.providerCredentialMetadata(provider.id);
     });
     ipcMain.handle(CH_BRIDGE_RESTART, async (event: IpcMainInvokeEvent) => { this.assertSender(event); await this.restartIfConfigured(); });
     ipcMain.handle(CH_DIAGNOSTICS_GET, (event: IpcMainInvokeEvent) => { this.assertSender(event); return this.diagnostics.snapshot(); });
@@ -223,7 +243,7 @@ export class HostController {
     return {
       settings: this.settings.getPublic(),
       workspace: this.workspace(),
-      credential: this.settings.credentialMetadata(),
+      credential: this.credentialSnapshot(),
       providerCredentials: this.providerCredentialSnapshot(),
       connection: this.bridge.connectionState,
       diagnostics: this.diagnostics.snapshot(),
@@ -247,7 +267,7 @@ export class HostController {
         fingerprint: workspace.fingerprint,
         recovery: workspace.recovery,
       },
-      credential: this.settings.credentialMetadata(),
+      credential: this.credentialSnapshot(),
       providerCredentials: this.providerCredentialSnapshot(),
       connection: this.bridge.connectionState,
       bridgeRuntime: this.bridge.runtimeVersions,
@@ -265,7 +285,35 @@ export class HostController {
     const providerMetadata = (this.settings as SettingsStore & {
       providerCredentialMetadataFor?: (providerIds: readonly string[]) => ProviderCredentialMetadata[];
     }).providerCredentialMetadataFor;
-    return typeof providerMetadata === 'function' ? providerMetadata.call(this.settings, PROVIDER_IDS) : [];
+    const activeProviders = new Set(this.bridge.activeCredentialProviderIds ?? []);
+    const persistedProviders = new Set(this.bridge.persistedCredentialProviderIds ?? []);
+    const engineStorageEncrypted = this.bridge.providerCredentialStorageEncrypted ?? false;
+    const snapshot = typeof providerMetadata === 'function'
+      ? providerMetadata.call(this.settings, PROVIDER_IDS)
+      : PROVIDER_IDS.map((providerId) => providerId === 'anthropic'
+        ? { providerId, ...this.settings.credentialMetadata() }
+        : { providerId, configured: false, encryptionAvailable: false });
+    return snapshot.map((metadata) => {
+      if (persistedProviders.has(metadata.providerId)) {
+        return {
+          providerId: metadata.providerId,
+          configured: true,
+          encryptionAvailable: engineStorageEncrypted,
+        };
+      }
+      if (metadata.configured || !activeProviders.has(metadata.providerId)) return metadata;
+      return { ...metadata, configured: true, runtimeOnly: true };
+    });
+  }
+
+  private providerCredentialMetadata(providerId: string): ProviderCredentialMetadata {
+    return this.providerCredentialSnapshot().find((metadata) => metadata.providerId === providerId)
+      ?? { providerId, configured: false, encryptionAvailable: false };
+  }
+
+  private credentialSnapshot(): CredentialMetadata {
+    const { providerId: _providerId, ...metadata } = this.providerCredentialMetadata('anthropic');
+    return metadata;
   }
 
   private requireProvider(providerId: unknown) {
@@ -279,6 +327,7 @@ export class HostController {
   private async selectWorkspace(input: string): Promise<WorkspaceMetadata> {
     this.assertNoActiveTurn();
     const workspace = canonicalWorkspace(input);
+    this.workspaceFiles.invalidate();
     this.settings.setWorkspace(workspace);
     await this.restartIfConfigured();
     return { path: workspace, ...this.settings.getTrust(workspace) };
@@ -297,6 +346,7 @@ export class HostController {
     if (!this.registered) return;
     for (const channel of [
       CH_BOOTSTRAP, CH_SETTINGS_GET, CH_SETTINGS_UPDATE, CH_WORKSPACE_PICK, CH_WORKSPACE_SET,
+      CH_WORKSPACE_FILES_SEARCH,
       CH_TRUST_SET, CH_CREDENTIAL_GET, CH_CREDENTIAL_SET, CH_CREDENTIAL_CLEAR,
       CH_PROVIDER_CREDENTIALS_GET, CH_PROVIDER_CREDENTIAL_SET, CH_PROVIDER_CREDENTIAL_CLEAR,
       CH_BRIDGE_RESTART, CH_DIAGNOSTICS_GET,

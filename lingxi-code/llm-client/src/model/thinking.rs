@@ -237,8 +237,8 @@ pub fn session_thinking_active(thinking: ThinkingConfig) -> bool {
 /// `0` hard-disables; a `NaN`/non-positive env value disables (`qIe` returns
 /// `hp(env) > 0` = false). When neither env nor flag pins a budget the
 /// gate falls to `alwaysThinkingEnabled === false ? disabled : adaptive`. The
-/// `--thinking` flag override (`adaptive`/`enabled`/`disabled`) is a SEPARATE,
-/// still-unwired CLI surface and is intentionally not folded here.
+/// `--thinking` is folded by [`session_thinking_from_cli`], which preserves the
+/// budget precedence implemented here.
 ///
 /// The env var name `MAX_THINKING_TOKENS` is kept UNPREFIXED — claude-code's
 /// name carries no `CLAUDE_`/`ANTHROPIC_` prefix, and this repo keeps such
@@ -281,6 +281,30 @@ pub fn session_thinking_from_env(
         return ThinkingConfig::Disabled;
     }
     ThinkingConfig::Adaptive
+}
+
+/// Resolve the hidden `--thinking` session override while preserving Claude's
+/// `MAX_THINKING_TOKENS` / `--max-thinking-tokens` precedence. A fixed budget
+/// still wins because it is more specific; otherwise `enabled` is an alias for
+/// adaptive thinking and `disabled` turns thinking off.
+#[must_use]
+pub fn session_thinking_from_cli(
+    cli_mode: Option<&str>,
+    cli_budget: Option<u32>,
+    always_thinking: Option<bool>,
+) -> ThinkingConfig {
+    let configured = session_thinking_from_env(cli_budget, always_thinking);
+    let has_env_budget = std::env::var("MAX_THINKING_TOKENS")
+        .ok()
+        .is_some_and(|value| !value.is_empty());
+    if has_env_budget || cli_budget.is_some() {
+        return configured;
+    }
+    match cli_mode {
+        Some("disabled") => ThinkingConfig::Disabled,
+        Some("enabled" | "adaptive") => ThinkingConfig::Adaptive,
+        _ => configured,
+    }
 }
 
 /// Resolve the SESSION [`ThinkingConfig`] into the per-request
@@ -619,6 +643,36 @@ mod tests {
         assert_eq!(
             session_thinking_from_env(None, None),
             ThinkingConfig::Adaptive
+        );
+    }
+
+    #[test]
+    fn cli_thinking_mode_overrides_setting_without_a_budget() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _g = EnvGuard::unset("MAX_THINKING_TOKENS");
+        assert_eq!(
+            session_thinking_from_cli(Some("disabled"), None, Some(true)),
+            ThinkingConfig::Disabled
+        );
+        assert_eq!(
+            session_thinking_from_cli(Some("enabled"), None, Some(false)),
+            ThinkingConfig::Adaptive
+        );
+        assert_eq!(
+            session_thinking_from_cli(Some("adaptive"), None, Some(false)),
+            ThinkingConfig::Adaptive
+        );
+    }
+
+    #[test]
+    fn explicit_thinking_budget_pre_empts_cli_mode() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _g = EnvGuard::unset("MAX_THINKING_TOKENS");
+        assert_eq!(
+            session_thinking_from_cli(Some("disabled"), Some(4096), None),
+            ThinkingConfig::Enabled {
+                budget_tokens: 4096
+            }
         );
     }
 

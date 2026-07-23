@@ -25,7 +25,7 @@ pub struct OutputStyle {
 }
 
 /// YAML frontmatter shape for output-style definition files.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OutputStyleFrontmatter {
     /// Style name (must match the filename slug in practice).
@@ -36,6 +36,25 @@ pub struct OutputStyleFrontmatter {
     pub default: bool,
     /// Wire-level output format this style renders to.
     pub format: OutputFormat,
+    /// Preserve the standard coding instructions when this style is active.
+    #[serde(rename = "keepCodingInstructions")]
+    pub keep_coding_instructions: bool,
+    /// Plugin name that activates this style while that plugin is enabled.
+    #[serde(rename = "force-for-plugin", skip_serializing_if = "Option::is_none")]
+    pub force_for_plugin: Option<String>,
+}
+
+impl Default for OutputStyleFrontmatter {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            description: String::new(),
+            default: false,
+            format: OutputFormat::default(),
+            keep_coding_instructions: true,
+            force_for_plugin: None,
+        }
+    }
 }
 
 /// Wire-level output formats supported by the engine.

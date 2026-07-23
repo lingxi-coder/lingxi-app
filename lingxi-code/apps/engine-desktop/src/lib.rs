@@ -35,7 +35,10 @@ mod skill_loader;
 
 use client_adapter::{AdapterPermissionGate, PermissionRequestSink};
 use command_api::model::BuiltinCommandHandler;
-use command_api::{parse_slash_command, CommandRegistry, RegistrySlashDispatcher};
+use command_api::{
+    parse_slash_command, CommandRegistry, CommandResult, ParsedSlashCommand,
+    RegistrySlashDispatcher,
+};
 use command_core::{
     register_all_builtin_commands, register_core_batch_1, register_core_batch_2,
     register_core_batch_4, register_core_batch_5,
@@ -399,6 +402,8 @@ struct BootPermissionTiers {
     /// feeds the sandbox-auto-allow derivation (last write wins, so a managed
     /// `sandbox.*` overrides user/project/local).
     raw_tiers: Vec<String>,
+    /// Enterprise gate that disables non-managed permission persistence.
+    allow_managed_permission_rules_only: bool,
 }
 
 /// Read the boot permission-settings tiers in ASCENDING priority — user →
@@ -550,10 +555,10 @@ async fn load_boot_permission_tiers(
         }
         additional_working_dirs.extend(permission::additional_directories_from_settings_json(raw));
     }
-    if managed_tiers
+    let allow_managed_permission_rules_only = managed_tiers
         .iter()
-        .any(|raw| permission::allow_managed_permission_rules_only_from_settings_json(raw))
-    {
+        .any(|raw| permission::allow_managed_permission_rules_only_from_settings_json(raw));
+    if allow_managed_permission_rules_only {
         rules.retain(|r| r.source == permission::PermissionRuleSource::PolicySettings);
     }
     raw_tiers.extend(managed_tiers);
@@ -564,6 +569,7 @@ async fn load_boot_permission_tiers(
         auto_mode_disabled,
         additional_working_dirs,
         raw_tiers,
+        allow_managed_permission_rules_only,
     }
 }
 
@@ -643,6 +649,86 @@ pub async fn managed_model_allowlist() -> (
 pub async fn managed_force_login_org_pin() -> engine::settings::enterprise::ForceLoginOrgPin {
     let managed_tiers = crate::settings_watch::managed_settings_raw_tiers().await;
     engine::settings::enterprise::fold_force_login_org_pin(&managed_tiers)
+}
+
+/// Fold the MANAGED (`policySettings`) raw tiers into telemetry env overrides.
+///
+/// This preserves the enterprise provenance of OTEL-related keys without
+/// mutating the process environment. Unknown or non-scalar values are ignored;
+/// later managed tiers override earlier ones.
+pub async fn managed_otel_env_overrides() -> std::collections::BTreeMap<String, String> {
+    const KEYS: &[&str] = &[
+        telemetry::otel::config::ENV_ENABLE_TELEMETRY,
+        telemetry::otel::config::ENV_FLUSH_TIMEOUT_MS,
+        telemetry::otel::config::ENV_SHUTDOWN_TIMEOUT_MS,
+        telemetry::otel::config::ENV_HEADERS_HELPER_DEBOUNCE_MS,
+        telemetry::otel::config::ENV_DIAG_STDERR,
+        telemetry::otel::config::ENV_CONTENT_MAX_LENGTH,
+        telemetry::otel::config::ENV_ATTRIBUTE_VALUE_LENGTH_LIMIT,
+        telemetry::otel::config::ENV_LOGRECORD_ATTRIBUTE_VALUE_LENGTH_LIMIT,
+        telemetry::otel::config::ENV_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT,
+        telemetry::otel::config::ENV_METRICS_EXPORTER,
+        telemetry::otel::config::ENV_LOGS_EXPORTER,
+        telemetry::otel::config::ENV_TRACES_EXPORTER,
+        telemetry::otel::config::ENV_OTLP_ENDPOINT,
+        telemetry::otel::config::ENV_OTLP_HEADERS,
+        telemetry::otel::config::ENV_OTLP_PROTOCOL,
+        telemetry::otel::config::ENV_OTLP_COMPRESSION,
+        telemetry::otel::config::ENV_OTLP_TIMEOUT,
+        telemetry::otel::config::ENV_OTLP_INSECURE,
+        telemetry::otel::config::ENV_OTLP_CERTIFICATE,
+        telemetry::otel::config::ENV_OTLP_CLIENT_KEY,
+        telemetry::otel::config::ENV_OTLP_CLIENT_CERTIFICATE,
+        telemetry::otel::config::ENV_METRIC_EXPORT_INTERVAL,
+        telemetry::otel::config::ENV_LOGS_EXPORT_INTERVAL,
+        telemetry::otel::config::ENV_RESOURCE_ATTRIBUTES,
+        telemetry::otel::config::ENV_SERVICE_NAME,
+        telemetry::otel::config::ENV_TRACES_SAMPLER,
+        telemetry::otel::config::ENV_TRACES_SAMPLER_ARG,
+        "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_METRICS_HEADERS",
+        "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL",
+        "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_LOGS_HEADERS",
+        "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL",
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+        "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
+        "OTEL_METRICS_INCLUDE_SESSION_ID",
+        "OTEL_METRICS_INCLUDE_VERSION",
+        "OTEL_METRICS_INCLUDE_ACCOUNT_UUID",
+        "OTEL_METRICS_INCLUDE_ENTRYPOINT",
+        "OTEL_METRICS_INCLUDE_RESOURCE_ATTRIBUTES",
+        "OTEL_LOG_USER_PROMPTS",
+        "OTEL_LOG_TOOL_DETAILS",
+        "OTEL_LOG_TOOL_CONTENT",
+        "OTEL_LOG_ASSISTANT_RESPONSES",
+        "OTEL_LOG_RAW_API_BODIES",
+    ];
+
+    let mut out = std::collections::BTreeMap::new();
+    let tiers = crate::settings_watch::managed_settings_raw_tiers().await;
+    for raw in tiers {
+        let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(&raw)
+        else {
+            continue;
+        };
+        for key in KEYS {
+            let Some(value) = map.get(*key) else {
+                continue;
+            };
+            let scalar = match value {
+                serde_json::Value::String(s) => Some(s.clone()),
+                serde_json::Value::Bool(v) => Some(v.to_string()),
+                serde_json::Value::Number(v) => Some(v.to_string()),
+                _ => None,
+            };
+            if let Some(value) = scalar {
+                out.insert((*key).to_string(), value);
+            }
+        }
+    }
+    out
 }
 
 /// Whether the live cron scheduler should run. Faithful to claude-code's
@@ -1096,6 +1182,7 @@ pub fn desktop_tool_registry(
         &mut reg,
         ctx,
         coordinator,
+        None,
         cron_auth,
         None,
         None,
@@ -1321,7 +1408,7 @@ impl orchestrator::StopHookSnapshotProvider for RegistryStopHookSnapshot {
         let path = cron::tasks_file::scheduled_tasks_path(&root);
         let body = std::fs::read_to_string(&path).unwrap_or_default();
         let doc = cron::tasks_file::parse_tasks(&body);
-        let inputs: Vec<orchestrator::CronSnapshotInput> = doc
+        let mut inputs: Vec<orchestrator::CronSnapshotInput> = doc
             .tasks
             .into_iter()
             .map(|t| orchestrator::CronSnapshotInput {
@@ -1331,6 +1418,18 @@ impl orchestrator::StopHookSnapshotProvider for RegistryStopHookSnapshot {
                 prompt: t.prompt,
             })
             .collect();
+        if let Ok(session_jobs) = cron::session_jobs(&self.registry).await {
+            inputs.extend(
+                session_jobs
+                    .into_iter()
+                    .map(|task| orchestrator::CronSnapshotInput {
+                        id: task.id,
+                        cron: task.cron,
+                        recurring: Some(task.recurring),
+                        prompt: task.prompt,
+                    }),
+            );
+        }
         orchestrator::build_session_crons(&inputs)
     }
 }
@@ -1380,6 +1479,9 @@ pub fn register_desktop_tools(
     reg: &mut ToolRegistry,
     ctx: BuiltinToolContext,
     coordinator: Option<CoordinatorWiring>,
+    ask_user_question_resolver: Option<
+        Arc<dyn tool_ui::ask_user_question::AskUserQuestionResolver>,
+    >,
     cron_auth: Option<Arc<dyn tool_cron::ClaudeAiAuthProvider>>,
     skill_loader: Option<Arc<dyn tool_skill::skill::SkillLoader>>,
     cwd_changed_firer: hooks::OptionalCwdChangedFirer,
@@ -1419,7 +1521,13 @@ pub fn register_desktop_tools(
     // would silently shadow the coordinator one. Mirrors the `tool_team`-skip
     // for `TeamCreate` / `TeamDelete`.
     if coordinator.is_some() {
-        tool_ui::register_all_except_send_message(reg, ctx.clone());
+        if let Some(resolver) = ask_user_question_resolver.clone() {
+            tool_ui::register_all_except_send_message_with_ask_resolver(reg, ctx.clone(), resolver);
+        } else {
+            tool_ui::register_all_except_send_message(reg, ctx.clone());
+        }
+    } else if let Some(resolver) = ask_user_question_resolver {
+        tool_ui::register_all_with_ask_resolver(reg, ctx.clone(), resolver);
     } else {
         tool_ui::register_all(reg, ctx.clone());
     }
@@ -1560,6 +1668,7 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 ///     system_prompt_override: None,
 ///     append_system_prompt: None,
 ///     session_id_override: None,
+///     parent_session_id: None,
 ///     disable_slash_commands: false,
 ///     add_dir: Vec::new(),
 ///     cli_mcp_servers: Vec::new(),
@@ -1581,6 +1690,8 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 ///     tmux_launch: None,
 ///     // `None` ⟶ background session forking is unavailable to this host.
 ///     bg_session_forker: None,
+///     // `None` ⟶ AskUserQuestion uses the non-TUI fallback path.
+///     ask_user_question_tx: None,
 /// };
 ///
 /// assert_eq!(cfg.cwd, PathBuf::from("/tmp/project"));
@@ -1749,6 +1860,10 @@ pub struct DesktopConfig {
     /// claude-code `--session-id`. The host (`apps/cli` / `apps/bridge-server`)
     /// validates UUID-ness + the cross-flag rules before setting this.
     pub session_id_override: Option<String>,
+    /// Source session id for a forked transcript. When present it is appended
+    /// to Anthropic's JSON-string `metadata.user_id` as `parent_session_id`.
+    /// Ordinary fresh/resumed sessions leave this unset.
+    pub parent_session_id: Option<String>,
     /// CLI `--disable-slash-commands` (claude-code "Disable all skills"). When
     /// `true`, the shared command registry is emptied AFTER all builtin + plugin
     /// + skill registration, so the slash dispatcher and the `Skill` tool's
@@ -1891,6 +2006,12 @@ pub struct DesktopConfig {
     /// lives in `apps/cli` (which owns the daemon dispatch machinery); injecting
     /// it here keeps the leaf `orchestrator` crate off an `apps/cli` dependency.
     pub bg_session_forker: Option<Arc<dyn traits::bg_session_forker::BgSessionForker>>,
+    /// Optional per-runtime TUI AskUserQuestion bridge sender. Interactive TUI
+    /// hosts fill this so questionnaire tools open the mounted bottom-pane
+    /// view; non-TUI hosts leave it `None`.
+    pub ask_user_question_tx: Option<
+        tokio::sync::mpsc::Sender<tui_core::ask_user_question_bridge::AskUserQuestionExchange>,
+    >,
 }
 
 /// `--safe-mode` / `--bare` reduced-mode customization gates (M3, cc 2.1.198).
@@ -2066,7 +2187,12 @@ impl std::fmt::Debug for DesktopConfig {
                 &self.append_system_prompt.is_some(),
             )
             .field("session_id_override", &self.session_id_override)
+            .field("parent_session_id", &self.parent_session_id)
             .field("disable_slash_commands", &self.disable_slash_commands)
+            .field(
+                "ask_user_question_tx",
+                &self.ask_user_question_tx.as_ref().map(|_| "<configured>"),
+            )
             .field("add_dir", &self.add_dir)
             .field("cli_mcp_server_count", &self.cli_mcp_servers.len())
             .field(
@@ -2128,6 +2254,7 @@ impl Default for DesktopConfig {
             system_prompt_override: None,
             append_system_prompt: None,
             session_id_override: None,
+            parent_session_id: None,
             disable_slash_commands: false,
             add_dir: Vec::new(),
             cli_mcp_servers: Vec::new(),
@@ -2154,6 +2281,7 @@ impl Default for DesktopConfig {
             // Default: no `/fork`-to-background forker ⟶ that /fork variant
             // fails with a clear ActionFailed until `apps/cli` injects one.
             bg_session_forker: None,
+            ask_user_question_tx: None,
         }
     }
 }
@@ -2344,11 +2472,210 @@ impl tui_core::bash_runner::BashRunner for DesktopBashRunner {
     }
 }
 
+/// Project-specific `/worktree` slash-command grammar. Claude Code exposes the
+/// same lifecycle through `--worktree` plus `EnterWorktree`/`ExitWorktree`, but
+/// has no slash row; `LingXi` keeps the upstream command table locked and adds
+/// this desktop-only convenience handler at composition time instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WorktreeSlashAction {
+    Create(Option<String>),
+    Enter(String),
+    Status,
+    Keep,
+    Remove { discard_changes: bool },
+}
+
+const WORKTREE_SLASH_USAGE: &str =
+    "Usage: /worktree [status|create [name]|enter <path>|keep|remove [--discard]]";
+
+fn parse_worktree_slash_action(
+    args: &ParsedSlashCommand,
+) -> Result<WorktreeSlashAction, &'static str> {
+    let tokens = &args.positional_args;
+    if tokens.is_empty() {
+        return Ok(WorktreeSlashAction::Create(None));
+    }
+
+    match tokens[0].as_str() {
+        "status" if tokens.len() == 1 => Ok(WorktreeSlashAction::Status),
+        "create" if tokens.len() == 1 => Ok(WorktreeSlashAction::Create(None)),
+        "create" if tokens.len() == 2 => Ok(WorktreeSlashAction::Create(Some(tokens[1].clone()))),
+        // Joining the remaining quote-aware tokens accepts both
+        // `enter "/path with spaces"` and the forgiving unquoted form.
+        "enter" if tokens.len() >= 2 => Ok(WorktreeSlashAction::Enter(tokens[1..].join(" "))),
+        // Do not let a missing path fall through to the `<name>` shorthand and
+        // accidentally create a worktree literally named `enter`.
+        "enter" => Err(WORKTREE_SLASH_USAGE),
+        "keep" if tokens.len() == 1 => Ok(WorktreeSlashAction::Keep),
+        "remove" if tokens.len() == 1 => Ok(WorktreeSlashAction::Remove {
+            discard_changes: false,
+        }),
+        "remove" if tokens.len() == 2 && tokens[1] == "--discard" => {
+            Ok(WorktreeSlashAction::Remove {
+                discard_changes: true,
+            })
+        }
+        // `/worktree <name>` mirrors the CLI's `--worktree <name>` shorthand.
+        _ if tokens.len() == 1 => Ok(WorktreeSlashAction::Create(Some(tokens[0].clone()))),
+        _ => Err(WORKTREE_SLASH_USAGE),
+    }
+}
+
+/// Desktop slash handler backed by the exact same tools as model-issued
+/// worktree operations. This keeps validation, cwd swaps, dirty-worktree
+/// protection, telemetry, hooks, and transcript state persistence on one path.
+struct DesktopWorktreeCommandHandler {
+    ctx: BuiltinToolContext,
+    state_persister: Option<Arc<dyn tool_api::WorktreeStatePersister>>,
+}
+
+impl DesktopWorktreeCommandHandler {
+    fn new(
+        ctx: BuiltinToolContext,
+        state_persister: Option<Arc<dyn tool_api::WorktreeStatePersister>>,
+    ) -> Self {
+        Self {
+            ctx,
+            state_persister,
+        }
+    }
+
+    fn status(&self) -> String {
+        let session = self
+            .ctx
+            .worktree_session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let Some(session) = session else {
+            return "No active worktree session.".to_string();
+        };
+
+        let branch = if session.branch_name.is_empty() || session.branch_name == "HEAD" {
+            "(detached HEAD)"
+        } else {
+            &session.branch_name
+        };
+        let ownership = if session.entered_existing {
+            "entered existing (keep only)"
+        } else {
+            "created by this session"
+        };
+        let mut lines = vec![
+            format!("Worktree: {}", session.worktree_path.display()),
+            format!("Branch: {branch}"),
+            format!("Original directory: {}", session.original_cwd.display()),
+            format!("Ownership: {ownership}"),
+        ];
+        if let Some(tmux) = session.tmux_session_name {
+            lines.push(format!("Tmux session: {tmux}"));
+        }
+        lines.join("\n")
+    }
+
+    fn enter_tool(&self) -> tool_worktree::EnterWorktreeTool {
+        let tool = tool_worktree::EnterWorktreeTool::new(self.ctx.clone());
+        match &self.state_persister {
+            Some(persister) => tool.with_state_persister(persister.clone()),
+            None => tool,
+        }
+    }
+
+    fn exit_tool(&self) -> tool_worktree::ExitWorktreeTool {
+        let tool = tool_worktree::ExitWorktreeTool::new(self.ctx.clone());
+        match &self.state_persister {
+            Some(persister) => tool.with_state_persister(persister.clone()),
+            None => tool,
+        }
+    }
+
+    async fn call_tool<T: tool_api::Tool + Sync>(
+        &self,
+        tool: &T,
+        input: serde_json::Value,
+    ) -> String {
+        let (progress_tx, _progress_rx) = tool_api::progress_channel();
+        let use_ctx = tool_api::ToolUseContext::model_seed(self.ctx.default_model.clone());
+        match tool.call(input, use_ctx, progress_tx).await {
+            Ok(result) => result
+                .model_content
+                .or_else(|| {
+                    result
+                        .data
+                        .get("message")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                })
+                .unwrap_or_else(|| result.data.to_string()),
+            Err(error) => error.to_string(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl BuiltinCommandHandler for DesktopWorktreeCommandHandler {
+    async fn handle(&self, args: &ParsedSlashCommand) -> CommandResult {
+        use WorktreeSlashAction::{Create, Enter, Keep, Remove, Status};
+
+        let display = match parse_worktree_slash_action(args) {
+            Ok(Create(name)) => {
+                let input = name.map_or_else(
+                    || serde_json::json!({}),
+                    |name| serde_json::json!({ "name": name }),
+                );
+                self.call_tool(&self.enter_tool(), input).await
+            }
+            Ok(Enter(path)) => {
+                self.call_tool(&self.enter_tool(), serde_json::json!({ "path": path }))
+                    .await
+            }
+            Ok(Status) => self.status(),
+            Ok(Keep) => {
+                self.call_tool(&self.exit_tool(), serde_json::json!({ "action": "keep" }))
+                    .await
+            }
+            Ok(Remove { discard_changes }) => {
+                self.call_tool(
+                    &self.exit_tool(),
+                    serde_json::json!({
+                        "action": "remove",
+                        "discard_changes": discard_changes,
+                    }),
+                )
+                .await
+            }
+            Err(usage) => usage.to_string(),
+        };
+        CommandResult::Done {
+            display: Some(display),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "worktree"
+    }
+
+    fn description(&self) -> &str {
+        "Create, enter, inspect, or exit a worktree"
+    }
+
+    fn allowed_tools(&self) -> &'static [&'static str] {
+        &[
+            tool_worktree::worktree::ENTER_TOOL_NAME,
+            tool_worktree::worktree::EXIT_TOOL_NAME,
+        ]
+    }
+}
+
 pub struct DesktopRuntime {
     /// The fully-constructed orchestrator (cost tracker + MCP/hook/agent
     /// registries + compaction wired), bound to the supplied output stream and
     /// permission gate.
     pub orchestrator: Arc<ConversationOrchestrator>,
+    /// Shared slash-command registry populated during build and observed by both
+    /// the dispatcher and skill/plugin loaders. Surfaced so non-TUI hosts can
+    /// snapshot the live catalog and detect command-set mutations.
+    pub shared_command_registry: Arc<RwLock<CommandRegistry>>,
     /// Slash-command dispatcher seeded with the builtin handlers + wired core
     /// handlers (the `register_all_builtin_commands` → `register_core_batch_1`
     /// → `register_core_batch_2` sequence).
@@ -2919,6 +3246,21 @@ fn load_merged_output_style(project_dir: &std::path::Path) -> Option<String> {
         .and_then(|eff| eff.settings.output_style)
 }
 
+/// Load the merged `settings.showThinkingSummaries` request-beta preference.
+/// Absent/invalid settings resolve to Claude Code's default (`false`).
+fn load_merged_show_thinking_summaries(project_dir: &std::path::Path) -> bool {
+    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+    let inputs = engine::settings::LoadInputs {
+        env: &env,
+        project_dir,
+        defaults: engine::settings::schema::SettingsJson::default(),
+    };
+    engine::settings::Settings::load(inputs)
+        .ok()
+        .and_then(|eff| eff.settings.show_thinking_summaries)
+        .unwrap_or(false)
+}
+
 /// Load the merged `settings.skipWebFetchPreflight` (project + user + env layers)
 /// for the given project dir. Mirrors [`load_merged_output_style`] (same
 /// `engine::settings::Settings::load` seam). When true, the `WebFetch` tool skips
@@ -3199,34 +3541,6 @@ async fn discover_plugin_set(
     discovered
 }
 
-/// Materialise one plugin's AGENTS into the shared catalog (the manager
-/// validates agent frontmatter but does not own the catalog — faithful to
-/// claude-code's dir-scan `getAgentDefinitionsWithOverrides`). Plugin agents win
-/// on collision (replace any same-named entry). Shared by the startup bootstrap
-/// and [`PluginRuntime::refresh`].
-async fn materialize_plugin_agents(
-    dir: &std::path::Path,
-    catalog: &Arc<RwLock<Vec<agent::definition::AgentDefinition>>>,
-) {
-    let agents_dir = dir.join("agents");
-    if !agents_dir.is_dir() {
-        return;
-    }
-    let plugin_agents =
-        agent::load_agents_from_dirs(&[(agents_dir, agent::definition::AgentSource::Plugin)]).await;
-    if plugin_agents.is_empty() {
-        return;
-    }
-    let mut cat = catalog.write().await;
-    for a in plugin_agents {
-        if let Some(slot) = cat.iter_mut().find(|e| e.agent_type == a.agent_type) {
-            *slot = a;
-        } else {
-            cat.push(a);
-        }
-    }
-}
-
 /// Component tallies reported by [`PluginRuntime::refresh`], mirroring
 /// claude-code's `RefreshActivePluginsResult` (`utils/plugins/refresh.ts`). The
 /// CLI formats these into the `/reload-plugins` confirmation line.
@@ -3260,7 +3574,6 @@ pub struct PluginRefreshCounts {
 /// live-dials MCP), and a wholesale rebuild of the plugin-agent catalog portion.
 pub struct PluginRuntime {
     manager: Arc<plugin::PluginManager>,
-    agent_catalog: Arc<RwLock<Vec<agent::definition::AgentDefinition>>>,
     plugins_dir: std::path::PathBuf,
     home: std::path::PathBuf,
     cwd: std::path::PathBuf,
@@ -3303,36 +3616,21 @@ impl PluginRuntime {
             let _ = self.manager.disable(&id).await;
         }
 
-        // (3) Drop every `Plugin`-source agent from the catalog; the enable loop
-        //     re-adds them for plugins that pass the privilege gate. Agents carry
-        //     no live connections, so this wholesale rebuild is cheap and matches
-        //     cc's full re-read of agent definitions.
-        {
-            let mut cat = self.agent_catalog.write().await;
-            cat.retain(|a| !matches!(a.source, agent::definition::AgentSource::Plugin));
-        }
-
-        // (4) Enable each target plugin, materialising its AGENTS into the
-        //     catalog ONLY after `enable()` succeeds. `enable`/`load_plugin` runs
-        //     the privilege gate (`validate_plugin_agent_frontmatter`) that the
-        //     ungated dir-scan loader (`materialize_plugin_agents`) does NOT — so
-        //     gating on enable keeps a plugin rejected for an escalating agent
-        //     from smuggling that agent into the live catalog (cc rejects the
-        //     plugin as a unit, agents included).
+        // (3) Enable each target plugin. The manager validates agent privileges
+        //     before materialising every component into the shared registries.
         let mut counts = PluginRefreshCounts::default();
         for (id, manifest, dir) in target {
             // Tally BEFORE `manifest` moves into `enable`.
             let c = &manifest.components;
             let this = (
-                c.commands.len(),
+                c.commands.len() + c.skills.len(),
                 c.agents.len(),
                 c.hooks.len(),
                 c.mcp_servers.len(),
                 c.lsp_servers.len(),
             );
-            match self.manager.enable(&id, manifest, dir.clone()).await {
+            match self.manager.enable(&id, manifest, dir).await {
                 Ok(()) => {
-                    materialize_plugin_agents(&dir, &self.agent_catalog).await;
                     counts.enabled += 1;
                     counts.commands += this.0;
                     counts.agents += this.1;
@@ -3637,7 +3935,9 @@ async fn apply_worktree_launch(
     let worktree_path = handle.path.clone();
     ctx.session_cwd
         .swap(handle.path.clone(), vec![handle.path.clone()]);
-    *ctx.worktree_session.lock().unwrap() = Some(tool_api::WorktreeSession {
+    *ctx.worktree_session
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(tool_api::WorktreeSession {
         original_cwd: original_cwd.clone(),
         worktree_path: handle.path,
         branch_name: handle.branch_name,
@@ -3672,7 +3972,12 @@ async fn apply_worktree_launch(
                 // notice precedent (the settings-warning `eprintln!` in
                 // `build`). Colorization (206 `ht.green`) is dropped.
                 eprintln!("Created tmux session: {session_name}\nTo attach: tmux attach -t {session_name}");
-                if let Some(session) = ctx.worktree_session.lock().unwrap().as_mut() {
+                if let Some(session) = ctx
+                    .worktree_session
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .as_mut()
+                {
                     session.tmux_session_name = Some(session_name);
                 }
             }
@@ -3779,13 +4084,6 @@ pub async fn build(
     // seam as an `oauth_delegate`.
     let mut oauth_auth_state: Option<Arc<llm_client::oauth::anthropic::refresh::AuthState>> = None;
     let mut openai_oauth_state: Option<Arc<openai_oauth::AuthState>> = None;
-    // WebSearch builds Anthropic `POST /v1/messages` requests via its own
-    // provider (server-side web search is Anthropic-only in v1).
-    let tool_provider = Arc::new(AnthropicRequestBuilder::new(
-        cfg.api_key.clone(),
-        Some(cfg.api_base.clone()),
-    ));
-
     // (3) Credential manager + OAuth client (used by /login, /logout).
     //
     // Task 4 (future-work batch 4): the shared subscription slot UI layers read
@@ -3801,6 +4099,18 @@ pub async fn build(
     // platform `Arc<dyn SecureStorage>` for per-server token persistence.
     let mcp_oauth_storage = storage.clone();
     let credentials = Arc::new(CredentialManager::new(storage, clock.clone(), http.clone()));
+    let resolved_anthropic_api_key = if cfg.api_key.is_empty() {
+        match credentials.get_anthropic_api_key().await {
+            Ok(Some(key)) => Some(key.expose_secret().clone()),
+            Ok(None) => None,
+            Err(error) => {
+                tracing::warn!(%error, "could not read Anthropic API key from secure storage");
+                None
+            }
+        }
+    } else {
+        Some(cfg.api_key.clone())
+    };
     let oauth_cfg = ClaudeAiOAuthConfig::default_with_port(0);
     let oauth_client = Arc::new(ClaudeAiOAuthClient::new(
         oauth_cfg.clone(),
@@ -3822,7 +4132,7 @@ pub async fn build(
     match credentials.get_oauth_tokens().await {
         Ok(Some(tokens)) => {
             is_subscriber = oauth_subscriber_flag(
-                !cfg.api_key.is_empty(),
+                resolved_anthropic_api_key.is_some(),
                 std::env::var_os("ANTHROPIC_AUTH_TOKEN").is_some(),
                 &tokens.scopes,
             );
@@ -4010,7 +4320,7 @@ pub async fn build(
     //       pre-built delegate so provider-config stays free of an anthropic-oauth
     //       dep. A bad settings entry only emits a warning — the engine still boots
     //       with every well-formed profile (incl. the built-in Anthropic one).
-    let has_api_key = !cfg.api_key.is_empty();
+    let has_api_key = resolved_anthropic_api_key.is_some();
     // OAuth bridges into the client ONLY when there is no API key (api-key wins;
     // the single credential slot + `oauth_subscriber_flag` enforce the
     // exclusion). `has_oauth` selects `AuthStrategy::OAuthBearer`, which is what
@@ -4125,15 +4435,22 @@ pub async fn build(
     // same map later drives the `/model` picker's Connect badge via
     // `DesktopRuntime.provider_availability`. Nothing between here and the
     // runtime literal mutates credentials, so early == late computation.
-    let mut provider_availability: std::collections::BTreeMap<String, bool> =
-        provider_config::compute_availability(
-            &credentials,
-            &assembled.credential_sources,
-            has_api_key,
-            has_oauth,
-            has_openai_chatgpt,
-        )
-        .await
+    let availability_probe = provider_config::compute_availability(
+        &credentials,
+        &assembled.credential_sources,
+        has_api_key,
+        has_oauth,
+        has_openai_chatgpt,
+    );
+    let availability_rows =
+        match tokio::time::timeout(std::time::Duration::from_secs(5), availability_probe).await {
+            Ok(rows) => rows,
+            Err(_) => {
+                tracing::warn!("provider availability probe timed out; continuing engine startup");
+                Vec::new()
+            }
+        };
+    let mut provider_availability: std::collections::BTreeMap<String, bool> = availability_rows
         .into_iter()
         .map(|a| (a.profile_name, a.available))
         .collect();
@@ -4306,11 +4623,7 @@ pub async fn build(
     let composite = provider_config::MultiCredentialProvider::new(
         credentials.clone(),
         assembled.credential_sources.clone(),
-        if has_api_key {
-            Some(cfg.api_key.clone())
-        } else {
-            None
-        },
+        resolved_anthropic_api_key.clone(),
         cfg.api_key_helper.clone(),
         oauth_delegates,
     );
@@ -4393,6 +4706,7 @@ pub async fn build(
             &migrations::global_config::get_or_create_user_id(),
             "",
             &main_session_uuid,
+            cfg.parent_session_id.as_deref(),
         ),
     };
     // Build the provider-neutral drive service (the retry/rate-limit/betas loop),
@@ -4500,6 +4814,15 @@ pub async fn build(
             .with_initial_effort(cfg.initial_effort.clone().map(serde_json::Value::String))
             .with_fast_mode(fast_flag.clone()),
     );
+    // WebSearch uses the resolved Anthropic key, while MCP large-result
+    // confirmation reuses the fully routed/OAuth-aware main session provider.
+    let tool_provider = Arc::new(
+        AnthropicRequestBuilder::new(
+            resolved_anthropic_api_key.clone().unwrap_or_default(),
+            Some(cfg.api_base.clone()),
+        )
+        .with_mcp_token_counter(provider_adapter.clone()),
+    );
     let provider_adapter_handle = provider_adapter.clone();
     let api_client: Arc<dyn OrchestratorApiClient> = provider_adapter.clone();
     // The SAME `ProviderApiAdapter` drives the streaming turn path: it impls both
@@ -4557,6 +4880,9 @@ pub async fn build(
     // `# Output Style: <name>` section (Explanatory / Learning builtins). `None`
     // / "default" / unknown ⇒ no section (prompt byte-identical to before).
     orch_cfg.output_style = load_merged_output_style(&cfg.cwd);
+    traits::session_flags::set_show_thinking_summaries(load_merged_show_thinking_summaries(
+        &cfg.cwd,
+    ));
     // OUTSTYLE.3: custom output-style search dirs — user (`~/.lingxi/output-styles`)
     // then project (`<cwd>/.lingxi/output-styles`), in increasing priority so a
     // project style overrides a user one and both override the builtins. A
@@ -5022,6 +5348,7 @@ pub async fn build(
             auto_mode_disabled,
             mut additional_working_dirs,
             raw_tiers,
+            allow_managed_permission_rules_only,
         } = load_boot_permission_tiers(&cfg.lingxi_home, &cwd, cfg.setting_source_scope).await;
         // CLI `--add-dir <directories...>`: union the host-provided dirs into
         // the working-dir set, exactly like a settings-tier
@@ -5090,6 +5417,7 @@ pub async fn build(
             .with_roots(roots)
             .with_working_dirs(additional_working_dirs)
             .with_sandbox_runtime(sandbox_auto_allow)
+            .with_managed_permission_rules_only(allow_managed_permission_rules_only)
             // TS `isBypassPermissionsModeAvailable` (2.1.211 permissionSetup):
             // `S = (n === "bypassPermissions" || o) && !g && !_` — available when
             // the session RESOLVED to bypass mode OR the explicit
@@ -5370,6 +5698,11 @@ pub async fn build(
         // matching claude-code r1d() = [cwd, ...additionalWorkingDirectories].
         .with_additional_roots(mcp_additional_roots),
     );
+    // Subscribe before connecting: a server is allowed to invalidate a catalog
+    // immediately after initialization, before the shared ToolRegistry exists.
+    // Tokio's broadcast receiver retains those early notifications until the
+    // refresh driver below is installed.
+    let mut mcp_catalog_changes = mcp_registry.subscribe_catalog_changes();
     mcp_registry.connect_all(mcp_configs).await;
     tokio::spawn(Arc::clone(&mcp_registry).run_reconnect_loop());
     // Clone handles the runtime `/add-dir` live effect needs (the same registry
@@ -5907,13 +6240,13 @@ pub async fn build(
         // (cwd_settings_paths / worktree_main_repo_path / additional_md_dirs)
         // stay empty — see spec §5.
         let managed = crate::settings_watch::managed_settings_dir();
-        // Each deny-write seed is resolved through the `SS` symlink hardening
-        // (sandbox-adapter.ts, parity 2.1.210): if a seeded `.lingxi/*` path is a
-        // symlink, deny its REAL target so a redirected write can't escape the
-        // sandbox. Non-symlink / non-existent seeds pass through unchanged.
-        let deny_seed = |p: std::path::PathBuf| {
-            sandbox::policy_convert::resolve_deny_write_symlink(&p.to_string_lossy())
-        };
+        // Preserve the lexical deny-write seeds in the session config. The
+        // command path resolves them immediately before every sandboxed launch
+        // (`BuiltinToolContext::effective_sandbox_runtime`), which covers both
+        // symlinks present at boot and links created or retargeted later. If we
+        // replaced a seed with its boot-time target here, a later retarget would
+        // be impossible to observe because the original link path was lost.
+        let deny_seed = |p: std::path::PathBuf| p.to_string_lossy().into_owned();
         let ctx = sandbox::policy_convert::SandboxConvertContext {
             lingxi_temp_dir: Some(lingxi_temp_dir()),
             settings_file_paths: vec![
@@ -6083,7 +6416,9 @@ pub async fn build(
                         restored.worktree_path.clone(),
                         vec![restored.worktree_path.clone()],
                     );
-                    *worktree_session_cell.lock().unwrap() = Some(restored);
+                    *worktree_session_cell
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(restored);
                 }
             }
         }
@@ -6298,12 +6633,11 @@ pub async fn build(
     //        connection's `McpClient::call_tool`. Mirrors claude-code's
     //        `fetchToolsForClient` per-tool `Tool` (services/mcp/client.ts:1766-1990).
     //
-    //        SEQUENCING: this MUST run BEFORE the registry is sealed into its
-    //        final `Arc` (registration is `&mut self`), and the MCP servers are
-    //        ALREADY connected at this point — `mcp_registry.connect_all` ran at
-    //        (5.1). So we build the registry mutably, register the per-connection
-    //        MCP partitions, then `Arc`-wrap. `tool_ctx` is consumed by
-    //        `register_desktop_tools`, so the builder gets a clone taken first.
+    //        The MCP partition supports live replacement after the registry is
+    //        Arc-wrapped, so an inbound `notifications/tools/list_changed` can
+    //        update the next model request without rebuilding the builtin pool.
+    //        `tool_ctx` is consumed by `register_desktop_tools`, so the builder
+    //        gets a clone taken first.
     let mcp_tool_ctx = tool_ctx.clone();
     // (`!` bash mode) Clone the session tool context for the TUI's sandboxed Bash
     // runner BEFORE `tool_ctx` is moved into `register_desktop_tools` below. The
@@ -6337,6 +6671,8 @@ pub async fn build(
     // `build()` returns, so the loader never reads the empty registry.
     let shared_command_registry: Arc<RwLock<CommandRegistry>> =
         Arc::new(RwLock::new(CommandRegistry::new()));
+    let plugin_output_style_registry =
+        Arc::new(RwLock::new(outputstyles::OutputStyleRegistry::new()));
     // SKILLEXEC: the per-session id stamped onto every resolved skill descriptor
     // so the `Skill` tool substitutes `${LINGXI_SESSION_ID}` in the body (TS
     // `getSessionId()`, a per-process session value). Generated once here at build
@@ -6417,13 +6753,29 @@ pub async fn build(
         } else {
             None
         };
+    // Keep a slash-command façade over the SAME context + persister before the
+    // tool registry consumes `tool_ctx`. The handler itself is registered only
+    // in the desktop command registry below, leaving the locked upstream
+    // command-api builtin table untouched.
+    let worktree_command_handler: Arc<dyn BuiltinCommandHandler> = Arc::new(
+        DesktopWorktreeCommandHandler::new(tool_ctx.clone(), worktree_state_persister.clone()),
+    );
     // The wakeup cell for the registered `ScheduleWakeup` tool — surfaced on
     // `DesktopRuntime` so the bridge composition root fills it once the
     // per-connection queue + spawner exist (`boot::assemble`).
+    let ask_user_question_resolver = cfg.ask_user_question_tx.clone().map(|tx| {
+        Arc::new(tool_ui::ask_user_question::TuiBridgeResolver::new(
+            tool_ui::ask_user_question::AskUserQuestionTimeout::parse_or_default(
+                tool_ctx.ask_user_question_timeout.as_deref(),
+            ),
+            tx,
+        )) as Arc<dyn tool_ui::ask_user_question::AskUserQuestionResolver>
+    });
     let wakeup_scheduler_cell = register_desktop_tools(
         &mut tools_inner,
         tool_ctx,
         coordinator_wiring,
+        ask_user_question_resolver,
         Some(cron_auth),
         Some(skill_loader),
         cwd_changed_firer,
@@ -6469,7 +6821,7 @@ pub async fn build(
         ));
     }
     for (conn_id, mcp_tools) in
-        tool_mcp::build_registered_mcp_tools(&mcp_registry, mcp_tool_ctx).await
+        tool_mcp::build_registered_mcp_tools(&mcp_registry, mcp_tool_ctx.clone()).await
     {
         tools_inner.register_mcp_tools(conn_id, mcp_tools);
     }
@@ -6519,6 +6871,86 @@ pub async fn build(
     tools_inner.refresh_tool_search_view();
 
     let tools = Arc::new(tools_inner);
+
+    // MCP servers can mutate their tool/prompt/resource catalogs while the
+    // session is running. Refresh the registry snapshot on every generation-
+    // checked notification; only a successful tools/list replaces the live
+    // ToolRegistry partition, so transient RPC failures keep the last-known
+    // tools available (the Claude Code behavior).
+    //
+    // Capture the MCP registry weakly. A strong Arc here would keep its own
+    // broadcast sender alive forever and prevent this task from terminating
+    // when the desktop runtime is dropped.
+    {
+        let mcp_registry_weak = Arc::downgrade(&mcp_registry);
+        let live_tools = tools.clone();
+        let live_mcp_tool_ctx = mcp_tool_ctx;
+        tokio::spawn(async move {
+            let mut recovery = std::collections::VecDeque::new();
+            loop {
+                let change = if let Some(change) = recovery.pop_front() {
+                    change
+                } else {
+                    match mcp_catalog_changes.recv().await {
+                        Ok(change) => change,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                            let Some(registry) = mcp_registry_weak.upgrade() else {
+                                break;
+                            };
+                            tracing::warn!(
+                                target: "lingxi_engine_desktop::mcp",
+                                skipped,
+                                "MCP catalog refresh receiver lagged; refreshing every connected catalog"
+                            );
+                            recovery.extend(registry.catalog_refresh_snapshot().await);
+                            continue;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                };
+                let Some(registry) = mcp_registry_weak.upgrade() else {
+                    break;
+                };
+
+                if let Some(retired) = change.retired_connection_id {
+                    live_tools.unregister_mcp_tools(retired);
+                    live_tools.refresh_tool_search_view();
+                }
+
+                tracing::debug!(
+                    target: "lingxi_engine_desktop::mcp",
+                    server = %change.server_name,
+                    catalog = ?change.kind,
+                    "Received MCP list_changed notification, refreshing catalog"
+                );
+                match registry.refresh_catalog(&change).await {
+                    Ok(Some(connection_id)) if change.kind == mcp::McpCatalogKind::Tools => {
+                        let refreshed = tool_mcp::build_registered_mcp_tools(
+                            registry.as_ref(),
+                            live_mcp_tool_ctx.clone(),
+                        )
+                        .await;
+                        if let Some((_, handles)) =
+                            refreshed.into_iter().find(|(id, _)| *id == connection_id)
+                        {
+                            live_tools.register_mcp_tools(connection_id, handles);
+                            live_tools.refresh_tool_search_view();
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(
+                            target: "lingxi_engine_desktop::mcp",
+                            server = %change.server_name,
+                            catalog = ?change.kind,
+                            %error,
+                            "Failed to refresh MCP catalog; keeping the previous catalog"
+                        );
+                    }
+                }
+            }
+        });
+    }
 
     // (5.5a) M10 (T13): bind the teammate handler's `DeferredToolInvoker` to the
     //        real `RegistryToolInvoker` now that `tools` exists. The invoker
@@ -6666,12 +7098,6 @@ pub async fn build(
         main_transcript_path.clone(),
         Arc::new(PosixFileSystem::new(watch_cwd.clone())) as Arc<dyn traits::FileSystem>,
     ));
-    // (P2-02 cc2.1.207) The orchestrator MOVES `hooks` below; capture a clone
-    // so the `--agent` `Rft` registration (frontmatter hooks →
-    // `mainThreadAgentHooks`, further down) can still reach the executor. The
-    // executor writes through the SHARED `Arc<RwLock<HookRegistry>>`, so a
-    // registration on this clone is visible to the orchestrator's own executor.
-    let main_thread_agent_hook_executor = hooks.clone();
     // (P2-02 cc2.1.207) `main_jsonl_writer` MOVES into the orchestrator builder
     // below (when `session_persistence`); capture a clone so the `--agent` block
     // can persist the applied `agentType` as an `agent-setting` transcript record
@@ -6752,6 +7178,7 @@ pub async fn build(
         .with_mcp_registry(mcp_registry)
         .with_hook_registry(hook_registry)
         .with_agent_catalog(agent_catalog)
+        .with_output_style_registry(plugin_output_style_registry.clone())
         .with_compaction(compactor)
         .with_cache_safe_slot(cache_safe_slot)
         // `/fork` engine seam: hand the orchestrator the background-agent spawner
@@ -6964,7 +7391,7 @@ pub async fn build(
     let oauth_connect_driver: Arc<dyn command_core::OAuthConnectDriver> = Arc::new(
         crate::connect::EngineOAuthConnect::new(auth.clone(), connect_chatgpt.clone()),
     );
-    let reg = desktop_command_registry(
+    let mut reg = desktop_command_registry(
         handle,
         auth.clone(),
         &cfg.cwd,
@@ -6976,6 +7403,7 @@ pub async fn build(
         shared_command_registry.clone(),
     )
     .await;
+    reg.register_builtin_handler(worktree_command_handler);
     // SKILLEXEC.2: fill the shared command-registry slot the `Skill` tool's
     // loader holds, then hand the SAME `Arc` to the slash dispatcher so the tool
     // and the dispatcher observe one command set (plugin lifecycle mutations via
@@ -7079,11 +7507,12 @@ pub async fn build(
                 shared_command_registry.clone(),
                 Arc::new(RwLock::new(SkillRegistry::new())),
                 plugin_hook_registry.clone(),
-                Arc::new(RwLock::new(outputstyles::OutputStyleRegistry::new())),
+                plugin_output_style_registry.clone(),
                 plugin_mcp_registry.clone(),
                 plugin_lsp_registry.clone(),
                 Arc::new(RwLock::new(ToolRegistry::new())),
             )
+            .with_agent_catalog(plugin_agent_catalog.clone())
             .with_plugin_configs(plugin_configs)
             .with_blocked_marketplaces(blocked_marketplaces),
         );
@@ -7095,8 +7524,8 @@ pub async fn build(
             // is ungated, so gating on enable keeps a plugin rejected for an
             // escalating agent from smuggling it into the live catalog (cc
             // rejects the plugin as a unit).
-            match pm.enable(&id, manifest, dir.clone()).await {
-                Ok(()) => materialize_plugin_agents(&dir, &plugin_agent_catalog).await,
+            match pm.enable(&id, manifest, dir).await {
+                Ok(()) => {}
                 Err(e) => tracing::warn!(
                     plugin = %plugin_name,
                     error = %e,
@@ -7106,7 +7535,6 @@ pub async fn build(
         }
         plugin_runtime = Some(Arc::new(PluginRuntime {
             manager: pm,
-            agent_catalog: plugin_agent_catalog.clone(),
             plugins_dir,
             home: cfg.lingxi_home.clone(),
             cwd: cwd_for_plugins.clone(),
@@ -7173,13 +7601,7 @@ pub async fn build(
         None if cfg.session_id_override.is_some() => {
             let snapshot_fs =
                 Arc::new(PosixFileSystem::new(watch_cwd.clone())) as Arc<dyn traits::FileSystem>;
-            let persisted = session::jsonl::loader::read_agent_setting(
-                &main_transcript_path,
-                snapshot_fs.clone(),
-                &main_session_uuid,
-            )
-            .await;
-            let snapshot = session::jsonl::loader::read_agent_snapshot(
+            let (persisted, snapshot) = session::jsonl::read_agent_resume_state(
                 &main_transcript_path,
                 snapshot_fs,
                 &main_session_uuid,
@@ -7311,16 +7733,38 @@ pub async fn build(
             // policy lands. `is_agent=false` keeps `Stop` as `Stop` (this is the
             // MAIN thread, not a subagent — no `Stop`→`SubagentStop` retarget).
             // Registered BEFORE the `fire_session_start("startup")` call below so
-            // a SessionStart frontmatter hook fires with the agent applied. A
-            // fresh `AgentId` scopes the bucket; the main thread never clears it
-            // (the hooks live for the whole session, like `mainThreadAgentHooks`).
+            // a SessionStart frontmatter hook fires with the agent applied. The
+            // orchestrator owns the bucket identity so an in-place resume can
+            // replace it without leaking hooks from the previously mounted
+            // session.
+            //
+            // (cc 2.1.218 `QEt`) The binary now ALSO gates on `mvo(e)` — the
+            // definition's folder must be trusted before its `hooks:` become
+            // live main-thread hooks:
+            //   `let t=!VR("hooks")||J0e(e.source), r=mvo(e);
+            //    if(t&&r){b1r(e.hooks);return} if(t&&!r)hvo(e,"mainThread"); b1r(void 0)`
+            // NOTE the pre-existing `strict_plugin_only_hooks` arm is inert
+            // (`uA("hooks")` unwired ⇒ `false` ⇒ `(!false || …)` is ALWAYS true),
+            // so before 2.1.218 this site had no effective gate at all.
             let strict_plugin_only_hooks = false; // `uA("hooks")` — unwired in LingXi.
             if !frontmatter_hooks.is_empty()
                 && (!strict_plugin_only_hooks || agent_source_is_trusted(source))
             {
-                main_thread_agent_hook_executor
-                    .register_agent_hooks(protocol::AgentId::new(), &frontmatter_hooks, false)
-                    .await;
+                if agent::hooks_trust::agent_hooks_origin_trusted(&resolved_definition, &cfg.cwd) {
+                    orch.replace_main_thread_agent_hooks(&frontmatter_hooks)
+                        .await;
+                } else {
+                    agent::hooks_trust::report_untrusted_hooks(
+                        &resolved_definition,
+                        &cfg.cwd,
+                        agent::hooks_trust::HooksTrustSurface::MainThread,
+                        false,
+                    );
+                    // `QEt`'s untrusted arm ends in `b1r(void 0)` (clear the
+                    // bucket). A no-op at boot (the bucket starts empty), kept
+                    // for parity with the resume site's clear.
+                    orch.replace_main_thread_agent_hooks(&[]).await;
+                }
             }
         }
     }
@@ -7342,6 +7786,7 @@ pub async fn build(
     }
     let expansion_ctx_orch = orch.clone();
     let dispatcher = RegistrySlashDispatcher::new(shared_command_registry.clone())
+        .with_skill_usage_home(cfg.lingxi_home.clone())
         .with_expansion_hooks(
             expansion_hook_executor,
             std::sync::Arc::new(move || {
@@ -7527,6 +7972,7 @@ pub async fn build(
 
     Ok(DesktopRuntime {
         orchestrator: orch,
+        shared_command_registry,
         dispatcher,
         auth,
         task_registry,
@@ -7567,9 +8013,52 @@ pub async fn build(
 #[cfg(test)]
 mod tests {
     use super::{
-        build, desktop_tool_registry, model_deprecation_warning, CoordinatorWiring, DesktopConfig,
+        build, desktop_tool_registry, model_deprecation_warning, parse_worktree_slash_action,
+        CoordinatorWiring, DesktopConfig, WorktreeSlashAction, WORKTREE_SLASH_USAGE,
     };
     use std::sync::Arc;
+
+    #[test]
+    fn worktree_slash_parser_covers_lifecycle_and_safe_remove() {
+        let parse = |raw: &str| {
+            let parsed = command_api::parse_slash_command(raw).expect("slash command");
+            parse_worktree_slash_action(&parsed)
+        };
+
+        assert_eq!(parse("/worktree"), Ok(WorktreeSlashAction::Create(None)));
+        assert_eq!(
+            parse("/worktree feature/auth"),
+            Ok(WorktreeSlashAction::Create(Some("feature/auth".into())))
+        );
+        assert_eq!(
+            parse("/worktree create review-fix"),
+            Ok(WorktreeSlashAction::Create(Some("review-fix".into())))
+        );
+        assert_eq!(
+            parse("/worktree enter \"/tmp/path with spaces\""),
+            Ok(WorktreeSlashAction::Enter("/tmp/path with spaces".into()))
+        );
+        assert_eq!(parse("/worktree enter"), Err(WORKTREE_SLASH_USAGE));
+        assert_eq!(parse("/worktree status"), Ok(WorktreeSlashAction::Status));
+        assert_eq!(parse("/worktree keep"), Ok(WorktreeSlashAction::Keep));
+        assert_eq!(
+            parse("/worktree remove"),
+            Ok(WorktreeSlashAction::Remove {
+                discard_changes: false
+            })
+        );
+        assert_eq!(
+            parse("/worktree remove --discard"),
+            Ok(WorktreeSlashAction::Remove {
+                discard_changes: true
+            })
+        );
+        assert_eq!(parse("/worktree remove --force"), Err(WORKTREE_SLASH_USAGE));
+        assert_eq!(
+            parse("/worktree create too many"),
+            Err(WORKTREE_SLASH_USAGE)
+        );
+    }
 
     // ── Plan 3c `/connect` wiring tests ──────────────────────────────────────
 
@@ -8195,6 +8684,7 @@ mod tests {
             system_prompt_override: None,
             append_system_prompt: None,
             session_id_override: None,
+            parent_session_id: None,
             disable_slash_commands: false,
             add_dir: Vec::new(),
             cli_mcp_servers: Vec::new(),
@@ -8216,6 +8706,9 @@ mod tests {
             tmux_launch: None,
             // No `/fork`-to-background forker in tests.
             bg_session_forker: None,
+            // The generic desktop test host does not mount an interactive TUI
+            // questionnaire surface.
+            ask_user_question_tx: None,
         };
         (tmp, cfg)
     }
@@ -8980,6 +9473,26 @@ mod tests {
             ),
             other => panic!("expected Plugin kind, got {other:?}"),
         }
+    }
+
+    /// The desktop runtime must surface the SAME shared command registry the
+    /// slash dispatcher reads so bridge hosts can emit `SlashCommandCatalog`
+    /// pulls and `CommandsChanged` diffs from live state without reconstructing
+    /// a parallel registry snapshot.
+    #[tokio::test]
+    async fn build_exposes_dispatcher_shared_command_registry() {
+        let (_tmp, cfg) = test_config(true);
+        let output: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+
+        let rt = build(cfg, output, perm_sink).await.expect("build() failed");
+
+        assert!(
+            Arc::ptr_eq(&rt.shared_command_registry, &rt.dispatcher.registry()),
+            "DesktopRuntime must expose the dispatcher's live shared registry"
+        );
     }
 
     /// GAP E (verification fix #1): a plugin laid out under the REAL claude-code
@@ -11306,6 +11819,7 @@ mod tests {
             1,
             "only the managed deny survives the lockdown"
         );
+        assert!(tiers.allow_managed_permission_rules_only);
         assert_eq!(
             tiers.rules[0].source,
             permission::PermissionRuleSource::PolicySettings
@@ -11897,7 +12411,6 @@ mod tests {
         ));
         let rt = super::PluginRuntime {
             manager: manager.clone(),
-            agent_catalog: Arc::new(RwLock::new(Vec::new())),
             plugins_dir: plugins_dir.clone(),
             home: home.clone(),
             cwd: cwd.clone(),
@@ -11948,10 +12461,16 @@ mod tests {
 
     /// Build a `PluginManager` (Arc, holding a fresh command registry to assert
     /// against) rooted at `plugins_dir`, like the composition root does.
+    ///
+    /// `agent_catalog` is wired into the manager (`with_agent_catalog`): the
+    /// manager — not `PluginRuntime` — owns plugin-agent materialisation, so a
+    /// test asserting what did/didn't reach the live catalog must observe it
+    /// through this seam.
     async fn make_reload_test_manager(
         plugins_dir: &std::path::Path,
         cwd: &std::path::Path,
         secrets: &std::path::Path,
+        agent_catalog: Arc<tokio::sync::RwLock<Vec<agent::AgentDefinition>>>,
     ) -> (
         Arc<plugin::PluginManager>,
         Arc<tokio::sync::RwLock<command_api::CommandRegistry>>,
@@ -11995,15 +12514,18 @@ mod tests {
             Arc::new(McpRegistry::new(Arc::new(PosixMcpTransport::new()))),
             Arc::new(LspRegistry::new(Arc::new(PosixLspTransport::new()))),
             Arc::new(RwLock::new(ToolRegistry::new())),
-        ));
+        )
+        .with_agent_catalog(agent_catalog));
         (manager, command_registry)
     }
 
     /// A plugin rejected by `enable()`'s privilege gate (an escalating agent)
-    /// must land NOTHING live — not its command, and crucially NOT its agent:
-    /// the catalog materialisation is gated on enable success, so the ungated
-    /// dir-scan loader can't smuggle the escalating agent into the live catalog.
-    /// Regression guard for the "materialise agents only after enable" fix.
+    /// must land NOTHING live — not its command, and crucially NOT its agent.
+    /// Plugin-agent materialisation is owned by `PluginManager` (validated by
+    /// `validate_plugin_agent_frontmatter` BEFORE parse, so an escalating agent
+    /// fails the whole plugin load) and the catalog is observed through the
+    /// manager's `with_agent_catalog` seam. Regression guard for the
+    /// "materialise agents only after enable" fix.
     #[tokio::test]
     async fn plugin_runtime_refresh_rejected_agent_never_enters_catalog() {
         use tokio::sync::RwLock;
@@ -12040,12 +12562,18 @@ mod tests {
         .unwrap();
         write_enabled_plugins(&home, &[("rogueplugin@mkt", true)]);
 
-        let (manager, command_registry) =
-            make_reload_test_manager(&plugins_dir, &cwd, &tmp.path().join("secrets")).await;
+        // The catalog is owned by the MANAGER now, so wire it there — that is the
+        // surface an escalating plugin agent would have to reach to be live.
         let agent_catalog = Arc::new(RwLock::new(Vec::new()));
+        let (manager, command_registry) = make_reload_test_manager(
+            &plugins_dir,
+            &cwd,
+            &tmp.path().join("secrets"),
+            agent_catalog.clone(),
+        )
+        .await;
         let rt = super::PluginRuntime {
             manager: manager.clone(),
-            agent_catalog: agent_catalog.clone(),
             plugins_dir: plugins_dir.clone(),
             home: home.clone(),
             cwd: cwd.clone(),
@@ -12072,6 +12600,70 @@ mod tests {
         assert!(
             manager.loaded_plugin_ids().await.is_empty(),
             "rejected plugin must not be marked loaded"
+        );
+    }
+
+    /// POSITIVE CONTROL for the test above. If the manager's `with_agent_catalog`
+    /// wiring ever breaks, `agent_catalog` would stay empty for ANY plugin and the
+    /// rejection assertion would silently pass while proving nothing. This test
+    /// enables a BENIGN plugin agent and requires it to actually REACH the live
+    /// catalog — so the two together pin "benign lands, escalating does not".
+    #[tokio::test]
+    async fn plugin_runtime_refresh_benign_agent_does_enter_catalog() {
+        use tokio::sync::RwLock;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let cwd = tmp.path().join("cwd");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        let plugins_dir = home.join("plugins");
+        let pdir = plugins_dir
+            .join("cache")
+            .join("mkt")
+            .join("goodplugin")
+            .join("1.0.0");
+        std::fs::create_dir_all(pdir.join(".lingxi-plugin")).unwrap();
+        std::fs::write(
+            pdir.join(".lingxi-plugin").join("plugin.json"),
+            r#"{"name":"goodplugin","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(pdir.join("agents")).unwrap();
+        std::fs::write(
+            pdir.join("agents").join("helper.md"),
+            "---\nname: helper\ndescription: a benign helper\n---\nI help.\n",
+        )
+        .unwrap();
+        write_enabled_plugins(&home, &[("goodplugin@mkt", true)]);
+
+        let agent_catalog = Arc::new(RwLock::new(Vec::new()));
+        let (manager, _command_registry) = make_reload_test_manager(
+            &plugins_dir,
+            &cwd,
+            &tmp.path().join("secrets"),
+            agent_catalog.clone(),
+        )
+        .await;
+        let rt = super::PluginRuntime {
+            manager: manager.clone(),
+            plugins_dir: plugins_dir.clone(),
+            home: home.clone(),
+            cwd: cwd.clone(),
+            cli_plugin_dirs: Vec::new(),
+            ambient: true,
+            inline: false,
+        };
+
+        let c = rt.refresh().await;
+        assert_eq!(c.errors, 0, "the benign plugin loads cleanly");
+        assert_eq!(c.enabled, 1, "the benign plugin is enabled");
+        let cat = agent_catalog.read().await;
+        assert!(
+            cat.iter().any(|d| d.agent_type.contains("helper")),
+            "a benign plugin agent MUST reach the live catalog (else the rejection \
+             test above is vacuous); catalog = {:?}",
+            cat.iter().map(|d| &d.agent_type).collect::<Vec<_>>()
         );
     }
 }

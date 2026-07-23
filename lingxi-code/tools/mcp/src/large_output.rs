@@ -15,26 +15,11 @@
 //!   viewability), or when the `ENABLE_MCP_LARGE_OUTPUT_FILES` env flag is set
 //!   to a falsy value, or when the file write fails.
 //!
-//! ## Divergences from claude-code (documented)
-//!
-//! 1. **No token-counting API.** TS `mcpContentNeedsTruncation` first applies a
-//!    cheap size heuristic (`estimate <= maxTokens * 0.5` → not large) and only
-//!    then confirms with `countMessagesTokensWithAPI` against the full
-//!    `maxTokens`. This port has no token-counting endpoint, so the rough
-//!    estimate (a faithful port of `getContentSizeEstimate` /
-//!    `roughTokenCountEstimation`) IS the decision: content whose estimate
-//!    exceeds the heuristic gate `maxTokens * MCP_TOKEN_COUNT_THRESHOLD_FACTOR`
-//!    (= 12 500 tokens) is treated as needing large-output handling. This is the
-//!    only part of `mcpContentNeedsTruncation` that runs locally; the omitted
-//!    second stage could only ever DROP the result back under threshold, so the
-//!    port is conservative (it persists/truncates rather than risk dumping a
-//!    huge blob into context).
-//! 2. **No image codec.** The image-truncation branch of TS
-//!    `truncateContentBlocks` compresses an over-budget image to fit the
-//!    remaining char budget. With no codec available (the same constraint that
-//!    makes `transform_result::maybe_resize` a passthrough) an over-budget image
-//!    is dropped instead — exactly the behavior TS falls back to when
-//!    `compressImageBlock` throws.
+//! The size decision mirrors Claude's two-stage guard: a cheap 12 500-token
+//! estimate first, followed by an exact provider count against the 25 000-token
+//! cap. Routes without a token-count endpoint retain the safe conservative
+//! behavior. The image branch reuses the shared image codec and compresses a
+//! valid image to the remaining character budget.
 //!
 //! Persistence REUSES the MCP-5d storage helper
 //! [`mcp::persist_binary_content`] (writing the serialized UTF-8 string as bytes
@@ -44,7 +29,7 @@
 use std::path::Path;
 
 use mcp::normalization::normalize_name_for_mcp;
-use mcp::{persist_binary_content, PersistBinaryResult};
+use mcp::{decode_base64, persist_binary_content, PersistBinaryResult};
 use serde_json::Value;
 
 /// `DEFAULT_MAX_MCP_OUTPUT_TOKENS` (`mcpValidation.ts:16`): the MCP output token
@@ -59,8 +44,7 @@ pub const IMAGE_TOKEN_ESTIMATE: u64 = 1_600;
 
 /// `MCP_TOKEN_COUNT_THRESHOLD_FACTOR` (`mcpValidation.ts:14`) applied to
 /// [`DEFAULT_MAX_MCP_OUTPUT_TOKENS`]: `25_000 * 0.5 = 12_500`. Content whose
-/// rough token estimate exceeds this is treated as needing large-output
-/// handling (see the module-level divergence note on the omitted API stage).
+/// rough token estimate exceeds this proceeds to exact provider counting.
 pub const MCP_TRUNCATION_THRESHOLD_TOKENS: u64 = DEFAULT_MAX_MCP_OUTPUT_TOKENS / 2;
 
 /// Process a transformed MCP tool-result `content` Value for the model.
@@ -84,13 +68,41 @@ pub fn process_mcp_result(
     output_dir: &Path,
     now_millis: u128,
 ) -> Value {
+    process_mcp_result_with_exact_count(
+        content,
+        server_name,
+        tool_name,
+        output_dir,
+        now_millis,
+        None,
+    )
+}
+
+/// Process an MCP result with the provider's exact token count when available.
+/// `None` preserves the conservative fallback used by providers that do not
+/// expose token counting.
+#[must_use]
+pub fn process_mcp_result_with_exact_count(
+    content: &Value,
+    server_name: &str,
+    tool_name: &str,
+    output_dir: &Path,
+    now_millis: u128,
+    exact_token_count: Option<u64>,
+) -> Value {
     // IDE tools are not going to the model directly (client.ts:2727-2731).
     if server_name == "ide" {
         return content.clone();
     }
 
     // Under the large-output threshold → forward verbatim (client.ts:2733-2736).
-    if !mcp_content_needs_truncation(content) {
+    if !mcp_content_needs_exact_count(content) {
+        return content.clone();
+    }
+
+    // Claude only enters large-output handling when the exact count exceeds
+    // the full cap. An unsupported count route (`None`) stays conservative.
+    if exact_token_count.is_some_and(|tokens| tokens <= DEFAULT_MAX_MCP_OUTPUT_TOKENS) {
         return content.clone();
     }
 
@@ -171,13 +183,12 @@ pub fn process_mcp_result(
 
 /// Whether `content`'s rough token estimate exceeds the large-output threshold.
 ///
-/// Port of the LOCAL portion of `mcpContentNeedsTruncation`
-/// (`mcpValidation.ts:151-178`): `getContentSizeEstimate(content) >
-/// getMaxMcpOutputTokens() * MCP_TOKEN_COUNT_THRESHOLD_FACTOR`. The subsequent
-/// `countMessagesTokensWithAPI` confirmation is omitted (no token-counting API
-/// in this port — see the module-level note).
+/// First stage of `mcpContentNeedsTruncation` (`mcpValidation.ts:151-178`):
+/// `getContentSizeEstimate(content) > getMaxMcpOutputTokens() *
+/// MCP_TOKEN_COUNT_THRESHOLD_FACTOR`. Callers then ask the active provider for
+/// an exact count before applying the 25 000-token cap.
 #[must_use]
-pub fn mcp_content_needs_truncation(content: &Value) -> bool {
+pub fn mcp_content_needs_exact_count(content: &Value) -> bool {
     content_size_estimate(content) > MCP_TRUNCATION_THRESHOLD_TOKENS
 }
 
@@ -468,9 +479,9 @@ fn truncate_string(content: &str, max_chars: usize) -> String {
 
 /// `truncateContentBlocks` (`mcpValidation.ts:94-149`): pack blocks into a
 /// `max_chars` budget — text blocks are kept whole or sliced to fit; image
-/// blocks cost `IMAGE_TOKEN_ESTIMATE * 4` chars and are kept only if they fit
-/// (an over-budget image is dropped — see the module note on the missing
-/// codec); any other block passes through.
+/// blocks cost `IMAGE_TOKEN_ESTIMATE * 4` chars and are compressed to the
+/// remaining budget when that estimate no longer fits; any other block passes
+/// through.
 fn truncate_content_blocks(blocks: &[Value], max_chars: usize) -> Vec<Value> {
     let mut result: Vec<Value> = Vec::new();
     let mut current_chars: usize = 0;
@@ -497,14 +508,43 @@ fn truncate_content_blocks(blocks: &[Value], max_chars: usize) -> Vec<Value> {
                 if current_chars + image_chars <= max_chars {
                     result.push(block.clone());
                     current_chars += image_chars;
+                } else {
+                    let remaining = max_chars.saturating_sub(current_chars);
+                    if let Some((compressed, chars)) =
+                        compress_image_block_to_budget(block, remaining)
+                    {
+                        result.push(compressed);
+                        current_chars = current_chars.saturating_add(chars);
+                    }
                 }
-                // Over budget: claude-code compresses-to-fit; without a codec
-                // the image is dropped (TS's compression-failure fallback).
             }
             _ => result.push(block.clone()),
         }
     }
     result
+}
+
+fn compress_image_block_to_budget(block: &Value, max_chars: usize) -> Option<(Value, usize)> {
+    let source = block.get("source")?.as_object()?;
+    if source.get("type").and_then(Value::as_str) != Some("base64") {
+        return None;
+    }
+    let data = source.get("data")?.as_str()?;
+    let bytes = decode_base64(data).ok()?;
+    let processed =
+        tool_api::util::image_budget::process_image_with_base64_budget(bytes, max_chars).ok()?;
+    if processed.base64.len() > max_chars {
+        return None;
+    }
+    let chars = processed.base64.len();
+    let mut compressed = block.clone();
+    let compressed_source = compressed.get_mut("source")?.as_object_mut()?;
+    compressed_source.insert("data".to_string(), Value::String(processed.base64));
+    compressed_source.insert(
+        "media_type".to_string(),
+        Value::String(processed.media_type),
+    );
+    Some((compressed, chars))
 }
 
 /// Build a `{"type":"text","text":<text>}` content block.
@@ -565,11 +605,11 @@ mod tests {
         assert_eq!(content_size_estimate(&at), 12_500);
         assert_eq!(content_size_estimate(&over), 12_501);
         assert!(
-            !mcp_content_needs_truncation(&at),
+            !mcp_content_needs_exact_count(&at),
             "12500 tokens is at the boundary, not over"
         );
         assert!(
-            mcp_content_needs_truncation(&over),
+            mcp_content_needs_exact_count(&over),
             "12501 tokens exceeds the threshold"
         );
     }
@@ -598,6 +638,43 @@ mod tests {
         );
         // Nothing persisted.
         assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn exact_count_below_full_cap_cancels_large_output_handling() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = Value::Array(vec![text_of_len(60_000)]);
+        assert!(mcp_content_needs_exact_count(&content));
+
+        let out = process_mcp_result_with_exact_count(
+            &content,
+            "srv",
+            "tool",
+            dir.path(),
+            1700,
+            Some(DEFAULT_MAX_MCP_OUTPUT_TOKENS),
+        );
+
+        assert_eq!(out, content);
+        assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn exact_count_above_full_cap_applies_large_output_handling() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = Value::Array(vec![text_of_len(60_000)]);
+
+        let out = process_mcp_result_with_exact_count(
+            &content,
+            "srv",
+            "tool",
+            dir.path(),
+            1700,
+            Some(DEFAULT_MAX_MCP_OUTPUT_TOKENS + 1),
+        );
+
+        assert!(out.as_str().is_some());
+        assert!(dir.path().join("mcp-srv-tool-1700.txt").exists());
     }
 
     #[test]
@@ -710,6 +787,34 @@ mod tests {
         );
         // Nothing was persisted to disk.
         assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn over_budget_image_is_compressed_into_remaining_character_budget() {
+        const WIDE_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAC7gAAAABCAIAAADBtXRpAAAAH0lEQVR42u3BAQEAAACCIP+vbkhAAQAAAAAAAADAgQEjKQABp2QvZgAAAABJRU5ErkJggg==";
+        let content = Value::Array(vec![
+            text_of_len(97_000),
+            json!({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "data": WIDE_PNG,
+                    "media_type": "image/png"
+                }
+            }),
+        ]);
+
+        let out = truncate_mcp_content(&content);
+        let image = out
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|block| is_image_block(block))
+            .expect("compressed image remains present");
+        let data = image["source"]["data"].as_str().unwrap();
+        assert!(data.len() <= 3_000);
+        assert_ne!(data, WIDE_PNG);
+        assert_eq!(image["source"]["media_type"], json!("image/jpeg"));
     }
 
     #[test]

@@ -31,7 +31,7 @@
 //! The worker also owns an authenticated live attach socket when the daemon
 //! provides `LINGXI_BG_ATTACH_*` env. `agents attach` connects to that endpoint
 //! while the worker is still running, avoiding a second `--resume` JSONL writer.
-//! Every byte except Ctrl-] reaches the child unchanged; Ctrl-] only detaches.
+//! Every byte except Ctrl-Z reaches the child unchanged; Ctrl-Z only detaches.
 
 use crate::agents_registry::{self, SessionRegistration};
 use crate::background_launch::{BackgroundLaunchKind, BackgroundLaunchSpec};

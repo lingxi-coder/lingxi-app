@@ -43,12 +43,11 @@ pub struct TuiPermissionGate {
     /// appended to when the user picks `AllowAlways`.
     pub session_allow_rules: Arc<Mutex<Vec<PermissionRule>>>,
     /// (3c) Filesystem roots for persisting an `AllowAlways` to
-    /// `settings.local.json`. `None` → session-only. NOTE: this gate is not yet
-    /// wired into the production TUI runtime (the engine selects the
-    /// `NoOp`/`Adapter` gate at boot), so the persist path is exercised only by
-    /// tests until the TUI gate itself is wired; the capability mirrors
-    /// `AdapterPermissionGate` so it is ready when that happens.
+    /// `settings.local.json`. `None` → session-only. The CLI TUI composition
+    /// root wires these paths before the engine wraps this transport in its
+    /// policy gate.
     persist_paths: Option<PermissionPaths>,
+    persistence_enabled: std::sync::atomic::AtomicBool,
 }
 
 impl TuiPermissionGate {
@@ -62,6 +61,7 @@ impl TuiPermissionGate {
             event_tx,
             session_allow_rules,
             persist_paths: None,
+            persistence_enabled: std::sync::atomic::AtomicBool::new(true),
         }
     }
 
@@ -75,6 +75,11 @@ impl TuiPermissionGate {
 
 #[async_trait]
 impl PermissionGate for TuiPermissionGate {
+    fn set_permission_persistence_enabled(&self, enabled: bool) {
+        self.persistence_enabled
+            .store(enabled, std::sync::atomic::Ordering::Release);
+    }
+
     async fn check(&self, name: &str, input: &serde_json::Value) -> PermissionDecision {
         // Main-thread call — no worker attribution.
         self.check_with_worker(name, input, None).await
@@ -142,7 +147,12 @@ impl PermissionGate for TuiPermissionGate {
             // (3c) Durably record the choice when a persist target is wired.
             // Best-effort: a write failure must not fail the check. Skip a
             // degenerate empty tool name so we never persist `allow: [""]`.
-            if let Some(paths) = self.persist_paths.as_ref().filter(|_| !name.is_empty()) {
+            if let Some(paths) = self.persist_paths.as_ref().filter(|_| {
+                !name.is_empty()
+                    && self
+                        .persistence_enabled
+                        .load(std::sync::atomic::Ordering::Acquire)
+            }) {
                 let update = PermissionUpdate {
                     rule,
                     destination: PermissionUpdateDestination::LocalSettings,

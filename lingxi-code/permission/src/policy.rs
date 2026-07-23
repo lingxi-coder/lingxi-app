@@ -84,8 +84,8 @@ pub struct PermissionPolicy {
     /// When `true`, `Plan` mode ALSO bypasses permissions (claude-code
     /// `permissions.ts:1268-1271` `shouldBypassPermissions`) — a plan started
     /// from a bypass session keeps the bypass grant. Defaults to `false`
-    /// (preserving the plan-mode mutation backstop); production engine wiring of
-    /// this flag is deferred this batch. Subject to the same
+    /// (preserving the plan-mode mutation backstop). Production engine wiring
+    /// resolves this from the launch mode/flag. Subject to the same
     /// [`Self::bypass_killswitch_active`] override as `BypassPermissions`.
     pub bypass_permissions_available: bool,
     /// Filesystem roots for per-tool file-path CONTENT matching (phase 3a).
@@ -110,8 +110,7 @@ pub struct PermissionPolicy {
     /// auto-allows safe file edits. 1:1 with the keys of the TS
     /// `ToolPermissionContext.additionalWorkingDirectories` map, which
     /// `allWorkingDirectories` (`filesystem.ts:667-674`) unions with the original
-    /// cwd. Empty by default; set via [`Self::with_working_dirs`]. Production
-    /// engine wiring is deferred this batch (cwd comes from `roots.cwd`).
+    /// cwd. Empty by default; production sets it via [`Self::with_working_dirs`].
     pub additional_working_dirs: Vec<PathBuf>,
     /// Minimal sandbox-runtime config for the bash sandbox-auto-allow layer
     /// (`bashToolHasPermission`'s `isSandboxingEnabled() &&
@@ -121,9 +120,8 @@ pub struct PermissionPolicy {
     /// opt-in posture. Set via [`Self::with_sandbox_runtime`]; the `permission`
     /// crate cannot depend on the `sandbox` crate (cycle), so this carries only
     /// the three fields the auto-allow branch reads
-    /// ([`crate::sandbox_auto_allow::SandboxAutoAllowConfig`]). Production
-    /// engine wiring of this field is reported as a follow-up this batch (the
-    /// boot site currently constructs a disabled-default `SandboxRuntimeConfig`).
+    /// ([`crate::sandbox_auto_allow::SandboxAutoAllowConfig`]). Production folds
+    /// the active settings tiers into this field at boot.
     pub sandbox_runtime: Option<crate::sandbox_auto_allow::SandboxAutoAllowConfig>,
     /// PowerShell command parser (via `pwsh`) enabling the PowerShell-specific
     /// path-containment guard. `None` (the DEFAULT) makes PowerShell path
@@ -132,6 +130,9 @@ pub struct PermissionPolicy {
     /// [`Self::with_pwsh_parser`] at the engine boot site on hosts with `pwsh`
     /// (e.g. [`crate::powershell_parse::SystemPwshParser`]).
     pub pwsh_parser: Option<std::sync::Arc<dyn crate::powershell_parse::PwshParser>>,
+    /// Enterprise gate that permits only managed policy rules and disables
+    /// user/project/local permission persistence for the session.
+    pub allow_managed_permission_rules_only: bool,
 }
 
 impl PermissionPolicy {
@@ -153,7 +154,15 @@ impl PermissionPolicy {
             additional_working_dirs: Vec::new(),
             sandbox_runtime: None,
             pwsh_parser: None,
+            allow_managed_permission_rules_only: false,
         }
+    }
+
+    /// Apply the enterprise managed-rules-only persistence gate.
+    #[must_use]
+    pub fn with_managed_permission_rules_only(mut self, enabled: bool) -> Self {
+        self.allow_managed_permission_rules_only = enabled;
+        self
     }
 
     /// Attach a [`crate::powershell_parse::PwshParser`], enabling PowerShell
@@ -468,6 +477,44 @@ impl PermissionPolicy {
             return deny_with_mode(PermissionMode::DontAsk);
         }
         result
+    }
+
+    /// Clone this policy, replacing only the live-mutable rule/working-dir
+    /// state a host `updatedPermissions` payload can change mid-session.
+    ///
+    /// Used by the permission gate's in-memory live overlay so a session sees
+    /// rule/directory updates immediately without mutating the shared boot
+    /// policy structure.
+    #[must_use]
+    pub(crate) fn clone_with_live_state(
+        &self,
+        allow_rules: HashMap<PermissionRuleSource, Vec<PermissionRule>>,
+        deny_rules: HashMap<PermissionRuleSource, Vec<PermissionRule>>,
+        ask_rules: HashMap<PermissionRuleSource, Vec<PermissionRule>>,
+        additional_working_dirs: Vec<PathBuf>,
+    ) -> Self {
+        Self {
+            mode: self.mode,
+            allow_rules,
+            deny_rules,
+            ask_rules,
+            denial_tracking: Mutex::new(
+                *self
+                    .denial_tracking
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()),
+            ),
+            bypass_killswitch_active: self.bypass_killswitch_active,
+            auto_mode_disabled: self.auto_mode_disabled,
+            bypass_permissions_available: self.bypass_permissions_available,
+            roots: self.roots.clone(),
+            stripped_dangerous: self.stripped_dangerous.clone(),
+            stripped_positions: self.stripped_positions.clone(),
+            additional_working_dirs,
+            sandbox_runtime: self.sandbox_runtime.clone(),
+            pwsh_parser: self.pwsh_parser.clone(),
+            allow_managed_permission_rules_only: self.allow_managed_permission_rules_only,
+        }
     }
 
     /// Rule + mode evaluation producing the pre-`DontAsk`-transform result.
@@ -2468,6 +2515,16 @@ fn deny_with_mode(mode: PermissionMode) -> PermissionResult {
 }
 
 fn ask_with_rule(rule: &PermissionRule, tool_name: &str) -> PermissionResult {
+    // This is the one suggestion shape the policy can derive without guessing
+    // tool-specific semantics: allow the exact rule that produced this Ask for
+    // the current session.  Content stays scoped (for example a Bash command or
+    // WebFetch domain) rather than broadening to the whole tool.
+    let mut suggested_rule = serde_json::json!({
+        "toolName": rule.value.tool_name,
+    });
+    if let Some(content) = &rule.value.rule_content {
+        suggested_rule["ruleContent"] = serde_json::json!(content);
+    }
     PermissionResult::Ask {
         reason: PermissionDecisionReason::MatchedRule { rule: rule.clone() },
         prompt: PermissionPrompt {
@@ -2483,7 +2540,15 @@ fn ask_with_rule(rule: &PermissionRule, tool_name: &str) -> PermissionResult {
             options: vec!["Allow once".into(), "Always allow".into(), "Deny".into()],
         },
         pending_classifier_check: None,
-        metadata: PermissionMetadata::default(),
+        metadata: PermissionMetadata {
+            permission_suggestions: Some(serde_json::json!([{
+                "type": "addRules",
+                "rules": [suggested_rule],
+                "behavior": "allow",
+                "destination": "session",
+            }])),
+            ..PermissionMetadata::default()
+        },
     }
 }
 
@@ -2586,15 +2651,23 @@ fn ask_path_constraint(
     tool_name: &str,
     ask: crate::path_constraints::PathConstraintAsk,
 ) -> PermissionResult {
+    let crate::path_constraints::PathConstraintAsk {
+        message,
+        reason,
+        blocked_path,
+    } = ask;
     PermissionResult::Ask {
-        reason: PermissionDecisionReason::Other { reason: ask.reason },
+        reason: PermissionDecisionReason::Other { reason },
         prompt: PermissionPrompt {
             title: format!("Allow {tool_name}?"),
-            message: ask.message,
+            message,
             options: vec!["Allow once".into(), "Deny".into()],
         },
         pending_classifier_check: None,
-        metadata: PermissionMetadata::default(),
+        metadata: PermissionMetadata {
+            blocked_path,
+            ..PermissionMetadata::default()
+        },
     }
 }
 

@@ -40,7 +40,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -118,6 +118,7 @@ pub struct AdapterPermissionGate {
     /// `settings.local.json`. `None` → session-only (the legacy behavior); when
     /// set, an `AllowAlways` additionally writes a durable allow rule.
     persist_paths: Option<PermissionPaths>,
+    persistence_enabled: AtomicBool,
 }
 
 impl AdapterPermissionGate {
@@ -142,6 +143,7 @@ impl AdapterPermissionGate {
             pending: Arc::new(Mutex::new(HashMap::new())),
             timeout: DEFAULT_PERMISSION_TIMEOUT,
             persist_paths: None,
+            persistence_enabled: AtomicBool::new(true),
         }
     }
 
@@ -197,11 +199,9 @@ impl AdapterPermissionGate {
             // fail the resolve (the session rule above still skips re-prompts).
             // Skip a degenerate empty tool name (a missing request id resolves
             // `tool_name = ""`) so we never persist `allow: [""]`.
-            if let Some(paths) = self
-                .persist_paths
-                .as_ref()
-                .filter(|_| !tool_name.is_empty())
-            {
+            if let Some(paths) = self.persist_paths.as_ref().filter(|_| {
+                !tool_name.is_empty() && self.persistence_enabled.load(Ordering::Acquire)
+            }) {
                 let update = PermissionUpdate {
                     rule,
                     destination: PermissionUpdateDestination::LocalSettings,
@@ -256,6 +256,10 @@ impl Drop for AdapterPermissionGate {
 
 #[async_trait]
 impl PermissionGate for AdapterPermissionGate {
+    fn set_permission_persistence_enabled(&self, enabled: bool) {
+        self.persistence_enabled.store(enabled, Ordering::Release);
+    }
+
     async fn check(&self, name: &str, input: &serde_json::Value) -> PermissionDecision {
         // Main-thread call — no worker attribution on the wire.
         self.check_with_worker(name, input, None).await
@@ -533,6 +537,7 @@ mod tests {
     async fn gate_persists_allow_always_writes_local_settings() {
         let tmp = std::env::temp_dir().join(format!("lx-3c-adapter-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("proj")).unwrap();
         let sink = MockRequestSink::arc();
         let gate = Arc::new(AdapterPermissionGate::new(sink.clone()).with_persist(
             permission::PermissionPaths {

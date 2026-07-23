@@ -37,7 +37,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use client_protocol::commands::{ClientCommand, ImageRefDto, ListingKindDto, PromptModeDto};
+use client_protocol::commands::{
+    ClientCommand, ImageRefDto, ListingKindDto, PromptModeDto, ProviderCredentialSecretDto,
+};
 use client_protocol::error::ClientError;
 use client_protocol::events::{ClientEvent, CostDto, ErrorKindDto, TurnOutcomeDto};
 use client_protocol::listings::{
@@ -136,6 +138,13 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             },
         ),
         (
+            "event/system_notice.json",
+            ClientEvent::SystemNotice {
+                message: "Conversation changes could not be saved.".to_string(),
+                is_error: true,
+            },
+        ),
+        (
             "event/text_delta.json",
             ClientEvent::TextDelta {
                 text: "Hello, world.".to_string(),
@@ -147,6 +156,14 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                 id: "toolu_01".to_string(),
                 tool: "Read".to_string(),
                 input_json: r#"{"file_path":"/tmp/example.txt"}"#.to_string(),
+            },
+        ),
+        (
+            "event/tool_heartbeat.json",
+            ClientEvent::ToolHeartbeat {
+                id: "toolu_01".to_string(),
+                tool: "Read".to_string(),
+                elapsed_ms: 1_500,
             },
         ),
         (
@@ -248,6 +265,22 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             "event/model_changed.json",
             ClientEvent::ModelChanged {
                 model: "claude-sonnet-4-5".to_string(),
+            },
+        ),
+        (
+            "event/permission_mode_changed.json",
+            ClientEvent::PermissionModeChanged {
+                mode: "acceptEdits".to_string(),
+            },
+        ),
+        (
+            "event/provider_credential_status.json",
+            ClientEvent::ProviderCredentialStatus {
+                operation_id: 17,
+                configured_provider_ids: vec!["deepseek".to_string()],
+                unavailable_provider_ids: Vec::new(),
+                storage_encrypted: true,
+                error: None,
             },
         ),
         (
@@ -391,6 +424,15 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                 cache_creation_tokens: 64,
             },
         ),
+        (
+            "event/api_retry.json",
+            ClientEvent::ApiRetry {
+                message: "rate limited".to_string(),
+                attempt: 2,
+                max_retries: 5,
+                delay_ms: 1_000,
+            },
+        ),
     ]
 }
 
@@ -423,6 +465,34 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
         (
             "command/deny_permission.json",
             ClientCommand::DenyPermission { request_id: 7 },
+        ),
+        (
+            "command/set_permission_mode.json",
+            ClientCommand::SetPermissionMode {
+                mode: "acceptEdits".to_string(),
+            },
+        ),
+        (
+            "command/list_provider_credentials.json",
+            ClientCommand::ListProviderCredentials {
+                operation_id: 17,
+                provider_ids: vec!["deepseek".to_string(), "openrouter".to_string()],
+            },
+        ),
+        (
+            "command/set_provider_credential.json",
+            ClientCommand::SetProviderCredential {
+                operation_id: 18,
+                provider_id: "deepseek".to_string(),
+                credential: ProviderCredentialSecretDto::new("sk-redacted-snapshot".to_string()),
+            },
+        ),
+        (
+            "command/delete_provider_credential.json",
+            ClientCommand::DeleteProviderCredential {
+                operation_id: 19,
+                provider_id: "deepseek".to_string(),
+            },
         ),
         (
             "command/set_model.json",

@@ -100,13 +100,14 @@ pub use orchestrator::{
     CompactionSummary, ContextPressureBanner, ContextPressureLevel, CostSnapshot, DoctorCheck,
     DoctorReport, DoctorSummary, ForkOutcome, HandleError, HookInfo, McpActionState, McpServerInfo,
     McpStatus, MemoryEditorOutcome, ModelListing, ModelUsageRow, OrchestratorHandle, OutputEvent,
-    OutputStream, RateLimitSnapshot, RecapOutcome, ResumeRuntimeSnapshot, RewindRowData,
-    StatusSnapshot, TurnOutcome,
+    OutputStream, PlanSnapshot, RateLimitSnapshot, RecapOutcome, ResumeRuntimeSnapshot,
+    RewindRowData, StatusSnapshot, TurnOutcome,
 };
 pub use permission_gate::{PermissionDecision, PermissionGate};
 pub use platform::Platform;
 pub use process::{
     ForegroundOutcome, HookRunOutcome, ProcessError, ProcessHandle, ProcessOutput, ProcessRunner,
+    ProcessStreamSink,
 };
 pub use prompting_gate::{
     PermissionRequest, PromptDecision, PromptDefault, PromptError, PromptingGate,

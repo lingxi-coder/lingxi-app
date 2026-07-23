@@ -15,7 +15,7 @@
 //! removed.
 
 use regex::Regex;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use thiserror::Error;
@@ -435,16 +435,29 @@ pub fn strip_frontmatter(raw: &str) -> &str {
 #[must_use]
 pub fn parse_frontmatter_paths(raw: &str) -> Option<Vec<String>> {
     let values = frontmatter_paths_values(raw)?;
-    let patterns: Vec<String> = values
+    let mut patterns = Vec::new();
+    for value in values {
+        let remaining = MAX_BRACE_EXPANSION_RESULTS.saturating_sub(patterns.len());
+        if remaining == 0 {
+            break;
+        }
+        match value {
+            FrontmatterPathValue::Scalar(value) => {
+                patterns.extend(split_path_in_frontmatter(&value, remaining));
+            }
+            FrontmatterPathValue::ListItem(value) => {
+                patterns.extend(expand_braces_with_limits(&value, remaining));
+            }
+        }
+    }
+    let patterns: Vec<String> = patterns
         .into_iter()
-        .flat_map(|value| match value {
-            FrontmatterPathValue::Scalar(value) => split_path_in_frontmatter(&value),
-            FrontmatterPathValue::ListItem(value) => expand_braces(&value),
-        })
-        .into_iter()
-        .map(|p| {
+        .map(|pattern| {
             // Remove a trailing `/**` (claudemd.ts:266-269).
-            p.strip_suffix("/**").map_or(p.clone(), str::to_string)
+            pattern
+                .strip_suffix("/**")
+                .map(str::to_string)
+                .unwrap_or(pattern)
         })
         .filter(|p| !p.is_empty())
         .collect();
@@ -498,8 +511,9 @@ fn frontmatter_paths_values(raw: &str) -> Option<Vec<FrontmatterPathValue>> {
 
 /// Comma-split a frontmatter path value while respecting `{...}` braces, then
 /// brace-expand each part. 1:1 with `splitPathInFrontmatter` +
-/// `expandBraces` (frontmatterParser.ts:189-266).
-fn split_path_in_frontmatter(input: &str) -> Vec<String> {
+/// `expandBraces` (frontmatterParser.ts:189-266), with the bounded expansion
+/// added in Claude Code 2.1.217.
+fn split_path_in_frontmatter(input: &str, max_results: usize) -> Vec<String> {
     let mut parts: Vec<String> = Vec::new();
     let mut current = String::new();
     let mut brace_depth: i32 = 0;
@@ -528,42 +542,123 @@ fn split_path_in_frontmatter(input: &str) -> Vec<String> {
         parts.push(trimmed.to_string());
     }
 
-    parts
-        .into_iter()
-        .filter(|p| !p.is_empty())
-        .flat_map(|p| expand_braces(&p))
-        .collect()
-}
-
-/// Expand the first `{a,b}` brace group in `pattern`, recursing on the rest.
-/// 1:1 with `expandBraces` (frontmatterParser.ts:240-266).
-fn expand_braces(pattern: &str) -> Vec<String> {
-    let Some((prefix, alternatives, suffix)) = split_first_brace_group(pattern) else {
-        return vec![pattern.to_string()];
-    };
     let mut expanded = Vec::new();
-    for alt in alternatives.split(',') {
-        let combined = format!("{}{}{}", prefix, alt.trim(), suffix);
-        expanded.extend(expand_braces(&combined));
+    for part in parts.into_iter().filter(|part| !part.is_empty()) {
+        let remaining = max_results.saturating_sub(expanded.len());
+        if remaining == 0 {
+            break;
+        }
+        expanded.extend(expand_braces_with_limits(&part, remaining));
     }
     expanded
 }
 
-/// Match `^([^{]*)\{([^}]+)\}(.*)$` — prefix, first non-empty `{...}` group,
-/// and the remainder.
+/// Maximum number of expanded paths retained from one frontmatter value.
+///
+/// This matches the `brace-expansion` package's `EXPANSION_MAX` used by
+/// Claude Code 2.1.217. LingXi shares the cap across every path in one
+/// frontmatter block so multiple scalar parts / YAML list items cannot multiply
+/// the allocation budget.
+const MAX_BRACE_EXPANSION_RESULTS: usize = 100_000;
+
+/// Expand `{a,b}` groups without allowing recursion or a Cartesian product to
+/// allocate without bound.
+///
+/// Results retain depth-first / source order. When `max_results` is reached,
+/// later alternatives are omitted.
+fn expand_braces_with_limits(pattern: &str, max_results: usize) -> Vec<String> {
+    if max_results == 0 {
+        return Vec::new();
+    }
+
+    let mut pending = VecDeque::from([pattern.to_string()]);
+    let mut expanded = Vec::new();
+
+    while let Some(current) = pending.pop_back() {
+        let Some((prefix, alternatives, suffix)) = split_first_brace_group(&current) else {
+            expanded.push(current);
+            if expanded.len() == max_results {
+                break;
+            }
+            continue;
+        };
+
+        let capacity = max_results - expanded.len();
+        let alternatives = split_top_level_alternatives(alternatives)
+            .into_iter()
+            .take(capacity)
+            .map(str::trim)
+            .collect::<Vec<_>>();
+
+        // `pending` holds later source-order branches at the front. Prefer
+        // the current branch's children so truncation preserves the first
+        // `max_results` fully expanded paths.
+        if alternatives.len() >= capacity {
+            pending.clear();
+        } else {
+            let retained_siblings = capacity - alternatives.len();
+            while pending.len() > retained_siblings {
+                pending.pop_front();
+            }
+        }
+
+        for alternative in alternatives.into_iter().rev() {
+            pending.push_back(format!("{prefix}{alternative}{suffix}"));
+        }
+    }
+
+    expanded
+}
+
+/// Split the first balanced, non-empty brace group into prefix/body/suffix.
+/// Nested groups remain part of the body so a later expansion pass can process
+/// them instead of mistaking their first `}` for the outer close.
 fn split_first_brace_group(pattern: &str) -> Option<(&str, &str, &str)> {
     let open = pattern.find('{')?;
-    // No `{` may appear in the prefix (regex `[^{]*`); `find` guarantees that.
-    let after_open = &pattern[open + 1..];
-    let close_rel = after_open.find('}')?;
-    if close_rel == 0 {
-        // `{}` — `[^}]+` requires at least one char inside.
+    let mut depth = 1_u32;
+    let mut close = None;
+    for (offset, ch) in pattern[open + 1..].char_indices() {
+        match ch {
+            '{' => depth = depth.saturating_add(1),
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(open + 1 + offset);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let close = close?;
+    if close == open + 1 {
         return None;
     }
     let prefix = &pattern[..open];
-    let alternatives = &after_open[..close_rel];
-    let suffix = &after_open[close_rel + 1..];
+    let alternatives = &pattern[open + 1..close];
+    let suffix = &pattern[close + 1..];
     Some((prefix, alternatives, suffix))
+}
+
+/// Split a brace body only at commas belonging to that body. Commas inside a
+/// nested group are handled when the nested group reaches the expansion queue.
+fn split_top_level_alternatives(body: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut depth = 0_u32;
+    for (index, ch) in body.char_indices() {
+        match ch {
+            '{' => depth = depth.saturating_add(1),
+            '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                parts.push(&body[start..index]);
+                start = index + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    parts.push(&body[start..]);
+    parts
 }
 
 fn comment_span_re() -> &'static Regex {
@@ -1189,6 +1284,49 @@ mod import_tests {
         assert_eq!(
             parse_memory_content(all, Path::new("/x/LINGXI.md"), None).globs,
             None
+        );
+    }
+
+    #[test]
+    fn frontmatter_paths_expand_nested_brace_groups_in_order() {
+        let raw = "---\npaths: '{src,test}/{api,ui}/**'\n---\nBODY\n";
+        assert_eq!(
+            parse_frontmatter_paths(raw),
+            Some(vec![
+                "src/api".to_string(),
+                "src/ui".to_string(),
+                "test/api".to_string(),
+                "test/ui".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn brace_expansion_stops_at_the_result_budget() {
+        let expanded = expand_braces_with_limits("{a,b,c,d}/{x,y}", 3);
+        assert_eq!(expanded, vec!["a/x", "a/y", "b/x"]);
+    }
+
+    #[test]
+    fn brace_expansion_handles_deep_single_path_nesting() {
+        let depth = 4_096;
+        let nested = format!("root/{}", "{a/".repeat(depth) + "leaf" + &"}".repeat(depth));
+        let expanded = expand_braces_with_limits(&nested, 8);
+        assert_eq!(
+            expanded,
+            vec!["root/".to_string() + &"a/".repeat(depth) + "leaf"]
+        );
+    }
+
+    #[test]
+    fn brace_expansion_preserves_nested_alternative_groups() {
+        assert_eq!(
+            expand_braces_with_limits("{a,{b,c}}", 8),
+            vec!["a", "b", "c"]
+        );
+        assert_eq!(
+            expand_braces_with_limits("root/{a,{b,c}}/{x,y}", 8),
+            vec!["root/a/x", "root/a/y", "root/b/x", "root/b/y", "root/c/x", "root/c/y"]
         );
     }
 

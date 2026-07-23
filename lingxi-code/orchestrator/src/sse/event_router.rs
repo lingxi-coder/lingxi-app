@@ -273,12 +273,23 @@ pub async fn dispatch_event(
                     name,
                     input,
                     provider_id,
-                } => Ok(RouterAction::DispatchToolUse {
-                    id,
-                    name,
-                    input,
-                    provider_id,
-                }),
+                } => {
+                    // (cc 2.1.218 `jYd`) The STREAMING tool_use assembly must get
+                    // the same literal-`\uXXXX` repair as the batched
+                    // `translate_response_blocks` — the oracle's `Uun` is a single
+                    // conversion shared by both paths. This is the PRIMARY
+                    // interactive path (TUI / bridge / mobile all stream), and the
+                    // repaired input must land here, BEFORE the tool executes and
+                    // before the block is pushed into the assistant message/JSONL.
+                    let (input, _stats) =
+                        llm_client::unicode_repair::repair_tool_input(&name, &input);
+                    Ok(RouterAction::DispatchToolUse {
+                        id,
+                        name,
+                        input,
+                        provider_id,
+                    })
+                }
                 // Low-frequency server-side block preserved verbatim from the
                 // start event — appended to the assistant message unchanged so
                 // resume/replay JSONL bytes stay intact.

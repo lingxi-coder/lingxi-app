@@ -24,13 +24,14 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::sync::{Mutex, Notify, RwLock};
 use traits::{SecureStorage, SecureStorageBackend, SecureStorageError};
 
 type CacheKey = (String, String);
+const SECURITY_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
 struct CachedEntry {
@@ -303,7 +304,8 @@ impl SecureStorage for MacOsKeychainStorage {
         self.bump_generation();
 
         let full_service = self.keychain_service_name(service);
-        let output = Command::new(&self.security_command)
+        let mut command = Command::new(&self.security_command);
+        command
             .args([
                 "delete-generic-password",
                 "-a",
@@ -314,8 +316,14 @@ impl SecureStorage for MacOsKeychainStorage {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .output()
+            .kill_on_drop(true);
+        let output = tokio::time::timeout(SECURITY_COMMAND_TIMEOUT, command.output())
             .await
+            .map_err(|_| {
+                SecureStorageError::BackendUnavailable(
+                    "security delete-generic-password timed out".to_string(),
+                )
+            })?
             .map_err(|e| SecureStorageError::Io(format!("spawn security: {e}")))?;
 
         // Treat "not found" (exit 44) as success — matches claude-code's
@@ -352,11 +360,14 @@ async fn run_security_stdin(
     security_command: &std::path::Path,
     command: &str,
 ) -> Result<(std::process::ExitStatus, String), SecureStorageError> {
-    let mut child = Command::new(security_command)
+    let mut process = Command::new(security_command);
+    process
         .arg("-i")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = process
         .spawn()
         .map_err(|e| SecureStorageError::Io(format!("spawn security -i: {e}")))?;
     if let Some(mut stdin) = child.stdin.take() {
@@ -369,9 +380,9 @@ async fn run_security_stdin(
             .await
             .map_err(|e| SecureStorageError::Io(format!("stdin shutdown: {e}")))?;
     }
-    let output = child
-        .wait_with_output()
+    let output = tokio::time::timeout(SECURITY_COMMAND_TIMEOUT, child.wait_with_output())
         .await
+        .map_err(|_| SecureStorageError::BackendUnavailable("security -i timed out".to_string()))?
         .map_err(|e| SecureStorageError::Io(format!("wait: {e}")))?;
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     Ok((output.status, stderr))
@@ -382,13 +393,18 @@ async fn run_security_argv(
     security_command: &std::path::Path,
     args: &[&str],
 ) -> Result<(std::process::ExitStatus, String), SecureStorageError> {
-    let output = Command::new(security_command)
+    let mut command = Command::new(security_command);
+    command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .output()
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(SECURITY_COMMAND_TIMEOUT, command.output())
         .await
+        .map_err(|_| {
+            SecureStorageError::BackendUnavailable("security command timed out".to_string())
+        })?
         .map_err(|e| SecureStorageError::Io(format!("spawn security: {e}")))?;
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     Ok((output.status, stderr))
@@ -405,7 +421,8 @@ async fn run_security_find(
     account: &str,
     full_service: &str,
 ) -> Result<Option<SecureStorageData>, SecureStorageError> {
-    let output = Command::new(security_command)
+    let mut command = Command::new(security_command);
+    command
         .args([
             "find-generic-password",
             "-a",
@@ -417,8 +434,14 @@ async fn run_security_find(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .output()
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(SECURITY_COMMAND_TIMEOUT, command.output())
         .await
+        .map_err(|_| {
+            SecureStorageError::BackendUnavailable(
+                "security find-generic-password timed out".to_string(),
+            )
+        })?
         .map_err(|e| SecureStorageError::Io(format!("spawn security: {e}")))?;
     if !output.status.success() {
         // exit code 44 (errSecItemNotFound) is a normal "no entry" result.

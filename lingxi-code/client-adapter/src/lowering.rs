@@ -512,6 +512,7 @@ mod tests {
             created: UNIX_EPOCH + Duration::from_secs(1_609_459_200),
             message_count: 7,
             path: PathBuf::from("/home/u/.lingxi/sessions/abc.jsonl"),
+            pr_number: None,
         };
         let row = lower_session_metadata(&meta);
         assert_eq!(row.uuid, uuid.to_string());

@@ -118,6 +118,8 @@ impl AgentExecutor {
             run_in_background: false,
             name: None,
             team_name: None,
+            creator_teammate_name: None,
+            creator_team_name: None,
             mode: None,
             isolation: None,
             cwd: None,

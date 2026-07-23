@@ -62,6 +62,12 @@ pub const WRITE_FAILED: &str = "tengu_tool_write_failed";
 /// `REPORT`/`SUMMARY`/`FINDINGS`/`ANALYSIS` `*.md` report file was hard-blocked
 /// (subagents must return findings as text). Payload carries `contentBytes`.
 pub const SUBAGENT_MD_REPORT_BLOCKED: &str = "tengu_subagent_md_report_blocked";
+/// `tengu_repair_double_escaped_unicode` — a model-emitted tool_use input
+/// contained literal `\uXXXX` TEXT that was rewritten into real characters
+/// (cc 2.1.218 `jYd`). Fields: `repaired_strings`, `windows_path_skips`
+/// (strings left verbatim because they look like a Windows path). Emitted once
+/// per tool_use, only when a counter is non-zero.
+pub const REPAIR_DOUBLE_ESCAPED_UNICODE: &str = "tengu_repair_double_escaped_unicode";
 /// `tengu_tool_web_fetch_started` — `WebFetch` tool began an HTTP request.
 pub const WEB_FETCH_STARTED: &str = "tengu_tool_web_fetch_started";
 /// `tengu_tool_web_fetch_completed` — `WebFetch` tool received the response.

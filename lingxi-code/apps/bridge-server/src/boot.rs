@@ -389,6 +389,11 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         // The headless bridge has no interactive /fork or /resume-as-background
         // surface, so it wires no background-session forker seam.
         bg_session_forker: None,
+        // AskUserQuestion needs a mounted TUI bottom pane. The Electron bridge
+        // is headless from the Rust runtime's perspective, so leave the
+        // session-scoped resolver unwired instead of creating an orphaned
+        // channel whose questions can never be answered.
+        ask_user_question_tx: None,
         // M10: the bridge-server does not start a coordinator session by
         // default (threading this from session metadata is a follow-up).
         session_started_as_coordinator: false,
@@ -416,6 +421,7 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         // The Electron bridge has no --session-id flag (the SDK/bridge path mints
         // its own ids); always a fresh session id.
         session_id_override: None,
+        parent_session_id: None,
         // The Electron bridge has no --disable-slash-commands flag.
         disable_slash_commands: false,
         // The Electron bridge has no --add-dir flag.
@@ -458,8 +464,11 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         worktree_launch: None,
         // The Electron bridge has no `--tmux` flag; inert (no tmux session).
         tmux_launch: None,
-        // The Electron bridge has no `--dangerously-skip-permissions` flag.
-        allow_dangerously_skip_permissions: false,
+        // The trusted Electron shell exposes an explicit, user-operated Full
+        // access selector. This only makes the live bypass mode AVAILABLE; the
+        // session still boots in Default and changes mode only after an
+        // authenticated renderer command crosses the bridge IPC boundary.
+        allow_dangerously_skip_permissions: trusted,
     }
 }
 
@@ -479,6 +488,13 @@ pub fn has_no_credential_source(cfg: &DesktopConfig) -> bool {
             .provider_profiles
             .as_ref()
             .is_none_or(BTreeMap::is_empty)
+}
+
+fn needs_credential_driver(
+    parent_credential_supplied: bool,
+    provider_availability: &BTreeMap<String, bool>,
+) -> bool {
+    !parent_credential_supplied && !provider_availability.values().any(|available| *available)
 }
 
 /// The assembled, ready-to-serve connection plus its auth-relevant facts.
@@ -522,11 +538,10 @@ pub async fn assemble_with_provider_keys(
 ) -> Result<BoundServer, String> {
     let connection = BridgeConnection::new();
 
-    // Decide the turn boundary before `cfg` moves into the desktop runtime.
-    // A keyless bridge still builds the runtime so handshake and read-only
-    // listings remain available, but its turn driver must never enter the
-    // provider client's retry path.
-    let credential_required = has_no_credential_source(&cfg) && provider_keys.is_empty();
+    // Preserve only the non-secret parent-source fact before `cfg` moves. The
+    // authoritative decision is completed after `build`, when the runtime has
+    // checked the same Rust secure store used by CLI and TUI.
+    let parent_credential_supplied = !has_no_credential_source(&cfg) || !provider_keys.is_empty();
 
     // Capture the persisted-session inputs before `cfg` moves into the desktop
     // composition root. The router uses the same cwd/config-home pair as the
@@ -555,6 +570,14 @@ pub async fn assemble_with_provider_keys(
             .set_provider_key_ephemeral(provider_id, secret)
             .await;
     }
+
+    // A packaged Electron parent normally supplies no secret at launch. That
+    // does not mean the user is disconnected: CLI/TUI may already have stored
+    // the selected provider key in the shared login keychain. Runtime build
+    // computes this map from `CredentialManager`, so consult it before binding
+    // the fail-fast driver.
+    let credential_required =
+        needs_credential_driver(parent_credential_supplied, &runtime.provider_availability);
 
     // `use_noop_permission_gate: false` ⇒ build MUST surface the adapter gate.
     let gate = runtime.permission_gate.clone().ok_or_else(|| {
@@ -636,13 +659,9 @@ pub async fn assemble_with_provider_keys(
             runtime.auth.clone(),
             runtime.task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>,
             Some(dispatcher),
-            // slash_registry: the shared CommandRegistry is not exposed on
-            // DesktopRuntime, so the router's proactive `CommandsChanged` catalog
-            // push (M-14) is inert here — RunSlashCommand still dispatches via the
-            // dispatcher above. FOLLOW-UP: expose DesktopRuntime.shared_registry and
-            // thread it in to enable the catalog-diff push over the bridge.
-            None,
+            Some(runtime.shared_command_registry.clone()),
         )
+        .with_credentials(runtime.credentials.clone())
         .with_session_store(session_store),
     );
 
@@ -751,6 +770,18 @@ mod tests {
     fn parse_help_flag() {
         assert!(BridgeArgs::parse(["--help"]).unwrap().help);
         assert!(BridgeArgs::parse(["-h"]).unwrap().help);
+    }
+
+    #[test]
+    fn shared_cli_tui_credential_disables_fail_fast_driver() {
+        let availability = BTreeMap::from([
+            ("deepseek".to_string(), true),
+            ("openrouter".to_string(), false),
+        ]);
+
+        assert!(!needs_credential_driver(false, &availability));
+        assert!(needs_credential_driver(false, &BTreeMap::new()));
+        assert!(!needs_credential_driver(true, &BTreeMap::new()));
     }
 
     #[test]
@@ -887,6 +918,10 @@ mod tests {
         );
         assert_eq!(cfg.mcp_paths.len(), 2);
         assert!(cfg.memory_provider.is_some());
+        assert!(
+            cfg.allow_dangerously_skip_permissions,
+            "trusted desktop sessions expose Full access only as an explicit live choice"
+        );
     }
 
     #[test]
@@ -966,6 +1001,7 @@ mod tests {
             use_noop_permission_gate: false,
             deny_unresolved_ask: false,
             injected_permission_gate: None,
+            ask_user_question_tx: None,
             session_started_as_coordinator: false,
             // Deterministic test: empty memory, never the real FS.
             memory_provider: None,
@@ -980,6 +1016,7 @@ mod tests {
             system_prompt_override: None,
             append_system_prompt: None,
             session_id_override: None,
+            parent_session_id: None,
             disable_slash_commands: false,
             add_dir: Vec::new(),
             cli_mcp_servers: Vec::new(),
@@ -1010,6 +1047,13 @@ mod tests {
         assert!(
             bound.runtime.wakeup_scheduler_cell.get().is_some(),
             "assemble must wire the ScheduleWakeup self-wakeup scheduler"
+        );
+        assert!(
+            Arc::ptr_eq(
+                &bound.runtime.shared_command_registry,
+                &bound.runtime.dispatcher.registry()
+            ),
+            "assemble must retain the live slash-command registry on DesktopRuntime"
         );
     }
 }

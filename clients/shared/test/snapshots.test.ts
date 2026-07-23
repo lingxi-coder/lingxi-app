@@ -160,6 +160,14 @@ function validateCost(v: unknown): void {
   );
 }
 
+function validatePermissionMode(v: unknown): void {
+  assert.ok(
+    ['default', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions'].includes(
+      v as string,
+    ),
+  );
+}
+
 // ── ClientCommand ─────────────────────────────────────────────────────────────
 
 function validateCommand(name: string, v: unknown): void {
@@ -185,6 +193,23 @@ function validateCommand(name: string, v: unknown): void {
       break;
     case 'deny_permission':
       assert.ok(isNumber(o['request_id']));
+      break;
+    case 'set_permission_mode':
+      validatePermissionMode(o['mode']);
+      break;
+    case 'list_provider_credentials':
+      assert.ok(isNumber(o['operation_id']) && Array.isArray(o['provider_ids']));
+      for (const providerId of o['provider_ids'] as unknown[]) assert.ok(isString(providerId));
+      break;
+    case 'set_provider_credential':
+      assert.ok(
+        isNumber(o['operation_id']) &&
+          isString(o['provider_id']) &&
+          isString(o['credential']),
+      );
+      break;
+    case 'delete_provider_credential':
+      assert.ok(isNumber(o['operation_id']) && isString(o['provider_id']));
       break;
     case 'set_model':
       assert.ok(isString(o['model']));
@@ -238,17 +263,23 @@ function validateEvent(name: string, v: unknown): void {
     case 'error':
       tag(o['kind'], (rec(o['kind'])['type']) as string);
       assert.ok(
-        ['transport', 'protocol', 'server', 'max_turns', 'internal'].includes(
+        ['transport', 'protocol', 'server', 'max_turns', 'rejected', 'internal'].includes(
           rec(o['kind'])['type'] as string,
         ),
       );
       assert.ok(isString(o['message']));
+      break;
+    case 'system_notice':
+      assert.ok(isString(o['message']) && isBool(o['is_error']));
       break;
     case 'text_delta':
       assert.ok(isString(o['text']));
       break;
     case 'tool_use_started':
       assert.ok(isString(o['id']) && isString(o['tool']) && isString(o['input_json']));
+      break;
+    case 'tool_heartbeat':
+      assert.ok(isString(o['id']) && isString(o['tool']) && isNumber(o['elapsed_ms']));
       break;
     case 'tool_use_result':
       assert.ok(
@@ -310,6 +341,18 @@ function validateEvent(name: string, v: unknown): void {
       break;
     case 'model_changed':
       assert.ok(isString(o['model']));
+      break;
+    case 'permission_mode_changed':
+      validatePermissionMode(o['mode']);
+      break;
+    case 'provider_credential_status':
+      assert.ok(
+        isNumber(o['operation_id']) &&
+          Array.isArray(o['configured_provider_ids']) &&
+          isBool(o['storage_encrypted']),
+      );
+      for (const providerId of o['configured_provider_ids'] as unknown[]) assert.ok(isString(providerId));
+      if ('error' in o) assert.ok(isString(o['error']));
       break;
     case 'mcp_servers':
       assert.ok(Array.isArray(o['servers']));
@@ -441,6 +484,14 @@ function validateEvent(name: string, v: unknown): void {
           isNumber(o['cache_creation_tokens']),
       );
       break;
+    case 'api_retry':
+      assert.ok(
+        isString(o['message']) &&
+          isNumber(o['attempt']) &&
+          isNumber(o['max_retries']) &&
+          isNumber(o['delay_ms']),
+      );
+      break;
     default:
       assert.fail(`snapshot ${name}: unknown ClientEvent type "${String(o['type'])}"`);
   }
@@ -498,7 +549,7 @@ function validateError(v: unknown): void {
 
 test('every command snapshot parses as ClientCommand', () => {
   const files = listSnapshots('command');
-  assert.equal(files.length, 19, `expected 19 command snapshots, found ${files.length}`);
+  assert.equal(files.length, 23, `expected 23 command snapshots, found ${files.length}`);
   for (const file of files) {
     validateCommand(file, loadSnapshot('command', file));
   }
@@ -506,7 +557,7 @@ test('every command snapshot parses as ClientCommand', () => {
 
 test('every event snapshot parses as ClientEvent', () => {
   const files = listSnapshots('event');
-  assert.equal(files.length, 31, `expected 31 event snapshots, found ${files.length}`);
+  assert.equal(files.length, 36, `expected 36 event snapshots, found ${files.length}`);
   for (const file of files) {
     validateEvent(file, loadSnapshot('event', file));
   }

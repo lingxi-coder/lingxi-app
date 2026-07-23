@@ -192,7 +192,17 @@ fn render_one(n: &TaskNotification) -> String {
                 escape_xml(&summary)
             )
         }
-        "monitor_mcp" => {
+        "monitor_ws" if n.status == "running" => {
+            let event = n.result.as_deref().unwrap_or_default();
+            let summary = format!("Monitor \"{}\" event", n.description);
+            format!(
+                "<task-notification>\n<task-id>{}</task-id>{tool_use_id_line}\n<output-file>{output_file}</output-file>\n<status>running</status>\n<summary>{}</summary>\n<result>{}</result>\n</task-notification>",
+                n.task_id,
+                escape_xml(&summary),
+                escape_xml(event)
+            )
+        }
+        "monitor_mcp" | "monitor_ws" => {
             // `enqueueShellNotification` (monitor kind) — no `<task-type>`;
             // summary escaped.
             let exit = n.exit_code;
@@ -554,6 +564,22 @@ mod tests {
         );
         // Monitor uses the no-`<task-type>` shell format.
         assert!(!block.contains("<task-type>"), "got: {block}");
+    }
+
+    #[test]
+    fn running_monitor_event_carries_escaped_stdout() {
+        let mut n = base("m12345678", "monitor_ws", "running", "watch <log>");
+        n.result = Some("ERROR: a < b && c > d".to_string());
+        let block = render_one(&n);
+        assert!(block.contains("<summary>Monitor \"watch &lt;log&gt;\" event</summary>"));
+        assert!(block.contains("<result>ERROR: a &lt; b &amp;&amp; c &gt; d</result>"));
+        assert!(!block.contains("<task-type>"));
+    }
+
+    #[test]
+    fn monitor_ws_terminal_uses_stream_ended_format() {
+        let n = base("m12345678", "monitor_ws", "completed", "watch");
+        assert!(render_one(&n).contains("<summary>Monitor \"watch\" stream ended</summary>"));
     }
 
     #[test]

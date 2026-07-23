@@ -194,6 +194,11 @@ pub struct TuiBuild {
     /// Threaded into `session::Runtime::with_permission_rx` so the TUI's
     /// permission pump drives the interactive dialog.
     pub permission_rx: tokio::sync::mpsc::Receiver<tui_core::permission_bridge::PermissionExchange>,
+    /// Receiver for interactive `AskUserQuestion` exchanges. The TUI drains
+    /// this into the dedicated bottom-pane questionnaire view instead of
+    /// routing those tools through the generic permission prompt.
+    pub ask_user_question_rx:
+        tokio::sync::mpsc::Receiver<tui_core::ask_user_question_bridge::AskUserQuestionExchange>,
     /// (/permissions) The gate's shared session-scoped allow-rule list. The
     /// `/permissions` editor pushes an ADDED allow rule here (in addition to
     /// the disk persist) so it takes effect THIS session — the same in-memory
@@ -210,6 +215,9 @@ pub struct TuiBuild {
     /// (`None` unless configured). The composition root selects one (memoized)
     /// and renders it in the startup banner — CC's `LVs`/`oip()`.
     pub company_announcements: Option<Vec<String>>,
+    /// Merged `settings.emojiCompletionEnabled`; absent resolves to `true` at
+    /// the composition root and is applied to the mounted composer.
+    pub emoji_completion_enabled: bool,
 }
 
 /// Errors surfaced while building a [`Runtime`].
@@ -491,6 +499,24 @@ fn load_settings_company_announcements(
     engine::settings::Settings::load_scoped(inputs, include_user, include_project)
         .ok()
         .and_then(|eff| eff.settings.company_announcements)
+}
+
+/// Load the merged `settings.emojiCompletionEnabled`, honoring the same
+/// `--setting-sources` scope as the rest of the interactive UI settings.
+fn load_settings_emoji_completion_enabled(
+    include_user: bool,
+    include_project: bool,
+) -> Option<bool> {
+    let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+    let inputs = engine::settings::LoadInputs {
+        env: &env,
+        project_dir: &project_dir,
+        defaults: engine::settings::schema::SettingsJson::default(),
+    };
+    engine::settings::Settings::load_scoped(inputs, include_user, include_project)
+        .ok()
+        .and_then(|eff| eff.settings.emoji_completion_enabled)
 }
 
 /// Load the merged `settings.claudeMdExcludes` (project + user + env layers) —
@@ -790,6 +816,9 @@ pub(crate) fn resolve_desktop_config(
         // either `None` or a valid UUID string. `build()` parses it into the
         // boot-canonical MAIN session id (else mints a fresh one).
         session_id_override: argv.session_id.clone(),
+        // Populated by the resume/fork TUI constructor after it has inspected
+        // the transcript's versioned `forkedFrom` metadata.
+        parent_session_id: None,
         // CLI `--disable-slash-commands`: empties the command/skill registry.
         disable_slash_commands: argv.disable_slash_commands,
         // CLI `--add-dir <directories...>`: extra tool-access directories,
@@ -835,10 +864,11 @@ pub(crate) fn resolve_desktop_config(
         // boot connected-provider fallback without counting as `userSpecifiedModel`.
         default_model_env_pinned,
         // Boot SESSION thinking config (claude-code `qIe()` + the `wn` arm):
-        // `MAX_THINKING_TOKENS` env > `--max-thinking-tokens` flag > the
-        // `alwaysThinkingEnabled` setting; a fixed budget pre-empts adaptive, `0`
-        // disables. Resolved host-side (F2-01: `build()` must not read env).
-        session_thinking: llm_client::model::thinking::session_thinking_from_env(
+        // `MAX_THINKING_TOKENS` env > `--max-thinking-tokens` flag >
+        // `--thinking` > the `alwaysThinkingEnabled` setting. A fixed budget
+        // pre-empts adaptive; `0`/`disabled` turns thinking off.
+        session_thinking: llm_client::model::thinking::session_thinking_from_cli(
+            argv.thinking.as_deref(),
             argv.max_thinking_tokens,
             load_always_thinking_enabled(incl_user, incl_project),
         ),
@@ -870,6 +900,7 @@ pub(crate) fn resolve_desktop_config(
                 permission_mode,
             ),
         )),
+        ask_user_question_tx: None,
     }
     // NOTE: claude-code's `--add-dir` is "Additional directories to allow TOOL
     // ACCESS to" (NOT LINGXI.md search — an earlier comment here misread it). It
@@ -982,15 +1013,24 @@ pub async fn build_runtime_for_tui_inner(
     argv: &Argv,
     resume_session_id: Option<uuid::Uuid>,
 ) -> Result<TuiBuild, InitError> {
+    build_runtime_for_tui_inner_with_parent(argv, resume_session_id, None).await
+}
+
+/// Resume/fork-aware variant that also supplies Anthropic request ancestry.
+pub async fn build_runtime_for_tui_inner_with_parent(
+    argv: &Argv,
+    resume_session_id: Option<uuid::Uuid>,
+    parent_session_id: Option<String>,
+) -> Result<TuiBuild, InitError> {
     crate::startup_trace::mark("tui_runtime_build_start");
     let (bridge_tx, bridge_rx) = tokio::sync::mpsc::unbounded_channel();
     // (MULTIMODAL.1) Clone the sender BEFORE it is moved into the
     // `BridgeOutputStream` so the TUI's turn-spawn pump can emit
     // `TurnStarted`/`TurnEnded` on the same channel the orchestrator streams on.
     let turn_tx = bridge_tx.clone();
-    let bridge: Arc<dyn OutputStream> = Arc::new(
-        tui_core::orchestrator_bridge::BridgeOutputStream::new(bridge_tx),
-    );
+    let bridge_output = tui_core::orchestrator_bridge::BridgeOutputStream::new(bridge_tx);
+    bridge_output.set_thinking_display(argv.thinking_display.as_deref());
+    let bridge: Arc<dyn OutputStream> = Arc::new(bridge_output);
     // (Task 8) Thread the CLI-resolved mode through the interactive TUI path.
     // The guard already ran in `run_cli` (notice already printed there too), so
     // this drops the notice and takes only the mode.
@@ -1007,12 +1047,17 @@ pub async fn build_runtime_for_tui_inner(
     if let Some(id) = resume_session_id {
         cfg.session_id_override = Some(id.to_string());
     }
+    cfg.parent_session_id = parent_session_id;
 
     // Interactive permission gate: an unresolved mutating `Ask` surfaces the
     // TUI dialog over this channel instead of auto-allowing. AllowAlways
     // persists to <cwd>/.lingxi/settings.local.json (via `.with_persist`).
     let (perm_tx, perm_rx) =
         tokio::sync::mpsc::channel::<tui_core::permission_bridge::PermissionExchange>(16);
+    let (ask_user_question_tx, ask_user_question_rx) = tokio::sync::mpsc::channel::<
+        tui_core::ask_user_question_bridge::AskUserQuestionExchange,
+    >(16);
+    cfg.ask_user_question_tx = Some(ask_user_question_tx);
     let session_allow_rules = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
     // (/permissions) The interactive editor reuses BOTH the gate's live
     // allow-rule bucket (for this-session effect of an added allow rule) and
@@ -1036,6 +1081,8 @@ pub async fn build_runtime_for_tui_inner(
     // the composition root (`run_ratatui`) selects + renders it at startup.
     let (incl_user, incl_project) = setting_source_flags(argv.setting_sources.as_deref());
     let company_announcements = load_settings_company_announcements(incl_user, incl_project);
+    let emoji_completion_enabled =
+        load_settings_emoji_completion_enabled(incl_user, incl_project).unwrap_or(true);
     Ok(TuiBuild {
         runtime,
         initial_permission_mode: permission_mode,
@@ -1044,9 +1091,11 @@ pub async fn build_runtime_for_tui_inner(
         bridge_rx,
         turn_tx,
         permission_rx: perm_rx,
+        ask_user_question_rx,
         session_allow_rules: editor_session_allow_rules,
         permission_paths,
         company_announcements,
+        emoji_completion_enabled,
     })
 }
 
@@ -1087,6 +1136,14 @@ mod tests {
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty)
             ),
             "permission_rx must be wired + open (gate holds the sender)"
+        );
+        let mut ask_rx = build.ask_user_question_rx;
+        assert!(
+            matches!(
+                ask_rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ),
+            "ask_user_question_rx must be wired + open (resolver holds the sender)"
         );
     }
 

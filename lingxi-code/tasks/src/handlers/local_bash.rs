@@ -139,6 +139,19 @@ pub trait TaskStatusSink: Send + Sync {
     ) {
     }
 
+    /// Queue a live stdout event from a `monitor_ws` task. Default no-op keeps
+    /// standalone handlers and existing test sinks source-compatible.
+    async fn notify_monitor_event(&self, _task_id: &str, _event: &str) {}
+
+    /// Whether the owning registry has inserted the task row. Handler-backed
+    /// tasks receive their generated id before [`crate::registry::TaskRegistry`]
+    /// can publish the state, so a very short command must wait for this handoff
+    /// or its first event/terminal update can race ahead and be lost. Standalone
+    /// sinks default to ready.
+    async fn is_registered(&self, _task_id: &str) -> bool {
+        true
+    }
+
     /// Report whether `task_id` has ALREADY reached a terminal status
     /// (Completed / Failed / Killed). Backs the `drain_pending_kills` guard: a
     /// worker that finished on its own must not be retroactively flipped to

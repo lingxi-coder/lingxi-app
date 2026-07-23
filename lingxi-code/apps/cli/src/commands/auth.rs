@@ -12,13 +12,18 @@
 //! - `logout` is REAL for the local-clear path: it deletes the persisted
 //!   Anthropic + OpenAI OAuth credentials via `CredentialManager`, then prints
 //!   claude's success line.
-//! - `login` is a NOTICE: it parses every flag faithfully (and reproduces
-//!   claude's `--console`/`--claudeai` conflict error) but the interactive
-//!   browser OAuth flow is not driven from this thin CLI entry point.
+//! - `login` drives the same browser-PKCE client and secure credential store as
+//!   interactive `/login`, including managed login-method and org policy.
 
 use clap::{Args, Subcommand};
 
-use crate::exit_codes::{NOT_IMPLEMENTED, RUNTIME_ERROR, SUCCESS};
+use crate::exit_codes::{RUNTIME_ERROR, SUCCESS};
+use engine::settings::enterprise::{ForceLoginMethod, ForceLoginOrgPin, OrgMembershipCheck};
+use llm_client::oauth::anthropic::client::ClaudeAiOAuthClient;
+use llm_client::oauth::anthropic::config::ClaudeAiOAuthConfig;
+use llm_client::oauth::anthropic::handle::{OAuthHandle, OAuthLoginOptions};
+use std::sync::Arc;
+use traits::AuthHandle;
 
 /// `auth` — Manage authentication.
 ///
@@ -107,19 +112,73 @@ fn print_family_help() {
 
 // ── login ──────────────────────────────────────────────────────────────────
 
-/// `lingxi-cli auth login` — parses flags faithfully (incl. claude's
-/// `--console`/`--claudeai` conflict error), then emits a not-implemented
-/// notice for the interactive browser OAuth flow. Never starts a chat turn.
+/// `lingxi-cli auth login` — run the browser-PKCE flow without starting a chat
+/// turn.
 async fn run_login(args: &LoginArgs) -> i32 {
     // claude: "Error: --console and --claudeai cannot be used together." (exit 1)
     if args.console && args.claudeai {
         eprintln!("Error: --console and --claudeai cannot be used together.");
         return RUNTIME_ERROR;
     }
-    // The browser OAuth flow (open browser → loopback callback → token
-    // exchange) is not driven from this thin management entry point.
-    eprintln!("lingxi-cli auth login: not yet implemented");
-    NOT_IMPLEMENTED
+    let forced_method = effective_force_login_method().await;
+    if forced_method == Some(ForceLoginMethod::Gateway) {
+        eprintln!(
+            "{}",
+            engine::settings::enterprise::GATEWAY_NONINTERACTIVE_LOCKOUT
+        );
+        return RUNTIME_ERROR;
+    }
+    let use_console = match forced_method {
+        Some(ForceLoginMethod::Console) => true,
+        Some(ForceLoginMethod::ClaudeAi) => false,
+        Some(ForceLoginMethod::Gateway) => unreachable!(),
+        None => args.console,
+    };
+    let org_pin = engine_desktop::managed_force_login_org_pin().await;
+    let org_uuid = match &org_pin {
+        ForceLoginOrgPin::Pinned(ids) if ids.len() == 1 => ids.first().cloned(),
+        _ => None,
+    };
+    let auth = match build_oauth_handle(use_console).await {
+        Ok(auth) => auth,
+        Err(error) => {
+            eprintln!("Login failed: {error}");
+            return RUNTIME_ERROR;
+        }
+    };
+
+    println!("Opening browser to sign in…");
+    let login = auth.login_with_options(OAuthLoginOptions {
+        login_hint: args.email.clone(),
+        sso: args.sso,
+        org_uuid,
+    });
+    let info = match tokio::time::timeout(std::time::Duration::from_secs(300), login).await {
+        Ok(Ok(info)) => info,
+        Ok(Err(error)) => {
+            eprintln!("Login failed: {error}");
+            return RUNTIME_ERROR;
+        }
+        Err(_) => {
+            eprintln!("Login failed: OAuth flow timed out.");
+            return RUNTIME_ERROR;
+        }
+    };
+
+    match engine::settings::enterprise::check_org_membership(
+        &org_pin,
+        std::slice::from_ref(&info.org_id),
+    ) {
+        OrgMembershipCheck::Permitted => {
+            println!("Login successful.");
+            SUCCESS
+        }
+        OrgMembershipCheck::Denied(message) => {
+            let _ = auth.logout().await;
+            eprintln!("{message}");
+            RUNTIME_ERROR
+        }
+    }
 }
 
 // ── logout ───────────────────────────────────────────────────────────────────
@@ -351,6 +410,32 @@ async fn build_credential_manager() -> Result<secret::CredentialManager, anyhow:
     let http = std::sync::Arc::new(platform_posix::PosixHttp::new());
 
     Ok(secret::CredentialManager::new(storage, clock, http))
+}
+
+pub(crate) async fn build_oauth_handle(use_console: bool) -> Result<OAuthHandle, anyhow::Error> {
+    let credentials = Arc::new(build_credential_manager().await?);
+    let http: Arc<dyn traits::HttpTransport> = Arc::new(platform_posix::PosixHttp::new());
+    let config = if use_console {
+        ClaudeAiOAuthConfig::console_with_port(0)
+    } else {
+        ClaudeAiOAuthConfig::default_with_port(0)
+    };
+    let client = Arc::new(ClaudeAiOAuthClient::new(config, http, credentials));
+    Ok(OAuthHandle::new(client))
+}
+
+pub(crate) async fn effective_force_login_method() -> Option<ForceLoginMethod> {
+    let mut method = None;
+    for raw in engine_desktop::settings_watch::managed_settings_raw_tiers().await {
+        let Ok(settings) = serde_json::from_str::<engine::settings::schema::SettingsJson>(&raw)
+        else {
+            continue;
+        };
+        if settings.force_login_method.is_some() {
+            method = settings.force_login_method_parsed();
+        }
+    }
+    method
 }
 
 /// Resolve the API provider label, mirroring claude's `getAPIProvider()`:

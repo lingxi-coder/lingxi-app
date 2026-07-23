@@ -38,7 +38,7 @@ pub mod worktree_session;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
-pub use anthropic_request::AnthropicRequestBuilder;
+pub use anthropic_request::{AnthropicRequestBuilder, McpTokenCounter};
 pub use builtin_context::{
     AndroidGitSecret, AndroidGitToolCtx, AndroidShellToolCtx, BuiltinToolContext,
     GitCredentialProvider, LiveCwdCell, TaskLifecycleHookFirer,

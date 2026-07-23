@@ -260,17 +260,23 @@ pub(crate) async fn run_ratatui_with_initial_prompt(
     // captured before `tui_build` is partly consumed below).
     let initial_permission_mode = tui_build.initial_permission_mode;
     let bypass_available = tui_build.bypass_available;
-    let (bridge_rx, permission_rx) = match &registration {
+    let (bridge_rx, permission_rx, ask_user_question_rx) = match &registration {
         Some(reg) => (
             spawn_status_bridge_forwarder(tui_build.bridge_rx, reg.clone()),
             spawn_status_permission_forwarder(tui_build.permission_rx, reg.clone()),
+            spawn_status_ask_user_question_forwarder(tui_build.ask_user_question_rx, reg.clone()),
         ),
-        None => (tui_build.bridge_rx, tui_build.permission_rx),
+        None => (
+            tui_build.bridge_rx,
+            tui_build.permission_rx,
+            tui_build.ask_user_question_rx,
+        ),
     };
     let turn_tx = tui_build.turn_tx;
     // (companyAnnouncements) The merged array, moved out before `tui_build` is
     // consumed further below; selected + rendered into the startup banner.
     let company_announcements = tui_build.company_announcements;
+    let emoji_completion_enabled = tui_build.emoji_completion_enabled;
     // (/permissions) The gate's live allow-rule bucket + the settings-file
     // roots the interactive editor writes to (same roots the AllowAlways
     // persist uses). Grabbed before `tui_build` is consumed further below.
@@ -680,16 +686,34 @@ pub(crate) async fn run_ratatui_with_initial_prompt(
                 tx.send(tui_core::orchestrator_bridge::TurnEvent::SystemNotice { body, is_error });
         });
     };
-    // (/rename async effect) `/rename <name>` returns `ChatOutcome::RenameSession`
-    // from the blocking ratatui loop; the custom-title JSONL append is a state
-    // mutation, so it runs off the render thread on the captured handle (doctrine:
-    // side-effects go off-loop). The confirmation (or failure) lands in the
-    // transcript via `TurnEvent::SystemNotice`, mirroring claude-code's
-    // `onDone("Session renamed to: ${newName}")`.
-    let on_rename = move |name: String| {
+    // `/rename [name]`: a bare invocation first runs the history-inert,
+    // tool-denied `rename_generate_name` side query; either path then persists
+    // the custom title off the render thread.
+    let on_rename = move |requested_name: String| {
         let orch = rename_orch.clone();
         let tx = rename_turn_tx.clone();
         rename_handle.spawn(async move {
+            let name = if requested_name.trim().is_empty() {
+                match orch.generate_session_name().await {
+                    Ok(Some(name)) => name,
+                    Ok(None) => {
+                        let _ = tx.send(tui_core::orchestrator_bridge::TurnEvent::SystemNotice {
+                            body: "Could not generate a name: no conversation context yet. Usage: /rename <name>".to_string(),
+                            is_error: false,
+                        });
+                        return;
+                    }
+                    Err(_) => {
+                        let _ = tx.send(tui_core::orchestrator_bridge::TurnEvent::SystemNotice {
+                            body: "Error renaming session".to_string(),
+                            is_error: true,
+                        });
+                        return;
+                    }
+                }
+            } else {
+                requested_name.trim().to_string()
+            };
             let (body, is_error) = match orch.rename_session(name.clone()).await {
                 Ok(()) => (format!("Session renamed to: {name}"), false),
                 Err(_e) => ("Error renaming session".to_string(), true),
@@ -726,28 +750,56 @@ pub(crate) async fn run_ratatui_with_initial_prompt(
                 tx.send(tui_core::orchestrator_bridge::TurnEvent::SystemNotice { body, is_error });
         });
     };
-    // (/plan async effect) `/plan` returns `ChatOutcome::PlanMode` from the
-    // blocking ratatui loop. The enter-vs-view decision (a read of the session
-    // plan-mode flag) and, when entering, the flip both run off the render
-    // thread on the captured handle (doctrine: session reads + mutations go
-    // off-loop). LingXi has no on-disk plan store, so the "already in plan mode"
-    // branch is a static message (claude-code `plan.tsx` no-plan branch); the
-    // trimmed arg tail is currently advisory (no `<description>` submit / editor
-    // open). The result is reported via `TurnEvent::SystemNotice`.
-    let on_plan_mode = move |_args: String| {
+    // `/plan`: enter plan mode, then reuse the orchestrator's real plan-file
+    // path for view/open instead of maintaining a second TUI-only store.
+    let on_plan_mode = move |args: String| {
         let orch = plan_orch.clone();
         let tx = plan_turn_tx.clone();
         plan_handle.spawn(async move {
-            let (body, is_error) = if orch.plan_mode().await {
-                (
+            let already_in_plan_mode = orch.plan_mode().await;
+            if !already_in_plan_mode {
+                if orch.set_plan_mode(true).await.is_err() {
+                    let _ = tx.send(tui_core::orchestrator_bridge::TurnEvent::SystemNotice {
+                        body: "Error entering plan mode".to_string(),
+                        is_error: true,
+                    });
+                    return;
+                }
+                let _ = tx.send(tui_core::orchestrator_bridge::TurnEvent::SystemNotice {
+                    body: "Enabled plan mode".to_string(),
+                    is_error: false,
+                });
+                return;
+            }
+
+            let action = args.split_whitespace().next().unwrap_or("");
+            let plan = match orch.current_plan().await {
+                Ok(plan) => plan,
+                Err(_) => {
+                    let _ = tx.send(tui_core::orchestrator_bridge::TurnEvent::SystemNotice {
+                        body: "Could not read the current plan".to_string(),
+                        is_error: true,
+                    });
+                    return;
+                }
+            };
+            let (body, is_error) = match plan {
+                None => (
                     "Already in plan mode. No plan written yet.".to_string(),
                     false,
-                )
-            } else {
-                match orch.set_plan_mode(true).await {
-                    Ok(()) => ("Enabled plan mode".to_string(), false),
-                    Err(_e) => ("Error entering plan mode".to_string(), true),
-                }
+                ),
+                Some(plan) if action == "open" => match orch.open_plan_editor().await {
+                    Ok(outcome) if outcome.exit_code == 0 => (
+                        format!("Opened plan in editor: {}", plan.path.display()),
+                        false,
+                    ),
+                    Ok(_) | Err(_) => ("Could not open plan in editor".to_string(), true),
+                },
+                Some(_) if action == "share" => (
+                    "Publishing plans is not available in this session.".to_string(),
+                    false,
+                ),
+                Some(plan) => (render_plan_snapshot(&plan), false),
             };
             let _ =
                 tx.send(tui_core::orchestrator_bridge::TurnEvent::SystemNotice { body, is_error });
@@ -965,6 +1017,7 @@ pub(crate) async fn run_ratatui_with_initial_prompt(
             session,
             bridge_rx,
             permission_rx,
+            ask_user_question_rx,
             Some(subscription),
             Some(status_line),
             Some(web_snapshot),
@@ -980,6 +1033,7 @@ pub(crate) async fn run_ratatui_with_initial_prompt(
             Some(task_registry_handle),
             initial_permission_mode,
             bypass_available,
+            emoji_completion_enabled,
             on_submit,
             on_switch_model,
             on_web_action,
@@ -1083,6 +1137,15 @@ pub(crate) async fn run_ratatui_with_initial_prompt(
             RunOutcome::Exit(exit_codes::RUNTIME_ERROR)
         }
     }
+}
+
+/// Render the same plan file used by the plan-mode reminder. The defensive
+/// character cap prevents an unexpectedly large or replaced file from flooding
+/// the TUI event channel while preserving valid UTF-8 boundaries.
+fn render_plan_snapshot(plan: &traits::PlanSnapshot) -> String {
+    const MAX_PLAN_CHARS: usize = 1_000_000;
+    let content: String = plan.content.chars().take(MAX_PLAN_CHARS).collect();
+    format!("Current Plan\n{}\n\n{content}", plan.path.display())
 }
 
 fn is_agent_task_type(task_type: &str) -> bool {
@@ -2054,6 +2117,34 @@ fn spawn_status_permission_forwarder(
     rx
 }
 
+fn spawn_status_ask_user_question_forwarder(
+    mut src: tokio::sync::mpsc::Receiver<
+        tui_core::ask_user_question_bridge::AskUserQuestionExchange,
+    >,
+    reg: Arc<crate::agents_registry::SessionRegistration>,
+) -> tokio::sync::mpsc::Receiver<tui_core::ask_user_question_bridge::AskUserQuestionExchange> {
+    let (tx, rx) = tokio::sync::mpsc::channel(16);
+    tokio::spawn(async move {
+        while let Some(mut exchange) = src.recv().await {
+            reg.update_status("waiting", Some("question prompt"));
+            let (wrapped_tx, wrapped_rx) = tokio::sync::oneshot::channel();
+            let original_tx = std::mem::replace(&mut exchange.resp_tx, wrapped_tx);
+            let reg = reg.clone();
+            tokio::spawn(async move {
+                let resolved = wrapped_rx.await;
+                reg.update_status("busy", None);
+                if let Ok(resp) = resolved {
+                    let _ = original_tx.send(resp);
+                }
+            });
+            if tx.send(exchange).await.is_err() {
+                break;
+            }
+        }
+    });
+    rx
+}
+
 /// Snapshot the orchestrator's MCP/hooks/agents/model listings into a
 /// `tui::session::SessionInfo` for the full-page screens (`/mcp`,
 /// `/hooks`, `/agents`, `/doctor`, `/model`). Awaited once before the blocking
@@ -2562,13 +2653,16 @@ mod tests {
         assert_eq!(decide_mode_with(&a, false), Mode::Print("hi".into()));
     }
 
-    // ── (A6 batch-6 Task 2) statusLine settings merge ─────────────────────
-
-    fn write_settings(path: &std::path::Path, body: &str) {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).unwrap();
-        }
-        std::fs::write(path, body).unwrap();
+    #[test]
+    fn plan_snapshot_renders_path_and_utf8_body() {
+        let plan = traits::PlanSnapshot {
+            path: PathBuf::from("/tmp/session-plan.md"),
+            content: "步骤一\n步骤二".to_string(),
+        };
+        assert_eq!(
+            render_plan_snapshot(&plan),
+            "Current Plan\n/tmp/session-plan.md\n\n步骤一\n步骤二"
+        );
     }
 
     // ── (Task 3) startup trust gate ───────────────────────────────────────

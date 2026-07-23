@@ -102,6 +102,22 @@ struct ExchangeRequest<'a> {
     client_id: &'a str,
     code_verifier: &'a str,
     state: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expires_in: Option<u64>,
+}
+
+/// Optional authorize-URL fields used by the public `auth login` and
+/// `setup-token` flows.
+#[derive(Debug, Clone, Default)]
+pub struct AuthorizeOptions {
+    /// Override the configured scopes (used by inference-only setup tokens).
+    pub scopes: Option<Vec<String>>,
+    /// Managed organization pin forwarded to the authorization service.
+    pub org_uuid: Option<String>,
+    /// Pre-populated account email.
+    pub login_hint: Option<String>,
+    /// Login method hint such as `sso`.
+    pub login_method: Option<String>,
 }
 
 /// Tokens (plus optionally-resolved identity) returned by [`ClaudeAiOAuthClient::exchange_code`].
@@ -206,18 +222,45 @@ impl ClaudeAiOAuthClient {
         &self,
         redirect_uri: &str,
     ) -> (String, String, String) {
+        self.build_authorize_url_with_options(redirect_uri, &AuthorizeOptions::default())
+    }
+
+    /// Build an authorize URL with the optional fields exposed by Claude
+    /// Code's public authentication commands.
+    #[must_use]
+    pub fn build_authorize_url_with_options(
+        &self,
+        redirect_uri: &str,
+        options: &AuthorizeOptions,
+    ) -> (String, String, String) {
         let (verifier, challenge) = generate_pkce();
         let state = generate_state_token();
-        let scopes = self.config.scopes.join(" ");
-        let url = format!(
-            "{}?response_type=code&client_id={}&redirect_uri={}&scope={}&state={}&code_challenge={}&code_challenge_method=S256",
+        let scopes = options
+            .scopes
+            .as_ref()
+            .unwrap_or(&self.config.scopes)
+            .join(" ");
+        let mut url = format!(
+            "{}?code=true&client_id={}&response_type=code&redirect_uri={}&scope={}&code_challenge={}&code_challenge_method=S256&state={}",
             self.config.authorization_endpoint,
             urlencoding::encode(&self.config.client_id),
             urlencoding::encode(redirect_uri),
             urlencoding::encode(&scopes),
-            urlencoding::encode(&state),
             urlencoding::encode(&challenge),
+            urlencoding::encode(&state),
         );
+        if let Some(org_uuid) = options.org_uuid.as_deref() {
+            url.push_str("&orgUUID=");
+            url.push_str(&urlencoding::encode(org_uuid));
+        }
+        if let Some(login_hint) = options.login_hint.as_deref() {
+            url.push_str("&login_hint=");
+            url.push_str(&urlencoding::encode(login_hint));
+        }
+        if let Some(login_method) = options.login_method.as_deref() {
+            url.push_str("&login_method=");
+            url.push_str(&urlencoding::encode(login_method));
+        }
         (url, verifier, state)
     }
 
@@ -254,6 +297,20 @@ impl ClaudeAiOAuthClient {
         state: &str,
         redirect_uri: &str,
     ) -> Result<ExchangedTokens, OAuthError> {
+        self.exchange_code_with_options(code, verifier, state, redirect_uri, None)
+            .await
+    }
+
+    /// Exchange a code while optionally requesting a provider-defined token
+    /// lifetime. `setup-token` uses one year; normal login omits the field.
+    pub async fn exchange_code_with_options(
+        &self,
+        code: &str,
+        verifier: &str,
+        state: &str,
+        redirect_uri: &str,
+        expires_in: Option<u64>,
+    ) -> Result<ExchangedTokens, OAuthError> {
         let body = ExchangeRequest {
             grant_type: "authorization_code",
             code,
@@ -261,6 +318,7 @@ impl ClaudeAiOAuthClient {
             client_id: &self.config.client_id,
             code_verifier: verifier,
             state,
+            expires_in,
         };
         let body = serde_json::to_string(&body)
             .map_err(|e| OAuthError::TokenExchange(format!("encode: {e}")))?;
@@ -371,6 +429,32 @@ mod exchange_tests {
         ClaudeAiOAuthClient::new(cfg, http as Arc<dyn HttpTransport>, cm).with_clock(clock)
     }
 
+    #[test]
+    fn authorize_url_matches_current_public_oauth_contract() {
+        let http = MockHttp::new(vec![]);
+        let client = client_with(http, 0);
+        let (url, verifier, state) = client.build_authorize_url_with_options(
+            "https://platform.claude.com/oauth/code/callback",
+            &AuthorizeOptions {
+                scopes: Some(vec!["user:inference".into()]),
+                org_uuid: Some("org/one".into()),
+                login_hint: Some("a+b@example.com".into()),
+                login_method: Some("sso".into()),
+            },
+        );
+
+        assert!(url.starts_with("https://claude.com/cai/oauth/authorize?code=true&"));
+        assert!(url.contains("client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e"));
+        assert!(url.contains("response_type=code"));
+        assert!(url.contains("scope=user%3Ainference"));
+        assert!(url.contains("orgUUID=org%2Fone"));
+        assert!(url.contains("login_hint=a%2Bb%40example.com"));
+        assert!(url.contains("login_method=sso"));
+        assert!(url.contains("code_challenge_method=S256"));
+        assert!(!verifier.is_empty());
+        assert!(!state.is_empty());
+    }
+
     #[tokio::test]
     async fn exchange_code_posts_json_and_parses_tokens() {
         let body = r#"{
@@ -428,9 +512,36 @@ mod exchange_tests {
         assert_eq!(sent["code"], "the-code");
         assert_eq!(sent["code_verifier"], "the-verifier");
         assert_eq!(sent["state"], "the-state");
-        assert_eq!(sent["client_id"], "lingxi-core");
-        assert_eq!(sent["redirect_uri"], "http://127.0.0.1:45321/callback");
+        assert_eq!(sent["client_id"], "9d1c250a-e61b-44d9-88ed-5944d1962f5e");
+        assert_eq!(sent["redirect_uri"], "http://localhost:45321/callback");
+        assert!(sent.get("expires_in").is_none());
         assert_eq!(http.call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn setup_token_exchange_requests_one_year_lifetime() {
+        let http = MockHttp::new(vec![(
+            "oauth/token",
+            Canned {
+                status: 200,
+                body: r#"{"access_token":"a","expires_in":31536000}"#.into(),
+            },
+        )]);
+        let client = client_with(http.clone(), 0);
+        client
+            .exchange_code_with_options(
+                "c",
+                "v",
+                "s",
+                "https://platform.claude.com/oauth/code/callback",
+                Some(31_536_000),
+            )
+            .await
+            .expect("exchange");
+        let req = http.last_request().expect("request");
+        let body: serde_json::Value =
+            serde_json::from_str(req.body.as_deref().expect("body")).expect("json");
+        assert_eq!(body["expires_in"], 31_536_000);
     }
 
     #[tokio::test]
@@ -469,7 +580,10 @@ mod exchange_tests {
         assert!(tokens.refresh_token.is_none());
         assert_eq!(
             tokens.scopes,
-            vec!["read:user", "write:messages", "read:projects"]
+            crate::oauth::anthropic::config::CLAUDE_CODE_OAUTH_SCOPES
+                .iter()
+                .map(|scope| (*scope).to_string())
+                .collect::<Vec<_>>()
         );
         assert!(tokens.account.is_none());
     }

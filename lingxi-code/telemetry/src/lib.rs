@@ -191,6 +191,41 @@ pub fn emit_auto_mode_denial_limit_exceeded(
     );
 }
 
+/// Emit `tengu_agent_hooks_origin_untrusted` (cc 2.1.218 `hvo`) — an agent
+/// definition's frontmatter `hooks:` were skipped because the folder the
+/// definition came from has not been trusted. `source` is the claude
+/// `SettingSource` string, `surface` is `"subagent"` or `"mainThread"`, and
+/// `from_additional_directory` reports whether the definition came from an
+/// `--add-dir` directory (serialized as the string `"true"`/`"false"`, matching
+/// the binary's `me(... ? "true" : "false")`).
+pub fn emit_agent_hooks_origin_untrusted(
+    source: &str,
+    surface: &str,
+    from_additional_directory: bool,
+) {
+    tracing::info!(
+        event = crate::tengu::agent::AGENT_HOOKS_ORIGIN_UNTRUSTED,
+        source = source,
+        surface = surface,
+        fromAdditionalDirectory = if from_additional_directory {
+            "true"
+        } else {
+            "false"
+        },
+    );
+}
+
+/// Emit `tengu_repair_double_escaped_unicode` (cc 2.1.218 `jYd`) — a tool_use
+/// input had literal `\uXXXX` text repaired into real characters, and/or was
+/// left verbatim because it looked like a Windows path.
+pub fn emit_repair_double_escaped_unicode(repaired_strings: u32, windows_path_skips: u32) {
+    tracing::info!(
+        event = crate::tengu::tool::REPAIR_DOUBLE_ESCAPED_UNICODE,
+        repaired_strings = repaired_strings,
+        windows_path_skips = windows_path_skips,
+    );
+}
+
 /// Emit `tengu_retention_sweep` — the on-disk data-retention housekeeping event
 /// (claude-code `fWu`). `skipped` with a `skip_reason` records a no-op run;
 /// otherwise the counts describe what was removed. The port sweeps the

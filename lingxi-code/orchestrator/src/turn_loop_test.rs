@@ -415,6 +415,14 @@ mod read_file_state_tests {
     /// rooted at `cwd`. The API queue is empty (these tests drive
     /// `dispatch_tool_uses` directly, never `run_turn`).
     fn orch_with_tools(cwd: PathBuf, tools: Vec<Arc<dyn Tool>>) -> ConversationOrchestrator {
+        orch_with_tools_and_gate(cwd, tools, Arc::new(NoOpPermissionGate))
+    }
+
+    fn orch_with_tools_and_gate(
+        cwd: PathBuf,
+        tools: Vec<Arc<dyn Tool>>,
+        gate: Arc<dyn permission::PermissionGate>,
+    ) -> ConversationOrchestrator {
         let mut registry = ToolRegistry::new();
         for t in tools {
             registry.register_builtin(t);
@@ -424,11 +432,42 @@ mod read_file_state_tests {
             Arc::new(MockApiClient::new(vec![])),
             Arc::new(registry),
             crate::test_support::noop_hook_executor(),
-            Arc::new(NoOpPermissionGate),
+            gate,
             Arc::new(MockOutputStream::new()),
             Arc::new(StaticMemoryProvider::empty()),
             cwd,
         )
+    }
+
+    #[derive(Default)]
+    struct RecordingUpdateGate {
+        applied: std::sync::Mutex<Vec<serde_json::Value>>,
+        persisted: std::sync::Mutex<Vec<serde_json::Value>>,
+    }
+
+    #[async_trait]
+    impl permission::PermissionGate for RecordingUpdateGate {
+        async fn check(
+            &self,
+            _name: &str,
+            _input: &serde_json::Value,
+        ) -> permission::PermissionDecision {
+            permission::PermissionDecision::Allow
+        }
+
+        fn apply_permission_updates(&self, updates: &[serde_json::Value]) {
+            self.applied
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend_from_slice(updates);
+        }
+
+        async fn persist_permission_updates(&self, updates: &[serde_json::Value]) {
+            self.persisted
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend_from_slice(updates);
+        }
     }
 
     // ===== Orphaned-permission recovery (run_orphaned_permission) ===========
@@ -523,6 +562,61 @@ mod read_file_state_tests {
         assert!(
             content.contains("RECOVERED"),
             "tool ran with the rewritten input: {content}"
+        );
+    }
+
+    #[tokio::test]
+    async fn orphaned_permission_applies_and_persists_permission_updates() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        tokio::fs::write(dir.path().join("real.txt"), "RECOVERED")
+            .await
+            .unwrap();
+        let tool = Arc::new(StubFileTool {
+            name: "Read",
+            cwd: dir.path().to_path_buf(),
+        });
+        let gate = Arc::new(RecordingUpdateGate::default());
+        let orch = orch_with_tools_and_gate(dir.path().to_path_buf(), vec![tool], gate.clone());
+        let tool_use_id = ToolUseId::new();
+        orch.session()
+            .lock()
+            .await
+            .history
+            .push(assistant_with_tool_use(
+                &tool_use_id,
+                "Read",
+                json!({"file_path":"real.txt"}),
+            ));
+        let update = json!({
+            "type": "addRules",
+            "rules": [{"toolName": "Read"}],
+            "behavior": "allow",
+            "destination": "session"
+        });
+
+        assert!(orch
+            .run_orphaned_permission(
+                &tool_use_id,
+                traits::permission_gate::PermissionOutcome::Allow {
+                    updated_input: None,
+                    permission_updates: vec![update.clone()],
+                },
+            )
+            .await
+            .expect("recovery"));
+        assert_eq!(
+            *gate
+                .applied
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec![update.clone()]
+        );
+        assert_eq!(
+            *gate
+                .persisted
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec![update]
         );
     }
 
@@ -1771,12 +1865,16 @@ mod max_output_tokens_recovery_tests {
         let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
             .await
             .expect("step");
-        match step {
-            TurnStepOutcome::Ended { stop_reason, .. } => {
+        let final_message_id = match step {
+            TurnStepOutcome::Ended {
+                stop_reason,
+                final_message_id,
+            } => {
                 assert_eq!(stop_reason, "max_tokens");
+                final_message_id
             }
             TurnStepOutcome::Continue => panic!("expected Ended on exhaustion"),
-        }
+        };
         // The counter is NOT incremented past the limit, and NO nudge is
         // appended on exhaustion. The step appends the response assistant message
         // AND the surfaced terminal `API Error: …` assistant message (#24 batched
@@ -1809,6 +1907,14 @@ mod max_output_tokens_recovery_tests {
             }
             other => panic!("expected the surfaced Assistant API-error, got {other:?}"),
         }
+        let last_id = match h.last() {
+            Some(ConversationMessage::Assistant { id, .. }) => *id,
+            other => panic!("expected final assistant message, got {other:?}"),
+        };
+        assert_eq!(
+            final_message_id, last_id,
+            "final_message_id must point at the surfaced terminal assistant message"
+        );
     }
 
     /// #24 batched parity: a terminal `model_context_window_exceeded` surfaces
@@ -1881,10 +1987,16 @@ mod max_output_tokens_recovery_tests {
         let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
             .await
             .expect("step");
-        match step {
-            TurnStepOutcome::Ended { stop_reason, .. } => assert_eq!(stop_reason, "refusal"),
+        let final_message_id = match step {
+            TurnStepOutcome::Ended {
+                stop_reason,
+                final_message_id,
+            } => {
+                assert_eq!(stop_reason, "refusal");
+                final_message_id
+            }
             TurnStepOutcome::Continue => panic!("expected Ended, not a bare re-call"),
-        }
+        };
         let h = history(&orch).await;
         assert_eq!(
             h.len(),
@@ -1909,6 +2021,14 @@ mod max_output_tokens_recovery_tests {
         assert!(
             text.contains("https://www.anthropic.com/legal/aup"),
             "got: {text}"
+        );
+        let last_id = match h.last() {
+            Some(ConversationMessage::Assistant { id, .. }) => *id,
+            other => panic!("expected final assistant message, got {other:?}"),
+        };
+        assert_eq!(
+            final_message_id, last_id,
+            "final_message_id must point at the surfaced refusal assistant message"
         );
     }
 
@@ -2202,17 +2322,22 @@ mod malformed_and_thinking_only_tests {
         let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
             .await
             .expect("step");
-        match step {
-            TurnStepOutcome::Ended { stop_reason, .. } => {
+        let final_message_id = match step {
+            TurnStepOutcome::Ended {
+                stop_reason,
+                final_message_id,
+            } => {
                 assert_eq!(stop_reason, "end_turn");
+                final_message_id
             }
             TurnStepOutcome::Continue => panic!("expected Ended on second failure"),
-        }
+        };
         let h = history(&orch).await;
         // Terminal message = ASSISTANT api-error message, stop_reason
         // "stop_sequence"; it is NOT persisted as a user message.
         match h.last().expect("history non-empty") {
             ConversationMessage::Assistant {
+                id,
                 content,
                 stop_reason,
                 ..
@@ -2222,6 +2347,10 @@ mod malformed_and_thinking_only_tests {
                     content.first(),
                     Some(ContentBlock::Text { text }) if text == MALFORMED_TOOL_USE_RETRY_FAILED
                 ));
+                assert_eq!(
+                    final_message_id, *id,
+                    "final_message_id must point at the terminal malformed-tool assistant message"
+                );
             }
             other => panic!("expected Assistant api-error message, got {other:?}"),
         }
@@ -4841,5 +4970,322 @@ mod recovery_state_reset_tests {
         assert_eq!(s.max_output_tokens_recovery_count, 0);
         assert_eq!(s.max_output_tokens_override, None);
         assert!(!s.max_output_tokens_escalated);
+    }
+}
+
+#[cfg(test)]
+mod memdir_index_cap_tests {
+    use crate::conversation::ConversationOrchestrator;
+    use crate::test_support::{
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
+    };
+    use crate::turn_loop::dispatch_tool_uses_tracked;
+    use crate::OrchestratorConfig;
+    use async_trait::async_trait;
+    use protocol::{ContentBlock, ToolUseId};
+    use serde_json::json;
+    use sidequery::{SideQueryClient, SideQueryError, SideQueryRequest, SideQueryResponse};
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
+    use telemetry::sinks::InMemorySink;
+    use tool_api::context::ToolUseContext;
+    use tool_api::progress::ToolProgressSender;
+    use tool_api::registry::ToolRegistry;
+    use tool_api::tool_trait::{
+        DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
+        ValidationError,
+    };
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn clear_privacy_env() {
+        for key in [
+            "DO_NOT_TRACK",
+            "DISABLE_TELEMETRY",
+            "LINGXI_DISABLE_NONESSENTIAL_TRAFFIC",
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+        ] {
+            std::env::remove_var(key);
+        }
+    }
+
+    struct NoopSideQueryClient;
+
+    #[async_trait]
+    impl SideQueryClient for NoopSideQueryClient {
+        async fn query(
+            &self,
+            _request: SideQueryRequest,
+        ) -> Result<SideQueryResponse, SideQueryError> {
+            Ok(SideQueryResponse {
+                text: Some("{\"filenames\":[]}".into()),
+                structured: None,
+                tool_calls: Vec::new(),
+                usage: cost::Usage::default(),
+                stop_reason: Some("end_turn".into()),
+            })
+        }
+    }
+
+    struct InlineRuntime;
+
+    #[async_trait]
+    impl traits::RuntimeSpawner for InlineRuntime {
+        async fn spawn(
+            &self,
+            name: &str,
+            task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
+        ) -> Result<traits::BackgroundTaskHandle, traits::RuntimeError> {
+            tokio::spawn(task);
+            Ok(traits::BackgroundTaskHandle {
+                task_name: name.to_string(),
+                task_id: 0,
+            })
+        }
+
+        async fn sleep(&self, _duration: std::time::Duration) {}
+
+        async fn cancel(
+            &self,
+            _handle: &traits::BackgroundTaskHandle,
+        ) -> Result<(), traits::RuntimeError> {
+            Ok(())
+        }
+    }
+
+    struct RelativeWriteTool;
+
+    #[async_trait]
+    impl Tool for RelativeWriteTool {
+        fn name(&self) -> &str {
+            "Write"
+        }
+
+        fn input_schema(&self) -> &serde_json::Value {
+            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
+                once_cell::sync::Lazy::new(|| {
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "file_path": { "type": "string" },
+                            "content": { "type": "string" }
+                        },
+                        "required": ["file_path", "content"]
+                    })
+                });
+            &SCHEMA
+        }
+
+        fn is_enabled(&self, _: &ToolStaticContext) -> bool {
+            true
+        }
+
+        fn max_result_size_chars(&self) -> usize {
+            1024 * 1024
+        }
+
+        fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
+            true
+        }
+
+        fn is_read_only(&self, _: &serde_json::Value) -> bool {
+            false
+        }
+
+        async fn validate_input(
+            &self,
+            _: &serde_json::Value,
+            _: &ToolUseContext,
+        ) -> Result<(), ValidationError> {
+            Ok(())
+        }
+
+        async fn check_permissions(
+            &self,
+            _: &serde_json::Value,
+            _: &ToolUseContext,
+        ) -> permission::PermissionResult {
+            permission::PermissionResult::Allow {
+                reason: permission::PermissionDecisionReason::Other {
+                    reason: "test".into(),
+                },
+                updated_input: None,
+                update_destination: None,
+                metadata: permission::result::PermissionMetadata::default(),
+            }
+        }
+
+        async fn description(&self, _: &serde_json::Value, _: &DescriptionOptions) -> String {
+            "write".into()
+        }
+
+        async fn prompt(&self, _: &PromptOptions) -> String {
+            String::new()
+        }
+
+        async fn call(
+            &self,
+            input: serde_json::Value,
+            ctx: ToolUseContext,
+            _: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            let raw = input
+                .get("file_path")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| ToolError::InvalidInput("file_path required".into()))?;
+            let content = input
+                .get("content")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| ToolError::InvalidInput("content required".into()))?;
+            let cwd = ctx.cwd.unwrap_or_else(|| PathBuf::from("/tmp"));
+            let path = if Path::new(raw).is_absolute() {
+                PathBuf::from(raw)
+            } else {
+                cwd.join(raw)
+            };
+            if let Some(parent) = path.parent() {
+                tokio::fs::create_dir_all(parent)
+                    .await
+                    .map_err(|e| ToolError::Io(e.to_string()))?;
+            }
+            tokio::fs::write(&path, content)
+                .await
+                .map_err(|e| ToolError::Io(e.to_string()))?;
+            Ok(ToolCallResult {
+                data: json!({ "content": "wrote file" }),
+                model_content: Some("wrote file".into()),
+                new_messages: vec![],
+                context_modifier: None,
+                is_error: false,
+                mcp_meta: None,
+            })
+        }
+    }
+
+    fn memdir_prefetch_for(config_home: &Path) -> Arc<memory::prefetch::MemoryPrefetch> {
+        let roots = memory::memdir::paths::memdir_roots_at(config_home, false);
+        let selector = Arc::new(memory::selector::MemorySelector::new(Arc::new(
+            NoopSideQueryClient,
+        )));
+        Arc::new(memory::prefetch::MemoryPrefetch::new(
+            selector,
+            Arc::new(InlineRuntime),
+            roots,
+        ))
+    }
+
+    fn orch_with_memdir(
+        cwd: PathBuf,
+        prefetch: Arc<memory::prefetch::MemoryPrefetch>,
+        bus: Arc<telemetry::AnalyticsBus>,
+    ) -> ConversationOrchestrator {
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(RelativeWriteTool) as Arc<dyn Tool>);
+        ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(registry),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            cwd,
+        )
+        .with_memory_prefetch(prefetch)
+        .with_analytics_bus(bus)
+    }
+
+    fn tool_result_text(block: &ContentBlock) -> &str {
+        match block {
+            ContentBlock::ToolResult { content, .. } => content,
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn write_to_active_memory_index_injects_cap_notice_and_telemetry() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_privacy_env();
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_home = temp.path().join(".lingxi");
+        let memdir = config_home.join("memdir");
+        std::fs::create_dir_all(&memdir).expect("mk memdir");
+        let near_cap = (0..170)
+            .map(|i| format!("- [Entry {i}](entry-{i}.md) — detail"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(memdir.join("MEMORY.md"), &near_cap).expect("seed memory index");
+
+        let bus = Arc::new(telemetry::AnalyticsBus::new());
+        let sink = Arc::new(InMemorySink::new());
+        bus.attach_sink(sink.clone()).await;
+        let orch = orch_with_memdir(memdir.clone(), memdir_prefetch_for(&config_home), bus);
+
+        let uses = vec![(
+            ToolUseId::new(),
+            "Write".to_string(),
+            json!({"file_path": "MEMORY.md", "content": near_cap}),
+            None,
+        )];
+        let (results, _prevent, injected, _mods) = dispatch_tool_uses_tracked(&orch, &uses, None)
+            .await
+            .unwrap();
+
+        let text = tool_result_text(&results[0]);
+        assert!(text.contains("The memory index at MEMORY.md is 170 lines"));
+        assert!(text.contains("approaching the 200-line read limit"));
+        assert_eq!(
+            injected.len(),
+            1,
+            "notice also surfaces as additional context"
+        );
+        assert!(injected[0]
+            .0
+            .text_content()
+            .contains("PostToolUse:Write hook additional context: The memory index at MEMORY.md"));
+
+        let events = sink.events().await;
+        assert_eq!(events.len(), 1, "one memdir near-cap telemetry event");
+        assert_eq!(events[0].name, memory::TENGU_MEMDIR_ENTRYPOINT_NEAR_CAP);
+        assert!(matches!(
+            events[0].metadata.get("over_cap"),
+            Some(telemetry::AnalyticsValue::Bool(false))
+        ));
+    }
+
+    #[tokio::test]
+    async fn write_outside_active_memory_index_has_no_notice() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_privacy_env();
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_home = temp.path().join(".lingxi");
+        let memdir = config_home.join("memdir");
+        std::fs::create_dir_all(&memdir).expect("mk memdir");
+        std::fs::write(memdir.join("MEMORY.md"), "small\n").expect("seed memory index");
+
+        let bus = Arc::new(telemetry::AnalyticsBus::new());
+        let sink = Arc::new(InMemorySink::new());
+        bus.attach_sink(sink.clone()).await;
+        let orch = orch_with_memdir(memdir.clone(), memdir_prefetch_for(&config_home), bus);
+
+        let uses = vec![(
+            ToolUseId::new(),
+            "Write".to_string(),
+            json!({"file_path": "other.md", "content": "hello"}),
+            None,
+        )];
+        let (results, _prevent, injected, _mods) = dispatch_tool_uses_tracked(&orch, &uses, None)
+            .await
+            .unwrap();
+
+        assert_eq!(tool_result_text(&results[0]), "wrote file");
+        assert!(injected.is_empty(), "non-memory writes stay untouched");
+        assert!(
+            sink.events().await.is_empty(),
+            "no memdir telemetry for unrelated writes"
+        );
     }
 }

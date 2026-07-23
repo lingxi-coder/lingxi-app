@@ -22,6 +22,8 @@ pub enum TaskType {
     LocalWorkflow,
     /// MCP server monitor.
     MonitorMcp,
+    /// Shell/WebSocket-style stdout event monitor (`monitor_ws`).
+    Monitor,
     /// A single long-running MCP `tools/call` that exceeded
     /// `getMcpAutoBackgroundMs` and was moved to the background (claude-code
     /// 2.1.212 `mcp_task`). Distinct from [`Self::MonitorMcp`], which watches a
@@ -42,6 +44,7 @@ impl TaskType {
             Self::InProcessTeammate => 't',
             Self::LocalWorkflow => 'w',
             Self::MonitorMcp => 'm',
+            Self::Monitor => 'm',
             Self::McpTask => 'k',
             Self::Dream => 'd',
         }

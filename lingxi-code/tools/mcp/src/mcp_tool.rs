@@ -364,6 +364,10 @@ pub struct MCPTool {
     /// The server's (truncated) description for a per-tool wire entry; `None`
     /// falls back to the generic dispatcher blurb.
     bound_desc: Option<String>,
+    /// Optional server-provided search hint used by ToolSearch ranking.
+    search_hint: Option<String>,
+    /// `_meta.anthropic/alwaysLoad` / server-level `alwaysLoad` opt-out.
+    always_load: bool,
 }
 
 /// Inspect a configured MCP server's auth/transport surface.
@@ -393,6 +397,8 @@ impl MCPTool {
             full_name: None,
             bound_schema: None,
             bound_desc: None,
+            search_hint: None,
+            always_load: true,
         }
     }
 
@@ -411,6 +417,8 @@ impl MCPTool {
         full_name: String,
         description: String,
         input_schema: Value,
+        search_hint: Option<String>,
+        always_load: bool,
     ) -> Self {
         Self {
             ctx,
@@ -421,6 +429,8 @@ impl MCPTool {
             // defensive no-op for in-band descriptions but keeps the per-tool
             // wire entry within the documented bound for any out-of-band source.
             bound_desc: Some(mcp::truncate_description(&description).into_owned()),
+            search_hint,
+            always_load,
         }
     }
 
@@ -509,6 +519,8 @@ static READ_MCP_RESOURCE_SCHEMA: Lazy<Value> = Lazy::new(|| {
 async fn process_mcp_call_result(
     bus: Arc<AnalyticsBus>,
     cwd: std::path::PathBuf,
+    token_counter: Arc<tool_api::AnthropicRequestBuilder>,
+    default_model: String,
     server: String,
     tool: String,
     tool_use_id: Option<protocol::ToolUseId>,
@@ -644,12 +656,30 @@ async fn process_mcp_call_result(
             // with read-it-from-file instructions; images / a falsy
             // ENABLE_MCP_LARGE_OUTPUT_FILES / a failed write fall back to
             // truncation. Under-threshold content is forwarded verbatim.
-            let content = crate::large_output::process_mcp_result(
+            let exact_token_count =
+                if crate::large_output::mcp_content_needs_exact_count(&model_content)
+                    && !crate::large_output::content_contains_images(&model_content)
+                {
+                    match token_counter
+                        .count_mcp_content_tokens(&default_model, &model_content)
+                        .await
+                    {
+                        Ok(count) => count,
+                        // Counting is an optimization gate, not a reason to lose a
+                        // valid MCP result. Any route/transport failure keeps the
+                        // conservative persistence/truncation behavior.
+                        Err(_error) => None,
+                    }
+                } else {
+                    None
+                };
+            let content = crate::large_output::process_mcp_result_with_exact_count(
                 &model_content,
                 &server,
                 &tool,
                 &output_dir,
                 now_millis,
+                exact_token_count,
             );
             // 1:1 with the binary's MCPTool result `data`: claude-code sets
             // `data = mcpResult.content` DIRECTLY (the content-block ARRAY, a
@@ -730,6 +760,15 @@ impl Tool for MCPTool {
     }
     fn is_mcp(&self) -> bool {
         true
+    }
+    fn should_defer(&self) -> bool {
+        self.full_name.is_some() && !self.always_load
+    }
+    fn always_load(&self) -> bool {
+        self.always_load
+    }
+    fn search_hint(&self) -> Option<&str> {
+        self.search_hint.as_deref()
     }
     fn max_result_size_chars(&self) -> usize {
         30_000
@@ -934,6 +973,8 @@ impl Tool for MCPTool {
         // can be detached on the background path.
         let bus = self.ctx.bus.clone();
         let cwd = self.ctx.cwd();
+        let token_counter = self.ctx.provider.clone();
+        let default_model = self.ctx.default_model.clone();
 
         // Direct-await path: auto-background disabled (`auto_bg_ms == 0`) OR no
         // task registry wired (nothing to detach into). This is the pre-G08
@@ -955,6 +996,8 @@ impl Tool for MCPTool {
             return process_mcp_call_result(
                 bus,
                 cwd,
+                token_counter,
+                default_model,
                 server,
                 tool,
                 tool_use_id,
@@ -989,6 +1032,8 @@ impl Tool for MCPTool {
             let client = client.clone();
             let bus = bus.clone();
             let cwd = cwd.clone();
+            let token_counter = token_counter.clone();
+            let default_model = default_model.clone();
             let server = server.clone();
             let tool = tool.clone();
             let tool_use_id = tool_use_id.clone();
@@ -1028,6 +1073,8 @@ impl Tool for MCPTool {
                         process_mcp_call_result(
                             bus,
                             cwd,
+                            token_counter,
+                            default_model,
                             server,
                             tool,
                             tool_use_id,
@@ -1739,7 +1786,7 @@ impl Tool for ReadMcpResourceTool {
 ///
 /// For each `Connected` server we map each [`traits::McpToolDto`] →
 /// `Arc::new(MCPTool::new_for_tool(ctx, dto.full_name, dto.description,
-/// dto.input_schema))`. The resulting tool's wire `name()` is the real
+/// dto.input_schema, dto.search_hint, dto.always_load))`. The resulting tool's wire `name()` is the real
 /// `mcp__<server>__<tool>` FQN, its `input_schema()` is the server's own
 /// `inputSchema`, and its `description()`/`prompt()` is the server's
 /// (truncated) description — so the model addresses it by name with the
@@ -1775,6 +1822,8 @@ pub async fn build_registered_mcp_tools(
                         dto.full_name.clone(),
                         dto.description.clone(),
                         dto.input_schema.clone(),
+                        dto.search_hint.clone(),
+                        dto.always_load.unwrap_or(false),
                     )) as Arc<dyn Tool>
                 })
                 .collect();

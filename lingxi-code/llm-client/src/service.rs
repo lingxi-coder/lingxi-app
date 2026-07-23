@@ -8,10 +8,12 @@
 //! path. The orchestrator's consumer-trait impls delegate to it 1:1.
 
 use crate::convert::{
-    ensure_tool_result_pairing, normalize_messages_for_api, to_llm_messages, to_tool_declarations,
+    ensure_tool_result_pairing, normalize_messages_for_api_with_tool_search, to_llm_messages,
+    to_tool_declarations,
 };
 use crate::model::betas::{
-    apply_beta_header_with_auth_and_custom, BetaContext, Endpoint, Provider,
+    apply_beta_header_with_auth_and_custom, bedrock_extra_body_betas, BetaContext, Endpoint,
+    Provider,
 };
 use crate::model::rate_limit::{
     formatted_reset_times_from_headers, parse_retry_after, parse_unified_reset,
@@ -30,7 +32,7 @@ use crate::{
 use futures::stream::BoxStream;
 use protocol::{ContentBlock, ConversationMessage};
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 /// Mirror claude-code `getPromptCachingEnabled` (services/api/claude.ts:333).
@@ -80,6 +82,34 @@ fn reasoning_budget(reasoning: Option<crate::ReasoningConfig>) -> u32 {
     match reasoning {
         Some(crate::ReasoningConfig::Enabled { budget_tokens }) => budget_tokens,
         Some(crate::ReasoningConfig::Adaptive) | None => 0,
+    }
+}
+
+/// Remove provider-authenticated assistant blocks before retrying on a different
+/// model. Their signatures are scoped to the model that produced them and must
+/// never be replayed to a fallback provider/model.
+fn strip_signature_blocks(messages: &mut [crate::Message]) {
+    for message in messages
+        .iter_mut()
+        .filter(|message| message.role == "assistant")
+    {
+        message.content.retain(|block| {
+            !matches!(
+                block,
+                crate::ContentBlock::Reasoning { .. }
+                    | crate::ContentBlock::RedactedThinking { .. }
+                    | crate::ContentBlock::ConnectorText { .. }
+            )
+        });
+    }
+}
+
+/// Claude Code currently gates cross-model signature stripping to its internal
+/// account class. Preserve that observable gate while keeping the pure transform
+/// separately testable.
+fn strip_signature_blocks_for_fallback(messages: &mut [crate::Message]) {
+    if std::env::var("USER_TYPE").ok().as_deref() == Some("ant") {
+        strip_signature_blocks(messages);
     }
 }
 
@@ -219,7 +249,7 @@ pub struct ApiService {
     /// against the model's thinking predicates + the `CLAUDE_CODE_DISABLE_*`
     /// env gates to produce the `reasoning` field and the coupled `temperature`.
     /// Set via [`Self::with_thinking`].
-    thinking: crate::model::thinking::ThinkingConfig,
+    thinking: RwLock<crate::model::thinking::ThinkingConfig>,
     /// Identity for the Anthropic `metadata.user_id` field (claude-code
     /// `claude.ts:503-525`). `None` (the default) omits `metadata` entirely.
     /// Set via [`Self::with_request_metadata`]; the composition root supplies
@@ -565,7 +595,7 @@ impl ApiService {
             subscription: None,
             retry_reporter: None,
             forced_tool_choice: None,
-            thinking: crate::model::thinking::ThinkingConfig::default(),
+            thinking: RwLock::new(crate::model::thinking::ThinkingConfig::default()),
             request_metadata: None,
             cache_editing_inputs: CacheEditingInputs::default(),
             ua,
@@ -625,6 +655,14 @@ impl ApiService {
         self
     }
 
+    /// Host-validated beta additions active for this service. Orchestrator
+    /// context-window and compaction math must use the same list as request
+    /// assembly (notably for the 1M-context beta).
+    #[must_use]
+    pub fn active_custom_betas(&self) -> &[String] {
+        &self.custom_cli_betas
+    }
+
     /// Attach a UI retry-status sink. The retry loop then reports each backoff
     /// (error text + attempt/max + delay) so the TUI can surface it, matching
     /// Claude Code's `SystemAPIErrorMessage` retry display.
@@ -677,8 +715,24 @@ impl ApiService {
     /// [`ThinkingConfig::Adaptive`](crate::model::thinking::ThinkingConfig::Adaptive).
     #[must_use]
     pub fn with_thinking(mut self, thinking: crate::model::thinking::ThinkingConfig) -> Self {
-        self.thinking = thinking;
+        self.thinking = RwLock::new(thinking);
         self
+    }
+
+    /// Replace the live session thinking policy. The next request observes the
+    /// new value; an already-open response stream is intentionally unaffected.
+    pub fn set_thinking(&self, thinking: crate::model::thinking::ThinkingConfig) {
+        *self
+            .thinking
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = thinking;
+    }
+
+    fn thinking(&self) -> crate::model::thinking::ThinkingConfig {
+        *self
+            .thinking
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Set the identity for the Anthropic `metadata.user_id` field. Builder-style;
@@ -710,6 +764,7 @@ impl ApiService {
         device_id: &str,
         account_uuid: &str,
         session_id: &str,
+        parent_session_id: Option<&str>,
     ) -> String {
         let mut obj = serde_json::Map::new();
         if let Ok(extra_str) = std::env::var("CLAUDE_CODE_EXTRA_METADATA") {
@@ -745,13 +800,14 @@ impl ApiService {
             "session_id".to_string(),
             serde_json::Value::String(session_id.to_string()),
         );
-        // NOTE (gap-audit, deferred): claude-code's `yit` additionally spreads
-        // `...r&&{parent_session_id:r}` AFTER `session_id` when the session has a
-        // parent (`S6()` — resume-fork / subagent). The port bakes `user_id` ONCE
-        // at engine construction (not per-request like CC's `getAPIMetadata`), and
-        // the parent session id is not in scope there, so `parent_session_id` is
-        // not emitted. Fully honoring it needs a dynamic per-request `user_id` (or
-        // threading the session's `parent_session_id` to the composition root).
+        if let Some(parent_session_id) = parent_session_id.filter(|id| !id.is_empty()) {
+            // The conditional spread is deliberately last: metadata.user_id is
+            // a JSON string and key order is externally observable.
+            obj.insert(
+                "parent_session_id".to_string(),
+                serde_json::Value::String(parent_session_id.to_string()),
+            );
+        }
         serde_json::to_string(&serde_json::Value::Object(obj)).unwrap_or_default()
     }
 
@@ -866,9 +922,21 @@ impl ApiService {
         // normalizeMessagesForAPI (consecutive-role merge) → ensureToolResultPairing
         // (SEND-time repair of orphaned/missing/duplicate tool_use↔tool_result on
         // resumed/interrupted transcripts; strict no-op on a clean turn).
-        let messages = to_llm_messages(ensure_tool_result_pairing(normalize_messages_for_api(
-            strip_excess_media(msgs, MAX_MEDIA_PER_REQUEST),
-        )))?;
+        let tool_search_enabled = tools
+            .iter()
+            .any(|tool| tool.get("name").and_then(serde_json::Value::as_str) == Some("ToolSearch"));
+        let available_tool_names: std::collections::HashSet<String> = tools
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(serde_json::Value::as_str))
+            .map(str::to_string)
+            .collect();
+        let messages = to_llm_messages(ensure_tool_result_pairing(
+            normalize_messages_for_api_with_tool_search(
+                strip_excess_media(msgs, MAX_MEDIA_PER_REQUEST),
+                tool_search_enabled,
+                Some(&available_tool_names),
+            ),
+        ))?;
         // Estimate the tool-schema input BEFORE `tools` is consumed — the full
         // agent toolset is ~18k tokens and `approximate_tokens` does not count it.
         // Used below to bound `max_tokens` against the context window.
@@ -987,7 +1055,8 @@ impl ApiService {
         // schemas that `approximate_tokens` doesn't count. Reserve the estimated
         // input (system + messages + tools). Claude models (output << context)
         // are unaffected unless the input is near-full.
-        let context_window = crate::model::context_window::context_window_for_model(model, &[]);
+        let context_window =
+            crate::model::context_window::context_window_for_model(model, &self.custom_cli_betas);
         let input_est = crate::model::count_tokens::approximate_tokens(&req) + tool_input_tokens;
         if let Some(mt) = req.max_tokens {
             req.max_tokens = Some(bound_output_to_context(mt, context_window, input_est));
@@ -999,7 +1068,8 @@ impl ApiService {
         {
             use crate::model::thinking::{model_sends_temperature, session_thinking_active};
 
-            let has_thinking = session_thinking_active(self.thinking);
+            let thinking = self.thinking();
+            let has_thinking = session_thinking_active(thinking);
 
             // The claude/non-claude branch, the env kill switches and the
             // budget clamp live in `model::thinking::reasoning_for_request` —
@@ -1007,7 +1077,7 @@ impl ApiService {
             // path inherits (cc 2.1.198). Behavior is byte-identical to the
             // previous inline block.
             req.reasoning =
-                crate::model::thinking::reasoning_for_request(self.thinking, model, req.max_tokens);
+                crate::model::thinking::reasoning_for_request(thinking, model, req.max_tokens);
 
             // temperature:1 ONLY when thinking is disabled AND the model is in the
             // `rhn` temperature-gate set (binary @205866168:
@@ -1039,16 +1109,18 @@ impl ApiService {
     /// hoisted value through as a parameter).
     /// Build the per-request [`BetaContext`] (the binary's `xLr(model)` inputs)
     /// from the prepared request body: the resolved model id and `speed: "fast"`.
-    /// `interactive`/`show_thinking_summaries` use the faithful external-default
-    /// (interactive TUI, no summaries) — wiring the live session flags is a
-    /// documented follow-up; the dominant interactive path matches the binary.
+    /// Interactivity and `showThinkingSummaries` come from the process session
+    /// flags published by the composition root, matching Claude's module-level
+    /// `getIsNonInteractiveSession()` / initial-settings reads.
     fn beta_context(prepared: &crate::PreparedLlmCall) -> BetaContext {
         let model = prepared
             .provider_request
             .body_json
             .get("model")
             .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
+            // Vertex/Bedrock codecs move the model into the URL; keep beta
+            // capability checks tied to the resolved request model.
+            .unwrap_or(&prepared.route.resolved_route.request_model);
         let fast_mode = prepared
             .provider_request
             .body_json
@@ -1063,9 +1135,26 @@ impl ApiService {
             .get("output_config")
             .and_then(|oc| oc.get("effort"))
             .is_some();
+        let has_tool_search = prepared
+            .provider_request
+            .body_json
+            .get("tools")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|tools| {
+                tools.iter().any(|tool| {
+                    tool.get("name").and_then(serde_json::Value::as_str) == Some("ToolSearch")
+                        || tool
+                            .get("defer_loading")
+                            .and_then(serde_json::Value::as_bool)
+                            == Some(true)
+                })
+            });
         BetaContext::for_model(model)
+            .with_interactive(!traits::session_flags::is_non_interactive_session())
+            .with_show_thinking_summaries(traits::session_flags::show_thinking_summaries())
             .with_fast_mode(fast_mode)
             .with_effort(has_effort)
+            .with_tool_search(has_tool_search)
     }
 
     /// Return host-validated CLI betas only for the first-party Anthropic
@@ -1196,10 +1285,17 @@ impl ApiService {
         if !Self::is_anthropic_family_protocol(&prepared.route.protocol) {
             return;
         }
-        // claude-code's `ol` beta arg is empty on the first-party path (betas ride
-        // the `anthropic-beta` header, not the body); the bedrock body-beta list is
-        // a separable, currently-dormant path.
-        let mut extra = Self::parse_extra_body(&[]);
+        // Bedrock carries a narrow beta subset in `anthropic_beta` inside the
+        // body. Other Anthropic-family routes carry their betas in headers.
+        let body_betas = if matches!(
+            prepared.route.protocol,
+            crate::ProtocolFamily::BedrockClaude
+        ) {
+            bedrock_extra_body_betas(&Self::beta_context(prepared))
+        } else {
+            Vec::new()
+        };
+        let mut extra = Self::parse_extra_body(&body_betas);
         if extra.is_empty() {
             return;
         }
@@ -1243,17 +1339,22 @@ impl ApiService {
     }
 
     fn inject_headers(&self, prepared: &mut crate::PreparedLlmCall, request_id: &str) {
-        // Anthropic beta headers are protocol-specific. OpenAI/Gemini/Vertex/
-        // Bedrock/Azure routes must not receive Anthropic beta headers.
-        if matches!(
-            prepared.route.protocol,
-            crate::ProtocolFamily::AnthropicMessages
-        ) {
+        // Provider-specific tool-search beta: first-party/Foundry use
+        // advanced-tool-use, Vertex uses tool-search-tool, and Bedrock carries
+        // tool-search-tool in the request body's anthropic_beta array.
+        let beta_provider = match prepared.route.protocol {
+            crate::ProtocolFamily::AnthropicMessages | crate::ProtocolFamily::FoundryClaude => {
+                Some(Provider::Anthropic)
+            }
+            crate::ProtocolFamily::VertexClaude => Some(Provider::Vertex),
+            _ => None,
+        };
+        if let Some(provider) = beta_provider {
             let ctx = Self::beta_context(prepared);
             let custom_betas = self.custom_cli_betas(prepared);
             apply_beta_header_with_auth_and_custom(
                 &mut prepared.provider_request,
-                Provider::Anthropic,
+                provider,
                 Endpoint::MessagesCreate,
                 &ctx,
                 self.effective_subscriber().is_subscriber,
@@ -1274,15 +1375,19 @@ impl ApiService {
 
     /// Same as [`inject_headers`] but for the streaming endpoint.
     fn inject_stream_headers(&self, prepared: &mut crate::PreparedLlmCall, request_id: &str) {
-        if matches!(
-            prepared.route.protocol,
-            crate::ProtocolFamily::AnthropicMessages
-        ) {
+        let beta_provider = match prepared.route.protocol {
+            crate::ProtocolFamily::AnthropicMessages | crate::ProtocolFamily::FoundryClaude => {
+                Some(Provider::Anthropic)
+            }
+            crate::ProtocolFamily::VertexClaude => Some(Provider::Vertex),
+            _ => None,
+        };
+        if let Some(provider) = beta_provider {
             let ctx = Self::beta_context(prepared);
             let custom_betas = self.custom_cli_betas(prepared);
             apply_beta_header_with_auth_and_custom(
                 &mut prepared.provider_request,
-                Provider::Anthropic,
+                provider,
                 Endpoint::MessagesCreateStream,
                 &ctx,
                 self.effective_subscriber().is_subscriber,
@@ -2053,6 +2158,7 @@ impl ApiService {
                                     // chain index so the next iteration's ctl
                                     // points at chain[chain_idx] (or is
                                     // exhausted → allow_fallback=false).
+                                    strip_signature_blocks_for_fallback(&mut req.messages);
                                     req.model = fallback_model;
                                     chain_idx += 1;
                                     // Reset the consecutive-overload counter so
@@ -2316,6 +2422,27 @@ impl ApiService {
     ) -> Result<u64, LlmError> {
         let req = self.build_request(model, profile, system, messages, tools, false, None)?;
         crate::model::count_tokens::count_tokens(
+            self.client.as_ref(),
+            self.transport.as_ref(),
+            &req,
+        )
+        .await
+    }
+
+    /// Return an exact provider token count when the resolved route supports
+    /// it. Unlike [`Self::count_tokens`], this never substitutes the generic
+    /// text-only approximation, which is unsuitable for ToolSearch's schema
+    /// threshold calculation.
+    pub async fn count_tokens_exact(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&str>,
+        messages: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+    ) -> Result<Option<u64>, LlmError> {
+        let req = self.build_request(model, profile, system, messages, tools, false, None)?;
+        crate::model::count_tokens::try_count_tokens_exact(
             self.client.as_ref(),
             self.transport.as_ref(),
             &req,

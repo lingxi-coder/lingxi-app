@@ -57,9 +57,10 @@ pub mod record;
 pub mod runtime;
 
 pub use config::{
-    bool_env, compute_content_max_length, env_truthy, int_env, js_number, ExporterKind,
-    GateTimeouts, LogIncludeFlags, MetricsInclude, OtelConfig, OtlpExporterConfig, OtlpProtocol,
-    Signal, DEFAULT_CONTENT_MAX_LENGTH, ENV_CONTENT_MAX_LENGTH, ENV_ENABLE_TELEMETRY,
+    bool_env, compute_content_max_length, env_truthy, int_env, js_number, ConfigValue,
+    ConfigValueSource, ExporterKind, GateTimeouts, LogIncludeFlags, MetricsInclude, OtelConfig,
+    OtlpExporterConfig, OtlpProtocol, Signal, DEFAULT_CONTENT_MAX_LENGTH, ENV_CONTENT_MAX_LENGTH,
+    ENV_ENABLE_TELEMETRY,
 };
 pub use headers_helper::{validate_helper_output, ExecOutcome, HeadersHelperState, ResolveOutcome};
 pub use record::{
@@ -69,7 +70,8 @@ pub use record::{
 };
 pub use runtime::{
     emit_assistant_response_log, emit_hook_lifecycle, emit_named_log_event, install_process,
-    prometheus_text, record_counter, record_histogram, record_lines_of_code_change, TelemetryGuard,
+    install_process_with_config, prometheus_text, record_counter, record_histogram,
+    record_lines_of_code_change, TelemetryGuard,
 };
 
 /// Whether the OpenTelemetry monitoring stack is enabled for this process

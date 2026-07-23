@@ -56,7 +56,9 @@ use tui_core::permission_bridge::PermissionExchange;
 use tui_core::theme::Theme;
 
 use crate::bottom_pane::ask_user_question_view::AskUserQuestionView;
-use crate::bottom_pane::completion_view::{command_items_merged, CompletionView, RegistrySlashRow};
+use crate::bottom_pane::completion_view::{
+    command_items_merged, emoji_items, exact_emoji, CompletionView, RegistrySlashRow,
+};
 use crate::bottom_pane::model_picker_view::ModelPickerView;
 use crate::bottom_pane::pending_input_preview::PendingInputPreview;
 use crate::bottom_pane::permission_view::PermissionView;
@@ -194,6 +196,10 @@ pub struct BottomPane {
     /// token is being typed. NOT a stacked view — it coexists with the
     /// composer (typing keeps filtering).
     completion: Option<CompletionView>,
+    /// Whether `:shortcode` emoji suggestions are enabled. Claude Code enables
+    /// these by default; `settings.emojiCompletionEnabled=false` disables only
+    /// this completion source without affecting `/command` or `@file`.
+    emoji_completion_enabled: bool,
     /// The session's active permission mode, shown as the indicator line below
     /// the composer (claude-code `⏵⏵ accept edits on (shift+tab to cycle)`) and
     /// cycled by Shift+Tab. Seeded from the boot mode via
@@ -278,6 +284,7 @@ impl BottomPane {
         Self {
             composer: Composer::default(),
             completion: None,
+            emoji_completion_enabled: true,
             permission_mode: permission::PermissionMode::Default,
             bypass_available: false,
             vim: None,
@@ -311,6 +318,12 @@ impl BottomPane {
     /// when the command registry is wired and after `/reload-skills`.
     pub fn set_registry_commands(&mut self, rows: Vec<RegistrySlashRow>) {
         self.registry_commands = rows;
+        self.sync_completion();
+    }
+
+    /// Enable/disable emoji shortcode completion for this mounted session.
+    pub fn set_emoji_completion_enabled(&mut self, enabled: bool) {
+        self.emoji_completion_enabled = enabled;
         self.sync_completion();
     }
 
@@ -459,6 +472,15 @@ impl BottomPane {
         self.composer.insert_str(&normalized);
         self.sync_completion();
         BottomPaneOutcome::Consumed
+    }
+
+    /// Advance the active modal's time-based state. This is separate from
+    /// input routing so an idle questionnaire can auto-continue when its
+    /// countdown expires.
+    pub fn handle_view_tick(&mut self, now: Instant) -> BottomPaneOutcome {
+        self.view_stack
+            .route_tick(now)
+            .map_or(BottomPaneOutcome::Consumed, Self::map_view_outcome)
     }
 
     /// The next `[Pasted Content N chars]` placeholder: the first paste of a
@@ -1002,9 +1024,15 @@ impl BottomPane {
             }
             KeyCode::Tab => {
                 let insert = self.completion.as_ref()?.selected_insert().to_string();
-                // An `@file` token completes in place; a `/command` replaces
-                // the whole buffer.
-                if let Some((at, _)) = self.composer.at_fragment() {
+                // Emoji and `@file` tokens complete in place; a `/command`
+                // replaces the whole buffer.
+                if let Some((start, _)) = self
+                    .emoji_completion_enabled
+                    .then(|| self.composer.emoji_fragment())
+                    .flatten()
+                {
+                    self.composer.complete_emoji(start, &insert);
+                } else if let Some((at, _)) = self.composer.at_fragment() {
                     self.composer.complete_at(at, &insert);
                 } else {
                     self.composer.replace_all(&insert);
@@ -1031,7 +1059,15 @@ impl BottomPane {
                     return None;
                 }
                 let insert = self.completion.as_ref()?.selected_insert().to_string();
-                if let Some((at, _)) = self.composer.at_fragment() {
+                if let Some((start, _)) = self
+                    .emoji_completion_enabled
+                    .then(|| self.composer.emoji_fragment())
+                    .flatten()
+                {
+                    self.composer.complete_emoji(start, &insert);
+                    self.completion = None;
+                    Some(BottomPaneOutcome::Consumed)
+                } else if let Some((at, _)) = self.composer.at_fragment() {
                     // `@file`: commit the highlighted path in place + close.
                     self.composer.complete_at(at, &insert);
                     self.completion = None;
@@ -1062,8 +1098,18 @@ impl BottomPane {
 
     /// Recompute the completion popup from the current composer text: a
     /// `/command` fragment (whole buffer) shows command matches; an `@file`
-    /// token at the cursor shows file matches; anything else closes it.
+    /// token or enabled `:emoji` shortcode at the cursor shows token matches;
+    /// anything else closes it.
     fn sync_completion(&mut self) {
+        // A fully typed shortcode replaces inline as soon as its closing colon
+        // arrives; the popup is only needed for partial fragments/navigation.
+        if self.emoji_completion_enabled {
+            if let Some((start, fragment)) = self.composer.emoji_fragment() {
+                if let Some(glyph) = exact_emoji(&fragment) {
+                    self.composer.complete_emoji(start, glyph);
+                }
+            }
+        }
         let text = self.composer.text();
         let is_command =
             text.starts_with('/') && !text.contains('\n') && !text.contains(char::is_whitespace);
@@ -1071,6 +1117,12 @@ impl BottomPane {
             self.completion =
                 CompletionView::new(command_items_merged(&text, &self.registry_commands));
             return;
+        }
+        if self.emoji_completion_enabled {
+            if let Some((_, fragment)) = self.composer.emoji_fragment() {
+                self.completion = CompletionView::new(emoji_items(&fragment));
+                return;
+            }
         }
         if let Some((_, fragment)) = self.composer.at_fragment() {
             self.completion = CompletionView::new(crate::files::file_completions(&fragment));
@@ -1707,6 +1759,14 @@ impl ViewStack {
     pub fn route_paste(&mut self, text: &str) -> Option<ViewOutcome> {
         let view = self.views.last_mut()?;
         let outcome = view.handle_paste(text);
+        Some(self.apply(outcome))
+    }
+
+    /// Advance the active view's time-based state and apply the same stack
+    /// completion rules used by keyboard and paste outcomes.
+    pub fn route_tick(&mut self, now: Instant) -> Option<ViewOutcome> {
+        let view = self.views.last_mut()?;
+        let outcome = view.handle_tick(now);
         Some(self.apply(outcome))
     }
 
@@ -2487,6 +2547,43 @@ mod tests {
         // Tab replaces the whole buffer for a /command.
         let _ = pane.handle_key(key(KeyCode::Tab));
         assert_eq!(pane.composer().text(), "/mcp");
+    }
+
+    #[test]
+    fn emoji_shortcode_completion_filters_and_inserts_the_glyph() {
+        let mut pane = pane();
+        typ(&mut pane, ":hea");
+        let popup = pane.completion().expect(":hea opens emoji completion");
+        assert!(
+            popup
+                .items()
+                .iter()
+                .any(|item| item.label.starts_with(":heart:")),
+            "heart shortcode is suggested"
+        );
+
+        // Typing the canonical closing colon performs inline replacement
+        // immediately, without requiring an extra Enter/Tab.
+        typ(&mut pane, "rt:");
+        assert_eq!(pane.composer().text(), "❤️");
+        assert!(pane.completion().is_none());
+
+        pane.composer.replace_all(":HEART:");
+        pane.sync_completion();
+        assert_eq!(pane.composer().text(), "❤️");
+    }
+
+    #[test]
+    fn emoji_shortcode_completion_setting_disables_only_emoji_source() {
+        let mut pane = pane();
+        pane.set_emoji_completion_enabled(false);
+        typ(&mut pane, ":hea");
+        assert!(pane.completion().is_none());
+
+        // Other completion sources are not affected by the setting.
+        pane.composer.replace_all("/m");
+        pane.sync_completion();
+        assert!(pane.completion().is_some());
     }
 
     #[test]

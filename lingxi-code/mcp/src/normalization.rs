@@ -33,9 +33,6 @@
 //! wire tool name is kept on [`traits::McpToolDto::tool_name`] and recovered for
 //! dispatch by [`crate::registry::McpRegistry::resolve_wire_tool_name`].
 
-/// Claude.ai server names are prefixed with this string.
-const CLAUDEAI_SERVER_PREFIX: &str = "claude.ai ";
-
 /// Normalize a server name to the API pattern `^[a-zA-Z0-9_-]{1,64}$` by
 /// replacing every invalid character (including `.` and spaces) with `_`.
 ///
@@ -48,45 +45,7 @@ const CLAUDEAI_SERVER_PREFIX: &str = "claude.ai ";
 /// here.
 #[must_use]
 pub fn normalize_name_for_mcp(name: &str) -> String {
-    let mut normalized: String = name
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    if name.starts_with(CLAUDEAI_SERVER_PREFIX) {
-        normalized = collapse_and_trim_underscores(&normalized);
-    }
-    normalized
-}
-
-/// `replace(/_+/g, '_').replace(/^_|_$/g, '')` — collapse runs of `_` to one,
-/// then strip a single leading and trailing `_`.
-fn collapse_and_trim_underscores(s: &str) -> String {
-    let mut collapsed = String::with_capacity(s.len());
-    let mut prev_underscore = false;
-    for c in s.chars() {
-        if c == '_' {
-            if !prev_underscore {
-                collapsed.push('_');
-            }
-            prev_underscore = true;
-        } else {
-            collapsed.push(c);
-            prev_underscore = false;
-        }
-    }
-    // `^_|_$` strips at most ONE leading and ONE trailing underscore (the JS
-    // regex without the `g` flag replaces a single match of each alternative).
-    let trimmed = collapsed
-        .strip_prefix('_')
-        .unwrap_or(&collapsed)
-        .to_string();
-    trimmed.strip_suffix('_').unwrap_or(&trimmed).to_string()
+    protocol::normalize_name_for_mcp(name)
 }
 
 /// Whether `name` is a reserved MCP server name — claude-code 2.1.206's `TEt`

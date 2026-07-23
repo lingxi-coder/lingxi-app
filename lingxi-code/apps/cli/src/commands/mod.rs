@@ -78,7 +78,7 @@ pub enum Commands {
     SetupToken(setup_token::Cli),
     /// Manage background agents
     Agents(agents::Cli),
-    /// Attach to a running background job
+    /// Open a background session here; Ctrl+Z returns to the shell
     Attach(attach::Cli),
     /// Delete a background session and its worktree. Unlike `stop`, works on
     /// already-exited sessions.

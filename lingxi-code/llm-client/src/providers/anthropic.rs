@@ -481,6 +481,9 @@ fn encode_tool(tool: &ToolDeclaration) -> Value {
     } else {
         obj.insert("input_schema".to_string(), tool.input_schema.clone());
     }
+    if tool.defer_loading {
+        obj.insert("defer_loading".to_string(), Value::Bool(true));
+    }
     Value::Object(obj)
 }
 

@@ -30,6 +30,13 @@ impl OutputStream for SinkAdapter {
     async fn emit_text(&self, text: &str) {
         self.sink.text(text).await;
     }
+    async fn emit_system_notice(&self, body: &str, is_error: bool) {
+        if is_error {
+            self.sink.error("transcript_persistence_failed", body).await;
+        } else {
+            self.sink.command_output("system", body).await;
+        }
+    }
     async fn emit_tool_call(
         &self,
         _id: &protocol::ToolUseId,
@@ -65,5 +72,50 @@ impl OutputStream for SinkAdapter {
                 cost.output_tokens,
             )
             .await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::Mutex;
+
+    #[derive(Default)]
+    struct RecordingSink {
+        errors: Mutex<Vec<(String, String)>>,
+    }
+
+    #[async_trait]
+    impl OutputSink for RecordingSink {
+        async fn text(&self, _s: &str) {}
+        async fn turn_start(&self) {}
+        async fn turn_end(&self, _stop_reason: &str, _usd: f64, _input: u64, _output: u64) {}
+        async fn tool_call(&self, _tool: &str, _input: &serde_json::Value) {}
+        async fn tool_result(&self, _tool: &str, _result: &serde_json::Value) {}
+        async fn tool_heartbeat(&self, _id: &str, _tool: &str, _elapsed_ms: u64) {}
+        async fn command_output(&self, _name: &str, _display: &str) {}
+        async fn error(&self, code: &str, message: &str) {
+            self.errors
+                .lock()
+                .await
+                .push((code.to_string(), message.to_string()));
+        }
+    }
+
+    #[tokio::test]
+    async fn error_system_notice_uses_plain_and_json_sink_error_channel() {
+        let sink = Arc::new(RecordingSink::default());
+        let adapter = SinkAdapter::new(sink.clone());
+        adapter
+            .emit_system_notice("transcript persistence failed", true)
+            .await;
+
+        assert_eq!(
+            sink.errors.lock().await.as_slice(),
+            &[(
+                "transcript_persistence_failed".to_string(),
+                "transcript persistence failed".to_string(),
+            )]
+        );
     }
 }

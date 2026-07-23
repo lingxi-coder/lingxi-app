@@ -16,6 +16,7 @@
 use async_trait::async_trait;
 use protocol::ContentBlock;
 use serde_json::Value;
+use std::path::Path;
 
 /// Identity of the SUBAGENT / in-process-teammate worker a permission prompt is
 /// being raised on behalf of, so the prompt UI can ATTRIBUTE it.
@@ -45,6 +46,23 @@ pub enum PermissionDecision {
     Deny {
         /// Reason surfaced to the model as the `tool_result`.
         reason: String,
+    },
+}
+
+/// Synchronous, prompt-free authorization used while expanding embedded shell
+/// commands from slash-command/skill prompt text. `None` from the trait method
+/// means the gate has no local rule layer and the caller should use its static
+/// fallback policy; a rule-evaluating gate returns one of these decisions from
+/// its live mode/rule snapshot without consulting an interactive prompt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NonInteractivePermissionDecision {
+    /// The command is permitted.
+    Allow,
+    /// The command is rejected. The policy may intentionally omit explanatory
+    /// text, matching `PermissionResult::Deny::explanation`.
+    Deny {
+        /// Optional user-facing denial reason.
+        reason: Option<String>,
     },
 }
 
@@ -81,6 +99,21 @@ pub struct PermissionCheckContext {
     /// is omitted. `None` ⇒ the key is OMITTED. Populated by the
     /// `PolicyPermissionGate` Ask path alongside `decision_reason`.
     pub decision_reason_type: Option<String>,
+    /// Whether every safety-check reason contributing to this Ask may be
+    /// approved by the automated classifier.  `None` means the decision has no
+    /// safety-check reason, so the stdio key is omitted.  For composite
+    /// subcommand reasons the policy gate sets this to `false` if any nested
+    /// safety check is not classifier-approvable.
+    pub classifier_approvable: Option<bool>,
+    /// Whether the tool itself requires interaction while it runs (for example
+    /// `AskUserQuestion`).  The tool registry is the authoritative producer;
+    /// the stdio transport emits the key only when this is `true`, matching the
+    /// upstream `requiresUserInteraction?.() || undefined` shape.
+    pub requires_user_interaction: bool,
+    /// The explicit Ask rule that matched this call, if the policy result
+    /// retains one.  Kept transport-neutral here because this crate sits below
+    /// the permission rule implementation.
+    pub matched_ask_rule: Option<MatchedAskRule>,
     /// `true` when a PreToolUse hook returned `ask`, establishing claude-code's
     /// `hookAskFloor` (BIN 224697675/225722419). With the floor set, an Auto-mode
     /// classifier ALLOW must NOT silently defeat the hook's ask — the ask is kept
@@ -97,22 +130,17 @@ pub struct PermissionCheckContext {
     /// `lingxi-permission`'s `PermissionUpdate` (dep direction, see the note at
     /// the bottom of this file). `None` ⇒ the key is OMITTED from the request.
     ///
-    /// Today no producer populates this: LingXi's policy `Ask`
-    /// ([`PermissionResult::Ask`]) does not model claude-code's
-    /// `PermissionAskDecision.suggestions` (the per-tool ask-suggestion builders,
-    /// e.g. `ruleSuggestionsForCommand`, are unported). The field exists so the
-    /// wire byte-shape is forward-compatible once those builders land; it is the
-    /// declared-partial sub-part of stream-json P5 finding #9.
+    /// Producers populate only suggestions they can derive without widening a
+    /// rule (currently the exact matched-Ask-rule session update). Tool-specific
+    /// suggestion builders may leave this absent.
     pub permission_suggestions: Option<Value>,
     /// The policy Ask's BLOCKED PATH, forwarded as the `blocked_path` field of a
     /// stdio `can_use_tool` request (claude-code `mainPermissionResult.blockedPath`
     /// — the filesystem path a path-scoped ask is gated on). `None` ⇒ the key is
     /// OMITTED.
     ///
-    /// Like [`Self::permission_suggestions`], no producer populates this today:
-    /// LingXi's policy `Ask` does not carry `PermissionAskDecision.blockedPath`.
-    /// Additive Default-None so the wire shape is forward-compatible (the
-    /// declared-partial sub-part of finding #9).
+    /// Path validators populate this only when they retain a structured concrete
+    /// path; non-path and expansion-only asks leave it absent.
     pub blocked_path: Option<String>,
     /// A PER-CALL permission mode OVERRIDE as a WIRE string
     /// (`default`/`plan`/`acceptEdits`/`bypassPermissions`/`dontAsk`/`auto`).
@@ -125,6 +153,17 @@ pub struct PermissionCheckContext {
     /// to before. Only the rule-evaluating `PolicyPermissionGate` consults it;
     /// other transports ignore it.
     pub mode_override: Option<String>,
+}
+
+/// Wire-neutral description of a matched permission Ask rule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatchedAskRule {
+    /// Raw settings source (`userSettings`, `projectSettings`, …).
+    pub source: String,
+    /// Canonical tool name stored in the rule.
+    pub tool_name: String,
+    /// Optional rule-specific content (command/path/domain pattern).
+    pub rule_content: Option<String>,
 }
 
 /// Richer outcome of [`PermissionGate::check_with_context`]: an allow may carry
@@ -143,9 +182,9 @@ pub enum PermissionOutcome {
         /// applied + persisted (claude-code `applyPermissionUpdates` +
         /// `persistPermissionUpdates`, fired in
         /// `permissionPromptToolResultToPermissionDecision`). Each element is a
-        /// `permissionUpdateSchema` discriminated union (the only one LingXi
-        /// persists today is `{type:"addRules", rules:[{toolName, ruleContent?}],
-        /// behavior, destination}`). EMPTY for every gate but
+        /// `permissionUpdateSchema` discriminated union (`addRules`,
+        /// `replaceRules`, `removeRules`, `setMode`, and directory updates are
+        /// supported). EMPTY for every gate but
         /// `StdioControlPermissionGate`. The value is a raw `serde_json::Value`
         /// (not the typed `permission::PermissionUpdate`) because this crate sits
         /// BELOW `lingxi-permission` in the dependency graph and cannot name that
@@ -233,6 +272,38 @@ pub trait PermissionGate: Send + Sync {
     /// error tier.
     async fn check(&self, name: &str, input: &Value) -> PermissionDecision;
 
+    /// Resolve a tool call synchronously and without prompting, after injecting
+    /// transient allow rules such as a prompt command's frontmatter
+    /// `allowed-tools`. This is the live-policy seam used by embedded `!cmd``
+    /// expansion: an unresolved `Ask` is returned as `Deny`, exactly as Claude
+    /// Code's prompt-shell path rejects every non-allow decision.
+    ///
+    /// The default returns `None`, preserving gates that are only prompt
+    /// transports or no-ops; callers then evaluate their construction-time
+    /// fallback policy. `PolicyPermissionGate` overrides this and reads its live
+    /// mode plus `updatedPermissions` overlay on every call.
+    fn check_noninteractive_with_allow_rules(
+        &self,
+        name: &str,
+        input: &Value,
+        transient_allow_rules: &[String],
+    ) -> Option<NonInteractivePermissionDecision> {
+        let _ = (name, input, transient_allow_rules);
+        None
+    }
+
+    /// Return the current `Read`-deny patterns rebased to `cwd` for search
+    /// result filtering. `None` means this gate has no live policy layer and
+    /// the caller should use its construction-time fallback.
+    ///
+    /// `PolicyPermissionGate` overrides this so `updatedPermissions` changes
+    /// take effect in `Glob`/`Grep` on the next call, matching Claude Code's
+    /// per-call read of `toolPermissionContext`.
+    fn read_deny_exclude_globs(&self, cwd: &Path) -> Option<Vec<String>> {
+        let _ = cwd;
+        None
+    }
+
     /// Like [`Self::check`], but carrying the identity of the SUBAGENT/teammate
     /// worker the call originates from so a prompt-building gate can ATTRIBUTE
     /// the prompt to that worker — claude-code 2.1.186 surfaces a background
@@ -285,6 +356,23 @@ pub trait PermissionGate: Send + Sync {
         }
     }
 
+    /// Apply permission-context updates to the live in-memory gate state.
+    ///
+    /// The default is a no-op for prompt-only transports. A rule-evaluating
+    /// gate overrides this so normal and orphaned permission responses update
+    /// the same live context.
+    fn apply_permission_updates(&self, _updates: &[Value]) {}
+
+    /// Persist permission updates through the transport that owns the settings
+    /// roots. This is separate from live application because an outer policy
+    /// gate owns the former while its inner stdio transport owns the latter.
+    async fn persist_permission_updates(&self, _updates: &[Value]) {}
+
+    /// Enable or disable permission persistence for this prompt transport.
+    /// Managed policy calls this with `false` when only centrally managed rules
+    /// are permitted. The default is a no-op for transports without persistence.
+    fn set_permission_persistence_enabled(&self, _enabled: bool) {}
+
     /// Resolve permission when a `PreToolUse` / `PermissionRequest` hook has
     /// already returned `allow` (`HookDecision::Approve`).
     ///
@@ -302,6 +390,31 @@ pub trait PermissionGate: Send + Sync {
     async fn check_after_hook_allow(&self, name: &str, input: &Value) -> PermissionDecision {
         let _ = (name, input);
         PermissionDecision::Allow
+    }
+
+    /// The PERMISSION-REQUEST-hook twin of [`Self::check_after_hook_allow`].
+    ///
+    /// claude-code has TWO hook-allow resolvers and they differ in what an
+    /// ask-rule does:
+    ///
+    /// * `lin` (PreToolUse) re-checks the rules and, on an `ask`, hands the call
+    ///   to the FULL permission pipeline — i.e. it PROMPTS
+    ///   ([`Self::check_after_hook_allow`]).
+    /// * `Fxy`/`epr` (the headless PermissionRequest rescue) re-checks only when
+    ///   the hook supplied `updatedInput` (or the tool requires user
+    ///   interaction) and converts an `ask` into a **hard deny** — that agent has
+    ///   no prompt available, and the hook already consumed the one chance to
+    ///   resolve it.
+    ///
+    /// Additive DEFAULTED method (frozen-trait safe): the default delegates to
+    /// [`Self::check_after_hook_allow`], preserving prior behavior for gates that
+    /// carry no rule layer.
+    async fn check_after_hook_allow_rewritten(
+        &self,
+        name: &str,
+        input: &Value,
+    ) -> PermissionDecision {
+        self.check_after_hook_allow(name, input).await
     }
 
     /// Resolve permission when the session is in PLAN mode — i.e. the model has
@@ -433,6 +546,22 @@ pub trait PermissionGate: Send + Sync {
     /// (frozen-trait safe).
     async fn set_permission_mode(&self, mode: &str) -> Result<(), String> {
         let _ = mode;
+        Ok(())
+    }
+
+    /// Set or clear the LIVE per-MCP-server permission-mode override used by
+    /// Claude's control-channel `set_mcp_permission_mode_override` surface.
+    ///
+    /// `mode == Some("default")` or `Some("auto")` stores a tighten-only
+    /// override for `server_name`; `mode == None` clears it. The default is a
+    /// no-op `Ok(())`: only `PolicyPermissionGate` carries a live per-server mode
+    /// layer. Additive DEFAULTED (frozen-trait safe).
+    async fn set_mcp_permission_mode_override(
+        &self,
+        server_name: &str,
+        mode: Option<&str>,
+    ) -> Result<(), String> {
+        let _ = (server_name, mode);
         Ok(())
     }
 

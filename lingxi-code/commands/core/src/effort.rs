@@ -320,8 +320,8 @@ fn convert_effort_value_to_level(level: EffortLevel) -> EffortLevel {
 /// be sent for `model`, following `env → app-state → model default`. `None`
 /// means "send no effort param" (env cleared, or no default).
 ///
-/// `app_state` mirrors the TS `appStateEffortValue` argument; this port has no
-/// app-state effort read seam, so call sites pass `None`.
+/// `app_state` mirrors the TS `appStateEffortValue` argument and is read from
+/// the live orchestrator handle by `/effort`.
 fn resolve_applied_effort(model: &str, app_state: Option<EffortLevel>) -> Option<EffortLevel> {
     match effort_env_override() {
         // envOverride === null → undefined.
@@ -382,8 +382,7 @@ impl EffortHandler {
     }
 
     /// `showCurrentEffort` (`effort.tsx` L62-75) — the `''`/`current`/`status`
-    /// branch. With no persisted effort (no read seam) the effective value is
-    /// driven entirely by the env override.
+    /// branch. The app-state value is the orchestrator's live request effort.
     async fn show_current(&self) -> String {
         match effort_env_override() {
             EnvOverride::Pinned { level, .. } => {
@@ -394,20 +393,29 @@ impl EffortHandler {
                     level.description()
                 )
             }
-            EnvOverride::Cleared | EnvOverride::Unset => {
-                // Effective value is undefined → TS renders
-                // `Effort level: auto (currently {level})` where `{level}` is
-                // `getDisplayedEffortLevel(model, appStateEffort)` (effort.ts
-                // L178). This port has no app-state effort read seam (TS reads
-                // `appStateEffort`, not `settings.json`, so a persisted level
-                // does NOT surface here either), so app-state is `None`; with
-                // every reachable model default seam-blocked the resolver lands
-                // on the API default `high`. The level is now computed by the
-                // real `getDisplayedEffortLevel` port rather than hard-coded.
+            EnvOverride::Cleared => {
                 let model = self.handle.get_status_snapshot().await.model;
                 format!(
                     "Effort level: auto (currently {})",
                     get_displayed_effort_level(&model, None).as_str()
+                )
+            }
+            EnvOverride::Unset => {
+                // Effective value is undefined → TS renders
+                // `Effort level: auto (currently {level})` where `{level}` is
+                // `getDisplayedEffortLevel(model, appStateEffort)` (effort.ts
+                // L178). The handle exposes the live app-state value directly;
+                // this deliberately does not re-read `settings.json`.
+                let model = self.handle.get_status_snapshot().await.model;
+                let app_state = self
+                    .handle
+                    .current_effort()
+                    .await
+                    .as_deref()
+                    .and_then(parse_effort_level);
+                format!(
+                    "Effort level: auto (currently {})",
+                    get_displayed_effort_level(&model, app_state).as_str()
                 )
             }
         }
@@ -415,16 +423,20 @@ impl EffortHandler {
 
     /// `unsetEffortLevel` (`effort.tsx` L76-106) — the `auto`/`unset` branch.
     /// Deletes the persisted `effortLevel`; only the env-conflict note varies.
-    ///
-    /// Kept an associated fn (not `&self`): the body only touches the
-    /// process env + the user `settings.json` via free helpers, so a `&self`
-    /// receiver would trip `clippy::unused_self`.
-    fn clear_effort() -> String {
+    async fn clear_effort(&self) -> String {
         // updateSettingsForSource('userSettings', { effortLevel: undefined }).
         if let Err(msg) = persist_effort_level(None) {
             return format!("Failed to set effort level: {msg}");
         }
-        match effort_env_override() {
+        let env = effort_env_override();
+        let live = match &env {
+            EnvOverride::Pinned { level, .. } => Some(level.as_str().to_string()),
+            EnvOverride::Cleared | EnvOverride::Unset => None,
+        };
+        if let Err(error) = self.handle.set_effort_level(live).await {
+            return format!("Failed to set effort level: {error}");
+        }
+        match env {
             EnvOverride::Pinned { raw, .. } => format!(
                 "Cleared effort from settings, but {EFFORT_ENV_VAR}={raw} still controls this session"
             ),
@@ -433,11 +445,7 @@ impl EffortHandler {
     }
 
     /// `setEffortValue` (`effort.tsx` L16-61) — the valid-level branch.
-    ///
-    /// Kept an associated fn (not `&self`) for the same reason as
-    /// [`Self::clear_effort`] — no receiver state is used, so `&self` would
-    /// trip `clippy::unused_self`.
-    fn set_effort(level: EffortLevel) -> String {
+    async fn set_effort(&self, level: EffortLevel) -> String {
         // toPersistableEffort: low/medium/high persist, max is session-only.
         let persistable = to_persistable(level);
         if persistable.is_some() {
@@ -446,10 +454,22 @@ impl EffortHandler {
             }
         }
 
+        let env = effort_env_override();
+        let live = match &env {
+            EnvOverride::Pinned {
+                level: env_level, ..
+            } => Some(env_level.as_str().to_string()),
+            EnvOverride::Cleared => None,
+            EnvOverride::Unset => Some(level.as_str().to_string()),
+        };
+        if let Err(error) = self.handle.set_effort_level(live).await {
+            return format!("Failed to set effort level: {error}");
+        }
+
         // TS flags env conflict only when env pins a *different* level than the
         // one the user asked for (`envOverride !== effortValue`). The note
         // wording then branches on whether the level was persistable.
-        match effort_env_override() {
+        match env {
             EnvOverride::Pinned {
                 level: env_level,
                 raw,
@@ -505,7 +525,7 @@ impl BuiltinCommandHandler for EffortHandler {
         {
             self.show_current().await
         } else if normalized == "auto" || normalized == "unset" {
-            Self::clear_effort()
+            self.clear_effort().await
         } else if normalized == "ultracode" {
             // `ZVn`: `ultracode` routes to `Pum`, the gated handler. When the
             // dynamic-workflow seam is off it returns the "needs dynamic
@@ -516,13 +536,13 @@ impl BuiltinCommandHandler for EffortHandler {
             // the `xhigh` mapping here.
             if dynamic_workflows_enabled() {
                 // ultracode → xhigh (Hum/Pum). Session-only orchestration.
-                Self::set_effort(EffortLevel::Xhigh)
+                self.set_effort(EffortLevel::Xhigh).await
             } else {
                 // `Pum` gate-off message (verbatim, v2.1.183).
                 "Ultracode needs dynamic workflows enabled (see /config). Valid options are: low, medium, high, xhigh, max, auto".to_string()
             }
         } else if let Some(level) = parse_effort_level(&normalized) {
-            Self::set_effort(level)
+            self.set_effort(level).await
         } else {
             // `ZVn` invalid-arg branch — uses the original (un-normalized,
             // trimmed) argument text. The `ultracode,` hint is appended only
@@ -728,6 +748,21 @@ Effort levels:\n\
             env.read_settings().unwrap().get("effortLevel"),
             Some(&json!("xhigh"))
         );
+    }
+
+    #[tokio::test]
+    async fn set_and_clear_update_the_live_effort_state() {
+        let _env = TestEnv::new();
+        let mock = Arc::new(MockOrchestratorHandle::new());
+        let handler = EffortHandler::new(mock.clone());
+
+        let result = handler.handle(&args("medium")).await;
+        assert!(matches!(result, CommandResult::Done { .. }));
+        assert_eq!(mock.current_effort().await.as_deref(), Some("medium"));
+
+        let result = handler.handle(&args("auto")).await;
+        assert!(matches!(result, CommandResult::Done { .. }));
+        assert_eq!(mock.current_effort().await, None);
     }
 
     #[tokio::test]

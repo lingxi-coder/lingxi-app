@@ -197,20 +197,10 @@ pub struct Argv {
     ///
     /// `text` = plain stdout (default). `json` = same as `--json` (NDJSON per event).
     /// `stream-json` = realtime bidirectional NDJSON I/O protocol (SDK consumers).
-    //
-    // NOTE(stream-json): the full bidirectional stream-json I/O subsystem is not
-    // yet implemented. Parsing succeeds but `stream-json` behaves like `text`
-    // until the realtime NDJSON I/O subsystem is wired.
-    // TODO(stream-json): realtime NDJSON I/O subsystem
     #[arg(long = "output-format", value_name = "format", value_parser = ["text", "json", "stream-json"])]
     pub output_format: Option<String>,
 
     /// Input format (only works with --print): "text" (default), or "stream-json" (realtime streaming input)
-    //
-    // NOTE(stream-json): the full bidirectional stream-json input subsystem is not
-    // yet implemented. Parsing succeeds but `stream-json` behaves like `text`
-    // until the realtime NDJSON I/O subsystem is wired.
-    // TODO(stream-json): realtime NDJSON I/O subsystem
     #[arg(long = "input-format", value_name = "format", value_parser = ["text", "stream-json"])]
     pub input_format: Option<String>,
 
@@ -241,11 +231,11 @@ pub struct Argv {
     pub append_system_prompt_file: Option<PathBuf>,
 
     /// Comma or space-separated list of tool names to allow (e.g. "Bash(git *) Edit")
-    #[arg(long = "allowed-tools", visible_alias = "allowedTools", value_name = "tools", num_args = 1..)]
+    #[arg(long = "allowedTools", visible_alias = "allowed-tools", value_name = "tools", num_args = 1..)]
     pub allowed_tools: Option<Vec<String>>,
 
     /// Comma or space-separated list of tool names to deny (e.g. "Bash(git *) Edit")
-    #[arg(long = "disallowed-tools", visible_alias = "disallowedTools", value_name = "tools", num_args = 1..)]
+    #[arg(long = "disallowedTools", visible_alias = "disallowed-tools", value_name = "tools", num_args = 1..)]
     pub disallowed_tools: Option<Vec<String>>,
 
     /// Specify the list of available tools from the built-in set. Use "" to disable all tools
@@ -265,7 +255,6 @@ pub struct Argv {
     pub settings: Option<String>,
 
     /// Load MCP servers from JSON files or strings (space-separated)
-    // TODO(mcp-config): wire into mcp server loading from CLI flag
     #[arg(long = "mcp-config", value_name = "configs", num_args = 1..)]
     pub mcp_config: Option<Vec<String>>,
 
@@ -383,11 +372,9 @@ pub struct Argv {
     // picker `filterByPr: rt` (bare flag → `!0` = only PR-linked sessions;
     // a value is parsed by `wqc` — leading int, else a
     // `/(pull|pull-requests|-\/merge_requests)\/(\d+)/` URL — and filters
-    // `prNumber === n`; an unparseable value applies NO narrowing). lingxi
-    // routes `--from-pr` through the same `--resume` pickers with that
-    // filter (`run::run_from_pr`). RESIDUAL: lingxi session metadata carries
-    // no `prNumber` yet (session JSONL `pr-link` deferral), so a PR filter
-    // currently matches zero sessions.
+    // `prNumber === n`; an unparseable value applies NO narrowing). LingXi
+    // routes `--from-pr` through the same pickers and projects persisted
+    // `pr-link` metadata onto each resume row.
     // No `require_equals`: commander's `--from-pr [value]` consumes the next
     // SPACE-separated token as the value (`--from-pr 123`), so we must NOT force
     // the `--from-pr=123` form or `123` would be mis-parsed as the prompt.
@@ -418,34 +405,29 @@ pub struct Argv {
     pub debug_file: Option<PathBuf>,
 
     /// Include partial message chunks as they arrive (only works with --print and --output-format=stream-json)
-    // TODO(stream-json): realtime NDJSON I/O subsystem
     #[arg(long = "include-partial-messages")]
     pub include_partial_messages: bool,
 
     /// Include all hook lifecycle events in the output stream (only works with --output-format=stream-json)
-    // TODO(stream-json): realtime NDJSON I/O subsystem
     #[arg(long = "include-hook-events")]
     pub include_hook_events: bool,
 
     /// Forward subagent text and thinking blocks as assistant/user messages with parent_tool_use_id set (only works with --print and --output-format=stream-json)
-    // TODO(stream-json): the parent stream-json emitter does not yet re-emit
-    // subagent blocks with a non-null `parent_tool_use_id`, so the effective
-    // flag is plumbed onto the stream but currently inert.
     #[arg(long = "forward-subagent-text")]
     pub forward_subagent_text: bool,
 
     /// Re-emit user messages from stdin back on stdout for acknowledgment (only works with --input-format=stream-json and --output-format=stream-json)
-    // TODO(stream-json): realtime NDJSON I/O subsystem
     #[arg(long = "replay-user-messages")]
     pub replay_user_messages: bool,
 
     /// Thinking mode: enabled (equivalent to adaptive), disabled (hidden flag)
-    // TODO(thinking): wire into model thinking budget configuration
+    // Resolved into the boot session ThinkingConfig after explicit token budgets.
     #[arg(long = "thinking", value_name = "mode", value_parser = ["enabled", "adaptive", "disabled"], hide = true)]
     pub thinking: Option<String>,
 
     /// How thinking content appears in the response (hidden flag)
-    // TODO(thinking-display): wire into thinking display configuration
+    // Applied to TUI/stream-json sinks; `omitted` suppresses display only and
+    // leaves model-facing transcript reasoning intact.
     #[arg(long = "thinking-display", value_name = "display", value_parser = ["summarized", "omitted"], hide = true)]
     pub thinking_display: Option<String>,
 
@@ -640,7 +622,7 @@ pub struct Argv {
 
     /// Start the session as a background agent and return immediately (manage
     /// with `lingxi-cli agents`)
-    #[arg(long = "background", visible_alias = "bg")]
+    #[arg(long = "bg", visible_alias = "background")]
     pub background: bool,
 
     /// Enable SendUserMessage tool for agent-to-user communication

@@ -20,6 +20,30 @@ body {
 @keyframes beta-spin { to { transform: rotate(360deg); } }
 .mono { font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace; }
 .beta-spinner { width: 12px; height: 12px; display: inline-block; flex: 0 0 auto; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: beta-spin 700ms linear infinite; }
+.beta-rich-prompt[data-empty='true']::before {
+  content: attr(data-placeholder);
+  color: color-mix(in srgb, currentColor 42%, transparent);
+  pointer-events: none;
+}
+.beta-file-mention {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: min(360px, 80%);
+  margin: 0 2px;
+  color: inherit;
+  font-weight: 570;
+  line-height: 1.2;
+  vertical-align: -2px;
+  white-space: nowrap;
+  cursor: default;
+  user-select: all;
+}
+.beta-file-mention > svg { flex: 0 0 auto; }
+.beta-file-mention > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 button { font-family: inherit; }
 textarea, input { font-family: inherit; }

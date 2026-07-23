@@ -5,13 +5,16 @@
 //! by `type`:
 //!
 //! - `user`   → the primary turn; role-checked + uuid-deduped + fed into the
-//!              orchestrator's sequential turn loop.
+//!              orchestrator's sequential input loop.
+//! - `assistant` / `system` → ordered history seed entries.
+//! - `bash_command` → a sandboxed shell command executed between turns.
 //! - `keep_alive` → silently ignored.
-//! - `update_environment_variables` → recognized (allowlist handling deferred P5).
+//! - `update_environment_variables` → applies the supplied string map to the
+//!              live process environment (SDK auth/config refresh parity).
 //! - `control_request` → `request` field required; routed onto the control channel.
-//!   Phase 0 stub: replies with `control_response` error
-//!   `"Unsupported control request subtype: <subtype>"` for every subtype.
-//! - `control_response` → routed onto the pending-resolver channel (Phase 0: stub/ignored).
+//!   `control_cancel_request` is also routed to this control channel for active
+//!   permission round-trip cancellation.
+//! - `control_response` → routed onto the pending-resolver channel.
 //! - unknown  → warn to stderr, drop.
 //!
 //! ## Dedup + replay (`--replay-user-messages`)
@@ -27,19 +30,20 @@
 //! `Err(InputError::MalformedJson)` (caller exits 1). Role mismatch and a
 //! missing `control_request.request` field are also fatal.
 //!
-//! ## P5 / deferred gaps (see .gap-notes/stream-json-p3.md)
-//! - `bash_command` frame
-//! - full `update_environment_variables` allowlist
-//! - `control_request` full protocol (Phase 1+)
-//! - `control_response` pending-request resolution (Phase 2+)
-//! - inbound `assistant`/`system` history seeding
+//! ## Remaining private/host-dependent gaps
+//! - `get_context_usage`/`get_session_cost`/`set_permission_mode` wire shapes
+//!   are conservative approximations, intentionally not byte-perfect where private
+//!   behavior is uncertain.
 
 #![forbid(unsafe_code)]
 
 use crate::stream_json::{serialize_ndjson_line, OutboundMsg, OutboundTx};
+use protocol::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
 use serde_json::{json, Value};
 use std::collections::HashSet;
-use std::io::{self, BufRead, Write};
+#[cfg(test)]
+use std::io;
+use std::io::{BufRead, Write};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -105,6 +109,38 @@ pub struct UserTurn {
     pub uuid: Option<String>,
 }
 
+/// An externally supplied history entry, kept in input order with user turns.
+#[derive(Debug, Clone)]
+pub struct HistoryInput {
+    /// Canonical engine message appended to session history and JSONL.
+    pub message: ConversationMessage,
+    /// Original normalized assistant frame for `--replay-user-messages`.
+    pub replay_frame: Option<Value>,
+    /// SDK `compact_metadata` payload for a compact-boundary system frame.
+    /// `None` for assistant history. The orchestrator converts this SDK
+    /// snake_case shape into the canonical JSONL compact boundary.
+    pub compact_metadata: Option<Value>,
+}
+
+/// Legacy SDK `bash_command` input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BashCommand {
+    /// Command text executed through the session's sandboxed Bash runner.
+    pub command: String,
+}
+
+/// Ordered data-plane input. A single channel is required so history seeds and
+/// bash output cannot overtake neighboring user turns.
+#[derive(Debug, Clone)]
+pub enum StreamInput {
+    /// Model turn.
+    User(UserTurn),
+    /// Inbound transcript seed.
+    History(HistoryInput),
+    /// Sandboxed shell command.
+    Bash(BashCommand),
+}
+
 // ── Frame dispatch ────────────────────────────────────────────────────────────
 
 /// Dispatch actions produced by [`process_line`].
@@ -112,6 +148,10 @@ pub struct UserTurn {
 pub enum FrameAction {
     /// A validated `user` turn to feed into the orchestrator.
     UserTurn(UserTurn),
+    /// A parsed assistant/system history entry.
+    History(HistoryInput),
+    /// A legacy SDK bash command.
+    BashCommand(BashCommand),
     /// A duplicate `user` frame (same uuid). Carries the ORIGINAL uuid,
     /// content, and timestamp so the replay-ack can echo them verbatim —
     /// claude-code's `SDKUserMessageReplaySchema` requires the original uuid +
@@ -127,9 +167,11 @@ pub enum FrameAction {
     /// (missing-request is validated and fatal before this variant is returned).
     ControlRequest(Value),
     /// A `control_response` frame — routed to the pending-request resolver.
-    /// Carries the full parsed (normalised) frame. Phase 0: stub/ignored;
-    /// Phase 2 resolves pending `send_request` futures from this.
+    /// Carries the full parsed (normalised) frame.
     ControlResponse(Value),
+    /// A `control_cancel_request` frame for an in-flight outbound control request.
+    /// Carries the `request_id` to cancel.
+    ControlCancel(String),
     /// The frame was silently consumed (keep_alive, update_environment_variables,
     /// assistant/system, unknown with warning).
     Consumed,
@@ -171,15 +213,16 @@ pub fn process_line(
         "keep_alive" => Ok(FrameAction::Consumed),
 
         "update_environment_variables" => {
-            // P3: recognize the frame, apply known allowlisted env vars.
-            // DEFER (P5): full allowlist + control_response ack when request_id present.
-            if let Some(env_vars) = frame.get("env").and_then(Value::as_object) {
+            // Claude Code's structuredIO applies every entry from the canonical
+            // `variables` map directly to the live process. This channel is
+            // print-mode SDK input and already shares the same trust boundary as
+            // user/control frames; restricting it breaks credential refresh and
+            // provider/runtime reconfiguration. Non-string values are rejected
+            // by Claude's schema and ignored here rather than coerced.
+            if let Some(env_vars) = frame.get("variables").and_then(Value::as_object) {
                 for (k, v) in env_vars {
-                    // Only apply the one confirmed key (OD-9).
-                    if k == "CLAUDE_CODE_OAUTH_TOKEN" {
-                        if let Some(val) = v.as_str() {
-                            std::env::set_var(k, val);
-                        }
+                    if let Some(val) = v.as_str() {
+                        std::env::set_var(k, val);
                     }
                 }
             }
@@ -192,27 +235,22 @@ pub fn process_line(
                 eprintln!("Error: Missing request on control_request");
                 return Err(InputError::MissingRequest);
             }
-            // Route to the control dispatcher. Phase 0: the caller's stub
-            // replies with `Unsupported control request subtype: <subtype>`.
-            // Phase 1+ replaces the stub with the real switch.
+            // Route to the control dispatcher.
             Ok(FrameAction::ControlRequest(frame))
         }
 
         "control_response" => {
-            // Route to the pending-request resolver. Phase 0: stub/ignored.
-            // Phase 2 resolves in-flight send_request futures from this.
+            // Route to the pending-request resolver.
             Ok(FrameAction::ControlResponse(frame))
         }
 
         "control_cancel_request" => {
-            // §1.4 INBOUND: the host cancels a control_request IT sent us. The
-            // CLI-as-server inbound handlers (initialize/interrupt/set_*/get_*)
-            // are synchronous and resolve before a cancel could arrive, so there
-            // is no in-flight async handler to abort — drop it (byte-faithful for
-            // the stdio-local path; a request_id→AbortHandle map is only needed
-            // once an async [D] handler lands). The OUTBOUND cancel LingXi emits
-            // for its own aborted `can_use_tool` is handled in `control_plane`.
-            Ok(FrameAction::Consumed)
+            let request_id = frame
+                .get("request_id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            Ok(FrameAction::ControlCancel(request_id))
         }
 
         "user" => {
@@ -258,15 +296,17 @@ pub fn process_line(
             Ok(FrameAction::UserTurn(UserTurn { content, uuid }))
         }
 
-        "assistant" | "system" => {
-            // P3-optional: inbound history seeding — deferred. Silently consume.
-            Ok(FrameAction::Consumed)
-        }
+        "assistant" | "system" => Ok(parse_history_frame(&frame)
+            .map(FrameAction::History)
+            .unwrap_or(FrameAction::Consumed)),
 
         "bash_command" => {
-            // P3-optional: bash_command frame handling deferred.
-            eprintln!("bash_command frame received but not yet implemented (P3 deferred)");
-            Ok(FrameAction::Consumed)
+            let command = frame
+                .get("command")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            Ok(FrameAction::BashCommand(BashCommand { command }))
         }
 
         other => {
@@ -274,6 +314,122 @@ pub fn process_line(
             Ok(FrameAction::Consumed)
         }
     }
+}
+
+fn parse_history_frame(frame: &Value) -> Option<HistoryInput> {
+    let frame_type = frame.get("type")?.as_str()?;
+    let message_id = frame
+        .get("uuid")
+        .and_then(Value::as_str)
+        .and_then(MessageId::parse_prefixed)
+        .unwrap_or_else(MessageId::new);
+
+    match frame_type {
+        "assistant" => {
+            let message = frame.get("message")?;
+            if message.get("role").and_then(Value::as_str) != Some("assistant") {
+                return None;
+            }
+            let content = parse_assistant_content(message.get("content"));
+            Some(HistoryInput {
+                message: ConversationMessage::Assistant {
+                    id: message_id,
+                    content,
+                    stop_reason: message
+                        .get("stop_reason")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                },
+                replay_frame: Some(frame.clone()),
+                compact_metadata: None,
+            })
+        }
+        "system" => {
+            // `toInternalMessages` accepts only the SDK compact boundary;
+            // informational/status system frames are presentation events and
+            // must not become model conversation history.
+            if frame.get("subtype").and_then(Value::as_str) != Some("compact_boundary") {
+                return None;
+            }
+            let compact_metadata = frame.get("compact_metadata")?.clone();
+            Some(HistoryInput {
+                message: ConversationMessage::System {
+                    id: message_id,
+                    content: "Conversation compacted".to_string(),
+                },
+                replay_frame: None,
+                compact_metadata: Some(compact_metadata),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn parse_assistant_content(content: Option<&Value>) -> Vec<ContentBlock> {
+    let Some(content) = content else {
+        return Vec::new();
+    };
+    if let Some(text) = content.as_str() {
+        return vec![ContentBlock::Text {
+            text: text.to_string(),
+        }];
+    }
+    let Some(blocks) = content.as_array() else {
+        return Vec::new();
+    };
+
+    blocks
+        .iter()
+        .filter_map(|block| match block.get("type").and_then(Value::as_str)? {
+            "text" => Some(ContentBlock::Text {
+                text: block.get("text")?.as_str()?.to_string(),
+            }),
+            "thinking" => Some(ContentBlock::Thinking {
+                thinking: block.get("thinking")?.as_str()?.to_string(),
+                signature: block
+                    .get("signature")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            }),
+            "redacted_thinking" => Some(ContentBlock::RedactedThinking {
+                data: block.get("data")?.as_str()?.to_string(),
+            }),
+            "tool_use" => {
+                let provider_id = block.get("id")?.as_str()?.to_string();
+                Some(ContentBlock::ToolUse {
+                    id: ToolUseId::from(provider_id.clone()),
+                    name: block.get("name")?.as_str()?.to_string(),
+                    input: block.get("input").cloned().unwrap_or(Value::Null),
+                    provider_id: Some(provider_id),
+                })
+            }
+            "server_tool_use" => Some(ContentBlock::ServerToolUse {
+                id: block.get("id")?.as_str()?.to_string(),
+                name: block.get("name")?.as_str()?.to_string(),
+                input: block.get("input").cloned().unwrap_or(Value::Null),
+            }),
+            "connector_text" => Some(ContentBlock::ConnectorText {
+                connector_text: block
+                    .get("connector_text")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                signature: block
+                    .get("signature")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            }),
+            "advisor_tool_result" => Some(ContentBlock::AdvisorToolResult {
+                tool_use_id: block.get("tool_use_id")?.as_str()?.to_string(),
+                content: block.get("content").cloned().unwrap_or(Value::Null),
+                is_error: block
+                    .get("is_error")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            }),
+            _ => None,
+        })
+        .collect()
 }
 
 // ── Replay-ack emitter ────────────────────────────────────────────────────────
@@ -304,6 +460,11 @@ fn build_replay_ack_frame(
         "timestamp": timestamp,
         "isReplay": true
     })
+}
+
+/// Queue an already-normalized replay/history frame on the sole stdout writer.
+pub fn emit_raw_frame_queued(out_tx: &OutboundTx, frame: &Value) {
+    let _ = out_tx.send(OutboundMsg::Line(serialize_ndjson_line(frame)));
 }
 
 /// Emit a replay-ack frame by writing directly to a locked stdout.
@@ -418,7 +579,10 @@ pub fn read_input_turns(
             // (used only by tests and non-streaming callers). The streaming
             // reader `spawn_stdin_router` routes them to their channels instead.
             FrameAction::ControlRequest(_)
+            | FrameAction::ControlCancel(_)
             | FrameAction::ControlResponse(_)
+            | FrameAction::History(_)
+            | FrameAction::BashCommand(_)
             | FrameAction::Consumed => {}
         }
     }
@@ -429,15 +593,18 @@ pub fn read_input_turns(
 // ── Streaming stdin router (Phase 0 — async, concurrent) ─────────────────────
 
 /// Channels produced by [`spawn_stdin_router`].
+#[derive(Debug)]
+pub enum StdinControlFrame {
+    Request(Value),
+    Cancel(String),
+}
+
 pub struct StdinChannels {
-    /// Receiver for validated `user` turns (consumed sequentially by the turn driver).
-    pub turn_rx: mpsc::Receiver<UserTurn>,
-    /// Receiver for `control_request` frames (consumed by the control dispatcher).
-    /// Phase 0: stub consumer replies with `Unsupported control request subtype: <subtype>`.
-    /// Phase 1+: replaced with the full switch.
-    pub control_req_rx: mpsc::Receiver<Value>,
+    /// Receiver for ordered user/history/bash inputs.
+    pub input_rx: mpsc::Receiver<StreamInput>,
+    /// Receiver for control requests and control-cancel frames.
+    pub control_req_rx: mpsc::Receiver<StdinControlFrame>,
     /// Receiver for `control_response` frames (consumed by the pending-request resolver).
-    /// Phase 0: stub/empty — ignored. Phase 2+: resolves in-flight `send_request` futures.
     pub control_resp_rx: mpsc::Receiver<Value>,
 }
 
@@ -453,12 +620,13 @@ pub struct StdinChannels {
 /// semantics as `read_input_turns`). Dedup (`seen_uuids`) is maintained inside
 /// the reader thread.
 ///
-/// ## Phase 0 stub: `control_request` handling
+/// ## Control channel handling
 ///
-/// The caller MUST consume `control_req_rx`. For each `control_request` received,
-/// call [`send_control_response_error`] with the subtype to emit the byte-exact
-/// fallthrough error `"Unsupported control request subtype: <subtype>"`.
-/// Phase 1 replaces this with the full switch.
+/// The caller MUST consume `control_req_rx`. For `control_request` frames the
+/// control dispatcher replies either with `control_response` success/error (or
+/// intentionally no response for CLI-originated subtypes). `control_cancel_request`
+/// frames cancel outstanding outbound requests via
+/// `StdioControlPlane::cancel_request`.
 ///
 /// ## Deadlock risk
 ///
@@ -474,8 +642,8 @@ pub fn spawn_stdin_router(
 ) -> StdinChannels {
     // Bounded channels: 64 buffered frames each. Turn channel is 64 (max burst
     // before the turn loop catches up). Control channels are 64 each.
-    let (turn_tx, turn_rx) = mpsc::channel::<UserTurn>(64);
-    let (control_req_tx, control_req_rx) = mpsc::channel::<Value>(64);
+    let (input_tx, input_rx) = mpsc::channel::<StreamInput>(64);
+    let (control_req_tx, control_req_rx) = mpsc::channel::<StdinControlFrame>(64);
     let (control_resp_tx, control_resp_rx) = mpsc::channel::<Value>(64);
 
     tokio::task::spawn_blocking(move || {
@@ -499,8 +667,21 @@ pub fn spawn_stdin_router(
             match process_line(&line, &mut seen_uuids) {
                 Ok(FrameAction::UserTurn(turn)) => {
                     // Block if the channel is full (backpressure).
-                    if turn_tx.blocking_send(turn).is_err() {
+                    if input_tx.blocking_send(StreamInput::User(turn)).is_err() {
                         // Receiver dropped — turn driver has stopped; exit.
+                        break;
+                    }
+                }
+                Ok(FrameAction::History(history)) => {
+                    if input_tx
+                        .blocking_send(StreamInput::History(history))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Ok(FrameAction::BashCommand(command)) => {
+                    if input_tx.blocking_send(StreamInput::Bash(command)).is_err() {
                         break;
                     }
                 }
@@ -525,9 +706,20 @@ pub fn spawn_stdin_router(
                     // Duplicate — do NOT forward as a turn.
                 }
                 Ok(FrameAction::ControlRequest(frame)) => {
-                    if control_req_tx.blocking_send(frame).is_err() {
+                    if control_req_tx
+                        .blocking_send(StdinControlFrame::Request(frame))
+                        .is_err()
+                    {
                         // Control dispatcher stopped; keep reading (don't break —
                         // still need to drain stdin for user turns).
+                    }
+                }
+                Ok(FrameAction::ControlCancel(request_id)) => {
+                    if control_req_tx
+                        .blocking_send(StdinControlFrame::Cancel(request_id))
+                        .is_err()
+                    {
+                        // Control dispatcher stopped; keep reading.
                     }
                 }
                 Ok(FrameAction::ControlResponse(frame)) => {
@@ -547,7 +739,7 @@ pub fn spawn_stdin_router(
     });
 
     StdinChannels {
-        turn_rx,
+        input_rx,
         control_req_rx,
         control_resp_rx,
     }
@@ -775,6 +967,70 @@ mod tests {
         );
     }
 
+    #[test]
+    fn assistant_history_preserves_protected_and_provider_tool_blocks() {
+        let line = r#"{"type":"assistant","uuid":"11111111-1111-1111-1111-111111111111","message":{"role":"assistant","stop_reason":"tool_use","content":[{"type":"text","text":"hello"},{"type":"thinking","thinking":"why","signature":"sig"},{"type":"redacted_thinking","data":"opaque"},{"type":"tool_use","id":"toolu_provider","name":"Read","input":{"file_path":"a"}}]}}"#;
+        let action = process_line(line, &mut fresh_seen()).unwrap();
+        let FrameAction::History(history) = action else {
+            panic!("expected history action");
+        };
+        assert!(history.replay_frame.is_some());
+        let ConversationMessage::Assistant {
+            content,
+            stop_reason,
+            ..
+        } = history.message
+        else {
+            panic!("expected assistant message");
+        };
+        assert_eq!(stop_reason.as_deref(), Some("tool_use"));
+        assert_eq!(content.len(), 4);
+        assert!(matches!(
+            &content[3],
+            ContentBlock::ToolUse { id, provider_id: Some(provider_id), .. }
+                if id.as_str() == "toolu_provider" && provider_id == "toolu_provider"
+        ));
+    }
+
+    #[test]
+    fn compact_boundary_history_and_legacy_bash_command_are_routed() {
+        let system = process_line(
+            r#"{"type":"system","subtype":"compact_boundary","uuid":"11111111-1111-1111-1111-111111111111","compact_metadata":{"trigger":"manual","pre_tokens":42}}"#,
+            &mut fresh_seen(),
+        )
+        .unwrap();
+        assert!(matches!(
+            system,
+            FrameAction::History(HistoryInput {
+                message: ConversationMessage::System { content, .. },
+                replay_frame: None,
+                compact_metadata: Some(metadata),
+            }) if content == "Conversation compacted"
+                && metadata["trigger"] == "manual"
+                && metadata["pre_tokens"] == 42
+        ));
+
+        let bash = process_line(
+            r#"{"type":"bash_command","command":"printf hello"}"#,
+            &mut fresh_seen(),
+        )
+        .unwrap();
+        assert!(matches!(
+            bash,
+            FrameAction::BashCommand(BashCommand { command }) if command == "printf hello"
+        ));
+    }
+
+    #[test]
+    fn informational_system_history_is_ignored() {
+        let action = process_line(
+            r#"{"type":"system","subtype":"informational","content":"do not inject"}"#,
+            &mut fresh_seen(),
+        )
+        .unwrap();
+        assert!(matches!(action, FrameAction::Consumed));
+    }
+
     // ── UUID dedup ───────────────────────────────────────────────────────────
 
     #[test]
@@ -845,6 +1101,18 @@ mod tests {
                 frame.get("request").is_some(),
                 "ControlRequest frame must carry the request field"
             );
+        }
+    }
+
+    #[test]
+    fn control_cancel_request_routes_to_control_cancel() {
+        let line = r#"{"type":"control_cancel_request","request_id":"req-cancel-1"}"#;
+        let result = process_line(line, &mut fresh_seen()).unwrap();
+        match result {
+            FrameAction::ControlCancel(request_id) => {
+                assert_eq!(request_id, "req-cancel-1");
+            }
+            _ => panic!("expected ControlCancel"),
         }
     }
 
@@ -1012,9 +1280,31 @@ mod tests {
 
     #[test]
     fn update_env_vars_is_consumed() {
-        let line = r#"{"type":"update_environment_variables","env":{"SOME_VAR":"value"}}"#;
-        let result = process_line(line, &mut fresh_seen()).unwrap();
+        let key = format!("LINGXI_STREAM_JSON_ENV_TEST_{}", std::process::id());
+        std::env::remove_var(&key);
+        let line = serde_json::json!({
+            "type": "update_environment_variables",
+            "variables": { key.clone(): "value" }
+        })
+        .to_string();
+        let result = process_line(&line, &mut fresh_seen()).unwrap();
         assert!(matches!(result, FrameAction::Consumed));
+        assert_eq!(std::env::var(&key).as_deref(), Ok("value"));
+        std::env::remove_var(key);
+    }
+
+    #[test]
+    fn update_env_vars_ignores_legacy_env_field() {
+        let key = format!("LINGXI_STREAM_JSON_LEGACY_ENV_TEST_{}", std::process::id());
+        std::env::remove_var(&key);
+        let line = serde_json::json!({
+            "type": "update_environment_variables",
+            "env": { key.clone(): "must-not-apply" }
+        })
+        .to_string();
+        let result = process_line(&line, &mut fresh_seen()).unwrap();
+        assert!(matches!(result, FrameAction::Consumed));
+        assert!(std::env::var(&key).is_err());
     }
 
     #[test]

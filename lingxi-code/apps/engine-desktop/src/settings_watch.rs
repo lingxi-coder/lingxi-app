@@ -340,6 +340,9 @@ pub async fn handle_event(event: &FileEvent, paths: &SettingsPaths, firer: &dyn 
     let Some(source) = paths.classify(&event.path) else {
         return;
     };
+    if permission::consume_internal_write(&event.path, std::time::Duration::from_secs(5)) {
+        return;
+    }
     firer
         .fire_config_change(source, Some(event.path.clone()))
         .await;
@@ -459,6 +462,20 @@ mod tests {
         handle_event(&ev("/work/proj/src/main.rs"), &p, &firer).await;
         handle_event(&ev("/home/u/.lingxi/LINGXI.md"), &p, &firer).await;
         assert!(firer.fired.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn handle_event_suppresses_one_recent_internal_write() {
+        let p = paths();
+        let firer = RecordingFirer::default();
+        let path = PathBuf::from("/work/proj/.lingxi/settings.json");
+        permission::mark_internal_write(&path);
+
+        handle_event(&ev(&path.to_string_lossy()), &p, &firer).await;
+        assert!(firer.fired.lock().unwrap().is_empty());
+
+        handle_event(&ev(&path.to_string_lossy()), &p, &firer).await;
+        assert_eq!(firer.fired.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]

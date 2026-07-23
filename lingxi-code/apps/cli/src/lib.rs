@@ -271,6 +271,30 @@ fn commander_error(e: &clap::Error, args: &[OsString]) -> Option<String> {
     }
 }
 
+/// Normalize clap's visible-alias layout to commander's option-heading layout.
+///
+/// clap renders a visible alias as a detached `[aliases: ...]` paragraph while
+/// commander renders both spellings in the option heading.  The aliases below
+/// are part of Claude Code's public root-help contract, so keep their accepted
+/// parser spellings *and* present them in the same place in `--help` output.
+fn commander_help(e: &clap::Error) -> String {
+    let mut help = e.to_string();
+    for (canonical, alias) in [
+        ("--allowedTools", "--allowed-tools"),
+        ("--disallowedTools", "--disallowed-tools"),
+        ("--bg", "--background"),
+    ] {
+        let heading = format!("{canonical}, {alias}");
+        help = help.replacen(canonical, &heading, 1);
+        let alias_paragraph = format!(
+            "\n          \n          [aliases: {}]",
+            alias.trim_start_matches("--")
+        );
+        help = help.replace(&alias_paragraph, "");
+    }
+    help
+}
+
 /// Top-level entrypoint. Returns the process exit code.
 pub async fn run_cli(args: Vec<OsString>) -> i32 {
     startup_trace::start();
@@ -287,9 +311,13 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
                 eprintln!("{msg}");
                 return exit_codes::ARGV_ERROR;
             }
-            // clap prints its own help/usage; we just return the locked
-            // code. Help/version are not errors.
-            e.print().ok();
+            // Help is normalized to commander's visible-alias presentation;
+            // other clap errors/version output retain clap's renderer.
+            if e.kind() == ErrorKind::DisplayHelp {
+                print!("{}", commander_help(&e));
+            } else {
+                e.print().ok();
+            }
             return match e.kind() {
                 ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => exit_codes::SUCCESS,
                 _ => exit_codes::ARGV_ERROR,
@@ -312,14 +340,21 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         && matches!(crate::mode::decide_mode(&parsed), crate::mode::Mode::Tui));
     startup_trace::mark("mode_decide_for_logging");
     logging::init(parsed.debug_enabled(), interactive_tui);
-    let _telemetry_guard = telemetry::otel::install_process(
-        "lingxi-cli",
-        parsed.command.is_none()
-            || matches!(
-                parsed.command.as_ref(),
-                Some(crate::commands::Commands::BgPtySession(_))
+    let telemetry_records_session = parsed.command.is_none()
+        || matches!(
+            parsed.command.as_ref(),
+            Some(crate::commands::Commands::BgPtySession(_))
+        );
+    let managed_otel_overrides = engine_desktop::managed_otel_env_overrides().await;
+    let _telemetry_guard =
+        match telemetry::otel::OtelConfig::from_env_with_managed(&managed_otel_overrides) {
+            cfg if cfg.enabled => telemetry::otel::install_process_with_config(
+                "lingxi-cli",
+                telemetry_records_session,
+                cfg,
             ),
-    );
+            _ => telemetry::otel::TelemetryGuard::disabled(),
+        };
     tracing::debug!(?parsed, "argv parsed");
 
     // (M3 cc2.1.198) `--bg`/`--background` × `--print`/`-p` is rejected UP
@@ -639,6 +674,10 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
             return exit_codes::ARGV_ERROR;
         }
         let stream = Arc::new(stream_json::StreamJsonStream::new_placeholder());
+        traits::OutputStream::set_thinking_display(
+            stream.as_ref(),
+            parsed.thinking_display.as_deref(),
+        );
         // P4: wire --include-partial-messages and --include-hook-events flags
         // before build_runtime so the stream is fully configured before any
         // hook or SSE events flow through it.

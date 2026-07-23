@@ -395,9 +395,9 @@ mod tests {
             ResumeOutcome::Stay
         );
         assert_eq!(s.selected, 0, "clamped at top");
-        handle_resume_key(&mut s, key(KeyCode::Down));
-        handle_resume_key(&mut s, key(KeyCode::Down));
-        handle_resume_key(&mut s, key(KeyCode::Down));
+        let _ = handle_resume_key(&mut s, key(KeyCode::Down));
+        let _ = handle_resume_key(&mut s, key(KeyCode::Down));
+        let _ = handle_resume_key(&mut s, key(KeyCode::Down));
         assert_eq!(s.selected, 2, "clamped at bottom");
     }
 
@@ -406,7 +406,7 @@ mod tests {
         let rows = vec![row("a"), row("b")];
         let want = rows[1].uuid;
         let mut s = ResumeState::new(rows);
-        handle_resume_key(&mut s, key(KeyCode::Down));
+        let _ = handle_resume_key(&mut s, key(KeyCode::Down));
         assert_eq!(
             handle_resume_key(&mut s, key(KeyCode::Enter)),
             ResumeOutcome::Resume(want)
@@ -425,15 +425,15 @@ mod tests {
     #[test]
     fn type_to_search_filters_and_slash_enters_search() {
         let mut s = ResumeState::new(vec![row("fix bug"), row("add feature")]);
-        handle_resume_key(&mut s, key(KeyCode::Char('/')));
+        let _ = handle_resume_key(&mut s, key(KeyCode::Char('/')));
         assert!(s.in_search_mode);
         for c in "feat".chars() {
-            handle_resume_key(&mut s, key(KeyCode::Char(c)));
+            let _ = handle_resume_key(&mut s, key(KeyCode::Char(c)));
         }
         assert_eq!(s.filtered().len(), 1);
         assert_eq!(s.filtered()[0].title, "add feature");
         // Esc with a query clears it and drops back to the list.
-        handle_resume_key(&mut s, key(KeyCode::Esc));
+        let _ = handle_resume_key(&mut s, key(KeyCode::Esc));
         assert!(s.query.is_empty());
         assert_eq!(s.filtered().len(), 2);
     }

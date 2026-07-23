@@ -6,32 +6,14 @@
 //! matching commander's parent-with-subcommands behavior (the `command` field
 //! is `Option`, and `run` prints help when it is `None`).
 //!
-//! Implementation policy (conservative — a green build beats coverage):
-//!
-//! * REAL-IMPLEMENTED locally (read-only / pure-validation, no network, no
-//!   billable turn): `list`, `details <name>`, `validate <path>`. These drive
-//!   the `plugin` crate's on-disk discovery + manifest reading directly against
-//!   `$LINGXI_CONFIG_DIR`/`~/.lingxi/plugins`.
-//! * NOTICE (`NOT_IMPLEMENTED`): every action that needs the network /
-//!   marketplace resolution / a settings-write seam / the heavy `PluginManager`
-//!   registry wiring — `install`, `uninstall`, `update`, `enable`, `disable`,
-//!   `init`, `tag`, `prune`, and all `marketplace *`. These are parsed
-//!   faithfully (so `--help` and dispatch are correct) and then print a clear
-//!   "not yet implemented" line — they never fake success and never start a
-//!   chat turn.
-//!
-//! `enable`/`disable` are intentionally NOTICE rather than wired: claude's
-//! `plugin enable/disable` toggles the on-disk `settings.enabledPlugins`
-//! allowlist, but `plugin::PluginManager::{enable,disable}` operate on an
-//! in-memory state map materialised into the 8 live engine registries
-//! (commands/agents/skills/hooks/output-styles/mcp/lsp/tools) and require
-//! `PluginManager::new`'s full registry + credential + blocklist + policy +
-//! fs/http/runtime wiring. That is the wrong seam for a CLI toggle and there is
-//! no exposed settings-write path, so we decline rather than guess.
+//! All public subcommands are wired: read-only inspection/validation, scoped
+//! settings toggles, install/update/uninstall/prune, scaffolding/tagging, and
+//! marketplace management. The implementations reuse the CLI's confined
+//! settings/archive/git helpers and never start a billable model turn.
 
 use clap::{Args, Subcommand};
 
-use crate::exit_codes::{NOT_IMPLEMENTED, RUNTIME_ERROR, SUCCESS};
+use crate::exit_codes::{RUNTIME_ERROR, SUCCESS};
 
 /// `plugin` args — byte-parity with `claude plugin|plugins [options] [command]`.
 ///
@@ -586,39 +568,55 @@ fn plugins_dir() -> std::path::PathBuf {
 
 /// `plugin list` — enumerate installed plugins from the durable on-disk install
 /// record (`~/.lingxi/plugins/installed_plugins.json`), resolving each to its
-/// versioned cache manifest. Read-only; never fetches.
+/// versioned cache manifest. `--available --json` additionally reads every
+/// configured marketplace's local catalog and excludes installed plugin ids.
+/// Read-only; never refreshes or fetches a marketplace.
 async fn run_list(args: &ListArgs) -> i32 {
-    // `--available` requires `--json` (claude gates it the same way); without a
-    // marketplace fetch we cannot enumerate available plugins, so decline that
-    // combination explicitly rather than silently dropping the flag.
-    if args.available {
-        if !args.json {
-            eprintln!("error: --available requires --json");
-            return RUNTIME_ERROR;
-        }
-        eprintln!(
-            "lingxi-cli plugin list --available: not yet implemented \
-             (requires marketplace resolution)"
-        );
-        return NOT_IMPLEMENTED;
+    // `--available` requires `--json` (claude gates it the same way).
+    if args.available && !args.json {
+        eprintln!("error: --available requires --json");
+        return RUNTIME_ERROR;
     }
 
     let dir = plugins_dir();
     let discovered = plugin::discover_recorded_plugins(&dir).await;
 
     if args.json {
-        let items: Vec<serde_json::Value> = discovered
-            .iter()
-            .map(|(_, m, path)| {
-                serde_json::json!({
-                    "name": m.name,
-                    "version": m.version,
-                    "description": m.description,
-                    "path": path.display().to_string(),
+        let (durable_installed, diagnostics) =
+            installed_json_items(&dir, &crate::run::lingxi_home_dir(), &scope_cwd());
+        for diagnostic in diagnostics {
+            eprintln!("warning: {diagnostic}");
+        }
+        let installed = durable_installed.unwrap_or_else(|| {
+            // Legacy/corrupt records cannot provide Claude's durable metadata;
+            // preserve the previous best-effort manifest view as a fallback.
+            discovered
+                .iter()
+                .map(|(_, m, path)| {
+                    serde_json::json!({
+                        "name": m.name,
+                        "version": m.version,
+                        "description": m.description,
+                        "path": path.display().to_string(),
+                    })
                 })
+                .collect()
+        });
+
+        let value = if args.available {
+            let (available, diagnostics) = available_plugins(&dir);
+            for diagnostic in diagnostics {
+                eprintln!("warning: {diagnostic}");
+            }
+            serde_json::json!({
+                "installed": installed,
+                "available": available,
             })
-            .collect();
-        match serde_json::to_string_pretty(&items) {
+        } else {
+            serde_json::Value::Array(installed)
+        };
+
+        match serde_json::to_string_pretty(&value) {
             Ok(s) => {
                 println!("{s}");
                 SUCCESS
@@ -647,6 +645,343 @@ async fn run_list(args: &ListArgs) -> i32 {
         }
         SUCCESS
     }
+}
+
+/// Resolve the settings file associated with an installed record. Project and
+/// local records retain the project root they were installed from, so listing
+/// remains correct even when invoked from another working directory.
+fn installed_record_settings_path(
+    record: &serde_json::Map<String, serde_json::Value>,
+    home: &std::path::Path,
+    cwd: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    use crate::commands::plugin_settings::Scope;
+
+    let scope = record.get("scope")?.as_str()?;
+    let project_root = record
+        .get("projectPath")
+        .and_then(serde_json::Value::as_str)
+        .map(std::path::Path::new)
+        .unwrap_or(cwd);
+    match scope {
+        "user" => Some(Scope::User.path(home, cwd)),
+        "project" => Some(Scope::Project.path(home, project_root)),
+        "local" => Some(Scope::Local.path(home, project_root)),
+        _ => None,
+    }
+}
+
+/// Render current v2 installed records in Claude's public JSON shape. This is
+/// intentionally driven by the durable database rather than the cache: a
+/// missing plugin directory is still an installed record and must remain
+/// visible to repair/uninstall workflows.
+fn installed_json_items(
+    plugins_dir: &std::path::Path,
+    home: &std::path::Path,
+    cwd: &std::path::Path,
+) -> (Option<Vec<serde_json::Value>>, Vec<String>) {
+    let path = plugins_dir.join("installed_plugins.json");
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return (None, Vec::new()),
+        Err(error) => {
+            return (
+                None,
+                vec![format!("failed to read {}: {error}", path.display())],
+            );
+        }
+    };
+    let value: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(value) => value,
+        Err(error) => {
+            return (
+                None,
+                vec![format!("failed to parse {}: {error}", path.display())],
+            );
+        }
+    };
+    let Some(plugins) = value.get("plugins").and_then(serde_json::Value::as_object) else {
+        return (
+            None,
+            vec![format!(
+                "{} field 'plugins' must be an object",
+                path.display()
+            )],
+        );
+    };
+    let mut out = Vec::new();
+    let mut diagnostics = Vec::new();
+
+    for (id, records) in plugins {
+        if let Some(records) = records.as_array() {
+            for (index, record) in records.iter().enumerate() {
+                let Some(record) = record.as_object() else {
+                    diagnostics.push(format!(
+                        "installed plugin '{id}' record[{index}] must be an object; skipping"
+                    ));
+                    continue;
+                };
+                out.push(installed_json_item(id, record, home, cwd));
+            }
+            continue;
+        }
+
+        // Legacy schema: `plugins[marketplace][name] = record`. Render these
+        // alongside v2 rows instead of letting one old marketplace hide every
+        // valid current record.
+        let Some(legacy_records) = records.as_object() else {
+            diagnostics.push(format!(
+                "installed plugin entry '{id}' must be an array or legacy object; skipping"
+            ));
+            continue;
+        };
+        for (name, record) in legacy_records {
+            let Some(record) = record.as_object() else {
+                diagnostics.push(format!(
+                    "legacy installed plugin '{name}@{id}' must be an object; skipping"
+                ));
+                continue;
+            };
+            out.push(installed_json_item(
+                &format!("{name}@{id}"),
+                record,
+                home,
+                cwd,
+            ));
+        }
+    }
+    (Some(out), diagnostics)
+}
+
+fn installed_json_item(
+    id: &str,
+    record: &serde_json::Map<String, serde_json::Value>,
+    home: &std::path::Path,
+    cwd: &std::path::Path,
+) -> serde_json::Value {
+    let settings = installed_record_settings_path(record, home, cwd)
+        .and_then(|path| migrations::settings_update::read_settings_map(&path).ok())
+        .unwrap_or_default();
+    let enabled = settings
+        .get("enabledPlugins")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|map| map.get(id))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+
+    let mut item = serde_json::Map::new();
+    item.insert("id".to_string(), serde_json::Value::String(id.to_string()));
+    for key in ["version", "scope"] {
+        if let Some(value) = record.get(key) {
+            item.insert(key.to_string(), value.clone());
+        }
+    }
+    item.insert("enabled".to_string(), serde_json::Value::Bool(enabled));
+    for key in ["installPath", "installedAt", "lastUpdated", "projectPath"] {
+        if let Some(value) = record.get(key) {
+            item.insert(key.to_string(), value.clone());
+        }
+    }
+    if let Some(mcp_servers) = settings
+        .get("pluginConfigs")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|configs| configs.get(id))
+        .and_then(|config| config.get("mcpServers"))
+    {
+        item.insert("mcpServers".to_string(), mcp_servers.clone());
+    }
+    serde_json::Value::Object(item)
+}
+
+/// Read the durable install database and return its full `plugin@marketplace`
+/// ids. Both the current v2 array shape and the legacy marketplace-nested shape
+/// are accepted so an older install is never offered as "available" again.
+fn installed_plugin_ids(plugins_dir: &std::path::Path) -> std::collections::BTreeSet<String> {
+    let Some(plugins) = std::fs::read_to_string(plugins_dir.join("installed_plugins.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|value| {
+            value
+                .get("plugins")
+                .and_then(serde_json::Value::as_object)
+                .cloned()
+        })
+    else {
+        return std::collections::BTreeSet::new();
+    };
+
+    let mut ids = std::collections::BTreeSet::new();
+    for (key, value) in plugins {
+        if let Some(records) = value.as_array() {
+            // Current schema: `plugins["name@marketplace"] = [records...]`.
+            // Match `installed_json_items`: empty arrays and arrays containing
+            // only malformed scalar records render no installed row, so they
+            // must not suppress a healthy marketplace entry.
+            if records.iter().any(serde_json::Value::is_object) {
+                ids.insert(key);
+            }
+        } else if let Some(nested) = value.as_object() {
+            // Legacy schema: `plugins["marketplace"]["name"] = record`.
+            // Mixed-schema rendering skips malformed legacy scalar records;
+            // apply the identical rule to availability suppression.
+            ids.extend(
+                nested
+                    .iter()
+                    .filter(|(_, record)| record.is_object())
+                    .map(|(name, _)| format!("{name}@{key}")),
+            );
+        }
+    }
+    ids
+}
+
+/// Convert a marketplace catalog entry to the public `--available` JSON shape.
+/// Unknown catalog metadata is intentionally not copied: Claude's command
+/// exposes only these stable fields.
+fn available_json_entry(
+    entry: &serde_json::Map<String, serde_json::Value>,
+    name: &str,
+    marketplace: &str,
+) -> serde_json::Value {
+    let mut out = serde_json::Map::new();
+    out.insert(
+        "pluginId".to_string(),
+        serde_json::Value::String(format!("{name}@{marketplace}")),
+    );
+    out.insert(
+        "name".to_string(),
+        serde_json::Value::String(name.to_string()),
+    );
+    if let Some(description) = entry.get("description") {
+        out.insert("description".to_string(), description.clone());
+    }
+    out.insert(
+        "marketplaceName".to_string(),
+        serde_json::Value::String(marketplace.to_string()),
+    );
+    for key in ["version", "source", "installCount"] {
+        if let Some(value) = entry.get(key) {
+            out.insert(key.to_string(), value.clone());
+        }
+    }
+    serde_json::Value::Object(out)
+}
+
+/// Enumerate locally-resolved marketplace catalogs.
+///
+/// A broken marketplace must not hide healthy catalogs. It is skipped with a
+/// diagnostic returned to the caller (stderr), while duplicate ids keep the
+/// first entry and report the conflict. This makes corruption visible without
+/// making a read-only list unusable.
+fn available_plugins(plugins_dir: &std::path::Path) -> (Vec<serde_json::Value>, Vec<String>) {
+    let mut diagnostics = Vec::new();
+    let registry_path = plugins_dir.join("known_marketplaces.json");
+    let registry = match std::fs::read_to_string(&registry_path) {
+        Ok(raw) => match serde_json::from_str::<serde_json::Value>(&raw) {
+            Ok(serde_json::Value::Object(registry)) => registry,
+            Ok(_) => {
+                diagnostics.push(format!(
+                    "{} must contain a JSON object",
+                    registry_path.display()
+                ));
+                return (Vec::new(), diagnostics);
+            }
+            Err(error) => {
+                diagnostics.push(format!(
+                    "failed to parse {}: {error}",
+                    registry_path.display()
+                ));
+                return (Vec::new(), diagnostics);
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return (Vec::new(), diagnostics);
+        }
+        Err(error) => {
+            diagnostics.push(format!(
+                "failed to read {}: {error}",
+                registry_path.display()
+            ));
+            return (Vec::new(), diagnostics);
+        }
+    };
+
+    let installed = installed_plugin_ids(plugins_dir);
+    let mut seen = std::collections::BTreeSet::new();
+    let mut available = Vec::new();
+
+    for (marketplace, registry_entry) in registry {
+        let Some(root) = registry_entry
+            .get("installLocation")
+            .and_then(serde_json::Value::as_str)
+            .filter(|path| !path.is_empty())
+        else {
+            diagnostics.push(format!(
+                "marketplace '{marketplace}' has no installLocation; skipping"
+            ));
+            continue;
+        };
+        let manifest_path = std::path::Path::new(root)
+            .join(branding::PLUGIN_MANIFEST_DIR)
+            .join("marketplace.json");
+        let catalog = match std::fs::read_to_string(&manifest_path) {
+            Ok(raw) => match serde_json::from_str::<serde_json::Value>(&raw) {
+                Ok(value) => value,
+                Err(error) => {
+                    diagnostics.push(format!(
+                        "failed to parse marketplace '{marketplace}' at {}: {error}",
+                        manifest_path.display()
+                    ));
+                    continue;
+                }
+            },
+            Err(error) => {
+                diagnostics.push(format!(
+                    "failed to read marketplace '{marketplace}' at {}: {error}",
+                    manifest_path.display()
+                ));
+                continue;
+            }
+        };
+        let Some(entries) = catalog.get("plugins").and_then(serde_json::Value::as_array) else {
+            diagnostics.push(format!(
+                "marketplace '{marketplace}' manifest field 'plugins' must be an array; skipping"
+            ));
+            continue;
+        };
+
+        for (index, entry) in entries.iter().enumerate() {
+            let Some(entry) = entry.as_object() else {
+                diagnostics.push(format!(
+                    "marketplace '{marketplace}' plugins[{index}] must be an object; skipping"
+                ));
+                continue;
+            };
+            let Some(name) = entry
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .filter(|name| !name.is_empty())
+            else {
+                diagnostics.push(format!(
+                    "marketplace '{marketplace}' plugins[{index}] has no non-empty name; skipping"
+                ));
+                continue;
+            };
+            let id = format!("{name}@{marketplace}");
+            if installed.contains(&id) {
+                continue;
+            }
+            if !seen.insert(id.clone()) {
+                diagnostics.push(format!(
+                    "duplicate plugin id '{id}' in marketplace catalog; keeping first entry"
+                ));
+                continue;
+            }
+            available.push(available_json_entry(entry, name, &marketplace));
+        }
+    }
+
+    (available, diagnostics)
 }
 
 /// `plugin details <name>` — show the component inventory of an installed
@@ -836,4 +1171,300 @@ async fn resolve_manifest(path: &std::path::Path) -> Option<(std::path::PathBuf,
         }
     }
     None
+}
+
+#[cfg(test)]
+mod list_tests {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    use serde_json::json;
+
+    use super::{available_plugins, installed_json_items, installed_plugin_ids};
+
+    fn write_json(path: &Path, value: &serde_json::Value) {
+        fs::create_dir_all(path.parent().expect("fixture file parent")).unwrap();
+        fs::write(path, serde_json::to_vec_pretty(value).unwrap()).unwrap();
+    }
+
+    fn add_marketplace(plugins_dir: &Path, root: &Path, name: &str, entries: serde_json::Value) {
+        write_json(
+            &root
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("marketplace.json"),
+            &json!({"name": name, "plugins": entries}),
+        );
+        let mut registry = serde_json::Map::new();
+        registry.insert(
+            name.to_string(),
+            json!({
+                "source": {"source": "directory", "path": root},
+                "installLocation": root,
+            }),
+        );
+        write_json(
+            &plugins_dir.join("known_marketplaces.json"),
+            &serde_json::Value::Object(registry),
+        );
+    }
+
+    #[test]
+    fn available_excludes_current_and_legacy_installed_ids() {
+        let temp = tempfile::tempdir().unwrap();
+        let plugins_dir = temp.path().join("plugins");
+        let marketplace = temp.path().join("marketplace");
+        add_marketplace(
+            &plugins_dir,
+            &marketplace,
+            "example",
+            json!([
+                {"name":"current", "description":"already here", "source":"./current"},
+                {"name":"legacy", "source":"./legacy"},
+                {"name":"fresh", "description":"new", "version":"1.2.3", "source":{"source":"url", "url":"https://example.test/fresh.git"}, "installCount":7}
+            ]),
+        );
+        write_json(
+            &plugins_dir.join("installed_plugins.json"),
+            &json!({
+                "version": 2,
+                "plugins": {
+                    "current@example": [{"scope":"user"}],
+                    "example": {"legacy": {"version":"0.1.0"}}
+                }
+            }),
+        );
+
+        assert_eq!(
+            installed_plugin_ids(&plugins_dir),
+            ["current@example".to_string(), "legacy@example".to_string()]
+                .into_iter()
+                .collect()
+        );
+        let (available, diagnostics) = available_plugins(&plugins_dir);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(
+            available,
+            vec![json!({
+                "pluginId": "fresh@example",
+                "name": "fresh",
+                "description": "new",
+                "marketplaceName": "example",
+                "version": "1.2.3",
+                "source": {"source":"url", "url":"https://example.test/fresh.git"},
+                "installCount": 7
+            })]
+        );
+    }
+
+    #[test]
+    fn empty_or_malformed_install_records_do_not_hide_available_plugins() {
+        let temp = tempfile::tempdir().unwrap();
+        let plugins_dir = temp.path().join("plugins");
+        let marketplace = temp.path().join("marketplace");
+        add_marketplace(
+            &plugins_dir,
+            &marketplace,
+            "example",
+            json!([
+                {"name":"valid", "source":"./valid"},
+                {"name":"empty", "source":"./empty"},
+                {"name":"malformed", "source":"./malformed"},
+                {"name":"legacy-valid", "source":"./legacy-valid"},
+                {"name":"legacy-malformed", "source":"./legacy-malformed"},
+                {"name":"fresh", "source":"./fresh"}
+            ]),
+        );
+        write_json(
+            &plugins_dir.join("installed_plugins.json"),
+            &json!({
+                "version": 2,
+                "plugins": {
+                    "valid@example": [{}],
+                    "empty@example": [],
+                    "malformed@example": [null, "not-an-object"],
+                    "example": {
+                        "legacy-valid": {"version":"0.9.0"},
+                        "legacy-malformed": "not-an-object"
+                    }
+                }
+            }),
+        );
+
+        assert_eq!(
+            installed_plugin_ids(&plugins_dir),
+            [
+                "legacy-valid@example".to_string(),
+                "valid@example".to_string()
+            ]
+            .into_iter()
+            .collect()
+        );
+        let (available, diagnostics) = available_plugins(&plugins_dir);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let ids: Vec<&str> = available
+            .iter()
+            .filter_map(|entry| entry.get("pluginId").and_then(serde_json::Value::as_str))
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                "empty@example",
+                "malformed@example",
+                "legacy-malformed@example",
+                "fresh@example"
+            ]
+        );
+    }
+
+    #[test]
+    fn installed_json_uses_durable_records_and_scope_settings() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let cwd = temp.path().join("project");
+        let plugins_dir = home.join("plugins");
+        write_json(
+            &plugins_dir.join("installed_plugins.json"),
+            &json!({
+                "version": 2,
+                "plugins": {
+                    "demo@example": [{
+                        "scope": "user",
+                        "installPath": "/missing/cache/is-still-listed",
+                        "version": "1.0.0",
+                        "installedAt": "2026-01-01T00:00:00.000Z",
+                        "lastUpdated": "2026-01-02T00:00:00.000Z"
+                    }]
+                }
+            }),
+        );
+        write_json(
+            &home.join("settings.json"),
+            &json!({
+                "enabledPlugins": {"demo@example": true},
+                "pluginConfigs": {
+                    "demo@example": {"mcpServers": {"demo": {"command": "demo-mcp"}}}
+                }
+            }),
+        );
+
+        let (installed, diagnostics) = installed_json_items(&plugins_dir, &home, &cwd);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(
+            installed.unwrap(),
+            vec![json!({
+                "id": "demo@example",
+                "version": "1.0.0",
+                "scope": "user",
+                "enabled": true,
+                "installPath": "/missing/cache/is-still-listed",
+                "installedAt": "2026-01-01T00:00:00.000Z",
+                "lastUpdated": "2026-01-02T00:00:00.000Z",
+                "mcpServers": {"demo": {"command": "demo-mcp"}}
+            })]
+        );
+    }
+
+    #[test]
+    fn mixed_installed_schema_keeps_v2_and_legacy_records_independently() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let cwd = temp.path().join("project");
+        let plugins_dir = home.join("plugins");
+        write_json(
+            &plugins_dir.join("installed_plugins.json"),
+            &json!({
+                "version": 2,
+                "plugins": {
+                    "current@example": [{"scope":"user", "version":"2.0.0"}],
+                    "example": {
+                        "legacy": {"version":"0.9.0"},
+                        "broken": "not-an-object"
+                    }
+                }
+            }),
+        );
+
+        let (installed, diagnostics) = installed_json_items(&plugins_dir, &home, &cwd);
+        let installed = installed.expect("valid top-level database");
+        assert_eq!(installed.len(), 2);
+        assert_eq!(installed[0]["id"], "current@example");
+        assert_eq!(installed[1]["id"], "legacy@example");
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert!(diagnostics[0].contains("broken@example"));
+    }
+
+    #[test]
+    fn bad_catalog_is_diagnosed_without_hiding_healthy_catalogs() {
+        let temp = tempfile::tempdir().unwrap();
+        let plugins_dir = temp.path().join("plugins");
+        let good_root = temp.path().join("good");
+        let bad_root = temp.path().join("bad");
+        write_json(
+            &good_root
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("marketplace.json"),
+            &json!({"plugins":[{"name":"ok", "source":"./ok"}]}),
+        );
+        let bad_manifest = bad_root
+            .join(branding::PLUGIN_MANIFEST_DIR)
+            .join("marketplace.json");
+        fs::create_dir_all(bad_manifest.parent().unwrap()).unwrap();
+        fs::write(&bad_manifest, b"{not-json").unwrap();
+        write_json(
+            &plugins_dir.join("known_marketplaces.json"),
+            &json!({
+                "bad": {"installLocation": bad_root},
+                "good": {"installLocation": good_root}
+            }),
+        );
+
+        let (available, diagnostics) = available_plugins(&plugins_dir);
+        assert_eq!(available.len(), 1);
+        assert_eq!(available[0]["pluginId"], "ok@good");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|line| line.contains("failed to parse marketplace 'bad'")),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn duplicate_or_malformed_entries_are_skipped_with_diagnostics() {
+        let temp = tempfile::tempdir().unwrap();
+        let plugins_dir = temp.path().join("plugins");
+        let root = temp.path().join("marketplace");
+        add_marketplace(
+            &plugins_dir,
+            &root,
+            "example",
+            json!([
+                {"name":"one", "source":"./one"},
+                {"name":"one", "source":"./duplicate"},
+                {"description":"missing name"},
+                "not-an-object"
+            ]),
+        );
+
+        let (available, diagnostics) = available_plugins(&plugins_dir);
+        assert_eq!(available.len(), 1);
+        assert_eq!(available[0]["source"], "./one");
+        assert_eq!(diagnostics.len(), 3, "{diagnostics:?}");
+        assert!(diagnostics.iter().any(|line| line.contains("duplicate")));
+        assert!(diagnostics
+            .iter()
+            .any(|line| line.contains("non-empty name")));
+        assert!(diagnostics
+            .iter()
+            .any(|line| line.contains("must be an object")));
+    }
+
+    #[test]
+    fn absent_registry_is_an_empty_success() {
+        let temp = tempfile::tempdir().unwrap();
+        let plugins_dir = PathBuf::from(temp.path()).join("plugins");
+        let (available, diagnostics) = available_plugins(&plugins_dir);
+        assert!(available.is_empty());
+        assert!(diagnostics.is_empty());
+    }
 }

@@ -104,11 +104,10 @@ pub struct OrchestratorConfig {
     /// `stop_reason`; the single-shot escalation to
     /// [`crate::turn_loop::ESCALATED_MAX_TOKENS`] is skipped.
     ///
-    /// DEFERRED: even when `true`, the escalation is currently a no-op because
-    /// the api-client `messages_create` signature has no `max_tokens` override
-    /// argument (see A1 spec — escalation needs an api-client change that is
-    /// out of scope for this crate-local batch). The flag + const are wired so
-    /// a follow-up can complete the escalation without a config migration.
+    /// The override is consumed by the next request through
+    /// `messages_create_with_opts`; a separate recovery latch guarantees a
+    /// single 64k retry per max-token episode before normal continuation
+    /// nudges resume.
     #[serde(default)]
     pub escalate_max_output_tokens: bool,
 

@@ -52,6 +52,9 @@ engine = { path = "../../engine" }
 msgqueue = { path = "../../msgqueue" }
 # stream-json P2b: contextWindow/maxOutputTokens per model from the llm-client catalog.
 llm-client = { path = "../../llm-client" }
+# Canonical pricing-model id for the stream-json per-model usage block
+# (`canonicalModel`, cc 2.1.218 `yo(r)` = `firstPartyNameToCanonical`).
+cost = { path = "../../cost" }
 dirs = "5"
 # `/web` async effect closure (`mode.rs::run_web_action`): persists the
 # picker/config save via `tui::web::persist`'s `WebSearchConfig`, and runs the

@@ -66,6 +66,14 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
             .or(prev.ask_user_question_timeout),
         // Scalar Override — `viewMode` (enum default|verbose|focus), H-BIN-11.
         view_mode: next.view_mode.or(prev.view_mode),
+        // Scalar Override — `emojiCompletionEnabled` (default true at use).
+        emoji_completion_enabled: next
+            .emoji_completion_enabled
+            .or(prev.emoji_completion_enabled),
+        // Scalar Override — `showThinkingSummaries` (default false at use).
+        show_thinking_summaries: next
+            .show_thinking_summaries
+            .or(prev.show_thinking_summaries),
         model: next.model.or(prev.model),
         // Managed model-restriction keys (H-BIN-08). `availableModels` (array)
         // and `enforceAvailableModels` (scalar) are scalar-override — CC's
@@ -488,5 +496,43 @@ mod tests {
         };
         let merged = merge(prev, next).providers.unwrap();
         assert!(merged.contains_key("groq") && merged.contains_key("ollama"));
+    }
+
+    #[test]
+    fn emoji_completion_enabled_parses_and_higher_layer_wins() {
+        let parsed: SettingsJson =
+            serde_json::from_str(r#"{"emojiCompletionEnabled":false}"#).unwrap();
+        assert_eq!(parsed.emoji_completion_enabled, Some(false));
+
+        let merged = merge(
+            SettingsJson {
+                emoji_completion_enabled: Some(true),
+                ..Default::default()
+            },
+            parsed,
+        );
+        assert_eq!(merged.emoji_completion_enabled, Some(false));
+        assert!(serde_json::to_string(&merged)
+            .unwrap()
+            .contains("\"emojiCompletionEnabled\":false"));
+    }
+
+    #[test]
+    fn show_thinking_summaries_parses_and_higher_layer_wins() {
+        let parsed: SettingsJson =
+            serde_json::from_str(r#"{"showThinkingSummaries":true}"#).unwrap();
+        assert_eq!(parsed.show_thinking_summaries, Some(true));
+
+        let merged = merge(
+            SettingsJson {
+                show_thinking_summaries: Some(false),
+                ..Default::default()
+            },
+            parsed,
+        );
+        assert_eq!(merged.show_thinking_summaries, Some(true));
+        assert!(serde_json::to_string(&merged)
+            .unwrap()
+            .contains("\"showThinkingSummaries\":true"));
     }
 }

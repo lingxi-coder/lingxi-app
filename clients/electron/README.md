@@ -37,9 +37,12 @@ project executable configuration and the host rejects prompts and session/model/
 task commands.
 
 Provider credentials are stored as per-provider generic-password items in the
-macOS Keychain and written once to bridge stdin as a bounded envelope. They are
-absent from arguments and environment variables. Legacy Safe Storage blobs are
-migrated once after a successful read, then removed. The bridge receives an
+macOS Data Protection Keychain (`SecItem` with
+`kSecUseDataProtectionKeychain`). They are written once to bridge stdin as a
+bounded envelope and remain absent from arguments and environment variables.
+An ad-hoc build has no provisioned keychain access group, so it keeps a key in
+main-process memory for that app session instead of writing plaintext or using
+the deprecated file-based login keychain. The bridge receives an
 allowlisted environment, publishes discovery data inside a private per-launch
 directory, requires protocol hello before commands, and accepts one
 authenticated client. OAuth/device sign-in remains a CLI/TUI-only flow in this
@@ -105,10 +108,17 @@ The gitignored `dist/` directory receives:
 - `LingXi-Code-<version>-mac-arm64.zip`
 - `LingXi-Code-<version>-mac-arm64.zip.sha256`
 
-The in-repo packager uses Electron's official application skeleton, bundles the
+The in-repo packager uses Electron's official application skeleton, builds the
+native Data Protection Keychain module, bundles the
 release Rust sidecar at `Contents/Resources/bin/bridge-server`, removes
 development metadata, checks both binaries are arm64, scans for credentials and
 developer paths, applies an ad-hoc signature, and emits a SHA-256 checksum.
+
+Provisioned builds can persist credentials by setting
+`LINGXI_CODESIGN_IDENTITY`, `LINGXI_MAC_TEAM_ID`, and
+`LINGXI_MAC_PROVISIONING_PROFILE` before `npm run package:mac`. The profile must
+authorize `com.lingxi.code`; the packager embeds it and signs the app with the
+matching private keychain access group.
 
 The ad-hoc signature is intended only for approved internal distribution. A
 public or wider external release still requires Developer ID signing,

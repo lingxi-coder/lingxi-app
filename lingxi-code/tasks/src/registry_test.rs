@@ -251,6 +251,22 @@ fn local_agent_input() -> TaskSpawnInput {
         prompt: "do the work".into(),
         is_backgrounded: true,
         tool_use_id: None,
+        creator_teammate_name: None,
+        creator_team_name: None,
+        spawn_request: None,
+        inheritance: None,
+    }
+}
+
+fn local_agent_input_with_creator(name: &str, team: &str) -> TaskSpawnInput {
+    TaskSpawnInput::LocalAgent {
+        agent_id: protocol::AgentId::new(),
+        subagent_type: "general-purpose".into(),
+        prompt: "do the work".into(),
+        is_backgrounded: true,
+        tool_use_id: None,
+        creator_teammate_name: Some(name.into()),
+        creator_team_name: Some(team.into()),
         spawn_request: None,
         inheritance: None,
     }
@@ -299,6 +315,111 @@ async fn spawn_local_agent_dispatches_once_registered() {
         }
         other => panic!("expected a LocalAgent state, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn budget_stop_matches_claude_background_agent_filter() {
+    use crate::state::LocalAgentTaskState;
+    use traits::task_registry::TaskRegistryHandle;
+
+    let (_d, mut registry) = make_registry();
+    let agent_handler = RecordingHandler::new(TaskType::LocalAgent, "abudget01");
+    let workflow_handler = RecordingHandler::new(TaskType::LocalWorkflow, "wbudget01");
+    registry.register_handler(TaskType::LocalAgent, agent_handler.clone());
+    registry.register_handler(TaskType::LocalWorkflow, workflow_handler.clone());
+
+    registry
+        .spawn(
+            TaskType::LocalAgent,
+            local_agent_input(),
+            "background research".into(),
+        )
+        .await
+        .unwrap();
+    registry
+        .spawn(
+            TaskType::LocalWorkflow,
+            TaskSpawnInput::LocalWorkflow {
+                workflow_id: "budget-workflow".into(),
+                script: "return true".into(),
+                resume_from_run_id: None,
+                args: None,
+                run_id: Some("wf_budget".into()),
+                invocation_mode: Some("inline".into()),
+                workflow_source: Some("inline".into()),
+                launched_from_subagent: false,
+            },
+            "background workflow".into(),
+        )
+        .await
+        .unwrap();
+
+    // A running foreground agent is explicitly excluded by Claude's
+    // `isBackgrounded === false` guard, even though it shares the same task
+    // type and status as the background agent.
+    registry
+        .insert_state_for_test(TaskState::LocalAgent(LocalAgentTaskState {
+            base: TaskStateBase {
+                id: "aforegrnd".into(),
+                task_type: TaskType::LocalAgent,
+                status: TaskStatus::Running,
+                description: "foreground".into(),
+                tool_use_id: None,
+                start_time: SystemTime::now(),
+                end_time: None,
+                total_paused_ms: 0,
+                output_file: PathBuf::from("/tmp/tasks/aforegrnd.output"),
+                output_offset: 0,
+                notified: false,
+                creator_teammate_name: None,
+                creator_team_name: None,
+            },
+            agent_id: protocol::AgentId::nil(),
+            subagent_type: "general-purpose".into(),
+            prompt: String::new(),
+            error: None,
+            messages: vec![],
+            pending_messages: vec![],
+            is_backgrounded: false,
+        }))
+        .await;
+
+    let announced = std::sync::atomic::AtomicBool::new(false);
+    let announce = || {
+        assert!(agent_handler.killed_ids().is_empty());
+        assert!(workflow_handler.killed_ids().is_empty());
+        announced.store(true, Ordering::SeqCst);
+    };
+    let stopped = TaskRegistryHandle::stop_background_agents_for_budget(&registry, &announce)
+        .await
+        .unwrap();
+
+    assert_eq!(stopped, 2);
+    assert!(announced.load(Ordering::SeqCst));
+    assert_eq!(agent_handler.killed_ids(), vec!["abudget01"]);
+    assert_eq!(workflow_handler.killed_ids(), vec!["wbudget01"]);
+    assert_eq!(
+        registry
+            .get("aforegrnd")
+            .await
+            .expect("foreground agent retained")
+            .base()
+            .status,
+        TaskStatus::Running
+    );
+
+    // The recording workflow handler does not drive the production status
+    // sink, so settle its synthetic state before exercising the no-match path.
+    registry
+        .set_status("wbudget01", TaskStatus::Killed)
+        .await
+        .unwrap();
+    let unexpected_announcement = || panic!("no matching background tasks remain");
+    let stopped_again =
+        TaskRegistryHandle::stop_background_agents_for_budget(&registry, &unexpected_announcement)
+            .await
+            .unwrap();
+    assert_eq!(stopped_again, 0);
 }
 
 #[tokio::test]
@@ -672,6 +793,44 @@ async fn completed_transition_fires_byte_faithful_payload() {
 }
 
 #[tokio::test]
+async fn completed_transition_carries_creator_identity() {
+    let dir = tempdir().unwrap();
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let runtime = Arc::new(MockRuntimeSpawner::default());
+    let out_mgr = Arc::new(crate::output_manager::TaskOutputManager::new(
+        PathBuf::from(dir.path()),
+        fs.clone(),
+    ));
+    let firer = RecordingFirer::new();
+    let mut registry =
+        TaskRegistry::new(runtime, fs, out_mgr).with_task_completed_firer(firer.clone());
+    let handler = RecordingHandler::new(TaskType::LocalAgent, "acompident");
+    registry.register_handler(TaskType::LocalAgent, handler);
+
+    let task_id = registry
+        .spawn(
+            TaskType::LocalAgent,
+            local_agent_input_with_creator("researcher", "alpha"),
+            "ship the parity port".into(),
+        )
+        .await
+        .unwrap();
+    registry
+        .set_status(&task_id, TaskStatus::Completed)
+        .await
+        .unwrap();
+
+    let recorded = firer.recorded();
+    assert_eq!(
+        recorded.len(),
+        1,
+        "exactly one TaskCompleted fire: {recorded:?}"
+    );
+    assert_eq!(recorded[0].teammate_name.as_deref(), Some("researcher"));
+    assert_eq!(recorded[0].team_name.as_deref(), Some("alpha"));
+}
+
+#[tokio::test]
 async fn failed_transition_also_fires() {
     // claude-code also fires `executeTaskCompletedHooks` from `stopHooks.ts`
     // when a teammate stops with in-progress tasks — the terminal transition
@@ -847,6 +1006,28 @@ async fn spawn_also_fires_task_created() {
     assert_eq!(recorded[0].task_id, task_id);
     assert_eq!(recorded[0].task_subject, "InProcessTeammate");
     assert_eq!(recorded[0].task_description.as_deref(), Some("a teammate"));
+}
+
+#[tokio::test]
+async fn spawn_local_agent_task_created_carries_creator_identity() {
+    let (_d, mut registry, firer) = registry_with_created_firer();
+    let handler = RecordingHandler::new(TaskType::LocalAgent, "acreator1");
+    registry.register_handler(TaskType::LocalAgent, handler);
+
+    let task_id = registry
+        .spawn(
+            TaskType::LocalAgent,
+            local_agent_input_with_creator("researcher", "alpha"),
+            "background agent".into(),
+        )
+        .await
+        .unwrap();
+
+    let recorded = firer.recorded();
+    assert_eq!(recorded.len(), 1, "spawn fires TaskCreated: {recorded:?}");
+    assert_eq!(recorded[0].task_id, task_id);
+    assert_eq!(recorded[0].teammate_name.as_deref(), Some("researcher"));
+    assert_eq!(recorded[0].team_name.as_deref(), Some("alpha"));
 }
 
 #[tokio::test]
@@ -1281,6 +1462,8 @@ fn state_for_spawn_stamps_local_agent_tool_use_id() {
         output_file: std::path::PathBuf::from("/tmp/tasks/abg01.output"),
         output_offset: 0,
         notified: false,
+        creator_teammate_name: None,
+        creator_team_name: None,
     };
     let input = TaskSpawnInput::LocalAgent {
         agent_id: protocol::AgentId::nil(),
@@ -1288,11 +1471,18 @@ fn state_for_spawn_stamps_local_agent_tool_use_id() {
         prompt: "go".into(),
         is_backgrounded: true,
         tool_use_id: Some("toolu_bg42".into()),
+        creator_teammate_name: Some("researcher".into()),
+        creator_team_name: Some("alpha".into()),
         spawn_request: None,
         inheritance: None,
     };
     let state = state_for_spawn(base, &input);
     assert_eq!(state.base().tool_use_id.as_deref(), Some("toolu_bg42"));
+    assert_eq!(
+        state.base().creator_teammate_name.as_deref(),
+        Some("researcher")
+    );
+    assert_eq!(state.base().creator_team_name.as_deref(), Some("alpha"));
 
     // A `None` input tool_use_id leaves the base untouched.
     let base2 = TaskStateBase {
@@ -1307,6 +1497,8 @@ fn state_for_spawn_stamps_local_agent_tool_use_id() {
         output_file: std::path::PathBuf::from("/tmp/tasks/abg02.output"),
         output_offset: 0,
         notified: false,
+        creator_teammate_name: None,
+        creator_team_name: None,
     };
     let input2 = TaskSpawnInput::LocalAgent {
         agent_id: protocol::AgentId::nil(),
@@ -1314,10 +1506,15 @@ fn state_for_spawn_stamps_local_agent_tool_use_id() {
         prompt: "go".into(),
         is_backgrounded: true,
         tool_use_id: None,
+        creator_teammate_name: None,
+        creator_team_name: None,
         spawn_request: None,
         inheritance: None,
     };
-    assert_eq!(state_for_spawn(base2, &input2).base().tool_use_id, None);
+    let state2 = state_for_spawn(base2, &input2);
+    assert_eq!(state2.base().tool_use_id, None);
+    assert_eq!(state2.base().creator_teammate_name, None);
+    assert_eq!(state2.base().creator_team_name, None);
 }
 
 #[tokio::test]
@@ -1337,6 +1534,8 @@ async fn take_pending_carries_agent_error() {
         output_file: std::path::PathBuf::from("/tmp/tasks/afailed01.output"),
         output_offset: 0,
         notified: false,
+        creator_teammate_name: None,
+        creator_team_name: None,
     };
     registry
         .insert_state_for_test(TaskState::LocalAgent(LocalAgentTaskState {
@@ -1380,6 +1579,8 @@ async fn find_running_workflow_by_run_id_matches_only_running_same_id() {
                 output_file: std::path::PathBuf::from(format!("/tmp/tasks/{id}.output")),
                 output_offset: 0,
                 notified: false,
+                creator_teammate_name: None,
+                creator_team_name: None,
             },
             workflow_id: String::new(),
             script: String::new(),
@@ -1435,6 +1636,8 @@ async fn rested_agent_surfaces_once_per_rest_without_eviction() {
         output_file: std::path::PathBuf::from("/tmp/tasks/a-rest-1.output"),
         output_offset: 0,
         notified: false,
+        creator_teammate_name: None,
+        creator_team_name: None,
     };
     registry
         .insert_state_for_test(TaskState::LocalAgent(LocalAgentTaskState {
@@ -1528,6 +1731,8 @@ async fn take_pending_skips_already_notified_and_non_terminal() {
             output_file: std::path::PathBuf::from("/tmp/tasks/bnotified.output"),
             output_offset: 0,
             notified: true, // already surfaced (e.g. via TaskOutput)
+            creator_teammate_name: None,
+            creator_team_name: None,
         };
         registry
             .insert_state_for_test(TaskState::LocalBash(LocalBashTaskState {

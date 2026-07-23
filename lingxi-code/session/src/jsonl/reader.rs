@@ -22,6 +22,56 @@ pub fn is_transcript_message_type(ty: &str) -> bool {
     matches!(ty, "user" | "assistant" | "attachment" | "system")
 }
 
+/// Parse Claude Code's pull-request selector representation.
+///
+/// This mirrors JavaScript `parseInt(raw, 10)` for positive leading numeric
+/// input, then accepts GitHub, Bitbucket and GitLab PR URL forms. Keeping the
+/// parser in the session layer lets both CLI filtering and legacy transcript
+/// recovery use exactly the same semantics.
+#[must_use]
+pub fn parse_pr_number(raw: &str) -> Option<u64> {
+    let trimmed = raw.trim_start();
+    let (negative, digits_part) = match trimmed.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, trimmed.strip_prefix('+').unwrap_or(trimmed)),
+    };
+    let digits: String = digits_part
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    if !digits.is_empty() && !negative {
+        if let Ok(number) = digits.parse::<u64>() {
+            if number > 0 {
+                return Some(number);
+            }
+        }
+    }
+
+    for marker in ["/pull/", "/pull-requests/", "/-/merge_requests/"] {
+        let Some(index) = raw.find(marker) else {
+            continue;
+        };
+        let prefix = &raw[..index];
+        let prefix = prefix
+            .strip_prefix("https://")
+            .or_else(|| prefix.strip_prefix("http://"))
+            .unwrap_or(prefix);
+        if !prefix.contains('/') || prefix.contains(char::is_whitespace) {
+            continue;
+        }
+        let digits: String = raw[index + marker.len()..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        if let Ok(number) = digits.parse::<u64>() {
+            if number > 0 {
+                return Some(number);
+            }
+        }
+    }
+    None
+}
+
 /// Two-phase tolerant load of a session JSONL — the structural equivalent of
 /// `claude-code`'s `loadTranscriptFile` (`sessionStorage.ts:3472`): chain
 /// participants are parsed into [`JsonlMessage`] and indexed by uuid; Tier-1
@@ -43,7 +93,7 @@ pub fn is_transcript_message_type(ty: &str) -> bool {
 /// | `modes` | ✅ implemented (gap #5) | `"mode"` |
 /// | `permission_modes` | ✅ implemented (gap #5) | `"permission-mode"` |
 /// | `worktree_states` | ✅ implemented (gap #5) | `"worktree-state"` |
-/// | `prNumbers/prUrls/prRepositories` | ⏭ deferred — PR subsystem absent in LingXi | `"pr-link"` |
+/// | `prNumbers/prUrls/prRepositories` | ✅ implemented | `"pr-link"` |
 /// | `bridgeSessionIds/bridgeLastSeqs/bridgeDialogKindsBySession` | ⏭ deferred — bridge subsystem absent | `"bridge-session"` |
 /// | `contextCollapseCommits/contextCollapseSnapshot` | ⏭ deferred — context-collapse is REFUTED/inert (prior audit) | `"marble-origami-*"` |
 /// | `attributionSnapshots` | ⏭ deferred — attribution subsystem absent | `"attribution-snapshot"` |
@@ -79,6 +129,13 @@ pub struct LoadedTranscript {
     /// `{type:"ai-title", sessionId, aiTitle}`; readers prefer `custom-title`
     /// over `ai-title`, `sessionStorage.ts:2644-2646`).
     pub ai_titles: HashMap<String, String>,
+    /// Pull-request number keyed by `sessionId` from the latest `pr-link`
+    /// metadata entry. Used by `--from-pr` resume filtering.
+    pub pr_numbers: HashMap<String, u64>,
+    /// Pull-request URL keyed by `sessionId` (preserved for picker consumers).
+    pub pr_urls: HashMap<String, String>,
+    /// Pull-request repository identifier keyed by `sessionId`.
+    pub pr_repositories: HashMap<String, String>,
 
     // ── Gap #1 fix: last-prompt resume tip ──────────────────────────────────
     /// The last `last-prompt` entry whose `explicit===true` flag is set.
@@ -319,6 +376,33 @@ pub fn route_lines(content: &str) -> LoadedTranscript {
                 value.get("aiTitle").and_then(Value::as_str),
             ) {
                 out.ai_titles.insert(sid.to_string(), title.to_string());
+            }
+        } else if ty == "pr-link" {
+            // PR metadata is a last-write-wins side record keyed by sessionId.
+            // Be tolerant of older writers that serialized the number as a
+            // decimal string instead of a JSON number.
+            if let Some(sid) = value.get("sessionId").and_then(Value::as_str) {
+                let url = value.get("prUrl").and_then(Value::as_str);
+                let number = value
+                    .get("prNumber")
+                    .and_then(|v| {
+                        v.as_u64()
+                            .filter(|number| *number > 0)
+                            .or_else(|| v.as_str().and_then(parse_pr_number))
+                    })
+                    // Older transcripts sometimes persisted only `prUrl`.
+                    // Recover the number so `--from-pr` sees those sessions.
+                    .or_else(|| url.and_then(parse_pr_number));
+                if let Some(number) = number {
+                    out.pr_numbers.insert(sid.to_string(), number);
+                }
+                if let Some(url) = url {
+                    out.pr_urls.insert(sid.to_string(), url.to_string());
+                }
+                if let Some(repository) = value.get("prRepository").and_then(Value::as_str) {
+                    out.pr_repositories
+                        .insert(sid.to_string(), repository.to_string());
+                }
             }
 
         // ── Gap #1 fix: last-prompt → explicit resume tip ────────────────────

@@ -1,5 +1,5 @@
-//! `CronDeleteTool` — cancel a scheduled cron job by id, removing it from the
-//! single project-relative `<root>/.lingxi/scheduled_tasks.json` file.
+//! `CronDeleteTool` — cancel a scheduled cron job by id, removing durable jobs
+//! from the project tasks file and session-only jobs from the live scheduler.
 //!
 //! 1:1 parity port of claude-code `CronDeleteTool.ts`. The model supplies the
 //! job `id` returned by `CronCreate`; the tool read-modify-writes the tasks
@@ -79,6 +79,53 @@ async fn job_exists(fs: &dyn traits::FileSystem, project_root: &Path, id: &str) 
     }
 }
 
+fn teammate_owner(ctx: &ToolUseContext) -> Option<String> {
+    ctx.agent_name.as_ref().map(|name| {
+        ctx.agent_id
+            .map_or_else(|| name.clone(), |agent_id| agent_id.to_string())
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum JobLocation {
+    Session,
+    Durable,
+    Foreign,
+}
+
+async fn locate_accessible_job(
+    tool_ctx: &tool_api::BuiltinToolContext,
+    call_ctx: &ToolUseContext,
+    id: &str,
+) -> Option<JobLocation> {
+    let owner = teammate_owner(call_ctx);
+    if let Some(registry) = &tool_ctx.task_registry {
+        if let Ok(tasks) = cron::session_jobs(registry).await {
+            if let Some(task) = tasks.into_iter().find(|task| task.id == id) {
+                return Some(
+                    if owner
+                        .as_deref()
+                        .is_none_or(|owner| task.owner.as_deref() == Some(owner))
+                    {
+                        JobLocation::Session
+                    } else {
+                        JobLocation::Foreign
+                    },
+                );
+            }
+        }
+    }
+    if job_exists(tool_ctx.fs.as_ref(), &tool_ctx.cwd(), id).await {
+        Some(if owner.is_none() {
+            JobLocation::Durable
+        } else {
+            JobLocation::Foreign
+        })
+    } else {
+        None
+    }
+}
+
 /// `CronDeleteTool` — cancel a scheduled cron job by id.
 pub struct CronDeleteTool {
     pub(crate) ctx: tool_api::BuiltinToolContext,
@@ -150,27 +197,29 @@ impl Tool for CronDeleteTool {
     async fn validate_input(
         &self,
         input: &Value,
-        _: &ToolUseContext,
+        call_ctx: &ToolUseContext,
     ) -> Result<(), ValidationError> {
         let id = input
             .get("id")
             .and_then(Value::as_str)
             .ok_or_else(|| ValidationError("CronDelete: missing or non-string id".into()))?;
 
-        if !job_exists(self.ctx.fs.as_ref(), &self.ctx.cwd(), id).await {
-            return Err(ValidationError(format!("No scheduled job with id '{id}'")));
+        match locate_accessible_job(&self.ctx, call_ctx, id).await {
+            Some(JobLocation::Session | JobLocation::Durable) => {}
+            Some(JobLocation::Foreign) => {
+                return Err(ValidationError(format!(
+                    "Cannot delete cron job '{id}': owned by another agent"
+                )));
+            }
+            None => return Err(ValidationError(format!("No scheduled job with id '{id}'"))),
         }
-        // PARITY-GAP: TS validateInput also rejects deleting a cron owned by a
-        // different teammate (`ctx && task.agentId !== ctx.agentId`). There is
-        // no teammate context in this Rust seam, so the ownership check is
-        // omitted.
         Ok(())
     }
 
     async fn call(
         &self,
         input: Value,
-        _ctx: ToolUseContext,
+        call_ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let started = Instant::now();
@@ -189,6 +238,44 @@ impl Tool for CronDeleteTool {
         let mut md: LogEventMetadata = HashMap::new();
         md.insert("id".into(), verified_str(&id));
         bus.log_event(CRON_DELETE_STARTED, md).await;
+
+        let location = match locate_accessible_job(&self.ctx, &call_ctx, &id).await {
+            Some(JobLocation::Foreign) => {
+                emit_failed(&bus, "foreign_owner", started.elapsed().as_millis() as u64).await;
+                return Err(ToolError::InvalidInput(format!(
+                    "Cannot delete cron job '{id}': owned by another agent"
+                )));
+            }
+            Some(location) => location,
+            None => {
+                emit_failed(&bus, "not_found", started.elapsed().as_millis() as u64).await;
+                return Err(ToolError::InvalidInput(format!(
+                    "No scheduled job with id '{id}'"
+                )));
+            }
+        };
+
+        if location == JobLocation::Session {
+            let registry = self.ctx.task_registry.as_ref().ok_or_else(|| {
+                ToolError::Internal("CronDelete: active scheduler disappeared".into())
+            })?;
+            let owner = teammate_owner(&call_ctx);
+            let removed = cron::unregister_live_job(registry, &id, owner.as_deref())
+                .await
+                .map_err(|error| ToolError::Internal(format!("CronDelete: {error}")))?;
+            if !removed {
+                return Err(ToolError::InvalidInput(format!(
+                    "No scheduled job with id '{id}'"
+                )));
+            }
+            let mut md: LogEventMetadata = HashMap::new();
+            md.insert(
+                "duration_ms".into(),
+                AnalyticsValue::Int(started.elapsed().as_millis() as i64),
+            );
+            bus.log_event(CRON_DELETE_COMPLETED, md).await;
+            return Ok(cancelled_result(&id));
+        }
 
         // Read-modify-write the single `{ "tasks": [...] }` file: drop the task
         // with the matching id and write the rest back. A missing file / missing
@@ -247,17 +334,25 @@ impl Tool for CronDeleteTool {
         );
         bus.log_event(CRON_DELETE_COMPLETED, md).await;
 
-        Ok(ToolCallResult {
-            data: json!({
-                "id": id,
-                "content": format!("Cancelled job {id}."),
-            }),
-            model_content: None,
-            new_messages: vec![],
-            context_modifier: None,
-            is_error: false,
-            mcp_meta: None,
-        })
+        if let Some(registry) = &self.ctx.task_registry {
+            let _ = cron::unregister_live_job(registry, &id, None).await;
+        }
+
+        Ok(cancelled_result(&id))
+    }
+}
+
+fn cancelled_result(id: &str) -> ToolCallResult {
+    ToolCallResult {
+        data: json!({
+            "id": id,
+            "content": format!("Cancelled job {id}."),
+        }),
+        model_content: None,
+        new_messages: vec![],
+        context_modifier: None,
+        is_error: false,
+        mcp_meta: None,
     }
 }
 
@@ -359,5 +454,30 @@ mod tests {
             .await
             .expect_err("missing");
         assert_eq!(err.0, "No scheduled job with id 'dmissing1'");
+    }
+
+    #[tokio::test]
+    async fn teammate_cannot_delete_another_owners_durable_job() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_ids(tmp.path(), &["abcdef12"]).await;
+        let tool = CronDeleteTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
+        let mut call_ctx = fresh_ctx();
+        call_ctx.agent_name = Some("researcher".into());
+
+        let error = tool
+            .validate_input(&json!({"id": "abcdef12"}), &call_ctx)
+            .await
+            .expect_err("teammate must not delete the leader's durable job");
+        assert_eq!(
+            error.0,
+            "Cannot delete cron job 'abcdef12': owned by another agent"
+        );
+        let call_error = tool
+            .call(json!({"id": "abcdef12"}), call_ctx, fresh_tx())
+            .await
+            .expect_err("call must enforce ownership without pre-validation too");
+        assert!(format!("{call_error}")
+            .contains("Cannot delete cron job 'abcdef12': owned by another agent"));
+        assert_eq!(read_ids(tmp.path()).await, vec!["abcdef12"]);
     }
 }

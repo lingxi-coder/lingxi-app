@@ -17,6 +17,7 @@
 //! 5. On `emit_end_turn` the bridge fires `TurnEvent::TurnEnded(_)`.
 
 use async_trait::async_trait;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::UnboundedSender;
 use traits::{ContextPressureBanner, CostSnapshot, OutputStream, TurnOutcome};
@@ -369,6 +370,7 @@ pub enum TurnEvent {
 pub struct BridgeOutputStream {
     tx: UnboundedSender<TurnEvent>,
     heartbeats: Arc<CoalescedToolHeartbeats>,
+    omit_thinking: AtomicBool,
 }
 
 impl BridgeOutputStream {
@@ -379,6 +381,7 @@ impl BridgeOutputStream {
         Self {
             tx,
             heartbeats: Arc::new(CoalescedToolHeartbeats::default()),
+            omit_thinking: AtomicBool::new(false),
         }
     }
 }
@@ -389,8 +392,23 @@ impl OutputStream for BridgeOutputStream {
         let _ = self.tx.send(TurnEvent::TextDelta(text.to_string()));
     }
 
+    async fn emit_system_notice(&self, body: &str, is_error: bool) {
+        let _ = self.tx.send(TurnEvent::SystemNotice {
+            body: body.to_string(),
+            is_error,
+        });
+    }
+
     async fn emit_thinking(&self, thinking: &str, _signature: Option<&str>) {
+        if self.omit_thinking.load(Ordering::Relaxed) {
+            return;
+        }
         let _ = self.tx.send(TurnEvent::ThinkingDelta(thinking.to_string()));
+    }
+
+    fn set_thinking_display(&self, mode: Option<&str>) {
+        self.omit_thinking
+            .store(mode == Some("omitted"), Ordering::Relaxed);
     }
 
     async fn emit_subagent_activity(&self, text: &str) {
@@ -597,6 +615,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn emit_system_notice_translates_to_error_notice() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let bridge = BridgeOutputStream::new(tx);
+        bridge
+            .emit_system_notice("transcript unavailable", true)
+            .await;
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            TurnEvent::SystemNotice { body, is_error }
+                if body == "transcript unavailable" && is_error
+        ));
+    }
+
+    #[tokio::test]
     async fn emit_compaction_started_translates_to_compact_started() {
         // The orchestrator emits this before every compaction pass (manual
         // AND auto); the bridge must forward it or the TUI's `Compacting
@@ -615,6 +647,22 @@ mod tests {
         bridge.emit_thinking("let me reason", Some("sig-abc")).await;
         let ev = rx.recv().await.unwrap();
         assert!(matches!(ev, TurnEvent::ThinkingDelta(ref s) if s == "let me reason"));
+    }
+
+    #[tokio::test]
+    async fn omitted_thinking_display_drops_thinking_until_restored() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let bridge = BridgeOutputStream::new(tx);
+        bridge.set_thinking_display(Some("omitted"));
+        bridge.emit_thinking("hidden", None).await;
+        assert!(rx.try_recv().is_err());
+
+        bridge.set_thinking_display(Some("summarized"));
+        bridge.emit_thinking("visible", None).await;
+        assert!(matches!(
+            rx.recv().await,
+            Some(TurnEvent::ThinkingDelta(ref s)) if s == "visible"
+        ));
     }
 
     #[tokio::test]

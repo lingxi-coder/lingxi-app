@@ -5,7 +5,7 @@ use super::*;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
+    use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx, StubProcess};
     use traits::process::ProcessOutput;
 
     fn dummy_out() -> ProcessOutput {
@@ -496,11 +496,15 @@ mod tests {
             body: "before !`echo hi` after".into(),
             ..prompt_desc("sh")
         };
-        // The stub process returns this stdout for the (single) embedded command.
-        let tool = SkillTool::with_loader(
-            shell_test_ctx(out_with_stdout("hi\n")),
-            Arc::new(FixedLoader(Some(desc))),
-        );
+        // Snapshot creation consumes the first process result; because the stub
+        // does not materialize the requested file, execution falls back to the
+        // login shell and consumes the second result.
+        let mut ctx = shell_test_ctx(dummy_out());
+        ctx.process = Arc::new(StubProcess::with(vec![
+            dummy_out(),
+            out_with_stdout("hi\n"),
+        ]));
+        let tool = SkillTool::with_loader(ctx, Arc::new(FixedLoader(Some(desc))));
         let out = tool
             .call(json!({"skill": "sh"}), fresh_ctx(), fresh_tx())
             .await
@@ -870,16 +874,17 @@ mod tests {
         assert_eq!(injected_text(&out), "pre OUT post");
         // The command the shell actually ran already had the token substituted.
         let seen = capture.seen.lock().unwrap();
-        assert_eq!(seen.len(), 1, "exactly one embedded command ran");
+        assert_eq!(seen.len(), 2, "snapshot plus embedded command ran");
+        let command = seen.last().expect("embedded command");
         assert!(
-            seen[0].contains("echo sess:zzz"),
+            command.contains("echo sess:zzz"),
             "shell saw substituted session id, got: {}",
-            seen[0]
+            command
         );
         assert!(
-            !seen[0].contains("${LINGXI_SESSION_ID}"),
+            !command.contains("${LINGXI_SESSION_ID}"),
             "token must be substituted BEFORE shell expansion, got: {}",
-            seen[0]
+            command
         );
     }
 
@@ -966,11 +971,12 @@ mod tests {
 
         // The runner's wrapped output (sentinel) is what actually got spawned.
         let seen = capture.seen.lock().unwrap();
-        assert_eq!(seen.len(), 1, "exactly one embedded command ran");
+        assert_eq!(seen.len(), 2, "snapshot plus embedded command ran");
+        let command = seen.last().expect("embedded command");
         assert!(
-            seen[0].contains("WRAPPED::"),
+            command.contains("WRAPPED::"),
             "the runner's wrapped command must be spawned, got: {}",
-            seen[0]
+            command
         );
         drop(seen);
 
@@ -1055,20 +1061,21 @@ mod tests {
         // The splice still works (the stub stdout is "OUT").
         assert_eq!(injected_text(&out), "pre OUT post");
         let seen = capture.seen.lock().unwrap();
-        assert_eq!(seen.len(), 1, "exactly one embedded command ran");
+        assert_eq!(seen.len(), 2, "snapshot plus embedded command ran");
+        let command = seen.last().expect("embedded command");
         // The spawned payload is the platform sandbox wrapper — NOT the raw
         // command — proving the should_use_sandbox + wrap_with_sandbox path ran.
         assert!(
-            seen[0].starts_with(sandbox_wrap_prefix()),
+            command.starts_with(sandbox_wrap_prefix()),
             "embedded command must be sandbox-wrapped, got: {}",
-            seen[0]
+            command
         );
         // The original command (plus the BASH.1 extglob guard) is nested inside
         // the wrapper's `/bin/sh -c '…'` payload.
         assert!(
-            seen[0].contains("echo hi"),
+            command.contains("echo hi"),
             "wrapped command should still carry the original command, got: {}",
-            seen[0]
+            command
         );
     }
 
@@ -1096,17 +1103,18 @@ mod tests {
             .expect("ok");
         assert_eq!(injected_text(&out), "pre OUT post");
         let seen = capture.seen.lock().unwrap();
-        assert_eq!(seen.len(), 1, "exactly one embedded command ran");
+        assert_eq!(seen.len(), 2, "snapshot plus embedded command ran");
+        let command = seen.last().expect("embedded command");
         // No sandbox wrapper — the raw command runs directly.
         assert!(
-            !seen[0].starts_with(sandbox_wrap_prefix()),
+            !command.starts_with(sandbox_wrap_prefix()),
             "NoSandbox path must run the command unwrapped, got: {}",
-            seen[0]
+            command
         );
         assert!(
-            seen[0].contains("echo hi"),
+            command.contains("echo hi"),
             "unwrapped command should be the raw command, got: {}",
-            seen[0]
+            command
         );
     }
 

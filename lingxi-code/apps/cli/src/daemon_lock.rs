@@ -704,7 +704,7 @@ mod tests {
             self.daemon.insert(pid, false);
             self
         }
-        fn start(mut self, pid: i32, seq: Vec<Option<&str>>) -> Self {
+        fn start(self, pid: i32, seq: Vec<Option<&str>>) -> Self {
             self.start_seq.borrow_mut().insert(
                 pid,
                 seq.into_iter().map(|s| s.map(str::to_string)).collect(),

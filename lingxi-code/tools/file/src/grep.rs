@@ -649,12 +649,13 @@ impl Tool for GrepTool {
             let _ = ob.add(&format!("!{dir}/**"));
         }
         // Read(deny) exclusions (GrepTool.ts:417-427): each active `Read`-`deny`
-        // rule (resolved by `permission::read_deny_exclude_globs` at boot) is
-        // turned into a negated override so a denied/sensitive path never
-        // appears in results. Prefix EXACTLY as the reference does: a rooted
+        // rule (resolved by `permission::read_deny_exclude_globs` from the live
+        // policy on every call) is turned into a negated override so a
+        // denied/sensitive path never appears in results. Prefix EXACTLY as
+        // the reference does: a rooted
         // (`/`-anchored) entry → `!P`; a bare relative entry → `!**/P` (match at
         // any depth). In `OverrideBuilder`, a `!`-prefixed pattern is an ignore.
-        for p in &self.ctx.read_deny_exclude_globs {
+        for p in self.ctx.effective_read_deny_exclude_globs(&canon_base) {
             let neg = if p.starts_with('/') {
                 format!("!{p}")
             } else {

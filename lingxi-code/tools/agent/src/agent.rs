@@ -1093,6 +1093,8 @@ Reach for this when the task matches an available agent type, when you have inde
                 .tool_use_id
                 .as_ref()
                 .map(std::string::ToString::to_string),
+            creator_teammate_name: ctx.agent_name.clone(),
+            creator_team_name: ctx.team_name.clone(),
             // Workflow-only spawn seam (defaults; the Agent tool doesn't use the
             // workflow-subagent prompt override/addendum or disallow-union).
             system_prompt_override: None,
@@ -2006,6 +2008,8 @@ Use /mcp to configure and authenticate the required MCP servers.",
             // Sync spawn: no background task / notification, so no tool_use_id
             // to stamp (only the async/background path threads it).
             tool_use_id: None,
+            creator_teammate_name: ctx.agent_name.clone(),
+            creator_team_name: ctx.team_name.clone(),
             // Workflow-only spawn seam (defaults; unused by the Agent tool).
             system_prompt_override: None,
             system_prompt_addendum: None,

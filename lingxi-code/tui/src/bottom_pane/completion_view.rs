@@ -31,6 +31,79 @@ pub struct CompletionItem {
     pub desc: String,
 }
 
+/// Emoji shortcode candidates supported by the composer.  Keeping this table
+/// local avoids a heavyweight Unicode-data dependency on the startup path;
+/// the entries cover the common GitHub/Slack-style shortcodes Claude Code
+/// exposes in its `:` completion surface.
+const EMOJI_SHORTCODES: &[(&str, &str)] = &[
+    ("+1", "👍"),
+    ("-1", "👎"),
+    ("100", "💯"),
+    ("blush", "😊"),
+    ("boom", "💥"),
+    ("broken_heart", "💔"),
+    ("checkered_flag", "🏁"),
+    ("clap", "👏"),
+    ("confetti_ball", "🎊"),
+    ("eyes", "👀"),
+    ("fire", "🔥"),
+    ("grinning", "😀"),
+    ("heart", "❤️"),
+    ("heart_eyes", "😍"),
+    ("heavy_check_mark", "✔️"),
+    ("joy", "😂"),
+    ("laughing", "😆"),
+    ("light_bulb", "💡"),
+    ("link", "🔗"),
+    ("memo", "📝"),
+    ("muscle", "💪"),
+    ("ok_hand", "👌"),
+    ("party_popper", "🎉"),
+    ("pray", "🙏"),
+    ("question", "❓"),
+    ("rocket", "🚀"),
+    ("sob", "😭"),
+    ("sparkles", "✨"),
+    ("star", "⭐"),
+    ("tada", "🎉"),
+    ("thinking", "🤔"),
+    ("warning", "⚠️"),
+    ("wave", "👋"),
+    ("white_check_mark", "✅"),
+    ("x", "❌"),
+    ("zap", "⚡"),
+];
+
+/// Build emoji suggestions for the text between the leading `:` and cursor.
+/// A closing `:` is accepted while filtering, so both `:hea` and `:heart:`
+/// resolve to `:heart:`.  Selection inserts the emoji glyph, not the shortcode.
+#[must_use]
+pub fn emoji_items(fragment: &str) -> Vec<CompletionItem> {
+    let query = fragment.trim_end_matches(':').to_ascii_lowercase();
+    if query.is_empty() {
+        return Vec::new();
+    }
+    EMOJI_SHORTCODES
+        .iter()
+        .filter(|(name, _)| name.starts_with(&query))
+        .map(|(name, glyph)| CompletionItem {
+            label: format!(":{name}:  {glyph}"),
+            insert: (*glyph).to_string(),
+            desc: String::new(),
+        })
+        .collect()
+}
+
+/// Resolve a fully typed `name:` fragment to its emoji. The leading `:` is
+/// owned by the composer token and is therefore not part of `fragment`.
+#[must_use]
+pub fn exact_emoji(fragment: &str) -> Option<&'static str> {
+    let name = fragment.strip_suffix(':')?;
+    EMOJI_SHORTCODES
+        .iter()
+        .find_map(|(candidate, glyph)| candidate.eq_ignore_ascii_case(name).then_some(*glyph))
+}
+
 /// A registry-backed slash command (user command, skill, plugin, or bundled
 /// skill) as a popup candidate — the NON-builtin half of claude-code's
 /// `generateCommandSuggestions` candidate set that lives in the

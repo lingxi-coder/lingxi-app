@@ -39,20 +39,21 @@
 //! (`Configure usage credits to keep working when you hit a limit`, two objects
 //! gated by `bnr()` = `!DISABLE_EXTRA_USAGE_COMMAND && (rateLimitStatus!==null
 //! || isOverageProvisioningAllowed())`, split interactive/non-interactive on
-//! `isNonInteractiveSession()`). This re-locks the total from 101 to **106**.
+//! `isNonInteractiveSession()`). The current-oracle total is **105** after
+//! removing the stale `x402` entry.
 //! `usage-credits` is hidden from the default palette / `/help` because `bnr()`
 //! resolves `false` in a fresh session with no subscription or rate-limit
 //! status (see [`is_palette_hidden`] + [`USAGE_CREDITS_BNR_GATED`]); the other
 //! four are visible.
 
 /// Every built-in slash command's runtime name (without leading `/`),
-/// ASCII-sorted. Locked at length **106** for v0.6.0.
+/// ASCII-sorted. Locked at length **105** for the current oracle.
 ///
 /// Changing the count or membership requires bumping the parity fixture
 /// `crates/test-harness/src/parity/fixtures/parity_slash_commands_102.json`
 /// (fixture filename retained for git-history continuity; the counts inside
-/// reflect the 106/47/18 lock per the 2026-07-14 H-BIN-11 slash-parity pass).
-pub const BUILTIN_COMMAND_NAMES: &[&str; 106] = &[
+/// reflect the current membership lock).
+pub const BUILTIN_COMMAND_NAMES: &[&str; 105] = &[
     "add-dir",
     "advisor",
     "agents",
@@ -158,7 +159,6 @@ pub const BUILTIN_COMMAND_NAMES: &[&str; 106] = &[
     "usage-credits",
     "version",
     "voice",
-    "x402",
 ];
 
 /// The 18 core commands that ship with real implementations in M5-10 / M5-11.
@@ -256,15 +256,10 @@ pub const INTENTIONALLY_DISABLED_COMMANDS: &[(&str, &str)] = &[
     ("thinkback", "statsig-gated in claude-code"),
     ("thinkback-play", "statsig-gated in claude-code"),
     (
-        "x402",
-        "entitlement-gated in claude-code (crypto micropayments)",
-    ),
-    (
         "break-cache",
         "compiled stub in claude-code (internal cache control)",
     ),
     ("share", "compiled stub in claude-code"),
-    ("reload-plugins", "local/internal stub in claude-code"),
 ];
 
 // ============================================================================
@@ -302,9 +297,8 @@ pub const INTENTIONALLY_DISABLED_COMMANDS: &[(&str, &str)] = &[
 /// [`BUILTIN_CORE_NAMES`], and disjoint from [`HOST_BOUND_DEFERRED_GAPS`]
 /// (asserted by the STUB.6 partition tests in the test-harness).
 ///
-/// This is the refined subset of [`INTENTIONALLY_DISABLED_COMMANDS`]: it is
-/// that table MINUS the three names that claude-code actually implements
-/// (see [`HOST_BOUND_DEFERRED_GAPS`]).
+/// This is the refined subset of [`INTENTIONALLY_DISABLED_COMMANDS`], excluding
+/// the one host/UI-bound `btw` entry.
 pub const CORRECT_BY_DESIGN_STUBS: &[(&str, &str)] = &[
     // --- 18 compiled `{ isEnabled:()=>false, isHidden:true, name:'stub' }` ---
     (
@@ -404,45 +398,11 @@ pub const CORRECT_BY_DESIGN_STUBS: &[(&str, &str)] = &[
     ),
 ];
 
-/// **Partition B — HOST-BOUND names (implemented by claude-code, but NOT on
-/// this plain-text command surface).** claude-code *implements* each of these
-/// (the source has a real body and is enabled for ordinary users — **no**
-/// `isEnabled:()=>false`, no ant/statsig gate), so they are NOT faithful no-op
-/// stubs like [`CORRECT_BY_DESIGN_STUBS`]. They are grouped here because the
-/// plain-text command-api registry returns the stub literal for them — but for
-/// two DIFFERENT reasons that a future audit must not conflate:
-///
-/// 1. **No plain-text analog by design (correct-by-design on THIS surface).**
-///    `btw` is a `local-jsx` command (`Ask a quick side question without
-///    interrupting the main conversation`, argumentHint `[question]`) whose body
-///    renders an interactive JSX side-question dialog and resolves via the
-///    `askSideQuestion` **control-request** — a TUI/SDK dialog surface, never a
-///    plain-text registry entry, and with no plain-text command body to port.
-///    Implementing it on the plain-text surface is a **non-goal**: it is
-///    implemented-elsewhere, so the plain-text stub literal is faithful *for
-///    this partition*. (When/if LingXi wires the JSX side-dialog surface, it is
-///    served there, not here.)
-///
-/// 2. **Genuine plain-text-surface deferred gap (in-scope future work).**
-///    - `reload-plugins` IS a real `type:"local"` command in the 2.1.215 binary
-///      (`argumentHint:"[--force]"`, no `isEnabled` gate) whose `call` body
-///      returns `{type:"text",...}` on the normal CLI path — it parses `--force`
-///      and computes cache invalidation locally. The SDK `reload_plugins`
-///      control-request is ONLY the `Wb()` thin-client/remote dispatch branch
-///      (analogous to `x402`'s host-infra dependency), NOT evidence of "no
-///      plain-text analog." So it is in-scope future work for the plain-text
-///      registry, exactly like a normal deferred gap.
-///    - `x402` is retained only for list continuity: the string `x402` does NOT
-///      appear anywhere in the 2.1.215 binary (verified — the only `402` matches
-///      are HTTP 402 / npm registry), so it is a stale entry from an earlier
-///      oracle version and should be dropped on the next regeneration, not
-///      treated as a confirmed 2.1.215 command.
-///
-/// Each entry is `(name, what-claude-code-actually-ships + which case above)`.
+/// Host/UI-bound behavior with no plain-text command body. `/reload-plugins`
+/// is implemented by the desktop host and therefore is not deferred here;
+/// `x402` is absent from the current oracle and has been removed entirely.
 pub const HOST_BOUND_DEFERRED_GAPS: &[(&str, &str)] = &[
     ("btw", "claude-code ships a `local-jsx` side-question dialog (enabled, no gate) resolved via the askSideQuestion control-request; no plain-text command-api analog by design — implemented on the JSX/SDK dialog surface, not here (case 1)"),
-    ("reload-plugins", "claude-code 2.1.215 ships a real `type:\"local\"` command (argumentHint `[--force]`, no gate) whose body returns `{type:\"text\",...}` on the normal CLI path; the SDK `reload_plugins` control-request is ONLY the thin-client (Wb()) dispatch branch, not an absence of a local body — so this IS a genuine plain-text-surface deferred gap, in-scope future work (case 2)"),
-    ("x402", "NOT present in the 2.1.215 binary (0 hits latin1/utf16 — the only `402` strings are HTTP 402 / npm registry); a stale entry carried over from an earlier oracle version. Left here for continuity; drop when the deferred list is next regenerated (case 2, absent in 2.1.215)"),
 ];
 
 /// **Statically-hidden named commands** — real, enabled (or conditionally
@@ -507,7 +467,6 @@ pub const COMMAND_ALIASES: &[(&str, &[&str])] = &[
     ("session", &["remote"]),
     ("tasks", &["bashes"]),
     ("usage", &["cost", "stats"]),
-    ("x402", &["wallet", "pay"]),
 ];
 
 /// The aliases for `name` (empty when it has none). See [`COMMAND_ALIASES`].
@@ -536,10 +495,9 @@ pub fn command_aliases(name: &str) -> &'static [&'static str] {
 /// - [`USAGE_CREDITS_BNR_GATED`] — the 1 `bnr()`-gated command
 ///   (`usage-credits`), off-by-default in a fresh no-subscription session.
 ///
-/// Total = 27 filtered names. The [`HOST_BOUND_DEFERRED_GAPS`] trio
-/// (`btw`, `x402`, `reload-plugins`) is deliberately EXCLUDED: claude-code
-/// implements those with no `isHidden`/`isEnabled` gate, so they remain
-/// visible. Likewise `install-slack-app`, `mobile`, and `desktop` carry no
+/// Total = 27 filtered names. The host-bound `btw` command and the implemented
+/// `/reload-plugins` command remain visible. Likewise `install-slack-app`,
+/// `mobile`, and `desktop` carry no
 /// default-off hidden gate (`desktop`'s `Dsl()` returns `true`) and stay
 /// visible; and `background`, `cd`, `focus`, `tui` (the other four H-BIN-11
 /// additions) are ungated and stay visible.
@@ -698,7 +656,6 @@ pub fn core_description(name: &str) -> &'static str {
         // (`name:"extra-usage",description:"Renamed to /usage-credits",isHidden:!0`).
         "extra-usage" => "Renamed to /usage-credits",
         "voice" => "Toggle voice mode",
-        "x402" => "Configure x402 crypto payments (USDC on Base)",
         // Batch-8 implemented commands (real handlers in `command-core`); their
         // `description()` bodies carry the verbatim oracle strings, mirrored here
         // so the palette / `/help` rows never show the placeholder fallback.
@@ -727,8 +684,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn total_count_locked_at_106() {
-        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 106);
+    fn total_count_locked_at_105() {
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 105);
     }
 
     #[test]
@@ -926,7 +883,7 @@ mod tests {
     #[test]
     fn includes_known_canonical_names() {
         // Spot-check a few rare ones so a future name rename doesn't drift silently.
-        assert!(BUILTIN_COMMAND_NAMES.contains(&"x402"));
+        assert!(!BUILTIN_COMMAND_NAMES.contains(&"x402"));
         assert!(BUILTIN_COMMAND_NAMES.contains(&"ctx-viz"));
         assert!(BUILTIN_COMMAND_NAMES.contains(&"thinkback-play"));
         assert!(BUILTIN_COMMAND_NAMES.contains(&"terminal-setup"));
@@ -944,12 +901,11 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn intentionally_disabled_count_is_26() {
-        // Bucket (d) is 26 names per SPECS.md "slash-commands-stubs".
+    fn intentionally_disabled_count_is_24() {
         assert_eq!(
             INTENTIONALLY_DISABLED_COMMANDS.len(),
-            26,
-            "bucket (d) is locked at 26 commands"
+            24,
+            "disabled command classification is locked at 24 commands"
         );
     }
 
@@ -1016,7 +972,6 @@ mod tests {
         assert!(table.contains_key("thinkback"));
         assert!(table.contains_key("thinkback-play"));
         // entitlement-gated.
-        assert!(table.contains_key("x402"));
         assert!(table.contains_key("brief"));
         assert!(table.contains_key("btw"));
         // compiled `name: 'stub'` files.
@@ -1048,7 +1003,7 @@ mod tests {
         // subset of the locked name list and therefore cannot change the
         // total count, membership, or ordering that the parity fixture locks.
         assert!(INTENTIONALLY_DISABLED_COMMANDS.len() < BUILTIN_COMMAND_NAMES.len());
-        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 106);
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 105);
     }
 
     // ========================================================================
@@ -1068,8 +1023,8 @@ mod tests {
     }
 
     #[test]
-    fn host_bound_deferred_count_is_3() {
-        assert_eq!(HOST_BOUND_DEFERRED_GAPS.len(), 3);
+    fn host_bound_deferred_count_is_1() {
+        assert_eq!(HOST_BOUND_DEFERRED_GAPS.len(), 1);
     }
 
     #[test]
@@ -1151,30 +1106,15 @@ mod tests {
         assert_eq!(
             CORRECT_BY_DESIGN_STUBS.len() + HOST_BOUND_DEFERRED_GAPS.len(),
             INTENTIONALLY_DISABLED_COMMANDS.len(),
-            "23 + 3 == 26"
+            "23 + 1 == 24"
         );
-        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 106);
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 105);
     }
 
     #[test]
-    fn host_bound_holds_the_three_implemented_but_not_plain_text_surface_names() {
-        // Lock the specific three names so they can never silently slide back
-        // into the faithful-no-op correct-by-design set.
-        // CLASSIFICATION (corrected 2026-07-19 vs the 2.1.215 binary):
-        //  - `btw`: `local-jsx` side-question dialog resolved via the
-        //    askSideQuestion control-request — NO plain-text command-api analog
-        //    by design; do not port into this registry (case 1).
-        //  - `reload-plugins`: a REAL `type:"local"` command in 2.1.215 whose
-        //    body returns `{type:"text",...}` on the normal CLI path; the SDK
-        //    `reload_plugins` control-request is only the thin-client dispatch
-        //    branch. It IS a genuine plain-text-surface deferred gap — in-scope
-        //    future work (case 2).
-        //  - `x402`: NOT present in the 2.1.215 binary (0 hits) — a stale entry
-        //    from an earlier oracle; retained for list continuity only, drop on
-        //    next regeneration.
+    fn host_bound_contains_only_btw() {
         let gaps = name_set(HOST_BOUND_DEFERRED_GAPS);
-        let expected: std::collections::HashSet<&str> =
-            ["btw", "x402", "reload-plugins"].into_iter().collect();
+        let expected: std::collections::HashSet<&str> = ["btw"].into_iter().collect();
         assert_eq!(gaps, expected);
     }
 }

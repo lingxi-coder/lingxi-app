@@ -444,6 +444,14 @@ mod tests {
 
     #[test]
     fn registered_loop_carries_dynamic_prompt_fn() {
+        // `LoopPromptFn` reads process-global feature-flag overrides. Serialize
+        // with the flag-on builder tests in `loop_skill` so this assertion is
+        // deterministic under the default parallel test runner.
+        let _guard = loop_skill::LOOP_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        telemetry::test_clear_flag("tengu_kairos_loop_prompt");
+        telemetry::test_clear_flag("tengu_kairos_loop_dynamic");
         let mut reg = CommandRegistry::new();
         register_bundled_skills(&mut reg, true);
         let cmd = reg.resolve("loop").expect("loop registered");

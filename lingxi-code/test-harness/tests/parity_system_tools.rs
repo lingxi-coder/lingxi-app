@@ -63,7 +63,7 @@ fn wire_identifiers_match_production_constants() {
     let w = &fx["wire_identifiers"];
 
     use tool_cron::schedule_cron::{
-        CRON_FILE_SUFFIX, CRON_SUBDIR, CRON_TASK_ID_PREFIX, SIX_FIELD_REJECTION,
+        generate_cron_task_id, CRON_FILE_SUFFIX, CRON_SUBDIR, SIX_FIELD_REJECTION,
     };
     use tool_meta::config::{CONFIG_FIELDS_ALLOWED, CONFIG_FILE_NAME, CONFIG_SUBDIR};
     use tool_meta::tool_search::TOOL_SEARCH_MAX_RESULTS;
@@ -110,10 +110,12 @@ fn wire_identifiers_match_production_constants() {
     );
     assert_eq!(w["cron_subdir"].as_str().unwrap(), CRON_SUBDIR);
     assert_eq!(w["cron_file_suffix"].as_str().unwrap(), CRON_FILE_SUFFIX);
-    assert_eq!(
-        w["cron_task_id_prefix"].as_str().unwrap(),
-        CRON_TASK_ID_PREFIX.to_string()
-    );
+    let cron_id = generate_cron_task_id();
+    assert_eq!(w["cron_task_id_length"].as_u64().unwrap(), 8);
+    assert_eq!(cron_id.len(), 8);
+    assert!(cron_id
+        .chars()
+        .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase()));
     assert_eq!(
         w["six_field_rejection"].as_str().unwrap(),
         SIX_FIELD_REJECTION

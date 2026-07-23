@@ -35,7 +35,7 @@ fn make_orch() -> Arc<ConversationOrchestrator> {
 }
 
 #[tokio::test]
-async fn resume_session_adopts_history_and_named_id_keeping_model() {
+async fn resume_session_adopts_history_named_id_and_runtime_model() {
     let orch = make_orch();
     let handle: Arc<dyn OrchestratorHandle> = orch.clone();
 
@@ -71,7 +71,12 @@ async fn resume_session_adopts_history_and_named_id_keeping_model() {
             history.clone(),
             Some("11111111-1111-4111-8111-111111111111".to_string()),
             None,
-            traits::ResumeRuntimeSnapshot::default(),
+            traits::ResumeRuntimeSnapshot {
+                model: "claude-opus-4-1".to_string(),
+                model_profile: Some("anthropic".to_string()),
+                effort: Some("high".to_string()),
+                ..traits::ResumeRuntimeSnapshot::default()
+            },
         )
         .await
         .expect("resume_session must succeed on the production handle");
@@ -90,10 +95,44 @@ async fn resume_session_adopts_history_and_named_id_keeping_model() {
         "resume must adopt the named session id, not mint a fresh one"
     );
 
-    // The live model is UNCHANGED (resume keeps the running model).
+    // The resumed runtime model is adopted in place, matching cold resume.
+    assert_eq!(
+        handle.get_status_snapshot().await.model,
+        "claude-opus-4-1",
+        "resume must adopt the replayed model, not keep the pre-resume live one"
+    );
+    assert_ne!(original_model, "claude-opus-4-1");
+    let session = orch.session();
+    assert_eq!(
+        session.lock().await.model_profile.as_deref(),
+        Some("anthropic"),
+        "resume must restore the provider profile paired with the replayed model"
+    );
+}
+
+#[tokio::test]
+async fn resume_session_default_runtime_keeps_live_model_for_legacy_callers() {
+    let orch = make_orch();
+    let handle: Arc<dyn OrchestratorHandle> = orch.clone();
+    let original_model = handle.get_status_snapshot().await.model;
+
+    handle
+        .resume_session(
+            SessionId::new(),
+            vec![ConversationMessage::user(
+                MessageId::new(),
+                "prior user turn".to_string(),
+            )],
+            None,
+            None,
+            traits::ResumeRuntimeSnapshot::default(),
+        )
+        .await
+        .expect("legacy resume_session call must still succeed");
+
     assert_eq!(
         handle.get_status_snapshot().await.model,
         original_model,
-        "resume must not change the live model"
+        "legacy/default runtime snapshots keep the pre-resume model until callers provide one"
     );
 }

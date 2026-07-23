@@ -45,7 +45,6 @@
 //! claude-code's `StatusLine.tsx` re-run on `lastAssistantMessageId`. The
 //! payload's OPTIONAL `rate_limits` comes from `AppState.raw_utilization`.
 
-use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -394,7 +393,6 @@ fn build_shell_command(command: &str) -> Command {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[test]
     fn build_status_line_input_shape() {

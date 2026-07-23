@@ -48,6 +48,7 @@ use tokio::sync::oneshot;
 use tui_core::ask_user_question_bridge::{
     join_answer_labels, AskQuestion, AskUserQuestionExchange, ASK_MIDDOT,
 };
+use unicode_width::UnicodeWidthStr;
 
 use crate::bottom_pane::dialog_view::centered_rect;
 use crate::bottom_pane::view::{BottomPaneView, ViewAction, ViewOutcome};
@@ -243,15 +244,14 @@ impl AskUserQuestionView {
                 .collect();
             let mut picked = picked;
             if st.other_selected {
-                picked.push(
-                    self.other_answer_text()
-                        .unwrap_or_else(|| Self::OTHER_LABEL.to_string()),
-                );
+                if let Some(other) = self.other_answer_text() {
+                    picked.push(other);
+                }
             }
             if picked.is_empty() {
                 if st.highlighted == self.other_index() {
                     self.other_answer_text()
-                        .unwrap_or_else(|| Self::OTHER_LABEL.to_string())
+                        .unwrap_or_else(|| q.options[0].label.clone())
                 } else {
                     q.options[st.highlighted].label.clone()
                 }
@@ -260,7 +260,7 @@ impl AskUserQuestionView {
             }
         } else if st.highlighted == self.other_index() {
             self.other_answer_text()
-                .unwrap_or_else(|| Self::OTHER_LABEL.to_string())
+                .unwrap_or_else(|| q.options[0].label.clone())
         } else {
             q.options[st.highlighted].label.clone()
         }
@@ -482,7 +482,7 @@ impl Renderable for AskUserQuestionView {
         if inner.width == 0 || inner.height < 4 {
             return None;
         }
-        let typed = u16::try_from(self.state().other_text.chars().count()).unwrap_or(u16::MAX);
+        let typed = u16::try_from(self.state().other_text.as_str().width()).unwrap_or(u16::MAX);
         let x = inner
             .x
             .saturating_add(7)
@@ -501,6 +501,14 @@ impl Renderable for AskUserQuestionView {
 }
 
 impl BottomPaneView for AskUserQuestionView {
+    fn handle_tick(&mut self, now: Instant) -> ViewOutcome {
+        if self.is_expired_at(now) {
+            self.auto_submit()
+        } else {
+            ViewOutcome::Pending
+        }
+    }
+
     fn handle_key(&mut self, key: KeyEvent) -> ViewOutcome {
         // "press any key to stay": the first key disarms the countdown, then is
         // still processed normally.
@@ -516,7 +524,15 @@ impl BottomPaneView for AskUserQuestionView {
             return match key.code {
                 KeyCode::Enter => self.confirm_other_editor(),
                 KeyCode::Esc => {
-                    self.state_mut().editing_other = false;
+                    let st = self.state_mut();
+                    st.editing_other = false;
+                    // Opening the multi-select editor tentatively selects the
+                    // synthetic row. Esc with no text is a rollback, not a
+                    // valid empty custom answer; otherwise a later Enter on a
+                    // fixed option could submit the literal label `Other`.
+                    if st.other_text.trim().is_empty() {
+                        st.other_selected = false;
+                    }
                     ViewOutcome::Pending
                 }
                 KeyCode::Backspace => {
@@ -792,6 +808,22 @@ mod tests {
     }
 
     #[test]
+    fn other_editor_cursor_uses_terminal_cell_width() {
+        let area = Rect::new(0, 0, 100, 20);
+        let (mut ascii, _rx) = exchange(vec![q("Pick?", "H", &["A", "B"], false)], None);
+        ascii.handle_key(press(KeyCode::Char('3')));
+        ascii.handle_paste("x");
+        let ascii_x = ascii.cursor_pos(area).expect("ASCII cursor").0;
+
+        let (mut wide, _rx) = exchange(vec![q("Pick?", "H", &["A", "B"], false)], None);
+        wide.handle_key(press(KeyCode::Char('3')));
+        wide.handle_paste("中");
+        let wide_x = wide.cursor_pos(area).expect("wide cursor").0;
+
+        assert_eq!(wide_x, ascii_x + 1, "CJK occupies two terminal cells");
+    }
+
+    #[test]
     fn out_of_range_number_is_ignored() {
         let (mut view, _rx) = exchange(vec![q("Q?", "H", &["A", "B"], false)], None);
         assert!(matches!(
@@ -860,6 +892,28 @@ mod tests {
         ));
         let answers = rx.blocking_recv().expect("submitted");
         assert_eq!(answers.get("Which?").map(String::as_str), Some("A, 自定义"));
+    }
+
+    #[test]
+    fn multi_select_other_escape_rolls_back_empty_selection() {
+        let (mut view, rx) = exchange(vec![q("Which?", "H", &["A", "B"], true)], None);
+        view.handle_key(press(KeyCode::Char('1'))); // select A
+        view.handle_key(press(KeyCode::Char('3'))); // open Other editor
+        assert!(view.states[0].other_selected);
+
+        view.handle_key(press(KeyCode::Esc));
+        assert!(!view.states[0].editing_other);
+        assert!(
+            !view.states[0].other_selected,
+            "empty custom response must not remain selected"
+        );
+
+        assert!(matches!(
+            view.handle_key(press(KeyCode::Enter)),
+            ViewOutcome::Accepted(_)
+        ));
+        let answers = rx.blocking_recv().expect("submitted");
+        assert_eq!(answers.get("Which?").map(String::as_str), Some("A"));
     }
 
     #[test]

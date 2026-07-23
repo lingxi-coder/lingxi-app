@@ -19,6 +19,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::io;
 use std::io::Write;
+use std::time::Instant;
 
 use crossterm::cursor::SetCursorStyle;
 use crossterm::event::KeyEvent;
@@ -26,12 +27,14 @@ use ratatui::backend::Backend;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use tokio_util::sync::CancellationToken;
+use tui_core::ask_user_question_bridge::AskUserQuestionExchange;
 use tui_core::message::CurrentTodo;
 use tui_core::message::RenderedMessage;
 use tui_core::orchestrator_bridge::{RunningAgentStatus, TurnEvent};
 use tui_core::permission_bridge::PermissionExchange;
 use tui_core::theme::{theme_for, Theme, ThemeName, ThemeSetting};
 
+use crate::bottom_pane::ask_user_question_view::AskUserQuestionView;
 use crate::bottom_pane::permission_view::PermissionView;
 use crate::bottom_pane::permissions_editor_view::PermissionsSnapshot;
 use crate::bottom_pane::screen_view::ScreenView;
@@ -123,15 +126,10 @@ pub enum ChatOutcome {
     /// `TurnEvent::SystemNotice`. When on and the active model supports fast
     /// mode (opus-4-7/opus-4-8), subsequent turns send `speed:"fast"`.
     FastMode(Option<bool>),
-    /// `/plan`: enter plan mode, or (when already in plan mode) view the current
-    /// plan. The enter-vs-view decision (a read of the session `plan_mode` flag)
-    /// and, when entering, the flip both run OFF-LOOP via
-    /// `OrchestratorHandle::plan_mode` / `set_plan_mode`; the outcome is reported
-    /// through `TurnEvent::SystemNotice`. Flipping the flag makes the next turn
-    /// run in plan mode (the turn loop reads `session.plan_mode`). The `String`
-    /// is the trimmed argument tail — advisory only: LingXi has no on-disk plan
-    /// store, so a `<description>` is not submitted and `open` does not launch an
-    /// editor.
+    /// `/plan`: enter plan mode, or view/open the current session's real plan
+    /// file. The reads and mutations run OFF-LOOP via [`OrchestratorHandle`]
+    /// methods, and the outcome is reported through
+    /// `TurnEvent::SystemNotice`. The `String` is the trimmed action tail.
     PlanMode(String),
     /// Shift+Tab cycled the session permission mode. The `String` is the wire
     /// mode id (`default`/`acceptEdits`/`plan`/`bypassPermissions`); the caller
@@ -162,11 +160,9 @@ pub enum ChatOutcome {
     /// unwind seam as [`Self::SwitchSession`] (`AppExit::BranchSession` →
     /// `RunOutcome::BranchFrom` → `mount_resumed_tui`).
     BranchSession { title: Option<String> },
-    /// `/rename <name>` resolved to this new title. The caller appends the
-    /// `custom-title` JSONL line OFF the render thread (state mutation goes
-    /// off-loop, per doctrine) via `OrchestratorHandle::rename_session`, then
-    /// reports `Session renamed to: <name>` (or a failure) back through
-    /// `TurnEvent::SystemNotice`.
+    /// `/rename [name]` resolved to an explicit title, or an empty string for
+    /// the bare-command auto-name path. The caller generates when needed, then
+    /// appends the `custom-title` JSONL line off the render thread.
     RenameSession(String),
     /// A `/sandbox` effect: persist the toggled `sandbox.enabled` (SetEnabled)
     /// to user settings, or append an `exclude` pattern to local settings
@@ -197,6 +193,11 @@ pub enum ChatOutcome {
     /// command and emits `TurnEnded` for a non-turn result so the widget clears
     /// its running state.
     DispatchSlash(String, CancellationToken),
+}
+
+enum PendingPrompt {
+    Permission(PermissionExchange),
+    AskUserQuestion(AskUserQuestionExchange),
 }
 
 /// A `/sandbox` off-loop effect handed to the embedder via
@@ -250,6 +251,12 @@ pub struct ChatWidget {
     current_turn: Option<CancellationToken>,
     /// Cancellation token for an in-flight manual compaction pass.
     current_compaction: Option<CancellationToken>,
+    /// A `/compact` submitted while a turn is running. It is replayed at the
+    /// next `TurnEnded` boundary, when the live history is no longer mutating.
+    queued_compact: Option<String>,
+    /// Turn-boundary handoff to the app's normal off-loop compact callback.
+    /// Taking this payload makes queued replay exactly once.
+    ready_compact: Option<(String, CancellationToken)>,
     /// When the in-flight turn began, for the spinner's elapsed-seconds counter.
     turn_started_at: Option<std::time::Instant>,
     /// When a `/compact` (forced) compaction pass began, or `None` when not
@@ -293,9 +300,9 @@ pub struct ChatWidget {
     foreground_agents: Vec<RunningAgentStatus>,
     /// Pending/running background agents from the task-registry snapshot pump.
     background_agents: Vec<RunningAgentStatus>,
-    /// Permission requests waiting for the currently open prompt to resolve
+    /// Interactive prompts waiting for the currently open prompt to resolve
     /// (prompts are serialized: one owns the keyboard at a time).
-    pending_permissions: VecDeque<PermissionExchange>,
+    pending_prompts: VecDeque<PendingPrompt>,
     /// Image files queued for the NEXT submitted turn: pasted image paths,
     /// clipboard-image pastes (Ctrl+V) and `/image` attachments. Drained by
     /// [`Self::take_pending_images`] when the prompt is submitted so the
@@ -457,6 +464,8 @@ impl ChatWidget {
             theme_name: ThemeName::Dark,
             current_turn: None,
             current_compaction: None,
+            queued_compact: None,
+            ready_compact: None,
             turn_started_at: None,
             compacting_started_at: None,
             api_retry: None,
@@ -468,7 +477,7 @@ impl ChatWidget {
             current_todo: None,
             foreground_agents: Vec::new(),
             background_agents: Vec::new(),
-            pending_permissions: VecDeque::new(),
+            pending_prompts: VecDeque::new(),
             pending_images: Vec::new(),
             start: std::time::Instant::now(),
             export_dir: crate::export::default_export_dir(),
@@ -643,6 +652,11 @@ impl ChatWidget {
         }
     }
 
+    /// Apply the merged `emojiCompletionEnabled` setting to the composer.
+    pub fn set_emoji_completion_enabled(&mut self, enabled: bool) {
+        self.bottom_pane.set_emoji_completion_enabled(enabled);
+    }
+
     /// The active theme preference (`/theme` picker current marker; tests).
     #[must_use]
     pub fn theme_setting(&self) -> ThemeSetting {
@@ -685,7 +699,7 @@ impl ChatWidget {
             )
             && matches!(key.code, crossterm::event::KeyCode::Char(c) if c.eq_ignore_ascii_case(&'v'))
         {
-            self.open_next_queued_permission();
+            self.open_next_queued_prompt();
             return ChatOutcome::PasteImage;
         }
         // Manual compaction replaces the whole live history atomically. Keep
@@ -699,12 +713,12 @@ impl ChatWidget {
             && key.code == crossterm::event::KeyCode::Enter
             && key.modifiers.is_empty()
         {
-            self.open_next_queued_permission();
+            self.open_next_queued_prompt();
             return ChatOutcome::Continue;
         }
         let outcome = self.bottom_pane.handle_key(key);
         let outcome = self.on_pane_outcome(outcome);
-        self.open_next_queued_permission();
+        self.open_next_queued_prompt();
         outcome
     }
 
@@ -739,6 +753,16 @@ impl ChatWidget {
         }
     }
 
+    /// Advance time-based modal behavior once per app tick. In particular,
+    /// this lets an idle AskUserQuestion countdown resolve its response
+    /// channel and pop the view without requiring a key press.
+    pub fn pump_view_timeout(&mut self) {
+        let outcome = self.bottom_pane.handle_view_tick(Instant::now());
+        let chat_outcome = self.on_pane_outcome(outcome);
+        debug_assert!(matches!(chat_outcome, ChatOutcome::Continue));
+        self.open_next_queued_prompt();
+    }
+
     /// Deliver the off-thread clipboard-image read's result (the
     /// [`ChatOutcome::PasteImage`] round-trip): attach the temp PNG on
     /// success, surface the failure as a red transcript line otherwise.
@@ -760,7 +784,7 @@ impl ChatWidget {
     pub fn handle_paste(&mut self, text: &str) -> ChatOutcome {
         let outcome = self.bottom_pane.handle_paste(text);
         let outcome = self.on_pane_outcome(outcome);
-        self.open_next_queued_permission();
+        self.open_next_queued_prompt();
         outcome
     }
 
@@ -1094,6 +1118,7 @@ impl ChatWidget {
                     s.data.vim_mode = vim_mode.clone();
                     s.dirty = true;
                 });
+                self.promote_queued_compact();
             }
             TurnEvent::CostUpdated(cost_str) => {
                 // Update the status-row cost so the next render pass shows the
@@ -1564,6 +1589,9 @@ impl ChatWidget {
         if let Some(token) = self.current_compaction.take() {
             token.cancel();
         }
+        self.queued_compact = None;
+        self.ready_compact = None;
+        self.bottom_pane.set_queued_messages(Vec::new());
     }
 
     /// Wire the composition root's real per-provider login-method +
@@ -1591,12 +1619,6 @@ impl ChatWidget {
                 || ("(default)".to_string(), "(default)".to_string()),
                 |m| (m.request_model.clone(), m.display.clone()),
             )
-    }
-
-    /// The current model's display string (falls back to `(default)`), reused
-    /// for the welcome banner + statusline seeding.
-    fn current_model_display(&self) -> String {
-        self.current_model_id_display().1
     }
 
     /// Re-point the snapshot's `is_current` marker at `request_model` after a
@@ -1638,14 +1660,28 @@ impl ChatWidget {
     /// Open a permission prompt for `exchange` by pushing a
     /// [`PermissionView`]: it owns the keyboard until the user resolves it
     /// (Enter/1-3 approve or deny, Esc denies) and delivers the response
-    /// through the exchange's one-shot channel exactly once. When a prompt is
-    /// already open the exchange queues instead — prompts are serialized, and
-    /// the queued one surfaces as soon as the open prompt resolves.
+    /// through the exchange's one-shot channel exactly once. When another
+    /// interactive prompt is already open the exchange queues instead —
+    /// prompts are serialized, and the queued one surfaces as soon as the open
+    /// prompt resolves.
     pub fn open_permission(&mut self, exchange: PermissionExchange) {
-        if self.has_open_permission() {
-            self.pending_permissions.push_back(exchange);
+        if self.has_open_interactive_prompt() {
+            self.pending_prompts
+                .push_back(PendingPrompt::Permission(exchange));
         } else {
             self.bottom_pane.show_permission(exchange);
+        }
+    }
+
+    /// Open an `AskUserQuestion` prompt in the dedicated bottom-pane view. Like
+    /// permission prompts, it serializes behind any currently open interactive
+    /// prompt and surfaces once the keyboard is free.
+    pub fn open_ask_user_question(&mut self, exchange: AskUserQuestionExchange) {
+        if self.has_open_interactive_prompt() {
+            self.pending_prompts
+                .push_back(PendingPrompt::AskUserQuestion(exchange));
+        } else {
+            self.bottom_pane.show_ask_user_question(exchange);
         }
     }
 
@@ -1654,6 +1690,18 @@ impl ChatWidget {
     #[must_use]
     pub fn has_open_permission(&self) -> bool {
         self.bottom_pane.view_stack().contains::<PermissionView>()
+    }
+
+    #[must_use]
+    pub fn has_open_ask_user_question(&self) -> bool {
+        self.bottom_pane
+            .view_stack()
+            .contains::<AskUserQuestionView>()
+    }
+
+    #[must_use]
+    fn has_open_interactive_prompt(&self) -> bool {
+        self.has_open_permission() || self.has_open_ask_user_question()
     }
 
     /// Route a recognized slash command through the [`crate::command`]
@@ -2027,12 +2075,11 @@ impl ChatWidget {
         }
     }
 
-    /// Async glue for `/mcp enable|disable` — writes the deferred
-    /// `disabledMcpjsonServers` gate (`set_mcp_servers_disabled`). The no-op
+    /// Async glue for `/mcp enable|disable` — updates the live registry and
+    /// persists the `disabledMcpjsonServers` gate. The no-op
     /// case (already in the requested state, per the config file) renders
     /// claude's byte-exact "already enabled/disabled" message; a real change
-    /// keeps the port's deferred "Takes effect for new sessions." wording
-    /// (mcp-enable-disable-deferred divergence).
+    /// reports the existing state without reconnecting.
     async fn mcp_do_enable_disable(
         handle: &dyn traits::OrchestratorHandle,
         target: &str,
@@ -2058,13 +2105,7 @@ impl ChatWidget {
             Ok(names) if names.is_empty() => (mcp_already_msg(is_all, target, enable), false),
             Ok(names) => {
                 let verb = if enable { "Enabled" } else { "Disabled" };
-                (
-                    format!(
-                        "{verb} {}. Takes effect for new sessions.",
-                        names.join(", ")
-                    ),
-                    false,
-                )
+                (format!("{verb} {}.", names.join(", ")), false)
             }
             Err(e) => (
                 format!(
@@ -2430,6 +2471,19 @@ impl ChatWidget {
         }
     }
 
+    /// LingXi's project-specific `/worktree` UI entry. Execution stays off the
+    /// render loop: the desktop command registry owns the handler and reuses
+    /// the existing EnterWorktree/ExitWorktree tools.
+    pub(crate) fn cmd_worktree(&mut self, args: &str) -> ChatOutcome {
+        let args = args.trim();
+        let input = if args.is_empty() {
+            "/worktree".to_string()
+        } else {
+            format!("/worktree {args}")
+        };
+        self.dispatch_registry_slash(&input)
+    }
+
     /// `/resume [term]` (alias `/continue`): open the interactive session
     /// picker, seeded from the rows preloaded at startup ([`Self::set_resume_rows`]).
     /// With a `term` argument the picker opens pre-filtered by title. On `Enter`
@@ -2701,11 +2755,6 @@ impl ChatWidget {
     /// beyond that already-blocking call. When no provider is wired (tests) the
     /// RAW template is submitted verbatim and the model re-runs the git commands.
     ///
-    /// Known parity gap (self-healing, tracked as a follow-up):
-    /// - `/skill-doctor` reports every skill as never-used because
-    ///   `command_core::skill_doctor::record_skill_usage` is not yet wired into
-    ///   the dispatcher (a shared-crate gap that predates this bridge and is
-    ///   identical on the desktop/mobile registries).
     fn run_core_command(
         &mut self,
         name: &str,
@@ -3062,21 +3111,18 @@ impl ChatWidget {
     }
 
     /// `/rename [name]`: persist a user-set title for the current session.
-    /// With a name, returns [`ChatOutcome::RenameSession`] so the CLI appends
+    /// Returns [`ChatOutcome::RenameSession`] so the CLI appends
     /// the `custom-title` JSONL line off the render thread (state mutation goes
     /// off-loop) and echoes the confirmation via `TurnEvent::SystemNotice`,
     /// mirroring claude-code's `saveCustomTitle` + `onDone("Session renamed
-    /// to: ...")`. Bare `/rename` renders a usage line — auto-name generation
-    /// (claude-code's Haiku side-query) is deferred. Graceful "unavailable"
-    /// no-op when no engine handle is wired.
+    /// to: ...")`. A bare `/rename` carries an empty name so the CLI can run
+    /// Claude's isolated `rename_generate_name` side query. Graceful
+    /// "unavailable" no-op when no engine handle is wired.
     pub(crate) fn cmd_rename(&mut self, args: &str) -> ChatOutcome {
         if self.orchestrator.is_none() {
             return self.show_system_text("/rename is unavailable (no engine handle wired)", true);
         }
         let name = args.trim();
-        if name.is_empty() {
-            return self.show_system_text("Usage: /rename <name>", true);
-        }
         ChatOutcome::RenameSession(name.to_string())
     }
 
@@ -3111,10 +3157,8 @@ impl ChatWidget {
         ChatOutcome::Continue
     }
 
-    /// `/effort`: show or set the model effort level. The set/clear write is a
-    /// direct-fs `settings.json` merge inside the handler (not via the handle);
-    /// it persists a default for NEW sessions, so the live turn's effort is
-    /// unchanged — the same parity limitation as the headless dispatcher.
+    /// `/effort`: show or set the model effort level. The handler updates the
+    /// live request state and persists eligible levels for new sessions.
     /// `/fast [on|off]`: toggle fast mode (the priority `speed:"fast"` tier).
     /// `on`/`off` set the state; a bare `/fast` toggles it. The change is an
     /// off-loop effect ([`ChatOutcome::FastMode`] →
@@ -3148,9 +3192,8 @@ impl ChatWidget {
 
     /// `/plan`: enter plan mode (the model plans before acting, like the
     /// `EnterPlanMode` tool), or — when already in plan mode — report the
-    /// current plan. Mirrors claude-code `commands/plan/plan.tsx`. LingXi has NO
-    /// on-disk plan store, so the "view" branch always degrades to the TS
-    /// no-plan message and `/plan open` is a no-op of that same branch. Entering
+    /// current plan. Mirrors claude-code `commands/plan/plan.tsx`. View/open
+    /// reuse the same on-disk plan store the plan reminder exposes. Entering
     /// flips `SessionState.plan_mode`, which the turn loop honors (routes tool
     /// checks through `check_in_plan_mode`, sends `permission_mode:"plan"`). The
     /// read + flip are a session read + mutation, so they run OFF-LOOP
@@ -3191,10 +3234,9 @@ impl ChatWidget {
 
     /// `/reload-skills`: pick up skills added or changed on disk this session,
     /// reloading them into the shared registry. Guards on the
-    /// `command_registry` field (NOT the orchestrator). Cosmetic parity gap:
-    /// the TUI slash palette is a static [`crate::command::BUILTIN`] table, so
-    /// newly-added skills won't surface as new slash entries even though the
-    /// reported count is truthful.
+    /// `command_registry` field (NOT the orchestrator). The live registry is
+    /// re-snapshotted after reconciliation so added, changed, and removed skills
+    /// are reflected by completion and dispatch immediately.
     pub(crate) fn cmd_reload_skills(&mut self, args: &str) -> ChatOutcome {
         let Some(registry) = self.command_registry.clone() else {
             return self.show_system_text(
@@ -3296,24 +3338,47 @@ impl ChatWidget {
         if self.orchestrator.is_none() {
             return self.show_system_text("/compact is unavailable (no engine handle wired)", true);
         }
-        // Divergence(safety): these two guard strings are NOT in the CC 2.1.211
-        // corpus — CC queues mid-turn input and replays it after the turn, so
-        // it never needs them. Until this port grows mid-turn command queueing,
-        // rejecting the overlap outright is the safe behavior: a /compact
-        // racing a live turn (or a second /compact racing the first) would
-        // contend on the whole-history swap.
         if self.current_compaction.is_some() {
             return self.show_system_text("Compaction already in progress", true);
         }
         if self.current_turn.is_some() {
-            return self.show_system_text(
-                "Cannot compact while a request is in progress. Press Esc to interrupt it first.",
-                true,
-            );
+            if self.queued_compact.is_none() {
+                let args = args.to_string();
+                let preview = if args.trim().is_empty() {
+                    "/compact".to_string()
+                } else {
+                    format!("/compact {args}")
+                };
+                self.queued_compact = Some(args);
+                self.bottom_pane.set_queued_messages(vec![preview]);
+            }
+            return ChatOutcome::Continue;
         }
         let token = CancellationToken::new();
         self.current_compaction = Some(token.clone());
         ChatOutcome::Compact(args.to_string(), token)
+    }
+
+    /// Promote a queued mid-turn `/compact` into the normal single-flight
+    /// compact state. Called only at a turn boundary.
+    fn promote_queued_compact(&mut self) {
+        if self.current_compaction.is_some() || self.ready_compact.is_some() {
+            return;
+        }
+        let Some(args) = self.queued_compact.take() else {
+            return;
+        };
+        let token = CancellationToken::new();
+        self.current_compaction = Some(token.clone());
+        self.ready_compact = Some((args, token));
+        self.bottom_pane.set_queued_messages(Vec::new());
+    }
+
+    /// Take the compact callback payload promoted by the most recent
+    /// `TurnEnded`. Taking makes the replay exactly-once even if several UI
+    /// ticks run before `CompactStarted` arrives.
+    pub(crate) fn take_ready_compact(&mut self) -> Option<(String, CancellationToken)> {
+        self.ready_compact.take()
     }
 
     /// The active streaming cell's rendered lines at `width` (empty when
@@ -3626,12 +3691,20 @@ impl ChatWidget {
         images
     }
 
-    /// Surface the oldest queued permission once no prompt is open (called
-    /// after every key/paste, i.e. after a resolution could have happened).
-    fn open_next_queued_permission(&mut self) {
-        if !self.has_open_permission() {
-            if let Some(exchange) = self.pending_permissions.pop_front() {
-                self.bottom_pane.show_permission(exchange);
+    /// Surface the oldest queued interactive prompt once no prompt is open
+    /// (called after every key/paste, i.e. after a resolution could have
+    /// happened).
+    fn open_next_queued_prompt(&mut self) {
+        if !self.has_open_interactive_prompt() {
+            if let Some(prompt) = self.pending_prompts.pop_front() {
+                match prompt {
+                    PendingPrompt::Permission(exchange) => {
+                        self.bottom_pane.show_permission(exchange);
+                    }
+                    PendingPrompt::AskUserQuestion(exchange) => {
+                        self.bottom_pane.show_ask_user_question(exchange);
+                    }
+                }
             }
         }
     }
@@ -3889,6 +3962,7 @@ fn current_todo_from_plan(
 }
 
 /// (Gap B) Resolve the spinner's current todo from TodoWrite input.
+#[cfg(test)]
 fn current_todo_from_todowrite_input(input: &serde_json::Value) -> Option<CurrentTodo> {
     current_todo_from_plan(&planned_tasks_from_todowrite_input(input))
 }
@@ -4034,8 +4108,7 @@ mod tests {
     }
 
     fn widget() -> ChatWidget {
-        let mut w = ChatWidget::new(Vec::new(), SessionInfo::default());
-        w
+        ChatWidget::new(Vec::new(), SessionInfo::default())
     }
 
     // ── `/mcp` state-aware message set (byte-exact vs claude-code 2.1.206 `lJy`) ──
@@ -4240,6 +4313,20 @@ mod tests {
             panic!("expected PlanMode");
         };
         assert_eq!(a, "open", "arg is trimmed, not dropped");
+    }
+
+    #[test]
+    fn cmd_rename_bare_routes_to_the_auto_name_effect() {
+        let (mut w, _mock) = widget_with_orchestrator();
+        let ChatOutcome::RenameSession(name) = w.cmd_rename("  ") else {
+            panic!("expected RenameSession");
+        };
+        assert!(name.is_empty());
+
+        let ChatOutcome::RenameSession(name) = w.cmd_rename("  fix startup  ") else {
+            panic!("expected RenameSession");
+        };
+        assert_eq!(name, "fix startup");
     }
 
     #[test]
@@ -4766,7 +4853,7 @@ mod tests {
     }
 
     #[test]
-    fn compact_rejects_overlapping_compaction_and_live_turn() {
+    fn compact_rejects_overlapping_compaction_and_queues_during_live_turn() {
         let (mut widget, _mock) = widget_with_orchestrator();
         assert!(matches!(
             widget.cmd_compact("first"),
@@ -4786,11 +4873,29 @@ mod tests {
             ChatOutcome::Submit(_, _, _)
         ));
         assert!(matches!(widget.cmd_compact(""), ChatOutcome::Continue));
-        let overlap = cell::<crate::history_cell::system::SystemTextCell>(&widget, 2);
-        assert!(overlap
-            .body()
-            .starts_with("Cannot compact while a request is in progress."));
-        assert!(overlap.is_error());
+        assert!(widget.queued_compact.is_some());
+
+        // Editing remains live after queueing; replay must not consume the
+        // composer's follow-up draft.
+        for ch in "draft".chars() {
+            assert!(matches!(
+                widget.handle_key(press(KeyCode::Char(ch))),
+                ChatOutcome::Continue
+            ));
+        }
+        widget.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
+        assert_eq!(widget.bottom_pane().composer().text(), "draft");
+
+        let Some((args, token)) = widget.take_ready_compact() else {
+            panic!("queued /compact must be replayed at TurnEnded");
+        };
+        assert_eq!(args, "");
+        assert!(!token.is_cancelled());
+        assert!(widget.current_compaction.is_some());
+        assert!(
+            widget.take_ready_compact().is_none(),
+            "queued compact callback is exactly once"
+        );
     }
 
     #[test]
@@ -5035,6 +5140,23 @@ mod tests {
         assert!(widget.handle_slash("/totally-unknown").is_none());
     }
 
+    /// The static `/worktree` palette row must still execute through the live
+    /// registry off-loop, preserving its exact argument tail for the desktop
+    /// handler.
+    #[test]
+    fn handle_slash_routes_worktree_builtin_to_registry_dispatch() {
+        let mut widget = widget();
+        let Some(ChatOutcome::DispatchSlash(input, _token)) =
+            widget.handle_slash("/worktree remove --discard")
+        else {
+            panic!("/worktree must route to DispatchSlash");
+        };
+        assert_eq!(input, "/worktree remove --discard");
+        assert!(widget.turn_running());
+        let shown = cell::<crate::history_cell::message::UserTextCell>(&widget, 0).body();
+        assert_eq!(shown, "/worktree remove --discard");
+    }
+
     /// A fake shell-expansion provider for the TUI expansion smoke tests: the
     /// runner echoes a fixed marker for any command, and the gate allows or
     /// denies. Proves `run_core_command` actually invokes expansion on a
@@ -5179,6 +5301,29 @@ mod tests {
                 request,
                 resp_tx,
                 worker: None,
+            },
+            resp_rx,
+        )
+    }
+
+    fn ask_exchange() -> (
+        AskUserQuestionExchange,
+        oneshot::Receiver<std::collections::HashMap<String, String>>,
+    ) {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        (
+            AskUserQuestionExchange {
+                questions: vec![tui_core::ask_user_question_bridge::AskQuestion {
+                    question: "Pick one?".to_string(),
+                    header: "Choice".to_string(),
+                    options: vec![
+                        tui_core::ask_user_question_bridge::AskOption::new("Alpha", "first"),
+                        tui_core::ask_user_question_bridge::AskOption::new("Beta", "second"),
+                    ],
+                    multi_select: false,
+                }],
+                timeout_secs: None,
+                resp_tx,
             },
             resp_rx,
         )
@@ -5374,7 +5519,7 @@ mod tests {
         assert!(widget.transcript().active_cell().is_none());
         assert!(!widget.turn_running());
         assert!(!widget.has_open_permission());
-        assert!(widget.pending_permissions.is_empty());
+        assert!(widget.pending_prompts.is_empty());
     }
 
     #[test]
@@ -5600,7 +5745,7 @@ mod tests {
             1,
             "second prompt queues instead of stacking"
         );
-        assert_eq!(widget.pending_permissions.len(), 1);
+        assert_eq!(widget.pending_prompts.len(), 1);
 
         // Resolving the first ('1' = AllowOnce) surfaces the queued prompt.
         widget.handle_key(press(KeyCode::Char('1')));
@@ -5609,7 +5754,7 @@ mod tests {
             PermissionResponse::AllowOnce
         );
         assert!(widget.has_open_permission(), "queued prompt opened");
-        assert!(widget.pending_permissions.is_empty());
+        assert!(widget.pending_prompts.is_empty());
 
         // The surfaced prompt owns the keyboard until resolved (Esc denies).
         widget.handle_key(press(KeyCode::Esc));
@@ -5635,7 +5780,7 @@ mod tests {
         };
         widget.open_permission(first);
         widget.open_permission(plan);
-        assert_eq!(widget.pending_permissions.len(), 1);
+        assert_eq!(widget.pending_prompts.len(), 1);
         // Resolve the first; the queued plan-approval prompt surfaces with its
         // own variant-specific keyboard ('2' = auto-accept edits).
         widget.handle_key(press(KeyCode::Esc));
@@ -5659,6 +5804,50 @@ mod tests {
         drop(widget);
         assert!(open_rx.blocking_recv().is_err());
         assert!(queued_rx.blocking_recv().is_err());
+    }
+
+    #[test]
+    fn ask_user_question_queues_behind_permission_and_uses_dedicated_view() {
+        let mut widget = widget();
+        let (permission, permission_rx) = tool_exchange();
+        let (ask, ask_rx) = ask_exchange();
+        widget.open_permission(permission);
+        widget.open_ask_user_question(ask);
+        assert!(widget.has_open_permission());
+        assert!(!widget.has_open_ask_user_question());
+        assert_eq!(widget.pending_prompts.len(), 1);
+
+        widget.handle_key(press(KeyCode::Char('1')));
+        assert_eq!(
+            permission_rx.blocking_recv().unwrap(),
+            PermissionResponse::AllowOnce
+        );
+        assert!(widget.has_open_ask_user_question(), "ask view surfaced");
+        assert!(!widget.has_open_permission());
+
+        widget.handle_key(press(KeyCode::Char('1')));
+        let answers = ask_rx.blocking_recv().expect("answers returned");
+        assert_eq!(answers.get("Pick one?").map(String::as_str), Some("Alpha"));
+        assert!(!widget.has_open_ask_user_question());
+        assert!(widget.pending_prompts.is_empty());
+    }
+
+    #[test]
+    fn ask_user_question_timeout_is_driven_by_the_widget_tick() {
+        let mut widget = widget();
+        let (mut ask, ask_rx) = ask_exchange();
+        ask.timeout_secs = Some(0);
+        widget.open_ask_user_question(ask);
+        assert!(widget.has_open_ask_user_question());
+
+        widget.pump_view_timeout();
+
+        let answers = ask_rx.blocking_recv().expect("timeout answers returned");
+        assert_eq!(answers.get("Pick one?").map(String::as_str), Some("Alpha"));
+        assert!(
+            !widget.has_open_ask_user_question(),
+            "expired questionnaire must be popped without keyboard input"
+        );
     }
 
     fn open_picker_request_models(widget: &ChatWidget) -> Vec<String> {

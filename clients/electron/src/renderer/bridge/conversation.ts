@@ -18,6 +18,7 @@
  *  - `turn_ended`         → `running = false` + a `meta` row carrying the cost
  *                           snapshot's formatted duration/token summary.
  *  - `error`              → a strong, danger-toned `narration` line.
+ *  - `system_notice`      → a non-terminal diagnostic narration line.
  *  - `thinking_delta`     → a dim/italic collapsible `thinking` block, streamed
  *                           (deltas accumulate like text); closed on
  *                           `message_complete` / `turn_ended`.
@@ -237,6 +238,10 @@ export function reduceEvent(state: ConversationState, event: ClientEvent): Conve
         },
       };
 
+    case 'system_notice':
+      if (event.is_error) return pushError(state, event.message);
+      return pushNotice(state, event.message);
+
     case 'error':
       return { ...pushError(state, event.message), running: false };
 
@@ -333,6 +338,19 @@ function pushError(state: ConversationState, message: string): ConversationState
     ...state,
     items,
     lastError: message,
+    openAssistantIndex: -1,
+    openThinkingIndex: -1,
+  };
+}
+
+/** Append a non-terminal informational notice without changing turn state. */
+function pushNotice(state: ConversationState, message: string): ConversationState {
+  const items = state.items.slice();
+  closeThinking(items, state.openThinkingIndex);
+  items.push({ type: 'narration', text: message, role: 'assistant' });
+  return {
+    ...state,
+    items,
     openAssistantIndex: -1,
     openThinkingIndex: -1,
   };

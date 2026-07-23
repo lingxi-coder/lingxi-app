@@ -49,7 +49,8 @@ use hooks::loader::parse_hooks_from_settings_json;
 use hooks::HookSource;
 use protocol::PluginId;
 use serde::Deserialize;
-use std::collections::{BTreeMap, HashMap};
+use serde_json::Value;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 /// Raw shape of `.lingxi-plugin/plugin.json`.
@@ -81,16 +82,16 @@ struct RawManifest {
     /// Explicitly declared skill directories. Parsed but not yet wired to
     /// override `detect_components()`. Binary: `skills` in `PluginManifestSchema`.
     #[serde(default)]
-    skills: Option<Vec<String>>,
+    skills: Option<PathDecl>,
     /// Explicitly declared command directories. Binary: `commands`.
     #[serde(default)]
-    commands: Option<Vec<String>>,
+    commands: Option<PathDecl>,
     /// Explicitly declared agent directories. Binary: `agents`.
     #[serde(default)]
-    agents: Option<Vec<String>>,
+    agents: Option<PathDecl>,
     /// Explicitly declared output-style directories. Binary: `outputStyles`.
     #[serde(rename = "outputStyles", default)]
-    output_styles: Option<Vec<String>>,
+    output_styles: Option<PathDecl>,
     /// Explicitly declared MCP server configs (manifest-declared MCP servers).
     /// Binary: `mcpServers` in `PluginManifestSchema`.
     #[serde(rename = "mcpServers", default)]
@@ -107,6 +108,9 @@ struct RawManifest {
     /// storage; non-sensitive fields through settings `pluginConfigs`.
     #[serde(rename = "userConfig", default)]
     user_config: Option<HashMap<String, UserConfigField>>,
+    /// Plugin settings shipped in the manifest.
+    #[serde(default)]
+    settings: Option<HashMap<String, serde_json::Value>>,
     /// Channel declarations. Binary: `channels`.
     #[serde(default)]
     channels: Option<Vec<serde_json::Value>>,
@@ -122,6 +126,22 @@ struct RawManifest {
     /// Repository URL or object. Binary: `repository`.
     #[serde(default)]
     repository: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum PathDecl {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl PathDecl {
+    fn into_vec(self) -> Vec<String> {
+        match self {
+            Self::One(v) => vec![v],
+            Self::Many(v) => v,
+        }
+    }
 }
 
 /// `author` may be a string or an object (`{ name, email, url }`); claude-code
@@ -560,7 +580,8 @@ pub(crate) async fn load_plugin_from_path(plugin_dir: &Path) -> Option<(PluginId
     };
     let trust_level = default_trust_for_source(&source);
 
-    let components = detect_components(plugin_dir).await;
+    let components = detect_components(plugin_dir, &parsed).await;
+    let settings = load_plugin_settings(plugin_dir, parsed.settings.as_ref()).await;
 
     let manifest = PluginManifest {
         id,
@@ -575,7 +596,7 @@ pub(crate) async fn load_plugin_from_path(plugin_dir: &Path) -> Option<(PluginId
         depends_on: Vec::new(),
         user_config: parsed.user_config.map(|fields| UserConfigSchema { fields }),
         channels: Vec::new(),
-        settings: HashMap::new(),
+        settings,
     };
     Some((id, manifest))
 }
@@ -587,14 +608,38 @@ pub(crate) async fn load_plugin_from_path(plugin_dir: &Path) -> Option<(PluginId
 /// `hooks/hooks.json` is parsed when present; and MCP / LSP server configs are
 /// read from the plugin-root `.mcp.json` / `.lsp.json` files
 /// (`mcpPluginIntegration.ts:137`, `lspPluginIntegration.ts:64`).
-async fn detect_components(plugin_dir: &Path) -> PluginComponents {
-    let commands = glob_md(&plugin_dir.join("commands")).await;
-    let agents = glob_md(&plugin_dir.join("agents")).await;
-    let skills = glob_skill_dirs(&plugin_dir.join("skills")).await;
-    let output_styles = glob_md(&plugin_dir.join("output-styles")).await;
-    let hooks = load_standard_hooks(plugin_dir).await;
-    let mcp_servers = load_mcp_servers(plugin_dir).await;
-    let lsp_servers = load_lsp_servers(plugin_dir).await;
+async fn detect_components(plugin_dir: &Path, parsed: &RawManifest) -> PluginComponents {
+    let default_commands = glob_md(&plugin_dir.join("commands")).await;
+    let default_agents = glob_md(&plugin_dir.join("agents")).await;
+    let default_skills = glob_skill_dirs(&plugin_dir.join("skills")).await;
+    let default_output_styles = glob_md(&plugin_dir.join("output-styles")).await;
+    let default_hooks = load_standard_hooks(plugin_dir).await;
+    let default_mcp_servers = load_mcp_servers(plugin_dir).await;
+    let default_lsp_servers = load_lsp_servers(plugin_dir).await;
+
+    let commands = match &parsed.commands {
+        Some(paths) => resolve_markdown_declared_paths(plugin_dir, paths.clone()).await,
+        None => default_commands,
+    };
+    let agents = match &parsed.agents {
+        Some(paths) => resolve_markdown_declared_paths(plugin_dir, paths.clone()).await,
+        None => default_agents,
+    };
+    let mut skills = default_skills;
+    if let Some(paths) = &parsed.skills {
+        skills.extend(resolve_skill_declared_paths(plugin_dir, paths.clone()).await);
+        dedup_component_paths(&mut skills);
+    }
+    let output_styles = match &parsed.output_styles {
+        Some(paths) => resolve_markdown_declared_paths(plugin_dir, paths.clone()).await,
+        None => default_output_styles,
+    };
+    let mut hooks = default_hooks;
+    hooks.extend(load_declared_hooks(plugin_dir, parsed.hooks.clone()).await);
+    let mut mcp_servers = default_mcp_servers;
+    mcp_servers.extend(load_declared_mcp_servers(plugin_dir, parsed.mcp_servers.clone()).await);
+    let mut lsp_servers = default_lsp_servers;
+    lsp_servers.extend(load_declared_lsp_servers(plugin_dir, parsed.lsp_servers.clone()).await);
 
     PluginComponents {
         commands,
@@ -607,26 +652,130 @@ async fn detect_components(plugin_dir: &Path) -> PluginComponents {
     }
 }
 
-/// Collect plugin skills using claude-code's `<name>/SKILL.md` layout: descend
-/// ONE level into `skills/` and collect each subdirectory's `SKILL.md`
-/// (`validatePlugin.ts:735-739` — single `.md` files directly in `skills/` are
-/// NOT loaded, and a subdir without a `SKILL.md` is skipped). Sorted by path
-/// for deterministic ordering; a missing `skills/` dir yields an empty vec.
+fn resolve_declared_relative_path(plugin_dir: &Path, raw: &str) -> Option<PathBuf> {
+    let rel = raw.strip_prefix("./")?;
+    if rel.is_empty() {
+        return None;
+    }
+    let path = Path::new(rel);
+    if path.is_absolute()
+        || path.components().any(|c| {
+            matches!(
+                c,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return None;
+    }
+    Some(plugin_dir.join(path))
+}
+
+fn dedup_component_paths(paths: &mut Vec<ComponentPath>) {
+    let mut seen = BTreeSet::new();
+    paths.retain(|cp| seen.insert(cp.path.clone()));
+}
+
+fn component_root_metadata(root: &Path) -> Option<Value> {
+    Some(serde_json::json!({ "root": root }))
+}
+
+fn stamp_component_root(paths: &mut [ComponentPath], root: &Path) {
+    for path in paths {
+        path.metadata = component_root_metadata(root);
+    }
+}
+
+async fn resolve_markdown_declared_paths(plugin_dir: &Path, paths: PathDecl) -> Vec<ComponentPath> {
+    let mut out = Vec::new();
+    for raw in paths.into_vec() {
+        let Some(abs) = resolve_declared_relative_path(plugin_dir, &raw) else {
+            tracing::warn!(path = %raw, "skipping invalid plugin manifest markdown path");
+            continue;
+        };
+        let Ok(meta) = tokio::fs::metadata(&abs).await else {
+            tracing::warn!(path = %abs.display(), "skipping missing plugin manifest markdown path");
+            continue;
+        };
+        if meta.is_dir() {
+            let mut found = glob_md(&abs).await;
+            stamp_component_root(&mut found, &abs);
+            out.extend(found);
+        } else if abs
+            .extension()
+            .and_then(|s| s.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
+        {
+            let root = abs.parent().unwrap_or(plugin_dir).to_path_buf();
+            out.push(ComponentPath {
+                path: abs,
+                metadata: component_root_metadata(&root),
+            });
+        }
+    }
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    dedup_component_paths(&mut out);
+    out
+}
+
+async fn resolve_skill_declared_paths(plugin_dir: &Path, paths: PathDecl) -> Vec<ComponentPath> {
+    let mut out = Vec::new();
+    for raw in paths.into_vec() {
+        let Some(abs) = resolve_declared_relative_path(plugin_dir, &raw) else {
+            tracing::warn!(path = %raw, "skipping invalid plugin manifest skill path");
+            continue;
+        };
+        let Ok(meta) = tokio::fs::metadata(&abs).await else {
+            tracing::warn!(path = %abs.display(), "skipping missing plugin manifest skill path");
+            continue;
+        };
+        if meta.is_dir() {
+            let mut found = glob_skill_dirs(&abs).await;
+            stamp_component_root(&mut found, &abs);
+            out.extend(found);
+        } else if abs.file_name().and_then(|s| s.to_str()) == Some("SKILL.md") {
+            let root = abs
+                .parent()
+                .and_then(Path::parent)
+                .unwrap_or(plugin_dir)
+                .to_path_buf();
+            out.push(ComponentPath {
+                path: abs,
+                metadata: component_root_metadata(&root),
+            });
+        }
+    }
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    dedup_component_paths(&mut out);
+    out
+}
+
+/// Collect plugin skills recursively, stopping at every directory that owns a
+/// `SKILL.md`. Nested grouping directories are allowed, but content below a
+/// discovered skill root is not scanned as another independent skill.
 async fn glob_skill_dirs(skills_dir: &Path) -> Vec<ComponentPath> {
     let mut out = Vec::new();
-    let Ok(mut entries) = tokio::fs::read_dir(skills_dir).await else {
-        return out;
-    };
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        if !entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false) {
-            continue;
+    let mut stack = vec![skills_dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        if current != skills_dir {
+            let skill_md = current.join("SKILL.md");
+            if tokio::fs::try_exists(&skill_md).await.unwrap_or(false) {
+                out.push(ComponentPath {
+                    path: skill_md,
+                    metadata: component_root_metadata(skills_dir),
+                });
+                continue;
+            }
         }
-        let skill_md = entry.path().join("SKILL.md");
-        if tokio::fs::try_exists(&skill_md).await.unwrap_or(false) {
-            out.push(ComponentPath {
-                path: skill_md,
-                metadata: None,
-            });
+        let Ok(mut entries) = tokio::fs::read_dir(&current).await else {
+            continue;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            if entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false) {
+                stack.push(entry.path());
+            }
         }
     }
     out.sort_by(|a, b| a.path.cmp(&b.path));
@@ -723,13 +872,55 @@ async fn glob_md(dir: &Path) -> Vec<ComponentPath> {
             {
                 out.push(ComponentPath {
                     path: p,
-                    metadata: None,
+                    metadata: component_root_metadata(dir),
                 });
             }
         }
     }
     out.sort_by(|a, b| a.path.cmp(&b.path));
     out
+}
+
+/// Load the plugin settings understood by Claude Code's plugin runtime. A
+/// valid plugin-root `settings.json` takes precedence over manifest `settings`;
+/// an absent or malformed file falls back to the manifest. Unknown keys are
+/// discarded instead of merging arbitrary plugin data into host settings.
+async fn load_plugin_settings(
+    plugin_dir: &Path,
+    manifest_settings: Option<&HashMap<String, Value>>,
+) -> HashMap<String, Value> {
+    const ALLOWED: [&str; 2] = ["agent", "subagentStatusLine"];
+
+    let settings_path = plugin_dir.join("settings.json");
+    let selected = match tokio::fs::read_to_string(&settings_path).await {
+        Ok(raw) => match serde_json::from_str::<HashMap<String, Value>>(&raw) {
+            Ok(settings) => settings,
+            Err(error) => {
+                tracing::warn!(
+                    path = %settings_path.display(),
+                    error = %error,
+                    "ignoring malformed plugin settings.json"
+                );
+                manifest_settings.cloned().unwrap_or_default()
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            manifest_settings.cloned().unwrap_or_default()
+        }
+        Err(error) => {
+            tracing::warn!(
+                path = %settings_path.display(),
+                error = %error,
+                "unable to read plugin settings.json"
+            );
+            manifest_settings.cloned().unwrap_or_default()
+        }
+    };
+
+    selected
+        .into_iter()
+        .filter(|(key, _)| ALLOWED.contains(&key.as_str()))
+        .collect()
 }
 
 /// Parse `hooks/hooks.json` into [`hooks::HookDefinition`]s, if present.
@@ -753,9 +944,11 @@ async fn load_standard_hooks(plugin_dir: &Path) -> Vec<hooks::HookDefinition> {
         }
     };
     // The file wraps the settings-shaped hooks under a `hooks` key.
-    let Some(inner) = wrapper.get("hooks") else {
-        return Vec::new();
-    };
+    parse_hooks_value(&wrapper, &path)
+}
+
+fn parse_hooks_value(value: &Value, path: &Path) -> Vec<hooks::HookDefinition> {
+    let inner = value.get("hooks").unwrap_or(value);
     let settings = serde_json::json!({ "hooks": inner });
     match parse_hooks_from_settings_json(&settings.to_string(), HookSource::Plugin) {
         Ok(hooks) => hooks,
@@ -763,5 +956,205 @@ async fn load_standard_hooks(plugin_dir: &Path) -> Vec<hooks::HookDefinition> {
             tracing::warn!(error = %e, path = %path.display(), "failed to parse plugin hooks");
             Vec::new()
         }
+    }
+}
+
+async fn load_declared_hooks(
+    plugin_dir: &Path,
+    value: Option<Value>,
+) -> Vec<hooks::HookDefinition> {
+    let Some(value) = value else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    match value {
+        Value::String(path) => {
+            out.extend(load_declared_hooks_from_path(plugin_dir, &path).await);
+        }
+        Value::Array(items) if items.iter().all(|v| matches!(v, Value::String(_))) => {
+            for item in items {
+                if let Value::String(path) = item {
+                    out.extend(load_declared_hooks_from_path(plugin_dir, &path).await);
+                }
+            }
+        }
+        other => out.extend(parse_hooks_value(&other, plugin_dir)),
+    }
+    out
+}
+
+async fn load_declared_hooks_from_path(plugin_dir: &Path, raw: &str) -> Vec<hooks::HookDefinition> {
+    let Some(path) = resolve_declared_relative_path(plugin_dir, raw) else {
+        tracing::warn!(path = %raw, "skipping invalid plugin manifest hooks path");
+        return Vec::new();
+    };
+    let Ok(raw_json) = tokio::fs::read_to_string(&path).await else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&raw_json) else {
+        return Vec::new();
+    };
+    parse_hooks_value(&value, &path)
+}
+
+async fn load_declared_mcp_servers(
+    plugin_dir: &Path,
+    value: Option<Value>,
+) -> HashMap<String, mcp::McpServerConfig> {
+    load_declared_json_records(plugin_dir, value, |raw| {
+        mcp::parse_mcp_json_string(raw, mcp::ConfigScope::Dynamic).map(|v| {
+            v.into_iter()
+                .map(|cfg| (cfg.name.clone(), cfg))
+                .collect::<HashMap<_, _>>()
+        })
+    })
+    .await
+}
+
+async fn load_declared_lsp_servers(
+    plugin_dir: &Path,
+    value: Option<Value>,
+) -> HashMap<String, traits::LspServerConfig> {
+    load_declared_json_records(plugin_dir, value, |raw| {
+        serde_json::from_str::<HashMap<String, traits::LspServerConfig>>(raw).map(|parsed| {
+            parsed
+                .into_iter()
+                .map(|(key, mut cfg)| {
+                    if cfg.name.is_empty() {
+                        cfg.name.clone_from(&key);
+                    }
+                    (cfg.name.clone(), cfg)
+                })
+                .collect::<HashMap<_, _>>()
+        })
+    })
+    .await
+}
+
+async fn load_declared_json_records<T, E>(
+    plugin_dir: &Path,
+    value: Option<Value>,
+    parse: impl Fn(&str) -> Result<HashMap<String, T>, E>,
+) -> HashMap<String, T> {
+    let Some(value) = value else {
+        return HashMap::new();
+    };
+    let mut out = HashMap::new();
+    match value {
+        Value::String(path) => {
+            merge_declared_json_records(plugin_dir, &path, &parse, &mut out).await;
+        }
+        Value::Array(items) if items.iter().all(|v| matches!(v, Value::String(_))) => {
+            for item in items {
+                if let Value::String(path) = item {
+                    merge_declared_json_records(plugin_dir, &path, &parse, &mut out).await;
+                }
+            }
+        }
+        other => {
+            if let Ok(parsed) = parse(&other.to_string()) {
+                out.extend(parsed);
+            }
+        }
+    }
+    out
+}
+
+async fn merge_declared_json_records<T, E>(
+    plugin_dir: &Path,
+    raw_path: &str,
+    parse: &impl Fn(&str) -> Result<HashMap<String, T>, E>,
+    out: &mut HashMap<String, T>,
+) {
+    let Some(path) = resolve_declared_relative_path(plugin_dir, raw_path) else {
+        tracing::warn!(path = %raw_path, "skipping invalid plugin manifest json path");
+        return;
+    };
+    let Ok(raw) = tokio::fs::read_to_string(&path).await else {
+        return;
+    };
+    if let Ok(parsed) = parse(&raw) {
+        out.extend(parsed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[tokio::test]
+    async fn declared_commands_replace_defaults_and_declared_skills_extend_defaults() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        fs::create_dir_all(plugin.join("commands")).unwrap();
+        fs::create_dir_all(plugin.join("custom-commands")).unwrap();
+        fs::create_dir_all(plugin.join("skills/base")).unwrap();
+        fs::create_dir_all(plugin.join("extra-skills/extra")).unwrap();
+
+        fs::write(
+            plugin
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            r#"{
+                "name":"demo",
+                "commands":"./custom-commands",
+                "skills":"./extra-skills"
+            }"#,
+        )
+        .unwrap();
+        fs::write(plugin.join("commands/default.md"), "default").unwrap();
+        fs::write(plugin.join("custom-commands/custom.md"), "custom").unwrap();
+        fs::write(plugin.join("skills/base/SKILL.md"), "base").unwrap();
+        fs::write(plugin.join("extra-skills/extra/SKILL.md"), "extra").unwrap();
+
+        let (_id, manifest) = load_plugin_from_path(plugin).await.unwrap();
+        let commands: Vec<_> = manifest
+            .components
+            .commands
+            .iter()
+            .map(|c| c.path.file_name().unwrap().to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(commands, vec!["custom.md"]);
+
+        let skills: Vec<_> = manifest
+            .components
+            .skills
+            .iter()
+            .map(|c| {
+                c.path
+                    .parent()
+                    .unwrap()
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(skills, vec!["base", "extra"]);
+    }
+
+    #[tokio::test]
+    async fn declared_relative_paths_are_confined_and_inline_mcp_lsp_are_loaded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        fs::write(
+            plugin.join(branding::PLUGIN_MANIFEST_DIR).join("plugin.json"),
+            r#"{
+                "name":"demo",
+                "commands":"../escape",
+                "mcpServers":{"inline":{"type":"stdio","command":"echo"}},
+                "lspServers":{"rust":{"name":"rust","command":"rust-analyzer","args":[],"env":{},"trigger_languages":["rust"],"root_dir_markers":["Cargo.toml"],"initialization_options":null,"extension_to_language":{}}}
+            }"#,
+        )
+        .unwrap();
+
+        let (_id, manifest) = load_plugin_from_path(plugin).await.unwrap();
+        assert!(manifest.components.commands.is_empty());
+        assert!(manifest.components.mcp_servers.contains_key("inline"));
+        assert!(manifest.components.lsp_servers.contains_key("rust"));
     }
 }

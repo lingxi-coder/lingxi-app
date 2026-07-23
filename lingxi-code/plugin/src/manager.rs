@@ -15,7 +15,7 @@
 use crate::blocklist::PluginBlocklist;
 use crate::lifecycle::PluginState;
 use crate::loader::resolve_user_config;
-use crate::manifest::{PluginManifest, PluginUserConfig};
+use crate::manifest::{ComponentPath, PluginManifest, PluginUserConfig};
 use crate::source::PluginSource;
 use crate::strict_policy::{PluginComponent, StrictPluginOnlyPolicy};
 use crate::user_config;
@@ -106,6 +106,11 @@ pub struct PluginManager {
     mcp_registry: Arc<McpRegistry>,
     lsp_registry: Arc<LspRegistry>,
     tool_registry: Arc<RwLock<ToolRegistry>>,
+    /// Optional live agent catalog owned by the host. When wired, plugin
+    /// agents are materialized and removed by the same lifecycle transaction
+    /// as every other plugin component.
+    agent_catalog: Option<Arc<RwLock<Vec<agent::AgentDefinition>>>>,
+    plugin_agent_names: RwLock<HashMap<PluginId, Vec<String>>>,
     // Channel registry is part of mcp_registry's agent-scoped pool in M1.
     /// Scoped MCP server names (`plugin:{plugin}:{server}`) each plugin seeded
     /// into `mcp_registry.connections`, so [`Self::unload_plugin`] can remove
@@ -151,8 +156,17 @@ impl PluginManager {
             mcp_registry,
             lsp_registry,
             tool_registry,
+            agent_catalog: None,
+            plugin_agent_names: RwLock::new(HashMap::new()),
             plugin_mcp_names: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Share the host's live agent catalog with the plugin lifecycle.
+    #[must_use]
+    pub fn with_agent_catalog(mut self, catalog: Arc<RwLock<Vec<agent::AgentDefinition>>>) -> Self {
+        self.agent_catalog = Some(catalog);
+        self
     }
 
     /// Seed the persisted `userConfig` state (settings `pluginConfigs`) the
@@ -571,14 +585,12 @@ impl PluginManager {
         // single unit; a privilege-escalating agent rejects the whole plugin,
         // not just the agent.
 
-        // (a) Agents — frontmatter validated against D2 (the privilege gate)
-        //     FIRST. The agent *catalog* materialisation happens at the
-        //     composition root via `agent::load_agents_from_dirs([(…/agents,
-        //     AgentSource::Plugin)])` (the manager holds no agent-catalog ref,
-        //     faithful to the dir-scan catalog design). Here we gate each
-        //     plugin agent file's YAML frontmatter so a plugin cannot smuggle
-        //     `permission_mode` / `hooks:` / `mcpServers` escalations
-        //     (`validate_plugin_agent_frontmatter`, agent_validation.rs:29).
+        // (a) Agents — validate the privilege boundary, then parse the same
+        //     declared paths discovery returned (including custom/nested agent
+        //     directories). Names are plugin-qualified so they cannot shadow a
+        //     user/project agent. Registry mutation remains below the complete
+        //     validation phase.
+        let mut agent_defs = Vec::new();
         for ap in &manifest.components.agents {
             let abs = if ap.path.is_absolute() {
                 ap.path.clone()
@@ -594,6 +606,47 @@ impl PluginManager {
                         )));
                     }
                 }
+                match agent::parse_agent_markdown(
+                    &raw,
+                    agent::AgentSource::Plugin,
+                    component_root(ap, install_dir.join("agents")),
+                    &abs,
+                ) {
+                    Ok(mut def) => {
+                        let root = component_root(ap, install_dir.join("agents"));
+                        let namespace = abs
+                            .parent()
+                            .and_then(|parent| parent.strip_prefix(&root).ok())
+                            .map(|relative| {
+                                relative
+                                    .components()
+                                    .filter_map(|part| match part {
+                                        std::path::Component::Normal(value) => {
+                                            Some(value.to_string_lossy().into_owned())
+                                        }
+                                        _ => None,
+                                    })
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default();
+                        let mut parts = Vec::with_capacity(namespace.len() + 2);
+                        parts.push(manifest.name.clone());
+                        parts.extend(namespace);
+                        parts.push(def.agent_type);
+                        def.agent_type = parts.join(":");
+                        if let Some(prompt) = def.system_prompt.take() {
+                            def.system_prompt =
+                                Some(user_config::substitute_string_field(&prompt, &subst_ctx));
+                        }
+                        agent_defs.push(def);
+                    }
+                    Err(agent::AgentLoadError::MissingName(_)) => {}
+                    Err(error) => tracing::warn!(
+                        path = %abs.display(),
+                        error = %error,
+                        "skipping malformed plugin agent"
+                    ),
+                }
             }
         }
 
@@ -608,7 +661,6 @@ impl PluginManager {
         //     read is skipped (TS returns null + filters).
         let mut cmds: Vec<command_api::SlashCommand> = Vec::new();
         if !self.strict.is_locked(PluginComponent::Commands) {
-            let commands_dir = install_dir.join("commands");
             for cp in &manifest.components.commands {
                 let abs = if cp.path.is_absolute() {
                     cp.path.clone()
@@ -621,7 +673,7 @@ impl PluginManager {
                 let file = command_api::parse_command_markdown(
                     &raw,
                     abs.clone(),
-                    commands_dir.clone(),
+                    component_root(cp, install_dir.join("commands")),
                     command_api::CommandSource::Plugin,
                 );
                 // Build the faithful Markdown command (name/description/body/
@@ -688,6 +740,43 @@ impl PluginManager {
                 };
                 skill.name = format!("{plugin_name}:{}", skill.name);
                 skill.plugin_id = Some(manifest.id);
+
+                // Plugin skills are prompt commands in Claude Code. Register
+                // the same parsed file in the shared slash-command catalog so
+                // the Skill tool, model skill listing, completion UI, and
+                // direct `/plugin:skill` invocation all observe it.
+                let skill_root = abs.parent().unwrap_or(install_dir).to_path_buf();
+                let file = command_api::parse_skill_command_markdown(
+                    &raw,
+                    abs.clone(),
+                    skill_root,
+                    command_api::CommandSource::Plugin,
+                );
+                let base =
+                    command_api::build_skill_command(&file, command_api::CommandSource::Plugin);
+                let (frontmatter, prompt_template) = match &base.kind {
+                    command_api::SlashCommandKind::Markdown {
+                        frontmatter,
+                        prompt_template,
+                        ..
+                    } => (frontmatter.clone(), prompt_template.clone()),
+                    _ => (
+                        command_api::CommandFrontmatter::default(),
+                        file.content.clone(),
+                    ),
+                };
+                cmds.push(command_api::SlashCommand {
+                    name: skill.name.clone(),
+                    source: command_api::CommandSource::Plugin,
+                    kind: command_api::SlashCommandKind::Plugin {
+                        plugin_id: manifest.id,
+                        file_path: abs,
+                        frontmatter,
+                        prompt_template,
+                    },
+                    loaded_from: Some("plugin".to_string()),
+                    ..base
+                });
                 skills.push(skill);
             }
         }
@@ -717,6 +806,8 @@ impl PluginManager {
                     frontmatter: OutputStyleFrontmatter {
                         name,
                         description: disk.description,
+                        keep_coding_instructions: disk.keep_coding_instructions,
+                        force_for_plugin: disk.force_for_plugin,
                         ..Default::default()
                     },
                     system_prompt_addendum: disk.prompt,
@@ -773,7 +864,7 @@ impl PluginManager {
 
         // ---- All inputs validated; mutate the live registries now. ----
 
-        // 1. Commands.
+        // 1. Commands and prompt skills share the live command catalog.
         if !cmds.is_empty() {
             self.command_registry
                 .write()
@@ -810,9 +901,35 @@ impl PluginManager {
                 .await
                 .register_plugin_styles(manifest.id, styles);
         }
+
+        // 6. Agents. Their names are plugin-qualified, so removal cannot
+        // delete a built-in/user/project agent with the same local name.
+        if let Some(catalog) = &self.agent_catalog {
+            let names: Vec<String> = agent_defs
+                .iter()
+                .map(|definition| definition.agent_type.clone())
+                .collect();
+            if !names.is_empty() {
+                let mut live = catalog.write().await;
+                for definition in agent_defs {
+                    if let Some(existing) = live
+                        .iter_mut()
+                        .find(|entry| entry.agent_type == definition.agent_type)
+                    {
+                        *existing = definition;
+                    } else {
+                        live.push(definition);
+                    }
+                }
+                self.plugin_agent_names
+                    .write()
+                    .await
+                    .insert(manifest.id, names);
+            }
+        }
         let _ = &self.tool_registry;
 
-        // 6. MCP servers — route each scoped config through the registry's
+        // 7. MCP servers — route each scoped config through the registry's
         //    live `connect_all` path, the SAME path engine-desktop uses for
         //    normal configured `.mcp.json` servers (so plugin servers auto-dial
         //    at bootstrap, transitioning Connecting→Connected, or to a
@@ -830,7 +947,7 @@ impl PluginManager {
             self.mcp_registry.connect_all(mcp_scoped).await;
         }
 
-        // 7. LSP servers — plugin-only registration path.
+        // 8. LSP servers — plugin-only registration path.
         //
         // `LspRegistry::register_plugin_servers` is the ONLY supported way
         // to register LSP servers. The internal `register_config` is
@@ -855,6 +972,14 @@ impl PluginManager {
             .await
             .unregister_plugin(id);
         self.tool_registry.write().await.unregister_plugin(id);
+        if let Some(names) = self.plugin_agent_names.write().await.remove(id) {
+            if let Some(catalog) = &self.agent_catalog {
+                catalog.write().await.retain(|definition| {
+                    !names.contains(&definition.agent_type)
+                        || definition.source != agent::AgentSource::Plugin
+                });
+            }
+        }
         let _ = self.lsp_registry.unregister_plugin(id).await;
         // MCP cleanup: remove exactly the scoped `plugin:{plugin}:*` entries
         // this plugin seeded into the registry's connection map.
@@ -866,6 +991,16 @@ impl PluginManager {
         }
         Ok(())
     }
+}
+
+fn component_root(component: &ComponentPath, fallback: PathBuf) -> PathBuf {
+    component
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("root"))
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+        .unwrap_or(fallback)
 }
 
 /// Substitute `${user_config.KEY}` references into an MCP server config's

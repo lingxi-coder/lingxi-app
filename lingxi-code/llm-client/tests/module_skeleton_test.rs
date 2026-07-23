@@ -14,25 +14,25 @@ fn scope_upgrade_module_exports_parser() {
 }
 
 #[test]
-fn config_default_uses_spec_locked_endpoints() {
+fn config_default_uses_current_claude_code_endpoints() {
+    use llm_client::oauth::anthropic::config::CLAUDE_CODE_OAUTH_SCOPES;
     use llm_client::oauth::anthropic::ClaudeAiOAuthConfig;
     let c = ClaudeAiOAuthConfig::default_with_port(0);
     assert_eq!(
         c.authorization_endpoint,
-        "https://claude.ai/oauth/authorize"
+        "https://claude.com/cai/oauth/authorize"
     );
     assert_eq!(
         c.token_endpoint,
-        "https://console.anthropic.com/v1/oauth/token"
+        "https://platform.claude.com/v1/oauth/token"
     );
     // Scope order is locked.
     assert_eq!(
         c.scopes,
-        vec![
-            "read:user".to_string(),
-            "write:messages".to_string(),
-            "read:projects".to_string(),
-        ],
+        CLAUDE_CODE_OAUTH_SCOPES
+            .iter()
+            .map(|scope| (*scope).to_string())
+            .collect::<Vec<_>>(),
     );
 }
 

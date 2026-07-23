@@ -79,6 +79,21 @@ impl TaskStatusSink for RegistryStatusSink {
         }
     }
 
+    async fn notify_monitor_event(&self, task_id: &str, event: &str) {
+        if let Some(reg) = self.registry.get() {
+            reg.notify_monitor_event(task_id, event).await;
+        }
+    }
+
+    async fn is_registered(&self, task_id: &str) -> bool {
+        match self.registry.get() {
+            Some(reg) => matches!(reg.get(task_id).await, Ok(Some(_))),
+            // An unbound sink is inert and should not stall a standalone
+            // handler forever.
+            None => true,
+        }
+    }
+
     /// Consult the stored task status so `drain_pending_kills` can skip flipping
     /// an already-terminal task to `Killed`. An unbound sink, an unknown/evicted
     /// task, or a lookup error all read as "not terminal" (`false`) — a

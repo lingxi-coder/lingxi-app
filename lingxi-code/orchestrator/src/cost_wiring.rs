@@ -24,14 +24,33 @@ use llm_client::Usage as LlmUsage;
 /// matching claude-code (`utils/cost-tracker.ts:282`, `utils/modelCost.ts:139`).
 #[must_use]
 pub(crate) fn llm_usage_to_cost_usage(usage: &LlmUsage) -> Usage {
+    // Anthropic reports cache creation both as a total and, on current
+    // responses, as TTL-specific buckets. Pricing differs for the 5-minute and
+    // 1-hour tiers, so split the total without double charging. Providers that
+    // do not expose the nested object retain the legacy single-bucket shape.
+    let cache_write_1h = usage
+        .provider_metadata
+        .pointer("/cache_creation/ephemeral_1h_input_tokens")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let cache_write = usage
+        .provider_metadata
+        .pointer("/cache_creation/ephemeral_5m_input_tokens")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or_else(|| {
+            usage
+                .billable_tokens
+                .cache_write
+                .saturating_sub(cache_write_1h)
+        });
     Usage {
         tokens: TokenUsage {
             input: usage.billable_tokens.input,
             output: usage.billable_tokens.output,
-            cache_write: usage.billable_tokens.cache_write,
+            cache_write,
             cache_read: usage.billable_tokens.cache_read,
             reasoning_output: usage.billable_tokens.reasoning_output,
-            cache_write_1h: 0,
+            cache_write_1h,
         },
         server_tool_use: usage.server_tool_use.map(|s| ServerToolUsage {
             // cost's counter is u32; clamp the (u64) wire value defensively.
@@ -265,6 +284,35 @@ mod tests {
         // Absent server_tool_use / speed default to None — no regression.
         assert!(u.server_tool_use.is_none());
         assert!(u.speed.is_none());
+    }
+
+    #[test]
+    fn splits_anthropic_cache_creation_by_ttl() {
+        let mut usage = make_llm_usage(100, 50, 30, 10, None, None);
+        usage.provider_metadata = serde_json::json!({
+            "cache_creation_input_tokens": 30,
+            "cache_creation": {
+                "ephemeral_5m_input_tokens": 12,
+                "ephemeral_1h_input_tokens": 18
+            }
+        });
+
+        let translated = llm_usage_to_cost_usage(&usage);
+        assert_eq!(translated.tokens.cache_write, 12);
+        assert_eq!(translated.tokens.cache_write_1h, 18);
+    }
+
+    #[test]
+    fn subtracts_one_hour_bucket_when_five_minute_breakdown_is_absent() {
+        let mut usage = make_llm_usage(100, 50, 30, 10, None, None);
+        usage.provider_metadata = serde_json::json!({
+            "cache_creation_input_tokens": 30,
+            "cache_creation": { "ephemeral_1h_input_tokens": 18 }
+        });
+
+        let translated = llm_usage_to_cost_usage(&usage);
+        assert_eq!(translated.tokens.cache_write, 12);
+        assert_eq!(translated.tokens.cache_write_1h, 18);
     }
 
     use cost::pricing::{ModelRef, PricingCatalog, ProviderId};

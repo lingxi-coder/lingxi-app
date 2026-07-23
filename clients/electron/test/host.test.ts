@@ -44,3 +44,66 @@ test('bootstrap surfaces an explicit recovery state when the persisted workspace
   assert.deepEqual(report.bridgeRuntime, bridge.runtimeVersions);
   assert.match(diagnostics.snapshot()[0]?.message ?? '', /workspace path is not a directory/);
 });
+
+test('bootstrap treats a credential already supplied to the running engine as configured', () => {
+  const diagnostics = new DiagnosticBuffer();
+  const settings = {
+    getWorkspace: () => '/workspace',
+    getTrust: () => ({ trusted: true, fingerprint: 'fingerprint' }),
+    getPublic: () => ({ version: 1, recentWorkspaces: ['/workspace'] }),
+    credentialMetadata: () => ({ configured: false, encryptionAvailable: false }),
+    providerCredentialMetadataFor: (providerIds: readonly string[]) => providerIds.map((providerId) => ({
+      providerId,
+      configured: false,
+      encryptionAvailable: false,
+    })),
+  };
+  const bridge = {
+    connectionState: { status: 'connected' as const },
+    activeCredentialProviderIds: ['deepseek'],
+    turnActive: false,
+  };
+  const host = new HostController(settings as any, bridge as any, diagnostics);
+
+  const bootstrap = (host as any).bootstrap();
+  const deepseek = bootstrap.providerCredentials.find((entry: { providerId: string }) => entry.providerId === 'deepseek');
+
+  assert.deepEqual(deepseek, {
+    providerId: 'deepseek',
+    configured: true,
+    encryptionAvailable: false,
+    runtimeOnly: true,
+  });
+});
+
+test('bootstrap reports CLI/TUI credentials discovered by the shared engine store as persisted', () => {
+  const diagnostics = new DiagnosticBuffer();
+  const settings = {
+    getWorkspace: () => '/workspace',
+    getTrust: () => ({ trusted: true, fingerprint: 'fingerprint' }),
+    getPublic: () => ({ version: 1, recentWorkspaces: ['/workspace'] }),
+    credentialMetadata: () => ({ configured: false, encryptionAvailable: false }),
+    providerCredentialMetadataFor: (providerIds: readonly string[]) => providerIds.map((providerId) => ({
+      providerId,
+      configured: false,
+      encryptionAvailable: false,
+    })),
+  };
+  const bridge = {
+    connectionState: { status: 'connected' as const },
+    activeCredentialProviderIds: ['deepseek'],
+    persistedCredentialProviderIds: ['deepseek'],
+    providerCredentialStorageEncrypted: true,
+    turnActive: false,
+  };
+  const host = new HostController(settings as any, bridge as any, diagnostics);
+
+  const bootstrap = (host as any).bootstrap();
+  const deepseek = bootstrap.providerCredentials.find((entry: { providerId: string }) => entry.providerId === 'deepseek');
+
+  assert.deepEqual(deepseek, {
+    providerId: 'deepseek',
+    configured: true,
+    encryptionAvailable: true,
+  });
+});

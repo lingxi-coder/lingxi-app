@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ClipboardEvent, type KeyboardEvent, type ReactNode } from 'react';
 import type { SessionRowDto } from '@lingxi/bridge-client';
 
 import type { UseBridge } from '../bridge/useBridge';
@@ -7,8 +7,21 @@ import { engineLaunchStatus } from '../bridge/engineStatus';
 import { classifyDesktopError } from '../bridge/errors';
 import { useT } from '../theme/ThemeContext';
 import type { ThemeMode } from '../theme/tokens';
+import {
+  activeFileMention,
+  promptWithFileMentions,
+} from '../bridge/fileMentions';
+import {
+  activeSlashCommand,
+  filterSlashCommands,
+  moveSlashSelectionIndex,
+  reconcileSlashSelectionIndex,
+  slashCommandText,
+  slashNavigationDirection,
+} from '../bridge/slashCommands';
 import { Icon } from './Icon';
 import { PROVIDERS, providerById } from '../../shared/providers';
+import { PERM_MODES } from '../data';
 
 function basename(path?: string): string {
   if (!path) return 'No workspace';
@@ -245,21 +258,346 @@ function modelLabel(model?: string | null): string {
     .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
+type FilePickerState = {
+  source: 'mention' | 'button';
+  query: string;
+};
+
+type RichPromptSnapshot = {
+  text: string;
+  files: string[];
+};
+
+const FILE_MENTION_SELECTOR = '[data-file-mention]';
+const ZERO_WIDTH_SPACE = '\u200b';
+
+function richPromptText(node: Node): string {
+  if (node.nodeType === Node.TEXT_NODE) return (node.nodeValue ?? '').split(ZERO_WIDTH_SPACE).join('');
+  if (node instanceof HTMLElement && node.matches(FILE_MENTION_SELECTOR)) return '';
+  if (node instanceof HTMLBRElement) return '\n';
+
+  let value = '';
+  for (const child of node.childNodes) {
+    if (child instanceof HTMLElement && /^(DIV|P)$/.test(child.tagName) && value && !value.endsWith('\n')) value += '\n';
+    value += richPromptText(child);
+  }
+  return value;
+}
+
+function richPromptSnapshot(editor: HTMLElement): RichPromptSnapshot {
+  const files = [...editor.querySelectorAll<HTMLElement>(FILE_MENTION_SELECTOR)]
+    .map((token) => token.dataset.fileMention)
+    .filter((path): path is string => Boolean(path));
+  return { text: richPromptText(editor), files: [...new Set(files)] };
+}
+
+function editorSelection(editor: HTMLElement): Range {
+  const selection = window.getSelection();
+  if (selection?.rangeCount) {
+    const current = selection.getRangeAt(0);
+    if (editor.contains(current.commonAncestorContainer)) return current.cloneRange();
+  }
+  const end = document.createRange();
+  end.selectNodeContents(editor);
+  end.collapse(false);
+  return end;
+}
+
+function applyEditorSelection(range: Range): void {
+  const selection = window.getSelection();
+  selection?.removeAllRanges();
+  selection?.addRange(range);
+}
+
+function createFileMention(path: string, color: string): HTMLElement {
+  const token = document.createElement('span');
+  token.className = 'beta-file-mention';
+  token.dataset.fileMention = path;
+  token.contentEditable = 'false';
+  token.title = path;
+  token.setAttribute('aria-label', `File mention: ${path}`);
+  token.style.color = color;
+
+  const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  icon.setAttribute('viewBox', '0 0 18 18');
+  icon.setAttribute('width', '18');
+  icon.setAttribute('height', '18');
+  icon.setAttribute('fill', 'none');
+  icon.setAttribute('stroke', 'currentColor');
+  icon.setAttribute('stroke-width', '1.45');
+  icon.setAttribute('stroke-linecap', 'round');
+  icon.setAttribute('stroke-linejoin', 'round');
+  icon.setAttribute('aria-hidden', 'true');
+  const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+  circle.setAttribute('cx', '9');
+  circle.setAttribute('cy', '9');
+  circle.setAttribute('r', '7');
+  const file = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  file.setAttribute('d', 'M6.5 5.25h4l2.25 2.25v5.25H6.5zM10.5 5.25V7.5h2.25');
+  icon.append(circle, file);
+
+  const label = document.createElement('span');
+  label.textContent = basename(path);
+  token.append(icon, label);
+  return token;
+}
+
 export function BetaComposer({ bridge, ready }: { bridge: UseBridge; ready: boolean }) {
   const t = useT();
   const [text, setText] = useState('');
   const [modelOpen, setModelOpen] = useState(false);
   const [permissionOpen, setPermissionOpen] = useState(false);
+  const [slashQuery, setSlashQuery] = useState<string | null>(null);
+  const [filePicker, setFilePicker] = useState<FilePickerState | null>(null);
+  const [fileResults, setFileResults] = useState<string[]>([]);
+  const [fileResultsTruncated, setFileResultsTruncated] = useState(false);
+  const [fileSearchStatus, setFileSearchStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
+  const [fileResultIndex, setFileResultIndex] = useState(0);
+  const [selectedFiles, setSelectedFiles] = useState<string[]>([]);
   const [goalMode, setGoalMode] = useState(false);
   const [voiceState, setVoiceState] = useState<'idle' | 'listening' | 'unsupported' | 'denied'>('idle');
-  const input = useRef<HTMLTextAreaElement>(null);
+  const [slashResultIndex, setSlashResultIndex] = useState(0);
+  const input = useRef<HTMLDivElement>(null);
+  const fileControl = useRef<HTMLDivElement>(null);
+  const fileSearchInput = useRef<HTMLInputElement>(null);
+  const permissionControl = useRef<HTMLDivElement>(null);
+  const permissionButton = useRef<HTMLButtonElement>(null);
+  const slashControl = useRef<HTMLDivElement>(null);
   const recognition = useRef<SpeechRecognitionLike | null>(null);
   const voiceBase = useRef('');
+  const fileSearchRequest = useRef(0);
+  const savedEditorSelection = useRef<Range | null>(null);
+  const activeMentionRange = useRef<Range | null>(null);
+  const activeSlashRange = useRef<Range | null>(null);
+  const activeSlashQuery = useRef<string | null>(null);
+  const slashDismissed = useRef(false);
+
+  const slashCommands = useMemo(
+    () => filterSlashCommands(bridge.desktop.slashCommands, slashQuery ?? ''),
+    [bridge.desktop.slashCommands, slashQuery],
+  );
+  const slashMenuOpen = slashQuery !== null && ready && !bridge.running;
+
+  const fileMenuOpen = Boolean(filePicker && ready && !bridge.running);
+
+  useEffect(() => {
+    setSlashResultIndex((index) => reconcileSlashSelectionIndex(
+      index,
+      slashQuery,
+      slashQuery ?? '',
+      slashCommands.length,
+    ));
+  }, [slashCommands.length, slashQuery]);
+
+  useEffect(() => {
+    if (!slashMenuOpen) return;
+    slashControl.current
+      ?.querySelector<HTMLElement>(`[data-slash-index="${slashResultIndex}"]`)
+      ?.scrollIntoView({ block: 'nearest' });
+  }, [slashMenuOpen, slashResultIndex]);
+
+  useEffect(() => {
+    if (!fileMenuOpen || !filePicker) {
+      fileSearchRequest.current += 1;
+      setFileSearchStatus('idle');
+      setFileResults([]);
+      setFileResultsTruncated(false);
+      setFileResultIndex(0);
+      return;
+    }
+    const request = ++fileSearchRequest.current;
+    setFileSearchStatus('loading');
+    const timer = window.setTimeout(() => {
+      void bridge.searchWorkspaceFiles(filePicker.query)
+        .then((result) => {
+          if (fileSearchRequest.current !== request) return;
+          setFileResults(result.files);
+          setFileResultsTruncated(result.truncated);
+          setFileResultIndex(0);
+          setFileSearchStatus('ready');
+        })
+        .catch(() => {
+          if (fileSearchRequest.current !== request) return;
+          setFileResults([]);
+          setFileResultsTruncated(false);
+          setFileResultIndex(0);
+          setFileSearchStatus('error');
+        });
+    }, 90);
+    return () => window.clearTimeout(timer);
+  }, [bridge.searchWorkspaceFiles, fileMenuOpen, filePicker?.query]);
+
+  useEffect(() => {
+    if (!fileMenuOpen) return;
+    const pointerDown = (event: PointerEvent) => {
+      if (event.target instanceof Node && !fileControl.current?.contains(event.target)) {
+        setFilePicker(null);
+      }
+    };
+    const escape = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      setFilePicker(null);
+      if (document.activeElement === fileSearchInput.current) input.current?.focus();
+    };
+    document.addEventListener('pointerdown', pointerDown);
+    document.addEventListener('keydown', escape);
+    return () => {
+      document.removeEventListener('pointerdown', pointerDown);
+      document.removeEventListener('keydown', escape);
+    };
+  }, [fileMenuOpen]);
+
+  useEffect(() => {
+    if (fileMenuOpen && filePicker?.source === 'button') fileSearchInput.current?.focus();
+  }, [fileMenuOpen, filePicker?.source]);
 
   useEffect(() => () => {
     recognition.current?.stop();
     recognition.current = null;
   }, []);
+
+  useEffect(() => {
+    if (!permissionOpen) return;
+    const pointerDown = (event: PointerEvent) => {
+      if (event.target instanceof Node && !permissionControl.current?.contains(event.target)) {
+        setPermissionOpen(false);
+      }
+    };
+    const keyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      setPermissionOpen(false);
+      permissionButton.current?.focus();
+    };
+    document.addEventListener('pointerdown', pointerDown);
+    document.addEventListener('keydown', keyDown);
+    return () => {
+      document.removeEventListener('pointerdown', pointerDown);
+      document.removeEventListener('keydown', keyDown);
+    };
+  }, [permissionOpen]);
+
+  useEffect(() => {
+    if (!slashMenuOpen) return;
+    const pointerDown = (event: PointerEvent) => {
+      if (
+        event.target instanceof Node
+        && !slashControl.current?.contains(event.target)
+        && !input.current?.contains(event.target)
+      ) {
+        slashDismissed.current = true;
+        setSlashQuery(null);
+        activeSlashRange.current = null;
+        activeSlashQuery.current = null;
+      }
+    };
+    const escape = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      slashDismissed.current = true;
+      setSlashQuery(null);
+      activeSlashRange.current = null;
+      activeSlashQuery.current = null;
+      input.current?.focus();
+    };
+    document.addEventListener('pointerdown', pointerDown);
+    document.addEventListener('keydown', escape);
+    return () => {
+      document.removeEventListener('pointerdown', pointerDown);
+      document.removeEventListener('keydown', escape);
+    };
+  }, [slashMenuOpen]);
+
+  const syncPromptState = () => {
+    const editor = input.current;
+    if (!editor) return { text: '', files: [] };
+    const snapshot = richPromptSnapshot(editor);
+    setText(snapshot.text);
+    setSelectedFiles((current) => (
+      current.length === snapshot.files.length && current.every((path, index) => path === snapshot.files[index])
+        ? current
+        : snapshot.files
+    ));
+    return snapshot;
+  };
+
+  const savePromptSelection = () => {
+    const editor = input.current;
+    if (!editor) return;
+    savedEditorSelection.current = editorSelection(editor);
+  };
+
+  const updateActiveCompletions = () => {
+    const editor = input.current;
+    const selection = window.getSelection();
+    if (!editor || !selection?.rangeCount || !editor.contains(selection.focusNode)) return;
+    savedEditorSelection.current = selection.getRangeAt(0).cloneRange();
+
+    const node = selection.focusNode;
+    const mention = node?.nodeType === Node.TEXT_NODE
+      ? activeFileMention(node.nodeValue ?? '', selection.focusOffset)
+      : null;
+    if (mention && node) {
+      const range = document.createRange();
+      range.setStart(node, mention.start);
+      range.setEnd(node, mention.end);
+      activeMentionRange.current = range;
+      setFilePicker((current) => (
+        current?.source === 'mention' && current.query === mention.query
+          ? current
+          : { source: 'mention', query: mention.query }
+      ));
+      setSlashQuery(null);
+      activeSlashRange.current = null;
+      activeSlashQuery.current = null;
+      return;
+    }
+    activeMentionRange.current = null;
+    setFilePicker((current) => current?.source === 'mention' ? null : current);
+
+    const slash = node?.nodeType === Node.TEXT_NODE
+      ? activeSlashCommand(node.nodeValue ?? '', selection.focusOffset)
+      : null;
+    if (slash && node) {
+      if (slashDismissed.current) return;
+      const range = document.createRange();
+      range.setStart(node, slash.start);
+      range.setEnd(node, slash.end);
+      activeSlashRange.current = range;
+      const previousQuery = activeSlashQuery.current;
+      activeSlashQuery.current = slash.query;
+      setSlashQuery((current) => current === slash.query ? current : slash.query);
+      setSlashResultIndex((index) => reconcileSlashSelectionIndex(
+        index,
+        previousQuery,
+        slash.query,
+        slashCommands.length,
+      ));
+      setFilePicker(null);
+      setModelOpen(false);
+      setPermissionOpen(false);
+      return;
+    }
+    slashDismissed.current = false;
+    activeSlashRange.current = null;
+    activeSlashQuery.current = null;
+    setSlashQuery(null);
+  };
+
+  const replaceVoiceText = (nextText: string) => {
+    const editor = input.current;
+    if (!editor) return;
+    const mentions = [...editor.querySelectorAll<HTMLElement>(FILE_MENTION_SELECTOR)];
+    editor.replaceChildren();
+    for (const mention of mentions) editor.append(mention, document.createTextNode(ZERO_WIDTH_SPACE));
+    if (nextText) editor.append(document.createTextNode(nextText));
+    const range = editorSelection(editor);
+    range.selectNodeContents(editor);
+    range.collapse(false);
+    savedEditorSelection.current = range;
+    setText(nextText);
+  };
 
   const stopVoice = () => {
     recognition.current?.stop();
@@ -288,7 +626,7 @@ export function BetaComposer({ bridge, ready }: { bridge: UseBridge; ready: bool
         transcript += event.results[index][0]?.transcript ?? '';
       }
       const prefix = voiceBase.current;
-      setText(`${prefix}${prefix && transcript ? ' ' : ''}${transcript}`);
+      replaceVoiceText(`${prefix}${prefix && transcript ? ' ' : ''}${transcript}`);
     };
     next.onerror = (event) => {
       setVoiceState(event.error === 'not-allowed' || event.error === 'service-not-allowed' ? 'denied' : 'idle');
@@ -309,47 +647,419 @@ export function BetaComposer({ bridge, ready }: { bridge: UseBridge; ready: bool
   };
 
   const submit = () => {
-    const value = text.trim();
+    const snapshot = input.current ? richPromptSnapshot(input.current) : { text, files: selectedFiles };
+    const value = promptWithFileMentions(snapshot.text, snapshot.files);
     if (!value || !ready || bridge.running) return;
+    const slashCommand = snapshot.files.length === 0 ? snapshot.text.trim() : '';
+    const isSlashCommand = /^\/[^\s/]+(?:\s|$)/.test(slashCommand);
     if (voiceState === 'listening') stopVoice();
+    input.current?.replaceChildren();
     setText('');
+    setSelectedFiles([]);
+    setFilePicker(null);
+    setSlashQuery(null);
+    activeSlashRange.current = null;
+    activeSlashQuery.current = null;
+    slashDismissed.current = false;
+    if (isSlashCommand) {
+      invoke(() => bridge.runSlashCommand(slashCommand));
+      return;
+    }
     invoke(() => bridge.sendPrompt(value));
   };
-  const keyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (event.key === 'Enter' && !event.shiftKey) {
+
+  const chooseSlashCommand = (name: string) => {
+    const editor = input.current;
+    if (!editor) {
+      setSlashQuery(null);
+      return;
+    }
+    const insertion = activeSlashRange.current?.cloneRange() ?? editorSelection(editor);
+    insertion.deleteContents();
+    const command = document.createTextNode(slashCommandText(name));
+    insertion.insertNode(command);
+    const caret = document.createRange();
+    caret.setStart(command, command.length);
+    caret.collapse(true);
+    applyEditorSelection(caret);
+    savedEditorSelection.current = caret.cloneRange();
+    activeSlashRange.current = null;
+    activeSlashQuery.current = null;
+    setSlashQuery(null);
+    // Keep the completed token closed through the matching keyup; typing any
+    // new character clears this guard in onInput.
+    slashDismissed.current = true;
+    setSlashResultIndex(0);
+    syncPromptState();
+    focusPrompt(caret);
+  };
+
+  const focusPrompt = (range?: Range | null) => {
+    window.requestAnimationFrame(() => {
+      const editor = input.current;
+      if (!editor) return;
+      editor.focus();
+      applyEditorSelection(range ?? savedEditorSelection.current ?? editorSelection(editor));
+    });
+  };
+
+  const chooseFile = (path: string) => {
+    const editor = input.current;
+    if (!filePicker || !editor) return;
+    const range = filePicker.source === 'mention'
+      ? activeMentionRange.current
+      : savedEditorSelection.current;
+    const insertion = range?.cloneRange() ?? editorSelection(editor);
+    if (filePicker.source === 'mention') insertion.deleteContents();
+
+    const duplicate = [...editor.querySelectorAll<HTMLElement>(FILE_MENTION_SELECTOR)]
+      .some((token) => token.dataset.fileMention === path);
+    let caret = insertion;
+    if (!duplicate) {
+      const token = createFileMention(path, t.accent);
+      const cursorNode = document.createTextNode(ZERO_WIDTH_SPACE);
+      const fragment = document.createDocumentFragment();
+      fragment.append(token, cursorNode);
+      insertion.insertNode(fragment);
+      caret = document.createRange();
+      caret.setStart(cursorNode, 1);
+      caret.collapse(true);
+    } else {
+      caret.collapse(true);
+    }
+    applyEditorSelection(caret);
+    savedEditorSelection.current = caret.cloneRange();
+    activeMentionRange.current = null;
+    syncPromptState();
+    setFilePicker(null);
+    setFileResults([]);
+    focusPrompt(caret);
+  };
+
+  const openFileMenu = () => {
+    if (filePicker?.source === 'button') {
+      setFilePicker(null);
+      input.current?.focus();
+      return;
+    }
+    setSlashQuery(null);
+    activeSlashRange.current = null;
+    setFilePicker({ source: 'button', query: '' });
+    setModelOpen(false);
+    setPermissionOpen(false);
+  };
+
+  const filePickerKeyDown = (event: KeyboardEvent<HTMLInputElement | HTMLDivElement>) => {
+    if (fileMenuOpen) {
+      if (event.key === 'ArrowDown') {
+        event.preventDefault();
+        setFileResultIndex((index) => fileResults.length ? (index + 1) % fileResults.length : 0);
+        return;
+      }
+      if (event.key === 'ArrowUp') {
+        event.preventDefault();
+        setFileResultIndex((index) => fileResults.length ? (index - 1 + fileResults.length) % fileResults.length : 0);
+        return;
+      }
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        setFilePicker(null);
+        input.current?.focus();
+        return;
+      }
+      if (event.key === 'Enter' || event.key === 'Tab') {
+        event.preventDefault();
+        const selected = fileResults[fileResultIndex];
+        if (selected) chooseFile(selected);
+        else setFilePicker(null);
+        return;
+      }
+    }
+  };
+  const slashPickerKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (!slashMenuOpen) return;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      slashDismissed.current = true;
+      setSlashQuery(null);
+      activeSlashRange.current = null;
+      activeSlashQuery.current = null;
+      return;
+    }
+    const direction = slashNavigationDirection(event.key);
+    if (direction) {
+      event.preventDefault();
+      setSlashResultIndex((index) => moveSlashSelectionIndex(index, direction, slashCommands.length));
+      return;
+    }
+    if (event.key === 'Enter' || event.key === 'Tab') {
+      event.preventDefault();
+      const selected = slashCommands[slashResultIndex];
+      if (selected) chooseSlashCommand(selected.name);
+      else {
+        setSlashQuery(null);
+        activeSlashRange.current = null;
+      }
+    }
+  };
+  const keyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    filePickerKeyDown(event);
+    if (slashMenuOpen) {
+      slashPickerKeyDown(event);
+      if (event.defaultPrevented) return;
+    }
+    if (event.defaultPrevented) return;
+    if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
       event.preventDefault();
       submit();
     }
   };
+  const keyUp = (event: KeyboardEvent<HTMLDivElement>) => {
+    // Arrow navigation changes only the active palette row. Re-running caret
+    // detection on the matching keyup can reconcile against stale query state
+    // and overwrite the index selected during keydown.
+    if (slashMenuOpen && slashNavigationDirection(event.key)) return;
+    updateActiveCompletions();
+  };
+
+  const pastePlainText = (event: ClipboardEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const editor = input.current;
+    if (!editor) return;
+    const range = editorSelection(editor);
+    range.deleteContents();
+    const value = event.clipboardData.getData('text/plain');
+    const node = document.createTextNode(value);
+    range.insertNode(node);
+    range.setStart(node, node.length);
+    range.collapse(true);
+    applyEditorSelection(range);
+    savedEditorSelection.current = range.cloneRange();
+    syncPromptState();
+    updateActiveCompletions();
+  };
+  const permissionMode = PERM_MODES.find((mode) => mode.id === bridge.desktop.permissionMode) ?? PERM_MODES[0]!;
+  const promptPlaceholder = !ready
+    ? 'Complete setup to start coding…'
+    : bridge.running
+      ? 'LingXi is working…'
+      : goalMode
+        ? 'Describe the goal you want LingXi to accomplish'
+        : 'Do anything';
+  const hasPrompt = Boolean(text.trim() || selectedFiles.length);
   return (
     <div style={{ flexShrink: 0, padding: '10px 18px 18px', background: t.stageBg }}>
-      <div className="beta-composer" style={{ maxWidth: 980, margin: '0 auto', borderRadius: 26, border: `1px solid ${ready ? t.borderStrong : t.border}`, background: t.surface, boxShadow: '0 12px 34px rgba(0,0,0,.10)', overflow: 'visible' }}>
-        <textarea
+      <div className="beta-composer" style={{ position: 'relative', maxWidth: 980, margin: '0 auto', borderRadius: 26, border: `1px solid ${ready ? t.borderStrong : t.border}`, background: t.surface, boxShadow: '0 12px 34px rgba(0,0,0,.10)', overflow: 'visible' }}>
+        <div
           ref={input}
-          rows={2}
-          value={text}
-          disabled={!ready || bridge.running}
-          maxLength={200_000}
-          onChange={(event) => {
-            setText(event.target.value);
-            event.currentTarget.style.height = 'auto';
-            event.currentTarget.style.height = `${Math.min(event.currentTarget.scrollHeight, 180)}px`;
-          }}
+          className="beta-rich-prompt"
+          role="textbox"
+          contentEditable={ready && !bridge.running}
+          suppressContentEditableWarning
+          spellCheck
+          data-placeholder={promptPlaceholder}
+          data-empty={!hasPrompt ? 'true' : 'false'}
+          onInput={() => { slashDismissed.current = false; syncPromptState(); updateActiveCompletions(); }}
+          onFocus={() => { slashDismissed.current = false; savePromptSelection(); updateActiveCompletions(); }}
+          onBlur={savePromptSelection}
+          onKeyUp={keyUp}
+          onMouseUp={updateActiveCompletions}
           onKeyDown={keyDown}
-          placeholder={!ready ? 'Complete setup to start coding…' : bridge.running ? 'LingXi is working…' : goalMode ? 'Describe the goal you want LingXi to accomplish' : 'Do anything'}
+          onPaste={pastePlainText}
           aria-label="Prompt"
-          style={{ display: 'block', width: '100%', minHeight: 86, maxHeight: 180, resize: 'none', border: 0, outline: 0, background: 'transparent', color: t.text, lineHeight: 1.45, fontSize: 17, padding: '18px 22px 4px', fontWeight: 450 }}
+          aria-multiline="true"
+          aria-disabled={!ready || bridge.running}
+          aria-autocomplete="list"
+          aria-controls={slashMenuOpen ? 'slash-command-results' : fileMenuOpen && filePicker?.source === 'mention' ? 'workspace-file-results' : undefined}
+          aria-expanded={slashMenuOpen || (fileMenuOpen && filePicker?.source === 'mention')}
+          aria-activedescendant={slashMenuOpen && slashCommands[slashResultIndex]
+            ? `slash-command-result-${slashResultIndex}`
+            : fileMenuOpen && filePicker?.source === 'mention' && fileResults[fileResultIndex]
+              ? `workspace-file-result-${fileResultIndex}`
+              : undefined}
+          style={{ display: 'block', width: '100%', minHeight: 86, maxHeight: 180, overflowY: 'auto', border: 0, outline: 0, background: 'transparent', color: t.text, lineHeight: 1.45, fontSize: 17, padding: '18px 22px 4px', fontWeight: 450, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', cursor: ready && !bridge.running ? 'text' : 'default', opacity: ready && !bridge.running ? 1 : .68 }}
         />
+        {slashMenuOpen && (
+          <div ref={slashControl} id="slash-command-results" role="listbox" aria-label="Slash commands" style={{ ...composerMenuStyle(t, 'left'), width: 600, maxWidth: 'min(600px, calc(100vw - 44px))', maxHeight: 300, overflowY: 'auto', padding: 7 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 9px 7px', borderBottom: `0.5px solid ${t.border}`, color: t.text3, fontSize: 10.5 }}>
+              <strong style={{ color: t.text2, fontWeight: 700, letterSpacing: '.08em', textTransform: 'uppercase' }}>Commands</strong>
+              <span className="mono" style={{ color: t.accent }}>/{slashQuery}</span>
+              <span style={{ marginLeft: 'auto', color: t.text4 }}>{slashCommands.length} match{slashCommands.length === 1 ? '' : 'es'}</span>
+            </div>
+            {slashCommands.length === 0 && (
+              <div role="status" style={{ padding: '16px 10px', color: t.text3, fontSize: 11.5 }}>
+                No matching commands. Press Esc to keep the text as a prompt.
+              </div>
+            )}
+            {slashCommands.map((entry, index) => {
+              const selected = index === slashResultIndex;
+              return (
+                <button
+                  id={`slash-command-result-${index}`}
+                  data-slash-index={index}
+                  key={entry.name}
+                  type="button"
+                  role="option"
+                  aria-selected={selected}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onMouseEnter={() => setSlashResultIndex(index)}
+                  onClick={() => chooseSlashCommand(entry.name)}
+                  style={{ width: '100%', display: 'grid', gridTemplateColumns: 'minmax(92px, auto) minmax(0, 1fr) auto', gap: 10, alignItems: 'center', padding: '8px 9px', border: 0, borderRadius: 7, background: selected ? t.accentBg : 'transparent', color: t.text, textAlign: 'left', cursor: 'pointer', font: 'inherit' }}
+                >
+                  <span
+                    className="mono"
+                    style={{ color: t.accent, fontWeight: 650, borderRadius: 6, padding: '2px 0', fontSize: 11.5 }}
+                  >/{entry.name}</span>
+                  <span style={{ color: t.text2, fontSize: 12.5 }}>{entry.description}</span>
+                  <span style={{ color: t.text4, fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{entry.source}</span>
+                </button>
+              );
+            })}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, minHeight: 26, padding: '5px 9px 2px', borderTop: `0.5px solid ${t.border}`, color: t.text4, fontSize: 9.5 }}>
+              <span>↑↓ Navigate</span><span>Enter / Tab Complete</span><span>Esc Close</span>
+            </div>
+          </div>
+        )}
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, minHeight: 54, padding: '0 10px 10px 14px' }}>
-          <button type="button" disabled={!ready || bridge.running} aria-label="Add context" title="Add context" style={{ ...composerIconStyle(t), width: 34, height: 34 }}><Icon name="plus" size={21} color={t.text2} stroke={1.7} /></button>
-          <button type="button" disabled={!ready || bridge.running} aria-expanded={permissionOpen} aria-label="Permission controls" onClick={() => { setPermissionOpen((open) => !open); setModelOpen(false); }} style={{ ...composerPillStyle(t, permissionOpen), color: t.text2 }}><Icon name="cog" size={18} color={t.text3} stroke={1.6} /><span>Custom</span></button>
+          <div ref={fileControl}>
+            <button type="button" disabled={!ready || bridge.running} aria-label="Search workspace files" aria-expanded={fileMenuOpen} title="Add file context (@)" onMouseDown={savePromptSelection} onClick={openFileMenu} style={{ ...composerIconStyle(t), width: 34, height: 34 }}><Icon name="plus" size={21} color={t.text2} stroke={1.7} /></button>
+            {fileMenuOpen && (
+              <div role="dialog" aria-label="Search workspace files" style={{ ...composerMenuStyle(t, 'left'), width: 560, maxWidth: 'min(560px, calc(100vw - 44px))', padding: 7, overflow: 'hidden' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '3px 4px 7px', borderBottom: `0.5px solid ${t.border}` }}>
+                  <Icon name="search" size={14} color={t.text3} />
+                  <input
+                    ref={fileSearchInput}
+                    type="text"
+                    role="searchbox"
+                    value={filePicker?.query ?? ''}
+                    onChange={(event) => setFilePicker((current) => current ? { ...current, query: event.target.value } : current)}
+                    onKeyDown={filePickerKeyDown}
+                    placeholder="Search workspace files"
+                    aria-label="File search query"
+                    aria-controls="workspace-file-results"
+                    aria-activedescendant={fileResults[fileResultIndex] ? `workspace-file-result-${fileResultIndex}` : undefined}
+                    style={{ minWidth: 0, flex: 1, height: 30, padding: '0 3px', border: 0, outline: 0, background: 'transparent', color: t.text, font: 'inherit', fontSize: 12.5 }}
+                  />
+                  <span className="mono" style={{ color: t.text4, fontSize: 9.5 }}>@ file</span>
+                  {filePicker?.query && <button type="button" aria-label="Clear file search" title="Clear search" onClick={() => { setFilePicker((current) => current ? { ...current, query: '' } : current); fileSearchInput.current?.focus(); }} style={{ width: 26, height: 26, display: 'grid', placeItems: 'center', padding: 0, border: 0, borderRadius: 6, background: 'transparent', color: t.text3, cursor: 'pointer' }}><Icon name="x" size={11} /></button>}
+                  <button type="button" aria-label="Close file search" title="Close" onClick={() => { setFilePicker(null); input.current?.focus(); }} style={{ width: 26, height: 26, display: 'grid', placeItems: 'center', padding: 0, border: 0, borderRadius: 6, background: t.surfaceHover, color: t.text2, cursor: 'pointer' }}><Icon name="x" size={13} /></button>
+                </div>
+                <div id="workspace-file-results" role="listbox" aria-label="Workspace files" style={{ maxHeight: 310, overflowY: 'auto', padding: '5px 0' }}>
+                  {fileSearchStatus === 'loading' && <div role="status" style={{ padding: '14px 10px', color: t.text3, fontSize: 11.5 }}>Searching workspace…</div>}
+                  {fileSearchStatus === 'error' && <div role="alert" style={{ padding: '14px 10px', color: t.danger, fontSize: 11.5 }}>Could not search this workspace.</div>}
+                  {fileSearchStatus === 'ready' && fileResults.length === 0 && <div role="status" style={{ padding: '14px 10px', color: t.text3, fontSize: 11.5 }}>No matching files.</div>}
+                  {fileResults.map((path, index) => {
+                    const slash = path.lastIndexOf('/');
+                    const directory = slash >= 0 ? path.slice(0, slash) : 'workspace root';
+                    const selected = index === fileResultIndex;
+                    return (
+                      <button
+                        id={`workspace-file-result-${index}`}
+                        key={path}
+                        type="button"
+                        role="option"
+                        aria-selected={selected}
+                        onMouseDown={(event) => event.preventDefault()}
+                        onMouseEnter={() => setFileResultIndex(index)}
+                        onClick={() => chooseFile(path)}
+                        style={{ width: '100%', display: 'grid', gridTemplateColumns: '24px minmax(0, 1fr)', gap: 8, alignItems: 'center', padding: '7px 9px', border: 0, borderRadius: 7, background: selected ? t.accentBg : 'transparent', color: t.text, textAlign: 'left', cursor: 'pointer', font: 'inherit' }}
+                      >
+                        <Icon name="file" size={15} color={selected ? t.accent : t.text3} />
+                        <span style={{ minWidth: 0 }}>
+                          <span style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12.5, fontWeight: 570 }}>{basename(path)}</span>
+                          <span className="mono" style={{ display: 'block', marginTop: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: t.text4, fontSize: 9.5 }}>{directory}</span>
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, minHeight: 30, padding: '5px 9px 2px', borderTop: `0.5px solid ${t.border}`, color: t.text4, fontSize: 9.5 }}>
+                  <span>↑↓ Navigate</span><span>Enter / Tab Add</span><span>Esc Close</span>
+                  {fileResultsTruncated && <span style={{ marginLeft: 'auto' }}>More matches available — keep typing</span>}
+                </div>
+              </div>
+            )}
+          </div>
+          <div ref={permissionControl} style={{ position: 'relative' }}>
+            <button
+              ref={permissionButton}
+              type="button"
+              disabled={!ready || bridge.running}
+              aria-haspopup="menu"
+              aria-expanded={permissionOpen}
+              aria-label={`Permission mode: ${permissionMode.label}`}
+              title="Change permission mode"
+              onMouseDown={() => { setSlashQuery(null); activeSlashRange.current = null; }}
+              onClick={() => { setPermissionOpen((open) => !open); setModelOpen(false); }}
+              style={{
+                ...composerPillStyle(t, permissionOpen),
+                color: permissionMode.danger ? t.danger : permissionOpen ? t.accent : t.text2,
+                background: permissionOpen ? t.accentBg : permissionMode.danger ? `color-mix(in oklab, ${t.danger} 9%, transparent)` : 'transparent',
+              }}
+            >
+              <Icon name={permissionMode.icon} size={18} color="currentColor" stroke={1.65} />
+              <span>{permissionMode.shortLabel}</span>
+              <Icon name="chevron" size={12} color="currentColor" stroke={1.8} />
+            </button>
+            {permissionOpen && (
+              <div
+                style={{ ...composerMenuStyle(t, 'left'), width: 480, maxWidth: 'min(480px, calc(100vw - 44px))', maxHeight: 'min(470px, calc(100vh - 150px))', overflowY: 'auto', padding: 9 }}
+                role="menu"
+                aria-label="Permission modes"
+              >
+                <div style={{ padding: '4px 9px 8px', display: 'flex', alignItems: 'baseline', gap: 9 }}>
+                  <strong style={{ color: t.text, fontSize: 12.5, fontWeight: 650 }}>How should LingXi actions be approved?</strong>
+                  <span style={{ marginLeft: 'auto', color: t.text4, fontSize: 10.5 }}>Current session</span>
+                </div>
+                {PERM_MODES.map((mode) => {
+                  const selected = mode.id === bridge.desktop.permissionMode;
+                  const color = mode.danger ? t.danger : selected ? t.accent : t.text2;
+                  return (
+                    <button
+                      key={mode.id}
+                      type="button"
+                      role="menuitemradio"
+                      aria-checked={selected}
+                      onClick={() => {
+                        if (!selected) invoke(() => bridge.setPermissionMode(mode.id));
+                        setPermissionOpen(false);
+                      }}
+                      style={{
+                        width: '100%', display: 'grid', gridTemplateColumns: '28px minmax(0, 1fr) 18px',
+                        alignItems: 'center', gap: 9, padding: '8px 9px', border: 0, borderRadius: 9,
+                        background: selected ? t.accentBg : 'transparent', color, textAlign: 'left',
+                        cursor: 'pointer', font: 'inherit',
+                      }}
+                    >
+                      <span style={{ width: 28, height: 28, display: 'grid', placeItems: 'center', color }}>
+                        <Icon name={mode.icon} size={19} color="currentColor" stroke={1.65} />
+                      </span>
+                      <span style={{ minWidth: 0 }}>
+                        <span style={{ display: 'block', color, fontSize: 13, fontWeight: 570, lineHeight: 1.25 }}>{mode.label}</span>
+                        <span style={{ display: 'block', marginTop: 2, color: mode.danger ? t.danger : t.text3, fontSize: 11, lineHeight: 1.35 }}>{mode.description}</span>
+                      </span>
+                      {selected && <Icon name="check" size={16} color={color} stroke={2.2} />}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
           <span aria-hidden="true" style={{ width: 1, height: 24, background: t.border, margin: '0 4px' }} />
           <button type="button" disabled={!ready || bridge.running} aria-pressed={goalMode} aria-label="Toggle goal mode" onClick={() => setGoalMode((enabled) => !enabled)} style={{ ...composerPillStyle(t, goalMode), color: goalMode ? t.accent : t.text2 }}><Icon name="goal" size={18} color={goalMode ? t.accent : t.text3} stroke={1.6} /><span>Goal</span></button>
 
           <div style={{ flex: 1 }} />
 
           <div style={{ position: 'relative' }}>
-            <button type="button" disabled={!ready || bridge.running || bridge.desktop.models.length === 0} aria-expanded={modelOpen} aria-label={`Model: ${modelLabel(bridge.desktop.currentModel)}`} onClick={() => { setModelOpen((open) => !open); setPermissionOpen(false); }} style={{ ...composerPillStyle(t, modelOpen), maxWidth: 280, color: t.text }}>
+            <button
+              type="button"
+              disabled={!ready || bridge.running || bridge.desktop.models.length === 0}
+              aria-expanded={modelOpen}
+              aria-label={`Model: ${modelLabel(bridge.desktop.currentModel)}`}
+              onMouseDown={() => { setSlashQuery(null); activeSlashRange.current = null; }}
+              onClick={() => { setModelOpen((open) => !open); setPermissionOpen(false); }}
+              style={{ ...composerPillStyle(t, modelOpen), maxWidth: 280, color: t.text }}
+            >
               <Icon name="bolt" size={18} color={t.text} stroke={2.1} />
               <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{modelLabel(bridge.desktop.currentModel)}</span>
               <Icon name="chevron" size={14} color={t.text3} />
@@ -363,22 +1073,17 @@ export function BetaComposer({ bridge, ready }: { bridge: UseBridge; ready: bool
           {bridge.running ? (
             <button type="button" onClick={() => invoke(() => bridge.cancel())} aria-label="Stop current turn" title="Stop" style={{ ...composerSendStyle(t, true), background: t.danger }}><Icon name="stop" size={15} color="#fff" /></button>
           ) : (
-            <button type="button" disabled={!ready || !text.trim()} onClick={submit} aria-label="Send prompt" title="Send prompt" style={composerSendStyle(t, Boolean(ready && text.trim()))}><Icon name="arrowU" size={19} color={ready && text.trim() ? '#fff' : t.text4} /></button>
+            <button type="button" disabled={!ready || !hasPrompt} onClick={submit} aria-label="Send prompt" title="Send prompt" style={composerSendStyle(t, Boolean(ready && hasPrompt))}><Icon name="arrowU" size={19} color={ready && hasPrompt ? '#fff' : t.text4} /></button>
           )}
         </div>
-        {(permissionOpen || voiceState === 'unsupported' || voiceState === 'denied') && <div style={{ position: 'relative' }}>
-          {permissionOpen && <div style={composerMenuStyle(t, 'left')} role="dialog" aria-label="Permission controls">
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 7 }}><Icon name="cog" size={15} color={t.accent} /><strong style={{ color: t.text, fontSize: 12.5 }}>Permission controls</strong></div>
-            <p style={{ color: t.text3, fontSize: 11.5, lineHeight: 1.45 }}>LingXi will ask before actions that need approval. Review each request in the approval panel.</p>
-            <div style={{ marginTop: 9, padding: '7px 8px', borderRadius: 7, background: bridge.pendingPermission ? t.accentBg : t.surfaceHover, color: bridge.pendingPermission ? t.accent : t.text3, fontSize: 11.5 }}>{bridge.pendingPermission ? '1 request waiting for your review' : 'No pending permission requests'}</div>
-          </div>}
+        {(voiceState === 'unsupported' || voiceState === 'denied') && <div style={{ position: 'relative' }}>
           {voiceState === 'unsupported' && <span role="status" style={{ position: 'absolute', right: 52, bottom: 9, padding: '5px 8px', borderRadius: 7, background: t.surfaceHover, color: t.text3, fontSize: 10.5 }}>Voice input is unavailable here</span>}
           {voiceState === 'denied' && <span role="status" style={{ position: 'absolute', right: 52, bottom: 9, padding: '5px 8px', borderRadius: 7, background: t.surfaceHover, color: t.danger, fontSize: 10.5 }}>Microphone permission denied</span>}
         </div>}
       </div>
       <div style={{ maxWidth: 980, margin: '5px auto 0', padding: '0 3px', display: 'flex', justifyContent: 'space-between', color: t.text4, fontSize: 9.5 }}>
-        <span>Enter to send · Shift+Enter for a new line</span>
-        <span>{goalMode ? 'Goal mode enabled' : 'Review tool permissions before allowing'}</span>
+        <span>Enter to send · Shift+Enter for a new line · @ files · / commands</span>
+        <span>{goalMode ? 'Goal mode enabled' : permissionMode.description}</span>
       </div>
     </div>
   );
@@ -477,9 +1182,11 @@ export function SetupCard({ bridge }: { bridge: UseBridge }) {
           <Button primary={step === 2} disabled={!workspace?.path || workspaceUnavailable} onClick={() => invoke(() => bridge.setWorkspaceTrusted(true))}>Trust this workspace</Button>
         </SetupStep>
           <SetupStep number={3} title="Connect a provider" active={step === 3} complete={hasProvider}>
-            <p>Choose the provider and sign-in method for this desktop. Each credential is encrypted by macOS and sent to the local engine only when it starts.</p>
-            {selectedMetadata?.configured && <p style={{ color: t.ok }}>Saved in macOS Keychain. Enter a new value only to replace this provider key.</p>}
-            {selectedMetadata?.encryptionAvailable === false && <p style={{ color: t.danger }}>Secure credential storage is unavailable. LingXi will not store a plaintext fallback.</p>}
+            <p>Choose the provider and sign-in method for this desktop. Credentials are sent to the local engine only when it starts.</p>
+            {selectedMetadata?.runtimeOnly && <p style={{ color: t.ok }}>Available to the running engine for this app launch. LingXi has not stored this external credential.</p>}
+            {selectedMetadata?.configured && !selectedMetadata.sessionOnly && !selectedMetadata.runtimeOnly && <p style={{ color: t.ok }}>Saved in the shared macOS login Keychain used by Desktop, CLI, and TUI. Generic API keys do not appear in the Passwords app.</p>}
+            {selectedMetadata?.sessionOnly && <p style={{ color: t.warn }}>Available for this app session only. This build cannot access its signed macOS keychain group; reconnect after relaunch.</p>}
+            {!selectedMetadata?.configured && selectedMetadata?.encryptionAvailable === false && <p style={{ color: t.warn }}>Secure persistence is unavailable. You can still connect for this session; LingXi never writes a plaintext fallback.</p>}
           <div role="radiogroup" aria-label="LLM providers" style={{ width: '100%', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(155px, 1fr))', gap: 7 }}>
             {PROVIDERS.map((provider) => {
               const metadata = providerCredentials.find((entry) => entry.providerId === provider.id);
@@ -495,8 +1202,8 @@ export function SetupCard({ bridge }: { bridge: UseBridge }) {
           {selectedProvider.available ? <>
             <label htmlFor="provider-credential" style={{ color: t.text2, fontSize: 11 }}>{selectedProvider.keyLabel}</label>
             <div style={{ display: 'flex', gap: 7, width: '100%' }}>
-              <input id="provider-credential" type="password" autoComplete="off" spellCheck={false} value={key} disabled={selectedMetadata?.encryptionAvailable === false} onChange={(event) => setKey(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') save(); }} placeholder={selectedProvider.keyPlaceholder} aria-label={selectedProvider.keyLabel} style={{ flex: 1, minWidth: 0, height: 33, borderRadius: 8, border: `0.5px solid ${t.border}`, background: t.windowBg, color: t.text, padding: '0 9px', outline: 0 }} />
-              <Button primary disabled={!key.trim() || selectedMetadata?.encryptionAvailable === false} onClick={save}>{selectedMetadata?.configured ? 'Replace' : 'Connect'}</Button>
+              <input id="provider-credential" type="password" autoComplete="off" spellCheck={false} value={key} onChange={(event) => setKey(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') save(); }} placeholder={selectedProvider.keyPlaceholder} aria-label={selectedProvider.keyLabel} style={{ flex: 1, minWidth: 0, height: 33, borderRadius: 8, border: `0.5px solid ${t.border}`, background: t.windowBg, color: t.text, padding: '0 9px', outline: 0 }} />
+              <Button primary disabled={!key.trim()} onClick={save}>{selectedMetadata?.configured ? 'Replace' : 'Connect'}</Button>
             </div>
           </> : <p style={{ color: t.warn }}>{selectedProvider.label} uses {selectedProvider.authMethod === 'oauth' ? 'OAuth' : 'device sign-in'}, which is available from the CLI/TUI connect flow but is not wired into this desktop build yet.</p>}
         </SetupStep>
@@ -611,7 +1318,7 @@ export function BetaSettings({ bridge, theme, onTheme, onClose }: { bridge: UseB
           <SettingsSection title="Appearance"><div style={{ display: 'flex', gap: 8 }}><Button primary={theme === 'dark'} onClick={() => onTheme('dark')}><Icon name="moon" size={13} /> Dark</Button><Button primary={theme === 'light'} onClick={() => onTheme('light')}><Icon name="sun" size={13} /> Light</Button></div></SettingsSection>
           <SettingsSection title="Workspace"><code className="mono" style={{ color: t.text2, fontSize: 10.5, overflowWrap: 'anywhere' }}>{snapshot?.workspace.path ?? 'Not selected'}</code><div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}><Button disabled={bridge.running} onClick={() => invoke(bridge.pickWorkspace)}>Change folder</Button>{snapshot?.workspace.path && <Button disabled={bridge.running} danger={snapshot.workspace.trusted} onClick={() => invoke(() => bridge.setWorkspaceTrusted(!snapshot.workspace.trusted))}>{snapshot.workspace.trusted ? 'Revoke trust' : 'Trust workspace'}</Button>}</div>{snapshot?.settings.recentWorkspaces.length ? <div><p style={{ marginBottom: 6 }}>Recent workspaces</p>{snapshot.settings.recentWorkspaces.map((path) => <button key={path} type="button" disabled={bridge.running} onClick={() => invoke(() => bridge.selectRecentWorkspace(path))} className="mono" style={{ display: 'block', width: '100%', padding: '5px 0', border: 0, background: 'transparent', color: t.accent, textAlign: 'left', cursor: bridge.running ? 'not-allowed' : 'pointer', opacity: bridge.running ? .5 : 1, fontSize: 10.5, overflow: 'hidden', textOverflow: 'ellipsis' }}>{path}</button>)}</div> : null}</SettingsSection>
           <SettingsSection title="Providers">
-            <p>Credentials are stored independently per provider in macOS secure storage.</p>
+            <p>Desktop, CLI, and TUI share provider credentials from the macOS login Keychain.</p>
             <div style={{ width: '100%', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(145px, 1fr))', gap: 7 }}>
               {PROVIDERS.map((provider) => {
                 const metadata = snapshot?.providerCredentials?.find((entry) => entry.providerId === provider.id);
@@ -619,9 +1326,13 @@ export function BetaSettings({ bridge, theme, onTheme, onClose }: { bridge: UseB
                 return <button key={provider.id} type="button" onClick={() => { setSelectedProviderId(provider.id); setKey(''); }} style={{ padding: '8px 9px', borderRadius: 8, border: `0.5px solid ${selected ? t.accentBorder : t.border}`, background: selected ? t.accentBg : t.surface, color: t.text, textAlign: 'left', cursor: 'pointer', opacity: provider.available ? 1 : .55 }}><span style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11.5, fontWeight: 650 }}>{metadata?.configured && <Icon name="check" size={12} color={t.ok} stroke={2.5} />}{provider.label}</span><span style={{ display: 'block', color: t.text4, fontSize: 10, marginTop: 2 }}>{provider.available ? provider.description : 'CLI/TUI sign-in'}</span></button>;
               })}
             </div>
+            {selectedMetadata?.runtimeOnly && <p style={{ color: t.ok }}>The running engine received this credential from an external runtime source. LingXi has not stored it.</p>}
+            {selectedMetadata?.configured && !selectedMetadata.sessionOnly && !selectedMetadata.runtimeOnly && <p style={{ color: t.ok }}>Persisted securely on this Mac. Generic API keys are intentionally not listed in the Passwords app.</p>}
+            {selectedMetadata?.sessionOnly && <p style={{ color: t.warn }}>Session-only credential: it will be cleared when LingXi exits.</p>}
+            {!selectedMetadata?.configured && selectedMetadata?.encryptionAvailable === false && <p style={{ color: t.warn }}>Secure persistence is unavailable in this build; connecting keeps the key in memory only.</p>}
             {selectedProvider.available ? <>
               <label htmlFor="settings-provider-credential" style={{ color: t.text2, fontSize: 11 }}>{selectedProvider.keyLabel}</label>
-              <div style={{ display: 'flex', gap: 7, width: '100%' }}><input id="settings-provider-credential" type="password" autoComplete="off" disabled={bridge.running || selectedMetadata?.encryptionAvailable === false} value={key} onChange={(event) => setKey(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') save(); }} placeholder={selectedMetadata?.configured ? 'Enter a replacement key' : selectedProvider.keyPlaceholder} aria-label={`${selectedProvider.keyLabel} for settings`} style={{ flex: 1, height: 33, borderRadius: 8, border: `0.5px solid ${t.border}`, background: t.surface, color: t.text, padding: '0 9px' }} /><Button disabled={!key.trim() || bridge.running || selectedMetadata?.encryptionAvailable === false} onClick={save}>{selectedMetadata?.configured ? 'Replace' : 'Connect'}</Button>{selectedMetadata?.configured && <Button disabled={bridge.running} danger onClick={() => invoke(() => bridge.clearProviderCredential(selectedProvider.id))}>Delete</Button>}</div>
+              <div style={{ display: 'flex', gap: 7, width: '100%' }}><input id="settings-provider-credential" type="password" autoComplete="off" disabled={bridge.running} value={key} onChange={(event) => setKey(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') save(); }} placeholder={selectedMetadata?.configured ? 'Enter a replacement key' : selectedProvider.keyPlaceholder} aria-label={`${selectedProvider.keyLabel} for settings`} style={{ flex: 1, height: 33, borderRadius: 8, border: `0.5px solid ${t.border}`, background: t.surface, color: t.text, padding: '0 9px' }} /><Button disabled={!key.trim() || bridge.running} onClick={save}>{selectedMetadata?.runtimeOnly ? 'Use entered key' : selectedMetadata?.configured ? 'Replace' : 'Connect'}</Button>{selectedMetadata?.configured && !selectedMetadata.runtimeOnly && <Button disabled={bridge.running} danger onClick={() => invoke(() => bridge.clearProviderCredential(selectedProvider.id))}>Delete</Button>}</div>
             </> : <p style={{ color: t.warn }}>{selectedProvider.label} sign-in is currently available from the CLI/TUI connect flow.</p>}
           </SettingsSection>
           <SettingsSection title="Engine">

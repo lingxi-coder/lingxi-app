@@ -1251,6 +1251,8 @@ async fn handler_rejects_a_non_workflow_input() {
         prompt: "p".into(),
         is_backgrounded: true,
         tool_use_id: None,
+        creator_teammate_name: None,
+        creator_team_name: None,
         spawn_request: None,
         inheritance: None,
     };

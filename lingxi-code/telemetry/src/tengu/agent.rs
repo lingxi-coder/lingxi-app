@@ -112,6 +112,13 @@ pub const CACHE_EVICTION_HINT: &str = "tengu_cache_eviction_hint";
 /// unique reportable pattern names, comma-joined), `categories` (sorted-unique),
 /// `match_count`. Emitted only when at least one reportable pattern matched.
 pub const SUBAGENT_OUTPUT_FLAGGED: &str = "tengu_subagent_output_flagged";
+/// `tengu_agent_hooks_origin_untrusted` — an agent definition's frontmatter
+/// `hooks:` were SKIPPED because the folder the definition came from is not
+/// trusted (cc 2.1.218 `hvo`; the gate is `mvo`). Fields: `source` (the claude
+/// `SettingSource` string), `surface` (`"subagent"` | `"mainThread"`),
+/// `fromAdditionalDirectory` (`"true"` | `"false"`). 2.1.217 registered these
+/// hooks unconditionally, so this event marks the new refusal.
+pub const AGENT_HOOKS_ORIGIN_UNTRUSTED: &str = "tengu_agent_hooks_origin_untrusted";
 /// `tengu_auto_mode_decision` — the handoff safety classifier's verdict on a
 /// subagent's work (claude `agentToolUtils.ts:431`). 13 fields incl. `decision`,
 /// `toolName`, `agentType`, `isHandoff:true`, the classifier-stage ids. (Not

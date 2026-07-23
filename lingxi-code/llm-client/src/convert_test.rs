@@ -489,24 +489,46 @@ mod tests {
     }
 
     #[test]
-    fn system_marker_is_dropped_and_lets_surrounding_users_merge() {
-        let first_id = MessageId::new();
+    fn compact_boundary_drops_pre_boundary_history_and_marker() {
+        let post_boundary_id = MessageId::new();
         let out = normalize_messages_for_api(vec![
-            user(first_id, "a"),
+            user(MessageId::new(), "old"),
             ConversationMessage::System {
                 id: MessageId::new(),
                 content: "Conversation compacted".to_string(),
             },
-            user(MessageId::new(), "b"),
+            user(post_boundary_id, "summary"),
         ]);
-        assert_eq!(out.len(), 1, "System marker dropped, two users collapse");
+        assert_eq!(out.len(), 1, "pre-boundary history and marker are hidden");
         match &out[0] {
             ConversationMessage::User { id, content, .. } => {
-                assert_eq!(id, &first_id);
-                assert_eq!(text_of(content), vec!["a\n", "b"]);
+                assert_eq!(id, &post_boundary_id);
+                assert_eq!(text_of(content), vec!["summary"]);
             }
-            other => panic!("expected merged User, got {other:?}"),
+            other => panic!("expected post-boundary User, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn most_recent_compact_boundary_wins() {
+        let out = normalize_messages_for_api(vec![
+            user(MessageId::new(), "old"),
+            ConversationMessage::System {
+                id: MessageId::new(),
+                content: "Conversation compacted".to_string(),
+            },
+            user(MessageId::new(), "first summary"),
+            ConversationMessage::System {
+                id: MessageId::new(),
+                content: "Conversation compacted".to_string(),
+            },
+            user(MessageId::new(), "latest summary"),
+        ]);
+        assert_eq!(out.len(), 1);
+        let ConversationMessage::User { content, .. } = &out[0] else {
+            panic!("expected latest summary")
+        };
+        assert_eq!(text_of(content), vec!["latest summary"]);
     }
 
     #[test]
@@ -922,5 +944,109 @@ mod tests {
         assert!(matches!(content[0], ProtoBlock::Text { .. }));
         assert!(matches!(content[1], ProtoBlock::RedactedThinking { .. }));
         assert!(matches!(content[2], ProtoBlock::ServerToolUse { .. }));
+    }
+
+    fn tool_reference_result(names: &[&str]) -> ConversationMessage {
+        usr_blocks(vec![ProtoBlock::ToolResult {
+            tool_use_id: ToolUseId::from("toolu_search"),
+            content: String::new(),
+            is_error: false,
+            provider_tool_use_id: None,
+            content_blocks: Some(
+                names
+                    .iter()
+                    .map(|name| serde_json::json!({"type": "tool_reference", "tool_name": name}))
+                    .collect(),
+            ),
+        }])
+    }
+
+    #[test]
+    fn disabled_tool_search_strips_references_with_placeholder() {
+        let out = normalize_messages_for_api_with_tool_search(
+            vec![tool_reference_result(&["mcp__x__read"])],
+            false,
+            None,
+        );
+        let ConversationMessage::User { content, .. } = &out[0] else {
+            panic!("expected user");
+        };
+        let ProtoBlock::ToolResult {
+            content_blocks: Some(blocks),
+            ..
+        } = &content[0]
+        else {
+            panic!("expected structured tool result");
+        };
+        assert_eq!(
+            blocks,
+            &[serde_json::json!({
+                "type": "text",
+                "text": "[Tool references removed - tool search not enabled]"
+            })]
+        );
+        assert_eq!(content.len(), 1, "disabled mode adds no turn boundary");
+    }
+
+    #[test]
+    fn enabled_tool_search_filters_unavailable_refs_and_adds_boundary() {
+        let available = std::collections::HashSet::from(["mcp__x__read".to_string()]);
+        let out = normalize_messages_for_api_with_tool_search(
+            vec![tool_reference_result(&["mcp__x__read", "mcp__gone__write"])],
+            true,
+            Some(&available),
+        );
+        let ConversationMessage::User { content, .. } = &out[0] else {
+            panic!("expected user");
+        };
+        let ProtoBlock::ToolResult {
+            content_blocks: Some(blocks),
+            ..
+        } = &content[0]
+        else {
+            panic!("expected structured tool result");
+        };
+        assert_eq!(
+            blocks,
+            &[serde_json::json!({
+                "type": "tool_reference",
+                "tool_name": "mcp__x__read"
+            })]
+        );
+        assert!(matches!(
+            &content[1],
+            ProtoBlock::Text { text } if text == "Tool loaded."
+        ));
+    }
+
+    #[test]
+    fn historical_tool_reference_aliases_validate_against_canonical_tools() {
+        let available = std::collections::HashSet::from([
+            "Agent".to_string(),
+            "TaskStop".to_string(),
+            "TaskOutput".to_string(),
+            "SendUserMessage".to_string(),
+        ]);
+        let out = normalize_messages_for_api_with_tool_search(
+            vec![tool_reference_result(&[
+                "Task",
+                "KillShell",
+                "BashOutputTool",
+                "Brief",
+            ])],
+            true,
+            Some(&available),
+        );
+        let ConversationMessage::User { content, .. } = &out[0] else {
+            panic!("expected user")
+        };
+        let ProtoBlock::ToolResult {
+            content_blocks: Some(blocks),
+            ..
+        } = &content[0]
+        else {
+            panic!("expected structured tool result")
+        };
+        assert_eq!(blocks.len(), 4, "legacy references must not be stripped");
     }
 }

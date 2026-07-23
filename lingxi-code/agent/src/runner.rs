@@ -83,6 +83,33 @@ pub enum SubagentEvent {
     },
 }
 
+fn completed_result_text(result: &serde_json::Value) -> Option<String> {
+    if let Some(text) = result.get("text").and_then(serde_json::Value::as_str) {
+        if !text.is_empty() {
+            return Some(text.to_string());
+        }
+    }
+    let content = result
+        .get("content")
+        .and_then(serde_json::Value::as_array)
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter_map(|block| {
+                    (block.get("type").and_then(serde_json::Value::as_str) == Some("text"))
+                        .then(|| block.get("text").and_then(serde_json::Value::as_str))
+                        .flatten()
+                        .map(str::to_string)
+                })
+                .collect::<Vec<String>>()
+        })?;
+    if content.is_empty() {
+        None
+    } else {
+        Some(content.join("\n"))
+    }
+}
+
 /// Milliseconds elapsed since `start`, saturated into a `u64` (claude
 /// `totalDurationMs`).
 fn elapsed_ms(start: std::time::Instant) -> u64 {
@@ -108,11 +135,31 @@ pub async fn run_subagent(
     // fires `SubagentStop`). Wrapped here at the dispatcher so the clear runs
     // regardless of how the body returns (the loop has many early returns), and
     // so an un-wired `hook_executor` (tests / minimal builds) is a strict no-op.
+    //
+    // (cc 2.1.218 `mvo`) ORIGIN TRUST gate: registering these hooks installs
+    // COMMANDS, so a definition whose folder has never been trusted must not get
+    // them — the `--add-dir <untrusted-repo>` case, where the repo ships
+    // `<dot>/agents/*.md` with a `hooks:` block. 2.1.217 registered
+    // unconditionally; 2.1.218 skips + logs + counts instead.
     let frontmatter_cleanup = match &ctx.hook_executor {
         Some(he) if !ctx.agent_definition.frontmatter_hooks.is_empty() => {
-            he.register_agent_hooks(ctx.agent_id, &ctx.agent_definition.frontmatter_hooks, true)
-                .await;
-            Some((he.clone(), ctx.agent_id))
+            let cwd = ctx
+                .cwd
+                .clone()
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+            if crate::hooks_trust::agent_hooks_origin_trusted(&ctx.agent_definition, &cwd) {
+                he.register_agent_hooks(ctx.agent_id, &ctx.agent_definition.frontmatter_hooks, true)
+                    .await;
+                Some((he.clone(), ctx.agent_id))
+            } else {
+                crate::hooks_trust::report_untrusted_hooks(
+                    &ctx.agent_definition,
+                    &cwd,
+                    crate::hooks_trust::HooksTrustSurface::Subagent,
+                    false,
+                );
+                None
+            }
         }
         _ => None,
     };
@@ -166,23 +213,25 @@ pub async fn run_subagent(
         let forwarder = {
             let real = out_tx.clone();
             tokio::spawn(async move {
-                let mut status: Option<&'static str> = None;
+                let mut terminal: Option<(&'static str, Option<String>)> = None;
                 while let Some(ev) = proxy_rx.recv().await {
-                    status = match &ev {
-                        SubagentEvent::Completed { .. } => Some("completed"),
-                        SubagentEvent::Failed { .. } => Some("failed"),
+                    terminal = match &ev {
+                        SubagentEvent::Completed { result, .. } => {
+                            Some(("completed", completed_result_text(result)))
+                        }
+                        SubagentEvent::Failed { .. } => Some(("failed", None)),
                         // Killed does not fire SubagentStop (claude: an aborted
                         // child throws before reaching its stop hooks).
                         SubagentEvent::Killed { .. } => None,
                         // Non-terminal: keep whatever terminal we last saw.
-                        _ => status,
+                        _ => terminal,
                     };
                     // Best-effort forward; a closed receiver drops the rest.
                     if real.send(ev).await.is_err() {
                         break;
                     }
                 }
-                status
+                terminal
             })
         };
         // Run the body against the proxy, then drop our proxy sender so the
@@ -209,7 +258,7 @@ pub async fn run_subagent(
     // (`completed` / `failed`).
     if let (
         Some((he, agent_id, agent_type, session_id, cwd, agent_transcript_path)),
-        Some(status),
+        Some((status, last_assistant_message)),
     ) = (agent_scoped_stop, terminal_status)
     {
         let stop_ctx = hooks::registry::HookContext {
@@ -217,6 +266,7 @@ pub async fn run_subagent(
             agent_id: Some(agent_id),
             cwd,
             agent_type: Some(agent_type.clone()),
+            last_assistant_message,
             // FIX 2: SubagentStop carries the agent's own transcript path
             // (claude-code `agent_transcript_path`). See the tuple build above.
             agent_transcript_path: Some(agent_transcript_path),
@@ -598,12 +648,16 @@ fn translate_response_blocks(content: &[llm_client::ContentBlock]) -> Vec<protoc
                 Some(protocol::ContentBlock::Text { text: text.clone() })
             }
             llm_client::ContentBlock::ToolCall { id, name, input } => {
+                // (cc 2.1.218 `jYd`) Same literal-`\uXXXX` repair the orchestrator
+                // applies — a subagent's tool inputs must be normalized too.
+                let (input, _stats) =
+                    llm_client::unicode_repair::repair_tool_input(name, input);
                 Some(protocol::ContentBlock::ToolUse {
                     // The provider-issued id IS the canonical ToolUseId (byte
                     // parity with claude-code); the provider_id sidecar stays None.
                     id: protocol::ToolUseId::from(id.clone()),
                     name: name.clone(),
-                    input: input.clone(),
+                    input,
                     provider_id: None,
                 })
             }

@@ -135,7 +135,14 @@ pub fn load_output_styles_from_dir(dir: &Path) -> Vec<DiskOutputStyle> {
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or_default();
-        styles.push(parse_output_style(&raw, stem));
+        let style = parse_output_style(&raw, stem);
+        if style.force_for_plugin.is_some() {
+            eprintln!(
+                "warning: output style '{}' declares force-for-plugin outside a plugin; ignoring automatic activation",
+                style.name
+            );
+        }
+        styles.push(style);
     }
     styles
 }

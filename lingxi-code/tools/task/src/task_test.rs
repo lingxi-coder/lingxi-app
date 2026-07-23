@@ -95,8 +95,8 @@ mod tests {
     #[test]
     fn task_id_regex_matches_fresh_generated() {
         use regex::Regex;
-        let re = Regex::new(r"^[bartwmd][0-9a-z]{8}$").unwrap();
-        for c in ['b', 'a', 'r', 't', 'w', 'm', 'd'] {
+        let re = Regex::new(r"^[bartwmdk][0-9a-z]{8}$").unwrap();
+        for c in ['b', 'a', 'r', 't', 'w', 'm', 'd', 'k'] {
             let id = fresh_task_id(c);
             assert!(re.is_match(&id), "generated id {id} fails regex");
             assert!(validate_task_id(&id).is_ok());
@@ -114,6 +114,8 @@ mod tests {
                 "in_process_teammate",
                 "local_workflow",
                 "monitor_mcp",
+                "monitor_ws",
+                "mcp_task",
                 "dream"
             ]
         );
@@ -1422,6 +1424,7 @@ mod tests {
                 )>,
             >,
             last_completed: std::sync::Mutex<Option<(String, String, String, Option<String>)>>,
+            last_completed_identity: std::sync::Mutex<Option<(Option<String>, Option<String>)>>,
         }
         #[async_trait]
         impl TaskLifecycleHookFirer for FakeFirer {
@@ -1452,6 +1455,8 @@ mod tests {
                 status: &str,
                 subject: &str,
                 description: Option<&str>,
+                teammate_name: Option<&str>,
+                team_name: Option<&str>,
             ) -> Result<(), String> {
                 self.completed_calls.fetch_add(1, Ordering::SeqCst);
                 *self.last_completed.lock().unwrap() = Some((
@@ -1459,6 +1464,10 @@ mod tests {
                     status.into(),
                     subject.into(),
                     description.map(str::to_string),
+                ));
+                *self.last_completed_identity.lock().unwrap() = Some((
+                    teammate_name.map(str::to_string),
+                    team_name.map(str::to_string),
                 ));
                 match &self.block_completed {
                     Some(reason) => Err(reason.clone()),
@@ -1692,6 +1701,46 @@ mod tests {
             );
             let after = store.get(&id).await.unwrap();
             assert_eq!(after.status, TodoState::Completed, "the status is applied");
+        }
+
+        /// The completing teammate identity must survive the TaskUpdate tool ->
+        /// lifecycle-firer boundary, matching claude-code's
+        /// `executeTaskCompletedHooks(..., getAgentName(), getTeamName(), ...)`.
+        #[tokio::test]
+        async fn task_completed_hook_carries_teammate_and_team_name() {
+            let (_g, list) = setup();
+            let store = TodoStore::for_list(&list);
+            let id = store
+                .create(TodoTask::new(
+                    "Ship it".into(),
+                    "desc".into(),
+                    None,
+                    Map::new(),
+                ))
+                .await
+                .unwrap();
+
+            let firer = Arc::new(FakeFirer::default());
+            let tool = TaskUpdateTool::new(bctx(Some(firer.clone())));
+            let mut ctx = fresh_ctx();
+            ctx.agent_name = Some("researcher".into());
+            ctx.team_name = Some("alpha-team".into());
+            tool.call(
+                json!({ "taskId": &id, "status": "completed" }),
+                ctx,
+                fresh_tx(),
+            )
+            .await
+            .expect("completion ok");
+
+            let identity = firer
+                .last_completed_identity
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("TaskCompleted hook fired");
+            assert_eq!(identity.0.as_deref(), Some("researcher"));
+            assert_eq!(identity.1.as_deref(), Some("alpha-team"));
         }
 
         #[tokio::test]

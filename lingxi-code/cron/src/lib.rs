@@ -42,7 +42,10 @@ pub use run_due::{
     FireStatus, FiredJob,
 };
 pub use schedule::{parse_cron, CronExpression, CronField, CronParseError};
-pub use scheduler::{CronScheduler, CronTaskDef};
+pub use scheduler::{
+    register_live_job, session_jobs, task_registry_identity, unregister_live_job, CronScheduler,
+    CronTaskDef, NoActiveCronScheduler, SessionCronTask,
+};
 pub use tasks_file::{
     lock_scheduled_tasks, parse_tasks, project_root_from_tasks_path, read_tasks_body,
     scheduled_tasks_lock_path, scheduled_tasks_lock_relative_path, scheduled_tasks_path,

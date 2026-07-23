@@ -16,6 +16,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// `interactive_permissions` (`-p`/print/headless ⇒ non-interactive).
 static NON_INTERACTIVE_SESSION: AtomicBool = AtomicBool::new(false);
 
+/// `settings.showThinkingSummaries` analog. Defaults `false`, matching Claude
+/// Code's external setting default. This is consumed by request beta assembly,
+/// whose provider adapter has no settings handle.
+static SHOW_THINKING_SUMMARIES: AtomicBool = AtomicBool::new(false);
+
 /// Record whether the current process is a non-interactive (`-p`/print/headless)
 /// session. Idempotent; safe to call repeatedly (the value is fixed per process).
 pub fn set_non_interactive_session(non_interactive: bool) {
@@ -26,4 +31,15 @@ pub fn set_non_interactive_session(non_interactive: bool) {
 #[must_use]
 pub fn is_non_interactive_session() -> bool {
     NON_INTERACTIVE_SESSION.load(Ordering::Relaxed)
+}
+
+/// Publish the merged `showThinkingSummaries` setting for request assembly.
+pub fn set_show_thinking_summaries(show: bool) {
+    SHOW_THINKING_SUMMARIES.store(show, Ordering::Relaxed);
+}
+
+/// Whether API-side thinking summaries are explicitly enabled.
+#[must_use]
+pub fn show_thinking_summaries() -> bool {
+    SHOW_THINKING_SUMMARIES.load(Ordering::Relaxed)
 }

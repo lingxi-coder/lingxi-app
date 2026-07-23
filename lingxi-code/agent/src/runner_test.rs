@@ -2128,6 +2128,50 @@ fn exec_recording_stop(seen: Arc<Mutex<Vec<String>>>) -> Arc<hooks::HookExecutor
     Arc::new(exec)
 }
 
+/// Records the `HookContext.last_assistant_message` carried by a runner-fired
+/// agent-scoped `SubagentStop`.
+struct RecordingStopContextHook {
+    seen: Arc<Mutex<Vec<Option<String>>>>,
+}
+#[async_trait]
+impl hooks::executor::BuiltinHookHandler for RecordingStopContextHook {
+    fn id(&self) -> &str {
+        "record-subagent-stop-context"
+    }
+    async fn handle(
+        &self,
+        event: &hooks::events::HookEvent,
+        ctx: &hooks::registry::HookContext,
+    ) -> hooks::response::HookResult {
+        if matches!(event, hooks::events::HookEvent::SubagentStop { .. }) {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(ctx.last_assistant_message.clone());
+        }
+        hooks::response::HookResult {
+            outcome: hooks::response::HookOutcome::Success,
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: None,
+            response: None,
+        }
+    }
+}
+
+fn exec_recording_stop_context(
+    seen: Arc<Mutex<Vec<Option<String>>>>,
+) -> Arc<hooks::HookExecutorImpl> {
+    let registry = Arc::new(tokio::sync::RwLock::new(hooks::HookRegistry::new()));
+    let mut exec = hooks::HookExecutorImpl::new(
+        registry,
+        Arc::new(test_harness::mocks::MockHttpTransport::new()),
+        Arc::new(test_harness::mocks::MockRuntimeSpawner::default()),
+    );
+    exec.register_builtin(Arc::new(RecordingStopContextHook { seen }));
+    Arc::new(exec)
+}
+
 /// A frontmatter `Stop` hook (Builtin executor) the runner retargets to
 /// `SubagentStop` (registerFrontmatterHooks isAgent=true).
 fn frontmatter_stop_hook(handler_id: &str) -> hooks::definition::HookDefinition {
@@ -2176,6 +2220,30 @@ async fn frontmatter_stop_hook_fires_as_subagent_stop_in_runner() {
         recorded,
         vec!["completed".to_string()],
         "frontmatter Stop→SubagentStop must fire exactly once (status completed): {recorded:?}"
+    );
+}
+
+#[tokio::test]
+async fn runner_subagent_stop_context_carries_final_assistant_text() {
+    let seen = Arc::new(Mutex::new(Vec::<Option<String>>::new()));
+    let api = CapturingApiClient::new();
+    let mut ctx = loop_ctx(api.clone(), None, 2);
+    ctx.prompt_messages = vec![ConversationMessage::user(MessageId::new(), "go".into())];
+    ctx.agent_definition.agent_type = "stop-agent".into();
+    ctx.agent_definition.frontmatter_hooks =
+        vec![frontmatter_stop_hook("record-subagent-stop-context")];
+    ctx.hook_executor = Some(exec_recording_stop_context(seen.clone()));
+
+    let (event_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    drop(event_tx);
+    run_subagent(ctx, event_rx, out_tx).await;
+    let _ = drain(out_rx).await;
+
+    assert_eq!(
+        seen.lock().unwrap().clone(),
+        vec![Some("done".to_string())],
+        "agent-scoped SubagentStop should carry the final assistant text"
     );
 }
 

@@ -10,19 +10,12 @@
 //! `mu()` = shell-available. So the tool is registered-but-disabled (invisible to
 //! the model), byte-identical to the shipped binary — exactly like `PushNotification`.
 //!
-//! **Scope (PHASE A).** Lands the full BYTE-EXACT static surface — name,
+//! The implementation preserves the public static surface — name,
 //! `description()`/`prompt()` (both `cJr + lJr()`, the latter the `Yke()`-gated
 //! PushNotification splice), the input/output schemas, `isEnabled`, permission,
-//! descriptor — plus a faithful `call` that validates the input (control-char +
-//! `timeout_ms <= 3_600_000` refines), applies the CCR timeout cap (`Mnl`), and
-//! returns the `{taskId, timeoutMs, persistent}` result shape.
-//!
-//! **PARITY-TODO (PHASE B).** The binary `SVp` handler's load-bearing primitive —
-//! spawning the command and streaming EACH stdout line as a live `TaskNotification`
-//! (token bucket cap 10 / refill 1 per 2000ms, 30s suppression hard-stop, 500-char
-//! per-line truncate) — has no analogue in the port today (`ProcessRunner::run` is
-//! full-capture; the registry notification path is terminal-gated). That streaming
-//! pipeline + registry arming are deferred; flag-off by default → inert.
+//! descriptor — and dispatches a real registry-backed monitor. The task runner
+//! streams stdout lines into rate-limited live notifications, spools stderr only,
+//! and remains addressable through `TaskOutput` / `TaskStop`.
 
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
@@ -37,6 +30,7 @@ use tool_api::tool_trait::{
     ValidationError,
 };
 use tool_api::BuiltinToolContext;
+use traits::task_registry::MonitorRegistration;
 
 /// Binary `IA` — the tool name.
 pub const MONITOR_TOOL_NAME: &str = "Monitor";
@@ -202,14 +196,14 @@ static OUTPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
 
 /// `Monitor` — arm a background event monitor (binary `EVp`).
 pub struct MonitorTool {
-    _ctx: BuiltinToolContext,
+    ctx: BuiltinToolContext,
 }
 
 impl MonitorTool {
     /// Construct the tool over the builtin context.
     #[must_use]
     pub fn new(ctx: BuiltinToolContext) -> Self {
-        Self { _ctx: ctx }
+        Self { ctx }
     }
 }
 
@@ -318,7 +312,7 @@ impl Tool for MonitorTool {
     async fn call(
         &self,
         input: Value,
-        _ctx: ToolUseContext,
+        ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let description = input
@@ -339,20 +333,33 @@ impl Tool for MonitorTool {
         let (timeout_ms, persistent) =
             apply_ccr_timeout_cap(requested_timeout, requested_persistent);
 
-        // PHASE A: the per-line streaming spawn + registry arming (binary `SVp`
-        // step 4-7) is the deferred Phase B; produce a faithful taskId + the
-        // `{taskId, timeoutMs, persistent}` result shape (binary returns
-        // `timeoutMs: persistent ? 0 : timeout_ms`).
-        let task_id = monitor_task_id();
+        let command = input
+            .get("command")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let registry = self.ctx.task_registry.as_ref().ok_or_else(|| {
+            ToolError::Internal("Monitor: task registry is not configured".into())
+        })?;
+        let cwd = ctx.cwd.unwrap_or_else(|| self.ctx.cwd());
         let timeout_field = if persistent { 0 } else { timeout_ms };
+        let task_id = registry
+            .spawn_monitor(MonitorRegistration {
+                command,
+                description,
+                timeout_ms: timeout_field,
+                persistent,
+                cwd: Some(cwd.to_string_lossy().into_owned()),
+                tool_use_id: ctx.tool_use_id.map(|id| id.to_string()),
+            })
+            .await
+            .map_err(|e| ToolError::Internal(format!("Monitor: {e}")))?;
 
         let model_content = if persistent {
             format!("Monitor started (task {task_id}, persistent \u{2014} runs until TaskStop or session end). You will be notified on each event. Keep working \u{2014} do not poll or sleep. Events may arrive while you are waiting for the user \u{2014} an event is not their reply.")
         } else {
             format!("Monitor started (task {task_id}, timeout {timeout_ms}ms). You will be notified on each event. Keep working \u{2014} do not poll or sleep. Events may arrive while you are waiting for the user \u{2014} an event is not their reply.")
         };
-        let _ = description;
-
         Ok(ToolCallResult {
             data: json!({
                 "taskId": task_id,
@@ -368,23 +375,75 @@ impl Tool for MonitorTool {
     }
 }
 
-/// A monitor task id (`monitor_<12 lowercase-hex>`). PHASE A: the binary mints
-/// this via the task registry (`IPe`); until the registry/spawn arming is wired
-/// (Phase B) this is a locally-generated id of the same shape.
-fn monitor_task_id() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let n = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    format!("monitor_{:012x}", (n as u64) & 0xffff_ffff_ffff)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
     use traits::process::ProcessOutput;
+    use traits::task_registry::{
+        TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryError,
+        TaskRegistryHandle, TaskUpdatePatch,
+    };
+
+    #[derive(Default)]
+    struct RecordingRegistry {
+        monitor: Mutex<Option<MonitorRegistration>>,
+    }
+
+    #[async_trait]
+    impl TaskRegistryHandle for RecordingRegistry {
+        async fn create(&self, _input: TaskCreateInput) -> Result<TaskRecord, TaskRegistryError> {
+            unreachable!("not used by MonitorTool")
+        }
+
+        async fn get(&self, _id: &str) -> Result<Option<TaskRecord>, TaskRegistryError> {
+            Ok(None)
+        }
+
+        async fn list(
+            &self,
+            _filter: TaskListFilter,
+        ) -> Result<Vec<TaskRecord>, TaskRegistryError> {
+            Ok(Vec::new())
+        }
+
+        async fn update(
+            &self,
+            _id: &str,
+            _patch: TaskUpdatePatch,
+        ) -> Result<TaskRecord, TaskRegistryError> {
+            unreachable!("not used by MonitorTool")
+        }
+
+        async fn set_status(
+            &self,
+            _id: &str,
+            _status: &str,
+        ) -> Result<TaskRecord, TaskRegistryError> {
+            unreachable!("not used by MonitorTool")
+        }
+
+        async fn kill(&self, _id: &str) -> Result<TaskRecord, TaskRegistryError> {
+            unreachable!("not used by MonitorTool")
+        }
+
+        async fn spawn_monitor(
+            &self,
+            reg: MonitorRegistration,
+        ) -> Result<String, TaskRegistryError> {
+            *self.monitor.lock().expect("monitor lock") = Some(reg);
+            Ok("m12345678".to_string())
+        }
+
+        async fn output(
+            &self,
+            _id: &str,
+            _offset: Option<u64>,
+        ) -> Result<TaskOutputChunk, TaskRegistryError> {
+            unreachable!("not used by MonitorTool")
+        }
+    }
 
     fn dummy_out() -> ProcessOutput {
         ProcessOutput {
@@ -404,6 +463,12 @@ mod tests {
     }
     fn tool() -> MonitorTool {
         MonitorTool::new(shell_test_ctx(dummy_out()))
+    }
+
+    fn tool_with_registry(registry: Arc<RecordingRegistry>) -> MonitorTool {
+        let mut ctx = shell_test_ctx(dummy_out());
+        ctx.task_registry = Some(registry);
+        MonitorTool::new(ctx)
     }
 
     #[test]
@@ -463,18 +528,50 @@ mod tests {
     #[tokio::test]
     async fn call_returns_result_shape_with_ccr_cap() {
         let _g = guard();
-        let out = tool()
+        let registry = Arc::new(RecordingRegistry::default());
+        let mut call_ctx = fresh_ctx();
+        call_ctx.cwd = Some(std::path::PathBuf::from("/tmp/monitor-cwd"));
+        call_ctx.tool_use_id = Some(protocol::ToolUseId::new());
+        let expected_tool_use_id = call_ctx.tool_use_id.as_ref().map(ToString::to_string);
+        let out = tool_with_registry(registry.clone())
             .call(
                 json!({"description": "ci", "command": "tail -f log", "persistent": true}),
-                fresh_ctx(),
+                call_ctx,
                 fresh_tx(),
             )
             .await
             .expect("ok");
-        assert!(out.data["taskId"].as_str().unwrap().starts_with("monitor_"));
+        assert_eq!(out.data["taskId"], json!("m12345678"));
         assert_eq!(out.data["persistent"], json!(true));
         assert_eq!(out.data["timeoutMs"], json!(0)); // persistent → 0
         assert!(out.model_content.as_deref().unwrap().contains("persistent"));
+        let launched = registry
+            .monitor
+            .lock()
+            .expect("monitor lock")
+            .clone()
+            .unwrap();
+        assert_eq!(launched.command, "tail -f log");
+        assert_eq!(launched.description, "ci");
+        assert!(launched.persistent);
+        assert_eq!(launched.timeout_ms, 0);
+        assert_eq!(launched.cwd.as_deref(), Some("/tmp/monitor-cwd"));
+        assert_eq!(launched.tool_use_id, expected_tool_use_id);
+    }
+
+    #[tokio::test]
+    async fn call_fails_closed_without_registry() {
+        let error = tool()
+            .call(
+                json!({"description": "ci", "command": "echo ready"}),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect_err("missing registry must not mint a fake task id");
+        assert!(error
+            .to_string()
+            .contains("task registry is not configured"));
     }
 
     #[tokio::test]

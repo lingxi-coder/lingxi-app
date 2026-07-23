@@ -37,6 +37,10 @@ fn provider_key_account(id: &str) -> String {
     format!("provider-key-{id}")
 }
 
+fn is_anthropic_api_key_id(id: &str) -> bool {
+    matches!(id, "anthropic" | "anthropic-api-key")
+}
+
 /// Keychain account name for a sensitive plugin `userConfig` value, namespaced
 /// by the owning `plugin` identity and field `key`. Mirrors claude-code's
 /// `pluginSecrets` `${plugin}/${key}` keying (`plugin-secret-` prefix keeps it
@@ -177,8 +181,37 @@ impl CredentialManager {
         }
         // Slow path: load from storage.
         let raw = self.storage.retrieve("lingxi", "anthropic-api-key").await?;
-        let Some(raw) = raw else {
-            return Ok(None);
+        let raw = if let Some(raw) = raw {
+            raw
+        } else {
+            // Desktop builds briefly stored Anthropic through the generic
+            // provider path. Recover either alias once and migrate it into the
+            // canonical account so CLI, TUI, and Desktop converge.
+            let mut recovered = None;
+            for legacy_id in ["anthropic", "anthropic-api-key"] {
+                if let Some(value) = self
+                    .storage
+                    .retrieve("lingxi", &provider_key_account(legacy_id))
+                    .await?
+                {
+                    recovered = Some((legacy_id, value));
+                    break;
+                }
+            }
+            let Some((legacy_id, value)) = recovered else {
+                return Ok(None);
+            };
+            self.storage
+                .store("lingxi", "anthropic-api-key", value.clone())
+                .await?;
+            if let Err(error) = self
+                .storage
+                .delete("lingxi", &provider_key_account(legacy_id))
+                .await
+            {
+                tracing::warn!(%error, legacy_id, "failed to remove migrated Anthropic credential alias");
+            }
+            value
         };
         let s = String::from_utf8(raw.expose_secret_bytes().to_vec())
             .map_err(|_| CredentialError::Unavailable)?;
@@ -202,6 +235,27 @@ impl CredentialManager {
             .await?;
         // invalidate cache
         *self.api_key_cache.write().await = None;
+        self.provider_key_cache
+            .write()
+            .await
+            .retain(|id, _| !is_anthropic_api_key_id(id));
+        Ok(())
+    }
+
+    /// Delete the canonical Anthropic API key and any generic aliases written
+    /// by older unified-provider builds.
+    pub async fn delete_anthropic_api_key(&self) -> Result<(), CredentialError> {
+        self.storage.delete("lingxi", "anthropic-api-key").await?;
+        for legacy_id in ["anthropic", "anthropic-api-key"] {
+            self.storage
+                .delete("lingxi", &provider_key_account(legacy_id))
+                .await?;
+        }
+        *self.api_key_cache.write().await = None;
+        self.provider_key_cache
+            .write()
+            .await
+            .retain(|id, _| !is_anthropic_api_key_id(id));
         Ok(())
     }
 
@@ -213,6 +267,9 @@ impl CredentialManager {
     /// the keychain live so a freshly connected key takes effect on the next
     /// request without a restart.
     pub async fn set_provider_key(&self, id: &str, secret: &str) -> Result<(), CredentialError> {
+        if is_anthropic_api_key_id(id) {
+            return self.store_anthropic_api_key(secret).await;
+        }
         let metadata = SecureStorageMetadata {
             created_at: self.clock.now(),
             last_accessed: None,
@@ -225,7 +282,35 @@ impl CredentialManager {
         self.storage
             .store("lingxi", &provider_key_account(id), data)
             .await?;
+        // A packaged desktop process may have injected an ephemeral value for
+        // this id at launch. Once the user explicitly persists a replacement,
+        // drop that override so subsequent reads observe the shared keychain
+        // value used by CLI, TUI, and Desktop alike.
+        self.provider_key_cache.write().await.remove(id);
         Ok(())
+    }
+
+    /// Delete a per-provider key from the shared secure store.
+    ///
+    /// This is the inverse of [`Self::set_provider_key`] and also clears any
+    /// process-local desktop override so a deleted credential cannot remain
+    /// usable until restart.
+    pub async fn delete_provider_key(&self, id: &str) -> Result<(), CredentialError> {
+        if is_anthropic_api_key_id(id) {
+            return self.delete_anthropic_api_key().await;
+        }
+        self.storage
+            .delete("lingxi", &provider_key_account(id))
+            .await?;
+        self.provider_key_cache.write().await.remove(id);
+        Ok(())
+    }
+
+    /// Whether the configured secure-storage backend encrypts persisted data.
+    /// This exposes backend capability only; it never reads secret material.
+    #[must_use]
+    pub fn provider_key_storage_is_encrypted(&self) -> bool {
+        self.storage.is_encrypted()
     }
 
     /// Inject a provider key for a packaged desktop process without touching
@@ -247,6 +332,9 @@ impl CredentialManager {
     ) -> Result<Option<Secret<String>>, CredentialError> {
         if let Some(secret) = self.provider_key_cache.read().await.get(id) {
             return Ok(Some(Secret::new(secret.expose_secret().clone())));
+        }
+        if is_anthropic_api_key_id(id) {
+            return self.get_anthropic_api_key().await;
         }
         let Some(raw) = self
             .storage
@@ -803,6 +891,78 @@ mod oauth_tests {
     }
 
     #[tokio::test]
+    async fn anthropic_provider_id_uses_the_canonical_api_key_account() {
+        let (storage, cm) = manager();
+        cm.set_provider_key("anthropic", "sk-ant-canonical")
+            .await
+            .expect("set Anthropic key");
+
+        let canonical = storage
+            .retrieve("lingxi", "anthropic-api-key")
+            .await
+            .expect("retrieve canonical")
+            .expect("canonical present");
+        assert_eq!(canonical.expose_secret_bytes(), b"sk-ant-canonical");
+        assert!(storage
+            .retrieve("lingxi", "provider-key-anthropic")
+            .await
+            .expect("retrieve alias")
+            .is_none());
+        assert_eq!(
+            cm.get_provider_key("anthropic")
+                .await
+                .expect("get")
+                .expect("present")
+                .expose_secret(),
+            "sk-ant-canonical"
+        );
+    }
+
+    #[tokio::test]
+    async fn generic_anthropic_alias_is_migrated_on_read() {
+        let (storage, cm) = manager();
+        storage
+            .store(
+                "lingxi",
+                "provider-key-anthropic",
+                SecureStorageData::new(
+                    b"sk-ant-legacy".to_vec(),
+                    SecureStorageMetadata {
+                        created_at: SystemTime::UNIX_EPOCH,
+                        last_accessed: None,
+                        kind: SecretKind::GenericApiKey {
+                            provider: "anthropic".to_string(),
+                        }
+                        .as_dto(),
+                    },
+                ),
+            )
+            .await
+            .expect("seed legacy alias");
+
+        let key = cm
+            .get_anthropic_api_key()
+            .await
+            .expect("read")
+            .expect("migrated key");
+        assert_eq!(key.expose_secret(), "sk-ant-legacy");
+        assert!(storage
+            .retrieve("lingxi", "provider-key-anthropic")
+            .await
+            .expect("retrieve alias")
+            .is_none());
+        assert_eq!(
+            storage
+                .retrieve("lingxi", "anthropic-api-key")
+                .await
+                .expect("retrieve canonical")
+                .expect("canonical present")
+                .expose_secret_bytes(),
+            b"sk-ant-legacy"
+        );
+    }
+
+    #[tokio::test]
     async fn ephemeral_provider_key_does_not_touch_secure_storage() {
         let (storage, cm) = manager();
         cm.set_provider_key_ephemeral("deepseek", "sk-ephemeral")
@@ -846,6 +1006,44 @@ mod oauth_tests {
             .expect("get")
             .expect("present");
         assert_eq!(got.expose_secret(), "new-key");
+    }
+
+    #[tokio::test]
+    async fn persisted_provider_key_replaces_ephemeral_override() {
+        let (_storage, cm) = manager();
+        cm.set_provider_key_ephemeral("deepseek", "session-key")
+            .await;
+        cm.set_provider_key("deepseek", "persisted-key")
+            .await
+            .expect("persist");
+
+        let got = cm
+            .get_provider_key("deepseek")
+            .await
+            .expect("get")
+            .expect("present");
+        assert_eq!(got.expose_secret(), "persisted-key");
+    }
+
+    #[tokio::test]
+    async fn delete_provider_key_clears_persisted_and_ephemeral_values() {
+        let (_storage, cm) = manager();
+        cm.set_provider_key("openrouter", "persisted-key")
+            .await
+            .expect("persist");
+        cm.set_provider_key_ephemeral("openrouter", "session-key")
+            .await;
+
+        cm.delete_provider_key("openrouter").await.expect("delete");
+
+        assert!(cm
+            .get_provider_key("openrouter")
+            .await
+            .expect("get")
+            .is_none());
+        cm.delete_provider_key("openrouter")
+            .await
+            .expect("idempotent delete");
     }
 
     #[tokio::test]

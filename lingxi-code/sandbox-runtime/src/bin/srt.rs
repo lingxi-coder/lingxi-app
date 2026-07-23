@@ -71,9 +71,48 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Sub {
     /// Windows: create the discriminator group + install WFP filters.
-    WindowsInstall,
+    WindowsInstall {
+        /// Discriminator group name.
+        #[arg(long, value_name = "group")]
+        name: Option<String>,
+        /// Discriminator group SID (overrides --name).
+        #[arg(long)]
+        group_sid: Option<String>,
+        /// WFP sublayer GUID.
+        #[arg(long)]
+        sublayer_guid: Option<String>,
+        /// Loopback permit port range, for example 60080-60089.
+        #[arg(long, value_parser = parse_proxy_port_range)]
+        proxy_port_range: Option<(u16, u16)>,
+        /// Replace an existing install with different configuration.
+        #[arg(long)]
+        force: bool,
+    },
     /// Windows: remove WFP filters.
-    WindowsUninstall,
+    WindowsUninstall {
+        /// WFP sublayer GUID.
+        #[arg(long)]
+        sublayer_guid: Option<String>,
+    },
+}
+
+fn parse_proxy_port_range(value: &str) -> Result<(u16, u16), String> {
+    let (low, high) = value
+        .split_once('-')
+        .ok_or_else(|| "expected a port range in lo-hi form".to_string())?;
+    let low = low
+        .parse::<u16>()
+        .map_err(|_| format!("invalid low port in {value:?}"))?;
+    let high = high
+        .parse::<u16>()
+        .map_err(|_| format!("invalid high port in {value:?}"))?;
+    if low > high {
+        return Err("proxy port range low value must not exceed high value".to_string());
+    }
+    if high - low > 64 {
+        return Err("proxy port range may span at most 64 ports".to_string());
+    }
+    Ok((low, high))
 }
 
 /// Default config path: `~/.srt-settings.json` (the TS `getDefaultConfigPath`).
@@ -123,44 +162,115 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Sub::WindowsInstall) => windows_install(),
-        Some(Sub::WindowsUninstall) => windows_uninstall(),
+        Some(Sub::WindowsInstall {
+            name,
+            group_sid,
+            sublayer_guid,
+            proxy_port_range,
+            force,
+        }) => windows_install(name, group_sid, sublayer_guid, proxy_port_range, force),
+        Some(Sub::WindowsUninstall { sublayer_guid }) => windows_uninstall(sublayer_guid),
         None => run(&cli),
     }
 }
 
-/// `windows-install` (cfg-gated; the admin install flow is a tracked gap, so
-/// even on Windows this reports the gap rather than performing the install).
+/// `windows-install`: run the one-shot discriminator-group + WFP installer.
 #[allow(clippy::unnecessary_wraps)]
-fn windows_install() -> ExitCode {
+fn windows_install(
+    group_name: Option<String>,
+    group_sid: Option<String>,
+    sublayer_guid: Option<String>,
+    proxy_port_range: Option<(u16, u16)>,
+    force: bool,
+) -> ExitCode {
     #[cfg(target_os = "windows")]
     {
-        eprintln!(
-            "Error: windows-install is not yet wired in this build \
-             (the admin install/uninstall flow is a tracked gap)."
-        );
-        ExitCode::FAILURE
+        let opts = sandbox_runtime::windows::WindowsInstallOptions {
+            group_name,
+            group_sid,
+            user_sid: None,
+            sublayer_guid,
+            proxy_port_range,
+            force,
+        };
+        match sandbox_runtime::install_windows_sandbox(&opts, windows_repo_root()) {
+            Ok(result) if result.cancelled => {
+                eprintln!("Install cancelled at the UAC prompt. Nothing changed.");
+                ExitCode::from(2)
+            }
+            Ok(result) => {
+                println!(
+                    "Installed.\n  group: {}{}\n  WFP:   {}, {} filters{}\n\n{}",
+                    result.group.state,
+                    result
+                        .group
+                        .sid
+                        .as_deref()
+                        .map_or_else(String::new, |sid| format!(" ({sid})")),
+                    result.wfp.state,
+                    result.wfp.filters.unwrap_or(0),
+                    result
+                        .wfp
+                        .port_range
+                        .map_or_else(String::new, |(low, high)| {
+                            format!(", port range {low}-{high}")
+                        }),
+                    if result.group.state == "ready" {
+                        "Group is already in your token — no logout needed.".to_string()
+                    } else {
+                        "→ LOG OUT and back in so the group SID enters your token.\n  Network stays up meanwhile (WFP filter-0 PERMITs non-members).".to_string()
+                    }
+                );
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("Error: {e}");
+                ExitCode::FAILURE
+            }
+        }
     }
     #[cfg(not(target_os = "windows"))]
     {
+        let _ = (
+            group_name,
+            group_sid,
+            sublayer_guid,
+            proxy_port_range,
+            force,
+        );
         eprintln!("Error: windows-install is Windows-only.");
         ExitCode::FAILURE
     }
 }
 
-/// `windows-uninstall` (cfg-gated; see [`windows_install`]).
+/// `windows-uninstall`: remove the default WFP filter set. The discriminator
+/// group is intentionally retained so reinstall does not require re-adding the
+/// user and logging out again.
 #[allow(clippy::unnecessary_wraps)]
-fn windows_uninstall() -> ExitCode {
+fn windows_uninstall(sublayer_guid: Option<String>) -> ExitCode {
     #[cfg(target_os = "windows")]
     {
-        eprintln!(
-            "Error: windows-uninstall is not yet wired in this build \
-             (the admin install/uninstall flow is a tracked gap)."
-        );
-        ExitCode::FAILURE
+        match sandbox_runtime::uninstall_windows_sandbox(
+            sublayer_guid.as_deref(),
+            windows_repo_root(),
+        ) {
+            Ok(result) if result.cancelled => {
+                eprintln!("Uninstall cancelled at the UAC prompt.");
+                ExitCode::from(2)
+            }
+            Ok(_) => {
+                println!("WFP filters removed. Group membership kept.");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("Error: {e}");
+                ExitCode::FAILURE
+            }
+        }
     }
     #[cfg(not(target_os = "windows"))]
     {
+        let _ = sublayer_guid;
         eprintln!("Error: windows-uninstall is Windows-only.");
         ExitCode::FAILURE
     }
@@ -251,9 +361,8 @@ fn run(cli: &Cli) -> ExitCode {
 ///
 /// On non-Windows: `wrap_with_sandbox` returns a shell string; run it via
 /// `sh -c <wrapped>` with inherited stdio, then clean up any returned mount
-/// points (Linux bwrap artifacts; empty on macOS). On Windows the wrapper
-/// returns an argv array spawned with no shell — but that path is the tracked
-/// P9 seam, so we report it.
+/// points (Linux bwrap artifacts; empty on macOS). On Windows the argv wrapper
+/// is spawned directly, never reparsed by a shell.
 #[cfg(not(target_os = "windows"))]
 fn exec_wrapped(manager: &SandboxManager, command: &str, cwd: &str) -> ExitCode {
     use sandbox_runtime::linux::cleanup_bwrap_mount_points;
@@ -308,12 +417,81 @@ fn exit_code_from_status(status: std::process::ExitStatus) -> ExitCode {
     ExitCode::from(u8::try_from(code & 0xff).unwrap_or(1))
 }
 
-/// Windows wrap + exec: the argv path is the tracked P9 seam in this port.
+/// Windows wrap + exec through `srt-win.exe exec` with inherited stdio.
 #[cfg(target_os = "windows")]
-fn exec_wrapped(_manager: &SandboxManager, _command: &str, _cwd: &str) -> ExitCode {
-    eprintln!(
-        "Error: the Windows argv sandbox path (wrap_with_sandbox_argv) is not yet \
-         wired in this build (tracked P9 seam)."
-    );
-    ExitCode::FAILURE
+fn exec_wrapped(manager: &SandboxManager, command: &str, cwd: &str) -> ExitCode {
+    let invocation = match manager.wrap_with_sandbox_argv(command, None, None) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let Some((program, args)) = invocation.argv.split_first() else {
+        eprintln!("Error: Windows sandbox produced an empty argv");
+        return ExitCode::FAILURE;
+    };
+    let mut child = Command::new(program);
+    child.args(args).current_dir(cwd);
+    for (key, value) in invocation.env {
+        child.env(key, value);
+    }
+    match child.status() {
+        Ok(status) => exit_code_from_status(status),
+        Err(e) => {
+            eprintln!("Failed to execute command: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Fallback search root for the vendored Windows helper. `SRT_WIN_PATH` takes
+/// precedence inside the library, so packaged deployments are not tied to this
+/// build-time location.
+#[cfg(target_os = "windows")]
+fn windows_repo_root() -> &'static Path {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_windows_install_surface() {
+        let cli = Cli::try_parse_from([
+            "srt",
+            "windows-install",
+            "--name",
+            "sandbox-user",
+            "--group-sid",
+            "S-1-5-21-7",
+            "--sublayer-guid",
+            "guid",
+            "--proxy-port-range",
+            "60080-60089",
+            "--force",
+        ])
+        .expect("windows install flags should parse");
+        assert!(matches!(
+            cli.command,
+            Some(Sub::WindowsInstall {
+                name: Some(ref name),
+                group_sid: Some(ref sid),
+                sublayer_guid: Some(ref guid),
+                proxy_port_range: Some((60080, 60089)),
+                force: true,
+            }) if name == "sandbox-user" && sid == "S-1-5-21-7" && guid == "guid"
+        ));
+    }
+
+    #[test]
+    fn validates_proxy_port_range() {
+        assert_eq!(parse_proxy_port_range("60080-60089"), Ok((60080, 60089)));
+        assert!(parse_proxy_port_range("60089-60080").is_err());
+        assert!(parse_proxy_port_range("60000-60100").is_err());
+        assert!(parse_proxy_port_range("not-a-range").is_err());
+    }
 }

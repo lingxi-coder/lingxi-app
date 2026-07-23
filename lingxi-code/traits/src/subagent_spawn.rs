@@ -71,6 +71,14 @@ pub struct SubagentSpawnRequest {
     /// routing is deferred.
     #[serde(default)]
     pub team_name: Option<String>,
+    /// DISPLAY name of the teammate / subagent that created this spawn request.
+    /// Distinct from the TARGET child `name` above.
+    #[serde(default)]
+    pub creator_teammate_name: Option<String>,
+    /// Team name of the teammate / subagent that created this spawn request.
+    /// Distinct from the TARGET child `team_name` above.
+    #[serde(default)]
+    pub creator_team_name: Option<String>,
     /// Permission mode for a spawned teammate (TS `mode`, e.g. `"plan"`).
     /// DEPRECATED and ignored as of claude-code 2.1.212: the Agent/Task entrypoint
     /// no longer threads the call param here (it always sends `None`), and the

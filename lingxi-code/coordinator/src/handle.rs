@@ -92,6 +92,39 @@ impl MailboxRouterHandle for MailboxRouter {
             Err(crate::mailbox::MailboxError::Closed) => Err(MailboxError::Closed),
         }
     }
+
+    async fn broadcast(
+        &self,
+        from_agent: &str,
+        message: MailboxMessage,
+    ) -> Result<Vec<String>, MailboxError> {
+        let sender_id = if from_agent.eq_ignore_ascii_case(TEAM_LEAD_NAME) {
+            None
+        } else if let Some(id) = try_parse_agent_id(from_agent) {
+            Some(id)
+        } else {
+            self.resolve_name(from_agent).await
+        };
+        let recipients = self.named_recipients().await;
+        let mut delivered = Vec::with_capacity(recipients.len());
+        for (name, agent_id) in recipients {
+            if Some(agent_id) == sender_id {
+                continue;
+            }
+            let teammate_msg = TeammateMessage {
+                from: sender_id.map_or(MessageSender::Coordinator, MessageSender::Teammate),
+                content: message.content.clone(),
+                message_id: message.message_id.clone(),
+                timestamp: message.timestamp,
+                request_id: None,
+            };
+            if self.route(&agent_id, teammate_msg).await.is_ok() {
+                delivered.push(name);
+            }
+        }
+        delivered.sort();
+        Ok(delivered)
+    }
 }
 
 /// Canonical lowering of [`WorkerStatus`] to the simplified `WorkerInfo.status`
@@ -282,6 +315,51 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, MailboxError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn broadcast_delivers_to_every_named_teammate_except_sender() {
+        let reg = TeamRegistry::new(AgentId::new());
+        let alpha = reg
+            .spawn_worker("explorer".into(), "alpha".into(), String::new())
+            .await
+            .unwrap();
+        let beta = reg
+            .spawn_worker("writer".into(), "beta".into(), String::new())
+            .await
+            .unwrap();
+        let gamma = reg
+            .spawn_worker("reviewer".into(), "gamma".into(), String::new())
+            .await
+            .unwrap();
+
+        let h: &dyn MailboxRouterHandle = reg.mailbox_router.as_ref();
+        let delivered = h
+            .broadcast(
+                "alpha",
+                MailboxMessage {
+                    message_id: "broadcast-1".into(),
+                    content: "status update".into(),
+                    timestamp: SystemTime::now(),
+                    color: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(delivered, vec!["beta", "gamma"]);
+        assert!(reg
+            .mailbox_router
+            .get(&alpha)
+            .await
+            .unwrap()
+            .drain()
+            .is_empty());
+        for recipient in [beta, gamma] {
+            let messages = reg.mailbox_router.get(&recipient).await.unwrap().drain();
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].content, "status update");
+            assert!(matches!(messages[0].from, MessageSender::Teammate(id) if id == alpha));
+        }
     }
 
     #[tokio::test]

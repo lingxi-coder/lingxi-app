@@ -142,11 +142,16 @@ if (hasSingleInstanceLock) void app.whenReady().then(() => {
   const userData = app.getPath('userData');
   const diagnostics = new DiagnosticBuffer(join(userData, 'logs', 'desktop.jsonl'));
   diagnostics.add('info', 'host', `desktop start: app=${app.getVersion()} electron=${process.versions.electron} platform=${process.platform} arch=${process.arch}`);
+  diagnostics.add('info', 'host', 'credential store: shared engine secure storage');
+  // SettingsStore remains a read-only migration source for pre-unification
+  // Electron ciphertext and generic-password items. New writes go through the
+  // bridge into the Rust CredentialManager shared with CLI/TUI.
   const settings = new SettingsStore(userData, safeStorage, new MacKeychainCredentialStore());
   bridge = new BridgeManager({
     isPackaged: app.isPackaged,
     resourcesPath: process.resourcesPath,
     bridgeRoot: join(app.getPath('userData'), 'bridge-runtime'),
+    providerIds: PROVIDER_IDS,
     diagnostics,
     accessState: () => {
       const workspace = settings.getWorkspace();
@@ -155,12 +160,16 @@ if (hasSingleInstanceLock) void app.whenReady().then(() => {
         : { trusted: false };
     },
     onModelChanged: (model) => { settings.update({ model }); },
+    onProviderCredentialMigrated: (providerId) => {
+      settings.clearProviderCredential(providerId);
+    },
     launchConfig: async () => {
       const workspace = settings.getWorkspace();
       if (!workspace) throw new Error('select a workspace before starting the bridge');
       const configured = settings.getPublic();
       const providerIds = PROVIDER_IDS;
-      const credentials = settings.readProviderCredentials(providerIds);
+      const legacyCredentials = settings.readProviderCredentials(providerIds);
+      const credentials = { ...legacyCredentials };
       for (const providerId of providerIds) {
         if (credentials[providerId] === undefined) {
           const environmentCredential = readEnvironmentCredential(providerId);
@@ -172,7 +181,11 @@ if (hasSingleInstanceLock) void app.whenReady().then(() => {
         .filter((entry) => entry.configured && credentials[entry.providerId] === undefined)
         .map((entry) => entry.providerId);
       if (unavailable.length > 0) {
-        throw new Error(`stored provider credential could not be decrypted (${unavailable.join(', ')}); replace it in Settings`);
+        diagnostics.add(
+          'warn',
+          'host',
+          `legacy provider credential is unreadable and will be ignored (${unavailable.join(', ')})`,
+        );
       }
       return {
         workspace,
@@ -181,6 +194,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(() => {
         providerCredentials: Object.fromEntries(
           Object.entries(credentials).filter(([providerId]) => providerId !== 'anthropic'),
         ),
+        providerCredentialsToMigrate: legacyCredentials,
         model: configured.model,
         apiBaseUrl: configured.apiBaseUrl,
       };

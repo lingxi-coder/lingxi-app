@@ -10,6 +10,8 @@ use crate::runner::SubagentEvent;
 use protocol::AgentId;
 use std::collections::HashMap;
 use std::sync::Arc;
+#[cfg(test)]
+use tokio::sync::Notify;
 use tokio::sync::{mpsc, OwnedSemaphorePermit, RwLock, Semaphore};
 use traits::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
 
@@ -38,6 +40,46 @@ pub struct StateMachinePool {
     slots: Arc<RwLock<HashMap<AgentId, StateMachineSlot>>>,
     capacity: Arc<Semaphore>,
     runtime: Arc<dyn RuntimeSpawner>,
+    #[cfg(test)]
+    post_spawn_wait: Arc<RwLock<Option<Arc<Notify>>>>,
+}
+
+/// Cancel-safety guard for [`StateMachinePool::allocate`].
+///
+/// `allocate` starts the runner before the slot is inserted into `slots`. If the
+/// future is dropped in that window, the spawned runner must still be canceled;
+/// otherwise a persistent child can outlive its caller with no way to recover
+/// its task handle or pool slot.
+struct AllocateCancelGuard {
+    runtime: Arc<dyn RuntimeSpawner>,
+    task: Option<BackgroundTaskHandle>,
+}
+
+impl AllocateCancelGuard {
+    fn new(runtime: Arc<dyn RuntimeSpawner>, task: BackgroundTaskHandle) -> Self {
+        Self {
+            runtime,
+            task: Some(task),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.task = None;
+    }
+}
+
+impl Drop for AllocateCancelGuard {
+    fn drop(&mut self) {
+        let Some(task) = self.task.take() else {
+            return;
+        };
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let runtime = self.runtime.clone();
+            handle.spawn(async move {
+                let _ = runtime.cancel(&task).await;
+            });
+        }
+    }
 }
 
 impl StateMachinePool {
@@ -49,7 +91,14 @@ impl StateMachinePool {
             slots: Arc::new(RwLock::new(HashMap::new())),
             capacity: Arc::new(Semaphore::new(max_concurrent)),
             runtime,
+            #[cfg(test)]
+            post_spawn_wait: Arc::new(RwLock::new(None)),
         }
+    }
+
+    #[cfg(test)]
+    pub async fn set_post_spawn_wait(&self, notify: Arc<Notify>) {
+        *self.post_spawn_wait.write().await = Some(notify);
     }
 
     /// Allocate a slot. Returns `(agent_id, event_rx)` where `event_rx` is the
@@ -79,6 +128,12 @@ impl StateMachinePool {
                 Box::pin(crate::runner::run_subagent(ctx, event_rx, out_tx)),
             )
             .await?;
+        let mut cancel_guard = AllocateCancelGuard::new(self.runtime.clone(), task.clone());
+
+        #[cfg(test)]
+        if let Some(wait) = self.post_spawn_wait.read().await.clone() {
+            wait.notified().await;
+        }
 
         self.slots.write().await.insert(
             agent_id,
@@ -89,6 +144,7 @@ impl StateMachinePool {
                 _capacity_permit: capacity_permit,
             },
         );
+        cancel_guard.disarm();
         Ok((agent_id, out_rx))
     }
 

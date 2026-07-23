@@ -80,6 +80,13 @@ impl MultiCredentialProvider {
         if let Some(key) = self.anthropic_api_key.clone() {
             return Ok(Credential::ApiKey(key));
         }
+        match self.credentials.get_anthropic_api_key().await {
+            Ok(Some(key)) => return Ok(Credential::ApiKey(key.expose_secret().clone())),
+            Ok(None) => {}
+            // Preserve the existing helper fallback when the OS store is
+            // unavailable; a configured helper may still supply the key.
+            Err(_) => {}
+        }
         let Some(helper) = self.anthropic_api_key_helper.as_deref() else {
             return Err(LlmError::Authentication);
         };
@@ -279,6 +286,27 @@ mod tests {
             .await
             .expect("api-key dispatch");
         assert_eq!(got, Credential::ApiKey("sk-ant-test".to_string()));
+    }
+
+    #[tokio::test]
+    async fn anthropic_api_key_dispatch_reads_the_shared_secure_store() {
+        let credentials = manager();
+        credentials
+            .store_anthropic_api_key("sk-ant-shared")
+            .await
+            .expect("seed shared store");
+        let provider =
+            MultiCredentialProvider::new(credentials, Vec::new(), None, None, Default::default());
+
+        let got = provider
+            .load(&scope(
+                ProviderId::AnthropicFirstParty,
+                "anthropic",
+                "anthropic-api-key",
+            ))
+            .await
+            .expect("shared api-key dispatch");
+        assert_eq!(got, Credential::ApiKey("sk-ant-shared".to_string()));
     }
 
     #[tokio::test]

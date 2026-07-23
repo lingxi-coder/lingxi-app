@@ -32,6 +32,7 @@
 //!   mutating the shared boot policy.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -50,7 +51,7 @@ use tool_api::builtin_context::BuiltinToolContext;
 ///
 /// Relocated verbatim from `tools/skill/src/skill.rs` (the former
 /// `SkillShellRunner`) so every prompt-expansion surface (dispatcher / TUI /
-/// skill) shares ONE host runner. All seven fields are cloned straight off a
+/// skill) shares ONE host runner. Runtime fields are cloned straight off a
 /// [`BuiltinToolContext`] (mirrors what `BashTool::call` reads off `self.ctx`)
 /// — there is no skill-specific input, so it is constructible from any
 /// `&BuiltinToolContext`.
@@ -84,6 +85,120 @@ pub struct PromptShellRunner {
     /// uses (default `LegacyWrapRunner` = byte-identical to the previous direct
     /// `wrap_with_sandbox` call).
     sandbox_runner: Arc<dyn tool_api::SandboxRunner>,
+    /// One lazily-created shell snapshot shared by every command expansion in
+    /// this session/provider.
+    snapshot: Arc<ShellSnapshot>,
+}
+
+/// Lazily materialized aliases/functions/options from the user's interactive
+/// shell. The private directory is removed when the session provider drops.
+struct ShellSnapshot {
+    dir: PathBuf,
+    path: PathBuf,
+    initialized: tokio::sync::OnceCell<bool>,
+}
+
+impl ShellSnapshot {
+    fn new() -> Self {
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("lingxi-shell-snapshot-{}-{id}", std::process::id()));
+        Self {
+            path: dir.join("snapshot.sh"),
+            dir,
+            initialized: tokio::sync::OnceCell::new(),
+        }
+    }
+
+    async fn ensure(
+        &self,
+        shell_path: &str,
+        process: &dyn traits::process::ProcessRunner,
+        sandbox: &dyn traits::sandbox::Sandbox,
+        workspace: &Path,
+    ) -> Option<&Path> {
+        use traits::sandbox::ProcessCommand;
+
+        let ready = self
+            .initialized
+            .get_or_init(|| async {
+                if std::fs::create_dir(&self.dir).is_err() {
+                    return false;
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    if std::fs::set_permissions(&self.dir, std::fs::Permissions::from_mode(0o700))
+                        .is_err()
+                    {
+                        return false;
+                    }
+                }
+
+                let rc_file = if shell_path.contains("zsh") {
+                    "\"$HOME/.zshrc\""
+                } else {
+                    "\"$HOME/.bashrc\""
+                };
+                let functions = if shell_path.contains("zsh") {
+                    "typeset -f; setopt | sed 's/^/setopt /'"
+                } else {
+                    "declare -f; shopt -p; set +o"
+                };
+                let script = format!(
+                    "if [ -f {rc_file} ]; then . {rc_file} </dev/null; fi; \
+                     {{ printf '%s\\n' '# LingXi shell snapshot' \
+                        'unalias -a 2>/dev/null || true'; \
+                        {functions}; alias; printf 'export PATH=%q\\n' \"$PATH\"; \
+                     }} > {}",
+                    shell_quote(&self.path.to_string_lossy())
+                );
+                let mut env = HashMap::new();
+                env.insert("SHELL".to_string(), shell_path.to_string());
+                env.insert("GIT_EDITOR".to_string(), "true".to_string());
+                env.insert("CLAUDECODE".to_string(), "1".to_string());
+                let command = ProcessCommand {
+                    command: shell_path.to_string(),
+                    args: vec!["-c".to_string(), "-l".to_string(), script],
+                    cwd: Some(workspace.to_path_buf()),
+                    env,
+                    timeout: Some(std::time::Duration::from_secs(10)),
+                    stdin: None,
+                };
+                let command = sandbox.bypass_with_audit(command, "prompt_shell_snapshot");
+                matches!(process.run(&command).await, Ok(out) if !out.timed_out && out.exit_code == 0)
+                    && self.path.is_file()
+            })
+            .await;
+
+        (*ready && self.path.is_file()).then_some(self.path.as_path())
+    }
+}
+
+impl Drop for ShellSnapshot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn command_with_snapshot(command: &str, shell_path: &str, snapshot: Option<&Path>) -> String {
+    let guarded = match disable_extglob(shell_path) {
+        Some(prefix) => format!("{prefix} && {command}"),
+        None => command.to_string(),
+    };
+    match snapshot {
+        Some(path) => format!(
+            ". {} 2>/dev/null || true; eval {}",
+            shell_quote(&path.to_string_lossy()),
+            shell_quote(&guarded)
+        ),
+        None => guarded,
+    }
 }
 
 /// Resolve the login shell exactly like `bash.rs::resolve_shell_path`
@@ -125,13 +240,19 @@ impl ShellRunner for PromptShellRunner {
         use traits::sandbox::ProcessCommand;
 
         let shell_path = resolve_shell_path();
-        // BASH.1: prepend the extglob-disable guard INTO the command so it runs
-        // in the same shell that expands the user's globs (mirrors the TS order
-        // `disableExtglob && <cmd>`).
-        let spawn_cmd = match disable_extglob(shell_path) {
-            Some(prefix) => format!("{prefix} && {command}"),
-            None => command.to_string(),
-        };
+        let snapshot = self
+            .snapshot
+            .ensure(
+                shell_path,
+                self.process.as_ref(),
+                self.sandbox.as_ref(),
+                &self.workspace,
+            )
+            .await;
+        // Snapshot mode sources the captured aliases/functions/options and uses
+        // `eval` so aliases expand. If snapshot creation/access failed, retain
+        // the login-shell fallback.
+        let spawn_cmd = command_with_snapshot(command, shell_path, snapshot);
 
         // ===== Sandbox decision (mirror of `BashTool::call`) =====
         // A prompt `!command` has NO per-command `dangerouslyDisableSandbox` flag
@@ -193,9 +314,13 @@ impl ShellRunner for PromptShellRunner {
 
         let pcmd = ProcessCommand {
             command: shell_path.to_string(),
-            // BASH.4: login-shell init (`-l` after `-c`), matching the bash
-            // foreground spawn (`bashProvider.ts:201-205`, snapshot path deferred).
-            args: vec!["-c".into(), "-l".into(), inner],
+            // A valid snapshot replaces per-command login-shell startup. If the
+            // snapshot vanished or failed to build, preserve the `-c -l` fallback.
+            args: if snapshot.is_some() {
+                vec!["-c".into(), inner]
+            } else {
+                vec!["-c".into(), "-l".into(), inner]
+            },
             cwd: Some(self.workspace.clone()),
             env: HashMap::new(),
             timeout: None,
@@ -260,6 +385,11 @@ struct PolicyShellPermissionGate {
     /// The live permission mode to authorize under (threaded so a session that
     /// has entered plan-mode is honored, not the stale boot mode).
     mode: PermissionMode,
+    /// The session's enforcing gate. When present and rule-aware, this is the
+    /// source of truth for the LIVE mode and `updatedPermissions` overlay.
+    live_gate: Option<Arc<dyn traits::permission_gate::PermissionGate>>,
+    /// Frontmatter allow rules injected only for this prompt command.
+    transient_allow_rules: Vec<String>,
 }
 
 impl ShellPermissionGate for PolicyShellPermissionGate {
@@ -273,6 +403,22 @@ impl ShellPermissionGate for PolicyShellPermissionGate {
             _ => "Bash",
         };
         let input = serde_json::json!({ "command": command });
+        if let Some(decision) = self.live_gate.as_ref().and_then(|gate| {
+            gate.check_noninteractive_with_allow_rules(
+                tool_name,
+                &input,
+                &self.transient_allow_rules,
+            )
+        }) {
+            return match decision {
+                traits::permission_gate::NonInteractivePermissionDecision::Allow => {
+                    ShellPermissionDecision::Allow
+                }
+                traits::permission_gate::NonInteractivePermissionDecision::Deny { reason } => {
+                    ShellPermissionDecision::Deny { message: reason }
+                }
+            };
+        }
         match self
             .policy
             .authorize_with_mode(tool_name, &input, self.mode)
@@ -353,6 +499,7 @@ fn build_effective_policy(
 /// share one uniform, 1:1 gate.
 pub struct PromptShellExpansionProvider {
     ctx: BuiltinToolContext,
+    snapshot: Arc<ShellSnapshot>,
 }
 
 impl ShellExpansionProvider for PromptShellExpansionProvider {
@@ -365,23 +512,34 @@ impl ShellExpansionProvider for PromptShellExpansionProvider {
         // `shell` that `execute_shell_commands_in_prompt` threads into both
         // `ShellPermissionGate::check` and `ShellRunner::run` (the SAME
         // frontmatter value), so the gate reads it there per call.
+        let sandbox_runtime = self.ctx.effective_sandbox_runtime();
         let runner = Arc::new(PromptShellRunner {
             process: self.ctx.process.clone(),
             sandbox: self.ctx.sandbox.clone(),
             workspace: self.ctx.cwd(),
             sandbox_available: self.ctx.sandbox_available,
-            sandbox_runtime: self.ctx.sandbox_runtime.clone(),
+            sandbox_runtime: sandbox_runtime.clone(),
             platform: self.ctx.platform,
             sandbox_runner: self.ctx.sandbox_runner.clone(),
+            snapshot: self.snapshot.clone(),
         });
-        let effective = build_effective_policy(
+        let mut effective = build_effective_policy(
             &self.ctx.permission_policy,
             self.ctx.permission_mode,
             allowed_tools,
         );
+        if self.ctx.permission_policy.sandbox_runtime.is_some() {
+            effective = effective.with_sandbox_runtime(permission::SandboxAutoAllowConfig::new(
+                sandbox_runtime.enabled,
+                sandbox_runtime.auto_allow_bash_if_sandboxed,
+                sandbox_runtime.excluded_commands.clone(),
+            ));
+        }
         let gate = Arc::new(PolicyShellPermissionGate {
             policy: Arc::new(effective),
             mode: self.ctx.permission_mode,
+            live_gate: self.ctx.permission_gate.clone(),
+            transient_allow_rules: allowed_tools.to_vec(),
         });
         ShellExpansionCtx {
             runner,
@@ -397,7 +555,10 @@ impl ShellExpansionProvider for PromptShellExpansionProvider {
 /// real runner + policy-backed gate.
 #[must_use]
 pub fn build_prompt_shell_provider(ctx: &BuiltinToolContext) -> Arc<dyn ShellExpansionProvider> {
-    Arc::new(PromptShellExpansionProvider { ctx: ctx.clone() })
+    Arc::new(PromptShellExpansionProvider {
+        ctx: ctx.clone(),
+        snapshot: Arc::new(ShellSnapshot::new()),
+    })
 }
 
 #[cfg(test)]
@@ -538,5 +699,14 @@ mod tests {
                 .check("gh pr view --json number 2>/dev/null || true", None),
             ShellPermissionDecision::Allow,
         );
+    }
+
+    #[test]
+    fn snapshot_command_sources_then_evals_with_safe_single_quote_escaping() {
+        let path = Path::new("/tmp/has space/snapshot.sh");
+        let command = command_with_snapshot("printf '%s' \"it's\"", "/bin/zsh", Some(path));
+        assert!(command.starts_with(". '/tmp/has space/snapshot.sh' 2>/dev/null || true; eval "));
+        assert!(command.contains("'\\''"));
+        assert!(command.contains("setopt NO_EXTENDED_GLOB"));
     }
 }

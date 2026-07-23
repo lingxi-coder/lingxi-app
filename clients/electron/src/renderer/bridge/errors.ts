@@ -5,6 +5,15 @@ export interface ActionableError {
 
 export function classifyDesktopError(raw: string): ActionableError {
   const message = raw.trim() || 'Unknown desktop error';
+  if (/login keychain.*locked|keychain.*access is denied/i.test(message)) {
+    return {
+      title: 'Provider credential unavailable',
+      detail: 'This key was stored in the legacy login keychain. Reconnect the provider to use the modern store or this app session.',
+    };
+  }
+  if (/Data Protection Keychain.*unavailable|keychain access group|app signature/i.test(message)) {
+    return { title: 'Secure persistence unavailable', detail: 'Reconnect the provider to use it for this session; no plaintext key will be written to disk.' };
+  }
   if (/could not be decrypted|secure credential storage|keychain/i.test(message)) {
     return {
       title: 'Provider credential unavailable',

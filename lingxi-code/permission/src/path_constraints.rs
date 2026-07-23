@@ -71,6 +71,9 @@ pub struct PathConstraintAsk {
     pub message: String,
     /// The `decisionReason` reason text (TS `type: 'other'`).
     pub reason: String,
+    /// Exact path rejected by containment, when this Ask is path-scoped.  Guard
+    /// asks such as process substitution or shell expansion leave this absent.
+    pub blocked_path: Option<String>,
 }
 
 /// Maximum directories listed verbatim before the "and N more" suffix — TS
@@ -574,6 +577,7 @@ pub fn check_path_constraints(
         return Some(PathConstraintAsk {
             message: "Process substitution (>(...) or <(...)) can execute arbitrary commands and requires manual approval".to_string(),
             reason: "Process substitution requires manual approval".to_string(),
+            blocked_path: None,
         });
     }
 
@@ -600,6 +604,7 @@ pub fn check_path_constraints(
                 .to_string(),
             reason: "Redirect involving /dev/tcp or /dev/udp opens a network connection"
                 .to_string(),
+            blocked_path: None,
         });
     }
 
@@ -611,6 +616,7 @@ pub fn check_path_constraints(
         return Some(PathConstraintAsk {
             message: "Shell expansion syntax in paths requires manual approval".to_string(),
             reason: "Shell expansion syntax in paths requires manual approval".to_string(),
+            blocked_path: None,
         });
     }
 
@@ -624,6 +630,7 @@ pub fn check_path_constraints(
         return Some(PathConstraintAsk {
             message: "Commands that change directories and write via output redirection require explicit approval to ensure paths are evaluated correctly. For security, LingXi cannot automatically determine the final working directory when 'cd' is used in compound commands.".to_string(),
             reason: "Compound command contains cd with output redirection - manual approval required to prevent path resolution bypass".to_string(),
+            blocked_path: None,
         });
     }
 
@@ -640,6 +647,7 @@ pub fn check_path_constraints(
             return Some(PathConstraintAsk {
                 message: "Brace characters in write target require manual approval \u{2014} bash may brace-expand to paths outside the working directory".to_string(),
                 reason: "Brace characters in write target require manual approval \u{2014} bash may brace-expand to paths outside the working directory".to_string(),
+                blocked_path: Some(r.target.clone()),
             });
         }
         // `X6r` `..`-after-directory pre-guard (claude-code `Q6r`/validatePath runs
@@ -656,6 +664,7 @@ pub fn check_path_constraints(
             return Some(PathConstraintAsk {
                 message: "Path contains '..' traversal after a directory segment, which may follow a symlink outside the working directory".to_string(),
                 reason: "Path contains '..' traversal after a directory segment, which may follow a symlink outside the working directory".to_string(),
+                blocked_path: Some(r.target.clone()),
             });
         }
         let resolved = expand_redirect_target(&r.target, roots);
@@ -672,6 +681,7 @@ pub fn check_path_constraints(
                 reason: format!(
                     "Output redirection to '{resolved_disp}' was blocked. For security, LingXi may only write to files in the allowed working directories for this session: {dir_list}."
                 ),
+                blocked_path: Some(resolved_disp.into_owned()),
             });
         }
     }
@@ -687,6 +697,7 @@ pub fn check_path_constraints(
                 return Some(PathConstraintAsk {
                     message: "cd with two or more directory arguments requires manual approval. zsh's \"cd OLD NEW\" form substitutes OLD\u{2192}NEW in $PWD, producing a target path that cannot be statically validated.".to_string(),
                     reason: "cd with two or more directory arguments".to_string(),
+                    blocked_path: None,
                 });
             }
             CdParse::Target(target) => target,
@@ -714,6 +725,7 @@ pub fn check_path_constraints(
             return Some(PathConstraintAsk {
                 message: "Shell expansion syntax in paths requires manual approval".to_string(),
                 reason: "Shell expansion syntax in paths requires manual approval".to_string(),
+                blocked_path: Some(cd_arg.clone()),
             });
         }
         // `X6r` `..`-after-directory pre-guard for the cd target (claude-code
@@ -727,6 +739,7 @@ pub fn check_path_constraints(
             return Some(PathConstraintAsk {
                 message: "Path contains '..' traversal after a directory segment, which may follow a symlink outside the working directory".to_string(),
                 reason: "Path contains '..' traversal after a directory segment, which may follow a symlink outside the working directory".to_string(),
+                blocked_path: Some(cd_arg.clone()),
             });
         }
         if !path_in_allowed_working_path(Path::new(&resolved), &work_dirs, roots) {
@@ -740,6 +753,7 @@ pub fn check_path_constraints(
                 reason: format!(
                     "cd in '{resolved_disp}' was blocked. For security, LingXi may only change directories to the allowed working directories for this session: {dir_list}."
                 ),
+                blocked_path: Some(resolved_disp.into_owned()),
             });
         }
     }

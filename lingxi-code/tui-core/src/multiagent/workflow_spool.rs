@@ -30,7 +30,7 @@ pub fn parse_workflow_spool(spool: &str) -> (usize, Vec<WorkflowPhase>) {
     // Distinct agents across the whole run (for the count).
     let mut distinct: HashMap<String, ()> = HashMap::new();
 
-    let mut see_phase = |index: usize, order: &mut Vec<usize>| {
+    let see_phase = |index: usize, order: &mut Vec<usize>| {
         if !order.contains(&index) {
             order.push(index);
         }

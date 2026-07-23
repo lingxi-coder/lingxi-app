@@ -13,7 +13,7 @@
 //!   `engine::TodoState` = `pending`/`in_progress`/`completed`). They do NOT use
 //!   `validate_task_id`, `TASK_TYPES`, or `TASK_STATUSES`.
 //! - **Product-B (background-registry):** `TaskStop` / `TaskOutput` dispatch the
-//!   M1 background `TaskRegistry` (9-char `[bartwmd][0-9a-z]{8}` ids). The
+//!   M1 background `TaskRegistry` (9-char `[bartwmdk][0-9a-z]{8}` ids). The
 //!   `validate_task_id` / `TASK_TYPES` / `TASK_STATUSES` symbols below back ONLY
 //!   these two tools now — they are retained Product-B-only (also for the locked
 //!   `parity_agent_task_tools` / `parity_registry` fixtures).
@@ -64,7 +64,7 @@ pub const TASK_STOP_TOOL_NAME: &str = "TaskStop";
 /// Tool name `'TaskOutput'` (claude-code `TASK_OUTPUT_TOOL_NAME`).
 pub const TASK_OUTPUT_TOOL_NAME: &str = "TaskOutput";
 
-/// The 7 background task-type wire strings. Byte-aligned with `tasks::TaskType`
+/// The 9 background task-type wire strings. Byte-aligned with `tasks::TaskType`
 /// variants (snake_case).
 ///
 // Product-B (background-registry) — retained for TaskStop/TaskOutput + fixture lock.
@@ -75,6 +75,8 @@ pub const TASK_TYPES: &[&str] = &[
     "in_process_teammate",
     "local_workflow",
     "monitor_mcp",
+    "monitor_ws",
+    "mcp_task",
     "dream",
 ];
 
@@ -83,7 +85,7 @@ pub const TASK_TYPES: &[&str] = &[
 // Product-B (background-registry) — retained for TaskStop/TaskOutput + fixture lock.
 pub const TASK_STATUSES: &[&str] = &["pending", "running", "completed", "failed", "killed"];
 
-/// Validate the M1 task-id format `[bartwmd][0-9a-z]{8}` (9 chars total).
+/// Validate the task-id format `[bartwmdk][0-9a-z]{8}` (9 chars total).
 ///
 // Product-B (background-registry) — retained for TaskStop/TaskOutput + fixture lock.
 /// V2 (Product-A) task ids are decimal strings and MUST NOT route through this.
@@ -93,27 +95,28 @@ pub const TASK_STATUSES: &[&str] = &["pending", "running", "completed", "failed"
 pub fn validate_task_id(s: &str) -> Result<(), String> {
     if s.chars().count() != 9 {
         return Err(format!(
-            "Task: malformed task_id '{s}' (expected 9-char [bartwmd][0-9a-z]{{8}})"
+            "Task: malformed task_id '{s}' (expected 9-char [bartwmdk][0-9a-z]{{8}})"
         ));
     }
     let mut chars = s.chars();
     let prefix = chars.next().expect("len==9");
-    if !"bartwmd".contains(prefix) {
+    if !"bartwmdk".contains(prefix) {
         return Err(format!(
-            "Task: malformed task_id '{s}' (expected 9-char [bartwmd][0-9a-z]{{8}})"
+            "Task: malformed task_id '{s}' (expected 9-char [bartwmdk][0-9a-z]{{8}})"
         ));
     }
     for c in chars {
         if !(c.is_ascii_digit() || (c.is_ascii_lowercase() && c.is_ascii_alphabetic())) {
             return Err(format!(
-                "Task: malformed task_id '{s}' (expected 9-char [bartwmd][0-9a-z]{{8}})"
+                "Task: malformed task_id '{s}' (expected 9-char [bartwmdk][0-9a-z]{{8}})"
             ));
         }
     }
     Ok(())
 }
 
-/// Generate a fresh task-id matching the M1 format (`[bartwmd][0-9a-z]{8}`).
+/// Generate a fresh task-id matching the task-registry format
+/// (`[bartwmdk][0-9a-z]{8}`).
 ///
 /// Mirrors `tasks::id::generate_task_id` without taking the
 /// cyclic dep on `lingxi-tasks`. Retained for test fixtures + parity
@@ -1614,6 +1617,8 @@ impl Tool for TaskUpdateTool {
                                 status_wire(st),
                                 &existing.subject,
                                 Some(existing.description.as_str()),
+                                ctx.agent_name.as_deref(),
+                                ctx.team_name.as_deref(),
                             )
                             .await
                         {

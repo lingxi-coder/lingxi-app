@@ -89,6 +89,28 @@ async fn replay_returns_state_with_last_uuid_set() {
 }
 
 #[tokio::test]
+async fn replay_carries_integrity_checked_main_agent_snapshot_for_hot_resume() {
+    let (_temp, lingxi_home, cwd, sid, _last_uuid, fs) = setup_two_turn_jsonl().await;
+    let transcript_path = session::jsonl::session_path(&lingxi_home, &cwd, &sid.to_string());
+    let definition = json!({
+        "agent_type": "reviewer",
+        "system_prompt": "frozen prompt",
+        "tools": {"Explicit": ["Read"]}
+    });
+    session::jsonl::JsonlWriter::new(transcript_path, fs.clone())
+        .append_agent_setting_snapshot(&sid.to_string(), "reviewer", &definition)
+        .await
+        .expect("append agent snapshot");
+
+    let replayed = replay_session_state(&lingxi_home, &cwd, sid, fs)
+        .await
+        .expect("replay ok");
+    let runtime = replayed.handle_runtime_snapshot();
+    assert_eq!(runtime.main_thread_agent_type.as_deref(), Some("reviewer"));
+    assert_eq!(runtime.main_thread_agent_definition, Some(definition));
+}
+
+#[tokio::test]
 async fn state_from_messages_matches_disk_replay() {
     // (M5-13) The CLI resume mount seeds the orchestrator session from the
     // transcript ALREADY in hand (no second disk read). `state_from_messages`
@@ -234,6 +256,7 @@ async fn resume_recovers_the_saved_model_from_the_last_assistant_line() {
             "type": "assistant", "uuid": m2.to_string(), "parentUuid": m1.to_string(),
             "sessionId": sid.to_string(), "timestamp": "2026-05-25T12:00:01.000Z",
             "cwd": cwd, "version": "0.6.0", "isSidechain": false, "userType": "external",
+            "modelProfile": "deepseek",
             "message": {"role": "assistant", "content": "hi there", "model": "deepseek-v4-pro"}
         }))
         .unwrap(),
@@ -249,12 +272,12 @@ async fn resume_recovers_the_saved_model_from_the_last_assistant_line() {
         replayed.state.model, "deepseek-v4-pro",
         "resume recovers the saved model from the last assistant line"
     );
+    assert_eq!(replayed.state.model_profile.as_deref(), Some("deepseek"));
     // The in-hand path (`state_from_messages`, used by the CLI resume mount)
     // recovers the same model.
-    assert_eq!(
-        state_from_messages(sid, &replayed.messages).model,
-        "deepseek-v4-pro"
-    );
+    let in_hand = state_from_messages(sid, &replayed.messages);
+    assert_eq!(in_hand.model, "deepseek-v4-pro");
+    assert_eq!(in_hand.model_profile.as_deref(), Some("deepseek"));
 }
 
 #[tokio::test]

@@ -18,6 +18,24 @@
 
 use std::collections::BTreeMap;
 
+/// Provenance of a telemetry config value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigValueSource {
+    /// Ordinary process environment / non-managed caller lookup.
+    Runtime,
+    /// Enterprise managed policy settings.
+    Managed,
+}
+
+/// One looked-up telemetry config value plus its provenance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigValue {
+    /// The raw string value.
+    pub value: String,
+    /// Where the value came from.
+    pub source: ConfigValueSource,
+}
+
 /// Master enable gate (rebrand of CC `CLAUDE_CODE_ENABLE_TELEMETRY`, binary
 /// `o7u(){return ct(process.env.CLAUDE_CODE_ENABLE_TELEMETRY)}`).
 pub const ENV_ENABLE_TELEMETRY: &str = "LINGXI_ENABLE_TELEMETRY";
@@ -505,11 +523,29 @@ pub struct OtlpExporterConfig {
 }
 
 impl OtlpExporterConfig {
-    fn from_lookup(signal: Signal, get: &impl Fn(&str) -> Option<String>) -> Self {
+    fn from_lookup_with_source(signal: Signal, get: &impl Fn(&str) -> Option<ConfigValue>) -> Self {
         let infix = signal.otlp_infix();
         // Per-signal-first, then generic fallback (binary `?? / ||` precedence).
-        let per_then_generic = |suffix: &str, generic: &str| -> Option<String> {
-            get(&format!("OTEL_EXPORTER_OTLP_{infix}_{suffix}")).or_else(|| get(generic))
+        //
+        // 2.1.217 managed-settings nuance: when the GENERIC endpoint is owned by
+        // managed policy, lower-scope per-signal endpoint overrides must not
+        // redirect one signal away from the managed collector. Preserve standard
+        // per-signal precedence for all non-managed cases, and for same-source
+        // managed signal-specific overrides.
+        let per_then_generic = |suffix: &str, generic: &str| -> Option<ConfigValue> {
+            let per = get(&format!("OTEL_EXPORTER_OTLP_{infix}_{suffix}"));
+            let generic = get(generic);
+            match (per, generic) {
+                (Some(per), Some(generic))
+                    if suffix == "ENDPOINT"
+                        && generic.source == ConfigValueSource::Managed
+                        && per.source != ConfigValueSource::Managed =>
+                {
+                    Some(generic)
+                }
+                (Some(per), _) => Some(per),
+                (None, generic) => generic,
+            }
         };
 
         let kind = ExporterKind::parse(
@@ -518,21 +554,33 @@ impl OtlpExporterConfig {
                 Signal::Logs => ENV_LOGS_EXPORTER,
                 Signal::Traces => ENV_TRACES_EXPORTER,
             })
+            .map(|v| v.value)
             .as_deref(),
         );
 
-        let protocol =
-            OtlpProtocol::parse(per_then_generic("PROTOCOL", ENV_OTLP_PROTOCOL).as_deref());
+        let protocol = OtlpProtocol::parse(
+            per_then_generic("PROTOCOL", ENV_OTLP_PROTOCOL)
+                .map(|v| v.value)
+                .as_deref(),
+        );
 
-        let headers = parse_otlp_headers(per_then_generic("HEADERS", ENV_OTLP_HEADERS).as_deref());
+        let headers = parse_otlp_headers(
+            per_then_generic("HEADERS", ENV_OTLP_HEADERS)
+                .map(|v| v.value)
+                .as_deref(),
+        );
 
         let export_interval_ms = match signal {
             Signal::Metrics => Some(int_env(
-                get(ENV_METRIC_EXPORT_INTERVAL).as_deref(),
+                get(ENV_METRIC_EXPORT_INTERVAL)
+                    .as_ref()
+                    .map(|v| v.value.as_str()),
                 DEFAULT_METRIC_EXPORT_INTERVAL_MS,
             )),
             Signal::Logs => Some(int_env(
-                get(ENV_LOGS_EXPORT_INTERVAL).as_deref(),
+                get(ENV_LOGS_EXPORT_INTERVAL)
+                    .as_ref()
+                    .map(|v| v.value.as_str()),
                 DEFAULT_LOGS_EXPORT_INTERVAL_MS,
             )),
             Signal::Traces => None,
@@ -541,15 +589,20 @@ impl OtlpExporterConfig {
         OtlpExporterConfig {
             signal,
             kind,
-            endpoint: per_then_generic("ENDPOINT", ENV_OTLP_ENDPOINT),
+            endpoint: per_then_generic("ENDPOINT", ENV_OTLP_ENDPOINT).map(|v| v.value),
             protocol,
             headers,
-            certificate: get(ENV_OTLP_CERTIFICATE),
-            client_key: get(ENV_OTLP_CLIENT_KEY),
-            client_certificate: get(ENV_OTLP_CLIENT_CERTIFICATE),
-            compression: get(ENV_OTLP_COMPRESSION),
-            timeout_ms: get(ENV_OTLP_TIMEOUT).as_deref().and_then(parse_int_js),
-            insecure: bool_env(get(ENV_OTLP_INSECURE).as_deref(), false),
+            certificate: get(ENV_OTLP_CERTIFICATE).map(|v| v.value),
+            client_key: get(ENV_OTLP_CLIENT_KEY).map(|v| v.value),
+            client_certificate: get(ENV_OTLP_CLIENT_CERTIFICATE).map(|v| v.value),
+            compression: get(ENV_OTLP_COMPRESSION).map(|v| v.value),
+            timeout_ms: get(ENV_OTLP_TIMEOUT)
+                .as_ref()
+                .and_then(|v| parse_int_js(&v.value)),
+            insecure: bool_env(
+                get(ENV_OTLP_INSECURE).as_ref().map(|v| v.value.as_str()),
+                false,
+            ),
             export_interval_ms,
         }
     }
@@ -619,25 +672,60 @@ impl OtelConfig {
         Self::from_lookup(|k| std::env::var(k).ok())
     }
 
+    /// Parse config from the process environment with a higher-priority managed
+    /// override map. Managed keys preserve their provenance so generic managed
+    /// OTLP endpoint values can override lower-scope per-signal endpoint vars
+    /// without changing normal environment-only precedence.
+    #[must_use]
+    pub fn from_env_with_managed(managed: &std::collections::BTreeMap<String, String>) -> Self {
+        Self::from_lookup_with_source(|k| {
+            if let Some(value) = managed.get(k) {
+                return Some(ConfigValue {
+                    value: value.clone(),
+                    source: ConfigValueSource::Managed,
+                });
+            }
+            std::env::var(k).ok().map(|value| ConfigValue {
+                value,
+                source: ConfigValueSource::Runtime,
+            })
+        })
+    }
+
     /// Parse config from an arbitrary lookup closure — the testable core (no
     /// global process-env access, so parse tests never race).
     #[must_use]
     pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Self {
+        Self::from_lookup_with_source(|k| {
+            get(k).map(|value| ConfigValue {
+                value,
+                source: ConfigValueSource::Runtime,
+            })
+        })
+    }
+
+    /// Parse config from a lookup that also reports value provenance.
+    #[must_use]
+    pub fn from_lookup_with_source(get: impl Fn(&str) -> Option<ConfigValue>) -> Self {
         OtelConfig {
-            enabled: bool_env(get(ENV_ENABLE_TELEMETRY).as_deref(), false),
-            metrics: OtlpExporterConfig::from_lookup(Signal::Metrics, &get),
-            logs: OtlpExporterConfig::from_lookup(Signal::Logs, &get),
-            traces: OtlpExporterConfig::from_lookup(Signal::Traces, &get),
-            metrics_include: MetricsInclude::from_lookup(&get),
-            log_include: LogIncludeFlags::from_lookup(&get),
-            timeouts: GateTimeouts::from_lookup(&get),
+            enabled: bool_env(
+                get(ENV_ENABLE_TELEMETRY).as_ref().map(|v| v.value.as_str()),
+                false,
+            ),
+            metrics: OtlpExporterConfig::from_lookup_with_source(Signal::Metrics, &get),
+            logs: OtlpExporterConfig::from_lookup_with_source(Signal::Logs, &get),
+            traces: OtlpExporterConfig::from_lookup_with_source(Signal::Traces, &get),
+            metrics_include: MetricsInclude::from_lookup(&|k| get(k).map(|v| v.value)),
+            log_include: LogIncludeFlags::from_lookup(&|k| get(k).map(|v| v.value)),
+            timeouts: GateTimeouts::from_lookup(&|k| get(k).map(|v| v.value)),
             service_name: get(ENV_SERVICE_NAME)
+                .map(|v| v.value)
                 .filter(|s| !s.trim().is_empty())
                 .unwrap_or_else(|| DEFAULT_SERVICE_NAME.to_string()),
-            resource_attributes: get(ENV_RESOURCE_ATTRIBUTES),
-            traces_sampler: get(ENV_TRACES_SAMPLER),
-            traces_sampler_arg: get(ENV_TRACES_SAMPLER_ARG),
-            content_max_length: compute_content_max_length(&get),
+            resource_attributes: get(ENV_RESOURCE_ATTRIBUTES).map(|v| v.value),
+            traces_sampler: get(ENV_TRACES_SAMPLER).map(|v| v.value),
+            traces_sampler_arg: get(ENV_TRACES_SAMPLER_ARG).map(|v| v.value),
+            content_max_length: compute_content_max_length(&|k| get(k).map(|v| v.value)),
         }
     }
 }
@@ -746,6 +834,48 @@ mod tests {
         assert_eq!(
             cfg.metrics.headers.get("x-tenant").map(String::as_str),
             Some("acme")
+        );
+    }
+
+    #[test]
+    fn managed_generic_endpoint_overrides_lower_signal_specific_endpoint() {
+        let cfg = OtelConfig::from_lookup_with_source(|key| match key {
+            ENV_OTLP_ENDPOINT => Some(ConfigValue {
+                value: "http://managed:4318".to_string(),
+                source: ConfigValueSource::Managed,
+            }),
+            "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT" => Some(ConfigValue {
+                value: "http://runtime-traces:4317".to_string(),
+                source: ConfigValueSource::Runtime,
+            }),
+            "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT" => Some(ConfigValue {
+                value: "http://runtime-logs:4317".to_string(),
+                source: ConfigValueSource::Runtime,
+            }),
+            _ => None,
+        });
+        assert_eq!(cfg.metrics.endpoint.as_deref(), Some("http://managed:4318"));
+        assert_eq!(cfg.logs.endpoint.as_deref(), Some("http://managed:4318"));
+        assert_eq!(cfg.traces.endpoint.as_deref(), Some("http://managed:4318"));
+    }
+
+    #[test]
+    fn managed_signal_specific_endpoint_still_overrides_managed_generic() {
+        let cfg = OtelConfig::from_lookup_with_source(|key| match key {
+            ENV_OTLP_ENDPOINT => Some(ConfigValue {
+                value: "http://managed:4318".to_string(),
+                source: ConfigValueSource::Managed,
+            }),
+            "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT" => Some(ConfigValue {
+                value: "http://managed-traces:4317".to_string(),
+                source: ConfigValueSource::Managed,
+            }),
+            _ => None,
+        });
+        assert_eq!(cfg.metrics.endpoint.as_deref(), Some("http://managed:4318"));
+        assert_eq!(
+            cfg.traces.endpoint.as_deref(),
+            Some("http://managed-traces:4317")
         );
     }
 

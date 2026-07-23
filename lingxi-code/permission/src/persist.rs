@@ -2,8 +2,7 @@
 //!
 //! Ports claude-code `persistPermissionUpdate` (`PermissionUpdate.ts`) →
 //! `addPermissionRulesToSettings` (`permissionsLoader.ts`) → `updateSettingsForSource`
-//! for the `addRules` case, which is the shape the Rust port's simplified
-//! [`PermissionUpdate`] (`{ rule, destination }`) models. The flow:
+//! for rule, mode, and workspace-directory updates. The flow:
 //!
 //! 1. Only DESTINATIONS that support persistence are written — `localSettings`
 //!    / `userSettings` / `projectSettings` (claude-code `supportsPersistence`).
@@ -17,34 +16,17 @@
 //!    matches its canonical form). Existing entries are preserved verbatim and
 //!    ALL other settings keys are preserved (the merge is on a `serde_json::Value`
 //!    so unrecognized keys survive — mirroring TS `{ ...settingsData }`).
-//! 4. Write back pretty-printed + trailing newline.
-//!
-//! ## Divergences (documented)
-//! - The `allowManagedPermissionRulesOnly` enterprise gate
-//!   (`shouldAllowManagedPermissionRulesOnly`) is NOT ported (no managed-policy
-//!   seam in-tree) — every persistable destination is writable here. This is
-//!   the one gate that can BLOCK persistence in claude-code; absent it, the
-//!   port persists where an enterprise claude-code would refuse (a hardening
-//!   gap, not a default-path divergence).
-//! - The Rust [`PermissionUpdate`] is the single-rule `addRules` case only;
-//!   `replaceRules` / `removeRules` / `setMode` / directory updates are not
-//!   modeled (the dialog + `/permissions add` only ever add one rule at a time).
-//! - The write is a plain truncate-write (like the `/effort` persister), not a
-//!   tmp+rename — matching the in-tree `updateSettingsForSource` analogue.
-//! - The `localSettings` `.gitignore` side-effect is NOT ported: when writing
-//!   `settings.local.json`, claude-code also `addFileGlobRuleToGitignore`s it
-//!   (`settings.ts`) so the per-clone file is ignored. We only write the file;
-//!   a project that does not already ignore `.lingxi/settings.local.json` could
-//!   accidentally commit it. (Porting the gitignore write is a follow-up.)
-//! - The `markInternalWrite` file-watcher hint is not ported (no settings
-//!   watcher seam in-tree); a future watcher would see this self-write as an
-//!   external change.
+//! 4. Hold a destination-scoped exclusive lock, mark the target as an internal
+//!    write for the settings watcher, and atomically replace it through the
+//!    root-confined no-follow filesystem primitive.
 
 use crate::result::PermissionUpdateDestination;
 use crate::rule::{PermissionBehavior, PermissionRule, PermissionRuleValue};
 use crate::update::PermissionUpdate;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
+use traits::rooted_fs::{self, AtomicWriteOptions, PRIVATE_DIR_MODE, PRIVATE_FILE_MODE};
+use traits::FsError;
 
 /// Filesystem roots used to resolve a [`PermissionUpdateDestination`] to a
 /// concrete settings file (the persistence analogue of [`crate::FsRoots`]).
@@ -90,14 +72,176 @@ pub enum PersistError {
         "settings file at {0} cannot be merged (invalid or wrong-typed JSON); not overwriting"
     )]
     BrokenJson(PathBuf),
-    /// A filesystem error reading/creating/writing the settings file.
-    #[error("io error on {path}: {source}")]
-    Io {
-        /// The file being read or written.
+    /// A root-confined read, lock, or atomic replacement failed. This includes
+    /// symlink/reparse-point traversal attempts, which are deliberately rejected.
+    #[error("confined settings operation failed on {path}: {source}")]
+    Confined {
+        /// The logical destination settings file.
         path: PathBuf,
-        /// The underlying error.
-        source: std::io::Error,
+        /// The hardened filesystem error.
+        source: FsError,
     },
+}
+
+#[derive(Debug, Clone)]
+struct ConfinedSettingsPath {
+    root: PathBuf,
+    relative: PathBuf,
+    display: PathBuf,
+}
+
+fn confined_settings_path(
+    paths: &PermissionPaths,
+    dest: PermissionUpdateDestination,
+) -> Result<Option<ConfinedSettingsPath>, PersistError> {
+    let Some(display) = paths.destination_path(dest) else {
+        return Ok(None);
+    };
+    let (root, relative) = match dest {
+        PermissionUpdateDestination::UserSettings => {
+            let Some(root) = paths.lingxi_home.parent() else {
+                return Err(PersistError::Confined {
+                    path: display,
+                    source: FsError::OutsideWorkspace(paths.lingxi_home.display().to_string()),
+                });
+            };
+            let Some(home_name) = paths.lingxi_home.file_name() else {
+                return Err(PersistError::Confined {
+                    path: display,
+                    source: FsError::OutsideWorkspace(paths.lingxi_home.display().to_string()),
+                });
+            };
+            (
+                root.to_path_buf(),
+                PathBuf::from(home_name).join("settings.json"),
+            )
+        }
+        PermissionUpdateDestination::ProjectSettings => (
+            paths.cwd.clone(),
+            PathBuf::from(branding::DOT_DIR).join("settings.json"),
+        ),
+        PermissionUpdateDestination::LocalSettings => (
+            paths.cwd.clone(),
+            PathBuf::from(branding::DOT_DIR).join("settings.local.json"),
+        ),
+        PermissionUpdateDestination::Session | PermissionUpdateDestination::CliArg => {
+            return Ok(None);
+        }
+    };
+    Ok(Some(ConfinedSettingsPath {
+        root,
+        relative,
+        display,
+    }))
+}
+
+fn confined_error(path: &ConfinedSettingsPath, source: FsError) -> PersistError {
+    PersistError::Confined {
+        path: path.display.clone(),
+        source,
+    }
+}
+
+fn lock_relative_path(relative: &Path) -> Result<PathBuf, FsError> {
+    let Some(file_name) = relative.file_name().and_then(|name| name.to_str()) else {
+        return Err(FsError::OutsideWorkspace(relative.display().to_string()));
+    };
+    let mut lock = relative.to_path_buf();
+    lock.set_file_name(format!(".{file_name}.lock"));
+    Ok(lock)
+}
+
+fn ensure_local_settings_ignored(paths: &PermissionPaths) -> Result<(), PersistError> {
+    let path = ConfinedSettingsPath {
+        root: paths.cwd.clone(),
+        relative: PathBuf::from(".gitignore"),
+        display: paths.cwd.join(".gitignore"),
+    };
+    let _lock = rooted_fs::lock_exclusive(
+        &path.root,
+        Path::new(".gitignore.lock"),
+        PRIVATE_DIR_MODE,
+        PRIVATE_FILE_MODE,
+    )
+    .map_err(|source| confined_error(&path, source))?;
+    let raw = match rooted_fs::read_to_string(&path.root, &path.relative) {
+        Ok(raw) => raw,
+        Err(FsError::NotFound(_)) => String::new(),
+        Err(source) => return Err(confined_error(&path, source)),
+    };
+    let rooted_rule = format!("/{}/settings.local.json", branding::DOT_DIR);
+    let relative_rule = format!("{}/settings.local.json", branding::DOT_DIR);
+    if raw
+        .lines()
+        .map(str::trim)
+        .any(|line| line == rooted_rule || line == relative_rule)
+    {
+        return Ok(());
+    }
+    let mut updated = raw;
+    if !updated.is_empty() && !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+    updated.push_str(&rooted_rule);
+    updated.push('\n');
+    rooted_fs::atomic_write(
+        &path.root,
+        &path.relative,
+        updated.as_bytes(),
+        AtomicWriteOptions {
+            file_mode: 0o644,
+            create_parents: false,
+            ..AtomicWriteOptions::default()
+        },
+    )
+    .map_err(|source| confined_error(&path, source))
+}
+
+fn mutate_settings_file<F>(
+    paths: &PermissionPaths,
+    dest: PermissionUpdateDestination,
+    missing_is_empty: bool,
+    mutate: F,
+) -> Result<bool, PersistError>
+where
+    F: FnOnce(&str) -> Result<Option<String>, ()>,
+{
+    let Some(path) = confined_settings_path(paths, dest)? else {
+        return Ok(false);
+    };
+    let lock_relative =
+        lock_relative_path(&path.relative).map_err(|source| confined_error(&path, source))?;
+    let _lock = rooted_fs::lock_exclusive(
+        &path.root,
+        &lock_relative,
+        PRIVATE_DIR_MODE,
+        PRIVATE_FILE_MODE,
+    )
+    .map_err(|source| confined_error(&path, source))?;
+
+    let raw = match rooted_fs::read_to_string(&path.root, &path.relative) {
+        Ok(raw) => raw,
+        Err(FsError::NotFound(_)) if missing_is_empty => String::new(),
+        Err(FsError::NotFound(_)) => return Ok(false),
+        Err(source) => return Err(confined_error(&path, source)),
+    };
+    let Some(updated) =
+        mutate(&raw).map_err(|()| PersistError::BrokenJson(path.display.clone()))?
+    else {
+        return Ok(false);
+    };
+    if dest == PermissionUpdateDestination::LocalSettings {
+        ensure_local_settings_ignored(paths)?;
+    }
+    crate::mark_internal_write(&path.display);
+    rooted_fs::atomic_write(
+        &path.root,
+        &path.relative,
+        updated.as_bytes(),
+        AtomicWriteOptions::default(),
+    )
+    .map_err(|source| confined_error(&path, source))?;
+    Ok(true)
 }
 
 /// `permissions.{allow|deny|ask}` key for a behavior.
@@ -120,6 +264,23 @@ fn behavior_key(behavior: PermissionBehavior) -> &'static str {
 /// Existing entries are preserved verbatim; only de-duplication normalizes via
 /// [`PermissionRuleValue::from_rule_string`]→[`PermissionRuleValue::to_rule_string`].
 fn apply_rule_to_settings_json(raw: &str, rule: &PermissionRule) -> Result<Option<String>, ()> {
+    mutate_rules_in_settings_json(raw, std::slice::from_ref(rule), true)
+}
+
+fn mutate_rules_in_settings_json(
+    raw: &str,
+    rules: &[PermissionRule],
+    add: bool,
+) -> Result<Option<String>, ()> {
+    let Some(first) = rules.first() else {
+        return Ok(None);
+    };
+    if rules.iter().any(|rule| rule.behavior != first.behavior) {
+        return Err(());
+    }
+    if !add && raw.trim().is_empty() {
+        return Ok(None);
+    }
     let mut root: Value = if raw.trim().is_empty() {
         json!({})
     } else {
@@ -127,29 +288,47 @@ fn apply_rule_to_settings_json(raw: &str, rule: &PermissionRule) -> Result<Optio
     };
     let obj = root.as_object_mut().ok_or(())?;
 
-    let perms = obj.entry("permissions").or_insert_with(|| json!({}));
-    let perms_obj = perms.as_object_mut().ok_or(())?;
-
-    let key = behavior_key(rule.behavior);
-    let arr = perms_obj.entry(key).or_insert_with(|| json!([]));
-    let arr_vec = arr.as_array_mut().ok_or(())?;
-
-    // The new rule's canonical string. De-dup against existing entries
-    // normalized the same way (so a legacy alias on disk still matches).
-    // NOTE: a tool-wide rule (`rule_content: None`) serializes its `tool_name`
-    // verbatim, so this assumes real tool names are paren-free — a name like
-    // `Read(x)` would persist `"Read(x)"` and re-parse on next load as
-    // Read+content=x (a different, narrower rule). Built-in tool names never
-    // contain parens, and this matches claude-code's `permissionRuleValueToString`.
-    let new_str = rule.value.to_rule_string();
-    let already_present = arr_vec.iter().filter_map(Value::as_str).any(|existing| {
-        PermissionRuleValue::from_rule_string(existing).to_rule_string() == new_str
-    });
-    if already_present {
+    let key = behavior_key(first.behavior);
+    let targets: Vec<String> = rules
+        .iter()
+        .map(|rule| rule.value.to_rule_string())
+        .collect();
+    let mut changed = false;
+    if add {
+        let perms = obj.entry("permissions").or_insert_with(|| json!({}));
+        let perms_obj = perms.as_object_mut().ok_or(())?;
+        let arr = perms_obj.entry(key).or_insert_with(|| json!([]));
+        let arr_vec = arr.as_array_mut().ok_or(())?;
+        for target in targets {
+            let exists = arr_vec.iter().filter_map(Value::as_str).any(|existing| {
+                PermissionRuleValue::from_rule_string(existing).to_rule_string() == target
+            });
+            if !exists {
+                arr_vec.push(json!(target));
+                changed = true;
+            }
+        }
+    } else {
+        let Some(perms) = obj.get_mut("permissions") else {
+            return Ok(None);
+        };
+        let perms_obj = perms.as_object_mut().ok_or(())?;
+        let Some(arr) = perms_obj.get_mut(key) else {
+            return Ok(None);
+        };
+        let arr_vec = arr.as_array_mut().ok_or(())?;
+        let before = arr_vec.len();
+        arr_vec.retain(|existing| {
+            existing.as_str().is_none_or(|value| {
+                let normalized = PermissionRuleValue::from_rule_string(value).to_rule_string();
+                !targets.iter().any(|target| target == &normalized)
+            })
+        });
+        changed = arr_vec.len() != before;
+    }
+    if !changed {
         return Ok(None);
     }
-
-    arr_vec.push(json!(new_str));
     let serialized = serde_json::to_string_pretty(&root).map_err(|_| ())?;
     Ok(Some(serialized + "\n"))
 }
@@ -160,42 +339,29 @@ fn apply_rule_to_settings_json(raw: &str, rule: &PermissionRule) -> Result<Optio
 ///
 /// # Errors
 /// [`PersistError::BrokenJson`] if the destination file is not valid JSON (it is
-/// left untouched); [`PersistError::Io`] on a read/create/write failure.
+/// left untouched); [`PersistError::Confined`] on a hardened filesystem failure.
 pub async fn persist_permission_update(
     update: &PermissionUpdate,
     paths: &PermissionPaths,
 ) -> Result<bool, PersistError> {
-    let Some(path) = paths.destination_path(update.destination) else {
-        return Ok(false); // Session / CliArg — not persistable.
-    };
+    mutate_settings_file(paths, update.destination, true, |raw| {
+        apply_rule_to_settings_json(raw, &update.rule)
+    })
+}
 
-    let raw = match tokio::fs::read_to_string(&path).await {
-        Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => {
-            return Err(PersistError::Io {
-                path: path.clone(),
-                source: e,
-            })
-        }
-    };
-
-    let Some(new_json) = apply_rule_to_settings_json(&raw, &update.rule)
-        .map_err(|()| PersistError::BrokenJson(path.clone()))?
-    else {
-        return Ok(false); // already present — nothing to write.
-    };
-
-    if let Some(parent) = path.parent() {
-        ensure_dir(parent, &path).await?;
+/// Add or remove a same-behavior rule set in one locked atomic transaction.
+pub async fn persist_permission_rule_set(
+    rules: &[PermissionRule],
+    add: bool,
+    destination: PermissionUpdateDestination,
+    paths: &PermissionPaths,
+) -> Result<bool, PersistError> {
+    if rules.is_empty() {
+        return Ok(false);
     }
-    tokio::fs::write(&path, new_json)
-        .await
-        .map_err(|e| PersistError::Io {
-            path: path.clone(),
-            source: e,
-        })?;
-    Ok(true)
+    mutate_settings_file(paths, destination, add, |raw| {
+        mutate_rules_in_settings_json(raw, rules, add)
+    })
 }
 
 /// Remove `rule`'s string form from `permissions.{behavior}` of `raw` settings
@@ -209,31 +375,65 @@ pub async fn persist_permission_update(
 /// Matching is canonical (both sides normalized via `PermissionRuleValue`), so a
 /// legacy on-disk alias of the same rule is removed too.
 fn remove_rule_from_settings_json(raw: &str, rule: &PermissionRule) -> Result<Option<String>, ()> {
-    if raw.trim().is_empty() {
-        return Ok(None);
-    }
-    let mut root: Value = serde_json::from_str(raw).map_err(|_| ())?;
-    let obj = root.as_object_mut().ok_or(())?;
-    let Some(perms) = obj.get_mut("permissions") else {
-        return Ok(None);
-    };
-    let perms_obj = perms.as_object_mut().ok_or(())?;
-    let key = behavior_key(rule.behavior);
-    let Some(arr) = perms_obj.get_mut(key) else {
-        return Ok(None);
-    };
-    let arr_vec = arr.as_array_mut().ok_or(())?;
+    mutate_rules_in_settings_json(raw, std::slice::from_ref(rule), false)
+}
 
-    let target = rule.value.to_rule_string();
-    let before = arr_vec.len();
-    arr_vec.retain(|existing| {
-        existing
-            .as_str()
-            .is_none_or(|s| PermissionRuleValue::from_rule_string(s).to_rule_string() != target)
-    });
-    if arr_vec.len() == before {
-        return Ok(None); // nothing matched.
+fn replace_rules_in_settings_json(
+    raw: &str,
+    behavior: PermissionBehavior,
+    rules: &[PermissionRule],
+) -> Result<Option<String>, ()> {
+    // Keep the public replacement primitive fail-closed just like the
+    // add/remove batch path. Production wire parsing constructs homogeneous
+    // rules, but accepting a mismatched caller here would silently serialize a
+    // deny/ask rule into the selected allow bucket (or vice versa).
+    if rules.iter().any(|rule| rule.behavior != behavior) {
+        return Err(());
     }
+    let mut root: Value = if raw.trim().is_empty() {
+        json!({})
+    } else {
+        serde_json::from_str(raw).map_err(|_| ())?
+    };
+    let obj = root.as_object_mut().ok_or(())?;
+    let perms = obj.entry("permissions").or_insert_with(|| json!({}));
+    let perms_obj = perms.as_object_mut().ok_or(())?;
+    let key = behavior_key(behavior);
+    let replacement: Vec<Value> = rules
+        .iter()
+        .map(|rule| json!(rule.value.to_rule_string()))
+        .collect();
+    if perms_obj.get(key).and_then(Value::as_array) == Some(&replacement) {
+        return Ok(None);
+    }
+    if let Some(existing) = perms_obj.get(key) {
+        if !existing.is_array() {
+            return Err(());
+        }
+    }
+    perms_obj.insert(key.to_string(), Value::Array(replacement));
+    let serialized = serde_json::to_string_pretty(&root).map_err(|_| ())?;
+    Ok(Some(serialized + "\n"))
+}
+
+fn set_default_mode_in_settings_json(raw: &str, mode: &str) -> Result<Option<String>, ()> {
+    let mut root: Value = if raw.trim().is_empty() {
+        json!({})
+    } else {
+        serde_json::from_str(raw).map_err(|_| ())?
+    };
+    let obj = root.as_object_mut().ok_or(())?;
+    let perms = obj.entry("permissions").or_insert_with(|| json!({}));
+    let perms_obj = perms.as_object_mut().ok_or(())?;
+    if perms_obj.get("defaultMode").and_then(Value::as_str) == Some(mode) {
+        return Ok(None);
+    }
+    if let Some(existing) = perms_obj.get("defaultMode") {
+        if !existing.is_string() {
+            return Err(());
+        }
+    }
+    perms_obj.insert("defaultMode".to_string(), json!(mode));
     let serialized = serde_json::to_string_pretty(&root).map_err(|_| ())?;
     Ok(Some(serialized + "\n"))
 }
@@ -245,36 +445,47 @@ fn remove_rule_from_settings_json(raw: &str, rule: &PermissionRule) -> Result<Op
 ///
 /// # Errors
 /// [`PersistError::BrokenJson`] if the destination is non-empty and not valid
-/// JSON (left untouched); [`PersistError::Io`] on a read/write failure.
+/// JSON (left untouched); [`PersistError::Confined`] on a hardened filesystem failure.
 pub async fn remove_permission_update(
     update: &PermissionUpdate,
     paths: &PermissionPaths,
 ) -> Result<bool, PersistError> {
-    let Some(path) = paths.destination_path(update.destination) else {
+    mutate_settings_file(paths, update.destination, false, |raw| {
+        remove_rule_from_settings_json(raw, &update.rule)
+    })
+}
+
+/// Replace every rule in one behavior bucket at `destination` atomically.
+/// Session and CLI destinations are live-only and therefore no-op here.
+pub async fn replace_permission_rules(
+    behavior: PermissionBehavior,
+    rules: &[PermissionRule],
+    destination: PermissionUpdateDestination,
+    paths: &PermissionPaths,
+) -> Result<bool, PersistError> {
+    mutate_settings_file(paths, destination, true, |raw| {
+        replace_rules_in_settings_json(raw, behavior, rules)
+    })
+}
+
+/// Persist a `setMode` permission update as `permissions.defaultMode`.
+/// `bypassPermissions` is intentionally session-scoped and is never written.
+pub async fn persist_permission_mode(
+    mode: &str,
+    destination: PermissionUpdateDestination,
+    paths: &PermissionPaths,
+) -> Result<bool, PersistError> {
+    if mode == "bypassPermissions"
+        || !matches!(
+            mode,
+            "default" | "acceptEdits" | "plan" | "dontAsk" | "auto"
+        )
+    {
         return Ok(false);
-    };
-    let raw = match tokio::fs::read_to_string(&path).await {
-        Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(e) => {
-            return Err(PersistError::Io {
-                path: path.clone(),
-                source: e,
-            })
-        }
-    };
-    let Some(new_json) = remove_rule_from_settings_json(&raw, &update.rule)
-        .map_err(|()| PersistError::BrokenJson(path.clone()))?
-    else {
-        return Ok(false);
-    };
-    tokio::fs::write(&path, new_json)
-        .await
-        .map_err(|e| PersistError::Io {
-            path: path.clone(),
-            source: e,
-        })?;
-    Ok(true)
+    }
+    mutate_settings_file(paths, destination, true, |raw| {
+        set_default_mode_in_settings_json(raw, mode)
+    })
 }
 
 /// (PERM-1 Workspace tab) Add or remove `dir` in
@@ -289,6 +500,17 @@ pub async fn remove_permission_update(
 /// Directory entries are compared verbatim (claude-code stores the path
 /// string as-typed; no canonicalization).
 fn apply_directory_to_settings_json(raw: &str, dir: &str, add: bool) -> Result<Option<String>, ()> {
+    mutate_directories_in_settings_json(raw, &[dir], add)
+}
+
+fn mutate_directories_in_settings_json(
+    raw: &str,
+    directories: &[&str],
+    add: bool,
+) -> Result<Option<String>, ()> {
+    if directories.is_empty() {
+        return Ok(None);
+    }
     if !add && raw.trim().is_empty() {
         return Ok(None);
     }
@@ -306,10 +528,20 @@ fn apply_directory_to_settings_json(raw: &str, dir: &str, add: bool) -> Result<O
             .entry("additionalDirectories")
             .or_insert_with(|| json!([]));
         let arr_vec = arr.as_array_mut().ok_or(())?;
-        if arr_vec.iter().filter_map(Value::as_str).any(|d| d == dir) {
-            return Ok(None); // already present.
+        let mut changed = false;
+        for directory in directories {
+            if !arr_vec
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|existing| existing == *directory)
+            {
+                arr_vec.push(json!(directory));
+                changed = true;
+            }
         }
-        arr_vec.push(json!(dir));
+        if !changed {
+            return Ok(None);
+        }
     } else {
         let Some(perms) = obj.get_mut("permissions") else {
             return Ok(None);
@@ -320,7 +552,11 @@ fn apply_directory_to_settings_json(raw: &str, dir: &str, add: bool) -> Result<O
         };
         let arr_vec = arr.as_array_mut().ok_or(())?;
         let before = arr_vec.len();
-        arr_vec.retain(|d| d.as_str() != Some(dir));
+        arr_vec.retain(|entry| {
+            entry
+                .as_str()
+                .is_none_or(|value| !directories.contains(&value))
+        });
         if arr_vec.len() == before {
             return Ok(None); // nothing matched.
         }
@@ -337,55 +573,32 @@ fn apply_directory_to_settings_json(raw: &str, dir: &str, add: bool) -> Result<O
 ///
 /// # Errors
 /// [`PersistError::BrokenJson`] if the destination is non-empty and not valid
-/// JSON (left untouched); [`PersistError::Io`] on a read/create/write failure.
+/// JSON (left untouched); [`PersistError::Confined`] on a hardened filesystem failure.
 pub async fn persist_workspace_directory(
     dir: &str,
     add: bool,
     dest: PermissionUpdateDestination,
     paths: &PermissionPaths,
 ) -> Result<bool, PersistError> {
-    let Some(path) = paths.destination_path(dest) else {
-        return Ok(false);
-    };
-    let raw = match tokio::fs::read_to_string(&path).await {
-        Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            if !add {
-                return Ok(false); // nothing to remove from a missing file.
-            }
-            String::new()
-        }
-        Err(e) => {
-            return Err(PersistError::Io {
-                path: path.clone(),
-                source: e,
-            })
-        }
-    };
-    let Some(new_json) = apply_directory_to_settings_json(&raw, dir, add)
-        .map_err(|()| PersistError::BrokenJson(path.clone()))?
-    else {
-        return Ok(false);
-    };
-    if let Some(parent) = path.parent() {
-        ensure_dir(parent, &path).await?;
-    }
-    tokio::fs::write(&path, new_json)
-        .await
-        .map_err(|e| PersistError::Io {
-            path: path.clone(),
-            source: e,
-        })?;
-    Ok(true)
+    mutate_settings_file(paths, dest, add, |raw| {
+        apply_directory_to_settings_json(raw, dir, add)
+    })
 }
 
-async fn ensure_dir(parent: &Path, path: &Path) -> Result<(), PersistError> {
-    tokio::fs::create_dir_all(parent)
-        .await
-        .map_err(|e| PersistError::Io {
-            path: path.to_path_buf(),
-            source: e,
-        })
+/// Add or remove multiple workspace directories in one locked atomic update.
+pub async fn persist_workspace_directories(
+    directories: &[String],
+    add: bool,
+    dest: PermissionUpdateDestination,
+    paths: &PermissionPaths,
+) -> Result<bool, PersistError> {
+    let directories: Vec<&str> = directories.iter().map(String::as_str).collect();
+    if directories.is_empty() {
+        return Ok(false);
+    }
+    mutate_settings_file(paths, dest, add, |raw| {
+        mutate_directories_in_settings_json(raw, &directories, add)
+    })
 }
 
 #[cfg(test)]
@@ -499,6 +712,39 @@ mod tests {
     }
 
     #[test]
+    fn replace_rules_and_default_mode_preserve_unrelated_settings() {
+        let raw =
+            r#"{ "model": "x", "permissions": { "allow": ["Read"], "deny": ["Bash(rm:*)"] } }"#;
+        let rules = [allow_rule("Edit(src/**)", PermissionUpdateDestination::ProjectSettings).rule];
+        let replaced = replace_rules_in_settings_json(raw, PermissionBehavior::Allow, &rules)
+            .unwrap()
+            .unwrap();
+        let with_mode = set_default_mode_in_settings_json(&replaced, "plan")
+            .unwrap()
+            .unwrap();
+        let value: Value = serde_json::from_str(&with_mode).unwrap();
+        assert_eq!(value["model"], "x");
+        assert_eq!(value["permissions"]["allow"], json!(["Edit(src/**)"]));
+        assert_eq!(value["permissions"]["deny"], json!(["Bash(rm:*)"]));
+        assert_eq!(value["permissions"]["defaultMode"], "plan");
+    }
+
+    #[test]
+    fn replace_rules_rejects_behavior_mismatch() {
+        let deny_rule = PermissionRule {
+            value: PermissionRuleValue::from_rule_string("Bash(rm:*)"),
+            behavior: PermissionBehavior::Deny,
+            source: PermissionRuleSource::LocalSettings,
+        };
+        assert!(replace_rules_in_settings_json(
+            r#"{ "permissions": { "allow": ["Read"] } }"#,
+            PermissionBehavior::Allow,
+            &[deny_rule],
+        )
+        .is_err());
+    }
+
+    #[test]
     fn broken_json_errors() {
         let rule = allow_rule("Bash", PermissionUpdateDestination::LocalSettings).rule;
         assert!(apply_rule_to_settings_json("{not json", &rule).is_err());
@@ -552,6 +798,7 @@ mod tests {
     async fn persist_creates_local_settings_and_is_idempotent() {
         let tmp = std::env::temp_dir().join(format!("lx-3c-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("proj")).unwrap();
         let paths = PermissionPaths {
             lingxi_home: tmp.join("home/.lingxi"),
             cwd: tmp.join("proj"),
@@ -564,10 +811,96 @@ mod tests {
         let written = std::fs::read_to_string(&path).unwrap();
         let v: Value = serde_json::from_str(&written).unwrap();
         assert_eq!(v["permissions"]["allow"], json!(["Bash"]));
+        assert_eq!(
+            std::fs::read_to_string(tmp.join("proj/.gitignore")).unwrap(),
+            "/.lingxi/settings.local.json\n"
+        );
 
         // Second persist of the same rule is a no-op (idempotent).
         assert!(!persist_permission_update(&update, &paths).await.unwrap());
 
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn persistent_variants_survive_reload_and_bypass_mode_does_not() {
+        let tmp = std::env::temp_dir().join(format!("lx-persist-variants-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("proj")).unwrap();
+        let paths = PermissionPaths {
+            lingxi_home: tmp.join("home/.lingxi"),
+            cwd: tmp.join("proj"),
+        };
+        let destination = PermissionUpdateDestination::LocalSettings;
+        let initial = [allow_rule("Read", destination).rule];
+        assert!(
+            replace_permission_rules(PermissionBehavior::Allow, &initial, destination, &paths)
+                .await
+                .unwrap()
+        );
+        assert!(persist_permission_mode("plan", destination, &paths)
+            .await
+            .unwrap());
+        assert!(
+            !persist_permission_mode("bypassPermissions", destination, &paths)
+                .await
+                .unwrap()
+        );
+        let body = std::fs::read_to_string(tmp.join("proj/.lingxi/settings.local.json")).unwrap();
+        let value: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(value["permissions"]["allow"], json!(["Read"]));
+        assert_eq!(value["permissions"]["defaultMode"], "plan");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn confined_persistence_rejects_symlinked_settings_directory() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = std::env::temp_dir().join(format!("lx-persist-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("proj")).unwrap();
+        std::fs::create_dir_all(tmp.join("outside")).unwrap();
+        symlink(tmp.join("outside"), tmp.join("proj/.lingxi")).unwrap();
+        let paths = PermissionPaths {
+            lingxi_home: tmp.join("home/.lingxi"),
+            cwd: tmp.join("proj"),
+        };
+        let update = allow_rule("Bash", PermissionUpdateDestination::LocalSettings);
+        let error = persist_permission_update(&update, &paths)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, PersistError::Confined { .. }));
+        assert!(!tmp.join("outside/settings.local.json").exists());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_persistence_rejects_symlinked_gitignore_before_writing_settings() {
+        use std::os::unix::fs::symlink;
+
+        let tmp =
+            std::env::temp_dir().join(format!("lx-persist-gitignore-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("proj")).unwrap();
+        std::fs::write(tmp.join("outside-gitignore"), "outside\n").unwrap();
+        symlink(tmp.join("outside-gitignore"), tmp.join("proj/.gitignore")).unwrap();
+        let paths = PermissionPaths {
+            lingxi_home: tmp.join("home/.lingxi"),
+            cwd: tmp.join("proj"),
+        };
+        let update = allow_rule("Bash", PermissionUpdateDestination::LocalSettings);
+        let error = persist_permission_update(&update, &paths)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, PersistError::Confined { .. }));
+        assert!(!tmp.join("proj/.lingxi/settings.local.json").exists());
+        assert_eq!(
+            std::fs::read_to_string(tmp.join("outside-gitignore")).unwrap(),
+            "outside\n"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

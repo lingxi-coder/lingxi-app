@@ -65,6 +65,9 @@ pub struct SessionMetadata {
     pub message_count: usize,
     /// Absolute path to the `.jsonl` file (kept so callers can re-load without re-resolving).
     pub path: PathBuf,
+    /// Pull-request number linked to this session, when a `pr-link` metadata
+    /// entry exists. This powers Claude-compatible `--from-pr` filtering.
+    pub pr_number: Option<u64>,
 }
 
 /// A resumable-session catalog plus the number of UUID-named transcript files
@@ -516,6 +519,7 @@ async fn collect_dir(
                 || extract_title(&loaded.messages_in_order),
                 |t| truncate_title(t),
             );
+        let pr_number = loaded.pr_numbers.get(sid).copied();
 
         rows.push(SessionMetadata {
             uuid,
@@ -529,6 +533,7 @@ async fn collect_dir(
             // assistant lines, isMeta lines, and system/attachment lines.
             message_count: count_visible_messages(&loaded.messages_in_order),
             path,
+            pr_number,
         });
     }
     Ok(true)
@@ -855,19 +860,48 @@ pub async fn read_agent_setting(
     fs: Arc<dyn FileSystem>,
     session_id: &str,
 ) -> Option<String> {
+    read_agent_resume_state(transcript_path, fs, session_id)
+        .await
+        .0
+}
+
+/// Read the persisted main-thread agent type and immutable definition from one
+/// routed transcript snapshot. Keeping the pair on one read prevents a
+/// concurrent append from producing a type from one revision and a definition
+/// from another.
+pub async fn read_agent_resume_state(
+    transcript_path: &Path,
+    fs: Arc<dyn FileSystem>,
+    session_id: &str,
+) -> (Option<String>, Option<Value>) {
+    use sha2::{Digest, Sha256};
+
     if !tokio::fs::try_exists(transcript_path)
         .await
         .unwrap_or(false)
     {
-        return None;
+        return (None, None);
     }
     let reader = JsonlReader::new(transcript_path.to_path_buf(), fs);
-    let loaded = reader.read_routed().await.ok()?;
-    loaded
+    let Ok(loaded) = reader.read_routed().await else {
+        return (None, None);
+    };
+    let setting = loaded
         .agent_settings
         .get(session_id)
         .and_then(Value::as_str)
-        .map(str::to_string)
+        .map(str::to_string);
+    let definition = loaded.agent_snapshots.get(session_id).and_then(|snapshot| {
+        if snapshot.get("schemaVersion").and_then(Value::as_u64) != Some(1) {
+            return None;
+        }
+        let definition = snapshot.get("definition")?;
+        let expected = snapshot.get("sha256").and_then(Value::as_str)?;
+        let canonical = serde_json::to_vec(definition).ok()?;
+        let actual = format!("{:x}", Sha256::digest(&canonical));
+        (actual == expected).then(|| definition.clone())
+    });
+    (setting, definition)
 }
 
 /// Read the last immutable resolved-agent snapshot for a session. Returns
@@ -878,25 +912,9 @@ pub async fn read_agent_snapshot(
     fs: Arc<dyn FileSystem>,
     session_id: &str,
 ) -> Option<Value> {
-    use sha2::{Digest, Sha256};
-
-    if !tokio::fs::try_exists(transcript_path)
+    read_agent_resume_state(transcript_path, fs, session_id)
         .await
-        .unwrap_or(false)
-    {
-        return None;
-    }
-    let reader = JsonlReader::new(transcript_path.to_path_buf(), fs);
-    let loaded = reader.read_routed().await.ok()?;
-    let snapshot = loaded.agent_snapshots.get(session_id)?;
-    if snapshot.get("schemaVersion").and_then(Value::as_u64) != Some(1) {
-        return None;
-    }
-    let definition = snapshot.get("definition")?;
-    let expected = snapshot.get("sha256").and_then(Value::as_str)?;
-    let canonical = serde_json::to_vec(definition).ok()?;
-    let actual = format!("{:x}", Sha256::digest(&canonical));
-    (actual == expected).then(|| definition.clone())
+        .1
 }
 
 /// (parity 2.1.212) Read the persisted `worktree-state` for `session_id` from
@@ -974,6 +992,48 @@ pub fn pre_compact_discovered_tools(messages: &[JsonlMessage]) -> Vec<String> {
         };
         for t in tools.iter().filter_map(Value::as_str) {
             set.insert(t.to_string());
+        }
+    }
+    let mut names: Vec<String> = set.into_iter().collect();
+    names.sort();
+    names
+}
+
+/// Reconstruct every deferred tool discovered by `ToolSearch` from a loaded
+/// transcript. This combines compact-boundary carry metadata with live
+/// `tool_reference` blocks that have not yet been summarized.
+///
+/// Both LingXi's persisted protocol shape (`content_blocks`) and Claude Code's
+/// Anthropic-compatible shape (array-valued `content`) are accepted, so a cold
+/// resume does not lose schemas merely because no compaction occurred.
+#[must_use]
+pub fn discovered_tool_names(messages: &[JsonlMessage]) -> Vec<String> {
+    let mut set: HashSet<String> = pre_compact_discovered_tools(messages).into_iter().collect();
+    for message in messages {
+        if message.message_type != "user" {
+            continue;
+        }
+        let Some(content) = message.message.get("content").and_then(Value::as_array) else {
+            continue;
+        };
+        for tool_result in content
+            .iter()
+            .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))
+        {
+            let nested = tool_result
+                .get("content_blocks")
+                .or_else(|| tool_result.get("content"))
+                .and_then(Value::as_array);
+            let Some(nested) = nested else {
+                continue;
+            };
+            for name in nested.iter().filter_map(|block| {
+                (block.get("type").and_then(Value::as_str) == Some("tool_reference"))
+                    .then(|| block.get("tool_name").and_then(Value::as_str))
+                    .flatten()
+            }) {
+                set.insert(name.to_string());
+            }
         }
     }
     let mut names: Vec<String> = set.into_iter().collect();
@@ -1830,6 +1890,53 @@ mod tests {
         assert!(pre_compact_discovered_tools(&[boundary_line("b1", Some(&[]))]).is_empty());
     }
 
+    #[test]
+    fn discovered_tool_names_reads_uncompacted_lingxi_and_claude_shapes() {
+        let lingxi = user_with_content(
+            "u1",
+            json!([{
+                "type": "tool_result",
+                "tool_use_id": "toolu_1",
+                "content": "",
+                "is_error": false,
+                "content_blocks": [
+                    {"type": "tool_reference", "tool_name": "mcp__x__read"}
+                ]
+            }]),
+        );
+        let claude = user_with_content(
+            "u2",
+            json!([{
+                "type": "tool_result",
+                "tool_use_id": "toolu_2",
+                "content": [
+                    {"type": "tool_reference", "tool_name": "mcp__y__write"}
+                ]
+            }]),
+        );
+        assert_eq!(
+            discovered_tool_names(&[lingxi, claude]),
+            vec!["mcp__x__read".to_string(), "mcp__y__write".to_string()]
+        );
+    }
+
+    #[test]
+    fn discovered_tool_names_unions_history_with_compact_carry() {
+        let history = user_with_content(
+            "u1",
+            json!([{
+                "type": "tool_result",
+                "content_blocks": [
+                    {"type": "tool_reference", "tool_name": "Task"}
+                ]
+            }]),
+        );
+        assert_eq!(
+            discovered_tool_names(&[boundary_line("b1", Some(&["WebFetch", "Task"])), history,]),
+            vec!["Task".to_string(), "WebFetch".to_string()]
+        );
+    }
+
     fn make_fs(root: &Path) -> Arc<dyn FileSystem> {
         Arc::new(PosixFileSystem::new(root.to_path_buf()))
     }
@@ -2175,6 +2282,7 @@ mod tests {
             created: SystemTime::UNIX_EPOCH + Duration::from_secs(100),
             message_count: 1,
             path: PathBuf::from("z.jsonl"),
+            pr_number: None,
         };
         let newer = SessionMetadata {
             uuid: Uuid::from_u128(2),
@@ -2183,6 +2291,7 @@ mod tests {
             created: SystemTime::UNIX_EPOCH + Duration::from_secs(200),
             message_count: 1,
             path: PathBuf::from("a.jsonl"),
+            pr_number: None,
         };
         // Insert oldest-created first to prove the sort (not insertion order)
         // drives the result.

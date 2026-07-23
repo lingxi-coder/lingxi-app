@@ -1,6 +1,6 @@
 //! Tick-loop-free, single-shot cron firing core.
 //!
-//! The desktop [`crate::scheduler::CronScheduler`] owns a long-lived 60-second
+//! The desktop [`crate::scheduler::CronScheduler`] owns a long-lived one-second
 //! tick loop and fires due jobs as `TaskType::Dream` subagents through a
 //! [`tasks::TaskRegistry`]. Mobile hosts cannot run that loop — a backgrounded
 //! Android process is killed, and the mobile engine binds no `TaskRegistry` /
@@ -14,11 +14,11 @@
 //! `tasks_file_without`, `is_recurring_task_aged` from [`crate::scheduler`], and
 //! [`crate::schedule::CronExpression::next_match_after`]), so the semantics —
 //! epoch-millisecond timestamps, missed-run catch-up-once, one-shot auto-delete,
-//! recurring `lastFiredAt` persistence, 30-day recurring auto-expiry — are 1:1
-//! with desktop. The single-shot path takes no per-job A9 firing lock and
-//! applies no jitter (a phone is single process and the foreground service is
-//! the only firer); every scheduled-task file mutation still takes the shared
-//! root-confined cross-process lock.
+//! recurring `lastFiredAt` persistence, deterministic jitter/cache lead, and
+//! seven-day recurring auto-expiry — are 1:1 with desktop. The single-shot path
+//! takes no per-job A9 firing lock (a phone is single process and the foreground
+//! service is the only firer); every scheduled-task file mutation still takes
+//! the shared root-confined cross-process lock.
 //!
 //! Firing itself is abstracted behind [`CronJobFirer`] (`fire(prompt) -> result`)
 //! so the same core serves desktop (a Dream subagent) and mobile (a fresh
@@ -34,8 +34,8 @@ use traits::{Clock, FileSystem};
 
 use crate::schedule::parse_cron;
 use crate::scheduler::{
-    finalize_fired_job, is_job_due, is_recurring_task_aged, tasks_file_with_last_fired,
-    tasks_file_without, CronTaskDef, DEFAULT_RECURRING_MAX_AGE,
+    finalize_fired_job, is_job_due, is_recurring_task_aged, next_fire_time,
+    tasks_file_with_last_fired, tasks_file_without, CronTaskDef, DEFAULT_RECURRING_MAX_AGE,
 };
 use crate::tasks_file::parse_tasks;
 
@@ -98,8 +98,9 @@ pub struct FiredJob {
 /// `recurring_max_age` mirrors [`crate::scheduler::CronScheduler`]'s field
 /// (`Some(`[`DEFAULT_RECURRING_MAX_AGE`]`)` on both hosts; `None` disables
 /// expiry). A missing / unparseable tasks file fires nothing. Unlike the desktop
-/// tick loop, firing takes no per-job lock and applies no jitter; persistence
-/// mutations remain serialized in-process and cross-process.
+/// tick loop, firing takes no per-job lock; deterministic fire-time jitter is
+/// already included by the shared due predicate. Persistence mutations remain
+/// serialized in-process and cross-process.
 pub async fn run_due_jobs(
     tasks_file: &Path,
     fs: Arc<dyn FileSystem>,
@@ -150,31 +151,16 @@ pub async fn run_due_jobs(
         );
     }
 
-    // (1) Auto-expire aged recurring jobs BEFORE the due scan (1:1 with
-    //     `CronScheduler::tick`), removing each from the single tasks file too.
-    let expired_ids: Vec<String> = tasks
-        .values()
-        .filter(|t| is_recurring_task_aged(now, t.created_at, t.recurring, recurring_max_age))
-        .map(|t| t.id.clone())
-        .collect();
-    for id in &expired_ids {
-        tasks.remove(id);
-        remove_task_from_file(fs.as_ref(), project_root, id).await;
-        tracing::info!(
-            event = "tengu_scheduled_task_expired",
-            cron_id = %id,
-            "cron job auto-expired after exceeding the recurring max age"
-        );
-    }
-
-    // (2) Due-detection with missed-run catch-up (`is_job_due`).
+    // (1) Due-detection with missed-run catch-up (`is_job_due`). Age is not
+    // checked here: Claude Code lets an aged recurring job keep waiting until
+    // its next due time, then gives it one final fire before deletion.
     let due_ids: Vec<String> = tasks
         .values()
         .filter(|t| is_job_due(t, now))
         .map(|t| t.id.clone())
         .collect();
 
-    // (3) Fire each due job, then apply post-fire bookkeeping identically to
+    // (2) Fire each due job, then apply post-fire bookkeeping identically to
     //     `CronScheduler::tick` (one-shot auto-delete vs recurring lastFiredAt).
     let now_ms = system_time_to_epoch_ms(now);
     let mut fired = Vec::with_capacity(due_ids.len());
@@ -185,10 +171,24 @@ pub async fn run_due_jobs(
             Err(message) => (FireStatus::Failed(message), None),
         };
 
-        let one_shot = finalize_fired_job(&mut tasks, &id, now);
-        if one_shot {
+        let expires_after_fire = tasks.get(&id).is_some_and(|task| {
+            is_recurring_task_aged(now, task.created_at, task.recurring, recurring_max_age)
+        });
+        let remove_after_fire = finalize_fired_job(&mut tasks, &id, now) || expires_after_fire;
+        if expires_after_fire {
+            tasks.remove(&id);
+        }
+        if remove_after_fire {
             remove_task_from_file(fs.as_ref(), project_root, &id).await;
-            tracing::info!(cron_id = %id, "one-shot cron job fired and auto-deleted");
+            if expires_after_fire {
+                tracing::info!(
+                    event = "tengu_scheduled_task_expired",
+                    cron_id = %id,
+                    "cron job fired its final run after exceeding the recurring max age"
+                );
+            } else {
+                tracing::info!(cron_id = %id, "one-shot cron job fired and auto-deleted");
+            }
         } else {
             set_last_fired_in_file(fs.as_ref(), project_root, &id, now_ms).await;
         }
@@ -206,9 +206,10 @@ pub async fn run_due_jobs(
 /// The earliest next fire across all persisted ENABLED jobs, as epoch
 /// **milliseconds**, or `None` if there are no jobs / none ever fire again. The
 /// host arms its next OS alarm at this instant. The anchor for each job is
-/// `lastFiredAt ?? createdAt` and the next fire is
-/// [`crate::schedule::CronExpression::next_match_after`] — so a job already
-/// overdue yields a past instant (the host fires immediately and re-arms).
+/// `lastFiredAt ?? createdAt`; the returned instant includes the same
+/// deterministic recurring/one-shot jitter and cache-lead exception as the
+/// desktop scheduler. An overdue job yields a past instant, so the host fires
+/// immediately and re-arms.
 pub async fn next_fire_epoch_ms(
     tasks_file: &Path,
     fs: Arc<dyn FileSystem>,
@@ -230,12 +231,21 @@ pub async fn next_fire_epoch_ms(
         } else {
             now
         };
-        let anchor = t
+        let last_run = t
             .last_fired_at
             .filter(|ms| *ms > 0)
-            .map(|ms| SystemTime::UNIX_EPOCH + Duration::from_millis(ms))
-            .unwrap_or(created_at);
-        if let Some(next) = schedule.next_match_after(anchor) {
+            .map(|ms| SystemTime::UNIX_EPOCH + Duration::from_millis(ms));
+        let task = CronTaskDef {
+            id: t.id,
+            schedule,
+            prompt: t.prompt,
+            agent_type: None,
+            last_run,
+            enabled: true,
+            created_at,
+            recurring: t.recurring.unwrap_or(false),
+        };
+        if let Some(next) = next_fire_time(&task) {
             earliest = Some(match earliest {
                 Some(e) if e <= next => e,
                 _ => next,
@@ -544,6 +554,61 @@ mod tests {
             "a job already fired this minute is not due"
         );
         assert!(firer.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn aged_due_recurring_job_fires_final_run_then_is_deleted() {
+        let created_ms = (NOW - 8 * 24 * 60 * 60) * 1000;
+        let last_fired_ms = (NOW - 120) * 1000;
+        let body = format!(
+            r#"{{"tasks":[{{"id":"00000000","cron":"* * * * *","prompt":"final","createdAt":{created_ms},"recurring":true,"lastFiredAt":{last_fired_ms}}}]}}"#
+        );
+        let fs = file_with(&body);
+        let firer = RecordingFirer::new("done");
+
+        let fired = run_due_jobs(
+            Path::new(PATH),
+            fs.clone(),
+            FixedClock::at_secs(NOW),
+            &firer,
+            Some(default_recurring_max_age()),
+        )
+        .await;
+
+        assert_eq!(fired.len(), 1, "an aged due job gets one final fire");
+        assert_eq!(firer.calls(), vec![("00000000".into(), "final".into())]);
+        assert!(
+            parse_tasks(&fs.get(PATH).await.unwrap()).tasks.is_empty(),
+            "the final fire removes the aged recurring descriptor"
+        );
+    }
+
+    #[tokio::test]
+    async fn aged_recurring_job_not_yet_due_is_retained() {
+        let created_ms = (NOW - 8 * 24 * 60 * 60) * 1000;
+        let body = format!(
+            r#"{{"tasks":[{{"id":"00000000","cron":"* * * * *","prompt":"later","createdAt":{created_ms},"recurring":true,"lastFiredAt":{last}}}]}}"#,
+            last = NOW * 1000,
+        );
+        let fs = file_with(&body);
+        let firer = RecordingFirer::new("unused");
+
+        let fired = run_due_jobs(
+            Path::new(PATH),
+            fs.clone(),
+            FixedClock::at_secs(NOW),
+            &firer,
+            Some(default_recurring_max_age()),
+        )
+        .await;
+
+        assert!(fired.is_empty());
+        assert!(firer.calls().is_empty());
+        assert_eq!(
+            parse_tasks(&fs.get(PATH).await.unwrap()).tasks.len(),
+            1,
+            "age alone must not delete a recurring job before its due time"
+        );
     }
 
     #[tokio::test]

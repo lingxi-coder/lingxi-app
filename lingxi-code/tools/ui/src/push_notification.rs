@@ -27,8 +27,6 @@
 //! branch — terminal notification "sent", mobile push not — matching the binary on
 //! a host without Remote Control.
 
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;

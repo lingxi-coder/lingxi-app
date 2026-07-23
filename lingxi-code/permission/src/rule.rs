@@ -19,7 +19,7 @@ pub struct PermissionRule {
 
 /// The match key for a `PermissionRule`: a tool name plus optional
 /// rule-specific content (for example, a bash command substring).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct PermissionRuleValue {
     /// Name of the tool this rule applies to (e.g. `"Bash"`, `"Edit"`).
     pub tool_name: String,

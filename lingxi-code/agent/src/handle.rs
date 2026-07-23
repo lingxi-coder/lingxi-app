@@ -1038,6 +1038,15 @@ impl PoolSubagentSpawner {
         ctx.tool_schemas = tool_schemas;
         ctx.allowed_tools = allowed_tools;
         ctx.schema = request.schema.clone();
+        // Preserve the spawn's human identity on every dispatched tool call.
+        // Claude's per-agent async-local context exposes `getAgentName()` and
+        // `getTeammateContext()?.teamName`; SendMessage and the V2 task tools
+        // key mailbox senders/owners on these display names, not on the pool's
+        // internal AgentId. The background wrapper already registers the same
+        // request.name on the shared mailbox, so carrying it here closes the
+        // reverse (child -> peer/lead) attribution path as well.
+        ctx.agent_name = request.name.clone();
+        ctx.team_name = request.team_name.clone();
         // Per-agent working directory (claude-code `me = cwd ?? worktreePath`):
         // the AgentTool resolves `isolation:"worktree"` to a freshly-created
         // worktree path (or honours an explicit `cwd`) and threads it via
@@ -1581,7 +1590,7 @@ fn short_input_hint(input: &serde_json::Value) -> String {
 
 /// settings/constants.ts:7-21). Used by [`PoolSubagentSpawner::resolve_selection`]
 /// to emit `tengu_agent_tool_selected`'s `source` field byte-faithfully.
-fn agent_source_to_claude_str(source: AgentSource) -> &'static str {
+pub(crate) fn agent_source_to_claude_str(source: AgentSource) -> &'static str {
     match source {
         AgentSource::BuiltIn => "built-in",
         AgentSource::Plugin => "plugin",
@@ -1597,12 +1606,19 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use serde_json::Value;
+    use std::collections::HashMap;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::Mutex;
     use test_harness::mocks::MockRuntimeSpawner;
+    use tokio::task::JoinHandle;
     use tool_api::tool_trait::PromptOptions;
     use tool_api::Tool;
     use traits::budget::{BudgetEnforcerHandle, BudgetError};
     use traits::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
+    use traits::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
 
     struct DummyInvoker;
 
@@ -1630,6 +1646,56 @@ mod tests {
         }
         async fn snapshot_total_nano_usd(&self) -> u64 {
             0
+        }
+    }
+
+    /// Runtime used to prove pool-level cancellation cleanup: it records
+    /// spawned/cancelled tasks while still driving the future on tokio.
+    struct CountingRuntimeSpawner {
+        next_id: AtomicU64,
+        handles: Mutex<HashMap<u64, JoinHandle<()>>>,
+        cancelled: AtomicUsize,
+    }
+
+    impl Default for CountingRuntimeSpawner {
+        fn default() -> Self {
+            Self {
+                next_id: AtomicU64::new(1),
+                handles: Mutex::new(HashMap::new()),
+                cancelled: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl RuntimeSpawner for CountingRuntimeSpawner {
+        async fn spawn(
+            &self,
+            name: &str,
+            task: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
+        ) -> Result<BackgroundTaskHandle, RuntimeError> {
+            let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+            let handle = tokio::spawn(task);
+            self.handles.lock().unwrap().insert(id, handle);
+            Ok(BackgroundTaskHandle {
+                task_name: name.to_string(),
+                task_id: id,
+            })
+        }
+
+        async fn sleep(&self, duration: std::time::Duration) {
+            tokio::time::sleep(duration).await;
+        }
+
+        async fn cancel(&self, handle: &BackgroundTaskHandle) -> Result<(), RuntimeError> {
+            let task = self.handles.lock().unwrap().remove(&handle.task_id);
+            if let Some(task) = task {
+                self.cancelled.fetch_add(1, Ordering::SeqCst);
+                task.abort();
+                Ok(())
+            } else {
+                Err(RuntimeError::NotFound(handle.task_name.clone()))
+            }
         }
     }
 
@@ -2389,6 +2455,8 @@ mod tests {
             run_in_background: false,
             name: None,
             team_name: None,
+            creator_teammate_name: None,
+            creator_team_name: None,
             mode: None,
             isolation: None,
             cwd: None,
@@ -2436,6 +2504,8 @@ mod tests {
             run_in_background: false,
             name: None,
             team_name: None,
+            creator_teammate_name: None,
+            creator_team_name: None,
             mode: None,
             isolation: None,
             cwd: None,
@@ -2774,6 +2844,8 @@ mod tests {
             run_in_background: false,
             name: None,
             team_name: None,
+            creator_teammate_name: None,
+            creator_team_name: None,
             mode: None,
             isolation: None,
             cwd: None,
@@ -2885,6 +2957,8 @@ mod tests {
             run_in_background: false,
             name: None,
             team_name: None,
+            creator_teammate_name: None,
+            creator_team_name: None,
             mode: None,
             isolation: None,
             cwd: None,
@@ -2984,6 +3058,8 @@ mod tests {
             run_in_background: false,
             name: None,
             team_name: None,
+            creator_teammate_name: None,
+            creator_team_name: None,
             mode: None,
             isolation: None,
             cwd: None,
@@ -3043,6 +3119,8 @@ mod tests {
             run_in_background: false,
             name: None,
             team_name: None,
+            creator_teammate_name: None,
+            creator_team_name: None,
             // Deprecated call param — ignored; Plan comes from frontmatter above.
             mode: None,
             isolation: None,
@@ -3094,6 +3172,8 @@ mod tests {
             run_in_background: true,
             name: None,
             team_name: None,
+            creator_teammate_name: None,
+            creator_team_name: None,
             mode: None,
             isolation: None,
             cwd: None,
@@ -3138,6 +3218,90 @@ mod tests {
         assert!(!one_shot.is_async);
     }
 
+    /// Canceling a persistent launch while the pool is paused after the runner
+    /// is spawned must tear the child back down. Without the pool-level
+    /// allocation cleanup, the runner would survive with no owner.
+    #[tokio::test]
+    async fn spawn_persistent_cancellation_cleans_up_runner_started_during_allocate() {
+        let runtime = Arc::new(CountingRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime.clone(), 1));
+        let wait = Arc::new(tokio::sync::Notify::new());
+        pool.set_post_spawn_wait(wait.clone()).await;
+        let spawner = Arc::new(PoolSubagentSpawner::new(pool.clone()));
+
+        let req = SubagentSpawnRequest {
+            subagent_type: "general-purpose".to_string(),
+            prompt: "go".to_string(),
+            context_paths: vec![],
+            description: None,
+            model: None,
+            model_profile: None,
+            run_in_background: true,
+            name: None,
+            team_name: None,
+            creator_teammate_name: None,
+            creator_team_name: None,
+            mode: None,
+            isolation: None,
+            cwd: None,
+            worktree: None,
+            fork_context_messages: None,
+            fork_parent_system_prompt: None,
+            schema: None,
+            effort: None,
+            tool_use_id: None,
+            system_prompt_override: None,
+            system_prompt_addendum: None,
+            additional_disallowed_tools: Vec::new(),
+            depth: 0,
+            parent_model_override: None,
+        };
+        let inherit = SubagentInheritance {
+            tool_invoker: Arc::new(DummyInvoker),
+            budget: Arc::new(DummyBudget),
+        };
+
+        let spawner_for_task = spawner.clone();
+        let launch =
+            tokio::spawn(async move { spawner_for_task.spawn_persistent(req, inherit).await });
+
+        for _ in 0..200 {
+            if runtime.next_id.load(Ordering::SeqCst) > 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            runtime.next_id.load(Ordering::SeqCst),
+            2,
+            "the child runner was already spawned before cancellation"
+        );
+
+        launch.abort();
+        let _ = launch.await;
+
+        for _ in 0..200 {
+            if runtime.cancelled.load(Ordering::SeqCst) > 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            runtime.cancelled.load(Ordering::SeqCst),
+            1,
+            "cancelling the launch must cancel the spawned runner"
+        );
+        assert_eq!(
+            pool.slot_count().await,
+            0,
+            "the canceled launch must not retain a pool slot"
+        );
+
+        // Release the paused hook so later tests don't inherit it if this test
+        // fails mid-run.
+        wait.notify_waiters();
+    }
+
     /// 2.1.186: the subagent `<env>` block (`tIm`) is appended after the
     /// `Notes:` trailer on a NON-fork spawn, rendered with the spawn's RESOLVED
     /// model id. The fork path is byte-verbatim (no env block). An unfilled
@@ -3171,6 +3335,8 @@ mod tests {
             run_in_background: false,
             name: None,
             team_name: None,
+            creator_teammate_name: None,
+            creator_team_name: None,
             mode: None,
             isolation: None,
             cwd: None,
@@ -3231,6 +3397,52 @@ mod tests {
             Some("PARENT VERBATIM"),
             "fork path must not append the env block"
         );
+    }
+
+    #[tokio::test]
+    async fn build_subagent_context_preserves_spawn_name_and_team() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 1));
+        let spawner = PoolSubagentSpawner::new(pool);
+        let request = SubagentSpawnRequest {
+            subagent_type: "general-purpose".to_string(),
+            prompt: "go".to_string(),
+            context_paths: vec![],
+            description: None,
+            model: None,
+            model_profile: None,
+            run_in_background: true,
+            name: Some("researcher".to_string()),
+            team_name: Some("alpha".to_string()),
+            creator_teammate_name: None,
+            creator_team_name: None,
+            mode: None,
+            isolation: None,
+            cwd: None,
+            worktree: None,
+            fork_context_messages: None,
+            fork_parent_system_prompt: None,
+            schema: None,
+            effort: None,
+            tool_use_id: None,
+            system_prompt_override: None,
+            system_prompt_addendum: None,
+            additional_disallowed_tools: Vec::new(),
+            depth: 1,
+            parent_model_override: None,
+        };
+        let inherit = SubagentInheritance {
+            tool_invoker: Arc::new(DummyInvoker),
+            budget: Arc::new(DummyBudget),
+        };
+
+        let ctx = spawner
+            .build_subagent_context(&request, inherit, true)
+            .await
+            .expect("context should build");
+
+        assert_eq!(ctx.agent_name.as_deref(), Some("researcher"));
+        assert_eq!(ctx.team_name.as_deref(), Some("alpha"));
     }
 
     // ── G11: resolve_selection source mapping + model resolution ──
@@ -3413,6 +3625,8 @@ mod tests {
             run_in_background: true,
             name: None,
             team_name: None,
+            creator_teammate_name: None,
+            creator_team_name: None,
             mode: None,
             isolation: None,
             cwd: None,

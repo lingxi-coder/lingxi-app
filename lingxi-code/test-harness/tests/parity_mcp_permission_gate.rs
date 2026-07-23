@@ -79,7 +79,7 @@ async fn seed(tools: &[&str]) -> (Arc<ToolRegistry>, Arc<McpRegistry>, Arc<MockM
     mcp_registry.connect(mock_config()).await.unwrap();
 
     let ctx = ctx_with_registry(mcp_registry.clone());
-    let mut reg = ToolRegistry::new();
+    let reg = ToolRegistry::new();
     for (conn_id, mcp_tools) in tool_mcp::build_registered_mcp_tools(&mcp_registry, ctx).await {
         reg.register_mcp_tools(conn_id, mcp_tools);
     }

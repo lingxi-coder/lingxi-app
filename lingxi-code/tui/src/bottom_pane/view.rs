@@ -9,6 +9,7 @@
 //! pass.
 
 use std::any::Any;
+use std::time::Instant;
 
 use crossterm::event::KeyEvent;
 use permission::gate::PermissionResponse;
@@ -335,6 +336,14 @@ pub trait BottomPaneView: Renderable {
     /// Route a bracketed paste while this view is active. Modal views own the
     /// paste stream, so the default swallows it without effect.
     fn handle_paste(&mut self, _text: &str) -> ViewOutcome {
+        ViewOutcome::Pending
+    }
+
+    /// Advance time-based view state during the app's regular render tick.
+    /// Most views are event-driven and keep the default no-op; countdown or
+    /// animation-backed views can resolve themselves without synthesizing a
+    /// keyboard event.
+    fn handle_tick(&mut self, _now: Instant) -> ViewOutcome {
         ViewOutcome::Pending
     }
 

@@ -10,16 +10,28 @@ import {
   validatePrompt,
 } from '../src/main/validation';
 
-test('only bounded model, session, and task commands pass the runtime allowlist', () => {
+test('only the bounded Desktop command surface passes the runtime allowlist', () => {
   assert.deepEqual(validateClientCommand({ type: 'list_models' }), { type: 'list_models' });
   assert.deepEqual(validateClientCommand({ type: 'list_sessions', limit: 25 }), { type: 'list_sessions', limit: 25 });
   assert.deepEqual(validateClientCommand({ type: 'task_output', task_id: 'task-1', offset: 0 }), { type: 'task_output', task_id: 'task-1', offset: 0 });
-  assert.deepEqual(validateClientCommand({ type: 'refresh_listings', which: [{ type: 'status' }, { type: 'doctor' }] }), { type: 'refresh_listings', which: [{ type: 'status' }, { type: 'doctor' }] });
+  assert.deepEqual(validateClientCommand({ type: 'set_permission_mode', mode: 'auto' }), { type: 'set_permission_mode', mode: 'auto' });
+  assert.deepEqual(validateClientCommand({ type: 'run_slash_command', raw: '/model opus' }), { type: 'run_slash_command', raw: '/model opus' });
+  assert.deepEqual(
+    validateClientCommand({ type: 'refresh_listings', which: [{ type: 'status' }, { type: 'doctor' }, { type: 'slash_commands' }] }),
+    { type: 'refresh_listings', which: [{ type: 'status' }, { type: 'doctor' }, { type: 'slash_commands' }] },
+  );
   assert.throws(() => validateClientCommand({ type: 'send_prompt', text: 'bypass' }), /not allowed/);
   assert.throws(() => validateClientCommand({ type: 'request_exit' }), /not allowed/);
   assert.throws(() => validateClientCommand({ type: 'list_sessions', limit: 201 }), /invalid limit/);
   assert.throws(() => validateClientCommand({ type: 'list_models', surprise: true }), /unsupported fields/);
   assert.throws(() => validateClientCommand({ type: 'refresh_listings', which: [{ type: 'hooks' }] }), /not allowed/);
+  assert.throws(() => validateClientCommand({ type: 'set_permission_mode', mode: 'unsafe' }), /invalid permission mode/);
+  assert.throws(() => validateClientCommand({ type: 'run_slash_command', raw: 'model opus' }), /invalid slash command/);
+  assert.throws(() => validateClientCommand({ type: 'run_slash_command', raw: '/' }), /invalid slash command/);
+  assert.throws(
+    () => validateClientCommand({ type: 'refresh_listings', which: [{ type: 'status' }, { type: 'doctor' }, { type: 'slash_commands' }, { type: 'status' }] }),
+    /invalid listing selection/,
+  );
 });
 
 test('session cwd is pinned to the active workspace', () => {
@@ -30,6 +42,8 @@ test('session cwd is pinned to the active workspace', () => {
 test('active turns reject model and session mutation but retain recovery commands', () => {
   for (const command of [
     { type: 'set_model', model: 'claude-sonnet' },
+    { type: 'set_permission_mode', mode: 'acceptEdits' },
+    { type: 'run_slash_command', raw: '/clear' },
     { type: 'new_session' },
     { type: 'resume_session', session_id: 'session-1' },
   ] as const) {

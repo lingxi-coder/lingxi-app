@@ -12,6 +12,21 @@
 //! wire tests pass unchanged.
 
 use protocol::{HttpMethod, HttpRequest};
+use std::sync::Arc;
+
+/// Session provider seam used by MCP's large-result guard for the exact
+/// token-counting stage. This lets builtin tools reuse the main session's
+/// routed/OAuth-aware provider without introducing a dependency cycle.
+#[async_trait::async_trait]
+pub trait McpTokenCounter: Send + Sync {
+    /// Count model-facing MCP content exactly when the active route supports
+    /// it. `Ok(None)` means the route has no exact token-count endpoint.
+    async fn count_mcp_content_tokens(
+        &self,
+        model: &str,
+        content: &serde_json::Value,
+    ) -> Result<Option<u64>, String>;
+}
 
 /// Value sent in the `anthropic-version` header on every request.
 /// Matches the value in `api-client/src/anthropic.rs::ANTHROPIC_VERSION`.
@@ -35,13 +50,25 @@ pub const ANTHROPIC_VERSION: &str = "2023-06-01";
 ///
 /// The WebSearch tool attaches `anthropic-beta` and `user-agent` headers itself
 /// after calling `build_request`, matching the upstream flow.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AnthropicRequestBuilder {
     /// API key sent as `x-api-key`.
     pub api_key: String,
     /// Base URL (e.g. `https://api.anthropic.com`). No trailing slash expected;
     /// `/v1/messages` is appended with a literal `/`.
     pub base_url: String,
+    /// Optional exact-token counter backed by the main session provider.
+    mcp_token_counter: Option<Arc<dyn McpTokenCounter>>,
+}
+
+impl std::fmt::Debug for AnthropicRequestBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AnthropicRequestBuilder")
+            .field("api_key", &"[REDACTED]")
+            .field("base_url", &self.base_url)
+            .field("has_mcp_token_counter", &self.mcp_token_counter.is_some())
+            .finish()
+    }
 }
 
 impl AnthropicRequestBuilder {
@@ -54,7 +81,27 @@ impl AnthropicRequestBuilder {
         Self {
             api_key: api_key.into(),
             base_url: base_url.unwrap_or_else(|| "https://api.anthropic.com".to_string()),
+            mcp_token_counter: None,
         }
+    }
+
+    /// Attach the main session's routed exact-token counter.
+    #[must_use]
+    pub fn with_mcp_token_counter(mut self, counter: Arc<dyn McpTokenCounter>) -> Self {
+        self.mcp_token_counter = Some(counter);
+        self
+    }
+
+    /// Count transformed MCP result content through the session provider.
+    pub async fn count_mcp_content_tokens(
+        &self,
+        model: &str,
+        content: &serde_json::Value,
+    ) -> Result<Option<u64>, String> {
+        let Some(counter) = &self.mcp_token_counter else {
+            return Ok(None);
+        };
+        counter.count_mcp_content_tokens(model, content).await
     }
 
     /// Build a non-streaming `POST /v1/messages` request.
@@ -95,6 +142,21 @@ mod tests {
     use super::*;
     use protocol::HttpMethod;
     use serde_json::json;
+
+    struct FixedCounter;
+
+    #[async_trait::async_trait]
+    impl McpTokenCounter for FixedCounter {
+        async fn count_mcp_content_tokens(
+            &self,
+            model: &str,
+            content: &serde_json::Value,
+        ) -> Result<Option<u64>, String> {
+            assert_eq!(model, "claude-test");
+            assert_eq!(content, &json!("payload"));
+            Ok(Some(12_345))
+        }
+    }
 
     #[test]
     fn build_request_method_is_post() {
@@ -150,5 +212,29 @@ mod tests {
         let b = AnthropicRequestBuilder::new("key", None);
         let req = b.build_request(&json!({}));
         assert_eq!(req.timeout, Some(std::time::Duration::from_secs(120)));
+    }
+
+    #[tokio::test]
+    async fn mcp_counter_is_optional_and_delegates_when_attached() {
+        let plain = AnthropicRequestBuilder::new("secret", None);
+        assert_eq!(
+            plain
+                .count_mcp_content_tokens("claude-test", &json!("payload"))
+                .await
+                .unwrap(),
+            None
+        );
+
+        let wired = plain.with_mcp_token_counter(Arc::new(FixedCounter));
+        assert_eq!(
+            wired
+                .count_mcp_content_tokens("claude-test", &json!("payload"))
+                .await
+                .unwrap(),
+            Some(12_345)
+        );
+        let debug = format!("{wired:?}");
+        assert!(!debug.contains("secret"));
+        assert!(debug.contains("[REDACTED]"));
     }
 }

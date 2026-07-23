@@ -23,9 +23,7 @@ pub struct TokenUsage {
     /// Tokens written into the ephemeral 1-hour prompt cache.
     ///
     /// Mirrors `cache_creation.ephemeral_1h_input_tokens` in the Anthropic API
-    /// response (binary field `promptCacheWrite1hTokens`). Currently always 0
-    /// until the llm-client Anthropic codec is wired to parse the field;
-    /// see `TokenClass::CacheWrite1h` for the TODO note.
+    /// response (binary field `promptCacheWrite1hTokens`).
     #[serde(default)]
     pub cache_write_1h: u64,
 }

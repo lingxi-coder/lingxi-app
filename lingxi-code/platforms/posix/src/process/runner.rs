@@ -22,6 +22,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
+use traits::process::ProcessStreamSink;
 use traits::{
     HookRunOutcome, ProcessError, ProcessHandle, ProcessOutput, ProcessRunner, SandboxedCommand,
     SandboxedTag,
@@ -127,6 +128,21 @@ struct ChildRegistration(u32);
 impl Drop for ChildRegistration {
     fn drop(&mut self) {
         active_children::unregister(self.0);
+    }
+}
+
+/// Cancellation guard for streaming commands. Monitor workers are cancelled by
+/// dropping their `run_streaming` future, so `Child::kill_on_drop` alone would
+/// only kill the shell and could orphan grandchildren. Streaming children are
+/// always session leaders; this guard synchronously kills their full process
+/// group on every early-return/drop path and is disarmed after a clean reap.
+struct StreamingProcessGroupGuard(Option<u32>);
+
+impl Drop for StreamingProcessGroupGuard {
+    fn drop(&mut self) {
+        if let Some(pid) = self.0.take() {
+            let _ = kill_tree_force(pid);
+        }
     }
 }
 
@@ -316,6 +332,124 @@ impl ProcessRunner for PosixProcess {
             exit_code: output.status.code().unwrap_or(-1),
             timed_out: false,
         })
+    }
+
+    async fn run_streaming(
+        &self,
+        cmd: &SandboxedCommand,
+        sink: std::sync::Arc<dyn ProcessStreamSink>,
+    ) -> Result<ProcessOutput, ProcessError> {
+        let inner = cmd.inner();
+        let mut tcmd = Self::build_command(cmd);
+        tcmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        // A Monitor/streaming worker can be cancelled at any await point. Give
+        // it an independent process group so the drop guard removes descendants
+        // as well as the direct shell.
+        attach_setsid(&mut tcmd);
+
+        let mut child = tcmd.spawn().map_err(|e| ProcessError::Io(e.to_string()))?;
+        let pid = child
+            .id()
+            .ok_or_else(|| ProcessError::Io("streaming child has no pid".into()))?;
+        let mut group_guard = StreamingProcessGroupGuard(Some(pid));
+
+        if let Some(stdin_text) = &inner.stdin {
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin
+                    .write_all(stdin_text.as_bytes())
+                    .await
+                    .map_err(|e| ProcessError::Io(e.to_string()))?;
+            }
+        }
+
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| ProcessError::Io("streaming child has no stdout pipe".into()))?;
+        let mut stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| ProcessError::Io("streaming child has no stderr pipe".into()))?;
+        let stdout_sink = sink.clone();
+        let stderr_sink = sink;
+
+        let stdout_task = async move {
+            let mut reader = BufReader::new(stdout);
+            let mut captured = Vec::new();
+            loop {
+                let mut line = Vec::new();
+                let read = reader
+                    .read_until(b'\n', &mut line)
+                    .await
+                    .map_err(|e| ProcessError::Io(e.to_string()))?;
+                if read == 0 {
+                    break;
+                }
+                captured.extend_from_slice(&line);
+                while matches!(line.last(), Some(b'\n' | b'\r')) {
+                    line.pop();
+                }
+                stdout_sink
+                    .stdout_line(String::from_utf8_lossy(&line).into_owned())
+                    .await?;
+            }
+            Ok::<Vec<u8>, ProcessError>(captured)
+        };
+        let stderr_task = async move {
+            let mut captured = Vec::new();
+            let mut chunk = vec![0_u8; 8 * 1024];
+            loop {
+                let read = stderr
+                    .read(&mut chunk)
+                    .await
+                    .map_err(|e| ProcessError::Io(e.to_string()))?;
+                if read == 0 {
+                    break;
+                }
+                let bytes = chunk[..read].to_vec();
+                captured.extend_from_slice(&bytes);
+                stderr_sink.stderr_chunk(bytes).await?;
+            }
+            Ok::<Vec<u8>, ProcessError>(captured)
+        };
+        let execution = async {
+            let (stdout, stderr, status) = tokio::try_join!(stdout_task, stderr_task, async {
+                child
+                    .wait()
+                    .await
+                    .map_err(|e| ProcessError::Io(e.to_string()))
+            })?;
+            Ok::<_, ProcessError>((stdout, stderr, status))
+        };
+
+        let timeout = inner.timeout.unwrap_or(DEFAULT_TIMEOUT);
+        let result = tokio::time::timeout(timeout, execution).await;
+        match result {
+            Ok(Ok((stdout, stderr, status))) => {
+                group_guard.0 = None;
+                Ok(ProcessOutput {
+                    stdout: String::from_utf8_lossy(&stdout).into_owned(),
+                    stderr: String::from_utf8_lossy(&stderr).into_owned(),
+                    exit_code: status.code().unwrap_or(-1),
+                    timed_out: false,
+                })
+            }
+            Ok(Err(error)) => {
+                let _ = kill_tree_force(pid);
+                group_guard.0 = None;
+                let _ = child.wait().await;
+                Err(error)
+            }
+            Err(_) => {
+                let _ = kill_tree_force(pid);
+                group_guard.0 = None;
+                let _ = child.wait().await;
+                Err(ProcessError::Timeout)
+            }
+        }
     }
 
     // PARITY 2.1.210 (timeout → move-to-background): a foreground Bash command
@@ -962,5 +1096,135 @@ mod hook_env_tests {
             lines.iter().any(|l| *l == "GIT_EDITOR=true"),
             "non-hook child carries GIT_EDITOR=true; env was:\n{dump}",
         );
+    }
+}
+
+#[cfg(test)]
+mod streaming_tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+    use tokio::sync::Notify;
+    use traits::ProcessCommand;
+
+    #[derive(Default)]
+    struct RecordingSink {
+        lines: Mutex<Vec<String>>,
+        stderr: Mutex<Vec<u8>>,
+        line_ready: Notify,
+    }
+
+    #[async_trait]
+    impl ProcessStreamSink for RecordingSink {
+        async fn stdout_line(&self, line: String) -> Result<(), ProcessError> {
+            self.lines.lock().expect("lines lock").push(line);
+            self.line_ready.notify_one();
+            Ok(())
+        }
+
+        async fn stderr_chunk(&self, chunk: Vec<u8>) -> Result<(), ProcessError> {
+            self.stderr.lock().expect("stderr lock").extend(chunk);
+            Ok(())
+        }
+    }
+
+    fn stream_sh(script: &str, timeout: Duration) -> SandboxedCommand {
+        SandboxedCommand::__new_sandboxed(
+            ProcessCommand {
+                command: "/bin/sh".to_string(),
+                args: vec!["-c".to_string(), script.to_string()],
+                cwd: None,
+                env: HashMap::new(),
+                timeout: Some(timeout),
+                stdin: None,
+            },
+            SandboxedTag::BypassAuditedWithReason {
+                reason: "monitor_task_test".to_string(),
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn streaming_delivers_a_line_before_process_exit() {
+        let sink = Arc::new(RecordingSink::default());
+        let command = stream_sh(
+            "printf 'ready\\n'; sleep 0.4; printf 'done\\n'",
+            Duration::from_secs(3),
+        );
+        let task_sink: Arc<dyn ProcessStreamSink> = sink.clone();
+        let task =
+            tokio::spawn(
+                async move { PosixProcess::new().run_streaming(&command, task_sink).await },
+            );
+
+        tokio::time::timeout(Duration::from_secs(2), sink.line_ready.notified())
+            .await
+            .expect("first line is delivered live");
+        assert!(
+            !task.is_finished(),
+            "streaming must not wait for process exit"
+        );
+        let output = task
+            .await
+            .expect("runner task joins")
+            .expect("command succeeds");
+        assert_eq!(output.stdout, "ready\ndone\n");
+        assert_eq!(
+            sink.lines.lock().expect("lines lock").as_slice(),
+            ["ready", "done"]
+        );
+    }
+
+    #[tokio::test]
+    async fn streaming_drains_large_stderr_without_deadlock() {
+        let sink = Arc::new(RecordingSink::default());
+        let command = stream_sh(
+            "dd if=/dev/zero bs=1024 count=256 1>&2 2>/dev/null; printf 'ok\\n'",
+            Duration::from_secs(5),
+        );
+        let output = PosixProcess::new()
+            .run_streaming(&command, sink.clone())
+            .await
+            .expect("large stderr is drained concurrently");
+        assert_eq!(output.stdout, "ok\n");
+        assert_eq!(output.stderr.len(), 256 * 1024);
+        assert_eq!(sink.stderr.lock().expect("stderr lock").len(), 256 * 1024);
+    }
+
+    #[tokio::test]
+    async fn streaming_timeout_kills_the_command() {
+        let sink: Arc<dyn ProcessStreamSink> = Arc::new(RecordingSink::default());
+        let command = stream_sh("sleep 30", Duration::from_millis(50));
+        let error = PosixProcess::new()
+            .run_streaming(&command, sink)
+            .await
+            .expect_err("deadline must stop the command");
+        assert!(matches!(error, ProcessError::Timeout));
+    }
+
+    #[tokio::test]
+    async fn dropping_streaming_future_kills_process_group() {
+        let sink = Arc::new(RecordingSink::default());
+        let command = stream_sh("echo $$; sleep 30", Duration::from_secs(60));
+        let task_sink: Arc<dyn ProcessStreamSink> = sink.clone();
+        let task =
+            tokio::spawn(
+                async move { PosixProcess::new().run_streaming(&command, task_sink).await },
+            );
+        tokio::time::timeout(Duration::from_secs(2), sink.line_ready.notified())
+            .await
+            .expect("shell pid is emitted");
+        let pid = sink.lines.lock().expect("lines lock")[0].clone();
+
+        task.abort();
+        let _ = task.await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let alive = std::process::Command::new("/bin/kill")
+            .args(["-0", &pid])
+            .status()
+            .expect("kill -0 runs")
+            .success();
+        assert!(!alive, "cancelled streaming shell {pid} must not survive");
     }
 }

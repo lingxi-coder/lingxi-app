@@ -34,6 +34,52 @@ use traits::{
     StatusSnapshot,
 };
 
+impl ConversationOrchestrator {
+    /// Reset state whose lifetime is one conversation rather than one process.
+    /// Both `/clear` and in-place resume cross that boundary; keeping any of
+    /// these caches would make the new session depend on the previously mounted
+    /// transcript.
+    async fn reset_session_scoped_runtime(&self) {
+        if let Some(tracker) = self.cost_tracker.as_ref() {
+            tracker.reset().await;
+        }
+        self.api_calls_recorded.store(0, Ordering::SeqCst);
+        self.last_api_call_at_ms.store(-1, Ordering::SeqCst);
+        *self
+            .session_started_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = std::time::Instant::now();
+        self.last_response_input_tokens.store(0, Ordering::Relaxed);
+        self.output_token_pool.store(0, Ordering::Relaxed);
+        self.turn_start_output_baseline.store(0, Ordering::Relaxed);
+        self.refusal_fallback_latched.store(false, Ordering::SeqCst);
+        self.transcript_persistence_warning_emitted
+            .store(false, Ordering::Release);
+
+        self.tools
+            .deferral()
+            .replace_loaded(std::iter::empty::<String>());
+        self.read_state_map
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .drain()
+            .for_each(drop);
+        self.post_compact_skill_attachments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        self.orphan_forced_decisions.lock().await.clear();
+        self.sent_conditional_rules.lock().await.clear();
+        self.sent_skill_names.lock().await.clear();
+        self.sent_agent_names.lock().await.clear();
+        self.surfaced_memory_paths.lock().await.clear();
+        self.surfaced_skill_names.lock().await.clear();
+        *self.current_turn_system_prompt.lock().await = None;
+        *self.pending_memory_prefetch.lock().await = None;
+        *self.pending_skill_prefetch.lock().await = None;
+    }
+}
+
 #[async_trait]
 impl OrchestratorHandle for ConversationOrchestrator {
     async fn current_session_id(&self) -> protocol::SessionId {
@@ -45,6 +91,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
         if let Err(err) = self.api.close_responses_websocket_session().await {
             tracing::warn!(error = %err, "failed to close responses websocket session during clear_session");
         }
+        self.reset_session_scoped_runtime().await;
         let mut s = self.session.lock().await;
         let old_session_id = s.session_id;
         s.history.clear();
@@ -74,11 +121,6 @@ impl OrchestratorHandle for ConversationOrchestrator {
         // ("Fixed /clear not resetting session cost counter"). Reset the wired
         // tracker (no-op when unwired) and the orchestrator's api-call counter —
         // claude-code zeroes `modelUsage`, from which the api-call count derives.
-        if let Some(tracker) = self.cost_tracker.as_ref() {
-            tracker.reset().await;
-        }
-        self.api_calls_recorded
-            .store(0, std::sync::atomic::Ordering::SeqCst);
         self.hooks.clear_session_hooks(old_session_id).await;
         Ok(())
     }
@@ -93,10 +135,9 @@ impl OrchestratorHandle for ConversationOrchestrator {
     /// `with_resume` overrides at construction time, here applied to a live
     /// orchestrator).
     ///
-    /// `s.model` is intentionally LEFT UNCHANGED — resume keeps the live model
-    /// the connection is running. (`build_state_from_jsonl` uses
-    /// `DEFAULT_MODEL` only for the throwaway `SessionState` the host loads +
-    /// discards; the live model is the source of truth.)
+    /// When the replay carries a resolved model, it replaces `s.model` and its
+    /// provider-profile hint. Legacy/default callers leave the live values
+    /// unchanged by passing an empty model.
     async fn resume_session(
         &self,
         session_id: protocol::SessionId,
@@ -109,19 +150,36 @@ impl OrchestratorHandle for ConversationOrchestrator {
         if let Err(err) = self.api.close_responses_websocket_session().await {
             tracing::warn!(error = %err, "failed to close responses websocket session during resume_session");
         }
+        self.reset_session_scoped_runtime().await;
         let mut s = self.session.lock().await;
         let old_session_id = s.session_id;
         s.history = history;
+        if !runtime.model.is_empty() {
+            s.model = runtime.model.clone();
+            s.model_profile = runtime.model_profile.clone();
+        }
         s.transcript_only_messages = runtime.transcript_only_message_ids.into_iter().collect();
         s.compact_summary_messages = runtime.compact_summary_message_ids.into_iter().collect();
+        *self
+            .post_compact_skill_attachments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            runtime.post_compact_skill_attachments.into_iter().collect();
         s.active_goal = active_goal.map(|goal| engine::session::ActiveGoalState {
             condition: goal.condition,
             set_at: goal.set_at,
             last_reason: goal.last_reason,
         });
+        let resumed_effort = runtime.effort.clone();
         // Adopt the NAMED id (clear_session mints a fresh one; resume does NOT).
         s.session_id = session_id;
         drop(s);
+        self.restore_effort_from_resume(resumed_effort);
+        self.restore_main_thread_agent_from_resume(
+            runtime.main_thread_agent_type,
+            runtime.main_thread_agent_definition,
+        )
+        .await;
         self.compaction_cumulative_dropped_tokens.store(
             runtime.cumulative_dropped_tokens,
             std::sync::atomic::Ordering::Relaxed,
@@ -133,12 +191,16 @@ impl OrchestratorHandle for ConversationOrchestrator {
             consecutive_failures: runtime.consecutive_failures,
             consecutive_rapid_refills: runtime.consecutive_rapid_refills,
         };
-        if !runtime.loaded_tool_names.is_empty() {
-            self.tools.deferral().mark_loaded(runtime.loaded_tool_names);
-        }
+        self.tools
+            .deferral()
+            .replace_loaded(runtime.loaded_tool_names);
         // Seed the parent-uuid chain so any future append chains off the
         // resumed tail (matching the M5-07 writer's chain semantics).
         *self.last_jsonl_uuid.lock().await = last_jsonl_uuid;
+        self.refusal_fallback_latched
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        self.transcript_persistence_warning_emitted
+            .store(false, std::sync::atomic::Ordering::Release);
         self.hooks.clear_session_hooks(old_session_id).await;
         self.sync_active_goal_stop_hook_for_current_state().await;
         Ok(())
@@ -292,6 +354,8 @@ impl OrchestratorHandle for ConversationOrchestrator {
             run_in_background: true,
             name: Some(codename.clone()),
             team_name: None,
+            creator_teammate_name: None,
+            creator_team_name: None,
             mode: None,
             isolation: None,
             cwd: None,
@@ -386,6 +450,11 @@ impl OrchestratorHandle for ConversationOrchestrator {
     /// `force_compact`'s fresh-token delegation to `force_compact_with_cancel`.
     async fn generate_recap(&self) -> Result<RecapOutcome, HandleError> {
         self.generate_recap_query(tokio_util::sync::CancellationToken::new())
+            .await
+    }
+
+    async fn generate_session_name(&self) -> Result<Option<String>, HandleError> {
+        self.generate_session_name_query(tokio_util::sync::CancellationToken::new())
             .await
     }
 
@@ -486,6 +555,55 @@ impl OrchestratorHandle for ConversationOrchestrator {
         Ok(())
     }
 
+    async fn current_plan(&self) -> Result<Option<traits::PlanSnapshot>, HandleError> {
+        let session_id = self.session.lock().await.session_id;
+        let path = std::path::PathBuf::from(ConversationOrchestrator::plan_file_path(
+            &session_id,
+            &self.cwd,
+            self.config.plans_directory.as_deref(),
+        ));
+        match tokio::fs::read_to_string(&path).await {
+            Ok(content) => Ok(Some(traits::PlanSnapshot { path, content })),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(HandleError::ActionFailed(format!(
+                "could not read plan {}: {error}",
+                path.display()
+            ))),
+        }
+    }
+
+    async fn open_plan_editor(&self) -> Result<MemoryEditorOutcome, HandleError> {
+        let session_id = self.session.lock().await.session_id;
+        let path = std::path::PathBuf::from(ConversationOrchestrator::plan_file_path(
+            &session_id,
+            &self.cwd,
+            self.config.plans_directory.as_deref(),
+        ));
+        spawn_editor_on(path, "").await
+    }
+
+    async fn current_effort(&self) -> Option<String> {
+        self.current_effort
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    async fn set_effort_level(&self, effort: Option<String>) -> Result<(), HandleError> {
+        ConversationOrchestrator::set_effort(self, effort);
+        Ok(())
+    }
+
+    async fn permission_mode(&self) -> Option<String> {
+        ConversationOrchestrator::permission_mode(self)
+    }
+
+    async fn set_permission_mode(&self, mode: &str) -> Result<(), HandleError> {
+        ConversationOrchestrator::set_permission_mode(self, mode)
+            .await
+            .map_err(HandleError::ActionFailed)
+    }
+
     async fn request_exit(&self) {
         self.abort_startup_responses_websocket_prewarm();
         if let Err(err) = self.api.close_responses_websocket_session().await {
@@ -561,13 +679,15 @@ impl OrchestratorHandle for ConversationOrchestrator {
         let Some(path) = migrations::global_config::global_config_path() else {
             return Err("global config path is unavailable".to_string());
         };
+        let Some(registry) = self.mcp_registry.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let known = registry.server_names().await;
         // `None`/"all" → every registered server; else just the named one.
         let targets: Vec<String> = match server {
-            None | Some("all") => match self.mcp_registry.as_ref() {
-                Some(reg) => reg.server_names().await,
-                None => Vec::new(),
-            },
-            Some(n) => vec![n.to_string()],
+            None | Some("all") => known,
+            Some(n) if known.iter().any(|known| known == n) => vec![n.to_string()],
+            Some(n) => return Err(format!("no MCP server named \"{n}\"")),
         };
         if targets.is_empty() {
             return Ok(Vec::new());
@@ -596,6 +716,17 @@ impl OrchestratorHandle for ConversationOrchestrator {
             proj
         })
         .map_err(|e| e.to_string())?;
+        // Always reconcile the requested live state, even when the persisted
+        // list was already correct (for example after a prior transport teardown
+        // failed). Include live-only changes in the returned affected set.
+        for name in &targets {
+            let changed = registry.set_disabled(name, disabled).await.map_err(|e| {
+                format!("saved MCP setting for {name}, but the live session transition failed: {e}")
+            })?;
+            if changed && !affected.iter().any(|affected| affected == name) {
+                affected.push(name.clone());
+            }
+        }
         Ok(affected)
     }
 
@@ -1096,6 +1227,14 @@ mod tests {
         );
         let transcript_only = protocol::MessageId::new();
         let compact_summary = protocol::MessageId::new();
+        let skill_message = protocol::MessageId::new();
+        tools.deferral().mark_loaded(["StaleTool"]);
+        orch.sent_skill_names
+            .lock()
+            .await
+            .insert("stale-skill".to_string());
+        orch.last_response_input_tokens
+            .store(99, std::sync::atomic::Ordering::Relaxed);
 
         traits::OrchestratorHandle::resume_session(
             &orch,
@@ -1104,9 +1243,18 @@ mod tests {
             None,
             None,
             traits::ResumeRuntimeSnapshot {
+                model: "claude-opus-4-1".to_string(),
+                model_profile: Some("anthropic".to_string()),
+                effort: Some("high".to_string()),
+                main_thread_agent_type: None,
+                main_thread_agent_definition: None,
                 transcript_only_message_ids: vec![transcript_only],
                 compact_summary_message_ids: vec![compact_summary],
                 loaded_tool_names: vec!["DeferredTool".to_string()],
+                post_compact_skill_attachments: vec![(
+                    skill_message,
+                    vec!["body with\n\n---\n\na legal separator".to_string()],
+                )],
                 cumulative_dropped_tokens: 4_321,
                 compacted: true,
                 turn_counter: 3,
@@ -1119,6 +1267,8 @@ mod tests {
         .expect("hot resume");
 
         let session = orch.session.lock().await;
+        assert_eq!(session.model, "claude-opus-4-1");
+        assert_eq!(session.model_profile.as_deref(), Some("anthropic"));
         assert!(session.transcript_only_messages.contains(&transcript_only));
         assert!(session.compact_summary_messages.contains(&compact_summary));
         drop(session);
@@ -1135,6 +1285,199 @@ mod tests {
         assert_eq!(tracking.consecutive_rapid_refills, 1);
         drop(tracking);
         assert!(tools.deferral().is_loaded("DeferredTool"));
+        assert!(!tools.deferral().is_loaded("StaleTool"));
+        assert!(orch.sent_skill_names.lock().await.is_empty());
+        assert_eq!(
+            orch.last_response_input_tokens
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            orch.post_compact_skill_attachments
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&skill_message)
+                .cloned(),
+            Some(vec!["body with\n\n---\n\na legal separator".to_string()]),
+            "hot resume restores structured skill attachment identity"
+        );
+        assert_eq!(
+            orch.current_effort
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_deref(),
+            Some("high"),
+            "an unpinned runtime inherits transcript effort"
+        );
+
+        traits::OrchestratorHandle::resume_session(
+            &orch,
+            protocol::SessionId::new(),
+            Vec::new(),
+            None,
+            None,
+            traits::ResumeRuntimeSnapshot::default(),
+        )
+        .await
+        .expect("second hot resume");
+        assert_eq!(
+            *orch
+                .current_effort
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            None,
+            "an unpinned legacy transcript clears inherited effort"
+        );
+    }
+
+    #[tokio::test]
+    async fn hot_resume_preserves_explicit_launch_effort() {
+        use crate::test_support::{
+            noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+            StaticMemoryProvider,
+        };
+        use std::sync::Arc;
+
+        let orch = crate::ConversationOrchestrator::new(
+            crate::OrchestratorConfig {
+                effort: Some("low".to_string()),
+                ..crate::OrchestratorConfig::default()
+            },
+            Arc::new(MockApiClient::new(Vec::new())),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+
+        traits::OrchestratorHandle::resume_session(
+            &orch,
+            protocol::SessionId::new(),
+            Vec::new(),
+            None,
+            None,
+            traits::ResumeRuntimeSnapshot {
+                effort: Some("high".to_string()),
+                ..traits::ResumeRuntimeSnapshot::default()
+            },
+        )
+        .await
+        .expect("hot resume");
+
+        assert_eq!(
+            orch.current_effort
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_deref(),
+            Some("low"),
+            "explicit launch effort outranks transcript resume metadata"
+        );
+    }
+
+    #[tokio::test]
+    async fn hot_resume_replaces_main_thread_agent_and_its_hooks() {
+        use crate::test_support::{
+            noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+            StaticMemoryProvider,
+        };
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        let orch = crate::ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(Vec::new())),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+        let definition = agent::AgentDefinition {
+            agent_type: "reviewer".to_string(),
+            when_to_use: "review code".to_string(),
+            tools: agent::AgentToolPolicy::Explicit(vec!["Read".to_string()]),
+            max_turns: 4,
+            model: agent::AgentModel::Inherit,
+            permission_mode: agent::AgentPermissionMode::Bubble,
+            source: agent::AgentSource::UserDefined,
+            base_dir: std::env::temp_dir(),
+            system_prompt: Some("review carefully".to_string()),
+            mcp_servers: Vec::new(),
+            frontmatter_hooks: vec![hooks::HookDefinition {
+                id: protocol::HookId::new(),
+                name: "resumed-agent-stop".to_string(),
+                events: vec![hooks::HookEventType::Stop],
+                if_condition: None,
+                executor: hooks::HookExecutor::Command {
+                    command: "true".to_string(),
+                    args: Vec::new(),
+                    env: HashMap::new(),
+                    cwd: None,
+                },
+                source: hooks::HookSource::User,
+                blocking: true,
+                timeout: None,
+                priority: 0,
+                once: false,
+                status_message: None,
+            }],
+            icon: None,
+            allowed_tools: Vec::new(),
+            worktree_requirement: None,
+            disallowed_tools: vec!["Write".to_string()],
+            skills: Vec::new(),
+            required_mcp_servers: Vec::new(),
+            background: false,
+            isolation: None,
+            memory: None,
+            effort: None,
+            initial_prompt: None,
+            color: None,
+        };
+
+        traits::OrchestratorHandle::resume_session(
+            &orch,
+            protocol::SessionId::new(),
+            Vec::new(),
+            None,
+            None,
+            traits::ResumeRuntimeSnapshot {
+                main_thread_agent_type: Some("reviewer".to_string()),
+                main_thread_agent_definition: Some(
+                    serde_json::to_value(definition).expect("serialize agent snapshot"),
+                ),
+                ..traits::ResumeRuntimeSnapshot::default()
+            },
+        )
+        .await
+        .expect("resume agent session");
+
+        {
+            let restored = orch.main_thread_agent.read().await;
+            let restored = restored.as_ref().expect("resumed main-thread agent");
+            assert_eq!(restored.agent_type, "reviewer");
+            assert_eq!(restored.system_prompt.as_deref(), Some("review carefully"));
+        }
+        assert!(orch.main_thread_agent_hook_id.lock().await.is_some());
+        assert!(orch.hooks.has_hooks_for(&hooks::HookEventType::Stop).await);
+
+        traits::OrchestratorHandle::resume_session(
+            &orch,
+            protocol::SessionId::new(),
+            Vec::new(),
+            None,
+            None,
+            traits::ResumeRuntimeSnapshot::default(),
+        )
+        .await
+        .expect("resume default-agent session");
+
+        assert!(orch.main_thread_agent.read().await.is_none());
+        assert!(orch.main_thread_agent_hook_id.lock().await.is_none());
+        assert!(!orch.hooks.has_hooks_for(&hooks::HookEventType::Stop).await);
     }
 
     #[test]
@@ -1202,6 +1545,64 @@ mod tests {
             "usage must come from session totals, not a model-id lookup"
         );
         assert_eq!(max, CONTEXT_WINDOW_MAX_TOKENS);
+    }
+
+    #[tokio::test]
+    async fn handle_reads_the_real_plan_store_and_updates_live_effort() {
+        use crate::test_support::{
+            noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+            StaticMemoryProvider,
+        };
+        use std::sync::Arc;
+
+        let root = std::env::temp_dir().join(format!(
+            "lingxi-handle-plan-{}-{}",
+            std::process::id(),
+            protocol::SessionId::new().as_uuid()
+        ));
+        std::fs::create_dir_all(&root).expect("create plan root");
+        let orch = crate::ConversationOrchestrator::new(
+            crate::OrchestratorConfig {
+                plans_directory: Some(root.to_string_lossy().into_owned()),
+                ..crate::OrchestratorConfig::default()
+            },
+            Arc::new(MockApiClient::new(Vec::new())),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+
+        assert!(traits::OrchestratorHandle::current_plan(&orch)
+            .await
+            .expect("read absent plan")
+            .is_none());
+        let session_id = orch.session.lock().await.session_id;
+        let path = ConversationOrchestrator::plan_file_path(
+            &session_id,
+            &orch.cwd,
+            orch.config.plans_directory.as_deref(),
+        );
+        std::fs::write(&path, "# Plan\n\n- ship it\n").expect("write plan");
+        let plan = traits::OrchestratorHandle::current_plan(&orch)
+            .await
+            .expect("read plan")
+            .expect("plan exists");
+        assert_eq!(plan.path, std::path::PathBuf::from(path));
+        assert_eq!(plan.content, "# Plan\n\n- ship it\n");
+
+        traits::OrchestratorHandle::set_effort_level(&orch, Some("xhigh".to_string()))
+            .await
+            .expect("set effort");
+        assert_eq!(
+            traits::OrchestratorHandle::current_effort(&orch)
+                .await
+                .as_deref(),
+            Some("xhigh")
+        );
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]

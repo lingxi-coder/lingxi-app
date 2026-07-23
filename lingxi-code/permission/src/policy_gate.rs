@@ -41,16 +41,19 @@
 use crate::classifier::{classify_tool_call, reason_allows_classifier, AutoModeClassifierVerdict};
 use crate::defaults_per_tool::tool_default;
 use crate::gate::{
-    PermissionCheckContext, PermissionDecision, PermissionDecisionSource, PermissionGate,
-    PermissionOutcome, PermissionResolution, PromptDefault,
+    MatchedAskRule, PermissionCheckContext, PermissionDecision, PermissionDecisionSource,
+    PermissionGate, PermissionOutcome, PermissionResolution, PromptDefault,
 };
 use crate::mode::PermissionMode;
 use crate::policy::PermissionPolicy;
 use crate::result::{
     ClassifierKind, PermissionDecisionReason, PermissionMetadata, PermissionResult,
 };
+use crate::rule::{PermissionBehavior, PermissionRule, PermissionRuleSource, PermissionRuleValue};
 use async_trait::async_trait;
 use serde_json::Value;
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 /// A source of the LIVE main-loop model id (claude-code `wi()` / `getModel()`),
@@ -60,6 +63,25 @@ use std::sync::Arc;
 /// without blocking (a contended session lock), so the caller fails OPEN (no
 /// rejection) rather than stall the control_request.
 pub type LiveModelProvider = Arc<dyn Fn() -> Option<String> + Send + Sync>;
+
+#[derive(Debug, Clone)]
+struct LivePermissionState {
+    allow_rules: HashMap<PermissionRuleSource, Vec<PermissionRule>>,
+    deny_rules: HashMap<PermissionRuleSource, Vec<PermissionRule>>,
+    ask_rules: HashMap<PermissionRuleSource, Vec<PermissionRule>>,
+    additional_working_dirs: Vec<PathBuf>,
+}
+
+impl LivePermissionState {
+    fn from_policy(policy: &PermissionPolicy) -> Self {
+        Self {
+            allow_rules: policy.allow_rules.clone(),
+            deny_rules: policy.deny_rules.clone(),
+            ask_rules: policy.ask_rules.clone(),
+            additional_working_dirs: policy.additional_working_dirs.clone(),
+        }
+    }
+}
 
 /// Enforcing gate over a [`PermissionPolicy`] (see module docs).
 pub struct PolicyPermissionGate {
@@ -75,6 +97,10 @@ pub struct PolicyPermissionGate {
     /// check, mirroring claude-code reading `toolPermissionContext.mode` LIVE.
     /// Read briefly per check (the value is `Copy`, never held across an `await`).
     mode_override: std::sync::RwLock<Option<PermissionMode>>,
+    /// LIVE tighten-only per-MCP-server permission-mode overrides from the
+    /// control channel (`set_mcp_permission_mode_override`). Keys are the
+    /// normalized MCP server token used in `mcp__<server>__<tool>` names.
+    mcp_mode_overrides: std::sync::RwLock<std::collections::HashMap<String, PermissionMode>>,
     /// LIVE main-loop model source (claude-code `wi()`), filled post-orchestrator
     /// via [`Self::live_model_provider_handle`] so the auto `set_permission_mode`
     /// gate can evaluate `One()`'s model reason (`dUe(wi())`) against the model
@@ -84,16 +110,83 @@ pub struct PolicyPermissionGate {
     /// never reaches this path in `Auto`); a contended read returns `None` and
     /// likewise skips (fail-open, matching every other post-orch live cell).
     live_model_provider: Arc<std::sync::OnceLock<LiveModelProvider>>,
+    /// Live session rule/directory state after applying host
+    /// `updatedPermissions`. Starts as a clone of the boot policy's mutable
+    /// permission state, then diverges only through
+    /// [`Self::apply_permission_update`].
+    live_state: std::sync::RwLock<LivePermissionState>,
 }
 
 impl PolicyPermissionGate {
+    fn parse_update_destination(value: &Value) -> Option<PermissionRuleSource> {
+        match value.as_str()? {
+            "userSettings" => Some(PermissionRuleSource::UserSettings),
+            "projectSettings" => Some(PermissionRuleSource::ProjectSettings),
+            "localSettings" => Some(PermissionRuleSource::LocalSettings),
+            "cliArg" => Some(PermissionRuleSource::CliArg),
+            "session" => Some(PermissionRuleSource::Session),
+            _ => None,
+        }
+    }
+
+    fn parse_update_behavior(value: &Value) -> Option<PermissionBehavior> {
+        match value.as_str()? {
+            "allow" => Some(PermissionBehavior::Allow),
+            "deny" => Some(PermissionBehavior::Deny),
+            "ask" => Some(PermissionBehavior::Ask),
+            _ => None,
+        }
+    }
+
+    fn parse_update_rules(
+        value: &Value,
+        behavior: PermissionBehavior,
+        source: PermissionRuleSource,
+    ) -> Option<Vec<PermissionRule>> {
+        value
+            .as_array()?
+            .iter()
+            .map(|rule| {
+                let object = rule.as_object()?;
+                let tool_name = object.get("toolName").and_then(Value::as_str)?;
+                let rule_content = match object.get("ruleContent") {
+                    None => None,
+                    Some(Value::String(content)) => Some(content.clone()),
+                    Some(_) => return None,
+                };
+                Some(PermissionRule {
+                    value: PermissionRuleValue {
+                        tool_name: crate::rule::normalize_legacy_tool_name(tool_name),
+                        rule_content,
+                    },
+                    behavior,
+                    source,
+                })
+            })
+            .collect()
+    }
+
+    fn rule_bucket_mut(
+        live: &mut LivePermissionState,
+        behavior: PermissionBehavior,
+    ) -> &mut HashMap<PermissionRuleSource, Vec<PermissionRule>> {
+        match behavior {
+            PermissionBehavior::Allow => &mut live.allow_rules,
+            PermissionBehavior::Deny => &mut live.deny_rules,
+            PermissionBehavior::Ask => &mut live.ask_rules,
+        }
+    }
+
     /// Wrap `policy` with `inner` as the `Ask`-delegation prompt transport.
     #[must_use]
     pub fn new(policy: Arc<PermissionPolicy>, inner: Arc<dyn PermissionGate>) -> Self {
+        inner.set_permission_persistence_enabled(!policy.allow_managed_permission_rules_only);
         Self {
+            live_state: std::sync::RwLock::new(LivePermissionState::from_policy(&policy)),
             policy,
             inner,
             mode_override: std::sync::RwLock::new(None),
+            mcp_mode_overrides: std::sync::RwLock::new(std::collections::HashMap::new()),
             live_model_provider: Arc::new(std::sync::OnceLock::new()),
         }
     }
@@ -137,9 +230,134 @@ impl PolicyPermissionGate {
             .unwrap_or(self.policy.mode)
     }
 
+    /// Effective mode for one specific tool, including the tighten-only
+    /// per-MCP-server override used by Claude's control channel. The override is
+    /// only consulted on MCP tools and only when the session-wide mode is one of
+    /// the modes Claude lets the per-server pin narrow: `bypassPermissions`,
+    /// `auto`, or `plan` while bypass remains available.
+    fn effective_mode_for_tool(&self, tool_name: &str) -> PermissionMode {
+        let base = self.effective_mode();
+        let Some(server) = mcp_server_token(tool_name) else {
+            return base;
+        };
+        let should_apply = matches!(
+            base,
+            PermissionMode::BypassPermissions | PermissionMode::Auto
+        ) || (base == PermissionMode::Plan
+            && self.policy.bypass_permissions_available
+            && !self.policy.bypass_killswitch_active);
+        if !should_apply {
+            return base;
+        }
+        self.mcp_mode_overrides
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(server)
+            .copied()
+            .unwrap_or(base)
+    }
+
     fn effective_authorize(&self, name: &str, input: &Value) -> (PermissionMode, PermissionResult) {
-        let mode = self.effective_mode();
-        (mode, self.policy.authorize_with_mode(name, input, mode))
+        let mode = self.effective_mode_for_tool(name);
+        (mode, self.authorize_with_live_state(name, input, mode))
+    }
+
+    /// claude-code `_pt` — the RULE + SAFETY verdict for a call, with **NO MODE
+    /// BACKSTOP**.
+    ///
+    /// `_pt` walks deny rules → allow rules → the tool's own `checkPermissions`
+    /// → ask rules → `requiresUserInteraction` → mcp `effectiveMaxPermission`,
+    /// and returns **`null`** when none of them decides. It never consults the
+    /// permission MODE — so an ordinary "Default mode, no matching rule,
+    /// mutating tool" call yields NO verdict, and a caller resolving a hook
+    /// `allow` lets that allow stand.
+    ///
+    /// This port folds rules + safety + mode into one `authorize_with_mode`, so
+    /// the mode layer is SUBTRACTED here: a result whose reason is
+    /// [`PermissionDecisionReason::PermissionMode`] is exactly what the mode tail
+    /// produced (`ask_with_mode` / `allow_with_mode` / the plan-mutation ask) and
+    /// therefore corresponds to `_pt`'s `null`. Everything else — deny rules, ask
+    /// rules, and the safety walks (dangerous-removal, path constraints, sed,
+    /// background-operator) — is a genuine rule/safety verdict and is returned.
+    ///
+    /// The evaluation runs under a NEUTRAL [`PermissionMode::Default`] rather
+    /// than the session's mode. `_pt` consults no mode at all, and every
+    /// mode-specific tail transform would otherwise masquerade as a rule verdict:
+    /// `DontAsk` rewrites a surviving ask into a mode-tagged **deny**
+    /// (`policy.rs:477`, the only `deny_with_mode` site), plan adds its mutation
+    /// backstop, and `bypassPermissions`/`acceptEdits` add allows. Under
+    /// `Default` none of those fire, and the remaining mode fallback
+    /// (`ask_with_mode(Default)`) is filtered out below — leaving exactly the
+    /// rule + safety walks. The session's real mode is still returned for
+    /// auto-mode bookkeeping.
+    fn rule_or_safety_verdict(
+        &self,
+        name: &str,
+        input: &Value,
+    ) -> (PermissionMode, Option<PermissionResult>) {
+        let mode = self.effective_mode_for_tool(name);
+        let result = self.authorize_with_live_state(name, input, PermissionMode::Default);
+        let verdict = match &result {
+            // Deny rules + the tool's own `checkPermissions` denies. (A
+            // mode-sourced deny cannot occur here: `deny_with_mode` is reachable
+            // only under `DontAsk`, which this neutral evaluation excludes.)
+            PermissionResult::Deny { .. } => Some(result),
+            // `_pt` reports an ASK only for its three arms — an ask RULE (`MFo`,
+            // including a nested `subcommandResults` ask), a `safetyCheck`
+            // (`W9`), or a `sandboxOverride`. Guard asks tagged `Other` (path
+            // constraints, `$IFS`/bash-safety, sed, PowerShell containment,
+            // edit-read-deny) are `type:"other"` in the oracle too and `_pt`
+            // SKIPS them — so they must NOT block a hook allow.
+            PermissionResult::Ask { reason, .. } if Self::is_pt_ask_reason(reason) => Some(result),
+            _ => None,
+        };
+        (mode, verdict)
+    }
+
+    /// Does this ask reason correspond to one of `_pt`'s ask arms?
+    /// `MFo(reason)` = a matched rule whose behavior is `ask` (recursing into
+    /// `subcommandResults`), `W9(reason)` = `safetyCheck`, plus `sandboxOverride`.
+    fn is_pt_ask_reason(reason: &PermissionDecisionReason) -> bool {
+        match reason {
+            PermissionDecisionReason::MatchedRule { rule } => {
+                rule.behavior == PermissionBehavior::Ask
+            }
+            PermissionDecisionReason::SubcommandResults { reasons } => {
+                reasons.values().any(|r| match r.as_ref() {
+                    PermissionResult::Ask { reason, .. } => Self::is_pt_ask_reason(reason),
+                    _ => false,
+                })
+            }
+            PermissionDecisionReason::SafetyCheck { .. }
+            | PermissionDecisionReason::SandboxOverride { .. } => true,
+            _ => false,
+        }
+    }
+
+    /// Evaluate one call against the current in-memory permission overlay while
+    /// forcing a caller-selected mode. Per-worker and plan-mode checks must see
+    /// the same live rules and working directories as the ordinary check path.
+    fn authorize_with_live_state(
+        &self,
+        name: &str,
+        input: &Value,
+        mode: PermissionMode,
+    ) -> PermissionResult {
+        self.live_policy().authorize_with_mode(name, input, mode)
+    }
+
+    fn live_policy(&self) -> PermissionPolicy {
+        let live = self
+            .live_state
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        self.policy.clone_with_live_state(
+            live.allow_rules,
+            live.deny_rules,
+            live.ask_rules,
+            live.additional_working_dirs,
+        )
     }
 
     /// Map a 3-valued [`PermissionResult`] onto the 2-valued
@@ -244,7 +462,11 @@ impl PolicyPermissionGate {
             } => PermissionOutcome::Deny {
                 reason: explanation.unwrap_or_else(|| deny_reason_string(&reason, name)),
             },
-            PermissionResult::Ask { ref reason, .. } => {
+            PermissionResult::Ask {
+                ref reason,
+                ref metadata,
+                ..
+            } => {
                 // HOOK-ASKFLOOR-03: when a PreToolUse hook returned `ask`
                 // (`ctx.hook_ask_floor`), the Auto-mode classifier's ALLOW must NOT
                 // silently defeat the hook's ask — CC's `hookAskFloor` keeps the ask
@@ -278,15 +500,24 @@ impl PolicyPermissionGate {
                     // serializeDecisionReason(mainPermissionResult.decisionReason)`.
                     // The turn loop builds the ctx with only `tool_use_id`; we add
                     // the reason without touching the unit `PermissionResolution::Ask`.
-                    // (permission_suggestions/blocked_path stay `None` — LingXi's
-                    // policy Ask does not model claude-code's
-                    // PermissionAskDecision.suggestions/blockedPath; see the
-                    // PermissionCheckContext field docs.)
-                    let ctx2 = PermissionCheckContext {
-                        decision_reason: serialize_decision_reason(reason),
-                        decision_reason_type: decision_reason_type(reason).map(str::to_string),
-                        ..ctx.clone()
-                    };
+                    let mut ctx2 = ctx.clone();
+                    ctx2.decision_reason = serialize_decision_reason(reason);
+                    ctx2.decision_reason_type = decision_reason_type(reason).map(str::to_string);
+                    // These two fields are functions of the authoritative
+                    // decision reason. Clear any stale caller value when the
+                    // reason does not support it instead of emitting metadata
+                    // for an unrelated Ask.
+                    ctx2.classifier_approvable = classifier_approvable(reason);
+                    ctx2.matched_ask_rule = matched_ask_rule(reason);
+                    // Tool-specific policy producers take precedence; retain an
+                    // explicitly supplied transport context only when the
+                    // permission result has no structured value.
+                    if metadata.permission_suggestions.is_some() {
+                        ctx2.permission_suggestions = metadata.permission_suggestions.clone();
+                    }
+                    if metadata.blocked_path.is_some() {
+                        ctx2.blocked_path = metadata.blocked_path.clone();
+                    }
                     let outcome = self.inner.check_with_context(name, input, &ctx2).await;
                     if let PermissionOutcome::Allow {
                         permission_updates, ..
@@ -297,8 +528,8 @@ impl PolicyPermissionGate {
                         // u=>bJ(u,updates))`): when the host's allow carried
                         // `updatedPermissions`, apply them to the LIVE session so
                         // subsequent checks see the change — not only the next
-                        // session load. `setMode` is applied here; rule/dir arms
-                        // are the documented PARTIAL (see `apply_permission_update`).
+                        // session load. Mode, rule, and directory arms all fold
+                        // through the same live reducer below.
                         if !permission_updates.is_empty() {
                             self.apply_permission_updates(permission_updates);
                         }
@@ -509,13 +740,9 @@ impl PolicyPermissionGate {
     ///   which sets the raw string and lets `transitionPermissionMode` no-op it)
     ///   but leaves the typed [`Self::mode_override`] unchanged.
     ///
-    /// PARTIAL (PERM-GATE-UPDATES-01): the `addRules` / `replaceRules` /
-    /// `removeRules` / `add|removeDirectories` arms are NOT applied in-memory
-    /// here — that needs a session-rule overlay consulted by
-    /// [`crate::PermissionPolicy::authorize_with_mode`] (in `policy.rs`) plus the
-    /// `persist.rs` session-destination changes, both outside this lane. Those
-    /// updates are still PERSISTED by the control plane (`addRules` only) and
-    /// take effect on the next session load, as before.
+    /// Rule and directory updates are applied to the gate's live overlay and
+    /// therefore affect subsequent model, subagent, and prompt-shell checks in
+    /// the current session. Persistence remains the control plane's concern.
     pub fn apply_permission_update(&self, update: &Value) {
         match update.get("type").and_then(Value::as_str) {
             Some("setMode") => {
@@ -538,9 +765,90 @@ impl PolicyPermissionGate {
                         .unwrap_or_else(|e| e.into_inner()) = Some(parsed);
                 }
             }
+            Some("addRules") | Some("replaceRules") | Some("removeRules") => {
+                let Some(source) = Self::parse_update_destination(
+                    update.get("destination").unwrap_or(&Value::Null),
+                ) else {
+                    return;
+                };
+                let Some(behavior) =
+                    Self::parse_update_behavior(update.get("behavior").unwrap_or(&Value::Null))
+                else {
+                    return;
+                };
+                let Some(rules) = Self::parse_update_rules(
+                    update.get("rules").unwrap_or(&Value::Null),
+                    behavior,
+                    source,
+                ) else {
+                    return;
+                };
+                let mut live = self.live_state.write().unwrap_or_else(|e| e.into_inner());
+                let bucket = Self::rule_bucket_mut(&mut live, behavior);
+                match update.get("type").and_then(Value::as_str) {
+                    Some("addRules") => {
+                        let entry = bucket.entry(source).or_default();
+                        for rule in rules {
+                            if !entry.iter().any(|existing| existing.value == rule.value) {
+                                entry.push(rule);
+                            }
+                        }
+                    }
+                    Some("replaceRules") => {
+                        bucket.insert(source, rules);
+                    }
+                    Some("removeRules") => {
+                        let to_remove: Vec<_> = rules.into_iter().map(|rule| rule.value).collect();
+                        if let Some(entry) = bucket.get_mut(&source) {
+                            entry.retain(|existing| {
+                                !to_remove.iter().any(|rule| rule == &existing.value)
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Some("addDirectories") | Some("removeDirectories") => {
+                if Self::parse_update_destination(update.get("destination").unwrap_or(&Value::Null))
+                    .is_none()
+                {
+                    return;
+                }
+                let Some(directories) = update.get("directories").and_then(Value::as_array) else {
+                    return;
+                };
+                let Some(directories) = directories
+                    .iter()
+                    .map(Value::as_str)
+                    .collect::<Option<Vec<_>>>()
+                else {
+                    return;
+                };
+                let mut live = self.live_state.write().unwrap_or_else(|e| e.into_inner());
+                match update.get("type").and_then(Value::as_str) {
+                    Some("addDirectories") => {
+                        for dir in directories {
+                            let dir = PathBuf::from(dir);
+                            if !live
+                                .additional_working_dirs
+                                .iter()
+                                .any(|existing| existing == &dir)
+                            {
+                                live.additional_working_dirs.push(dir);
+                            }
+                        }
+                    }
+                    Some("removeDirectories") => {
+                        let to_remove: Vec<PathBuf> =
+                            directories.into_iter().map(PathBuf::from).collect();
+                        live.additional_working_dirs
+                            .retain(|dir| !to_remove.iter().any(|remove| remove == dir));
+                    }
+                    _ => {}
+                }
+            }
             _ => {
-                // addRules/replaceRules/removeRules/add|removeDirectories:
-                // in-memory apply deferred (see the method docs). No-op here.
+                // Unknown update type: ignored, matching the JS reducer.
             }
         }
     }
@@ -571,6 +879,50 @@ fn read_only_default_auto_allows(name: &str, reason: &PermissionDecisionReason) 
 
 #[async_trait]
 impl PermissionGate for PolicyPermissionGate {
+    fn read_deny_exclude_globs(&self, cwd: &std::path::Path) -> Option<Vec<String>> {
+        Some(crate::read_deny_exclude_globs(&self.live_policy(), cwd))
+    }
+
+    fn check_noninteractive_with_allow_rules(
+        &self,
+        name: &str,
+        input: &Value,
+        transient_allow_rules: &[String],
+    ) -> Option<traits::permission_gate::NonInteractivePermissionDecision> {
+        use traits::permission_gate::NonInteractivePermissionDecision;
+
+        let mode = self.effective_mode_for_tool(name);
+        let mut live = self
+            .live_state
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let command_rules = live
+            .allow_rules
+            .entry(PermissionRuleSource::Command)
+            .or_default();
+        command_rules.extend(transient_allow_rules.iter().map(|spec| PermissionRule {
+            value: PermissionRuleValue::from_rule_string(spec),
+            behavior: PermissionBehavior::Allow,
+            source: PermissionRuleSource::Command,
+        }));
+        let policy = self.policy.clone_with_live_state(
+            live.allow_rules,
+            live.deny_rules,
+            live.ask_rules,
+            live.additional_working_dirs,
+        );
+        Some(match policy.authorize_with_mode(name, input, mode) {
+            PermissionResult::Allow { .. } => NonInteractivePermissionDecision::Allow,
+            PermissionResult::Deny { explanation, .. } => NonInteractivePermissionDecision::Deny {
+                reason: explanation,
+            },
+            PermissionResult::Ask { prompt, .. } => NonInteractivePermissionDecision::Deny {
+                reason: Some(prompt.message),
+            },
+        })
+    }
+
     async fn check(&self, name: &str, input: &Value) -> PermissionDecision {
         // Authorize under the LIVE mode (boot mode or a set_permission_mode
         // override), then map the 3-valued result (an `Ask` auto-allows read-only
@@ -609,11 +961,27 @@ impl PermissionGate for PolicyPermissionGate {
         // dispatch seam reads it, so the shared gate's mode is never mutated (the
         // parent's own checks are unaffected).
         let (mode, result) = match ctx.mode_override.as_deref().and_then(parse_settable_mode) {
-            Some(m) => (m, self.policy.authorize_with_mode(name, input, m)),
+            Some(m) => (m, self.authorize_with_live_state(name, input, m)),
             None => self.effective_authorize(name, input),
         };
         self.decide_outcome_with_context(mode, result, name, input, ctx)
             .await
+    }
+
+    fn apply_permission_updates(&self, updates: &[Value]) {
+        PolicyPermissionGate::apply_permission_updates(self, updates);
+    }
+
+    async fn persist_permission_updates(&self, updates: &[Value]) {
+        if !self.policy.allow_managed_permission_rules_only {
+            self.inner.persist_permission_updates(updates).await;
+        }
+    }
+
+    fn set_permission_persistence_enabled(&self, enabled: bool) {
+        self.inner.set_permission_persistence_enabled(
+            enabled && !self.policy.allow_managed_permission_rules_only,
+        );
     }
 
     /// A PreToolUse / PermissionRequest hook `allow` skips the PROMPT but still
@@ -624,20 +992,95 @@ impl PermissionGate for PolicyPermissionGate {
     /// approved, so the would-be prompt is skipped) and `Allow → Allow`. Unlike
     /// `check`, an `Ask` NEVER delegates to the inner prompt transport here — the
     /// hook already resolved the prompt.
+    /// claude-code `lin` — resolve a **PreToolUse** hook `allow`.
+    ///
+    /// `lin` re-runs the rule/safety check ([`Self::rule_or_safety_verdict`],
+    /// the `_pt` analog) UNCONDITIONALLY — there is no "only if the hook rewrote
+    /// the input" gate — and then:
+    ///
+    /// * `deny` ⇒ the deny rule OVERRIDES the hook
+    ///   (`"…but deny rule overrides: ${u.message}"`);
+    /// * `ask`  ⇒ the call goes to the FULL permission pipeline
+    ///   (`"…but ask rule/safety check requires full permission pipeline"`), i.e.
+    ///   it PROMPTS — headless resolves that to a deny via the inner gate;
+    /// * no verdict ⇒ the hook's allow stands, prompt skipped.
+    ///
+    /// The third arm is why the mode layer must be subtracted: an ordinary
+    /// Default-mode mutating call has no rule verdict at all, so the hook allow
+    /// is honoured. Feeding the mode-backstop ask in here instead would deny
+    /// almost every hook-rescued call.
     async fn check_after_hook_allow(&self, name: &str, input: &Value) -> PermissionDecision {
-        let (mode, result) = self.effective_authorize(name, input);
-        match result {
-            PermissionResult::Allow { .. } | PermissionResult::Ask { .. } => {
-                self.record_auto_mode_non_deny(mode);
-                PermissionDecision::Allow
-            }
-            PermissionResult::Deny {
+        let (mode, verdict) = self.rule_or_safety_verdict(name, input);
+        match verdict {
+            Some(PermissionResult::Deny {
                 reason,
                 explanation,
                 ..
-            } => PermissionDecision::Deny {
-                reason: explanation.unwrap_or_else(|| deny_reason_string(&reason, name)),
-            },
+            }) => {
+                let msg = explanation.unwrap_or_else(|| deny_reason_string(&reason, name));
+                tracing::warn!(
+                    target: "permission",
+                    "Hook returned 'allow' for {name}, but deny rule overrides: {msg}"
+                );
+                PermissionDecision::Deny { reason: msg }
+            }
+            Some(PermissionResult::Ask { .. }) => {
+                tracing::warn!(
+                    target: "permission",
+                    "Hook returned 'allow' for {name}, but ask rule/safety check requires full permission pipeline"
+                );
+                self.inner.check(name, input).await
+            }
+            // `_pt` returned null (no rule/safety verdict) or an allow RULE.
+            _ => {
+                self.record_auto_mode_non_deny(mode);
+                PermissionDecision::Allow
+            }
+        }
+    }
+
+    /// claude-code `Fxy` + `epr` — resolve a **PermissionRequest** (headless
+    /// rescue) hook `allow` that came with a REWRITTEN input.
+    ///
+    /// Same `_pt` re-check, but an `ask` becomes a **hard deny** carrying the
+    /// ASK's own message (`{behavior:"deny", message:c.message, …}`) — that
+    /// surface has no prompt to fall back to, and the hook already consumed the
+    /// one opportunity to resolve it. Without this a hook could rewrite a tool's
+    /// arguments into something an ask rule covers and have it run unprompted.
+    async fn check_after_hook_allow_rewritten(
+        &self,
+        name: &str,
+        input: &Value,
+    ) -> PermissionDecision {
+        let (mode, verdict) = self.rule_or_safety_verdict(name, input);
+        match verdict {
+            Some(PermissionResult::Deny {
+                reason,
+                explanation,
+                ..
+            }) => {
+                let msg = explanation.unwrap_or_else(|| deny_reason_string(&reason, name));
+                tracing::warn!(
+                    target: "permission",
+                    "PermissionRequest hook allowed {name} with updatedInput, but deny rule overrides: {msg}"
+                );
+                PermissionDecision::Deny { reason: msg }
+            }
+            Some(PermissionResult::Ask { prompt, .. }) => {
+                tracing::warn!(
+                    target: "permission",
+                    "PermissionRequest hook allowed {name} with updatedInput, but ask rule overrides: {}",
+                    prompt.message
+                );
+                // `c.behavior==="ask" ? {behavior:"deny", message:c.message, …}`
+                PermissionDecision::Deny {
+                    reason: prompt.message,
+                }
+            }
+            _ => {
+                self.record_auto_mode_non_deny(mode);
+                PermissionDecision::Allow
+            }
         }
     }
 
@@ -653,8 +1096,7 @@ impl PermissionGate for PolicyPermissionGate {
     async fn check_in_plan_mode(&self, name: &str, input: &Value) -> PermissionDecision {
         self.decide(
             PermissionMode::Plan,
-            self.policy
-                .authorize_with_mode(name, input, PermissionMode::Plan),
+            self.authorize_with_live_state(name, input, PermissionMode::Plan),
             name,
             input,
         )
@@ -675,7 +1117,7 @@ impl PermissionGate for PolicyPermissionGate {
     /// excluded by [`PermissionPolicy::tool_wide_deny_names`] (they deny calls,
     /// not the tool). With zero deny rules this is empty ⇒ no tools stripped.
     async fn tool_wide_deny_names(&self) -> Vec<String> {
-        self.policy.tool_wide_deny_names()
+        self.live_policy().tool_wide_deny_names()
     }
 
     /// Surface the source of a matching `Agent(<type>)` deny rule so the Agent
@@ -685,7 +1127,7 @@ impl PermissionGate for PolicyPermissionGate {
     /// ([`PermissionRuleSource::lingxi_settings_source`]), matching the binary's
     /// `… from ${rule.source}.`.
     async fn agent_type_deny(&self, agent_type: &str) -> Option<String> {
-        self.policy
+        self.live_policy()
             .agent_type_deny_source(agent_type)
             .map(|s| s.lingxi_settings_source().to_string())
     }
@@ -694,7 +1136,7 @@ impl PermissionGate for PolicyPermissionGate {
     /// advertised agent catalog and `Available agents:` lists exclude denied
     /// types (claude-code `Pxe`).
     async fn agent_deny_content_types(&self) -> Vec<String> {
-        self.policy.agent_deny_content_types()
+        self.live_policy().agent_deny_content_types()
     }
 
     /// Apply a LIVE `set_permission_mode` override (claude-code
@@ -774,6 +1216,35 @@ impl PermissionGate for PolicyPermissionGate {
         Ok(())
     }
 
+    async fn set_mcp_permission_mode_override(
+        &self,
+        server_name: &str,
+        mode: Option<&str>,
+    ) -> Result<(), String> {
+        let normalized = protocol::normalize_name_for_mcp(server_name);
+        let mut overrides = self
+            .mcp_mode_overrides
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        match mode {
+            None => {
+                overrides.remove(&normalized);
+                Ok(())
+            }
+            Some("default") => {
+                overrides.insert(normalized, PermissionMode::Default);
+                Ok(())
+            }
+            Some("auto") => {
+                overrides.insert(normalized, PermissionMode::Auto);
+                Ok(())
+            }
+            Some(other) => Err(format!(
+                "Permission mode override over the control channel is tighten-only ('default', 'auto', or null); rejected '{other}'"
+            )),
+        }
+    }
+
     /// The LIVE effective mode as a wire string — the override when set, else the
     /// boot mode ([`Self::effective_mode`]). Lets the in-process `/resume`
     /// re-mount snapshot and restore the user's mid-session Shift+Tab mode.
@@ -801,6 +1272,14 @@ fn parse_settable_mode(s: &str) -> Option<PermissionMode> {
         "auto" => Some(PermissionMode::Auto),
         _ => None,
     }
+}
+
+fn mcp_server_token(tool_name: &str) -> Option<&str> {
+    let mut parts = tool_name.splitn(3, "__");
+    let Some("mcp") = parts.next() else {
+        return None;
+    };
+    parts.next().filter(|server| !server.is_empty())
 }
 
 /// Render a [`PermissionDecisionReason`] to the model-facing deny string for
@@ -831,6 +1310,49 @@ fn deny_reason_string(reason: &PermissionDecisionReason, tool_name: &str) -> Str
 /// `` `Permission to use ${tool} has been denied. ${Rws}` `` (see
 /// [`crate::headless_gate::DenyOnAskGate`]).
 pub(crate) const DENIAL_WORKAROUND_GUIDANCE: &str = "IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this denial in malicious ways, e.g. do not use your ability to run tests to execute non-test actions. You should only try to work around this restriction in reasonable ways that do not attempt to bypass the intent behind this denial. If you believe this capability is essential to complete the user's request, STOP and explain to the user what you were trying to do and why you need this permission. Let the user decide how to proceed.";
+
+/// Compute the stdio `classifier_approvable` value from the structured
+/// decision reason.  Claude Code emits this field only when at least one
+/// `safetyCheck` exists and folds composite subcommand reasons so one
+/// non-approvable check makes the whole request non-approvable.
+fn classifier_approvable(reason: &PermissionDecisionReason) -> Option<bool> {
+    fn visit(reason: &PermissionDecisionReason) -> (bool, bool) {
+        match reason {
+            PermissionDecisionReason::SafetyCheck {
+                classifier_approvable,
+                ..
+            } => (true, *classifier_approvable),
+            PermissionDecisionReason::SubcommandResults { reasons } => {
+                reasons.values().fold((false, true), |(any, all), result| {
+                    let nested = match result.as_ref() {
+                        PermissionResult::Allow { reason, .. }
+                        | PermissionResult::Deny { reason, .. }
+                        | PermissionResult::Ask { reason, .. } => visit(reason),
+                    };
+                    (any || nested.0, all && nested.1)
+                })
+            }
+            _ => (false, true),
+        }
+    }
+
+    let (has_safety_check, all_approvable) = visit(reason);
+    has_safety_check.then_some(all_approvable)
+}
+
+/// Preserve an explicit Ask rule in the structured control request.  Every
+/// field comes directly from the matched rule; no path/command inference is
+/// performed here.
+fn matched_ask_rule(reason: &PermissionDecisionReason) -> Option<MatchedAskRule> {
+    let PermissionDecisionReason::MatchedRule { rule } = reason else {
+        return None;
+    };
+    Some(MatchedAskRule {
+        source: rule.source.lingxi_settings_source().to_string(),
+        tool_name: rule.value.tool_name.clone(),
+        rule_content: rule.value.rule_content.clone(),
+    })
+}
 
 /// Serialize a [`PermissionDecisionReason`] to the free-text `decision_reason`
 /// string a stdio `can_use_tool` control_request carries — 1:1 with claude-code

@@ -157,6 +157,10 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::Error.kind", "ErrorKindDto");
     put("ClientEvent::Error.message", "String");
 
+    put("ClientEvent::SystemNotice", "system_notice");
+    put("ClientEvent::SystemNotice.message", "String");
+    put("ClientEvent::SystemNotice.is_error", "bool");
+
     put("ClientEvent::TextDelta", "text_delta");
     put("ClientEvent::TextDelta.text", "String");
 
@@ -164,6 +168,11 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::ToolUseStarted.id", "String");
     put("ClientEvent::ToolUseStarted.tool", "String");
     put("ClientEvent::ToolUseStarted.input_json", "String");
+
+    put("ClientEvent::ToolHeartbeat", "tool_heartbeat");
+    put("ClientEvent::ToolHeartbeat.id", "String");
+    put("ClientEvent::ToolHeartbeat.tool", "String");
+    put("ClientEvent::ToolHeartbeat.elapsed_ms", "u64");
 
     put("ClientEvent::ToolUseResult", "tool_use_result");
     put("ClientEvent::ToolUseResult.id", "String");
@@ -214,6 +223,34 @@ fn current_contract_index() -> ContractIndex {
 
     put("ClientEvent::ModelChanged", "model_changed");
     put("ClientEvent::ModelChanged.model", "String");
+
+    put(
+        "ClientEvent::PermissionModeChanged",
+        "permission_mode_changed",
+    );
+    put("ClientEvent::PermissionModeChanged.mode", "String");
+
+    put(
+        "ClientEvent::ProviderCredentialStatus",
+        "provider_credential_status",
+    );
+    put("ClientEvent::ProviderCredentialStatus.operation_id", "u64");
+    put(
+        "ClientEvent::ProviderCredentialStatus.configured_provider_ids",
+        "Vec<String>",
+    );
+    put(
+        "ClientEvent::ProviderCredentialStatus.unavailable_provider_ids",
+        "Vec<String>",
+    );
+    put(
+        "ClientEvent::ProviderCredentialStatus.storage_encrypted",
+        "bool",
+    );
+    put(
+        "ClientEvent::ProviderCredentialStatus.error",
+        "Option<String>",
+    );
 
     put("ClientEvent::McpServers", "mcp_servers");
     put("ClientEvent::McpServers.servers", "Vec<McpServerDto>");
@@ -279,11 +316,18 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::UsageUpdate.cache_read_tokens", "u64");
     put("ClientEvent::UsageUpdate.cache_creation_tokens", "u64");
 
+    put("ClientEvent::ApiRetry", "api_retry");
+    put("ClientEvent::ApiRetry.message", "String");
+    put("ClientEvent::ApiRetry.attempt", "u32");
+    put("ClientEvent::ApiRetry.max_retries", "u32");
+    put("ClientEvent::ApiRetry.delay_ms", "u64");
+
     // ── ErrorKindDto (events.rs) ──────────────────────────────────────────
     put("ErrorKindDto::Transport", "transport");
     put("ErrorKindDto::Protocol", "protocol");
     put("ErrorKindDto::Server", "server");
     put("ErrorKindDto::MaxTurns", "max_turns");
+    put("ErrorKindDto::Rejected", "rejected");
     put("ErrorKindDto::Internal", "internal");
 
     // ── TurnOutcomeDto (events.rs) ────────────────────────────────────────
@@ -321,6 +365,43 @@ fn current_contract_index() -> ContractIndex {
 
     put("ClientCommand::DenyPermission", "deny_permission");
     put("ClientCommand::DenyPermission.request_id", "u64");
+
+    put("ClientCommand::SetPermissionMode", "set_permission_mode");
+    put("ClientCommand::SetPermissionMode.mode", "String");
+
+    put(
+        "ClientCommand::ListProviderCredentials",
+        "list_provider_credentials",
+    );
+    put("ClientCommand::ListProviderCredentials.operation_id", "u64");
+    put(
+        "ClientCommand::ListProviderCredentials.provider_ids",
+        "Vec<String>",
+    );
+    put(
+        "ClientCommand::SetProviderCredential",
+        "set_provider_credential",
+    );
+    put("ClientCommand::SetProviderCredential.operation_id", "u64");
+    put("ClientCommand::SetProviderCredential.provider_id", "String");
+    put(
+        "ClientCommand::SetProviderCredential.credential",
+        "ProviderCredentialSecretDto",
+    );
+    put(
+        "ClientCommand::DeleteProviderCredential",
+        "delete_provider_credential",
+    );
+    put(
+        "ClientCommand::DeleteProviderCredential.operation_id",
+        "u64",
+    );
+    put(
+        "ClientCommand::DeleteProviderCredential.provider_id",
+        "String",
+    );
+
+    put("ProviderCredentialSecretDto.value", "String");
 
     put("ClientCommand::SetModel", "set_model");
     put("ClientCommand::SetModel.model", "String");
@@ -763,6 +844,7 @@ fn current_contract_matches_index_or_version_bumped() {
 fn contract_index_covers_every_dto() {
     use client_protocol::commands::{
         ClientCommand, CommandResultDto, ImageRefDto, ListingKindDto, PromptModeDto,
+        ProviderCredentialSecretDto,
     };
     use client_protocol::error::ClientError;
     use client_protocol::events::{ClientEvent, CostDto, ErrorKindDto, TurnOutcomeDto};
@@ -785,6 +867,17 @@ fn contract_index_covers_every_dto() {
             kind: ErrorKindDto::Internal,
             message: String::new(),
         },
+        ClientEvent::SystemNotice {
+            message: String::new(),
+            is_error: false,
+        },
+        ClientEvent::ProviderCredentialStatus {
+            operation_id: 0,
+            configured_provider_ids: Vec::new(),
+            unavailable_provider_ids: Vec::new(),
+            storage_encrypted: false,
+            error: None,
+        },
         ClientEvent::SessionEnded,
     ];
     let _outcome = TurnOutcomeDto::EndTurn;
@@ -796,7 +889,23 @@ fn contract_index_covers_every_dto() {
         session_duration_secs: 0,
         formatted: String::new(),
     };
-    let _cmd: Vec<ClientCommand> = vec![ClientCommand::ListModels, ClientCommand::RequestExit];
+    let _cmd: Vec<ClientCommand> = vec![
+        ClientCommand::ListProviderCredentials {
+            operation_id: 0,
+            provider_ids: Vec::new(),
+        },
+        ClientCommand::SetProviderCredential {
+            operation_id: 0,
+            provider_id: String::new(),
+            credential: ProviderCredentialSecretDto::new(String::new()),
+        },
+        ClientCommand::DeleteProviderCredential {
+            operation_id: 0,
+            provider_id: String::new(),
+        },
+        ClientCommand::ListModels,
+        ClientCommand::RequestExit,
+    ];
     let _mode = PromptModeDto::Normal;
     let _img = ImageRefDto {
         media_type: String::new(),

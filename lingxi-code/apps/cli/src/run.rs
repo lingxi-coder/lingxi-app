@@ -15,8 +15,9 @@ use crate::init::Runtime;
 use crate::output::OutputSink;
 use crate::stream_json::{build_init_params, permission_mode_str, StreamJsonStream};
 use crate::stream_json_input::{
-    content_to_prompt, control_frame_request_id, control_request_subtype, emit_replay_ack_queued,
-    spawn_stdin_router, ControlPlaneWriter, StdinChannels,
+    content_to_prompt, control_frame_request_id, control_request_subtype, emit_raw_frame_queued,
+    emit_replay_ack_queued, spawn_stdin_router, ControlPlaneWriter, StdinChannels,
+    StdinControlFrame, StreamInput,
 };
 use command_api::format_description_with_source;
 use permission;
@@ -37,6 +38,83 @@ fn stream_json_error_subtype(err: &orchestrator::OrchestratorError) -> &'static 
         orchestrator::OrchestratorError::MaxBudgetReached { .. } => "error_max_budget_usd",
         _ => "error_during_execution",
     }
+}
+
+/// Claude Code 2.1.217 print-loop budget cleanup (`Wam` + `rcr`). After every
+/// main turn, compare the cumulative cost directly with `--max-budget-usd` and
+/// stop every running background local agent/workflow once the ceiling is
+/// reached. This deliberately does not depend on the main turn returning
+/// `error_max_budget_usd`: a natural `end_turn` can itself push the cumulative
+/// cost over the ceiling.
+async fn stop_background_agents_at_budget(
+    max_budget_usd: Option<f64>,
+    orchestrator: &dyn OrchestratorHandle,
+    task_registry: &dyn traits::task_registry::TaskRegistryHandle,
+) -> usize {
+    let Some(max_budget_usd) = max_budget_usd else {
+        return 0;
+    };
+    let cost = orchestrator.snapshot_cost().await;
+    if !budget_reached(max_budget_usd, cost.total_nano_usd) {
+        return 0;
+    }
+    let notice = budget_halt_notice(cost.total_usd, max_budget_usd);
+    let announce = || eprintln!("{notice}");
+    let Ok(stopped) = task_registry
+        .stop_background_agents_for_budget(&announce)
+        .await
+    else {
+        return 0;
+    };
+    stopped
+}
+
+fn budget_reached(max_budget_usd: f64, total_nano_usd: u64) -> bool {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let budget_nano_usd = (max_budget_usd.max(0.0) * 1_000_000_000.0) as u64;
+    total_nano_usd >= budget_nano_usd
+}
+
+fn budget_halt_notice(total_usd: f64, max_budget_usd: f64) -> String {
+    let total_usd = js_to_fixed_2(total_usd);
+    format!("Budget limit reached (${total_usd} of ${max_budget_usd}); stopping background agents.")
+}
+
+/// Render a non-negative finite `f64` like JavaScript `Number#toFixed(2)`.
+/// Rust's precision formatter uses ties-to-even (`1.125 -> 1.12`), while the
+/// ECMAScript rule chooses the larger decimal integer on an exact tie
+/// (`1.125 -> 1.13`). Work from the exact IEEE-754 rational so nearby values
+/// such as `2.675` still produce JavaScript's `2.67`.
+fn js_to_fixed_2(value: f64) -> String {
+    debug_assert!(value.is_finite() && value >= 0.0);
+
+    let bits = value.to_bits();
+    let raw_exponent = ((bits >> 52) & 0x7ff) as i32;
+    let fraction = bits & ((1_u64 << 52) - 1);
+    let (significand, exponent) = if raw_exponent == 0 {
+        (u128::from(fraction), -1022 - 52)
+    } else {
+        (
+            u128::from(fraction | (1_u64 << 52)),
+            raw_exponent - 1023 - 52,
+        )
+    };
+    let scaled = significand * 100;
+    let cents = if exponent >= 0 {
+        scaled << exponent.unsigned_abs()
+    } else {
+        let shift = exponent.unsigned_abs();
+        if shift >= 128 {
+            0
+        } else {
+            let whole = scaled >> shift;
+            let remainder = scaled & ((1_u128 << shift) - 1);
+            let halfway = 1_u128 << (shift - 1);
+            whole + u128::from(remainder >= halfway)
+        }
+    };
+
+    format!("{}.{:02}", cents / 100, cents % 100)
 }
 
 /// Install the print/SDK-mode process-tree cleanup (parity 2.1.212 — "Fixed
@@ -93,7 +171,7 @@ pub async fn run_oneshot(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink) 
 
     // Slash branch — bypasses the API entirely.
     if prompt.starts_with('/') {
-        return run_slash_command(&prompt, runtime, sink).await;
+        return run_slash_command_with_budget(&prompt, runtime, argv.max_budget_usd, sink).await;
     }
 
     // Structured-output branch (`--json-schema`): the model is forced through the
@@ -106,14 +184,29 @@ pub async fn run_oneshot(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink) 
             .as_ref()
             .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
         {
-            return run_structured_output(runtime, &prompt, &slot, &schema, sink).await;
+            return run_structured_output(
+                runtime,
+                &prompt,
+                &slot,
+                &schema,
+                argv.max_budget_usd,
+                sink,
+            )
+            .await;
         }
     }
 
     // Non-slash branch — drive the orchestrator turn loop. Without a real
     // ANTHROPIC_API_KEY this returns 401; we surface the error verbatim.
     sink.turn_start().await;
-    match runtime.orchestrator.run_turn(&prompt).await {
+    let turn_result = runtime.orchestrator.run_turn(&prompt).await;
+    stop_background_agents_at_budget(
+        argv.max_budget_usd,
+        runtime.orchestrator.as_ref(),
+        runtime.task_registry.as_ref(),
+    )
+    .await;
+    match turn_result {
         Ok(_outcome) => exit_codes::SUCCESS,
         Err(e) => {
             sink.error("runtime", &e.to_string()).await;
@@ -268,6 +361,12 @@ pub async fn run_stream_json_print(
     // helper already handles the "[1m]" substring check — no beta list needed.
     let betas = argv.betas.clone().unwrap_or_default();
 
+    stop_background_agents_at_budget(
+        argv.max_budget_usd,
+        runtime.orchestrator.as_ref(),
+        runtime.task_registry.as_ref(),
+    )
+    .await;
     if let Err(err) = turn_result {
         let err_msg = err.to_string();
         let subtype = stream_json_error_subtype(&err);
@@ -376,6 +475,48 @@ async fn dispatch_control_request(
                 Err(e) => writer.reply_error(request_id, &e.to_string()),
             }
         }
+        "set_max_thinking_tokens" => {
+            let max_tokens = match field("max_thinking_tokens") {
+                Some(Value::Null) => None,
+                Some(Value::Number(value)) => value.as_u64().and_then(|v| u32::try_from(v).ok()),
+                None | Some(_) => None,
+            };
+            let max_tokens_valid =
+                matches!(field("max_thinking_tokens"), Some(Value::Null)) || max_tokens.is_some();
+            let display_valid = match field("thinking_display") {
+                None | Some(Value::Null) => true,
+                Some(Value::String(value)) => value == "summarized" || value == "omitted",
+                Some(_) => false,
+            };
+            if !max_tokens_valid || !display_valid {
+                writer.reply_error(
+                    request_id,
+                    "set_max_thinking_tokens: max_thinking_tokens must be an integer or null and thinking_display must be \"summarized\", \"omitted\", or null",
+                );
+                return;
+            }
+            let thinking = match max_tokens {
+                Some(0) => llm_client::model::thinking::ThinkingConfig::Disabled,
+                Some(budget_tokens) => {
+                    llm_client::model::thinking::ThinkingConfig::Enabled { budget_tokens }
+                }
+                None => llm_client::model::thinking::ThinkingConfig::Adaptive,
+            };
+            orchestrator.set_thinking_config(thinking);
+            orchestrator.set_thinking_display(field("thinking_display").and_then(Value::as_str));
+            writer.reply_success(request_id, None);
+        }
+        "rename_session" => {
+            let title = field("title").and_then(Value::as_str).unwrap_or("");
+            if title.trim().is_empty() {
+                writer.reply_error(request_id, "title must be non-empty");
+                return;
+            }
+            match orchestrator.rename_session(title.to_string()).await {
+                Ok(()) => writer.reply_success(request_id, None),
+                Err(err) => writer.reply_error(request_id, &format!("rename_session: {err}")),
+            }
+        }
         "mcp_status" => {
             // §2.2 #7: `{mcpServers: [...]}`.
             let servers: Vec<serde_json::Value> = orchestrator
@@ -443,6 +584,74 @@ async fn dispatch_control_request(
                 Err(e) => writer.reply_error(request_id, &e),
             }
         }
+        "set_mcp_permission_mode_override" => {
+            let server_name = field("serverName")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let mode = match field("mode") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(s)) if s == "default" || s == "auto" => Some(s.as_str()),
+                Some(Value::String(s))
+                    if matches!(
+                        s.as_str(),
+                        "acceptEdits"
+                            | "auto"
+                            | "bypassPermissions"
+                            | "default"
+                            | "dontAsk"
+                            | "plan"
+                    ) =>
+                {
+                    writer.reply_error(
+                        request_id,
+                        &format!(
+                            "Permission mode override over the control channel is tighten-only ('default', 'auto', or null); rejected '{s}'"
+                        ),
+                    );
+                    return;
+                }
+                _ => {
+                    writer.reply_error(
+                        request_id,
+                        "Cannot set permission mode: must be one of acceptEdits, auto, bypassPermissions, default, dontAsk, plan",
+                    );
+                    return;
+                }
+            };
+            let known = orchestrator
+                .list_mcp_servers()
+                .await
+                .into_iter()
+                .any(|s| s.name == server_name);
+            if !known {
+                if let Err(e) = orchestrator
+                    .set_mcp_permission_mode_override(&server_name, mode)
+                    .await
+                {
+                    writer.reply_error(request_id, &e);
+                    return;
+                }
+                let warning = match mode {
+                    Some(_) => format!(
+                        "MCP server '{server_name}' is not yet known; override stored but will not apply until a server with that exact name connects."
+                    ),
+                    None => format!(
+                        "MCP server '{server_name}' is not known; no override was present to clear."
+                    ),
+                };
+                writer.reply_success(request_id, Some(json!({"warning": warning})));
+                return;
+            }
+
+            match orchestrator
+                .set_mcp_permission_mode_override(&server_name, mode)
+                .await
+            {
+                Ok(()) => writer.reply_success(request_id, None),
+                Err(e) => writer.reply_error(request_id, &e),
+            }
+        }
         "end_session" => {
             // §2.2 #2: abort the in-flight turn, ack, then break the loop.
             let _ = cancel_tx.send(true);
@@ -483,8 +692,8 @@ async fn dispatch_control_request(
                 writer.reply_success(request_id, Some(json!({})));
             }
         }
-        // The orchestrator-free arms (set_max_thinking_tokens, get_binary_version,
-        // rename_session, message_rated, seed_read_state, file_suggestions,
+        // The orchestrator-free arms (get_binary_version, message_rated,
+        // seed_read_state, file_suggestions,
         // mcp_oauth_callback_url), the CLI-originated guard subtypes (no-reply),
         // and the byte-exact `Unsupported control request subtype` fallthrough
         // are pure — classified by `pure_control_response` so the wire shapes
@@ -513,28 +722,16 @@ enum PureControlReply {
 /// Classify the control arms that need no async orchestrator/registry access,
 /// including the byte-exact `Unsupported control request subtype` fallthrough.
 ///
-/// Several arms are accept-and-ack approximations per spec §2.2 `[T (partial)]`:
-/// `set_max_thinking_tokens` and `seed_read_state` lack a storage seam (acked,
-/// not persisted); `rename_session` validates non-empty but defers persistence.
+/// `seed_read_state` remains an accept-and-ack approximation because the
+/// stream-json protocol does not yet expose a read-state cache storage seam.
 fn pure_control_response(subtype: &str, frame: &serde_json::Value) -> PureControlReply {
     let field = |k: &str| frame.get("request").and_then(|r| r.get(k));
     match subtype {
-        // §2.2 #6: accepted + acked; value not persisted (no session field yet).
-        "set_max_thinking_tokens" => PureControlReply::Success(None),
         // §2.2 #8: `{version, buildTime}`.
         "get_binary_version" => PureControlReply::Success(Some(json!({
             "version": traits::CLAUDE_CODE_VERSION,
             "buildTime": ""
         }))),
-        // §2.2 #41: trim + validate; error on empty; persistence deferred.
-        "rename_session" => {
-            let title = field("title").and_then(|v| v.as_str()).unwrap_or("");
-            if title.trim().is_empty() {
-                PureControlReply::Error("title must be non-empty".to_string())
-            } else {
-                PureControlReply::Success(None)
-            }
-        }
         // §2.2 #45: telemetry-only; ack with `{}`.
         "message_rated" => PureControlReply::Success(Some(json!({}))),
         // §2.2 #21: seed read-state cache; errors swallowed ⇒ empty ack (no seam).
@@ -623,9 +820,14 @@ fn orphan_decision_from_payload(
                 }
                 _ => None,
             };
+            let permission_updates = payload
+                .get("updatedPermissions")
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+                .unwrap_or_default();
             PermissionOutcome::Allow {
                 updated_input,
-                permission_updates: vec![],
+                permission_updates,
             }
         }
         Some("deny") => PermissionOutcome::Deny {
@@ -809,15 +1011,15 @@ pub async fn run_stream_json_input_loop(
 
     // Phase 0 (0b): spawn the streaming stdin router. Frames arrive AS THEY
     // ARE SENT (not buffered to EOF), routed by type onto three channels:
-    // - turn_rx     → user turns consumed sequentially below.
-    // - control_req_rx → control_request frames (Phase 0 stub: reply Unsupported).
-    // - control_resp_rx → control_response frames (Phase 0 stub: ignored).
+    // - input_rx    → ordered user/history/bash frames consumed below.
+    // - control_req_rx → control_request frames: dispatched to control-plane and cancel.
+    // - control_resp_rx → control_response frames: resolved by `resolver_task`.
     //
     // The reader runs in a spawn_blocking thread so stdin I/O doesn't block
     // the async runtime. When stdin closes or a fatal error occurs all senders
     // drop, signalling EOF to all receivers.
     let StdinChannels {
-        mut turn_rx,
+        mut input_rx,
         mut control_req_rx,
         mut control_resp_rx,
     } = spawn_stdin_router(
@@ -943,17 +1145,15 @@ pub async fn run_stream_json_input_loop(
     // ③ Phase 1: cancel watch channel for interrupt support.
     // The cancel_tx is shared with the ctrl-dispatcher task; the turn loop
     // listens to cancel_rx so it can abort an in-flight turn on `interrupt`.
-    let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
     let cancel_tx_clone = cancel_tx.clone();
 
-    // ③ Drain control_request and control_response channels concurrently with
-    //    the turn loop.
+    // ③ Drain control-request/control-cancel and control-response channels
+    //    concurrently with the turn loop.
     //
-    // Phase 1: `initialize`/`interrupt` + byte-exact fallthrough.
-    // Phase 3: the tractable inbound arms (set_model/get_*/mcp_status/
-    // get_binary_version/rename_session/message_rated/stop_task/end_session/…),
-    // which need async orchestrator/registry access — so the dispatcher is async
-    // and owns clones of the handle + task registry.
+    // The dispatcher handles both server-initiated control requests and
+    // inbound `control_cancel_request` frames for outbound permission
+    // round-trips.
     let outbound_tx = stream.outbound_tx();
     let ctrl_plane = ControlPlaneWriter::new(outbound_tx.clone());
     let ctrl_orch = runtime.orchestrator.clone();
@@ -961,36 +1161,46 @@ pub async fn run_stream_json_input_loop(
     // `end_session` signals the turn loop to drain + exit (the loop selects on it).
     let end_notify = Arc::new(tokio::sync::Notify::new());
     let end_notify_ctrl = end_notify.clone();
+    let resolver_plane_for_cancel = control_plane.clone();
     let ctrl_req_task = tokio::spawn(async move {
         // §2.2: a second `initialize` is an error, not a re-handshake — the
         // binary's handleInitializeRequest replies {subtype:'error', error:
         // 'Already initialized'} when the `initialized` flag is already set.
         let mut initialized = false;
         while let Some(frame) = control_req_rx.recv().await {
-            let subtype = control_request_subtype(&frame).to_string();
-            let request_id = control_frame_request_id(&frame).to_string();
-            if subtype == "initialize" {
-                if initialized {
-                    ctrl_plane.reply_error(&request_id, "Already initialized");
+            match frame {
+                StdinControlFrame::Cancel(request_id) => {
+                    resolver_plane_for_cancel.cancel_request(&request_id).await;
                     continue;
                 }
-                initialized = true;
+                StdinControlFrame::Request(frame) => {
+                    let request_id = control_frame_request_id(&frame).to_string();
+                    let subtype = control_request_subtype(&frame).to_string();
+                    if subtype == "initialize" {
+                        if initialized {
+                            ctrl_plane.reply_error(&request_id, "Already initialized");
+                            continue;
+                        }
+                        initialized = true;
+                    }
+
+                    dispatch_control_request(
+                        &subtype,
+                        &request_id,
+                        &frame,
+                        &ctrl_plane,
+                        &cancel_tx_clone,
+                        &ctrl_orch,
+                        &ctrl_tasks,
+                        &end_notify_ctrl,
+                        &init_commands,
+                        &init_agents,
+                        &init_models,
+                        &init_account,
+                    )
+                    .await;
+                }
             }
-            dispatch_control_request(
-                &subtype,
-                &request_id,
-                &frame,
-                &ctrl_plane,
-                &cancel_tx_clone,
-                &ctrl_orch,
-                &ctrl_tasks,
-                &end_notify_ctrl,
-                &init_commands,
-                &init_agents,
-                &init_models,
-                &init_account,
-            )
-            .await;
         }
     });
 
@@ -1029,13 +1239,83 @@ pub async fn run_stream_json_input_loop(
                     continue;
                 }
             },
-            recv = turn_rx.recv() => match recv {
-                Some(t) => t,
+            recv = input_rx.recv() => match recv {
+                Some(StreamInput::User(t)) => t,
+                Some(StreamInput::History(history)) => {
+                    if let Some(compact_metadata) = history.compact_metadata {
+                        runtime
+                            .orchestrator
+                            .append_external_compact_boundary(
+                                history.message,
+                                compact_metadata,
+                            )
+                            .await;
+                    } else {
+                        runtime
+                            .orchestrator
+                            .append_external_history_message(history.message)
+                            .await;
+                    }
+                    if argv.replay_user_messages {
+                        if let Some(frame) = history.replay_frame {
+                            emit_raw_frame_queued(&outbound_tx, &frame);
+                        }
+                    }
+                    continue;
+                }
+                Some(StreamInput::Bash(command)) => {
+                    let input = format!("<bash-input>{}</bash-input>", command.command);
+                    let output = runtime.bash_runner.run(&command.command).await;
+                    let result = format!(
+                        "<bash-stdout>{}</bash-stdout><bash-stderr>{}</bash-stderr>",
+                        output.stdout, output.stderr
+                    );
+                    for content in [input, result] {
+                        runtime
+                            .orchestrator
+                            .append_external_history_message(protocol::ConversationMessage::user(
+                                protocol::MessageId::new(),
+                                content.clone(),
+                            ))
+                            .await;
+                        emit_replay_ack_queued(
+                            &outbound_tx,
+                            &uuid::Uuid::new_v4().to_string(),
+                            &Value::String(content),
+                            None,
+                            &session_id_str,
+                        );
+                    }
+                    continue;
+                }
                 None => break, // stdin closed or fatal error — exit the loop.
             },
         };
         had_any_turn = true;
         let prompt = content_to_prompt(&turn.content);
+        let external_message_id = turn
+            .uuid
+            .as_deref()
+            .and_then(protocol::MessageId::parse_prefixed);
+
+        if let Some(uuid) = turn.uuid.as_deref() {
+            if runtime
+                .orchestrator
+                .session_contains_message_uuid(uuid)
+                .await
+            {
+                if argv.replay_user_messages {
+                    emit_replay_ack_queued(
+                        &outbound_tx,
+                        uuid,
+                        &turn.content,
+                        None,
+                        &session_id_str,
+                    );
+                }
+                continue;
+            }
+        }
 
         // Under --replay-user-messages, re-emit the inbound user frame as
         // isReplay:true (the initial-prompt ack for each new turn). Echo the
@@ -1073,11 +1353,22 @@ pub async fn run_stream_json_input_loop(
         // `deny+interrupt` response (§3.4) can abort the whole turn.
         control_plane.set_active_turn(cancel.clone()).await;
 
-        match runtime
+        let turn_result = runtime
             .orchestrator
-            .run_turn_streaming_with_cancel(&prompt, cancel)
-            .await
-        {
+            .run_turn_streaming_with_cancel_image_sources_and_message_id(
+                &prompt,
+                Vec::new(),
+                cancel,
+                external_message_id,
+            )
+            .await;
+        stop_background_agents_at_budget(
+            argv.max_budget_usd,
+            runtime.orchestrator.as_ref(),
+            runtime.task_registry.as_ref(),
+        )
+        .await;
+        match turn_result {
             Ok(_) => {
                 // Reset the cancel signal for the next turn.
                 let _ = cancel_tx.send(false);
@@ -1213,6 +1504,7 @@ async fn run_structured_output(
     prompt: &str,
     slot: &orchestrator::structured_output::StructuredOutputSlot,
     schema: &serde_json::Value,
+    max_budget_usd: Option<f64>,
     sink: &dyn OutputSink,
 ) -> i32 {
     use crate::structured_output::{
@@ -1231,6 +1523,12 @@ async fn run_structured_output(
         }
         sink.turn_start().await;
         let turn_result = runtime.orchestrator.run_turn(&turn_prompt).await;
+        stop_background_agents_at_budget(
+            max_budget_usd,
+            runtime.orchestrator.as_ref(),
+            runtime.task_registry.as_ref(),
+        )
+        .await;
         let captured = slot.lock().ok().and_then(|mut s| s.take());
         // The forced StructuredOutput call trips the 1-turn cap AFTER capturing the
         // result, so a turn error WITH a captured value is success, not failure —
@@ -1261,6 +1559,17 @@ async fn run_structured_output(
 
 /// Dispatch a `/command [args]` line through the registry.
 pub async fn run_slash_command(input: &str, runtime: &Runtime, sink: &dyn OutputSink) -> i32 {
+    run_slash_command_with_budget(input, runtime, None, sink).await
+}
+
+/// Budget-aware internal form used by print mode. Keeping the public wrapper's
+/// original signature avoids breaking downstream callers of the CLI library.
+async fn run_slash_command_with_budget(
+    input: &str,
+    runtime: &Runtime,
+    max_budget_usd: Option<f64>,
+    sink: &dyn OutputSink,
+) -> i32 {
     match runtime.dispatcher.dispatch(input).await {
         SlashDispatchResult::Handled { display } => {
             sink.command_output("", &display).await;
@@ -1272,7 +1581,14 @@ pub async fn run_slash_command(input: &str, runtime: &Runtime, sink: &dyn Output
         // + executes.
         SlashDispatchResult::RunAsTurn { prompt } => {
             sink.turn_start().await;
-            match runtime.orchestrator.run_turn(&prompt).await {
+            let turn_result = runtime.orchestrator.run_turn(&prompt).await;
+            stop_background_agents_at_budget(
+                max_budget_usd,
+                runtime.orchestrator.as_ref(),
+                runtime.task_registry.as_ref(),
+            )
+            .await;
+            match turn_result {
                 Ok(_outcome) => exit_codes::SUCCESS,
                 Err(e) => {
                     sink.error("runtime", &e.to_string()).await;
@@ -1382,21 +1698,19 @@ pub async fn run_from_pr(argv: &Argv, sink: &dyn OutputSink) -> i32 {
 /// * a value parsing to a PR number ([`parse_pr_value`]) → `prNumber === n`;
 /// * an unparseable value → NO narrowing (the binary applies no filter).
 ///
-/// RESIDUAL: lingxi's [`SessionMetadata`] does not carry `prNumber` yet (the
-/// session JSONL `prNumbers/prUrls/prRepositories` envelope is deferred —
-/// `session/src/jsonl/reader.rs` "pr-link"), so every row counts as "no
-/// linked PR" and a PR filter yields the empty picker ("No conversations
-/// found to resume."). When the pr-link metadata lands, this helper is the
-/// single place to consult it.
 fn filter_rows_by_pr(rows: Vec<SessionMetadata>, from_pr: Option<&str>) -> Vec<SessionMetadata> {
     let Some(raw) = from_pr else { return rows };
     if raw.is_empty() {
-        // Bare `--from-pr`: keep only sessions with a linked PR — none yet.
-        return Vec::new();
+        return rows
+            .into_iter()
+            .filter(|row| row.pr_number.is_some())
+            .collect();
     }
     match parse_pr_value(raw) {
-        // `prNumber === n` — no row carries a prNumber yet.
-        Some(_n) => Vec::new(),
+        Some(number) => rows
+            .into_iter()
+            .filter(|row| row.pr_number == Some(number))
+            .collect(),
         // Unparseable value: the binary applies NO narrowing.
         None => rows,
     }
@@ -1408,47 +1722,7 @@ fn filter_rows_by_pr(rows: Vec<SessionMetadata>, from_pr: Option<&str>) -> Vec<S
 /// forms), else `None`.
 #[must_use]
 fn parse_pr_value(raw: &str) -> Option<u64> {
-    // JS `parseInt(e, 10)`: skip leading whitespace, optional sign, leading
-    // digits; trailing garbage ignored ("123abc" → 123). Must be > 0.
-    let t = raw.trim_start();
-    let (neg, digits_part) = match t.strip_prefix('-') {
-        Some(rest) => (true, rest),
-        None => (false, t.strip_prefix('+').unwrap_or(t)),
-    };
-    let digits: String = digits_part
-        .chars()
-        .take_while(char::is_ascii_digit)
-        .collect();
-    if !digits.is_empty() && !neg {
-        if let Ok(n) = digits.parse::<u64>() {
-            if n > 0 {
-                return Some(n);
-            }
-        }
-    }
-    // URL forms. The JS regex needs a host token + at least one path segment
-    // before the marker (`[^/\s]+\/[^\s]+?\/`), then the marker + digits.
-    for marker in ["/pull/", "/pull-requests/", "/-/merge_requests/"] {
-        if let Some(idx) = raw.find(marker) {
-            let prefix = &raw[..idx];
-            let prefix = prefix
-                .strip_prefix("https://")
-                .or_else(|| prefix.strip_prefix("http://"))
-                .unwrap_or(prefix);
-            if prefix.contains('/') && !prefix.contains(char::is_whitespace) {
-                let digits: String = raw[idx + marker.len()..]
-                    .chars()
-                    .take_while(char::is_ascii_digit)
-                    .collect();
-                if !digits.is_empty() {
-                    if let Ok(n) = digits.parse::<u64>() {
-                        return Some(n);
-                    }
-                }
-            }
-        }
-    }
-    None
+    session::jsonl::parse_pr_number(raw)
 }
 
 /// `--resume <uuid>` — the concrete-id path.
@@ -1545,9 +1819,12 @@ async fn resume_resolved_session(
     }
 
     // No prompt: mirror the fresh interactive dispatch. Under a full TTY (and no
-    // `--no-tui`) mount the live TUI with the prior conversation replayed (the
-    // M5-13 milestone); otherwise fall back to the stdio notice.
+    // `--no-tui`) run the same trust + dangerous-bypass acknowledgement gates
+    // as a fresh TUI before mounting the resumed conversation.
     if crate::mode::is_full_tty() && !argv.no_tui {
+        if !crate::mode::startup_preflight(argv).await {
+            return exit_codes::RUNTIME_ERROR;
+        }
         // Drive the mount, following any in-session `/resume` switch by
         // re-mounting the chosen session in-process (writer retargeted) until
         // the user quits — never an in-place `resume_session` swap. Cold
@@ -1581,15 +1858,6 @@ async fn resume_resolved_session(
 /// `build_tui_runtime` with an empty replay vec, so this change leaves the fresh
 /// path byte-identical.
 ///
-/// PARITY-GAP (documented follow-up): this resume-into-TUI path does NOT mount
-/// the `BypassPermissionsModeDialog` that the fresh `Mode::Tui` arm shows
-/// (`mode.rs`). TS `showSetupScreens` runs the acknowledgement dialog on every
-/// interactive startup, resume included. NOT a security hole — the root/sandbox
-/// bypass guard already ran once in `run_cli` before this dispatch, so no
-/// un-acknowledged session reaches tool execution un-guarded; only the one-time
-/// acknowledgement UX is skipped when a first-time bypass user resumes straight
-/// into the TUI. `build_runtime_for_tui` still threads the resolved permission
-/// mode, so the mode itself is correct here.
 async fn mount_resumed_tui(
     argv: &Argv,
     session_id: uuid::Uuid,
@@ -1641,14 +1909,20 @@ async fn mount_resumed_tui_inner(
     // Build with the RESUMED session id as the JSONL writer's file name, so new
     // turns append to `<session_id>.jsonl` (the loaded file) instead of forking a
     // fresh-uuid file — the fix for resume splitting a conversation across files.
-    let mut tui_build =
-        match crate::init::build_runtime_for_tui_inner(&resumed_argv, Some(session_id)).await {
-            Ok(b) => b,
-            Err(e) => {
-                eprintln!("lingxi-cli: tui init failed: {e}");
-                return crate::mode::RunOutcome::Exit(exit_codes::RUNTIME_ERROR);
-            }
-        };
+    let parent_session_id = parent_session_id_from_messages(&messages);
+    let mut tui_build = match crate::init::build_runtime_for_tui_inner_with_parent(
+        &resumed_argv,
+        Some(session_id),
+        parent_session_id,
+    )
+    .await
+    {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("lingxi-cli: tui init failed: {e}");
+            return crate::mode::RunOutcome::Exit(exit_codes::RUNTIME_ERROR);
+        }
+    };
     // ENGINE seed: replay the transcript into the orchestrator's session so a
     // live turn continues the prior conversation.
     seed_orchestrator_session(&tui_build.runtime.orchestrator, session_id, &messages).await;
@@ -1718,6 +1992,21 @@ async fn mount_resumed_tui_inner(
         initial_prompt,
     )
     .await
+}
+
+/// Recover the source session stamped by `session::branch::create_branch`.
+/// Legacy and ordinary transcripts have no marker and intentionally return
+/// `None`.
+fn parent_session_id_from_messages(messages: &[JsonlMessage]) -> Option<String> {
+    messages.iter().find_map(|entry| {
+        entry
+            .extra
+            .get("forkedFrom")?
+            .get("sessionId")?
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+    })
 }
 
 /// Drive a mounted TUI, following any in-session `/resume` switch by re-mounting
@@ -2093,16 +2382,11 @@ pub(crate) async fn seed_orchestrator_session(
     // `DEFAULT_MODEL` when the transcript has no assistant lines, which is the
     // correct fallback.
     session.model = replayed.model;
-    // Clear the provider profile. The JSONL doesn't persist it, and the
-    // freshly-built orchestrator seeded `model_profile` to the DEFAULT model's
-    // provider (engine-desktop's startup `switch_model(default, Some(profile))`
-    // → e.g. `Some("anthropic")`). Leaving it scopes routing to the WRONG
-    // provider: a resumed cross-provider model like `deepseek-v4-pro` then fails
-    // its FIRST LIVE TURN with `ModelUnavailable` — `registry.resolve_in` finds
-    // nothing under `anthropic`. With `None`, the registry resolves the model id
-    // to its provider BY ID across all providers; a switched-to id like
-    // `deepseek-v4-pro` is unique, so it lands on the right provider.
-    session.model_profile = None;
+    // Newer transcripts persist the provider profile beside each real
+    // assistant response. Legacy transcripts reconstruct `None`, preserving
+    // the safe global-by-model-id fallback instead of keeping the launch
+    // default provider's stale routing hint.
+    session.model_profile = replayed.model_profile;
     drop(session);
     orchestrator
         .sync_active_goal_stop_hook_for_current_state()
@@ -2160,9 +2444,12 @@ async fn run_resume_stdio_picker(argv: &Argv, sink: &dyn OutputSink) -> i32 {
 }
 
 /// `--resume` (no id) under a full TTY — open the ratatui Resume picker over
-/// the same M5-08 loader rows. After the picker returns, read the chosen UUID:
-/// `Some(uuid)` → "Resumed session {uuid}"; `None` → "Cancelled."
+/// the same M5-08 loader rows. A selected UUID is mounted through the standard
+/// resumed-TUI path; cancelling exits without constructing a runtime.
 async fn run_resume_iocraft(argv: &Argv, sink: &dyn OutputSink) -> i32 {
+    if !crate::mode::startup_preflight(argv).await {
+        return exit_codes::RUNTIME_ERROR;
+    }
     let rows = match load_resume_rows().await {
         // (M4 cc2.1.198) `--from-pr` narrows the picker rows (`filterByPr`);
         // a no-flag `--resume` passes through unchanged. An emptied list
@@ -2189,8 +2476,15 @@ async fn run_resume_iocraft(argv: &Argv, sink: &dyn OutputSink) -> i32 {
 
     match picked {
         Ok(Ok(Some(uuid))) => {
-            sink.text(&format!("Resumed session {uuid}\n")).await;
-            exit_codes::SUCCESS
+            let messages = match load_resume_session(uuid).await {
+                Ok(messages) => messages,
+                Err(error) => {
+                    sink.error("runtime", &error.to_string()).await;
+                    return exit_codes::RUNTIME_ERROR;
+                }
+            };
+            let first = mount_resumed_tui(argv, uuid, messages, None).await;
+            drive_tui_switch_loop(argv, first, Some(uuid)).await
         }
         Ok(Ok(None)) => {
             sink.text("Cancelled.\n").await;
@@ -2412,6 +2706,53 @@ mod tests {
         assert_eq!(
             stream_json_error_subtype(&orchestrator::OrchestratorError::Internal("boom".into())),
             "error_during_execution"
+        );
+    }
+
+    #[test]
+    fn budget_halt_notice_matches_claude_bytes() {
+        assert_eq!(
+            budget_halt_notice(1.75, 5.0),
+            "Budget limit reached ($1.75 of $5); stopping background agents."
+        );
+        assert_eq!(
+            budget_halt_notice(1.505, 1.5),
+            "Budget limit reached ($1.50 of $1.5); stopping background agents."
+        );
+        assert_eq!(
+            budget_halt_notice(1.125, 2.0),
+            "Budget limit reached ($1.13 of $2); stopping background agents."
+        );
+        assert_eq!(
+            budget_halt_notice(2.675, 3.0),
+            "Budget limit reached ($2.67 of $3); stopping background agents."
+        );
+    }
+
+    #[test]
+    fn budget_reached_matches_claude_print_loop_boundary() {
+        assert!(!budget_reached(1.5, 1_499_999_999));
+        assert!(budget_reached(1.5, 1_500_000_000));
+        assert!(budget_reached(1.5, 1_500_000_001));
+    }
+
+    #[test]
+    fn orphaned_allow_retains_updated_permissions() {
+        let update = json!({
+            "type": "setMode",
+            "mode": "acceptEdits",
+            "destination": "session"
+        });
+        let outcome = orphan_decision_from_payload(&json!({
+            "behavior": "allow",
+            "updatedPermissions": [update.clone()]
+        }));
+        assert_eq!(
+            outcome,
+            permission::gate::PermissionOutcome::Allow {
+                updated_input: None,
+                permission_updates: vec![update],
+            }
         );
     }
 
@@ -2670,13 +3011,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn seed_orchestrator_session_restores_saved_model_and_clears_stale_profile() {
+    async fn seed_orchestrator_session_restores_saved_model_and_profile() {
         // Regression (reported): a resumed cross-provider session failed its
         // first LIVE turn with "model unavailable". The engine seeds
         // `model_profile` to the default provider at startup; restoring the
         // saved model but leaving that profile scopes routing to the wrong
-        // provider. Seeding must restore the model AND clear the profile so the
-        // registry resolves the model id to its provider by id.
+        // provider. Seeding must restore the model AND its persisted profile.
         let argv = tui_argv();
         let build = crate::init::build_runtime_for_tui(&argv)
             .await
@@ -2696,6 +3036,7 @@ mod tests {
             "timestamp": "2026-05-25T12:00:00.000Z",
             "cwd": "/tmp/workproj",
             "version": "0.8.0",
+            "modelProfile": "deepseek",
             "message": {"content": "answered on deepseek", "model": "deepseek-v4-pro"},
         }))
         .expect("valid JsonlMessage");
@@ -2709,8 +3050,9 @@ mod tests {
             "resume restores the saved cross-provider model"
         );
         assert_eq!(
-            s.model_profile, None,
-            "the stale default profile is cleared so routing resolves the model id by provider"
+            s.model_profile.as_deref(),
+            Some("deepseek"),
+            "the persisted provider profile replaces the stale startup profile"
         );
     }
 
@@ -2975,24 +3317,6 @@ mod tests {
     }
 
     #[test]
-    fn pure_rename_session_empty_title_errors() {
-        let frame = req("rename_session", json!({"title": "   "}));
-        assert_eq!(
-            pure_control_response("rename_session", &frame),
-            PureControlReply::Error("title must be non-empty".to_string())
-        );
-    }
-
-    #[test]
-    fn pure_rename_session_valid_title_acks_empty() {
-        let frame = req("rename_session", json!({"title": "My Session"}));
-        assert_eq!(
-            pure_control_response("rename_session", &frame),
-            PureControlReply::Success(None)
-        );
-    }
-
-    #[test]
     fn pure_message_rated_acks_empty_object() {
         let frame = req("message_rated", json!({"sentiment": "up"}));
         assert_eq!(
@@ -3002,15 +3326,190 @@ mod tests {
     }
 
     #[test]
-    fn pure_set_max_thinking_and_seed_read_state_ack_no_payload() {
-        for st in ["set_max_thinking_tokens", "seed_read_state"] {
-            let frame = req(st, json!({}));
-            assert_eq!(
-                pure_control_response(st, &frame),
-                PureControlReply::Success(None),
-                "{st} should ack with no payload"
-            );
+    fn pure_seed_read_state_acks_no_payload() {
+        let frame = req("seed_read_state", json!({}));
+        assert_eq!(
+            pure_control_response("seed_read_state", &frame),
+            PureControlReply::Success(None)
+        );
+    }
+
+    fn outbound_line(msg: crate::stream_json::OutboundMsg) -> String {
+        match msg {
+            crate::stream_json::OutboundMsg::Line(line) => line,
+            crate::stream_json::OutboundMsg::Heartbeats(_) => {
+                panic!("unexpected heartbeat message")
+            }
+            crate::stream_json::OutboundMsg::Flush(_) => panic!("unexpected flush message"),
         }
+    }
+
+    async fn dispatch_and_capture(
+        orch: &Arc<orchestrator::ConversationOrchestrator>,
+        task_registry: &Arc<tasks::registry::TaskRegistry>,
+        frame: serde_json::Value,
+    ) -> serde_json::Value {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let writer = ControlPlaneWriter::new(std::sync::Arc::new(tx));
+        let (cancel_tx, _cancel_rx) = tokio::sync::watch::channel(false);
+        let end_notify = std::sync::Arc::new(tokio::sync::Notify::new());
+        dispatch_control_request(
+            frame["request"]["subtype"].as_str().unwrap_or(""),
+            frame["request_id"].as_str().unwrap_or("r1"),
+            &frame,
+            &writer,
+            &cancel_tx,
+            orch,
+            task_registry,
+            &end_notify,
+            &[],
+            &[],
+            &[],
+            &json!({}),
+        )
+        .await;
+        serde_json::from_str::<serde_json::Value>(&outbound_line(rx.recv().await.expect("reply")))
+            .expect("valid control_response json")
+    }
+
+    #[tokio::test]
+    async fn dispatch_live_thinking_and_rename_controls_validate_and_ack() {
+        let build = crate::init::build_runtime_for_tui(&tui_argv())
+            .await
+            .expect("build_runtime_for_tui");
+        let orch = &build.runtime.orchestrator;
+        let tasks = &build.runtime.task_registry;
+
+        let bad = dispatch_and_capture(
+            orch,
+            tasks,
+            req(
+                "set_max_thinking_tokens",
+                json!({"max_thinking_tokens": "lots", "thinking_display": "raw"}),
+            ),
+        )
+        .await;
+        assert_eq!(bad["response"]["subtype"], "error");
+        assert!(bad["response"]["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("max_thinking_tokens must be an integer or null"));
+
+        let thinking = dispatch_and_capture(
+            orch,
+            tasks,
+            req(
+                "set_max_thinking_tokens",
+                json!({"max_thinking_tokens": 2048, "thinking_display": "summarized"}),
+            ),
+        )
+        .await;
+        assert_eq!(thinking["response"]["subtype"], "success");
+
+        let empty =
+            dispatch_and_capture(orch, tasks, req("rename_session", json!({"title": "   "}))).await;
+        assert_eq!(empty["response"]["subtype"], "error");
+
+        let renamed = dispatch_and_capture(
+            orch,
+            tasks,
+            req("rename_session", json!({"title": "Control Rename"})),
+        )
+        .await;
+        assert_eq!(renamed["response"]["subtype"], "success");
+    }
+
+    #[tokio::test]
+    async fn dispatch_unknown_mcp_permission_override_matches_claude_warning() {
+        const UNKNOWN_SERVER: &str = "__lingxi_unknown_test_server_4ad4__";
+        let argv = tui_argv();
+        let build = crate::init::build_runtime_for_tui(&argv)
+            .await
+            .expect("build_runtime_for_tui");
+        let frame = req(
+            "set_mcp_permission_mode_override",
+            json!({ "serverName": UNKNOWN_SERVER, "mode": "default" }),
+        );
+        let resp = dispatch_and_capture(
+            &build.runtime.orchestrator,
+            &build.runtime.task_registry,
+            frame,
+        )
+        .await;
+        assert_eq!(
+            resp,
+            json!({
+                "type": "control_response",
+                "response": {
+                    "subtype": "success",
+                    "request_id": "r1",
+                    "response": {
+                        "warning": "MCP server '__lingxi_unknown_test_server_4ad4__' is not yet known; override stored but will not apply until a server with that exact name connects."
+                    }
+                }
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_unknown_mcp_permission_override_clear_matches_claude_warning() {
+        const UNKNOWN_SERVER: &str = "__lingxi_unknown_test_server_4ad4__";
+        let argv = tui_argv();
+        let build = crate::init::build_runtime_for_tui(&argv)
+            .await
+            .expect("build_runtime_for_tui");
+        let frame = req(
+            "set_mcp_permission_mode_override",
+            json!({ "serverName": UNKNOWN_SERVER, "mode": serde_json::Value::Null }),
+        );
+        let resp = dispatch_and_capture(
+            &build.runtime.orchestrator,
+            &build.runtime.task_registry,
+            frame,
+        )
+        .await;
+        assert_eq!(
+            resp,
+            json!({
+                "type": "control_response",
+                "response": {
+                    "subtype": "success",
+                    "request_id": "r1",
+                    "response": {
+                        "warning": "MCP server '__lingxi_unknown_test_server_4ad4__' is not known; no override was present to clear."
+                    }
+                }
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_mcp_permission_override_rejects_non_tightening_known_modes() {
+        let argv = tui_argv();
+        let build = crate::init::build_runtime_for_tui(&argv)
+            .await
+            .expect("build_runtime_for_tui");
+        let frame = req(
+            "set_mcp_permission_mode_override",
+            json!({ "serverName": "context7", "mode": "bypassPermissions" }),
+        );
+        let resp = dispatch_and_capture(
+            &build.runtime.orchestrator,
+            &build.runtime.task_registry,
+            frame,
+        )
+        .await;
+        assert_eq!(
+            resp,
+            json!({
+                "type": "control_response",
+                "response": {
+                    "subtype": "error",
+                    "request_id": "r1",
+                    "error": "Permission mode override over the control channel is tighten-only ('default', 'auto', or null); rejected 'bypassPermissions'"
+                }
+            })
+        );
     }
 
     // ── (M4 cc2.1.198) `--from-pr` — `wqc` + `filterByPr` ports ─────────────
@@ -3046,16 +3545,32 @@ mod tests {
         assert_eq!(parse_pr_value("fix the login bug"), None);
     }
 
-    /// `filterByPr` port over REAL loader rows: bare flag / a parsed PR number
-    /// filter on `prNumber`, which no lingxi row carries yet (session `pr-link`
-    /// deferral) → empty; an unparseable value applies NO narrowing.
+    /// `filterByPr` port over REAL loader rows, including a persisted `pr-link`.
     #[tokio::test]
     async fn filter_rows_by_pr_semantics() {
         let temp = tempfile::TempDir::new().unwrap();
         let lingxi_home = temp.path().join("home");
         let cwd_str = "/tmp/workproj".to_string();
         let project_dir = make_project_dir(&lingxi_home, &cwd_str);
-        write_session(&project_dir, "some prompt", SystemTime::now());
+        let linked_id = write_session(&project_dir, "some prompt", SystemTime::now());
+        let linked_path = project_dir.join(format!("{linked_id}.jsonl"));
+        let pr_link = serde_json::json!({
+            "type": "pr-link",
+            "sessionId": linked_id.to_string(),
+            "prNumber": 123,
+            "prUrl": "https://github.com/foo/bar/pull/123",
+            "prRepository": "foo/bar"
+        });
+        use std::io::Write as _;
+        writeln!(
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(linked_path)
+                .unwrap(),
+            "{}",
+            serde_json::to_string(&pr_link).unwrap()
+        )
+        .unwrap();
         let rows = load_resume_rows_from(&lingxi_home, std::path::Path::new(&cwd_str))
             .await
             .unwrap();
@@ -3063,10 +3578,10 @@ mod tests {
 
         // No --from-pr → unchanged.
         assert_eq!(filter_rows_by_pr(rows.clone(), None).len(), 1);
-        // Bare --from-pr → PR-linked only (none yet).
-        assert!(filter_rows_by_pr(rows.clone(), Some("")).is_empty());
-        // Parseable PR number/URL → prNumber === n (none yet).
-        assert!(filter_rows_by_pr(rows.clone(), Some("123")).is_empty());
+        // Bare --from-pr → PR-linked only.
+        assert_eq!(filter_rows_by_pr(rows.clone(), Some("")).len(), 1);
+        // Parseable PR number/URL → prNumber === n.
+        assert_eq!(filter_rows_by_pr(rows.clone(), Some("123")).len(), 1);
         assert!(
             filter_rows_by_pr(rows.clone(), Some("https://github.com/foo/bar/pull/9")).is_empty()
         );

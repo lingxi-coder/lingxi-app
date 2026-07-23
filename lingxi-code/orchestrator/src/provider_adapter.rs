@@ -29,7 +29,7 @@ pub struct ProviderApiAdapter {
     /// (binary: session state `thinkingConfig: SF(a.effort)` → request
     /// `output_config.effort`). `None` (the default) keeps main-loop request
     /// bodies byte-identical to before this field existed.
-    initial_effort: Option<serde_json::Value>,
+    initial_effort: std::sync::RwLock<Option<serde_json::Value>>,
     /// (`/fast`) Session-scoped fast-mode toggle, shared (same `Arc`) with the
     /// [`ConversationOrchestrator`] so the handle's `set_fast_mode` flip is seen
     /// here on the next turn. When set AND the active model supports fast mode
@@ -54,7 +54,7 @@ impl ProviderApiAdapter {
     pub fn new(service: Arc<llm_client::ApiService>) -> Self {
         Self {
             service,
-            initial_effort: None,
+            initial_effort: std::sync::RwLock::new(None),
             fast_mode: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
@@ -78,8 +78,15 @@ impl ProviderApiAdapter {
     /// keep their own per-spawn effort resolution and are unaffected.
     #[must_use]
     pub fn with_initial_effort(mut self, effort: Option<serde_json::Value>) -> Self {
-        self.initial_effort = effort;
+        self.initial_effort = std::sync::RwLock::new(effort);
         self
+    }
+
+    fn current_effort(&self) -> Option<serde_json::Value> {
+        self.initial_effort
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// Return the most recently observed rate-limit header snapshot (the internal
@@ -95,7 +102,64 @@ impl ProviderApiAdapter {
 // ── Trait implementations ─────────────────────────────────────────────────────
 
 #[async_trait]
+impl tool_api::McpTokenCounter for ProviderApiAdapter {
+    async fn count_mcp_content_tokens(
+        &self,
+        model: &str,
+        content: &serde_json::Value,
+    ) -> Result<Option<u64>, String> {
+        let blocks = match content {
+            serde_json::Value::String(text) => {
+                vec![protocol::ContentBlock::Text { text: text.clone() }]
+            }
+            serde_json::Value::Array(values) => values
+                .iter()
+                .filter_map(|block| {
+                    (block.get("type").and_then(serde_json::Value::as_str) == Some("text")).then(
+                        || protocol::ContentBlock::Text {
+                            text: block
+                                .get("text")
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or_default()
+                                .to_string(),
+                        },
+                    )
+                })
+                .collect(),
+            _ => return Ok(None),
+        };
+        if blocks.is_empty() {
+            return Ok(None);
+        }
+        let message = ConversationMessage::User {
+            id: protocol::MessageId::new(),
+            content: blocks,
+            is_meta: false,
+        };
+        self.service
+            .count_tokens_exact(model, None, None, vec![message], Vec::new())
+            .await
+            .map_err(|error| error.to_string())
+    }
+}
+
+#[async_trait]
 impl OrchestratorApiClient for ProviderApiAdapter {
+    fn active_betas(&self) -> Vec<String> {
+        self.service.active_custom_betas().to_vec()
+    }
+
+    fn set_thinking_config(&self, thinking: llm_client::model::thinking::ThinkingConfig) {
+        self.service.set_thinking(thinking);
+    }
+
+    fn set_effort(&self, effort: Option<serde_json::Value>) {
+        *self
+            .initial_effort
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = effort;
+    }
+
     async fn messages_create(
         &self,
         model: &str,
@@ -119,6 +183,19 @@ impl OrchestratorApiClient for ProviderApiAdapter {
     ) -> Result<u64, LlmError> {
         self.service
             .count_tokens(model, profile, system, msgs, tools)
+            .await
+    }
+
+    async fn count_tokens_exact(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&str>,
+        msgs: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+    ) -> Result<Option<u64>, LlmError> {
+        self.service
+            .count_tokens_exact(model, profile, system, msgs, tools)
             .await
     }
 
@@ -568,7 +645,7 @@ impl StreamingApiClient for ProviderApiAdapter {
                 system,
                 messages,
                 tools,
-                self.initial_effort.clone(),
+                self.current_effort(),
                 speed,
             )
             .await
@@ -1248,5 +1325,18 @@ mod tests {
         assert!(!model_supports_fast_mode("claude-sonnet-4-20250514"));
         assert!(!model_supports_fast_mode("claude-opus-4-1"));
         assert!(!model_supports_fast_mode("gpt-5.2"));
+    }
+
+    #[test]
+    fn live_effort_replaces_and_clears_the_startup_value() {
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter(transport).with_initial_effort(Some(serde_json::json!("low")));
+        assert_eq!(adapter.current_effort(), Some(serde_json::json!("low")));
+
+        OrchestratorApiClient::set_effort(&adapter, Some(serde_json::json!("high")));
+        assert_eq!(adapter.current_effort(), Some(serde_json::json!("high")));
+
+        OrchestratorApiClient::set_effort(&adapter, None);
+        assert_eq!(adapter.current_effort(), None);
     }
 }

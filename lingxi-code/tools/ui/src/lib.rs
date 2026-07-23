@@ -30,10 +30,12 @@ pub use push_notification::PushNotificationTool;
 pub use send_message::SendMessageTool;
 pub use sleep::SleepTool;
 pub use synthetic_output::SyntheticOutputTool;
+
+use std::sync::Arc;
 /// Register the UI tools against `reg` (the full set, including the builtin
 /// `SendMessage`). This is the default-session path.
 pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinToolContext) {
-    register_with_options(reg, ctx, true);
+    register_with_options(reg, ctx, true, None);
 }
 
 /// Register the UI tools EXCEPT the builtin `SendMessage`.
@@ -50,15 +52,36 @@ pub fn register_all_except_send_message(
     reg: &mut tool_api::ToolRegistry,
     ctx: tool_api::BuiltinToolContext,
 ) {
-    register_with_options(reg, ctx, false);
+    register_with_options(reg, ctx, false, None);
+}
+
+/// Register the full UI tool set but force `AskUserQuestion` to use the given
+/// resolver for this registry instance.
+pub fn register_all_with_ask_resolver(
+    reg: &mut tool_api::ToolRegistry,
+    ctx: tool_api::BuiltinToolContext,
+    resolver: Arc<dyn ask_user_question::AskUserQuestionResolver>,
+) {
+    register_with_options(reg, ctx, true, Some(resolver));
+}
+
+/// Coordinator-mode variant of [`register_all_with_ask_resolver`]: skip the
+/// builtin `SendMessage` while still injecting a custom AskUserQuestion
+/// resolver.
+pub fn register_all_except_send_message_with_ask_resolver(
+    reg: &mut tool_api::ToolRegistry,
+    ctx: tool_api::BuiltinToolContext,
+    resolver: Arc<dyn ask_user_question::AskUserQuestionResolver>,
+) {
+    register_with_options(reg, ctx, false, Some(resolver));
 }
 
 fn register_with_options(
     reg: &mut tool_api::ToolRegistry,
     ctx: tool_api::BuiltinToolContext,
     include_send_message: bool,
+    ask_resolver: Option<Arc<dyn ask_user_question::AskUserQuestionResolver>>,
 ) {
-    use std::sync::Arc;
     reg.register_builtin(Arc::new(SleepTool::new(ctx.clone())));
     if include_send_message {
         reg.register_builtin(Arc::new(SendMessageTool::new(ctx.clone())));
@@ -80,9 +103,11 @@ fn register_with_options(
     let ask_timeout = ask_user_question::AskUserQuestionTimeout::parse_or_default(
         ctx.ask_user_question_timeout.as_deref(),
     );
+    let ask_resolver = ask_resolver
+        .unwrap_or_else(|| Arc::new(ask_user_question::DefaultTimeoutResolver::new(ask_timeout)));
     reg.register_builtin(Arc::new(AskUserQuestionTool::with_resolver(
         ctx.clone(),
-        Arc::new(ask_user_question::DefaultTimeoutResolver::new(ask_timeout)),
+        ask_resolver,
     )));
     reg.register_builtin(Arc::new(BriefTool::new(ctx.clone())));
     // PARITY: the `PushNotification` tool (binary `Wzp`). Registered always; its

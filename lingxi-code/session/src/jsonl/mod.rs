@@ -36,16 +36,17 @@ pub use path::{project_dir_name, session_path};
 pub use reader::JsonlReader;
 // Tolerant-reader surface (real-transcript gap fix): the two-phase routed
 // loader output + its line-router + the transcript-message type predicate.
-pub use reader::{is_transcript_message_type, route_lines, LoadedTranscript};
+pub use reader::{is_transcript_message_type, parse_pr_number, route_lines, LoadedTranscript};
 pub use schema::JsonlMessage;
 pub use uuid::validate_uuid;
 pub use writer::JsonlWriter;
 
 // New M5-08 public surface.
 pub use loader::{
-    build_conversation_chain, find_tip, list_recent_sessions,
+    build_conversation_chain, discovered_tool_names, find_tip, list_recent_sessions,
     list_recent_sessions_with_diagnostics, load_session, pre_compact_discovered_tools,
-    read_agent_snapshot, select_session_interactive, LoaderError, SessionCatalog, SessionMetadata,
+    read_agent_resume_state, read_agent_snapshot, select_session_interactive, LoaderError,
+    SessionCatalog, SessionMetadata,
 };
 pub use title::{derive_fork_name, extract_title, FORK_NAME_FALLBACK};
 

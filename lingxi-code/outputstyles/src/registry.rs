@@ -7,6 +7,7 @@
 //! configs and resolves the active one from the `output_style` setting.
 
 use crate::builtin::{EXPLANATORY_PROMPT, LEARNING_PROMPT};
+use crate::disk::ResolvedOutputStyle;
 use crate::model::{OutputFormat, OutputStyle, OutputStyleFrontmatter, OutputStyleSource};
 use protocol::PluginId;
 use std::collections::HashMap;
@@ -100,6 +101,7 @@ pub struct OutputStyleRegistry {
     styles: HashMap<String, OutputStyle>,
     current_active: RwLock<String>,
     plugin_styles: HashMap<PluginId, Vec<String>>,
+    forced_plugin_styles: Vec<(PluginId, String)>,
 }
 
 /// Errors raised by [`OutputStyleRegistry`].
@@ -127,6 +129,8 @@ impl OutputStyleRegistry {
                     description: String::new(),
                     default: true,
                     format: OutputFormat::Markdown,
+                    keep_coding_instructions: true,
+                    force_for_plugin: None,
                 },
                 system_prompt_addendum: String::new(),
                 source_path: None,
@@ -136,6 +140,7 @@ impl OutputStyleRegistry {
             styles: s,
             current_active: RwLock::new("markdown".into()),
             plugin_styles: HashMap::new(),
+            forced_plugin_styles: Vec::new(),
         }
     }
 
@@ -171,10 +176,42 @@ impl OutputStyleRegistry {
         self.styles.get(name)
     }
 
+    /// Resolve a non-default registered style into the prompt-facing shape.
+    /// This is the live plugin-registry counterpart to the disk resolver.
+    #[must_use]
+    pub fn resolve(&self, setting: Option<&str>) -> Option<ResolvedOutputStyle> {
+        let active;
+        let name = match setting {
+            Some(name) if !name.is_empty() && name != DEFAULT_OUTPUT_STYLE_NAME => name,
+            _ => {
+                active = self
+                    .forced_plugin_styles
+                    .last()
+                    .map(|(_, name)| name.as_str())?;
+                active
+            }
+        };
+        let style = self.styles.get(name)?;
+        Some(ResolvedOutputStyle {
+            name: style.name.clone(),
+            prompt: style.system_prompt_addendum.clone(),
+            keep_coding_instructions: style.frontmatter.keep_coding_instructions,
+        })
+    }
+
     /// Register a batch of styles owned by `plugin_id`.
     pub fn register_plugin_styles(&mut self, plugin_id: PluginId, styles: Vec<OutputStyle>) {
         let names: Vec<String> = styles.iter().map(|s| s.name.clone()).collect();
         for s in styles {
+            let plugin_name = s
+                .name
+                .split_once(':')
+                .map_or(s.name.as_str(), |(name, _)| name);
+            if s.frontmatter.force_for_plugin.as_deref() == Some(plugin_name) {
+                self.forced_plugin_styles
+                    .retain(|(owner, _)| owner != &plugin_id);
+                self.forced_plugin_styles.push((plugin_id, s.name.clone()));
+            }
             self.styles.insert(s.name.clone(), s);
         }
         self.plugin_styles.insert(plugin_id, names);
@@ -182,6 +219,8 @@ impl OutputStyleRegistry {
 
     /// Remove every style previously registered under `plugin_id`.
     pub fn unregister_plugin(&mut self, plugin_id: &PluginId) {
+        self.forced_plugin_styles
+            .retain(|(owner, _)| owner != plugin_id);
         if let Some(names) = self.plugin_styles.remove(plugin_id) {
             for n in &names {
                 self.styles.remove(n);
@@ -210,6 +249,34 @@ mod tests {
     async fn switch_to_unknown_errors() {
         let r = OutputStyleRegistry::new();
         assert!(r.switch("nope").await.is_err());
+    }
+
+    #[test]
+    fn force_for_plugin_activates_and_unload_restores_default() {
+        let mut registry = OutputStyleRegistry::new();
+        let plugin_id = PluginId::new();
+        registry.register_plugin_styles(
+            plugin_id,
+            vec![OutputStyle {
+                name: "demo:terse".into(),
+                description: String::new(),
+                source: OutputStyleSource::Plugin,
+                frontmatter: OutputStyleFrontmatter {
+                    name: "demo:terse".into(),
+                    force_for_plugin: Some("demo".into()),
+                    ..OutputStyleFrontmatter::default()
+                },
+                system_prompt_addendum: "Be terse.".into(),
+                source_path: None,
+            }],
+        );
+
+        assert_eq!(
+            registry.resolve(None).map(|style| style.name),
+            Some("demo:terse".into())
+        );
+        registry.unregister_plugin(&plugin_id);
+        assert!(registry.resolve(None).is_none());
     }
 
     // ---- OUTSTYLE.2: builtin prompt-style configs + settings resolver ----

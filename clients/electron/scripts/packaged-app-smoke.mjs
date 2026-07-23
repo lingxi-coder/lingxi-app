@@ -412,6 +412,8 @@ function createAdversarialWorkspace(tempRoot) {
   writeText(join(workspace, '.lingxi', 'settings.local.json'), JSON.stringify({
     mirrors: ['LINGXI_SECRET_CANARY_DO_NOT_PACKAGE'],
   }));
+  writeText(join(workspace, 'src', 'smoke-context.ts'), 'export const smokeContext = true;\n');
+  writeText(join(workspace, 'node_modules', 'fixture', 'smoke-context-secret.ts'), 'must not be indexed\n');
   return workspace;
 }
 
@@ -465,6 +467,7 @@ async function assertRendererContract(page, leakPatterns) {
     () => evaluate(page, `(() => ({
       hasLingxi: typeof window.lingxi === 'object' && window.lingxi !== null,
       isElectron: window.lingxi?.isElectron === true,
+      hasWorkspaceFileSearch: typeof window.lingxi?.searchWorkspaceFiles === 'function',
       protocol: window.location.protocol,
       hasNodeRequire: typeof window.require !== 'undefined',
       hasNodeProcess: typeof window.process !== 'undefined',
@@ -474,6 +477,7 @@ async function assertRendererContract(page, leakPatterns) {
   );
   assert.equal(details.hasLingxi, true, 'window.lingxi must be exposed');
   assert.equal(details.isElectron, true, 'window.lingxi must identify Electron');
+  assert.equal(details.hasWorkspaceFileSearch, true, 'preload must expose bounded workspace file search');
   assert.equal(details.protocol, 'file:', 'packaged app must load the bundled file renderer');
   assert.equal(details.hasNodeRequire, false, 'nodeIntegration must remain disabled');
   assert.equal(details.hasNodeProcess, false, 'process must not be exposed to the renderer');
@@ -525,10 +529,16 @@ async function assertKeylessBundledSidecar(page, appPath, tempRoot) {
   assert.equal(bootstrap.credential.configured, false, 'packaged smoke profile must remain keyless');
   assert.equal(bootstrap.workspace.trusted, true, 'workspace should be pretrusted for automated smoke verification');
 
+  const fileSearch = await evaluate(page, `window.lingxi.searchWorkspaceFiles('smoke-context')`);
+  assert.deepEqual(fileSearch.files, ['src/smoke-context.ts'], 'workspace file search must return relative source paths and skip dependencies');
+  assert.equal(fileSearch.truncated, false, 'small workspace file search should not be truncated');
+
   await setupSmokeCollectors(page);
   await evaluate(page, `window.lingxi.command({ type: 'list_models' })`);
   await evaluate(page, `window.lingxi.command({ type: 'list_sessions', limit: 5 })`);
   await evaluate(page, `window.lingxi.command({ type: 'new_session' })`);
+  await evaluate(page, `window.lingxi.command({ type: 'set_permission_mode', mode: 'acceptEdits' })`);
+  await evaluate(page, `window.lingxi.command({ type: 'set_permission_mode', mode: 'bypassPermissions' })`);
 
   const smokeState = await waitFor(
     async () => {
@@ -538,12 +548,28 @@ async function assertKeylessBundledSidecar(page, appPath, tempRoot) {
         permissions: window.__lingxiSmoke.permissions,
       })`);
       const types = new Set((value?.events ?? []).map((event) => event.type));
-      if (types.has('model_list') && types.has('session_list') && types.has('session_started')) return value;
+      const modes = (value?.events ?? [])
+        .filter((event) => event.type === 'permission_mode_changed')
+        .map((event) => event.mode);
+      if (
+        types.has('model_list')
+        && types.has('session_list')
+        && types.has('session_started')
+        && modes.includes('acceptEdits')
+        && modes.includes('bypassPermissions')
+      ) return value;
       return undefined;
     },
     { timeoutMs: 20_000, label: 'bundled sidecar keyless event flow' },
   );
   assert.equal(smokeState.permissions.length, 0, 'packaged keyless smoke must not trigger permission prompts during listing/session setup');
+  assert.deepEqual(
+    smokeState.events
+      .filter((event) => event.type === 'permission_mode_changed')
+      .map((event) => event.mode),
+    ['acceptEdits', 'bypassPermissions'],
+    'trusted desktop sessions must acknowledge live permission-mode changes, including explicit Full access',
+  );
 
   const diagnostics = await evaluate(page, `window.lingxi.diagnostics()`);
   const diagnosticText = JSON.stringify(diagnostics);
@@ -658,7 +684,7 @@ export async function runPackagedAppSmoke(root = packageRoot) {
       cdpPort,
       runtimePaths,
       notes: [
-        'Automated: bundled file:// renderer, preload contract, keyless bundled sidecar session/listing flow, renderer security checks, and exact temp cleanup.',
+        'Automated: bundled file:// renderer, preload contract, bounded @file workspace search, keyless bundled sidecar session/listing flow, live permission-mode switching, renderer security checks, and exact temp cleanup.',
         'Manual-only: Gatekeeper transfer prompts, ad-hoc signature approval on a different Mac, full Developer ID notarization/stapling, and native workspace-trust dialog text on physical user interaction.',
       ],
     };

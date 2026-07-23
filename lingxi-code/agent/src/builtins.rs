@@ -27,9 +27,10 @@
 //!   build their system prompt from host context (the user's skills / MCP /
 //!   plugins / settings; PS1 shell logic) that the Rust port does not yet
 //!   assemble. Their structural config (tool policy / model / `when_to_use`)
-//!   is faithful; their `system_prompt` is a concise placeholder pending a
-//!   follow-up that wires the host-context assembly. The 4 static agents'
-//!   prompts are ported VERBATIM (non-embedded-search-tools branch:
+//!   is faithful, and their prompt body is assembled from live host context
+//!   (settings path, enabled plugins, shell/terminal hints, and the current
+//!   `statusLine` setting when present). The 4 static agents' prompts are
+//!   ported VERBATIM (non-embedded-search-tools branch:
 //!   `Glob`/`Grep`/`Read`/`Bash`).
 //! - **`color` / `background`**: now exist as `AgentDefinition` fields (parsed
 //!   from frontmatter / JSON by [`crate::catalog`]); built-ins leave them at
@@ -56,11 +57,14 @@
 use crate::definition::{
     AgentDefinition, AgentModel, AgentPermissionMode, AgentSource, AgentToolPolicy,
 };
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 
 /// Turn-set cap applied to every built-in subagent. claude-code built-ins are
 /// effectively unbounded; the Rust runner requires a finite `u32`, so we use a
 /// high value matching `parse_agent_markdown`'s custom-agent default.
 pub const BUILTIN_AGENT_MAX_TURNS: u32 = 100;
+const LINGXI_DOT_DIR: &str = ".lingxi";
 
 /// Tools the read-only built-ins (Explore, Plan, verification) must NOT have,
 /// mirroring claude-code's `disallowedTools` for those agents.
@@ -399,23 +403,150 @@ pub fn workflow_subagent_definition() -> AgentDefinition {
     }
 }
 
-// ── Placeholder prompts for the 2 dynamic agents (verbatim port deferred) ──
+#[derive(Debug, Default, Clone)]
+struct BuiltinPromptContext {
+    settings_path: PathBuf,
+    settings_json: Option<serde_json::Value>,
+    cwd: Option<PathBuf>,
+    shell: String,
+    terminal: String,
+}
 
-/// PLACEHOLDER for `claude-code-guide`. claude-code builds this prompt
-/// dynamically (`getSystemPrompt({ toolUseContext })`), appending the user's
-/// skills / agents / MCP servers / plugin commands / settings.json. That
-/// host-context assembly is not yet wired in the Rust port, so this is a
-/// concise faithful stand-in; the verbatim dynamic prompt is a follow-up.
-const CLAUDE_CODE_GUIDE_PLACEHOLDER: &str = r"You are the Claude guide agent. Your primary responsibility is helping users understand and use Claude Code (the CLI tool), the Claude Agent SDK, and the Claude API (formerly the Anthropic API) effectively. Answer questions about Claude Code features, hooks, skills, MCP servers, settings, keyboard shortcuts, and IDE integrations; about building custom agents with the Claude Agent SDK; and about Claude API usage, tool use, and the Anthropic SDK. Prefer the official documentation and verify against current docs rather than relying on assumptions.
+fn builtin_prompt_context() -> BuiltinPromptContext {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("~"));
+    let settings_path = home.join(LINGXI_DOT_DIR).join("settings.json");
+    let settings_json = std::fs::read_to_string(&settings_path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+    BuiltinPromptContext {
+        settings_path,
+        settings_json,
+        cwd: std::env::current_dir().ok(),
+        shell: detect_shell_name(),
+        terminal: detect_terminal_name(),
+    }
+}
 
-[NOTE: This is a placeholder. claude-code assembles the full prompt dynamically from the user's configured skills, agents, MCP servers, plugin commands, and settings.json — that host-context assembly is a deferred follow-up.]";
+fn detect_shell_name() -> String {
+    std::env::var("SHELL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            Path::new(&s)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(&s)
+                .to_string()
+        })
+        .or_else(|| std::env::var("ComSpec").ok().filter(|s| !s.is_empty()))
+        .unwrap_or_else(|| "unknown".to_string())
+}
 
-/// PLACEHOLDER for `statusline-setup`. claude-code's prompt contains detailed
-/// PS1->statusLine conversion logic; ported as a concise stand-in pending the
-/// verbatim follow-up.
-const STATUSLINE_SETUP_PLACEHOLDER: &str = r"You are a status line setup agent for Claude Code. Help the user configure their terminal status line: convert their shell PS1 (or described preference) into a `statusLine` command and write it into ~/.lingxi/settings.json, preserving existing settings (if the file is a symlink, update the target). Return a summary of what was configured, including any script file used.
+fn detect_terminal_name() -> String {
+    ["TERM_PROGRAM", "LC_TERMINAL", "TERM"]
+        .into_iter()
+        .find_map(|key| std::env::var(key).ok().filter(|v| !v.is_empty()))
+        .unwrap_or_else(|| "unknown".to_string())
+}
 
-[NOTE: This is a placeholder. claude-code's full prompt includes detailed PS1-parsing and rate-limit status-line recipes — a deferred verbatim follow-up.]";
+fn enabled_plugin_names(settings_json: Option<&serde_json::Value>) -> Vec<String> {
+    let Some(map) = settings_json
+        .and_then(|json| json.get("enabledPlugins"))
+        .and_then(|value| value.as_object())
+    else {
+        return Vec::new();
+    };
+    let mut out: BTreeSet<String> = BTreeSet::new();
+    for (name, enabled) in map {
+        if enabled.as_bool() == Some(true) {
+            out.insert(name.clone());
+        }
+    }
+    out.into_iter().collect()
+}
+
+fn configured_statusline(settings_json: Option<&serde_json::Value>) -> String {
+    let Some(value) = settings_json.and_then(|json| json.get("statusLine")) else {
+        return "none configured".to_string();
+    };
+    match value {
+        serde_json::Value::String(s) if !s.trim().is_empty() => s.clone(),
+        serde_json::Value::Object(map) => map
+            .get("command")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| "configured (non-command form)".to_string()),
+        _ => "configured (unsupported form)".to_string(),
+    }
+}
+
+fn configured_output_style(settings_json: Option<&serde_json::Value>) -> String {
+    settings_json
+        .and_then(|json| json.get("outputStyle"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| "default".to_string())
+}
+
+fn dynamic_claude_code_guide_prompt() -> String {
+    let ctx = builtin_prompt_context();
+    let plugins = enabled_plugin_names(ctx.settings_json.as_ref());
+    let plugin_line = if plugins.is_empty() {
+        "Enabled plugins: none detected.".to_string()
+    } else {
+        format!("Enabled plugins: {}.", plugins.join(", "))
+    };
+    let cwd = ctx
+        .cwd
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    format!(
+        "You are the Claude guide agent. Help the user understand and use Claude Code (the CLI tool), the Claude Agent SDK, and the Claude API effectively.\n\n\
+Answer questions about Claude Code features, hooks, slash commands, MCP servers, settings, IDE integrations, keyboard shortcuts, status line behavior, custom output styles, and plugin behavior. Prefer official documentation and current local configuration evidence over assumptions.\n\n\
+Host context:\n\
+- Settings path: {}\n\
+- Current working directory: {}\n\
+- Shell: {}\n\
+- Terminal: {}\n\
+- Output style: {}\n\
+- {}\n\n\
+Use this context when the user asks what is configured locally. If the answer depends on runtime state you cannot infer from these inputs, say what you verified and what remains unknown.",
+        ctx.settings_path.display(),
+        cwd,
+        ctx.shell,
+        ctx.terminal,
+        configured_output_style(ctx.settings_json.as_ref()),
+        plugin_line,
+    )
+}
+
+fn dynamic_statusline_setup_prompt() -> String {
+    let ctx = builtin_prompt_context();
+    let ps1 = std::env::var("PS1")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "not exported".to_string());
+    format!(
+        "You are a status line setup agent for Claude Code. Convert the user's shell prompt or described preference into a Claude Code `statusLine` configuration and write it to {}, preserving existing settings. If the settings path is a symlink, update the target. Return a concise summary of what you changed and any helper script you created.\n\n\
+Host context:\n\
+- Shell: {}\n\
+- Terminal: {}\n\
+- Current statusLine: {}\n\
+- PS1: {}\n\n\
+Prefer a minimal, robust status line for the detected shell and terminal. Preserve unrelated settings. If the existing statusLine already satisfies the request, explain that and avoid unnecessary edits.",
+        ctx.settings_path.display(),
+        ctx.shell,
+        ctx.terminal,
+        configured_statusline(ctx.settings_json.as_ref()),
+        ps1,
+    )
+}
 
 /// Build one built-in [`AgentDefinition`].
 fn def(
@@ -485,7 +616,7 @@ pub fn builtin_agent_definitions() -> Vec<AgentDefinition> {
                 "Use this agent to configure the user's Claude Code status line setting.",
                 AgentToolPolicy::Explicit(vec!["Read".to_string(), "Edit".to_string()]),
                 AgentModel::Alias("sonnet".to_string()),
-                STATUSLINE_SETUP_PLACEHOLDER,
+                &dynamic_statusline_setup_prompt(),
             );
             d.color = Some("orange".to_string());
             d
@@ -526,7 +657,7 @@ pub fn builtin_agent_definitions() -> Vec<AgentDefinition> {
                 "WebSearch".to_string(),
             ]),
             AgentModel::Alias("haiku".to_string()),
-            CLAUDE_CODE_GUIDE_PLACEHOLDER,
+            &dynamic_claude_code_guide_prompt(),
         ),
         def(
             "verification",
@@ -726,7 +857,7 @@ mod tests {
     }
 
     #[test]
-    fn static_prompts_are_verbatim_not_placeholders() {
+    fn static_prompts_are_verbatim_and_dynamic_prompts_include_host_context() {
         let defs = builtin_agent_definitions();
         // The 4 static agents carry real prompt text (no placeholder marker).
         for ty in ["general-purpose", "Explore", "Plan", "verification"] {
@@ -736,12 +867,16 @@ mod tests {
                 "{ty} should be verbatim"
             );
         }
-        // The 2 dynamic agents are explicitly marked placeholders.
+        // The 2 dynamic agents are now real host-context prompts.
         for ty in ["claude-code-guide", "statusline-setup"] {
             let p = find(&defs, ty).system_prompt.as_deref().unwrap();
             assert!(
-                p.contains("[NOTE: This is a placeholder"),
-                "{ty} should be a placeholder"
+                !p.contains("[NOTE: This is a placeholder"),
+                "{ty} must not be a placeholder"
+            );
+            assert!(
+                p.contains("Host context:"),
+                "{ty} should include host context"
             );
         }
     }

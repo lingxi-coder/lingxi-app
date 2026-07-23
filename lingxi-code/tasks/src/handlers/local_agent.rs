@@ -249,6 +249,8 @@ impl Task for LocalAgentHandler {
             // The registry's `state_for_spawn` stamps this onto `TaskStateBase`;
             // the handler itself doesn't consume it.
             tool_use_id: _,
+            creator_teammate_name,
+            creator_team_name,
             spawn_request,
             inheritance,
         } = input
@@ -288,6 +290,8 @@ impl Task for LocalAgentHandler {
             run_in_background: is_backgrounded,
             name: None,
             team_name: None,
+            creator_teammate_name,
+            creator_team_name,
             mode: None,
             isolation: None,
             cwd: None,
@@ -600,11 +604,13 @@ impl Task for LocalAgentHandler {
                 let _ = streaming.stop(&agent_id).await;
             }
         }
-        // Flip status to Killed regardless (best-effort; a worker that already
-        // reported a terminal status simply gets a redundant Killed).
-        self.status_sink
-            .set_status(task_id, TaskStatus::Killed)
-            .await;
+        // A raced kill must not clobber a real terminal outcome that the worker
+        // has already reported through the sink.
+        if !self.status_sink.is_terminal(task_id).await {
+            self.status_sink
+                .set_status(task_id, TaskStatus::Killed)
+                .await;
+        }
         Ok(())
     }
 
@@ -941,6 +947,8 @@ mod tests {
             run_in_background: true,
             name: None,
             team_name: None,
+            creator_teammate_name: None,
+            creator_team_name: None,
             mode: None,
             isolation: Some("worktree".into()),
             cwd: Some("/repo/.lingxi/worktrees/agent-1".into()),
@@ -965,6 +973,8 @@ mod tests {
             prompt: prompt.into(),
             is_backgrounded: true,
             tool_use_id: None,
+            creator_teammate_name: None,
+            creator_team_name: None,
             spawn_request: Some(request_with_worktree(prompt)),
             inheritance: None,
         }
@@ -1045,6 +1055,8 @@ mod tests {
             prompt: prompt.into(),
             is_backgrounded: true,
             tool_use_id: None,
+            creator_teammate_name: None,
+            creator_team_name: None,
             spawn_request: None,
             inheritance: None,
         }
@@ -1655,6 +1667,44 @@ mod tests {
         ));
     }
 
+    /// A raced kill must not overwrite a terminal status the sink already
+    /// observed, even if the worker-cancel record is still live.
+    #[tokio::test]
+    async fn kill_preserves_terminal_status_when_sink_already_knows_task_is_done() {
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let spawner = MockSpawner::new(CannedResult::Pending);
+        let (_dir, mgr) = make_output_manager(fs.clone());
+        let sink = Arc::new(RecordingSink::default());
+        let handler = make_handler(spawner, mgr, sink.clone());
+        let workers = handler.workers_map();
+
+        let handle = handler
+            .spawn(local_agent_input("p"), make_ctx(fs.clone()))
+            .await
+            .unwrap();
+
+        for _ in 0..50 {
+            if !workers.lock().await.is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        sink.set_status(&handle.task_id, TaskStatus::Completed)
+            .await;
+
+        handler
+            .kill(&handle.task_id, make_ctx(fs))
+            .await
+            .expect("kill should still succeed");
+
+        assert_eq!(
+            sink.last_status(),
+            Some(TaskStatus::Completed),
+            "kill must not overwrite an already-terminal status"
+        );
+    }
+
     /// P1-04: reaching a terminal state on the persistent path (here a natural
     /// channel-close) also frees the inner pool slot — `spawn_persistent`
     /// returns no dealloc owner, so even normal termination would leak the slot
@@ -1852,6 +1902,8 @@ mod tests {
             prompt: "p".into(),
             is_backgrounded: true,
             tool_use_id: None,
+            creator_teammate_name: None,
+            creator_team_name: None,
             spawn_request: None,
             inheritance: None,
         };
@@ -1890,6 +1942,8 @@ mod tests {
             run_in_background: true,
             name: Some("reviewer".into()),
             team_name: Some("team-a".into()),
+            creator_teammate_name: Some("lead".into()),
+            creator_team_name: Some("alpha".into()),
             mode: Some("plan".into()),
             isolation: Some("worktree".into()),
             cwd: Some("/workspace/subdir".into()),
@@ -1914,6 +1968,8 @@ mod tests {
             prompt: "legacy prompt".into(),
             is_backgrounded: true,
             tool_use_id: Some("toolu_background".into()),
+            creator_teammate_name: Some("lead".into()),
+            creator_team_name: Some("alpha".into()),
             spawn_request: Some(expected.clone()),
             inheritance: Some(SubagentInheritance {
                 tool_invoker: inherited_invoker.clone(),

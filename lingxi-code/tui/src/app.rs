@@ -21,6 +21,7 @@ use crossterm::event::{self, Event, KeyEvent, KeyEventKind};
 use ratatui::backend::{Backend, CrosstermBackend};
 use tokio::sync::mpsc::{Receiver, UnboundedReceiver};
 use tokio_util::sync::CancellationToken;
+use tui_core::ask_user_question_bridge::AskUserQuestionExchange;
 use tui_core::message::RenderedMessage;
 use tui_core::orchestrator_bridge::TurnEvent;
 use tui_core::permission_bridge::PermissionExchange;
@@ -168,6 +169,9 @@ pub struct RataApp<'cb> {
     /// Permission requests from the permission bridge, drained into the
     /// widget right after the turn events (the widget serializes prompts).
     permission_rx: Receiver<PermissionExchange>,
+    /// Interactive AskUserQuestion exchanges, drained into the dedicated
+    /// questionnaire view.
+    ask_user_question_rx: Receiver<AskUserQuestionExchange>,
     /// Off-thread clipboard-image paste results (`ChatOutcome::PasteImage`):
     /// the loop spawns the (slow) clipboard read + PNG encode on a worker
     /// thread and drains its result here each tick.
@@ -190,6 +194,7 @@ impl<'cb> RataApp<'cb> {
         session: SessionInfo,
         events_rx: UnboundedReceiver<TurnEvent>,
         permission_rx: Receiver<PermissionExchange>,
+        ask_user_question_rx: Receiver<AskUserQuestionExchange>,
         callbacks: AppCallbacks<'cb>,
     ) -> Self {
         let (paste_tx, paste_rx) = std::sync::mpsc::channel();
@@ -197,6 +202,7 @@ impl<'cb> RataApp<'cb> {
             chat_widget: ChatWidget::new(messages, session),
             events_rx,
             permission_rx,
+            ask_user_question_rx,
             paste_tx,
             paste_rx,
             callbacks,
@@ -223,6 +229,9 @@ impl<'cb> RataApp<'cb> {
             while let Ok(exchange) = self.permission_rx.try_recv() {
                 self.open_permission(exchange);
             }
+            while let Ok(exchange) = self.ask_user_question_rx.try_recv() {
+                self.open_ask_user_question(exchange);
+            }
             // Off-thread clipboard-image paste results (Ctrl+V): attach the
             // temp PNG (or surface the error) as soon as the worker delivers.
             while let Ok(result) = self.paste_rx.try_recv() {
@@ -232,6 +241,10 @@ impl<'cb> RataApp<'cb> {
             // as typing; a completed burst lands as one paste). The pump
             // never submits, so the outcome needs no callback dispatch.
             let _ = self.chat_widget.pump_paste_burst();
+            // Countdown-backed modal views must advance while the terminal is
+            // idle. This runs before drawing so an expired questionnaire is
+            // popped and its queued successor can render on the same tick.
+            self.chat_widget.pump_view_timeout();
             // Hook-returned terminal escapes (`TurnEvent::TerminalSequence`,
             // already validated + BEL-normalized) write through to the tty
             // BEFORE the draw so the diff pass never interleaves with them.
@@ -415,6 +428,9 @@ impl<'cb> RataApp<'cb> {
     /// [`ChatWidget::apply_turn_event`]).
     fn apply_turn_event(&mut self, event: TurnEvent) {
         self.chat_widget.apply_turn_event(event);
+        if let Some((args, token)) = self.chat_widget.take_ready_compact() {
+            (self.callbacks.on_compact)(args, token);
+        }
     }
 
     /// Open a permission prompt for `exchange` — or queue it when one is
@@ -422,6 +438,10 @@ impl<'cb> RataApp<'cb> {
     /// `permission_rx` drain path; see [`ChatWidget::open_permission`]).
     fn open_permission(&mut self, exchange: PermissionExchange) {
         self.chat_widget.open_permission(exchange);
+    }
+
+    fn open_ask_user_question(&mut self, exchange: AskUserQuestionExchange) {
+        self.chat_widget.open_ask_user_question(exchange);
     }
 
     /// Route one key press into the chat widget.
@@ -538,6 +558,7 @@ pub fn run_app(
     session: SessionInfo,
     events_rx: UnboundedReceiver<TurnEvent>,
     permission_rx: Receiver<PermissionExchange>,
+    ask_user_question_rx: Receiver<AskUserQuestionExchange>,
     subscription: Option<traits::subscription::SharedSubscription>,
     status_line: Option<crate::status_line::SharedStatusLine>,
     web_snapshot: Option<std::sync::Arc<std::sync::Mutex<crate::web::picker::WebConfigSnapshot>>>,
@@ -557,6 +578,7 @@ pub fn run_app(
     // Shift+Tab cycle target — seeds the below-composer mode indicator.
     initial_permission_mode: permission::PermissionMode,
     bypass_available: bool,
+    emoji_completion_enabled: bool,
     on_submit: impl FnMut(String, Vec<std::path::PathBuf>, CancellationToken),
     on_switch_model: impl FnMut(String, Option<String>),
     on_web_action: impl FnMut(WebAction),
@@ -599,6 +621,7 @@ pub fn run_app(
         session,
         events_rx,
         permission_rx,
+        ask_user_question_rx,
         AppCallbacks {
             on_submit: Box::new(on_submit),
             on_switch_model: Box::new(on_switch_model),
@@ -626,6 +649,8 @@ pub fn run_app(
         tui_core::theme_persist::load_editor_mode_is_vim(),
         tui_core::theme_persist::load_vim_insert_mode_remaps(),
     );
+    app.chat_widget
+        .set_emoji_completion_enabled(emoji_completion_enabled);
     if let Some(slot) = subscription {
         app.chat_widget.set_subscription(slot);
     }
@@ -719,11 +744,13 @@ mod tests {
     fn test_app(messages: Vec<RenderedMessage>) -> RataApp<'static> {
         let (_events_tx, events_rx) = tokio::sync::mpsc::unbounded_channel();
         let (_permission_tx, permission_rx) = tokio::sync::mpsc::channel(1);
-        let mut app = RataApp::new(
+        let (_ask_user_question_tx, ask_user_question_rx) = tokio::sync::mpsc::channel(1);
+        let app = RataApp::new(
             messages,
             SessionInfo::default(),
             events_rx,
             permission_rx,
+            ask_user_question_rx,
             AppCallbacks {
                 on_submit: Box::new(|_, _, _| {}),
                 on_switch_model: Box::new(|_, _| {}),

@@ -28,11 +28,17 @@
 //! render "" — matching the default-disabled binary path.
 //!
 //! Literal interpolations resolve to constants here: `${VSt}` = `10m`,
-//! `${xw}` = `CronCreate`, `${t9}` = `CronDelete`, `${lte}` = `30`
+//! `${xw}` = `CronCreate`, `${t9}` = `CronDelete`, `${lte}` = `7`
 //! (`DEFAULT_MAX_AGE_DAYS`), `${Kh}` = `ScheduleWakeup`, `${IA}` = `Monitor`,
 //! `${AI}` = `TaskList`, `${eP}` = `TaskStop`.
 
 use command_api::BundledPromptFn;
+
+// Feature-flag overrides are process-global. Keep every unit test in this crate
+// that exercises `LoopPromptFn` on one lock so flag-on cases cannot transiently
+// change the result observed by a sibling test module.
+#[cfg(test)]
+pub(crate) static LOOP_TEST_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Binary `VSt` (cc_all.txt:521947) — default interval when none is parsed.
 const DEFAULT_INTERVAL: &str = "10m";
@@ -74,7 +80,7 @@ Examples:
 /// point: the binary emits `…→ show usage\n${zpc()}\n## Interval → cron`, so when
 /// `zpc()` returns `""` (the default) the result is `…→ show usage\n\n## Interval`
 /// — a preserved blank line, which this const reproduces. Interpolations:
-/// `${xw}` = `CronCreate`, `${VSt}` = `10m`, `${lte}` = `30`, `${t9}` = `CronDelete`.
+/// `${xw}` = `CronCreate`, `${VSt}` = `10m`, `${lte}` = `7`, `${t9}` = `CronDelete`.
 ///
 // PARITY: binary fZm (cc_all.txt:521800-521846).
 // PARITY-TODO: fZm splices `${zpc()}` (own line, after the parsing examples) and
@@ -118,7 +124,7 @@ Supported suffixes: `s` (seconds, rounded up to nearest minute, min 1), `m` (min
    - `cron`: the expression from the table above
    - `prompt`: the parsed prompt from above, verbatim (slash commands are passed through unchanged)
    - `recurring`: `true`
-2. Briefly confirm: what's scheduled, the cron expression, the human-readable cadence, that recurring tasks auto-expire after 30 days, and that they can cancel sooner with CronDelete (include the job ID).
+2. Briefly confirm: what's scheduled, the cron expression, the human-readable cadence, that recurring tasks auto-expire after 7 days, and that they can cancel sooner with CronDelete (include the job ID).
 3. **Then immediately execute the parsed prompt now** — don't wait for the first cron fire. If it's a slash command, invoke it via the Skill tool; otherwise act on it directly.",
         default = DEFAULT_INTERVAL,
     )
@@ -161,7 +167,7 @@ const TASK_STOP: &str = "TaskStop"; // eP
 const CRON_CREATE: &str = "CronCreate"; // xw
 const CRON_DELETE: &str = "CronDelete"; // t9
 /// Binary `lte` (cc_all.txt:521920) — `DEFAULT_MAX_AGE_DAYS`.
-const MAX_AGE_DAYS: u32 = 30;
+const MAX_AGE_DAYS: u32 = 7;
 
 /// Binary `lZm` (cc_all.txt:521947) — interval-only matcher `^\d+[smhd]$`.
 fn interval_only_re() -> &'static Regex {
@@ -505,7 +511,7 @@ mod tests {
         // PARITY: binary fZm head (cc_all.txt:521800-521846) — single newlines
         // except the blank line before `## Interval` from the empty `${zpc()}` on
         // its own line; ${default}=10m, tool names baked in, zpc()/Ypc() empty.
-        let expected = "# /loop — schedule a recurring prompt\nParse the input below into `[interval] <prompt…>` and schedule it with CronCreate.\n## Parsing (in priority order)\n1. **Leading token**: if the first whitespace-delimited token matches `^\\d+[smhd]$` (e.g. `5m`, `2h`), that's the interval; the rest is the prompt.\n2. **Trailing \"every\" clause**: otherwise, if the input ends with `every <N><unit>` or `every <N> <unit-word>` (e.g. `every 20m`, `every 5 minutes`, `every 2 hours`), extract that as the interval and strip it from the prompt. Only match when what follows \"every\" is a time expression — `check every PR` has no interval.\n3. **Default**: otherwise, interval is `10m` and the entire input is the prompt.\nIf the resulting prompt is empty, show usage `/loop [interval] <prompt>` and stop — do not call CronCreate.\nExamples:\n- `5m /babysit-prs` → interval `5m`, prompt `/babysit-prs` (rule 1)\n- `check the deploy every 20m` → interval `20m`, prompt `check the deploy` (rule 2)\n- `run tests every 5 minutes` → interval `5m`, prompt `run tests` (rule 2)\n- `check the deploy` → interval `10m`, prompt `check the deploy` (rule 3)\n- `check every PR` → interval `10m`, prompt `check every PR` (rule 3 — \"every\" not followed by time)\n- `5m` → empty prompt → show usage\n\n## Interval → cron\nSupported suffixes: `s` (seconds, rounded up to nearest minute, min 1), `m` (minutes), `h` (hours), `d` (days). Convert:\n| Interval pattern      | Cron expression     | Notes                                    |\n|-----------------------|---------------------|------------------------------------------|\n| `Nm` where N ≤ 59   | `*/N * * * *`     | every N minutes                          |\n| `Nm` where N ≥ 60   | `0 */H * * *`     | round to hours (H = N/60, must divide 24)|\n| `Nh` where N ≤ 23   | `0 */N * * *`     | every N hours                            |\n| `Nd`                | `0 0 */N * *`     | every N days at midnight local           |\n| `Ns`                | treat as `ceil(N/60)m` | cron minimum granularity is 1 minute  |\n**If the interval doesn't cleanly divide its unit** (e.g. `7m` → `*/7 * * * *` gives uneven gaps at :56→:00; `90m` → 1.5h which cron can't express), pick the nearest clean interval and tell the user what you rounded to before scheduling.\n## Action\n1. Call CronCreate with:\n   - `cron`: the expression from the table above\n   - `prompt`: the parsed prompt from above, verbatim (slash commands are passed through unchanged)\n   - `recurring`: `true`\n2. Briefly confirm: what's scheduled, the cron expression, the human-readable cadence, that recurring tasks auto-expire after 30 days, and that they can cancel sooner with CronDelete (include the job ID).\n3. **Then immediately execute the parsed prompt now** — don't wait for the first cron fire. If it's a slash command, invoke it via the Skill tool; otherwise act on it directly.";
+        let expected = "# /loop — schedule a recurring prompt\nParse the input below into `[interval] <prompt…>` and schedule it with CronCreate.\n## Parsing (in priority order)\n1. **Leading token**: if the first whitespace-delimited token matches `^\\d+[smhd]$` (e.g. `5m`, `2h`), that's the interval; the rest is the prompt.\n2. **Trailing \"every\" clause**: otherwise, if the input ends with `every <N><unit>` or `every <N> <unit-word>` (e.g. `every 20m`, `every 5 minutes`, `every 2 hours`), extract that as the interval and strip it from the prompt. Only match when what follows \"every\" is a time expression — `check every PR` has no interval.\n3. **Default**: otherwise, interval is `10m` and the entire input is the prompt.\nIf the resulting prompt is empty, show usage `/loop [interval] <prompt>` and stop — do not call CronCreate.\nExamples:\n- `5m /babysit-prs` → interval `5m`, prompt `/babysit-prs` (rule 1)\n- `check the deploy every 20m` → interval `20m`, prompt `check the deploy` (rule 2)\n- `run tests every 5 minutes` → interval `5m`, prompt `run tests` (rule 2)\n- `check the deploy` → interval `10m`, prompt `check the deploy` (rule 3)\n- `check every PR` → interval `10m`, prompt `check every PR` (rule 3 — \"every\" not followed by time)\n- `5m` → empty prompt → show usage\n\n## Interval → cron\nSupported suffixes: `s` (seconds, rounded up to nearest minute, min 1), `m` (minutes), `h` (hours), `d` (days). Convert:\n| Interval pattern      | Cron expression     | Notes                                    |\n|-----------------------|---------------------|------------------------------------------|\n| `Nm` where N ≤ 59   | `*/N * * * *`     | every N minutes                          |\n| `Nm` where N ≥ 60   | `0 */H * * *`     | round to hours (H = N/60, must divide 24)|\n| `Nh` where N ≤ 23   | `0 */N * * *`     | every N hours                            |\n| `Nd`                | `0 0 */N * *`     | every N days at midnight local           |\n| `Ns`                | treat as `ceil(N/60)m` | cron minimum granularity is 1 minute  |\n**If the interval doesn't cleanly divide its unit** (e.g. `7m` → `*/7 * * * *` gives uneven gaps at :56→:00; `90m` → 1.5h which cron can't express), pick the nearest clean interval and tell the user what you rounded to before scheduling.\n## Action\n1. Call CronCreate with:\n   - `cron`: the expression from the table above\n   - `prompt`: the parsed prompt from above, verbatim (slash commands are passed through unchanged)\n   - `recurring`: `true`\n2. Briefly confirm: what's scheduled, the cron expression, the human-readable cadence, that recurring tasks auto-expire after 7 days, and that they can cancel sooner with CronDelete (include the job ID).\n3. **Then immediately execute the parsed prompt now** — don't wait for the first cron fire. If it's a slash command, invoke it via the Skill tool; otherwise act on it directly.";
         assert_eq!(cron_prompt_head(), expected);
     }
 
@@ -541,7 +547,7 @@ mod tests {
         assert!(out.ends_with("\n## Input\ncheck the deploy"));
         assert!(out.contains("schedule it with CronCreate."));
         assert!(out.contains("cancel sooner with CronDelete"));
-        assert!(out.contains("auto-expire after 30 days"));
+        assert!(out.contains("auto-expire after 7 days"));
     }
 
     // ── Flag-on (autonomous-default / dynamic-pacing) builders ───────────────
@@ -554,11 +560,10 @@ mod tests {
     // ends with the binary preamble (kept apart so a preamble edit doesn't have to
     // re-touch every fixture).
 
-    /// Serialize the env-var + preamble-dependent builder tests within this crate.
-    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     fn no_persistent_guard() -> std::sync::MutexGuard<'static, ()> {
-        let g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let g = LOOP_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Establish the shipped-binary default: persistent off (preamble = aJr),
         // and the prompt/dynamic flags cleared. Gates now read the flag override
         // layer (binary `nt`), so reset it rather than env vars.
@@ -578,13 +583,21 @@ mod tests {
                 include_str!("../../tests/fixtures/loop_autonomous/a_auto_dynamic.txt").to_string()
             }
             "a_loopfile_cron" => {
-                include_str!("../../tests/fixtures/loop_autonomous/a_loopfile_cron.txt").to_string()
+                include_str!("../../tests/fixtures/loop_autonomous/a_loopfile_cron.txt")
+                    .strip_suffix('\n')
+                    .unwrap_or(include_str!(
+                        "../../tests/fixtures/loop_autonomous/a_loopfile_cron.txt"
+                    ))
+                    .to_string()
             }
             "a_loopfile_dynamic" => {
                 include_str!("../../tests/fixtures/loop_autonomous/a_loopfile_dynamic.txt")
                     .to_string()
             }
-            "gZm" => include_str!("../../tests/fixtures/loop_autonomous/gZm.txt").to_string(),
+            "gZm" => include_str!("../../tests/fixtures/loop_autonomous/gZm.txt")
+                .strip_suffix('\n')
+                .unwrap_or(include_str!("../../tests/fixtures/loop_autonomous/gZm.txt"))
+                .to_string(),
             _ => unreachable!(),
         }
     }

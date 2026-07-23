@@ -122,10 +122,16 @@ async fn streaming_four_consecutive_max_tokens_exhausts_recovery() {
     ]);
 
     let outcome = orch.run_turn_streaming("write forever").await.expect("ok");
-    match outcome {
-        ConversationOutcome::EndTurn { turn_count, .. } => assert_eq!(turn_count, 4),
+    let final_message_id = match outcome {
+        ConversationOutcome::EndTurn {
+            turn_count,
+            final_message_id,
+        } => {
+            assert_eq!(turn_count, 4);
+            final_message_id
+        }
         _ => panic!("unexpected outcome"),
-    }
+    };
 
     // Exactly 3 nudges were injected across the 4 turns (one after each of the
     // first three max_tokens; the fourth exhausts and ends the turn).
@@ -147,4 +153,14 @@ async fn streaming_four_consecutive_max_tokens_exhausts_recovery() {
         })
         .expect("an EndTurn event");
     assert_eq!(end, "max_tokens");
+
+    let history = orch.session().lock().await.history.clone();
+    let last_id = match history.last() {
+        Some(ConversationMessage::Assistant { id, .. }) => *id,
+        other => panic!("expected final assistant message, got {other:?}"),
+    };
+    assert_eq!(
+        final_message_id, last_id,
+        "final_message_id must point at the surfaced terminal max_tokens assistant message"
+    );
 }

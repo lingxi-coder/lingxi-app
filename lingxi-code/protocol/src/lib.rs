@@ -13,6 +13,7 @@ pub mod capabilities;
 pub mod effect_result;
 pub mod effects;
 pub mod ids;
+pub mod mcp_name;
 pub mod message_size;
 pub mod messages;
 pub mod secret;
@@ -28,6 +29,7 @@ pub use ids::{
     AgentId, HookId, McpConnectionId, MessageId, PluginId, PrefetchId, RequestId, SessionId,
     SnapshotId, ToolUseId,
 };
+pub use mcp_name::normalize_name_for_mcp;
 pub use message_size::text_byte_size;
 pub use messages::{
     ContentBlock, ConversationMessage, DocumentSource, ImageSource, MemoryEntry, MemoryEntryTier,

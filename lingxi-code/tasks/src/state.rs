@@ -54,6 +54,14 @@ pub struct TaskStateBase {
     pub output_offset: u64,
     /// Whether the user has been notified of completion.
     pub notified: bool,
+    /// Display name of the teammate / subagent that CREATED this task, if any.
+    /// Additive + defaulted so older serialized rows remain valid.
+    #[serde(default)]
+    pub creator_teammate_name: Option<String>,
+    /// Team name of the teammate / subagent that CREATED this task, if any.
+    /// Additive + defaulted so older serialized rows remain valid.
+    #[serde(default)]
+    pub creator_team_name: Option<String>,
 }
 
 /// Tagged union of per-type task states.
@@ -72,6 +80,8 @@ pub enum TaskState {
     LocalWorkflow(LocalWorkflowTaskState),
     /// MCP monitor.
     MonitorMcp(MonitorMcpTaskState),
+    /// Shell stdout event monitor.
+    Monitor(MonitorTaskState),
     /// Backgrounded MCP tool call (`mcp_task`).
     McpTask(McpTaskState),
     /// Dream loop.
@@ -89,6 +99,7 @@ impl TaskState {
             Self::InProcessTeammate(s) => &s.base,
             Self::LocalWorkflow(s) => &s.base,
             Self::MonitorMcp(s) => &s.base,
+            Self::Monitor(s) => &s.base,
             Self::McpTask(s) => &s.base,
             Self::Dream(s) => &s.base,
         }
@@ -104,6 +115,7 @@ impl TaskState {
             Self::InProcessTeammate(s) => &mut s.base,
             Self::LocalWorkflow(s) => &mut s.base,
             Self::MonitorMcp(s) => &mut s.base,
+            Self::Monitor(s) => &mut s.base,
             Self::McpTask(s) => &mut s.base,
             Self::Dream(s) => &mut s.base,
         }
@@ -213,6 +225,18 @@ pub struct MonitorMcpTaskState {
     pub server_name: String,
     /// Resource URIs watched.
     pub watch_resources: Vec<String>,
+}
+
+/// State specific to a shell stdout event monitor (`monitor_ws`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MonitorTaskState {
+    /// Shared base fields.
+    #[serde(flatten)]
+    pub base: TaskStateBase,
+    /// Shell command being monitored.
+    pub command: String,
+    /// Exit code once the command terminates.
+    pub exit_code: Option<i32>,
 }
 
 /// State specific to a backgrounded MCP tool call (claude-code `mcp_task`,

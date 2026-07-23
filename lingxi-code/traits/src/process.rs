@@ -13,6 +13,22 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+/// Consumer for a command whose output must be observed while it is running.
+///
+/// The process runner invokes stdout one complete logical line at a time and
+/// stderr in bounded byte chunks. Implementations should apply bounded
+/// backpressure; returning an error aborts the command and lets the platform
+/// runner tear down its process tree.
+#[async_trait]
+pub trait ProcessStreamSink: Send + Sync {
+    /// Consume one stdout line, without its trailing line ending.
+    async fn stdout_line(&self, line: String) -> Result<(), ProcessError>;
+
+    /// Consume a bounded stderr chunk. Stderr is not an event stream, but must
+    /// be drained concurrently so a noisy child cannot deadlock on a full pipe.
+    async fn stderr_chunk(&self, chunk: Vec<u8>) -> Result<(), ProcessError>;
+}
+
 /// Runs sandbox-vetted commands on the host.
 ///
 /// Implementations live in platform crates. Every method consumes a
@@ -26,6 +42,27 @@ pub trait ProcessRunner: Send + Sync {
     /// Returns [`ProcessError`] when the platform does not support process
     /// execution, when I/O fails, or when the command's timeout fires.
     async fn run(&self, cmd: &SandboxedCommand) -> Result<ProcessOutput, ProcessError>;
+
+    /// Run a sandboxed command while streaming stdout lines and stderr chunks.
+    ///
+    /// Platform runners with pipe support override this to deliver output live.
+    /// The compatibility default preserves correctness for minimal/mobile test
+    /// runners by executing through [`Self::run`] and replaying the captured
+    /// output before returning.
+    async fn run_streaming(
+        &self,
+        cmd: &SandboxedCommand,
+        sink: std::sync::Arc<dyn ProcessStreamSink>,
+    ) -> Result<ProcessOutput, ProcessError> {
+        let output = self.run(cmd).await?;
+        for line in output.stdout.lines() {
+            sink.stdout_line(line.to_string()).await?;
+        }
+        if !output.stderr.is_empty() {
+            sink.stderr_chunk(output.stderr.as_bytes().to_vec()).await?;
+        }
+        Ok(output)
+    }
 
     /// Spawn a sandboxed command as a background process and return a
     /// handle that can later be passed to [`ProcessRunner::kill`].

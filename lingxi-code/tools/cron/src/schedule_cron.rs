@@ -8,7 +8,7 @@
 //! Wire identifiers:
 //! - 5-field cron expressions only (6-field with seconds is rejected by the
 //!   shared parser and surfaces as the generic "Expected 5 fields" message).
-//! - `id = [d][0-9a-z]{8}` (9-char format).
+//! - `id = [0-9a-f]{8}` (`randomUUID().slice(0, 8)`).
 //!
 //! Persistence (1:1 with claude-code `cronTasks.ts`): a DURABLE job is appended
 //! to the single project-relative file `<projectRoot>/.lingxi/scheduled_tasks.json`
@@ -18,10 +18,9 @@
 //! claude-code's separate in-memory session store and the tool's own
 //! "Session-only (not written to disk …)" promise).
 //!
-//! This seam does NOT register the job into a live scheduler — it parses,
-//! validates, and persists. Production hosts pick the file up via
-//! [`cron::scheduler::CronScheduler`], which computes each job's next fire time
-//! at runtime from the cron string + `lastFiredAt ?? createdAt`.
+//! The desktop tool registers the job with the live
+//! [`cron::scheduler::CronScheduler`] immediately. Durable state remains
+//! authoritative on disk; session-only state is owned by that scheduler.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -291,8 +290,6 @@ pub const CRON_CREATE_TOOL_NAME: &str = "CronCreate";
 pub const CRON_SUBDIR: &str = "cron";
 /// Legacy per-job file extension (retained as a wire-identifier lock).
 pub const CRON_FILE_SUFFIX: &str = ".json";
-/// 9-char task-id prefix character (`d` for daemon/cron).
-pub const CRON_TASK_ID_PREFIX: char = 'd';
 /// 6-field rejection message (retained for the wire-identifier parity lock).
 pub const SIX_FIELD_REJECTION: &str =
     "ScheduleCron: 6-field cron (with seconds) is not supported; use 5-field cron (minute hour day month weekday)";
@@ -302,7 +299,7 @@ pub const NEXT_FIRE_HORIZON_MINUTES: u64 = 60 * 24 * 366;
 /// Maximum number of scheduled jobs allowed at once (CronCreateTool.ts:25).
 const MAX_JOBS: usize = 50;
 /// Recurring jobs auto-expire after this many days (CronCreateTool.ts prompt.ts).
-const DEFAULT_MAX_AGE_DAYS: i64 = 30;
+const DEFAULT_MAX_AGE_DAYS: i64 = 7;
 
 /// Absolute path to the single project tasks file
 /// (`<project_root>/.lingxi/scheduled_tasks.json`). 1:1 with claude-code, which
@@ -314,17 +311,17 @@ pub(crate) fn cron_file_path(project_root: &Path) -> PathBuf {
     cron::tasks_file::scheduled_tasks_path(project_root)
 }
 
-/// Generate a fresh 9-char cron task id (`d` + 8 base36 chars), 1:1 with
-/// claude-code. Exposed so the mobile FFI `cron_create` path mints ids in the
+/// Generate a fresh eight-character lowercase hexadecimal cron id, matching
+/// Claude Code 2.1.217's `randomUUID().slice(0, 8)`. Exposed so the mobile FFI
+/// `cron_create` path mints ids in the
 /// SAME format as the `CronCreate` tool (no on-disk drift between a UI-created
 /// and a model-created job).
 #[must_use]
 pub fn generate_cron_task_id() -> String {
     use rand::Rng;
-    const ALPHABET: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    const ALPHABET: &[u8] = b"0123456789abcdef";
     let mut rng = rand::rng();
-    let mut s = String::with_capacity(9);
-    s.push(CRON_TASK_ID_PREFIX);
+    let mut s = String::with_capacity(8);
     for _ in 0..8 {
         let idx = rng.random_range(0..ALPHABET.len());
         s.push(ALPHABET[idx] as char);
@@ -378,21 +375,6 @@ const DAY_NAMES: [&str; 7] = [
     "Saturday",
 ];
 
-const MONTH_NAMES: [&str; 12] = [
-    "January",
-    "February",
-    "March",
-    "April",
-    "May",
-    "June",
-    "July",
-    "August",
-    "September",
-    "October",
-    "November",
-    "December",
-];
-
 /// `true` if `s` is one or more ASCII digits (mirrors the TS `/^\d+$/`).
 fn all_digits(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
@@ -409,21 +391,21 @@ fn parse_step(s: &str) -> Option<u32> {
         .and_then(|rest| rest.parse::<u32>().ok())
 }
 
-/// Format `hour:minute` (24h) as a 12-hour clock like "2:30pm".
-// PARITY-GAP: TS formats in local time (`toLocaleTimeString`); we use UTC to
-// avoid local-timezone nondeterminism, and emit lowercase am/pm with no space.
-fn format_time_utc(minute: u32, hour: u32) -> String {
-    let period = if hour < 12 { "am" } else { "pm" };
+/// Format `hour:minute` (24h) like en-US `toLocaleTimeString`, e.g. "2:30 PM".
+/// Cron fields are already interpreted in local wall-clock time; this helper
+/// only formats those field values and performs no timezone conversion.
+fn format_time(minute: u32, hour: u32) -> String {
+    let period = if hour < 12 { "AM" } else { "PM" };
     let h12 = match hour % 12 {
         0 => 12,
         h => h,
     };
-    format!("{h12}:{minute:02}{period}")
+    format!("{h12}:{minute:02} {period}")
 }
 
 /// Render a 5-field cron expression as a human-readable schedule string.
 /// Exposed so the mobile cron-management UI can show the same human schedule the
-/// tool surfaces (e.g. "every day at 9:00am").
+/// tool surfaces (e.g. "every day at 9:00 AM").
 #[must_use]
 pub fn cron_to_human(cron: &str) -> String {
     let parts: Vec<&str> = cron.split_whitespace().collect();
@@ -432,9 +414,12 @@ pub fn cron_to_human(cron: &str) -> String {
     }
     let (minute, hour, dom, month, dow) = (parts[0], parts[1], parts[2], parts[3], parts[4]);
 
-    // Every N minutes: */N * * * *
-    if let Some(n) = parse_step(minute) {
-        if hour == "*" && dom == "*" && month == "*" && dow == "*" {
+    // Every minute / every N minutes: * * * * * or */N * * * *
+    if hour == "*" && dom == "*" && month == "*" && dow == "*" {
+        if minute == "*" {
+            return "Every minute".to_string();
+        }
+        if let Some(n) = parse_step(minute) {
             return if n == 1 {
                 "Every minute".to_string()
             } else {
@@ -477,7 +462,7 @@ pub fn cron_to_human(cron: &str) -> String {
     }
     let m: u32 = minute.parse().unwrap_or(0);
     let h: u32 = hour.parse().unwrap_or(0);
-    let time = format_time_utc(m, h);
+    let time = format_time(m, h);
 
     // Daily at specific time: M H * * *
     if dom == "*" && month == "*" && dow == "*" {
@@ -495,21 +480,6 @@ pub fn cron_to_human(cron: &str) -> String {
     // Weekdays: M H * * 1-5
     if dom == "*" && month == "*" && dow == "1-5" {
         return format!("Weekdays at {time}");
-    }
-
-    // PARITY-GAP: extensions beyond TS cronToHuman (which returns the raw cron
-    // for these). Specific month + day-of-month: M H D Mon *
-    if all_digits(dom) && all_digits(month) && dow == "*" {
-        let mon: usize = month.parse().unwrap_or(0);
-        if (1..=12).contains(&mon) {
-            let name = MONTH_NAMES[mon - 1];
-            return format!("{name} {dom} at {time}");
-        }
-    }
-
-    // PARITY-GAP: extension beyond TS. Day-of-month, every month: M H D * *
-    if all_digits(dom) && month == "*" && dow == "*" {
-        return format!("Day {dom} of every month at {time}");
     }
 
     cron.to_string()
@@ -574,11 +544,25 @@ fn build_result_content(
 /// Count persisted jobs in the project's single `scheduled_tasks.json`
 /// (`tasks.len()`). A missing/garbage file counts as zero. Backs the
 /// `MAX_JOBS = 50` limit (CronCreateTool.ts:25).
-async fn count_existing_jobs(fs: &dyn traits::FileSystem, project_root: &Path) -> usize {
-    match cron::tasks_file::read_tasks_body(fs, project_root).await {
+async fn count_existing_jobs(ctx: &tool_api::BuiltinToolContext) -> usize {
+    let durable = match cron::tasks_file::read_tasks_body(ctx.fs.as_ref(), &ctx.cwd()).await {
         Ok(body) => cron::tasks_file::parse_tasks(&body).tasks.len(),
         Err(_) => 0,
-    }
+    };
+    let session = match &ctx.task_registry {
+        Some(registry) => cron::session_jobs(registry)
+            .await
+            .map_or(0, |jobs| jobs.len()),
+        None => 0,
+    };
+    durable + session
+}
+
+fn teammate_owner(ctx: &ToolUseContext) -> Option<String> {
+    ctx.agent_name.as_ref().map(|name| {
+        ctx.agent_id
+            .map_or_else(|| name.clone(), |agent_id| agent_id.to_string())
+    })
 }
 
 /// `CronCreateTool` — schedule a prompt on a 5-field cron + persist the job.
@@ -695,7 +679,7 @@ impl Tool for CronCreateTool {
     async fn validate_input(
         &self,
         input: &Value,
-        _: &ToolUseContext,
+        call_ctx: &ToolUseContext,
     ) -> Result<(), ValidationError> {
         let cron = input
             .get("cron")
@@ -720,24 +704,26 @@ impl Tool for CronCreateTool {
             )));
         }
 
-        // Too many scheduled jobs already (counted in the single project file).
-        if count_existing_jobs(self.ctx.fs.as_ref(), &self.ctx.cwd()).await >= MAX_JOBS {
+        // Too many scheduled jobs already (durable + this session's in-memory
+        // jobs, exactly the set CronList exposes).
+        if count_existing_jobs(&self.ctx).await >= MAX_JOBS {
             return Err(ValidationError(format!(
                 "Too many scheduled jobs (max {MAX_JOBS}). Cancel one first."
             )));
         }
 
-        // PARITY-GAP: TS rejects a `durable` cron created by a teammate
-        // (`input.durable && getTeammateContext()`) because teammates don't
-        // persist across sessions. There is no teammate context in this Rust
-        // seam, so the durable+teammate check is omitted.
+        if semantic_bool(input.get("durable"), false) && teammate_owner(call_ctx).is_some() {
+            return Err(ValidationError(
+                "durable crons are not supported for teammates (teammates do not persist across sessions)".into(),
+            ));
+        }
         Ok(())
     }
 
     async fn call(
         &self,
         input: Value,
-        _ctx: ToolUseContext,
+        call_ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let started = Instant::now();
@@ -774,6 +760,12 @@ impl Tool for CronCreateTool {
 
         let recurring = semantic_bool(input.get("recurring"), true);
         let durable = semantic_bool(input.get("durable"), false);
+        let owner = teammate_owner(&call_ctx);
+        if durable && owner.is_some() {
+            return Err(ToolError::InvalidInput(
+                "durable crons are not supported for teammates (teammates do not persist across sessions)".into(),
+            ));
+        }
 
         let mut md: LogEventMetadata = HashMap::new();
         md.insert("_PROTO_cron".into(), pii_str(&cron));
@@ -796,10 +788,8 @@ impl Tool for CronCreateTool {
 
         let id = generate_cron_task_id();
 
-        // Persist ONLY when durable. A session-only job (durable:false) is never
-        // written to disk — it would live in claude-code's separate in-memory
-        // session store (which this seam does not own), honoring the tool's
-        // "Session-only (not written to disk …)" promise.
+        // Persist ONLY when durable. Session-only jobs are inserted into the
+        // live scheduler's session-owned store below.
         let mut bytes_written: usize = 0;
         if durable {
             let path = cron_file_path(&self.ctx.cwd());
@@ -861,6 +851,38 @@ impl Tool for CronCreateTool {
             }
         }
 
+        let live_task = cron::SessionCronTask {
+            id: id.clone(),
+            cron: cron.clone(),
+            prompt: prompt.clone(),
+            created_at: now,
+            last_fired_at: None,
+            recurring,
+            owner,
+        };
+        let scheduler_active = if let Some(registry) = &self.ctx.task_registry {
+            match cron::register_live_job(registry, live_task, durable).await {
+                Ok(()) => true,
+                Err(error) if durable => {
+                    tracing::warn!(%error, "durable cron saved but live scheduler is unavailable");
+                    false
+                }
+                Err(error) => {
+                    emit_failed(&bus, "no_scheduler", started.elapsed().as_millis() as u64).await;
+                    return Err(ToolError::Internal(format!(
+                        "CronCreate: session-only job requires an active scheduler: {error}"
+                    )));
+                }
+            }
+        } else if durable {
+            false
+        } else {
+            emit_failed(&bus, "no_scheduler", started.elapsed().as_millis() as u64).await;
+            return Err(ToolError::Internal(
+                "CronCreate: session-only job requires an active scheduler".into(),
+            ));
+        };
+
         let mut md: LogEventMetadata = HashMap::new();
         md.insert(
             "duration_ms".into(),
@@ -880,11 +902,6 @@ impl Tool for CronCreateTool {
         bus.log_event(SCHEDULE_CRON_COMPLETED, md).await;
 
         let human = cron_to_human(&cron);
-        // `task_registry` is Some only on a host that wired a live scheduler (the
-        // desktop root constructs the `TaskRegistry` AND starts `CronScheduler`
-        // together); mobile/iOS leave it None and start no scheduler, so the
-        // created job will never auto-fire — reflect that in the result text.
-        let scheduler_active = self.ctx.task_registry.is_some();
         let content = build_result_content(&id, &human, recurring, durable, scheduler_active);
 
         Ok(ToolCallResult {
@@ -933,16 +950,17 @@ mod tests {
     fn constants_locked() {
         assert_eq!(CRON_CREATE_TOOL_NAME, "CronCreate");
         assert_eq!(CRON_SUBDIR, "cron");
-        assert_eq!(CRON_TASK_ID_PREFIX, 'd');
         assert_eq!(MAX_JOBS, 50);
-        assert_eq!(DEFAULT_MAX_AGE_DAYS, 30);
+        assert_eq!(DEFAULT_MAX_AGE_DAYS, 7);
     }
 
     #[test]
     fn task_id_format() {
         let id = generate_cron_task_id();
-        assert_eq!(id.len(), 9);
-        assert_eq!(id.chars().next().unwrap(), 'd');
+        assert_eq!(id.len(), 8);
+        assert!(id
+            .chars()
+            .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase()));
     }
 
     #[test]
@@ -981,28 +999,25 @@ mod tests {
         assert_eq!(cron_to_human("0 * * * *"), "Every hour");
         assert_eq!(cron_to_human("30 * * * *"), "Every hour at :30");
         assert_eq!(cron_to_human("0 */2 * * *"), "Every 2 hours");
-        assert_eq!(cron_to_human("0 9 * * *"), "Every day at 9:00am");
-        assert_eq!(cron_to_human("0 12 * * *"), "Every day at 12:00pm");
-        assert_eq!(cron_to_human("30 14 * * 1"), "Every Monday at 2:30pm");
-        assert_eq!(cron_to_human("0 0 * * 0"), "Every Sunday at 12:00am");
-        assert_eq!(cron_to_human("0 9 * * 1-5"), "Weekdays at 9:00am");
-        assert_eq!(cron_to_human("30 14 28 2 *"), "February 28 at 2:30pm");
-        assert_eq!(
-            cron_to_human("0 9 15 * *"),
-            "Day 15 of every month at 9:00am"
-        );
+        assert_eq!(cron_to_human("0 9 * * *"), "Every day at 9:00 AM");
+        assert_eq!(cron_to_human("0 12 * * *"), "Every day at 12:00 PM");
+        assert_eq!(cron_to_human("30 14 * * 1"), "Every Monday at 2:30 PM");
+        assert_eq!(cron_to_human("0 0 * * 0"), "Every Sunday at 12:00 AM");
+        assert_eq!(cron_to_human("0 9 * * 1-5"), "Weekdays at 9:00 AM");
+        assert_eq!(cron_to_human("30 14 28 2 *"), "30 14 28 2 *");
+        assert_eq!(cron_to_human("0 9 15 * *"), "0 9 15 * *");
         // Unrecognized -> raw cron string.
         assert_eq!(cron_to_human("garbage"), "garbage");
-        assert_eq!(cron_to_human("* * * * *"), "* * * * *");
+        assert_eq!(cron_to_human("* * * * *"), "Every minute");
     }
 
     #[test]
     fn result_content_variants() {
         // scheduler_active = true (desktop): promises firing, as before.
-        let r = build_result_content("d12345678", "Every day at 9:00am", true, false, true);
-        assert!(r.contains("Scheduled recurring job d12345678 (Every day at 9:00am)."));
+        let r = build_result_content("d12345678", "Every day at 9:00 AM", true, false, true);
+        assert!(r.contains("Scheduled recurring job d12345678 (Every day at 9:00 AM)."));
         assert!(r.contains("Session-only (not written to disk, dies when Claude exits)"));
-        assert!(r.contains("Auto-expires after 30 days. Use CronDelete to cancel sooner."));
+        assert!(r.contains("Auto-expires after 7 days. Use CronDelete to cancel sooner."));
 
         let o = build_result_content("d87654321", "February 28 at 2:30pm", false, true, true);
         assert!(o.contains("Scheduled one-shot task d87654321 (February 28 at 2:30pm)."));
@@ -1014,12 +1029,12 @@ mod tests {
     fn result_content_no_scheduler_is_honest() {
         // scheduler_active = false (mobile/iOS): keeps the saved-job prefix but
         // does NOT promise firing — it tells the model nothing will auto-run.
-        let r = build_result_content("d12345678", "Every day at 9:00am", true, true, false);
-        assert!(r.contains("Scheduled recurring job d12345678 (Every day at 9:00am)."));
+        let r = build_result_content("d12345678", "Every day at 9:00 AM", true, true, false);
+        assert!(r.contains("Scheduled recurring job d12345678 (Every day at 9:00 AM)."));
         assert!(r.contains("Persisted to .lingxi/scheduled_tasks.json"));
         assert!(r.contains("no active cron scheduler"));
         assert!(r.contains("will NOT fire automatically"));
-        assert!(!r.contains("Auto-expires after 30 days"));
+        assert!(!r.contains("Auto-expires after 7 days"));
 
         let o = build_result_content("d87654321", "February 28 at 2:30pm", false, false, false);
         assert!(o.contains("Scheduled one-shot task d87654321 (February 28 at 2:30pm)."));
@@ -1028,27 +1043,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_only_job_is_not_written_to_disk() {
-        // A durable:false (default) job lives only in the (separate) in-memory
-        // session store; nothing is written to scheduled_tasks.json.
+    async fn session_only_job_without_live_scheduler_fails_honestly() {
         let tmp = tempfile::tempdir().unwrap();
         let tool = CronCreateTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
-        let out = tool
+        let error = tool
             .call(
                 json!({"cron": "*/5 9-17 * * 1-5", "prompt": "echo hi"}),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
-            .expect("ok");
-        let id = out.data["id"].as_str().unwrap();
-        assert!(id.starts_with('d') && id.len() == 9, "{id}");
-        // Defaults: recurring=true, durable=false.
-        assert_eq!(out.data["recurring"], json!(true));
-        assert_eq!(out.data["durable"], json!(false));
-        let content = out.data["content"].as_str().unwrap();
-        assert!(content.contains("Scheduled recurring job"));
-        assert!(content.contains("Session-only (not written to disk, dies when Claude exits)"));
+            .expect_err("must not claim an inert session cron was scheduled");
+        assert!(format!("{error}").contains("requires an active scheduler"));
 
         // No file written at all.
         let path = cron::tasks_file::scheduled_tasks_path(tmp.path());
@@ -1185,7 +1191,7 @@ mod tests {
             .expect("ok");
         assert_eq!(out.data["recurring"], json!(false));
         assert_eq!(out.data["durable"], json!(true));
-        assert_eq!(out.data["humanSchedule"], json!("February 28 at 2:30pm"));
+        assert_eq!(out.data["humanSchedule"], json!("30 14 28 2 *"));
         let content = out.data["content"].as_str().unwrap();
         assert!(content.contains("Scheduled one-shot task"));
         // The shared test ctx wires no `task_registry` (no live scheduler), so the
@@ -1213,6 +1219,27 @@ mod tests {
             .expect("ok");
         assert_eq!(out.data["recurring"], json!(false));
         assert_eq!(out.data["durable"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn teammate_cannot_create_durable_job() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = CronCreateTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
+        let mut call_ctx = fresh_ctx();
+        call_ctx.agent_name = Some("researcher".into());
+        let input = json!({"cron": "0 9 * * *", "prompt": "x", "durable": true});
+
+        let validation = tool.validate_input(&input, &call_ctx).await.unwrap_err();
+        assert_eq!(
+            validation.0,
+            "durable crons are not supported for teammates (teammates do not persist across sessions)"
+        );
+        let error = tool
+            .call(input, call_ctx, fresh_tx())
+            .await
+            .expect_err("call must enforce the boundary without pre-validation too");
+        assert!(format!("{error}").contains("durable crons are not supported for teammates"));
+        assert!(!cron::tasks_file::scheduled_tasks_path(tmp.path()).exists());
     }
 
     #[tokio::test]

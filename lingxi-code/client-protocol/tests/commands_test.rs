@@ -17,6 +17,7 @@
 
 use client_protocol::commands::{
     ClientCommand, CommandResultDto, ImageRefDto, ListingKindDto, PromptModeDto,
+    ProviderCredentialSecretDto,
 };
 use client_protocol::listings::TaskStatusDto;
 use client_protocol::permission::PermissionResponseDto;
@@ -151,6 +152,42 @@ fn deny_permission_round_trips() {
     assert_eq!(json["request_id"], 7);
     let back: ClientCommand = serde_json::from_value(json).expect("deserialize DenyPermission");
     assert_eq!(back, cmd);
+}
+
+/// `SetPermissionMode` — names the live mode to apply.
+#[test]
+fn set_permission_mode_round_trips() {
+    let cmd = ClientCommand::SetPermissionMode {
+        mode: "acceptEdits".to_string(),
+    };
+    let json = serde_json::to_value(&cmd).expect("serialize SetPermissionMode");
+    assert_eq!(json["type"], "set_permission_mode");
+    assert_eq!(json["mode"], "acceptEdits");
+    let back: ClientCommand = serde_json::from_value(json).expect("deserialize SetPermissionMode");
+    assert_eq!(back, cmd);
+}
+
+#[test]
+fn provider_credential_command_round_trips_without_debug_leak() {
+    let secret = "sk-provider-super-secret";
+    let command = ClientCommand::SetProviderCredential {
+        operation_id: 9,
+        provider_id: "deepseek".to_string(),
+        credential: ProviderCredentialSecretDto::new(secret.to_string()),
+    };
+
+    let debug = format!("{command:?}");
+    assert!(
+        !debug.contains(secret),
+        "credential leaked through Debug: {debug}"
+    );
+    assert!(debug.contains("<redacted>"));
+
+    let json = serde_json::to_value(&command).expect("serialize credential command");
+    assert_eq!(json["type"], "set_provider_credential");
+    assert_eq!(json["credential"], secret);
+    let back: ClientCommand = serde_json::from_value(json).expect("deserialize credential command");
+    assert_eq!(back, command);
 }
 
 /// `SetModel` — names the model to switch to.

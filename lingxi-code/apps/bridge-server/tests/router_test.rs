@@ -36,12 +36,12 @@ use bridge::{BridgeRequest, Capabilities, ClientHello, McpEndpoint, BRIDGE_PROTO
 use bridge_server::router::{CommandRouter, EngineCommandRouter, SessionStoreContext};
 use bridge_server::server::BridgeConnection;
 use client_adapter::{AdapterPermissionGate, ClientEventSink, PermissionRequestSink};
-use client_protocol::commands::{ClientCommand, ListingKindDto};
+use client_protocol::commands::{ClientCommand, ListingKindDto, ProviderCredentialSecretDto};
 use client_protocol::events::{ClientEvent, ErrorKindDto};
 use client_protocol::permission::PermissionRequest;
 use futures_util::{SinkExt, StreamExt};
 use orchestrator::test_support::MockOrchestratorHandle;
-use platform_posix::PosixFileSystem;
+use platform_posix::{PlainTextSecureStorage, PosixClock, PosixFileSystem, PosixHttp};
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::tungstenite::Message;
@@ -54,6 +54,7 @@ use traits::task_registry::{
     TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryError,
     TaskRegistryHandle, TaskUpdatePatch,
 };
+use traits::{SlashCommandDispatcher, SlashDispatchResult};
 
 // ── Test sink ───────────────────────────────────────────────────────────────
 
@@ -62,6 +63,73 @@ use traits::task_registry::{
 #[derive(Default)]
 struct CapturingSink {
     events: Mutex<Vec<ClientEvent>>,
+}
+
+#[derive(Default)]
+struct SelectiveFailureStorage {
+    values:
+        std::sync::Mutex<std::collections::HashMap<(String, String), protocol::SecureStorageData>>,
+}
+
+#[async_trait]
+impl traits::SecureStorage for SelectiveFailureStorage {
+    async fn store(
+        &self,
+        service: &str,
+        account: &str,
+        data: protocol::SecureStorageData,
+    ) -> Result<(), traits::SecureStorageError> {
+        self.values
+            .lock()
+            .unwrap()
+            .insert((service.to_string(), account.to_string()), data);
+        Ok(())
+    }
+
+    async fn retrieve(
+        &self,
+        service: &str,
+        account: &str,
+    ) -> Result<Option<protocol::SecureStorageData>, traits::SecureStorageError> {
+        if account == "provider-key-openrouter" {
+            return Err(traits::SecureStorageError::PermissionDenied(
+                "test keychain denial".to_string(),
+            ));
+        }
+        Ok(self
+            .values
+            .lock()
+            .unwrap()
+            .get(&(service.to_string(), account.to_string()))
+            .cloned())
+    }
+
+    async fn delete(&self, service: &str, account: &str) -> Result<(), traits::SecureStorageError> {
+        self.values
+            .lock()
+            .unwrap()
+            .remove(&(service.to_string(), account.to_string()));
+        Ok(())
+    }
+
+    async fn list(&self, service: &str) -> Result<Vec<String>, traits::SecureStorageError> {
+        Ok(self
+            .values
+            .lock()
+            .unwrap()
+            .keys()
+            .filter(|(stored_service, _)| stored_service == service)
+            .map(|(_, account)| account.clone())
+            .collect())
+    }
+
+    fn is_encrypted(&self) -> bool {
+        true
+    }
+
+    fn backend(&self) -> traits::SecureStorageBackend {
+        traits::SecureStorageBackend::MacOsKeychain
+    }
 }
 
 impl CapturingSink {
@@ -256,6 +324,30 @@ fn router_with(
     )
 }
 
+async fn router_with_credentials() -> (
+    EngineCommandRouter,
+    Arc<secret::CredentialManager>,
+    tempfile::TempDir,
+) {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let storage = Arc::new(
+        PlainTextSecureStorage::new(temp.path().join("credentials"))
+            .await
+            .expect("storage"),
+    );
+    let credentials = Arc::new(secret::CredentialManager::new(
+        storage,
+        Arc::new(PosixClock::new()),
+        Arc::new(PosixHttp::new()),
+    ));
+    let router = router_with(
+        Arc::new(MockOrchestratorHandle::new()),
+        Arc::new(MockTaskRegistry { rows: Vec::new() }),
+    )
+    .with_credentials(credentials.clone());
+    (router, credentials, temp)
+}
+
 fn router_with_store(
     handle: Arc<MockOrchestratorHandle>,
     root: &std::path::Path,
@@ -372,7 +464,12 @@ fn seed_replay_session(root: &std::path::Path) -> String {
         "cwd": cwd,
         "version": "0.9.0",
         "isSidechain": false,
-        "message": {"role": "assistant", "content": [{"type": "text", "text": "restored"}]}
+        "message": {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "restored"}],
+            "model": "claude-opus-4-1"
+        },
+        "effort": "high"
     });
     std::fs::write(
         project_dir.join(format!("{session_id}.jsonl")),
@@ -383,6 +480,145 @@ fn seed_replay_session(root: &std::path::Path) -> String {
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn provider_credentials_round_trip_through_shared_engine_store() {
+    let (router, credentials, _temp) = router_with_credentials().await;
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::SetProviderCredential {
+                operation_id: 1,
+                provider_id: "deepseek".into(),
+                credential: ProviderCredentialSecretDto::new("sk-shared-secret".into()),
+            },
+            sink.clone(),
+        )
+        .await;
+
+    let stored = credentials
+        .get_provider_key("deepseek")
+        .await
+        .expect("read")
+        .expect("stored");
+    assert_eq!(stored.expose_secret(), "sk-shared-secret");
+    assert_eq!(
+        sink.events().await.last(),
+        Some(&ClientEvent::ProviderCredentialStatus {
+            operation_id: 1,
+            configured_provider_ids: vec!["deepseek".into()],
+            unavailable_provider_ids: Vec::new(),
+            storage_encrypted: false,
+            error: None,
+        })
+    );
+
+    router
+        .route(
+            ClientCommand::DeleteProviderCredential {
+                operation_id: 2,
+                provider_id: "deepseek".into(),
+            },
+            sink.clone(),
+        )
+        .await;
+
+    assert!(credentials
+        .get_provider_key("deepseek")
+        .await
+        .expect("read after delete")
+        .is_none());
+    assert_eq!(
+        sink.events().await.last(),
+        Some(&ClientEvent::ProviderCredentialStatus {
+            operation_id: 2,
+            configured_provider_ids: Vec::new(),
+            unavailable_provider_ids: Vec::new(),
+            storage_encrypted: false,
+            error: None,
+        })
+    );
+
+    router
+        .route(
+            ClientCommand::SetProviderCredential {
+                operation_id: 3,
+                provider_id: "anthropic".into(),
+                credential: ProviderCredentialSecretDto::new("sk-ant-shared-secret".into()),
+            },
+            sink.clone(),
+        )
+        .await;
+    let anthropic = credentials
+        .get_anthropic_api_key()
+        .await
+        .expect("read Anthropic key")
+        .expect("stored Anthropic key");
+    assert_eq!(anthropic.expose_secret(), "sk-ant-shared-secret");
+
+    router
+        .route(
+            ClientCommand::DeleteProviderCredential {
+                operation_id: 4,
+                provider_id: "anthropic".into(),
+            },
+            sink,
+        )
+        .await;
+    assert!(credentials
+        .get_anthropic_api_key()
+        .await
+        .expect("read Anthropic key after delete")
+        .is_none());
+}
+
+#[tokio::test]
+async fn provider_credential_listing_reports_partial_success_without_erasing_unknown_state() {
+    let credentials = Arc::new(secret::CredentialManager::new(
+        Arc::new(SelectiveFailureStorage::default()),
+        Arc::new(PosixClock::new()),
+        Arc::new(PosixHttp::new()),
+    ));
+    credentials
+        .set_provider_key("deepseek", "sk-deepseek")
+        .await
+        .expect("seed readable credential");
+    let router = router_with(
+        Arc::new(MockOrchestratorHandle::new()),
+        Arc::new(MockTaskRegistry { rows: Vec::new() }),
+    )
+    .with_credentials(credentials);
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::ListProviderCredentials {
+                operation_id: 9,
+                provider_ids: vec!["deepseek".into(), "openrouter".into()],
+            },
+            sink.clone(),
+        )
+        .await;
+
+    let events = sink.events().await;
+    let ClientEvent::ProviderCredentialStatus {
+        configured_provider_ids,
+        unavailable_provider_ids,
+        storage_encrypted,
+        error,
+        ..
+    } = &events[0]
+    else {
+        panic!("expected provider status event")
+    };
+    assert_eq!(configured_provider_ids, &["deepseek"]);
+    assert_eq!(unavailable_provider_ids, &["openrouter"]);
+    assert!(*storage_encrypted);
+    assert!(error
+        .as_deref()
+        .is_some_and(|message| message.contains("openrouter")));
+}
 
 #[tokio::test]
 async fn set_model_routes() {
@@ -414,6 +650,87 @@ async fn set_model_routes() {
         ClientEvent::ModelChanged {
             model: "claude-opus-4-8".into()
         }
+    );
+}
+
+#[tokio::test]
+async fn set_permission_mode_routes_and_acknowledges_authoritative_mode() {
+    let handle = Arc::new(MockOrchestratorHandle::new());
+    let router = router_with(handle.clone(), Arc::new(MockTaskRegistry { rows: vec![] }));
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::SetPermissionMode {
+                mode: "acceptEdits".into(),
+            },
+            sink.clone(),
+        )
+        .await;
+
+    assert_eq!(
+        handle.current_permission_mode().as_deref(),
+        Some("acceptEdits")
+    );
+    assert_eq!(
+        sink.events().await,
+        vec![ClientEvent::PermissionModeChanged {
+            mode: "acceptEdits".into(),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn set_permission_mode_is_rejected_while_a_turn_is_active() {
+    let handle = Arc::new(MockOrchestratorHandle::new());
+    let router = router_with(handle.clone(), Arc::new(MockTaskRegistry { rows: vec![] }));
+    let sink = CapturingSink::arc();
+    router.set_turn_active(true);
+
+    router
+        .route(
+            ClientCommand::SetPermissionMode {
+                mode: "acceptEdits".into(),
+            },
+            sink.clone(),
+        )
+        .await;
+
+    assert_eq!(handle.current_permission_mode().as_deref(), Some("default"));
+    assert_eq!(
+        sink.events().await,
+        vec![ClientEvent::Error {
+            kind: ErrorKindDto::Rejected,
+            message: "cannot change permission mode while a turn is active".into(),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn set_permission_mode_rejection_is_not_reported_as_internal() {
+    let handle = Arc::new(MockOrchestratorHandle::new());
+    handle.set_permission_mode_error("bypassPermissions is disabled".into());
+    let router = router_with(handle.clone(), Arc::new(MockTaskRegistry { rows: vec![] }));
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::SetPermissionMode {
+                mode: "bypassPermissions".into(),
+            },
+            sink.clone(),
+        )
+        .await;
+
+    assert_eq!(handle.current_permission_mode().as_deref(), Some("default"));
+    assert_eq!(
+        sink.events().await,
+        vec![ClientEvent::Error {
+            kind: ErrorKindDto::Rejected,
+            message:
+                "set_permission_mode failed: handle action failed: bypassPermissions is disabled"
+                    .into(),
+        }]
     );
 }
 
@@ -515,6 +832,160 @@ async fn slash_command_routes_to_registry() {
             .iter()
             .any(|e| matches!(e, ClientEvent::TextDelta { text } if !text.is_empty())),
         "the slash command must route to the registry and surface a display, got {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn refresh_slash_commands_reads_live_registry_catalog() {
+    use command_api::dispatcher::RegistrySlashDispatcher;
+    use command_api::model::{CommandFrontmatter, CommandSource, SlashCommand, SlashCommandKind};
+    use command_api::registry::CommandRegistry;
+    use tokio::sync::RwLock;
+
+    let mut reg = CommandRegistry::new();
+    reg.register_command(SlashCommand {
+        name: "deploy".to_string(),
+        description: "ship it".to_string(),
+        source: CommandSource::Project,
+        kind: SlashCommandKind::Markdown {
+            file_path: std::path::PathBuf::from("/tmp/deploy.md"),
+            frontmatter: CommandFrontmatter {
+                description: "ship it".to_string(),
+                ..CommandFrontmatter::default()
+            },
+            prompt_template: "deploy".to_string(),
+        },
+        ..SlashCommand::default()
+    });
+    let shared = Arc::new(RwLock::new(reg));
+    let dispatcher = Arc::new(RegistrySlashDispatcher::new(shared.clone()));
+    let router = EngineCommandRouter::new(
+        Arc::new(MockOrchestratorHandle::new())
+            as Arc<dyn traits::orchestrator::OrchestratorHandle>,
+        Arc::new(MockAuth) as Arc<dyn AuthHandle>,
+        Arc::new(MockTaskRegistry { rows: vec![] }) as Arc<dyn TaskRegistryHandle>,
+        Some(dispatcher),
+        Some(shared),
+    );
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::RefreshListings {
+                which: vec![ListingKindDto::SlashCommands],
+            },
+            sink.clone(),
+        )
+        .await;
+
+    let events = sink.events().await;
+    match events.as_slice() {
+        [ClientEvent::SlashCommandCatalog { commands }] => {
+            assert!(
+                commands.iter().any(|cmd| {
+                    cmd.name == "deploy" && cmd.description == "ship it" && cmd.source == "project"
+                }),
+                "expected live registry command in catalog, got {commands:?}"
+            );
+        }
+        other => panic!("expected SlashCommandCatalog, got {other:?}"),
+    }
+}
+
+struct MutatingDispatcher {
+    registry: Arc<tokio::sync::RwLock<command_api::registry::CommandRegistry>>,
+}
+
+#[async_trait]
+impl SlashCommandDispatcher for MutatingDispatcher {
+    async fn dispatch(&self, raw: &str) -> SlashDispatchResult {
+        use command_api::model::{
+            CommandFrontmatter, CommandSource, SlashCommand, SlashCommandKind,
+        };
+
+        if raw == "/install" {
+            self.registry.write().await.register_command(SlashCommand {
+                name: "newcmd".to_string(),
+                description: "added during dispatch".to_string(),
+                source: CommandSource::User,
+                kind: SlashCommandKind::Markdown {
+                    file_path: std::path::PathBuf::from("/tmp/newcmd.md"),
+                    frontmatter: CommandFrontmatter {
+                        description: "added during dispatch".to_string(),
+                        ..CommandFrontmatter::default()
+                    },
+                    prompt_template: "hello".to_string(),
+                },
+                ..SlashCommand::default()
+            });
+            SlashDispatchResult::Handled {
+                display: "installed".to_string(),
+            }
+        } else {
+            SlashDispatchResult::Handled {
+                display: raw.to_string(),
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn run_slash_command_emits_commands_changed_when_registry_mutates() {
+    use command_api::model::{CommandFrontmatter, CommandSource, SlashCommand, SlashCommandKind};
+    use command_api::registry::CommandRegistry;
+    use tokio::sync::RwLock;
+
+    let mut reg = CommandRegistry::new();
+    reg.register_command(SlashCommand {
+        name: "install".to_string(),
+        description: "install command".to_string(),
+        source: CommandSource::Builtin,
+        kind: SlashCommandKind::Markdown {
+            file_path: std::path::PathBuf::from("/tmp/install.md"),
+            frontmatter: CommandFrontmatter {
+                description: "install command".to_string(),
+                ..CommandFrontmatter::default()
+            },
+            prompt_template: "install".to_string(),
+        },
+        ..SlashCommand::default()
+    });
+    let shared = Arc::new(RwLock::new(reg));
+    let router = EngineCommandRouter::new(
+        Arc::new(MockOrchestratorHandle::new())
+            as Arc<dyn traits::orchestrator::OrchestratorHandle>,
+        Arc::new(MockAuth) as Arc<dyn AuthHandle>,
+        Arc::new(MockTaskRegistry { rows: vec![] }) as Arc<dyn TaskRegistryHandle>,
+        Some(Arc::new(MutatingDispatcher {
+            registry: shared.clone(),
+        })),
+        Some(shared),
+    );
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::RunSlashCommand {
+                raw: "/install".into(),
+            },
+            sink.clone(),
+        )
+        .await;
+
+    let events = sink.events().await;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, ClientEvent::TextDelta { text } if text == "installed")),
+        "dispatcher reply must be surfaced, got {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            ClientEvent::CommandsChanged { commands }
+                if commands.iter().any(|cmd| cmd.name == "newcmd" && cmd.source == "user")
+        )),
+        "registry mutation must emit CommandsChanged, got {events:?}"
     );
 }
 
@@ -904,6 +1375,8 @@ async fn resume_session_replays_adopts_and_emits_full_transcript() {
     );
     assert_eq!(adopted.4.cumulative_dropped_tokens, 4_321);
     assert!(adopted.4.compacted);
+    assert_eq!(adopted.4.model, "claude-opus-4-1");
+    assert_eq!(adopted.4.effort.as_deref(), Some("high"));
     assert_eq!(adopted.4.loaded_tool_names, vec!["DeferredTool"]);
     assert_eq!(adopted.4.transcript_only_message_ids.len(), 1);
     assert_eq!(adopted.4.compact_summary_message_ids.len(), 1);

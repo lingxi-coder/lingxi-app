@@ -87,9 +87,6 @@ pub fn to_llm_messages(messages: Vec<ConversationMessage>) -> Result<Vec<Message
 ///   `isMeta` flag and `isSyntheticApiErrorMessage` markers; the protocol has
 ///   no `isMeta` flag (see `conversation.rs:1389`, `turn_loop.rs:940`) and no
 ///   `RequestTooLarge`/`PdfTooLarge` markers.
-/// * `stripToolReferenceBlocksFromUserMessage` / `TOOL_REFERENCE_TURN_BOUNDARY`
-///   injection — N/A: no `tool_reference` content block exists; tool search
-///   returns a plain name list (`tools/meta/src/tool_search.rs:20`).
 /// * assistant tool-input normalization (`normalizeToolInputForAPI` stripping
 ///   `plan`/`caller`/synthetic-edit fields) — N/A: LingXi has no
 ///   `normalizeToolInput` *producer* to reverse; tool inputs are model-authored
@@ -97,8 +94,38 @@ pub fn to_llm_messages(messages: Vec<ConversationMessage>) -> Result<Vec<Message
 ///   Stripping a model-authored field would corrupt faithful round-trips.
 #[must_use]
 pub fn normalize_messages_for_api(messages: Vec<ConversationMessage>) -> Vec<ConversationMessage> {
-    let mut out: Vec<ConversationMessage> = Vec::with_capacity(messages.len());
-    for mut msg in messages {
+    normalize_messages_for_api_with_tool_search(messages, true, None)
+}
+
+/// Request-aware normalization for dynamic tool loading.
+///
+/// When tool search is unavailable (for example after switching Sonnet →
+/// Haiku), stale `tool_reference` blocks are removed from the API-bound clone.
+/// When it remains enabled, references to tools no longer present in the live
+/// registry are removed. A surviving reference receives Claude Code's
+/// transient `Tool loaded.` sibling boundary; none of these mutations touch the
+/// persisted transcript.
+#[must_use]
+pub fn normalize_messages_for_api_with_tool_search(
+    messages: Vec<ConversationMessage>,
+    tool_search_enabled: bool,
+    available_tool_names: Option<&std::collections::HashSet<String>>,
+) -> Vec<ConversationMessage> {
+    // Claude's query path first projects from the most recent compact boundary
+    // (including the marker), then drops the transcript-only marker below.
+    // Local compaction already replaces the active history, but SDK history
+    // replay can deliver pre-boundary messages followed by the boundary, so the
+    // slice is required here as a final model-facing invariant.
+    let boundary_index = messages.iter().rposition(|message| {
+        matches!(
+            message,
+            ConversationMessage::System { content, .. }
+                if content == "Conversation compacted"
+        )
+    });
+    let start = boundary_index.unwrap_or(0);
+    let mut out: Vec<ConversationMessage> = Vec::with_capacity(messages.len() - start);
+    for mut msg in messages.into_iter().skip(start) {
         // `stripAdvisorBlocks` (claude-code `claude.ts:1305`): drop
         // `advisor_tool_result` (no advisor beta) and `connector_text` (no
         // encode path — the Anthropic encoder rejects them) before the wire.
@@ -122,6 +149,9 @@ pub fn normalize_messages_for_api(messages: Vec<ConversationMessage>) -> Vec<Con
             // here. claude-code `isVisibleInTranscriptOnly`. Dropping pre-merge
             // also lets the surrounding same-role messages collapse below.
             ConversationMessage::System { .. } => continue,
+        }
+        if let ConversationMessage::User { content, .. } = &mut msg {
+            normalize_tool_references(content, tool_search_enabled, available_tool_names);
         }
         match (out.last_mut(), msg) {
             (
@@ -164,6 +194,85 @@ pub fn normalize_messages_for_api(messages: Vec<ConversationMessage>) -> Vec<Con
         }
     }
     out
+}
+
+fn normalize_tool_references(
+    content: &mut Vec<ProtoBlock>,
+    tool_search_enabled: bool,
+    available_tool_names: Option<&std::collections::HashSet<String>>,
+) {
+    const TURN_BOUNDARY: &str = "Tool loaded.";
+    const DISABLED_PLACEHOLDER: &str = "[Tool references removed - tool search not enabled]";
+    const UNAVAILABLE_PLACEHOLDER: &str = "[Tool references removed - tools no longer available]";
+
+    let mut has_surviving_reference = false;
+    for block in content.iter_mut() {
+        let ProtoBlock::ToolResult {
+            content_blocks: Some(blocks),
+            ..
+        } = block
+        else {
+            continue;
+        };
+        let had_reference = blocks.iter().any(is_tool_reference);
+        if !had_reference {
+            continue;
+        }
+        blocks.retain(|candidate| {
+            if !is_tool_reference(candidate) {
+                return true;
+            }
+            if !tool_search_enabled {
+                return false;
+            }
+            candidate
+                .get("tool_name")
+                .and_then(Value::as_str)
+                .is_some_and(|name| {
+                    available_tool_names.map_or(true, |available| {
+                        available.contains(normalize_legacy_tool_name(name))
+                    })
+                })
+        });
+        has_surviving_reference |= blocks.iter().any(is_tool_reference);
+        if blocks.is_empty() {
+            blocks.push(serde_json::json!({
+                "type": "text",
+                "text": if tool_search_enabled {
+                    UNAVAILABLE_PLACEHOLDER
+                } else {
+                    DISABLED_PLACEHOLDER
+                },
+            }));
+        }
+    }
+
+    if tool_search_enabled
+        && has_surviving_reference
+        && !content.iter().any(
+            |block| matches!(block, ProtoBlock::Text { text } if text.starts_with(TURN_BOUNDARY)),
+        )
+    {
+        content.push(ProtoBlock::Text {
+            text: TURN_BOUNDARY.to_string(),
+        });
+    }
+}
+
+/// Claude's persisted-tool alias normalization used when validating historical
+/// tool_reference blocks against the current catalog.
+fn normalize_legacy_tool_name(name: &str) -> &str {
+    match name {
+        "Task" => "Agent",
+        "KillShell" | "KillBash" => "TaskStop",
+        "AgentOutputTool" | "BashOutputTool" => "TaskOutput",
+        "Brief" => "SendUserMessage",
+        current => current,
+    }
+}
+
+fn is_tool_reference(value: &Value) -> bool {
+    value.get("type").and_then(Value::as_str) == Some("tool_reference")
 }
 
 /// Append `b` onto `a`, first joining a text|text seam with a `'\n'`.
@@ -568,12 +677,17 @@ fn convert_tool_declaration(value: Value) -> Result<ToolDeclaration, LlmError> {
         .get("strict")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let defer_loading = value
+        .get("defer_loading")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
 
     Ok(ToolDeclaration {
         name,
         description,
         input_schema,
         strict,
+        defer_loading,
         ..Default::default()
     })
 }

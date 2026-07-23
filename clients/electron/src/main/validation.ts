@@ -4,7 +4,9 @@ const MAX_PROMPT_LENGTH = 256 * 1024;
 const MAX_ID_LENGTH = 512;
 const ALLOWED_COMMANDS = new Set([
   'set_model',
+  'set_permission_mode',
   'list_models',
+  'run_slash_command',
   'new_session',
   'resume_session',
   'list_sessions',
@@ -92,7 +94,7 @@ export function validateBridgeLockfile(
   }
 }
 
-/** Runtime validator for the deliberately small model/session/task command surface. */
+/** Runtime validator for the deliberately small desktop command surface. */
 export function validateClientCommand(value: unknown, workspace?: string): ClientCommand {
   const input = object(value);
   const type = input['type'];
@@ -102,6 +104,14 @@ export function validateClientCommand(value: unknown, workspace?: string): Clien
     case 'set_model':
       exactKeys(input, ['type', 'model']);
       return { type, model: string(input['model'], 'model', 256) };
+    case 'set_permission_mode': {
+      exactKeys(input, ['type', 'mode']);
+      const mode = input['mode'];
+      if (!['default', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions'].includes(String(mode))) {
+        throw new Error('invalid permission mode');
+      }
+      return { type, mode } as Extract<ClientCommand, { type: 'set_permission_mode' }>;
+    }
     case 'list_models':
       exactKeys(input, ['type']);
       return { type };
@@ -119,6 +129,12 @@ export function validateClientCommand(value: unknown, workspace?: string): Clien
       const command: ClientCommand = { type, session_id: string(input['session_id'], 'session id') };
       if (workspace) command.cwd = workspace;
       return command;
+    }
+    case 'run_slash_command': {
+      exactKeys(input, ['type', 'raw']);
+      const raw = string(input['raw'], 'slash command raw', 4096);
+      if (!/^\/[^\s/]+(?:\s|$)/.test(raw)) throw new Error('invalid slash command raw');
+      return { type, raw };
     }
     case 'list_sessions':
       exactKeys(input, ['type', 'limit']);
@@ -142,13 +158,17 @@ export function validateClientCommand(value: unknown, workspace?: string): Clien
       return { type, task_id: string(input['task_id'], 'task id') };
     case 'refresh_listings': {
       exactKeys(input, ['type', 'which']);
-      if (!Array.isArray(input['which']) || input['which'].length === 0 || input['which'].length > 2) {
+      if (!Array.isArray(input['which']) || input['which'].length === 0 || input['which'].length > 3) {
         throw new Error('invalid listing selection');
       }
       const which = input['which'].map((value) => {
         const listing = object(value);
         exactKeys(listing, ['type']);
-        if (listing['type'] !== 'status' && listing['type'] !== 'doctor') throw new Error('listing is not allowed');
+        if (
+          listing['type'] !== 'status'
+          && listing['type'] !== 'doctor'
+          && listing['type'] !== 'slash_commands'
+        ) throw new Error('listing is not allowed');
         return { type: listing['type'] } as const;
       });
       return { type, which };
@@ -161,9 +181,15 @@ export function validateClientCommand(value: unknown, workspace?: string): Clien
 export function assertCommandAllowedDuringTurn(command: ClientCommand, turnActive: boolean): void {
   if (
     turnActive
-    && (command.type === 'set_model' || command.type === 'new_session' || command.type === 'resume_session')
+    && (
+      command.type === 'set_model'
+      || command.type === 'set_permission_mode'
+      || command.type === 'run_slash_command'
+      || command.type === 'new_session'
+      || command.type === 'resume_session'
+    )
   ) {
-    throw new Error('cancel the active turn before changing the model or session');
+    throw new Error('cancel the active turn before changing the model, session, or running a slash command');
   }
 }
 

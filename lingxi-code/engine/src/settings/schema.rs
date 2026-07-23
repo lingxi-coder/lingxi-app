@@ -193,6 +193,17 @@ pub struct SettingsJson {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub view_mode: Option<String>,
 
+    /// Scalar field (later source wins). `emojiCompletionEnabled` controls
+    /// `:shortcode` suggestions in the interactive composer. Absent defaults
+    /// to enabled, matching Claude Code 2.1.217.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emoji_completion_enabled: Option<bool>,
+
+    /// Scalar field (later source wins). When true, retain API-provided
+    /// thinking summaries instead of requesting redacted-thinking blocks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub show_thinking_summaries: Option<bool>,
+
     /// Scalar field (later source wins). Telemetry on/off toggle.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub telemetry_enabled: Option<bool>,

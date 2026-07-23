@@ -79,11 +79,10 @@ async fn main() -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!(e))?;
     }
     if boot::has_no_credential_source(&cfg) && provider_keys.is_empty() {
-        // NON-SECRET warning: never includes a credential value.
-        tracing::warn!(
-            "no accepted credential source was supplied — the server will boot for transport \
-             testing, but live turns will fail until a credential is supplied"
-        );
+        // The Rust runtime checks the shared CLI/TUI secure store during
+        // assembly. Absence from the Electron stdin envelope is therefore not
+        // itself an error or warning.
+        tracing::info!("no parent credential supplied; checking shared secure storage");
     }
     tracing::info!(
         cwd = %cfg.cwd.display(),

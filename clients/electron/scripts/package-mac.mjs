@@ -38,6 +38,69 @@ function run(command, args, cwd = packageRoot) {
   execFileSync(command, args, { cwd, stdio: 'inherit' });
 }
 
+function escapeXml(value) {
+  return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
+}
+
+function readProvisioningProfile(path) {
+  const plist = execFileSync('/usr/bin/security', ['cms', '-D', '-i', path]);
+  return JSON.parse(execFileSync('/usr/bin/plutil', ['-convert', 'json', '-o', '-', '-'], {
+    input: plist,
+    encoding: 'utf8',
+  }));
+}
+
+function signApplication(appPath, contents, appContainer) {
+  if (!commandAvailable('/usr/bin/codesign')) {
+    log('codesign not found; artifact remains unsigned');
+    return;
+  }
+  const identity = process.env['LINGXI_CODESIGN_IDENTITY']?.trim();
+  if (!identity) {
+    log('applying deterministic ad-hoc code signature (shared login Keychain remains available)');
+    execFileSync('/usr/bin/codesign', [
+      '--force', '--deep', '--sign', '-', '--timestamp=none', appPath,
+    ], { stdio: 'inherit' });
+    return;
+  }
+
+  const teamId = process.env['LINGXI_MAC_TEAM_ID']?.trim();
+  const profilePath = process.env['LINGXI_MAC_PROVISIONING_PROFILE']?.trim();
+  if (!teamId || !/^[A-Z0-9]{10}$/.test(teamId)) {
+    throw new Error('LINGXI_MAC_TEAM_ID must be the 10-character team identifier for signed builds');
+  }
+  if (!profilePath) throw new Error('LINGXI_MAC_PROVISIONING_PROFILE is required for signed builds');
+  const absoluteProfilePath = resolve(profilePath);
+  const profile = readProvisioningProfile(absoluteProfilePath);
+  const profileTeams = Array.isArray(profile.TeamIdentifier) ? profile.TeamIdentifier : [];
+  const applicationIdentifier = profile.Entitlements?.['com.apple.application-identifier'];
+  const expectedApplicationIdentifier = `${teamId}.${BUNDLE_ID}`;
+  if (!profileTeams.includes(teamId)) throw new Error('provisioning profile team does not match LINGXI_MAC_TEAM_ID');
+  if (applicationIdentifier !== expectedApplicationIdentifier && applicationIdentifier !== `${teamId}.*`) {
+    throw new Error(`provisioning profile does not authorize ${expectedApplicationIdentifier}`);
+  }
+  copyFileSync(absoluteProfilePath, join(contents, 'embedded.provisionprofile'));
+  const entitlementsPath = join(appContainer, 'LingXi-Code.entitlements.plist');
+  writeFileSync(entitlementsPath, `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>com.apple.application-identifier</key><string>${escapeXml(expectedApplicationIdentifier)}</string>
+  <key>com.apple.developer.team-identifier</key><string>${escapeXml(teamId)}</string>
+  <key>com.apple.security.cs.allow-jit</key><true/>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>
+  <key>com.apple.security.cs.disable-library-validation</key><true/>
+</dict></plist>
+`, 'utf8');
+  log(`signing with ${identity} and hardened runtime entitlements`);
+  execFileSync('/usr/bin/codesign', [
+    '--force', '--deep', '--sign', identity,
+    '--entitlements', entitlementsPath,
+    '--options', 'runtime',
+    '--timestamp=none',
+    appPath,
+  ], { stdio: 'inherit' });
+}
+
 function main() {
   if (process.platform !== 'darwin' || process.arch !== TARGET_ARCH) {
     throw new Error(`macOS ${TARGET_ARCH} host required; received ${process.platform} ${process.arch}`);
@@ -97,7 +160,6 @@ function main() {
   };
   writeJson(join(packagedApp, 'package.json'), runtimeMetadata);
   copyProductionDependencies(metadata.dependencies, packageRoot, join(packagedApp, 'node_modules'));
-
   const binDir = join(resources, 'bin');
   mkdirSync(binDir, { recursive: true });
   const packagedSidecar = join(binDir, 'bridge-server');
@@ -111,20 +173,7 @@ function main() {
 
   assertArm64Executable(mainExecutable, `${APP_NAME} executable`);
   assertArm64Executable(packagedSidecar, 'packaged bridge-server sidecar');
-
-  if (commandAvailable('/usr/bin/codesign')) {
-    log('applying deterministic ad-hoc code signature');
-    execFileSync('/usr/bin/codesign', [
-      '--force',
-      '--deep',
-      '--sign',
-      '-',
-      '--timestamp=none',
-      paths.appPath,
-    ], { stdio: 'inherit' });
-  } else {
-    log('codesign not found; artifact remains unsigned');
-  }
+  signApplication(paths.appPath, contents, paths.appContainer);
 
   normalizeTimestamps(paths.appPath);
   createDeterministicZip(paths.appPath, paths.zipPath);

@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import type { IpcMainInvokeEvent, WebContents } from 'electron';
 import {
   BridgeClient,
+  type ClientCommand,
   type ClientEvent,
   type PermissionRequest,
 } from '@lingxi/bridge-client';
@@ -46,6 +47,8 @@ export interface BridgeLaunchConfig {
   workspace: string;
   apiKey?: string;
   providerCredentials?: Record<string, string>;
+  /** Legacy Electron-owned values to move into the shared engine store. */
+  providerCredentialsToMigrate?: Record<string, string>;
   trusted: boolean;
   model?: string;
   apiBaseUrl?: string;
@@ -67,10 +70,22 @@ export interface BridgeManagerOptions {
   isPackaged?: boolean;
   resourcesPath?: string;
   launchConfig: () => BridgeLaunchConfig | Promise<BridgeLaunchConfig>;
+  /** Provider ids whose shared secure-store status is cached after connect. */
+  providerIds?: readonly string[];
   /** Synchronous trust snapshot used by privileged IPC checks. */
   accessState?: () => { workspace?: string; trusted: boolean };
   diagnostics?: DiagnosticBuffer;
   onModelChanged?: (model: string) => void;
+  onProviderCredentialMigrated?: (providerId: string) => void;
+}
+
+type ProviderCredentialStatus = Extract<ClientEvent, { type: 'provider_credential_status' }>;
+
+interface PendingCredentialOperation {
+  providerIds: readonly string[];
+  resolve: (status: ProviderCredentialStatus) => void;
+  reject: (error: Error) => void;
+  timer: NodeJS.Timeout;
 }
 
 const SERVER_BIN_NAME = process.platform === 'win32' ? 'bridge-server.exe' : 'bridge-server';
@@ -174,7 +189,12 @@ export class BridgeManager {
   private launchDir: string | null = null;
   private activeWorkspace: string | undefined;
   private activeWorkspaceTrusted = false;
-  private activeCredentialAvailable = false;
+  private runtimeCredentialProviders = new Set<string>();
+  private persistedCredentialProviders = new Set<string>();
+  private activeCredentialProviders = new Set<string>();
+  private credentialStorageEncrypted = false;
+  private nextCredentialOperationId = 1;
+  private readonly pendingCredentialOperations = new Map<number, PendingCredentialOperation>();
   private activeTurn = false;
   private lastRuntimeVersions: BridgeRuntimeVersions | undefined;
   private readonly pendingPermissionIds = new Set<number>();
@@ -191,6 +211,18 @@ export class BridgeManager {
 
   get turnActive(): boolean {
     return this.activeTurn;
+  }
+
+  get activeCredentialProviderIds(): readonly string[] {
+    return [...this.activeCredentialProviders];
+  }
+
+  get persistedCredentialProviderIds(): readonly string[] {
+    return [...this.persistedCredentialProviders];
+  }
+
+  get providerCredentialStorageEncrypted(): boolean {
+    return this.credentialStorageEncrypted;
   }
 
   get runtimeVersions(): BridgeRuntimeVersions | undefined {
@@ -226,8 +258,13 @@ export class BridgeManager {
     this.restartChain = this.restartChain.catch(() => undefined).then(async () => {
       if (this.disposed) return;
       this.setState({ status: 'restarting' });
-      await this.stopBridge();
-      await this.startInternal();
+      try {
+        await this.stopBridge();
+        await this.startInternal();
+      } catch (error) {
+        if (this.state.status !== 'error') this.fail(error);
+        throw error;
+      }
     });
     return this.restartChain;
   }
@@ -236,7 +273,13 @@ export class BridgeManager {
     const launch = await this.opts.launchConfig();
     this.activeWorkspace = launch.workspace;
     this.activeWorkspaceTrusted = launch.trusted;
-    this.activeCredentialAvailable = Boolean(launch.apiKey) || Object.keys(launch.providerCredentials ?? {}).length > 0;
+    this.runtimeCredentialProviders = new Set([
+      ...(launch.apiKey ? ['anthropic'] : []),
+      ...Object.keys(launch.providerCredentials ?? {}),
+    ]);
+    this.persistedCredentialProviders.clear();
+    this.activeCredentialProviders = new Set(this.runtimeCredentialProviders);
+    this.credentialStorageEncrypted = false;
     const bridgeDir = this.createLaunchDirectory();
     const generation = ++this.generation;
 
@@ -283,12 +326,44 @@ export class BridgeManager {
         bridgeVersionDiagnostic(hello.server_name, hello.protocol_version, hello.capabilities.client_protocol_version),
       );
       this.setState({ status: 'connected' });
+      // Read/migrate credential metadata after readiness. macOS may need to
+      // consult the login Keychain; that must never hold the desktop in a
+      // spawning/restarting state.
+      void this.refreshAndMigrateProviderCredentials(launch, generation);
     } catch (error) {
       if (generation === this.generation) {
         this.fail(error);
         await this.stopBridge();
       }
       throw error;
+    }
+  }
+
+  private async refreshAndMigrateProviderCredentials(
+    launch: BridgeLaunchConfig,
+    generation: number,
+  ): Promise<void> {
+    const providerIds = this.opts.providerIds ?? [];
+    if (providerIds.length > 0) {
+      try {
+        await this.listProviderCredentials(providerIds);
+      } catch (error) {
+        this.diagnostics.add('warn', 'bridge', error);
+      }
+    }
+    if (generation !== this.generation || this.disposed) return;
+
+    for (const [providerId, credential] of Object.entries(launch.providerCredentialsToMigrate ?? {})) {
+      if (generation !== this.generation || this.disposed) return;
+      try {
+        if (!this.persistedCredentialProviders.has(providerId)) {
+          await this.setProviderCredential(providerId, credential);
+        }
+        this.opts.onProviderCredentialMigrated?.(providerId);
+        this.diagnostics.add('info', 'bridge', `migrated legacy provider credential (${providerId})`);
+      } catch (error) {
+        this.diagnostics.add('warn', 'bridge', error);
+      }
     }
   }
 
@@ -327,6 +402,78 @@ export class BridgeManager {
     } else if (launch.apiKey) child.stdin?.end(`${launch.apiKey}\n`);
     else child.stdin?.end();
     return child;
+  }
+
+  listProviderCredentials(providerIds: readonly string[]): Promise<ProviderCredentialStatus> {
+    const ids = providerIds.map((providerId) => this.validateProviderId(providerId));
+    if (ids.length > 32) throw new Error('too many provider credentials requested');
+    return this.requestCredentialOperation(ids, (operationId) => ({
+      type: 'list_provider_credentials',
+      operation_id: operationId,
+      provider_ids: ids,
+    }));
+  }
+
+  setProviderCredential(providerId: string, credential: string): Promise<ProviderCredentialStatus> {
+    const id = this.validateProviderId(providerId);
+    if (!credential || credential.length > 16_384 || credential.includes('\0')) {
+      throw new Error('invalid provider credential');
+    }
+    return this.requestCredentialOperation([id], (operationId) => ({
+      type: 'set_provider_credential',
+      operation_id: operationId,
+      provider_id: id,
+      credential,
+    }));
+  }
+
+  deleteProviderCredential(providerId: string): Promise<ProviderCredentialStatus> {
+    const id = this.validateProviderId(providerId);
+    return this.requestCredentialOperation([id], (operationId) => ({
+      type: 'delete_provider_credential',
+      operation_id: operationId,
+      provider_id: id,
+    }));
+  }
+
+  private requestCredentialOperation(
+    providerIds: readonly string[],
+    command: (operationId: number) => ClientCommand,
+  ): Promise<ProviderCredentialStatus> {
+    const client = this.client;
+    if (!client) throw new Error(`bridge client not connected (state=${this.state.status})`);
+    const operationId = this.nextCredentialOperationId;
+    this.nextCredentialOperationId = Number.isSafeInteger(operationId + 1)
+      ? operationId + 1
+      : 1;
+
+    return new Promise<ProviderCredentialStatus>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingCredentialOperations.delete(operationId);
+        reject(new Error('provider credential operation timed out'));
+      }, 10_000);
+      timer.unref();
+      this.pendingCredentialOperations.set(operationId, {
+        providerIds: [...providerIds],
+        resolve,
+        reject,
+        timer,
+      });
+      try {
+        client.sendCommand(command(operationId));
+      } catch (error) {
+        clearTimeout(timer);
+        this.pendingCredentialOperations.delete(operationId);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
+  }
+
+  private validateProviderId(providerId: string): string {
+    if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(providerId)) {
+      throw new Error('invalid provider id');
+    }
+    return providerId;
   }
 
   private captureLogs(child: ChildProcess, secrets: readonly string[] = []): void {
@@ -388,6 +535,9 @@ export class BridgeManager {
 
   private wireClient(client: BridgeClient, generation: number): void {
     client.on('event', (event: ClientEvent) => {
+      if (event.type === 'provider_credential_status') {
+        this.handleProviderCredentialStatus(event);
+      }
       if (event.type === 'turn_started') this.activeTurn = true;
       if (event.type === 'turn_ended' || event.type === 'session_ended' || event.type === 'error') {
         this.activeTurn = false;
@@ -416,6 +566,31 @@ export class BridgeManager {
     });
   }
 
+  private handleProviderCredentialStatus(event: ProviderCredentialStatus): void {
+    const pending = this.pendingCredentialOperations.get(event.operation_id);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this.pendingCredentialOperations.delete(event.operation_id);
+    const configured = new Set(event.configured_provider_ids);
+    const unavailable = new Set(event.unavailable_provider_ids ?? []);
+    for (const providerId of pending.providerIds) {
+      if (unavailable.has(providerId)) continue;
+      if (configured.has(providerId)) this.persistedCredentialProviders.add(providerId);
+      else this.persistedCredentialProviders.delete(providerId);
+    }
+    this.credentialStorageEncrypted = event.storage_encrypted;
+    this.activeCredentialProviders = new Set([
+      ...this.runtimeCredentialProviders,
+      ...this.persistedCredentialProviders,
+    ]);
+    if (this.state.status === 'connected') this.broadcast(CH_STATE_CHANGED, this.state);
+    if (event.error) {
+      pending.reject(new Error(sanitizeDiagnostic(event.error)));
+      return;
+    }
+    pending.resolve(event);
+  }
+
   private assertSender(event: IpcMainInvokeEvent): void {
     const origins = this.targets.get(event.sender);
     const senderFrame = event.senderFrame;
@@ -429,7 +604,10 @@ export class BridgeManager {
     this.ipcRegistered = true;
     ipcMain.handle(CH_SEND_PROMPT, (event: IpcMainInvokeEvent, text: unknown) => {
       this.assertSender(event);
-      this.requirePromptClient().sendPrompt(validatePrompt(text));
+      // The engine owns provider credential resolution. The Electron host must
+      // not reject a prompt merely because no secret crossed its stdin boundary;
+      // CLI/TUI may already have populated the shared secure store.
+      this.requireClient().sendPrompt(validatePrompt(text));
     });
     ipcMain.handle(CH_APPROVE, (event: IpcMainInvokeEvent, requestId: unknown, response: unknown) => {
       this.assertSender(event);
@@ -477,33 +655,22 @@ export class BridgeManager {
     return this.client;
   }
 
-  private requirePromptClient(): BridgeClient {
-    const client = this.requireClient();
-    this.refreshAccessState();
-    if (!this.activeCredentialAvailable) throw new Error('provider credential is required before sending a prompt');
-    return client;
-  }
-
   private refreshAccessState(): void {
     const workspace = this.activeWorkspace;
     if (!workspace) {
       this.activeWorkspaceTrusted = false;
-      this.activeCredentialAvailable = false;
       return;
     }
     if (this.opts.accessState) {
       const snapshot = this.opts.accessState();
       const matchesWorkspace = snapshot.workspace === workspace;
       this.activeWorkspaceTrusted = matchesWorkspace && snapshot.trusted;
-      if (!matchesWorkspace) this.activeCredentialAvailable = false;
       return;
     }
     const launch = this.opts.launchConfig();
     if (launch instanceof Promise) return;
     const matchesWorkspace = launch.workspace === workspace;
     this.activeWorkspaceTrusted = matchesWorkspace && launch.trusted;
-    this.activeCredentialAvailable = matchesWorkspace
-      && (Boolean(launch.apiKey) || Object.keys(launch.providerCredentials ?? {}).length > 0);
   }
 
   private broadcast(channel: string, payload: unknown): void {
@@ -528,9 +695,17 @@ export class BridgeManager {
   private async stopBridge(): Promise<void> {
     ++this.generation;
     this.pendingPermissionIds.clear();
+    for (const pending of this.pendingCredentialOperations.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error('bridge credential operation was interrupted'));
+    }
+    this.pendingCredentialOperations.clear();
     this.activeWorkspace = undefined;
     this.activeWorkspaceTrusted = false;
-    this.activeCredentialAvailable = false;
+    this.runtimeCredentialProviders.clear();
+    this.persistedCredentialProviders.clear();
+    this.activeCredentialProviders.clear();
+    this.credentialStorageEncrypted = false;
     this.activeTurn = false;
     const client = this.client;
     this.client = null;

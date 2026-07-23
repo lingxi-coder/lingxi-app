@@ -160,6 +160,16 @@ pub enum SandboxOverrideReason {
 pub struct PermissionMetadata {
     /// Names of rules that contributed to the decision.
     pub matched_rules: Vec<String>,
+    /// Raw `PermissionUpdate[]` suggestions offered with an Ask decision.
+    /// Keeping the wire-shaped value here lets the lower permission engine
+    /// retain tool-specific suggestions without depending on the CLI control
+    /// protocol.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_suggestions: Option<Value>,
+    /// Concrete filesystem path that caused a path-scoped Ask, when the path
+    /// validator can report it without parsing a human-readable reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_path: Option<String>,
 }
 
 /// Prompt payload shown to the user when the decision is `Ask`.

@@ -239,6 +239,41 @@ pub(crate) fn expand_path(raw: &str, roots: &FsRoots) -> PathBuf {
     normalize_lexically(&expanded)
 }
 
+/// The path forms permission checks must consider: the lexical form plus, when
+/// the filesystem exposes one, the symlink-resolved target path. Mirrors
+/// claude-code `getPathsForPermissionCheck` at the containment layer.
+fn permission_paths_to_check(path: &Path, roots: &FsRoots) -> Vec<PathBuf> {
+    let absolute = expand_path(&path.to_string_lossy(), roots);
+    let mut out = vec![absolute.clone()];
+    if let Some(resolved) = resolve_deepest_existing_ancestor(&absolute) {
+        if resolved != absolute {
+            out.push(resolved);
+        }
+    }
+    out
+}
+
+/// Resolve the deepest existing ancestor of `absolute_path` through the real
+/// filesystem, then re-attach any non-existent tail segments. This catches both
+/// direct symlinks and parent-directory symlinks for paths that do not yet
+/// exist.
+fn resolve_deepest_existing_ancestor(absolute_path: &Path) -> Option<PathBuf> {
+    for ancestor in absolute_path.ancestors() {
+        let Ok(meta) = std::fs::symlink_metadata(ancestor) else {
+            continue;
+        };
+        let Ok(resolved_ancestor) = std::fs::canonicalize(ancestor) else {
+            continue;
+        };
+        // Existing special files are still permission-relevant; let
+        // canonicalize decide their real location just like symlinks/dirs/files.
+        let _ = meta;
+        let tail = absolute_path.strip_prefix(ancestor).ok()?;
+        return Some(resolved_ancestor.join(tail));
+    }
+    None
+}
+
 /// Collapse `.`/`..` segments without touching the filesystem (Node
 /// `path.normalize`/`resolve`). A `..` pops the previous NORMAL component;
 /// a leading `..` with nothing to pop is kept.
@@ -474,14 +509,37 @@ pub fn path_in_allowed_working_path(
     working_dirs: &[PathBuf],
     roots: &FsRoots,
 ) -> bool {
-    working_dirs
+    let path_forms = permission_paths_to_check(path, roots);
+    let working_forms: Vec<PathBuf> = working_dirs
         .iter()
-        .any(|wd| path_in_working_path(path, wd, roots))
+        .flat_map(|wd| permission_paths_to_check(wd, roots))
+        .collect();
+    path_forms.iter().all(|path_form| {
+        working_forms
+            .iter()
+            .any(|working_form| path_in_working_path(path_form, working_form, roots))
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[cfg(unix)]
+    fn unique_temp_dir(label: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "lingxi_permission_{label}_{}_{}",
+            std::process::id(),
+            nonce
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
 
     fn roots() -> FsRoots {
         FsRoots {
@@ -818,5 +876,53 @@ mod tests {
             &[],
             &r
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn allowed_working_path_checks_resolved_symlink_target() {
+        let tmp = unique_temp_dir("resolved_symlink_target");
+        let workspace = tmp.join("workspace");
+        let outside = tmp.join("outside");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, workspace.join("link")).unwrap();
+
+        let roots = FsRoots {
+            cwd: workspace.clone(),
+            home: None,
+            lingxi_home: tmp.join(".lingxi"),
+        };
+
+        assert!(
+            !path_in_allowed_working_path(&workspace.join("link/secret.txt"), &[workspace], &roots),
+            "resolved target outside the working dir must be rejected"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn allowed_working_path_checks_nonexistent_tail_under_symlink_parent() {
+        let tmp = unique_temp_dir("nonexistent_symlink_tail");
+        let workspace = tmp.join("workspace");
+        let outside = tmp.join("outside");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, workspace.join("link")).unwrap();
+
+        let roots = FsRoots {
+            cwd: workspace.clone(),
+            home: None,
+            lingxi_home: tmp.join(".lingxi"),
+        };
+
+        assert!(
+            !path_in_allowed_working_path(
+                &workspace.join("link/newdir/newfile.txt"),
+                &[workspace],
+                &roots
+            ),
+            "a non-existent tail beneath a symlinked parent must still resolve outside"
+        );
     }
 }

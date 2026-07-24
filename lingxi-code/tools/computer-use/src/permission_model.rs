@@ -35,6 +35,18 @@ impl AppTier {
             AppTier::Full => "full",
         }
     }
+
+    /// Convert to the render-facing `tui_core::computer_access_bridge`
+    /// tier — kept as a SEPARATE type there (backend-neutral, no dependency
+    /// on this crate) rather than reusing `AppTier` directly.
+    #[must_use]
+    pub fn to_bridge(self) -> tui_core::computer_access_bridge::AccessTier {
+        match self {
+            AppTier::Read => tui_core::computer_access_bridge::AccessTier::Read,
+            AppTier::Click => tui_core::computer_access_bridge::AccessTier::Click,
+            AppTier::Full => tui_core::computer_access_bridge::AccessTier::Full,
+        }
+    }
 }
 
 /// One allowlisted application.

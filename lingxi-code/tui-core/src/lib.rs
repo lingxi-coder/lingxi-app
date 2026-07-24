@@ -12,6 +12,7 @@ pub mod active_turn;
 pub mod ask_user_question_bridge;
 pub mod bash_runner;
 pub mod collapse;
+pub mod computer_access_bridge;
 pub mod error;
 pub mod key_hint;
 pub mod message;

@@ -32,7 +32,7 @@
 
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
-use permission::result::{PermissionMetadata, PermissionPrompt};
+use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
 use std::sync::Mutex;
@@ -46,9 +46,11 @@ use tool_api::tool_trait::{
 };
 use tool_api::BuiltinToolContext;
 
+mod access_resolver;
 mod permission_model;
 mod validate;
 
+pub use access_resolver::{AutoGrantResolver, ComputerAccessResolver, DenyAllResolver, TuiBridgeResolver};
 use permission_model::{AppTier, GrantFlags, SessionState};
 
 /// Tool name byte-lock.
@@ -85,15 +87,31 @@ pub const NOTIFY_EXIT: &str = "Claude is done using your computer";
 pub struct ComputerTool {
     ctx: BuiltinToolContext,
     state: std::sync::Arc<Mutex<SessionState>>,
+    access_resolver: std::sync::Arc<dyn ComputerAccessResolver>,
 }
 
 impl ComputerTool {
-    /// Construct from the builtin tool context.
+    /// Construct from the builtin tool context, denying every
+    /// `request_access` call (no live UI to ask — see
+    /// [`Self::with_access_resolver`] for the interactive path).
     #[must_use]
     pub fn new(ctx: BuiltinToolContext) -> Self {
+        Self::with_access_resolver(ctx, std::sync::Arc::new(DenyAllResolver))
+    }
+
+    /// Construct with an explicit `request_access` resolver — the desktop
+    /// composition root wires a [`TuiBridgeResolver`] here when a live TUI is
+    /// present, matching how `tool_ui::AskUserQuestionTool` takes its
+    /// resolver.
+    #[must_use]
+    pub fn with_access_resolver(
+        ctx: BuiltinToolContext,
+        access_resolver: std::sync::Arc<dyn ComputerAccessResolver>,
+    ) -> Self {
         Self {
             ctx,
             state: std::sync::Arc::new(Mutex::new(SessionState::default())),
+            access_resolver,
         }
     }
 }
@@ -352,80 +370,19 @@ impl Tool for ComputerTool {
         )
     }
 
-    async fn check_permissions(&self, input: &Value, _: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(&self, _input: &Value, _: &ToolUseContext) -> PermissionResult {
         // Parity note: claude-code does NOT permission-prompt per action — the
         // `mcp__computer-use__*` tools are pre-added to allowedTools, and the
         // dedicated `request_access` tool handles session-scoped approval via
         // its own bespoke two-panel dialog (app allowlist + grant-flag
-        // checkboxes, or a TCC-permission panel). LingXi routes `request_access`
-        // through the SAME generic Allow/Deny permission-prompt every other
-        // tool uses instead of building a bespoke dialog — a deliberate,
-        // smaller-footprint substitute for the same approval gate. Every other
-        // action is pre-approved (matching upstream's allowedTools bypass);
-        // per-app/per-capability enforcement happens inside `call()` against
-        // the session's allowlist + grant flags, not here.
-        if input.get("action").and_then(Value::as_str) == Some("request_access") {
-            let apps: Vec<String> = input
-                .get("apps")
-                .and_then(Value::as_array)
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|v| v.as_str().map(str::to_string))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let reason = input
-                .get("reason")
-                .and_then(Value::as_str)
-                .unwrap_or("control your computer");
-            let app_list = if apps.is_empty() {
-                "no applications".to_string()
-            } else {
-                apps.join(", ")
-            };
-            // Surface exactly what's being granted — the tier (defaults to
-            // "full" the same way the actual grant does, so the disclosed
-            // scope can never be narrower than what call() will apply) and
-            // any extra capability flags. Approving a generic "wants to
-            // control X" message while the model silently gets full
-            // keyboard/right-click/system-shortcut access is a bigger grant
-            // than the human read.
-            let tier = match input.get("tier").and_then(Value::as_str) {
-                Some("read") => "read (screenshots only)",
-                Some("click") => "click (clicks/scroll, no typing)",
-                _ => "full (clicks, typing, and key presses)",
-            };
-            let mut extra_flags = Vec::new();
-            if input.get("clipboardRead").and_then(Value::as_bool) == Some(true) {
-                extra_flags.push("read the clipboard");
-            }
-            if input.get("clipboardWrite").and_then(Value::as_bool) == Some(true) {
-                extra_flags.push("write the clipboard");
-            }
-            if input.get("systemKeyCombos").and_then(Value::as_bool) == Some(true) {
-                extra_flags.push("send system-level shortcuts (quit, switch app, lock screen)");
-            }
-            let flags_clause = if extra_flags.is_empty() {
-                String::new()
-            } else {
-                format!(" It also asks to {}.", extra_flags.join(" and "))
-            };
-            return PermissionResult::Ask {
-                reason: PermissionDecisionReason::SafetyCheck {
-                    reason: format!("computer-use request_access — {reason}"),
-                    classifier_approvable: false,
-                },
-                prompt: PermissionPrompt {
-                    title: "Computer Use".into(),
-                    message: format!(
-                        "Claude wants to control: {app_list} ({reason}), at tier \"{tier}\".{flags_clause} This lets Claude see and interact with these applications for the rest of the session."
-                    ),
-                    options: vec![],
-                },
-                pending_classifier_check: None,
-                metadata: PermissionMetadata::default(),
-            };
-        }
+        // checkboxes, or a TCC-permission panel). LingXi's `request_access`
+        // owns its OWN interactivity the same way — via `self.access_resolver`
+        // inside `handle_request_access`, exactly how `AskUserQuestionTool`
+        // pauses on its own resolver rather than routing through this generic
+        // gate — so this hook always allows; per-app/per-capability
+        // enforcement happens inside `call()` against the session's allowlist
+        // + grant flags, and `request_access` itself against the resolver's
+        // real answer, not here.
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
                 reason: "computer tool — OS screen-recording/accessibility prompt gates use"
@@ -524,11 +481,37 @@ impl ComputerTool {
                     .collect()
             })
             .unwrap_or_default();
-        let mut apps = Vec::with_capacity(raw_apps.len());
+        let mut resolved_apps = Vec::with_capacity(raw_apps.len());
         for name in &raw_apps {
-            apps.push(self.resolve_app_identifier(name).await);
+            resolved_apps.push(self.resolve_app_identifier(name).await);
         }
-        let flags = GrantFlags {
+        let tier = match input.get("tier").and_then(Value::as_str) {
+            Some("read") => AppTier::Read,
+            Some("click") => AppTier::Click,
+            _ => AppTier::Full, // default — matches upstream's "full" unless the model asks for less
+        };
+        let tcc_state = match self.ctx.computer_control.as_ref() {
+            Some(cc) => cc.check_os_permissions().await.and_then(|(acc, rec)| {
+                (!acc || !rec).then_some(tui_core::computer_access_bridge::TccState {
+                    accessibility: acc,
+                    screen_recording: rec,
+                })
+            }),
+            None => None,
+        };
+        let request = tui_core::computer_access_bridge::ComputerAccessRequest {
+            reason: input
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("control your computer")
+                .to_string(),
+            apps: resolved_apps
+                .iter()
+                .map(|label| tui_core::computer_access_bridge::RequestedApp {
+                    label: label.clone(),
+                })
+                .collect(),
+            tier: tier.to_bridge(),
             clipboard_read: input
                 .get("clipboardRead")
                 .and_then(Value::as_bool)
@@ -541,21 +524,31 @@ impl ComputerTool {
                 .get("systemKeyCombos")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
+            tcc_state,
         };
-        let tier = match input.get("tier").and_then(Value::as_str) {
-            Some("read") => AppTier::Read,
-            Some("click") => AppTier::Click,
-            _ => AppTier::Full, // default — matches upstream's "full" unless the model asks for less
-        };
+        // Pause here for the user's real decision — the resolver is either a
+        // live `TuiBridgeResolver` (real interactive dialog) or the hermetic
+        // `DenyAllResolver` (no UI wired: fails closed, grants nothing).
+        let response = self.access_resolver.resolve(request).await;
+
         let mut state = self
             .state
             .lock()
             .map_err(|_| ToolError::Internal("computer-use session state poisoned".into()))?;
-        for name in &apps {
+        for name in &response.granted_apps {
             state.grant_app(name.clone(), tier);
         }
-        state.merge_grant_flags(flags);
-        let granted: Vec<Value> = state.allowed_apps.iter().map(|a| json!(a.bundle_id)).collect();
+        state.merge_grant_flags(GrantFlags {
+            clipboard_read: response.clipboard_read,
+            clipboard_write: response.clipboard_write,
+            system_key_combos: response.system_key_combos,
+        });
+        let granted: Vec<Value> = response.granted_apps.iter().map(|a| json!(a)).collect();
+        let denied: Vec<Value> = resolved_apps
+            .iter()
+            .filter(|a| !response.granted_apps.contains(a))
+            .map(|a| json!(a))
+            .collect();
         let grant_flags = json!({
             "clipboardRead": state.grant_flags.clipboard_read,
             "clipboardWrite": state.grant_flags.clipboard_write,
@@ -563,7 +556,7 @@ impl ComputerTool {
         });
         drop(state);
         Ok(finish(
-            json!({ "granted": granted, "grant_flags": grant_flags }),
+            json!({ "granted": granted, "denied": denied, "grant_flags": grant_flags }),
             "request_access",
         ))
     }
@@ -996,10 +989,27 @@ fn finish(mut data: Value, action: &str) -> ToolCallResult {
     }
 }
 
-/// Register the `computer` tool against `reg`.
+/// Register the `computer` tool against `reg`, denying every
+/// `request_access` call (no live UI to ask). Composition roots with a live
+/// TUI should call [`register_all_with_access_resolver`] instead.
 pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinToolContext) {
     use std::sync::Arc;
     reg.register_builtin(Arc::new(ComputerTool::new(ctx)));
+}
+
+/// Register the `computer` tool with an explicit `request_access` resolver —
+/// the desktop composition root's entry point when a live TUI is present
+/// (mirrors `tool_ui::register_all_with_ask_resolver`).
+pub fn register_all_with_access_resolver(
+    reg: &mut tool_api::ToolRegistry,
+    ctx: tool_api::BuiltinToolContext,
+    access_resolver: std::sync::Arc<dyn ComputerAccessResolver>,
+) {
+    use std::sync::Arc;
+    reg.register_builtin(Arc::new(ComputerTool::with_access_resolver(
+        ctx,
+        access_resolver,
+    )));
 }
 
 #[cfg(test)]
@@ -1283,7 +1293,12 @@ mod integration_tests {
         let fs = tool_api::test_support::make_dummy_fs();
         let mut ctx = tool_api::test_support::ctx_for_file_tools(fs, bus, vec![]);
         ctx.computer_control = Some(std::sync::Arc::new(mock));
-        ComputerTool::new(ctx)
+        // AutoGrantResolver, not the production DenyAllResolver default —
+        // these tests exercise the tool's OWN grant/tier bookkeeping (a
+        // request_access call followed by tier-gated actions), not the
+        // resolver's UI-vs-no-UI behavior (that's covered directly in
+        // access_resolver.rs's own tests).
+        ComputerTool::with_access_resolver(ctx, std::sync::Arc::new(AutoGrantResolver))
     }
 
     async fn call(tool: &ComputerTool, input: Value) -> Result<ToolCallResult, ToolError> {
@@ -1517,26 +1532,85 @@ mod integration_tests {
     }
 
     #[tokio::test]
-    async fn check_permissions_asks_for_request_access_and_allows_everything_else() {
+    async fn check_permissions_always_allows_request_access_owns_its_own_interactivity() {
+        // request_access no longer routes through the generic Ask gate — its
+        // own resolver (access_resolver.rs) owns the interactive dialog now,
+        // the same split AskUserQuestionTool uses. check_permissions is a
+        // flat Allow for every action, including request_access itself.
         let tool = tool_with(MockCc::default());
         let ctx = tool_api::test_support::fresh_ctx();
-        match tool
-            .check_permissions(&json!({ "action": "request_access", "apps": ["Slack"], "reason": "automate chat" }), &ctx)
-            .await
-        {
-            PermissionResult::Ask { prompt, .. } => {
-                assert!(prompt.message.contains("Slack"));
-                assert!(prompt.message.contains("automate chat"));
-                assert!(prompt.message.contains("full"));
+        for action in ["request_access", "left_click"] {
+            match tool
+                .check_permissions(&json!({ "action": action, "coordinate": [1, 2] }), &ctx)
+                .await
+            {
+                PermissionResult::Allow { .. } => {}
+                other => panic!("expected Allow for {action}, got {other:?}"),
             }
-            other => panic!("expected Ask for request_access, got {other:?}"),
         }
-        match tool
-            .check_permissions(&json!({ "action": "left_click", "coordinate": [1, 2] }), &ctx)
+    }
+
+    #[tokio::test]
+    async fn request_access_denies_everything_with_no_resolver_wired() {
+        // ComputerTool::new (no explicit resolver) defaults to DenyAllResolver
+        // — the safe failure mode when there's no live UI to ask.
+        let bus = std::sync::Arc::new(telemetry::AnalyticsBus::new());
+        let fs = tool_api::test_support::make_dummy_fs();
+        let mut ctx = tool_api::test_support::ctx_for_file_tools(fs, bus, vec![]);
+        let mut mock = MockCc::default();
+        *mock.frontmost.get_mut().unwrap() = Ok(Some(app("com.granted.app", "Granted")));
+        ctx.computer_control = Some(std::sync::Arc::new(mock));
+        let tool = ComputerTool::new(ctx);
+        let result = call(&tool, json!({ "action": "request_access", "apps": ["Granted"] }))
             .await
-        {
-            PermissionResult::Allow { .. } => {}
-            other => panic!("expected Allow for a non-request_access action, got {other:?}"),
+            .unwrap();
+        assert_eq!(result.data["granted"].as_array().map(Vec::len), Some(0));
+        let err = call(&tool, json!({ "action": "left_click", "coordinate": [1, 2] }))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "permission denied: No applications are granted for this session. Call request_access first."
+        );
+    }
+
+    #[tokio::test]
+    async fn request_access_reports_denied_apps_the_resolver_did_not_grant() {
+        // A resolver that grants only PART of what was requested (the real
+        // TUI checkbox panel lets the user uncheck individual apps).
+        struct PartialGrantResolver;
+        #[async_trait]
+        impl ComputerAccessResolver for PartialGrantResolver {
+            async fn resolve(
+                &self,
+                request: tui_core::computer_access_bridge::ComputerAccessRequest,
+            ) -> tui_core::computer_access_bridge::ComputerAccessResponse {
+                tui_core::computer_access_bridge::ComputerAccessResponse {
+                    // Grant only the first requested app.
+                    granted_apps: request
+                        .apps
+                        .into_iter()
+                        .take(1)
+                        .map(|a| a.label)
+                        .collect(),
+                    clipboard_read: false,
+                    clipboard_write: false,
+                    system_key_combos: false,
+                }
+            }
         }
+        let bus = std::sync::Arc::new(telemetry::AnalyticsBus::new());
+        let fs = tool_api::test_support::make_dummy_fs();
+        let mut ctx = tool_api::test_support::ctx_for_file_tools(fs, bus, vec![]);
+        ctx.computer_control = Some(std::sync::Arc::new(MockCc::default()));
+        let tool = ComputerTool::with_access_resolver(ctx, std::sync::Arc::new(PartialGrantResolver));
+        let result = call(
+            &tool,
+            json!({ "action": "request_access", "apps": ["com.a.app", "com.b.app"] }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.data["granted"], json!(["com.a.app"]));
+        assert_eq!(result.data["denied"], json!(["com.b.app"]));
     }
 }

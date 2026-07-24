@@ -15,7 +15,7 @@
 //! removed.
 
 use regex::Regex;
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use thiserror::Error;
@@ -435,18 +435,18 @@ pub fn strip_frontmatter(raw: &str) -> &str {
 #[must_use]
 pub fn parse_frontmatter_paths(raw: &str) -> Option<Vec<String>> {
     let values = frontmatter_paths_values(raw)?;
+    // ONE budget shared across the whole frontmatter block (oracle threads a
+    // single `t` through every `uCg` call), so multiple parts / list items can't
+    // each claim a fresh allowance.
+    let mut budget = BraceBudget::default();
     let mut patterns = Vec::new();
     for value in values {
-        let remaining = MAX_BRACE_EXPANSION_RESULTS.saturating_sub(patterns.len());
-        if remaining == 0 {
-            break;
-        }
         match value {
             FrontmatterPathValue::Scalar(value) => {
-                patterns.extend(split_path_in_frontmatter(&value, remaining));
+                patterns.extend(split_path_in_frontmatter(&value, &mut budget));
             }
             FrontmatterPathValue::ListItem(value) => {
-                patterns.extend(expand_braces_with_limits(&value, remaining));
+                patterns.extend(expand_braces_budgeted(&value, &mut budget));
             }
         }
     }
@@ -513,7 +513,7 @@ fn frontmatter_paths_values(raw: &str) -> Option<Vec<FrontmatterPathValue>> {
 /// brace-expand each part. 1:1 with `splitPathInFrontmatter` +
 /// `expandBraces` (frontmatterParser.ts:189-266), with the bounded expansion
 /// added in Claude Code 2.1.217.
-fn split_path_in_frontmatter(input: &str, max_results: usize) -> Vec<String> {
+fn split_path_in_frontmatter(input: &str, budget: &mut BraceBudget) -> Vec<String> {
     let mut parts: Vec<String> = Vec::new();
     let mut current = String::new();
     let mut brace_depth: i32 = 0;
@@ -544,121 +544,99 @@ fn split_path_in_frontmatter(input: &str, max_results: usize) -> Vec<String> {
 
     let mut expanded = Vec::new();
     for part in parts.into_iter().filter(|part| !part.is_empty()) {
-        let remaining = max_results.saturating_sub(expanded.len());
-        if remaining == 0 {
-            break;
-        }
-        expanded.extend(expand_braces_with_limits(&part, remaining));
+        expanded.extend(expand_braces_budgeted(&part, budget));
     }
     expanded
 }
 
-/// Maximum number of expanded paths retained from one frontmatter value.
-///
-/// This matches the `brace-expansion` package's `EXPANSION_MAX` used by
-/// Claude Code 2.1.217. LingXi shares the cap across every path in one
-/// frontmatter block so multiple scalar parts / YAML list items cannot multiply
-/// the allocation budget.
-const MAX_BRACE_EXPANSION_RESULTS: usize = 100_000;
+/// Shared brace-expansion budget — Claude Code 2.1.218's `{results, bytes}`
+/// (`lCg=1000`, `cCg=4_194_304`). It is MUTATED across every path in one
+/// frontmatter block (not reset per part / list item), and when a single pattern
+/// would blow it the expander returns that pattern UNEXPANDED with a warn rather
+/// than truncating. This is the DoS fix: the previous 100_000-result cap could
+/// still allocate ~100k × ~30KB ≈ 3GB just by opening a project whose `paths:`
+/// held a wide multi-group brace product; the byte budget trips first.
+struct BraceBudget {
+    results: usize,
+    bytes: i64,
+}
 
-/// Expand `{a,b}` groups without allowing recursion or a Cartesian product to
-/// allocate without bound.
-///
-/// Results retain depth-first / source order. When `max_results` is reached,
-/// later alternatives are omitted.
-fn expand_braces_with_limits(pattern: &str, max_results: usize) -> Vec<String> {
-    if max_results == 0 {
-        return Vec::new();
+impl Default for BraceBudget {
+    fn default() -> Self {
+        Self {
+            results: 1_000,
+            bytes: 4_194_304,
+        }
     }
+}
 
-    let mut pending = VecDeque::from([pattern.to_string()]);
-    let mut expanded = Vec::new();
-
-    while let Some(current) = pending.pop_back() {
-        let Some((prefix, alternatives, suffix)) = split_first_brace_group(&current) else {
-            expanded.push(current);
-            if expanded.len() == max_results {
-                break;
-            }
+/// Claude Code 2.1.218 `uCg`: expand `{a,b}` groups under the shared
+/// [`BraceBudget`].
+///
+/// Uses a first-CLOSE-brace match (the oracle regex `^([^{]*)\{([^}]+)\}(.*)$`),
+/// so the alternatives run up to the FIRST `}` and may themselves contain `{`.
+/// A nested `{a,{b,c}}` therefore expands to `["a}","b","c}"]` — matching
+/// upstream's (quirky) behaviour is required for byte parity. On budget exceed
+/// the whole pattern is returned unexpanded (one element) with a warn.
+fn expand_braces_budgeted(pattern: &str, budget: &mut BraceBudget) -> Vec<String> {
+    if !pattern.contains('{') {
+        return vec![pattern.to_string()];
+    }
+    let pattern_len = pattern.chars().count() as i64;
+    let mut results: Vec<String> = Vec::new();
+    let mut pending: Vec<String> = vec![pattern.to_string()];
+    while let Some(current) = pending.pop() {
+        let Some((prefix, alternatives, suffix)) = match_first_brace(&current) else {
+            results.push(current);
             continue;
         };
-
-        let capacity = max_results - expanded.len();
-        let alternatives = split_top_level_alternatives(alternatives)
-            .into_iter()
-            .take(capacity)
-            .map(str::trim)
-            .collect::<Vec<_>>();
-
-        // `pending` holds later source-order branches at the front. Prefer
-        // the current branch's children so truncation preserves the first
-        // `max_results` fully expanded paths.
-        if alternatives.len() >= capacity {
-            pending.clear();
-        } else {
-            let retained_siblings = capacity - alternatives.len();
-            while pending.len() > retained_siblings {
-                pending.pop_front();
-            }
+        let branches: Vec<&str> = alternatives.split(',').map(str::trim).collect();
+        // Charge the current string, then bail (unexpanded) if the projected
+        // item count or its byte cost would exceed what remains — 1:1 with
+        // `t.bytes<0 || u>t.results || u*e.length>t.bytes`.
+        budget.bytes -= current.chars().count() as i64;
+        let projected = results.len() + pending.len() + branches.len();
+        if budget.bytes < 0
+            || projected > budget.results
+            || (projected as i64) * pattern_len > budget.bytes
+        {
+            tracing::warn!(
+                "Brace pattern expansion exceeds the budget; using it unexpanded: {}",
+                truncate_for_log(pattern, 256)
+            );
+            return vec![pattern.to_string()];
         }
-
-        for alternative in alternatives.into_iter().rev() {
-            pending.push_back(format!("{prefix}{alternative}{suffix}"));
+        for branch in branches.iter().rev() {
+            pending.push(format!("{prefix}{branch}{suffix}"));
         }
     }
-
-    expanded
+    budget.results = budget.results.saturating_sub(results.len());
+    budget.bytes -= (results.len() as i64) * pattern_len;
+    results
 }
 
-/// Split the first balanced, non-empty brace group into prefix/body/suffix.
-/// Nested groups remain part of the body so a later expansion pass can process
-/// them instead of mistaking their first `}` for the outer close.
-fn split_first_brace_group(pattern: &str) -> Option<(&str, &str, &str)> {
-    let open = pattern.find('{')?;
-    let mut depth = 1_u32;
-    let mut close = None;
-    for (offset, ch) in pattern[open + 1..].char_indices() {
-        match ch {
-            '{' => depth = depth.saturating_add(1),
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    close = Some(open + 1 + offset);
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
-    let close = close?;
-    if close == open + 1 {
+/// The oracle regex `^([^{]*)\{([^}]+)\}(.*)$` — the FIRST `{` and the FIRST
+/// `}` after it. Alternatives (`[^}]+`) must be non-empty and carry no `}` but
+/// MAY carry `{` (the un-closed nested case), so `{}` does not match and
+/// `{a,{b,c}}` splits as `a` / `{b` / `c` against a `}` suffix.
+fn match_first_brace(s: &str) -> Option<(&str, &str, &str)> {
+    let open = s.find('{')?;
+    let after = &s[open + 1..];
+    let close_rel = after.find('}')?;
+    if close_rel == 0 {
         return None;
     }
-    let prefix = &pattern[..open];
-    let alternatives = &pattern[open + 1..close];
-    let suffix = &pattern[close + 1..];
-    Some((prefix, alternatives, suffix))
+    Some((&s[..open], &after[..close_rel], &after[close_rel + 1..]))
 }
 
-/// Split a brace body only at commas belonging to that body. Commas inside a
-/// nested group are handled when the nested group reaches the expansion queue.
-fn split_top_level_alternatives(body: &str) -> Vec<&str> {
-    let mut parts = Vec::new();
-    let mut start = 0;
-    let mut depth = 0_u32;
-    for (index, ch) in body.char_indices() {
-        match ch {
-            '{' => depth = depth.saturating_add(1),
-            '}' => depth = depth.saturating_sub(1),
-            ',' if depth == 0 => {
-                parts.push(&body[start..index]);
-                start = index + ch.len_utf8();
-            }
-            _ => {}
-        }
+/// Truncate a pattern to `max` chars for the budget-exceeded warn (oracle
+/// `Pl(e,256)`).
+fn truncate_for_log(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        s.chars().take(max).collect()
     }
-    parts.push(&body[start..]);
-    parts
 }
 
 fn comment_span_re() -> &'static Regex {
@@ -1302,31 +1280,58 @@ mod import_tests {
     }
 
     #[test]
-    fn brace_expansion_stops_at_the_result_budget() {
-        let expanded = expand_braces_with_limits("{a,b,c,d}/{x,y}", 3);
-        assert_eq!(expanded, vec!["a/x", "a/y", "b/x"]);
+    fn brace_expansion_returns_unexpanded_when_over_budget() {
+        // A small budget → the pattern is returned UNEXPANDED (a warn is logged),
+        // NOT truncated to the first N (oracle `uCg` returns `[e]` on exceed).
+        let mut budget = BraceBudget {
+            results: 3,
+            bytes: 4_194_304,
+        };
+        assert_eq!(
+            expand_braces_budgeted("{a,b,c,d}/{x,y}", &mut budget),
+            vec!["{a,b,c,d}/{x,y}"]
+        );
+        // Under a generous budget the same pattern fully expands.
+        let mut ok = BraceBudget::default();
+        assert_eq!(
+            expand_braces_budgeted("{a,b,c,d}/{x,y}", &mut ok),
+            vec!["a/x", "a/y", "b/x", "b/y", "c/x", "c/y", "d/x", "d/y"]
+        );
     }
 
     #[test]
-    fn brace_expansion_handles_deep_single_path_nesting() {
+    fn brace_expansion_deep_nesting_trips_the_byte_budget() {
+        // A ~12KB deeply-nested pattern trips the 4MiB byte budget before it can
+        // collapse, so it is returned UNEXPANDED — the DoS is bounded.
         let depth = 4_096;
         let nested = format!("root/{}", "{a/".repeat(depth) + "leaf" + &"}".repeat(depth));
-        let expanded = expand_braces_with_limits(&nested, 8);
+        let mut budget = BraceBudget::default();
         assert_eq!(
-            expanded,
-            vec!["root/".to_string() + &"a/".repeat(depth) + "leaf"]
+            expand_braces_budgeted(&nested, &mut budget),
+            vec![nested.clone()]
         );
     }
 
     #[test]
-    fn brace_expansion_preserves_nested_alternative_groups() {
+    fn brace_expansion_matches_upstream_first_close_nesting() {
+        // First-CLOSE-brace semantics (oracle `\{([^}]+)\}`): a nested group's
+        // first `}` closes the match, leaving the trailing `}` in the suffix.
+        let mut b1 = BraceBudget::default();
         assert_eq!(
-            expand_braces_with_limits("{a,{b,c}}", 8),
-            vec!["a", "b", "c"]
+            expand_braces_budgeted("{a,{b,c}}", &mut b1),
+            vec!["a}", "b", "c}"]
         );
+        let mut b2 = BraceBudget::default();
         assert_eq!(
-            expand_braces_with_limits("root/{a,{b,c}}/{x,y}", 8),
-            vec!["root/a/x", "root/a/y", "root/b/x", "root/b/y", "root/c/x", "root/c/y"]
+            expand_braces_budgeted("root/{a,{b,c}}/{x,y}", &mut b2),
+            vec![
+                "root/a}/x",
+                "root/a}/y",
+                "root/b/x",
+                "root/b/y",
+                "root/c}/x",
+                "root/c}/y"
+            ]
         );
     }
 

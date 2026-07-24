@@ -233,7 +233,10 @@ where
     if dest == PermissionUpdateDestination::LocalSettings {
         ensure_local_settings_ignored(paths)?;
     }
-    crate::mark_internal_write(&path.display);
+    // Mark AFTER a successful write. Marking before (the prior order) left a
+    // stale suppression mark on a FAILED write — the settings watcher would then
+    // consume it on the next event and silently swallow one genuine external
+    // settings change as if it were our own write.
     rooted_fs::atomic_write(
         &path.root,
         &path.relative,
@@ -241,6 +244,7 @@ where
         AtomicWriteOptions::default(),
     )
     .map_err(|source| confined_error(&path, source))?;
+    crate::mark_internal_write(&path.display);
     Ok(true)
 }
 

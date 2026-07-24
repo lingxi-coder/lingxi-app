@@ -1132,7 +1132,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delegated_ask_carries_exact_rule_and_session_suggestion() {
+    async fn delegated_ask_carries_exact_rule_but_no_invented_suggestion() {
         let policy = policy_with(
             r#"{ "permissions": { "ask": ["Bash"] } }"#,
             PermissionMode::Default,
@@ -1161,15 +1161,10 @@ mod tests {
                 rule_content: None,
             })
         );
-        assert_eq!(
-            seen.permission_suggestions,
-            Some(json!([{
-                "type": "addRules",
-                "rules": [{"toolName": "Bash"}],
-                "behavior": "allow",
-                "destination": "session",
-            }]))
-        );
+        // The oracle's `_pt` ask-rule arm carries NO `permission_suggestions`
+        // (the previously-emitted addRules/allow/session payload was invented +
+        // inert — review finding).
+        assert_eq!(seen.permission_suggestions, None);
     }
 
     #[tokio::test]

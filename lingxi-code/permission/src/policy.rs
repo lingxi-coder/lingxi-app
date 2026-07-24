@@ -2532,16 +2532,6 @@ fn deny_with_mode(mode: PermissionMode) -> PermissionResult {
 }
 
 fn ask_with_rule(rule: &PermissionRule, tool_name: &str) -> PermissionResult {
-    // This is the one suggestion shape the policy can derive without guessing
-    // tool-specific semantics: allow the exact rule that produced this Ask for
-    // the current session.  Content stays scoped (for example a Bash command or
-    // WebFetch domain) rather than broadening to the whole tool.
-    let mut suggested_rule = serde_json::json!({
-        "toolName": rule.value.tool_name,
-    });
-    if let Some(content) = &rule.value.rule_content {
-        suggested_rule["ruleContent"] = serde_json::json!(content);
-    }
     PermissionResult::Ask {
         reason: PermissionDecisionReason::MatchedRule { rule: rule.clone() },
         prompt: PermissionPrompt {
@@ -2557,15 +2547,14 @@ fn ask_with_rule(rule: &PermissionRule, tool_name: &str) -> PermissionResult {
             options: vec!["Allow once".into(), "Always allow".into(), "Deny".into()],
         },
         pending_classifier_check: None,
-        metadata: PermissionMetadata {
-            permission_suggestions: Some(serde_json::json!([{
-                "type": "addRules",
-                "rules": [suggested_rule],
-                "behavior": "allow",
-                "destination": "session",
-            }])),
-            ..PermissionMetadata::default()
-        },
+        // The oracle's `_pt` plain ask-rule arm returns
+        // `{behavior:"ask", decisionReason:{type:"rule",rule}, message:Lh(name)}`
+        // with NO `permission_suggestions`; the previously-attached
+        // `addRules/allow/session` suggestion was both invented and inert (an
+        // applied session allow did not actually suppress the ask). Removed for
+        // byte parity — the metadata plumbing stays for genuine per-tool
+        // producers.
+        metadata: PermissionMetadata::default(),
     }
 }
 

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, safeStorage, shell, type Session } from 'electron';
+import { app, BrowserWindow, dialog, safeStorage, shell, type Session } from 'electron';
 import { join } from 'node:path';
 import { dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -162,6 +162,33 @@ if (hasSingleInstanceLock) void app.whenReady().then(() => {
     onModelChanged: (model) => { settings.update({ model }); },
     onProviderCredentialMigrated: (providerId) => {
       settings.clearProviderCredential(providerId);
+    },
+    confirmBypassPermissions: async () => {
+      // Shown ONCE per install (persisted), mirroring the oracle's
+      // `bypassPermissionsModeAccepted`. Body text is the oracle's Bypass
+      // Permissions acceptance copy.
+      if (settings.getBypassPermissionsAccepted()) return true;
+      const options = {
+        type: 'warning' as const,
+        buttons: ['Cancel', 'Yes, I accept'],
+        defaultId: 0,
+        cancelId: 0,
+        noLink: true,
+        title: 'Bypass Permissions mode',
+        message:
+          'In Bypass Permissions mode, LingXi will not ask for your approval before running potentially dangerous commands.',
+        detail:
+          'This mode should only be used in a sandboxed container/VM that has restricted internet access and can easily be restored if damaged.\n\n' +
+          'By proceeding, you accept all responsibility for actions taken while running in Bypass Permissions mode.\n\n' +
+          'https://code.claude.com/docs/en/security',
+      };
+      const parent = BrowserWindow.getAllWindows()[0];
+      const confirmation = parent
+        ? await dialog.showMessageBox(parent, options)
+        : await dialog.showMessageBox(options);
+      if (confirmation.response !== 1) return false;
+      settings.setBypassPermissionsAccepted(true);
+      return true;
     },
     launchConfig: async () => {
       const workspace = settings.getWorkspace();

@@ -77,6 +77,11 @@ export interface BridgeManagerOptions {
   diagnostics?: DiagnosticBuffer;
   onModelChanged?: (model: string) => void;
   onProviderCredentialMigrated?: (providerId: string) => void;
+  /** SECURITY: consulted before a `set_permission_mode: bypassPermissions`
+   * command is forwarded to the engine. Must show a blocking acceptance dialog
+   * (once — persisted) and resolve `true` only on explicit consent. When absent,
+   * bypassPermissions is refused (never one-click enabled). */
+  confirmBypassPermissions?: () => Promise<boolean>;
 }
 
 type ProviderCredentialStatus = Extract<ClientEvent, { type: 'provider_credential_status' }>;
@@ -659,11 +664,9 @@ export class BridgeManager {
       this.assertSender(event);
       this.requireClient().cancel(validateOptionalTurnId(turnId));
     });
-    ipcMain.handle(CH_COMMAND, (event: IpcMainInvokeEvent, command: unknown) => {
+    ipcMain.handle(CH_COMMAND, async (event: IpcMainInvokeEvent, command: unknown) => {
       this.assertSender(event);
-      const validated = validateClientCommand(command, this.activeWorkspace);
-      assertCommandAllowedDuringTurn(validated, this.activeTurn);
-      this.requireClient().sendCommand(validated);
+      await this.dispatchCommand(command);
     });
     ipcMain.handle(CH_CONNECTION_STATE, (event: IpcMainInvokeEvent) => {
       this.assertSender(event);
@@ -677,6 +680,26 @@ export class BridgeManager {
       ipcMain.removeHandler(channel);
     }
     this.ipcRegistered = false;
+  }
+
+  /**
+   * Validate a renderer command and forward it to the engine. SECURITY:
+   * `set_permission_mode: bypassPermissions` is gated behind explicit,
+   * persisted acceptance (a blocking main-process dialog, shown once) — it is
+   * NEVER one-click. A decline (or no confirmer wired) throws and the command
+   * never reaches the engine; the renderer's mode display reads the engine's
+   * actual (unchanged) mode, so nothing to revert.
+   */
+  async dispatchCommand(command: unknown): Promise<void> {
+    const validated = validateClientCommand(command, this.activeWorkspace);
+    assertCommandAllowedDuringTurn(validated, this.activeTurn);
+    if (validated.type === 'set_permission_mode' && validated.mode === 'bypassPermissions') {
+      const accepted = (await this.opts.confirmBypassPermissions?.()) ?? false;
+      if (!accepted) {
+        throw new Error('Bypass Permissions mode was not accepted');
+      }
+    }
+    this.requireClient().sendCommand(validated);
   }
 
   private requireClient(): BridgeClient {

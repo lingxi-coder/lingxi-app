@@ -49,6 +49,10 @@ export interface PersistedSettings {
   lastWorkspace?: string;
   recentWorkspaces: string[];
   trustedWorkspaces: Record<string, TrustRecord>;
+  /** One-time acknowledgement that the user accepted Bypass Permissions mode
+   * (oracle `bypassPermissionsModeAccepted`). Persisted so the blocking
+   * acceptance dialog is shown ONCE, not on every activation. */
+  bypassPermissionsModeAccepted?: boolean;
 }
 
 export interface PublicSettings {
@@ -94,6 +98,9 @@ export function parseSettings(value: unknown): PersistedSettings {
   settings.model = boundedString(value['model'], 256);
   settings.apiBaseUrl = boundedString(value['apiBaseUrl'], 2_048);
   settings.lastWorkspace = boundedString(value['lastWorkspace'], 32_768);
+  if (value['bypassPermissionsModeAccepted'] === true) {
+    settings.bypassPermissionsModeAccepted = true;
+  }
 
   if (Array.isArray(value['recentWorkspaces'])) {
     settings.recentWorkspaces = value['recentWorkspaces']

@@ -286,3 +286,65 @@ test('clean child exit clears the SIGKILL timer so the process group is not sign
 
   assert.deepEqual(signals, ['SIGINT']);
 });
+
+// ── Bypass Permissions acceptance gate (security #34) ──────────────────────
+
+function trustedManager(confirm?: () => Promise<boolean>): {
+  manager: BridgeManager;
+  commands: Array<Record<string, unknown>>;
+} {
+  const commands: Array<Record<string, unknown>> = [];
+  const manager = new BridgeManager({
+    launchConfig: () => ({ workspace: '/workspace', trusted: true }),
+    accessState: () => ({ workspace: '/workspace', trusted: true }),
+    ...(confirm ? { confirmBypassPermissions: confirm } : {}),
+  });
+  (manager as any).client = {
+    sendCommand: (command: Record<string, unknown>) => commands.push(command),
+  };
+  (manager as any).activeWorkspace = '/workspace';
+  return { manager, commands };
+}
+
+test('bypassPermissions is refused when the acceptance dialog is declined', async () => {
+  let confirmCalls = 0;
+  const { manager, commands } = trustedManager(async () => {
+    confirmCalls += 1;
+    return false; // user picked Cancel
+  });
+  await assert.rejects(
+    (manager as any).dispatchCommand({ type: 'set_permission_mode', mode: 'bypassPermissions' }),
+    /not accepted/,
+  );
+  assert.equal(confirmCalls, 1, 'the acceptance confirmer is consulted');
+  assert.equal(commands.length, 0, 'a declined bypass never reaches the engine');
+});
+
+test('bypassPermissions reaches the engine only after acceptance', async () => {
+  const { manager, commands } = trustedManager(async () => true); // user accepted
+  await (manager as any).dispatchCommand({ type: 'set_permission_mode', mode: 'bypassPermissions' });
+  assert.equal(commands.length, 1);
+  assert.equal(commands[0]!['type'], 'set_permission_mode');
+  assert.equal(commands[0]!['mode'], 'bypassPermissions');
+});
+
+test('bypassPermissions is refused when no confirmer is wired (never one-click)', async () => {
+  const { manager, commands } = trustedManager(); // no confirmBypassPermissions
+  await assert.rejects(
+    (manager as any).dispatchCommand({ type: 'set_permission_mode', mode: 'bypassPermissions' }),
+    /not accepted/,
+  );
+  assert.equal(commands.length, 0);
+});
+
+test('non-bypass permission modes are not gated by the acceptance dialog', async () => {
+  let confirmCalls = 0;
+  const { manager, commands } = trustedManager(async () => {
+    confirmCalls += 1;
+    return true;
+  });
+  await (manager as any).dispatchCommand({ type: 'set_permission_mode', mode: 'acceptEdits' });
+  assert.equal(confirmCalls, 0, 'only bypassPermissions consults the confirmer');
+  assert.equal(commands.length, 1);
+  assert.equal(commands[0]!['mode'], 'acceptEdits');
+});

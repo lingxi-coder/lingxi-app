@@ -37,6 +37,23 @@ test('settings parser fails closed to the current version and bounds recent work
   assert.equal(parsed.recentWorkspaces.length, 10);
 });
 
+test('bypassPermissionsModeAccepted round-trips only for a strict true', () => {
+  // Persisted acceptance survives a parse.
+  assert.equal(
+    parseSettings({ version: 1, bypassPermissionsModeAccepted: true }).bypassPermissionsModeAccepted,
+    true,
+  );
+  // Absent / falsy / non-boolean never fabricates acceptance (fail-closed).
+  assert.equal(parseSettings({ version: 1 }).bypassPermissionsModeAccepted, undefined);
+  for (const bad of [false, 'true', 1, null]) {
+    assert.equal(
+      parseSettings({ version: 1, bypassPermissionsModeAccepted: bad }).bypassPermissionsModeAccepted,
+      undefined,
+      `${JSON.stringify(bad)} must not be read as acceptance`,
+    );
+  }
+});
+
 test('workspace paths are canonical and recents are unique most-recent-first', () => {
   const workspace = temporaryDirectory();
   const canonical = canonicalWorkspace(join(workspace, '.'));

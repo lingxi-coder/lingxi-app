@@ -162,6 +162,12 @@ export function createPackagedSettings({ workspace, theme = 'dark', now = new Da
         trustedAt: now.toISOString(),
       },
     },
+    // Pre-accept Bypass Permissions for the automated profile: the smoke driver
+    // issues the raw `set_permission_mode: bypassPermissions` command and has no
+    // UI to click the (now-required) acceptance dialog. Persisting the
+    // acceptance makes the main-process gate pass without prompting — exactly the
+    // "already accepted, don't re-prompt" path (security #34).
+    bypassPermissionsModeAccepted: true,
   };
 }
 
@@ -538,6 +544,11 @@ async function assertKeylessBundledSidecar(page, appPath, tempRoot) {
   await evaluate(page, `window.lingxi.command({ type: 'list_sessions', limit: 5 })`);
   await evaluate(page, `window.lingxi.command({ type: 'new_session' })`);
   await evaluate(page, `window.lingxi.command({ type: 'set_permission_mode', mode: 'acceptEdits' })`);
+  // bypassPermissions now requires explicit, persisted acceptance (security #34).
+  // This profile pre-accepts it (createPackagedSettings sets
+  // bypassPermissionsModeAccepted), so the raw command passes the gate without a
+  // blocking dialog — the "already accepted, don't re-prompt" path. A fresh
+  // profile with no acceptance would have this command rejected.
   await evaluate(page, `window.lingxi.command({ type: 'set_permission_mode', mode: 'bypassPermissions' })`);
 
   const smokeState = await waitFor(
@@ -568,7 +579,7 @@ async function assertKeylessBundledSidecar(page, appPath, tempRoot) {
       .filter((event) => event.type === 'permission_mode_changed')
       .map((event) => event.mode),
     ['acceptEdits', 'bypassPermissions'],
-    'trusted desktop sessions must acknowledge live permission-mode changes, including explicit Full access',
+    'trusted desktop sessions apply live permission-mode changes; bypassPermissions applies here only because the profile pre-accepted it (a fresh profile requires the acceptance dialog first)',
   );
 
   const diagnostics = await evaluate(page, `window.lingxi.diagnostics()`);

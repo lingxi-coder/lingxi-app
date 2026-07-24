@@ -122,6 +122,19 @@ export class SettingsStore {
     return workspaceTrust(this.settings, workspace);
   }
 
+  /** Whether the user has previously accepted Bypass Permissions mode. */
+  getBypassPermissionsAccepted(): boolean {
+    return this.settings.bypassPermissionsModeAccepted === true;
+  }
+
+  /** Persist the one-time Bypass Permissions acceptance (oracle
+   * `bypassPermissionsModeAccepted`). */
+  setBypassPermissionsAccepted(accepted: boolean): void {
+    if (accepted) this.settings.bypassPermissionsModeAccepted = true;
+    else delete this.settings.bypassPermissionsModeAccepted;
+    this.persist();
+  }
+
   credentialMetadata(): CredentialMetadata {
     const { providerId: _providerId, ...metadata } = this.providerCredentialMetadata('anthropic');
     return metadata;

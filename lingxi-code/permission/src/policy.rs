@@ -133,6 +133,18 @@ pub struct PermissionPolicy {
     /// Enterprise gate that permits only managed policy rules and disables
     /// user/project/local permission persistence for the session.
     pub allow_managed_permission_rules_only: bool,
+    /// `autoMode.classifyAllShell` escalation — 1:1 with claude-code `QOi()`
+    /// (`fon()`), resolved TRUE when ANY settings tier sets
+    /// `autoMode.classifyAllShell === true`. When set, EVERY `Bash`/`PowerShell`
+    /// allow rule is treated as dangerous for the auto-mode classifier (the
+    /// `R1t`/`uxt` escalation: `(e===Bash||e===PowerShell)&&fon()`), so it is
+    /// suspended while auto mode is active and all shell commands route through
+    /// the classifier — per the settings schema *"When true, every Bash/PowerShell
+    /// allow rule is suspended while auto mode is active so all shell commands are
+    /// routed through the classifier"*. Defaults to `false` (the base predicate).
+    /// Set at engine boot from any enabling settings tier via
+    /// [`crate::classify_all_shell_from_settings_json`].
+    pub classify_all_shell: bool,
 }
 
 impl PermissionPolicy {
@@ -155,6 +167,7 @@ impl PermissionPolicy {
             sandbox_runtime: None,
             pwsh_parser: None,
             allow_managed_permission_rules_only: false,
+            classify_all_shell: false,
         }
     }
 
@@ -162,6 +175,18 @@ impl PermissionPolicy {
     #[must_use]
     pub fn with_managed_permission_rules_only(mut self, enabled: bool) -> Self {
         self.allow_managed_permission_rules_only = enabled;
+        self
+    }
+
+    /// Set the `autoMode.classifyAllShell` escalation flag (claude-code
+    /// `QOi()`/`fon()`). When `true`, every `Bash`/`PowerShell` allow rule is
+    /// treated as dangerous for the auto-mode classifier and suspended while auto
+    /// mode is active. Engine boot resolves the argument as the sticky OR over
+    /// every settings tier (any tier with `autoMode.classifyAllShell === true`
+    /// wins). See [`Self::classify_all_shell`].
+    #[must_use]
+    pub fn with_classify_all_shell(mut self, enabled: bool) -> Self {
+        self.classify_all_shell = enabled;
         self
     }
 
@@ -531,6 +556,7 @@ impl PermissionPolicy {
             sandbox_runtime: self.sandbox_runtime.clone(),
             pwsh_parser: self.pwsh_parser.clone(),
             allow_managed_permission_rules_only: self.allow_managed_permission_rules_only,
+            classify_all_shell: self.classify_all_shell,
         }
     }
 
@@ -1078,9 +1104,10 @@ impl PermissionPolicy {
             // before any later removed slot is, so indices stay valid).
             let mut kept = Vec::with_capacity(rules.len());
             for (orig_idx, rule) in std::mem::take(rules).into_iter().enumerate() {
-                if crate::dangerous_perms::is_dangerous_classifier_permission(
+                if crate::dangerous_perms::is_dangerous_classifier_permission_with_flag(
                     &rule.value.tool_name,
                     &rule.value.rule_content,
+                    self.classify_all_shell,
                 ) {
                     // AUTO-06: mirror CC's per-rule strip log
                     // `Ignoring dangerous permission ${ruleDisplay} from
@@ -1264,9 +1291,10 @@ impl PermissionPolicy {
 
     fn rule_is_available_in_mode(&self, rule: &PermissionRule, mode: PermissionMode) -> bool {
         mode != PermissionMode::Auto
-            || !crate::dangerous_perms::is_dangerous_classifier_permission(
+            || !crate::dangerous_perms::is_dangerous_classifier_permission_with_flag(
                 &rule.value.tool_name,
                 &rule.value.rule_content,
+                self.classify_all_shell,
             )
     }
 
@@ -2849,3 +2877,58 @@ fn ask_plan_mutation(tool_name: &str, write_path: Option<&str>) -> PermissionRes
 #[cfg(test)]
 #[path = "policy_test.rs"]
 mod policy_test;
+
+// AUTO-03: separate inline module (kept out of `policy_test.rs`) covering the
+// `autoMode.classifyAllShell` escalation at the two policy call sites.
+#[cfg(test)]
+mod classify_all_shell_policy_test {
+    use super::*;
+    use crate::PermissionRuleValue;
+
+    fn bash_allow(content: &str) -> PermissionRule {
+        PermissionRule {
+            value: PermissionRuleValue {
+                tool_name: "Bash".into(),
+                rule_content: Some(content.into()),
+            },
+            behavior: PermissionBehavior::Allow,
+            source: PermissionRuleSource::UserSettings,
+        }
+    }
+
+    #[test]
+    fn strip_honors_classify_all_shell_flag() {
+        // flag OFF: a SAFE `Bash(ls:*)` allow survives the auto-mode strip.
+        let mut p =
+            PermissionPolicy::from_rules(PermissionMode::Default, vec![bash_allow("ls:*")]);
+        p.set_mode(PermissionMode::Auto);
+        assert!(p.stripped_dangerous.is_empty());
+        assert!(p.allow_rules.values().any(|v| !v.is_empty()));
+
+        // flag ON (set BEFORE the Default→Auto transition, matching the boot
+        // ordering fix): the same safe shell allow is stripped into the stash.
+        let mut p =
+            PermissionPolicy::from_rules(PermissionMode::Default, vec![bash_allow("ls:*")])
+                .with_classify_all_shell(true);
+        p.set_mode(PermissionMode::Auto);
+        assert_eq!(p.stripped_dangerous.len(), 1);
+        assert_eq!(p.stripped_dangerous[0].value.tool_name, "Bash");
+        // Leaving auto mode restores it verbatim (strip↔restore identity holds).
+        p.set_mode(PermissionMode::Default);
+        assert!(p.stripped_dangerous.is_empty());
+        assert!(p.allow_rules.values().any(|v| !v.is_empty()));
+    }
+
+    #[test]
+    fn availability_gate_honors_classify_all_shell_flag() {
+        let rule = bash_allow("ls:*");
+        // flag OFF, Auto mode: a safe Bash allow is AVAILABLE (base predicate).
+        let p = PermissionPolicy::new(PermissionMode::Auto);
+        assert!(p.rule_is_available_in_mode(&rule, PermissionMode::Auto));
+        // flag ON, Auto mode: NOT available (suspended → routed to classifier).
+        let p = PermissionPolicy::new(PermissionMode::Auto).with_classify_all_shell(true);
+        assert!(!p.rule_is_available_in_mode(&rule, PermissionMode::Auto));
+        // flag ON but a NON-auto mode: available — the escalation is auto-only.
+        assert!(p.rule_is_available_in_mode(&rule, PermissionMode::Default));
+    }
+}

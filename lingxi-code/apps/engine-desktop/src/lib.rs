@@ -395,6 +395,10 @@ struct BootPermissionTiers {
     /// true when ANY tier disables auto mode at either settings position. Set on
     /// the boot policy and applied at mode-load (auto → default downgrade).
     auto_mode_disabled: bool,
+    /// Sticky `autoMode.classifyAllShell` escalation (claude-code `QOi()`) — true
+    /// when ANY tier sets `autoMode.classifyAllShell === true`. Set on the boot
+    /// policy so every `Bash`/`PowerShell` allow rule is suspended in auto mode.
+    classify_all_shell: bool,
     /// Union of every tier's `permissions.additionalDirectories` (raw paths;
     /// `authorize` resolves them against the policy roots via `expand_path`).
     additional_working_dirs: Vec<std::path::PathBuf>,
@@ -441,6 +445,7 @@ async fn load_boot_permission_tiers(
     let mut mode = permission::PermissionMode::Default;
     let mut bypass_disabled = false;
     let mut auto_mode_disabled = false;
+    let mut classify_all_shell = false;
     let mut additional_working_dirs: Vec<std::path::PathBuf> = Vec::new();
     // Retain each tier's raw text (in ascending priority) so the
     // sandbox-auto-allow config can be derived from the SAME settings.
@@ -513,6 +518,9 @@ async fn load_boot_permission_tiers(
             if permission::auto_mode_disabled_from_settings_json(&raw) {
                 auto_mode_disabled = true; // sticky: any tier disabling wins (Bpa)
             }
+            if permission::classify_all_shell_from_settings_json(&raw) {
+                classify_all_shell = true; // sticky: any tier enabling wins (QOi)
+            }
             // (#34) Union this tier's additionalDirectories into the
             // working-dir set (claude-code merges across SETTING_SOURCES).
             additional_working_dirs
@@ -553,6 +561,9 @@ async fn load_boot_permission_tiers(
         if permission::auto_mode_disabled_from_settings_json(raw) {
             auto_mode_disabled = true; // managed auto-mode killswitch binds (sticky)
         }
+        if permission::classify_all_shell_from_settings_json(raw) {
+            classify_all_shell = true; // managed classifyAllShell binds (sticky, QOi)
+        }
         additional_working_dirs.extend(permission::additional_directories_from_settings_json(raw));
     }
     let allow_managed_permission_rules_only = managed_tiers
@@ -567,6 +578,7 @@ async fn load_boot_permission_tiers(
         mode,
         bypass_disabled,
         auto_mode_disabled,
+        classify_all_shell,
         additional_working_dirs,
         raw_tiers,
         allow_managed_permission_rules_only,
@@ -5383,6 +5395,7 @@ pub async fn build(
             mut mode,
             bypass_disabled,
             auto_mode_disabled,
+            classify_all_shell,
             mut additional_working_dirs,
             raw_tiers,
             allow_managed_permission_rules_only,
@@ -5450,11 +5463,25 @@ pub async fn build(
             );
             mode = gated;
         }
-        let mut policy = permission::PermissionPolicy::from_rules(mode, rules)
+        // Construct in `Default` and apply the resolved boot `mode` LAST (below),
+        // so the auto-mode dangerous-rule strip runs AFTER
+        // `with_classify_all_shell` is set and therefore honors the
+        // `autoMode.classifyAllShell` escalation on a session that BOOTS directly
+        // into auto mode. (The availability gate `rule_is_available_in_mode` also
+        // enforces the escalation at authorize time, so this ordering only keeps
+        // the strip stash faithful — but it costs nothing and removes the
+        // stale-flag foot-gun.)
+        let mut policy = permission::PermissionPolicy::from_rules(
+            permission::PermissionMode::Default,
+            rules,
+        )
             .with_roots(roots)
             .with_working_dirs(additional_working_dirs)
             .with_sandbox_runtime(sandbox_auto_allow)
             .with_managed_permission_rules_only(allow_managed_permission_rules_only)
+            // `autoMode.classifyAllShell` escalation (`QOi()`): any tier enabling
+            // it suspends every Bash/PowerShell allow rule in auto mode.
+            .with_classify_all_shell(classify_all_shell)
             // TS `isBypassPermissionsModeAvailable` (2.1.211 permissionSetup):
             // `S = (n === "bypassPermissions" || o) && !g && !_` — available when
             // the session RESOLVED to bypass mode OR the explicit
@@ -5478,6 +5505,11 @@ pub async fn build(
         // Auto-mode killswitch (`Bpa()`): the live `set_permission_mode` gate
         // refuses `auto` when any tier set `disableAutoMode: "disable"`.
         policy.auto_mode_disabled = auto_mode_disabled;
+        // Apply the resolved boot mode now that every field (crucially
+        // `classify_all_shell`) is set — this triggers the auto-mode
+        // dangerous-rule strip with the escalation in effect. A no-op when `mode`
+        // is `Default` (from == to).
+        policy.set_mode(mode);
         // Resolve the active Read(deny) rules to search-exclude globs while
         // the policy is still in scope (before it moves into the gate).
         read_deny_exclude_globs = permission::read_deny_exclude_globs(&policy, &cwd);

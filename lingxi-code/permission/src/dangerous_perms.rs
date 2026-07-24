@@ -300,11 +300,29 @@ pub struct DangerousPermissionInfo {
 pub fn find_dangerous_classifier_permissions(
     rules: &[PermissionRule],
 ) -> Vec<DangerousPermissionInfo> {
+    find_dangerous_classifier_permissions_with_flag(rules, false)
+}
+
+/// [`find_dangerous_classifier_permissions`] WITH the `autoMode.classifyAllShell`
+/// escalation (`R1t`/`uxt`). When `classify_all_shell` is set, every `Bash`/
+/// `PowerShell`/`Shell` allow rule is also reported as dangerous — 1:1 with the
+/// TS `rjs` half of `findDangerousClassifierPermissions`, which walks each rule
+/// through `R1t` (the flag-aware predicate) rather than the base `mon`. The base
+/// [`find_dangerous_classifier_permissions`] is exactly this with the flag off.
+#[must_use]
+pub fn find_dangerous_classifier_permissions_with_flag(
+    rules: &[PermissionRule],
+    classify_all_shell: bool,
+) -> Vec<DangerousPermissionInfo> {
     let mut dangerous = Vec::new();
 
     for rule in rules {
         if rule.behavior == PermissionBehavior::Allow
-            && is_dangerous_classifier_permission(&rule.value.tool_name, &rule.value.rule_content)
+            && is_dangerous_classifier_permission_with_flag(
+                &rule.value.tool_name,
+                &rule.value.rule_content,
+                classify_all_shell,
+            )
         {
             // `Bash(python:*)` when content is set, else `Bash(*)` for tool-wide.
             let rule_string = match &rule.value.rule_content {
@@ -754,5 +772,22 @@ mod tests {
         let found = find_dangerous_classifier_permissions(&rules);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].rule_display, "Bash(*)");
+    }
+
+    #[test]
+    fn find_with_flag_escalates_safe_shell_allows() {
+        let rules = vec![
+            allow("Bash", Some("ls:*"), PermissionRuleSource::UserSettings),
+            allow("PowerShell", Some("gci:*"), PermissionRuleSource::UserSettings),
+            allow("Read", None, PermissionRuleSource::UserSettings),
+        ];
+        // flag OFF: none of these safe shell allows is dangerous.
+        assert!(find_dangerous_classifier_permissions_with_flag(&rules, false).is_empty());
+        assert!(find_dangerous_classifier_permissions(&rules).is_empty());
+        // flag ON: both shell allows are collected (Read stays out).
+        let found = find_dangerous_classifier_permissions_with_flag(&rules, true);
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].rule_display, "Bash(ls:*)");
+        assert_eq!(found[1].rule_display, "PowerShell(gci:*)");
     }
 }

@@ -68,8 +68,9 @@ pub use dangerous_patterns::{
     dangerous_bash_patterns, CROSS_PLATFORM_CODE_EXEC, POWERSHELL_DANGEROUS_PATTERNS,
 };
 pub use dangerous_perms::{
-    find_dangerous_classifier_permissions, is_dangerous_bash_permission,
-    is_dangerous_classifier_permission, is_dangerous_powershell_permission,
+    find_dangerous_classifier_permissions, find_dangerous_classifier_permissions_with_flag,
+    is_dangerous_bash_permission, is_dangerous_classifier_permission,
+    is_dangerous_classifier_permission_with_flag, is_dangerous_powershell_permission,
     is_dangerous_task_permission, DangerousPermissionInfo,
 };
 pub use dangerous_removal::{check_dangerous_removal, is_dangerous_removal_path, DangerousRemoval};
@@ -84,7 +85,8 @@ pub use internal_writes::{consume_internal_write, mark_internal_write};
 pub use loader::{
     additional_directories_from_settings_json,
     allow_managed_permission_rules_only_from_settings_json, auto_mode_disabled_from_settings_json,
-    bypass_permissions_disabled_from_settings_json, default_mode_from_settings_json,
+    bypass_permissions_disabled_from_settings_json, classify_all_shell_from_settings_json,
+    default_mode_from_settings_json,
     permission_rule_file_warning, permission_rule_startup_warning,
     permission_rules_from_settings_json,
 };

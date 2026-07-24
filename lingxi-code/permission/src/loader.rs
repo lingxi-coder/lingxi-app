@@ -100,6 +100,24 @@ struct SettingsTop {
     /// [`skip_dangerous_mode_permission_prompt_from_settings_json`].
     #[serde(default, rename = "skipDangerousModePermissionPrompt")]
     skip_dangerous_mode_permission_prompt: Option<bool>,
+    /// TOP-LEVEL `autoMode` object. claude-code schema declares
+    /// `autoMode: E.object({ classifyAllShell: E.boolean().optional()… }).optional()`
+    /// as a sibling of `permissions`; `QOi()` reads `Pr(tier)?.autoMode?.
+    /// classifyAllShell === true`. Consumed via
+    /// [`classify_all_shell_from_settings_json`].
+    #[serde(default, rename = "autoMode")]
+    auto_mode: Option<AutoModeBlock>,
+}
+
+/// The `autoMode` settings object. Only [`Self::classify_all_shell`] is read by
+/// this port; other keys are tolerated-and-ignored.
+#[derive(Debug, Default, Deserialize)]
+struct AutoModeBlock {
+    /// `autoMode.classifyAllShell`: when `true`, every `Bash`/`PowerShell` allow
+    /// rule is suspended while auto mode is active so all shell commands route
+    /// through the classifier.
+    #[serde(default, rename = "classifyAllShell")]
+    classify_all_shell: Option<bool>,
 }
 
 /// The `permissions` block. `allow`/`deny`/`ask` are arrays of rule strings;
@@ -334,6 +352,28 @@ pub fn auto_mode_disabled_from_settings_json(raw: &str) -> bool {
     top.permissions.and_then(|p| p.disable_auto_mode).as_deref() == Some("disable")
 }
 
+/// Does this settings file ENABLE the `autoMode.classifyAllShell` escalation?
+/// True iff `autoMode.classifyAllShell === true` — 1:1 with the per-tier read
+/// inside claude-code's `QOi()`
+/// (`Pr(tier)?.autoMode?.classifyAllShell===!0`). Strictly `true` (a missing key
+/// or a non-boolean value is `false`), matching the `===!0` comparison.
+///
+/// The engine resolves the session-wide flag as the STICKY OR over every settings
+/// tier (any tier enabling it wins — `QOi` returns on the first `true`), then
+/// feeds it to [`crate::PermissionPolicy::with_classify_all_shell`]. When set,
+/// every `Bash`/`PowerShell` allow rule is suspended in auto mode so all shell
+/// commands route through the classifier. Returns `false` when the block, the
+/// field, or the JSON is absent/invalid (best-effort projection, like the other
+/// loaders here).
+#[must_use]
+pub fn classify_all_shell_from_settings_json(raw: &str) -> bool {
+    serde_json::from_str::<SettingsTop>(raw)
+        .ok()
+        .and_then(|t| t.auto_mode)
+        .and_then(|a| a.classify_all_shell)
+        == Some(true)
+}
+
 /// `MODE-BG-DISCLAIMER-02`: does this settings file set
 /// `skipDangerousModePermissionPrompt` truthy at the TOP LEVEL?
 ///
@@ -430,6 +470,32 @@ mod tests {
         assert!(!auto_mode_grantable_by_source(
             PermissionRuleSource::Session
         ));
+    }
+
+    #[test]
+    fn classify_all_shell_reads_auto_mode_block_strictly() {
+        // AUTO-03 / `QOi`: only `autoMode.classifyAllShell === true` enables it.
+        assert!(classify_all_shell_from_settings_json(
+            r#"{"autoMode": {"classifyAllShell": true}}"#
+        ));
+        // Strict `=== true`: false, a truthy non-bool, or a missing key ⇒ false.
+        assert!(!classify_all_shell_from_settings_json(
+            r#"{"autoMode": {"classifyAllShell": false}}"#
+        ));
+        assert!(!classify_all_shell_from_settings_json(
+            r#"{"autoMode": {"classifyAllShell": 1}}"#
+        ));
+        assert!(!classify_all_shell_from_settings_json(
+            r#"{"autoMode": {"classifyAllShell": "true"}}"#
+        ));
+        assert!(!classify_all_shell_from_settings_json(r#"{"autoMode": {}}"#));
+        // The key lives at the TOP LEVEL `autoMode`, NOT under `permissions`.
+        assert!(!classify_all_shell_from_settings_json(
+            r#"{"permissions": {"autoMode": {"classifyAllShell": true}}}"#
+        ));
+        // Absent / empty / malformed ⇒ false (best-effort, like the siblings).
+        assert!(!classify_all_shell_from_settings_json("{}"));
+        assert!(!classify_all_shell_from_settings_json("not json"));
     }
 
     #[test]

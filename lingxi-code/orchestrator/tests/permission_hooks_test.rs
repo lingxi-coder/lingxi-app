@@ -114,6 +114,8 @@ impl PermissionGate for ClassifierDenyGate {
         PermissionResolution::Deny {
             reason: self.reason.into(),
             source: PermissionDecisionSource::Classifier,
+            decision_reason_type: None,
+            decision_reason: None,
             behavior_ask: false,
             content_blocks: Vec::new(),
         }
@@ -141,6 +143,8 @@ impl PermissionGate for AskRejectGate {
         PermissionResolution::Deny {
             reason: self.reason.into(),
             source: PermissionDecisionSource::Unspecified,
+            decision_reason_type: None,
+            decision_reason: None,
             behavior_ask: true,
             content_blocks: vec![ContentBlock::Image {
                 source: ImageSource::Base64 {

@@ -2728,7 +2728,22 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         let decision = if let Some(forced) = forced_decision {
             forced
         } else if plan_mode {
-            orch.perms.check_in_plan_mode(name, &effective_input).await
+            let plan_decision = orch.perms.check_in_plan_mode(name, &effective_input).await;
+            // GATE-SYSMSG-01: a plan-mode mutation deny is a LOCAL deny the oracle
+            // emits `permission_denied` for. `check_in_plan_mode` is 2-valued, so
+            // the structured reason (mode vs a plan-visible deny rule) is not
+            // available here — emit the message with the discriminants omitted
+            // (still a valid oracle subsequence). No-op on non-stdio transports.
+            if let PermissionDecision::Deny { reason } = &plan_decision {
+                let sysmsg_ctx = traits::permission_gate::PermissionCheckContext {
+                    tool_use_id: Some(tool_use_id.to_string()),
+                    ..Default::default()
+                };
+                orch.perms
+                    .on_permission_denied(name, &sysmsg_ctx, None, None, reason)
+                    .await;
+            }
+            plan_decision
         } else if hook_allowed {
             // Carry the REAL tool_use_id so a hook-allow→ask-rule re-check emits a
             // byte-faithful stdio `can_use_tool` (correlatable id + decision_reason).

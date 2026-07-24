@@ -59,6 +59,74 @@ impl Default for BatchState {
     }
 }
 
+/// What one flush tick decided to do with the batched output — the PURE result
+/// of the token-bucket / suppression / high-volume-stop logic (no I/O), so it is
+/// unit-testable in isolation.
+#[derive(Debug, PartialEq, Eq)]
+enum FlushOutcome {
+    /// Deliver this event to the model via `notify_monitor_event`.
+    Deliver(String),
+    /// Deliver this stop message to the model, THEN cancel the task (the oracle
+    /// `cvo` delivers via `dY(...)` before `killTask()` → terminal status Killed).
+    Stop(String),
+    /// Rate-limited with nothing to report this tick.
+    Nothing,
+}
+
+impl BatchState {
+    /// Pure token-bucket + suppression decision for one flush tick (mirrors the
+    /// oracle `cvo` onData body). Refills the bucket, drains `pending`, and
+    /// returns what to deliver. Caller has already confirmed `pending` is
+    /// non-empty and the task is not cancelled.
+    fn flush_decision(&mut self, now: Instant) -> FlushOutcome {
+        // Reset the high-volume WINDOW after a quiet gap (oracle `i=void 0`).
+        // The suppressed COUNT is NOT cleared here — the oracle only zeroes `o`
+        // when it reports it on the next delivered event, so a quiet gap must
+        // not silently drop an unreported count.
+        if self
+            .last_batch
+            .is_some_and(|last| now.duration_since(last) >= QUIET_RESET)
+        {
+            self.high_volume_since = None;
+        }
+        self.last_batch = Some(now);
+        let elapsed = now.duration_since(self.last_refill).as_secs_f64();
+        self.tokens = (self.tokens + elapsed / TOKEN_REFILL_SECS).min(TOKEN_CAPACITY);
+        self.last_refill = now;
+        let batch = self.pending.join("\n");
+        self.pending.clear();
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            if self.suppressed > 0 {
+                // Oracle suppression notice, reported on the next delivered event.
+                let suppressed = std::mem::take(&mut self.suppressed);
+                FlushOutcome::Deliver(format!(
+                    "{batch}\n[{suppressed} events suppressed — output rate too high. Consider using TaskStop to restart this monitor with a more selective filter.]"
+                ))
+            } else {
+                FlushOutcome::Deliver(batch)
+            }
+        } else {
+            self.suppressed = self.suppressed.saturating_add(1);
+            let started = *self.high_volume_since.get_or_insert(now);
+            let window = now.duration_since(started);
+            if window >= HIGH_VOLUME_STOP {
+                // Oracle stop message, DELIVERED before the kill. `${s}` is
+                // `Math.round((now - windowStart) / 1000)`.
+                let secs = window.as_secs_f64().round() as u64;
+                let stop = format!(
+                    "[Monitor stopped — too much output ({} events suppressed over {secs}s). Restart with a more selective source.]",
+                    self.suppressed
+                );
+                self.stop_reason = Some(stop.clone());
+                FlushOutcome::Stop(stop)
+            } else {
+                FlushOutcome::Nothing
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 struct MonitorStreamSink {
     task_id: String,
@@ -83,49 +151,30 @@ impl MonitorStreamSink {
 
     async fn flush(&self) {
         let now = Instant::now();
-        let event = {
+        let outcome = {
             let mut state = self.batch.lock().await;
             state.flush_scheduled = false;
             if state.pending.is_empty() || self.cancel.is_cancelled() {
                 state.pending.clear();
                 return;
             }
-            if state
-                .last_batch
-                .is_some_and(|last| now.duration_since(last) >= QUIET_RESET)
-            {
-                state.high_volume_since = None;
-                state.suppressed = 0;
-            }
-            state.last_batch = Some(now);
-            let elapsed = now.duration_since(state.last_refill).as_secs_f64();
-            state.tokens = (state.tokens + elapsed / TOKEN_REFILL_SECS).min(TOKEN_CAPACITY);
-            state.last_refill = now;
-            let batch = state.pending.join("\n");
-            state.pending.clear();
-            if state.tokens >= 1.0 {
-                state.tokens -= 1.0;
-                if state.suppressed > 0 {
-                    let suppressed = std::mem::take(&mut state.suppressed);
-                    Some(format!("{batch}\n[{suppressed} monitor events suppressed]"))
-                } else {
-                    Some(batch)
-                }
-            } else {
-                state.suppressed = state.suppressed.saturating_add(1);
-                let started = *state.high_volume_since.get_or_insert(now);
-                if now.duration_since(started) >= HIGH_VOLUME_STOP {
-                    let reason = "Monitor stopped after 30s of excessive output; restart it with a more selective filter".to_string();
-                    state.stop_reason = Some(reason);
-                    self.cancel.cancel();
-                }
-                None
-            }
+            state.flush_decision(now)
         };
-        if let Some(event) = event {
-            self.status_sink
-                .notify_monitor_event(&self.task_id, &event)
-                .await;
+        match outcome {
+            FlushOutcome::Deliver(event) => {
+                self.status_sink
+                    .notify_monitor_event(&self.task_id, &event)
+                    .await;
+            }
+            // High-volume auto-stop: deliver the stop message to the model FIRST,
+            // then cancel — the terminal status becomes Killed (epilogue).
+            FlushOutcome::Stop(event) => {
+                self.status_sink
+                    .notify_monitor_event(&self.task_id, &event)
+                    .await;
+                self.cancel.cancel();
+            }
+            FlushOutcome::Nothing => {}
         }
     }
 
@@ -205,6 +254,22 @@ impl MonitorHandler {
             Ok(_) => TaskStatus::Failed,
             Err(ProcessError::Timeout) => TaskStatus::Killed,
             Err(_) => TaskStatus::Failed,
+        }
+    }
+
+    /// Terminal status for a finished monitor worker. A cancellation — whether an
+    /// explicit `kill()` or the high-volume auto-stop — goes through the oracle's
+    /// `killTask()`, which sets the status to Killed (NOT Failed, even though the
+    /// cancelled `run_streaming` resolves to an `Err`). Only a natural end is
+    /// classified from the process result.
+    fn terminal_status(
+        cancelled: bool,
+        result: &Result<traits::ProcessOutput, ProcessError>,
+    ) -> TaskStatus {
+        if cancelled {
+            TaskStatus::Killed
+        } else {
+            Self::classify(result)
         }
     }
 }
@@ -321,11 +386,7 @@ impl Task for MonitorHandler {
                     .await;
             }
             let status =
-                if worker_cancel.is_cancelled() && worker_sink.stop_reason().await.is_none() {
-                    TaskStatus::Killed
-                } else {
-                    MonitorHandler::classify(&result)
-                };
+                MonitorHandler::terminal_status(worker_cancel.is_cancelled(), &result);
             status_sink.set_status(&worker_id, status).await;
             flush_cancel.cancel();
             let _ = worker_runtime.cancel(&worker_flush_handle).await;
@@ -380,5 +441,428 @@ impl Task for MonitorHandler {
                 .await;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap as StdHashMap;
+    use std::sync::Mutex as StdMutex;
+    use test_harness::mocks::MockRuntimeSpawner;
+    use tokio::sync::Mutex as TokioMutex;
+    use traits::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
+    use traits::sandbox::{SandboxBackend, SandboxCapability, SandboxedTag};
+    use traits::{
+        ProcessCommand, ProcessHandle, ProcessOutput, SandboxError, SandboxPolicy, SandboxedCommand,
+    };
+
+    // ── Pure token-bucket / suppression / high-volume-stop logic ────────────
+
+    /// A `BatchState` at `now` with a given token count and suppressed count,
+    /// `last_refill`/`last_batch` pinned to `now` (no incidental refill or quiet
+    /// reset unless the test overrides them).
+    fn state(now: Instant, tokens: f64, suppressed: usize) -> BatchState {
+        let mut s = BatchState::default();
+        s.tokens = tokens;
+        s.last_refill = now;
+        s.last_batch = Some(now);
+        s.suppressed = suppressed;
+        s
+    }
+
+    #[test]
+    fn flush_decision_batches_pending_into_one_event() {
+        let now = Instant::now();
+        let mut s = state(now, 10.0, 0);
+        s.pending = vec!["a".into(), "b".into(), "c".into()];
+        assert_eq!(
+            s.flush_decision(now),
+            FlushOutcome::Deliver("a\nb\nc".to_string())
+        );
+        assert!(s.pending.is_empty(), "pending is drained");
+    }
+
+    #[test]
+    fn flush_decision_reports_suppression_notice_byte_exact() {
+        let now = Instant::now();
+        let mut s = state(now, 5.0, 5);
+        s.pending = vec!["out".into()];
+        assert_eq!(
+            s.flush_decision(now),
+            FlushOutcome::Deliver(
+                "out\n[5 events suppressed \u{2014} output rate too high. Consider using TaskStop to restart this monitor with a more selective filter.]"
+                    .to_string()
+            )
+        );
+        assert_eq!(s.suppressed, 0, "count is zeroed ONLY when reported");
+    }
+
+    #[test]
+    fn flush_decision_rate_limited_suppresses_and_starts_window() {
+        let now = Instant::now();
+        let mut s = state(now, 0.0, 0);
+        s.high_volume_since = None;
+        s.pending = vec!["x".into()];
+        assert_eq!(s.flush_decision(now), FlushOutcome::Nothing);
+        assert_eq!(s.suppressed, 1);
+        assert!(s.high_volume_since.is_some(), "high-volume window started");
+    }
+
+    #[test]
+    fn flush_decision_high_volume_stop_delivers_byte_exact_message() {
+        // `now` is 100s after `base`; the window opened at base+69s → 31s wide.
+        let base = Instant::now();
+        let now = base + Duration::from_secs(100);
+        let mut s = state(now, 0.0, 42);
+        s.high_volume_since = Some(base + Duration::from_secs(69));
+        s.pending = vec!["x".into()];
+        assert_eq!(
+            s.flush_decision(now),
+            FlushOutcome::Stop(
+                "[Monitor stopped \u{2014} too much output (43 events suppressed over 31s). Restart with a more selective source.]"
+                    .to_string()
+            )
+        );
+        assert!(s.stop_reason.is_some());
+    }
+
+    #[test]
+    fn flush_decision_quiet_gap_resets_window_but_keeps_the_unreported_count() {
+        let base = Instant::now();
+        let now = base + Duration::from_secs(100);
+        let mut s = state(now, 0.0, 7);
+        // Last batch was 3s ago (> QUIET_RESET = 2s); the window opened long ago.
+        s.last_batch = Some(base + Duration::from_secs(97));
+        s.high_volume_since = Some(base + Duration::from_secs(50));
+        s.pending = vec!["x".into()];
+        assert_eq!(s.flush_decision(now), FlushOutcome::Nothing);
+        assert_eq!(
+            s.suppressed, 8,
+            "a quiet gap must NOT silently drop the unreported suppressed count"
+        );
+        assert_eq!(
+            s.high_volume_since,
+            Some(now),
+            "the 30s window is reset by the quiet gap, then restarted at `now`"
+        );
+    }
+
+    #[test]
+    fn truncate_line_caps_at_max_event_chars() {
+        let long = "x".repeat(MAX_EVENT_CHARS + 50);
+        let t = MonitorStreamSink::truncate_line(&long);
+        assert_eq!(t.chars().count(), MAX_EVENT_CHARS + 1);
+        assert!(t.ends_with('\u{2026}'));
+        assert_eq!(MonitorStreamSink::truncate_line("hello"), "hello");
+    }
+
+    #[test]
+    fn terminal_status_treats_any_cancellation_as_killed() {
+        // The high-volume auto-stop cancels with an Err result — it must be
+        // Killed (NOT Failed, the pre-fix bug).
+        assert_eq!(
+            MonitorHandler::terminal_status(true, &Err(ProcessError::Io("stopped".into()))),
+            TaskStatus::Killed
+        );
+        // A natural end is classified from the exit code.
+        let ok0 = Ok(ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        });
+        assert_eq!(
+            MonitorHandler::terminal_status(false, &ok0),
+            TaskStatus::Completed
+        );
+        let ok1 = Ok(ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 1,
+            timed_out: false,
+        });
+        assert_eq!(
+            MonitorHandler::terminal_status(false, &ok1),
+            TaskStatus::Failed
+        );
+    }
+
+    // ── Handler-level (spawn → run → terminal status) ───────────────────────
+
+    struct MockRunner {
+        output: ProcessOutput,
+    }
+    impl MockRunner {
+        fn new(stdout: &str, exit_code: i32) -> Arc<Self> {
+            Arc::new(Self {
+                output: ProcessOutput {
+                    stdout: stdout.to_string(),
+                    stderr: String::new(),
+                    exit_code,
+                    timed_out: false,
+                },
+            })
+        }
+    }
+    #[async_trait]
+    impl ProcessRunner for MockRunner {
+        async fn run(&self, _cmd: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+            Ok(self.output.clone())
+        }
+        async fn spawn_background(
+            &self,
+            _cmd: &SandboxedCommand,
+        ) -> Result<ProcessHandle, ProcessError> {
+            Err(ProcessError::Unsupported)
+        }
+        async fn kill(&self, _handle: &ProcessHandle) -> Result<(), ProcessError> {
+            Ok(())
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    /// A `run()` that parks forever — stands in for a long-running monitored
+    /// command until the future is cancelled.
+    struct BlockingRunner;
+    impl BlockingRunner {
+        fn new() -> Arc<Self> {
+            Arc::new(Self)
+        }
+    }
+    #[async_trait]
+    impl ProcessRunner for BlockingRunner {
+        async fn run(&self, _cmd: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+            std::future::pending::<()>().await;
+            unreachable!()
+        }
+        async fn spawn_background(
+            &self,
+            _cmd: &SandboxedCommand,
+        ) -> Result<ProcessHandle, ProcessError> {
+            Err(ProcessError::Unsupported)
+        }
+        async fn kill(&self, _handle: &ProcessHandle) -> Result<(), ProcessError> {
+            Ok(())
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    struct StubSandbox;
+    #[async_trait]
+    impl Sandbox for StubSandbox {
+        fn is_available(&self) -> bool {
+            true
+        }
+        fn backend(&self) -> SandboxBackend {
+            SandboxBackend::None
+        }
+        fn prepare(
+            &self,
+            cmd: ProcessCommand,
+            _policy: &SandboxPolicy,
+        ) -> Result<SandboxedCommand, SandboxError> {
+            Ok(SandboxedCommand::__new_sandboxed(
+                cmd,
+                SandboxedTag::BypassAuditedWithReason {
+                    reason: "test".into(),
+                },
+            ))
+        }
+        fn bypass_with_audit(&self, cmd: ProcessCommand, reason: &str) -> SandboxedCommand {
+            SandboxedCommand::__new_sandboxed(
+                cmd,
+                SandboxedTag::BypassAuditedWithReason {
+                    reason: reason.into(),
+                },
+            )
+        }
+        async fn probe_capability(&self) -> SandboxCapability {
+            SandboxCapability {
+                available: true,
+                reason: None,
+                features: traits::SandboxFeatures::default(),
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingSink {
+        statuses: StdMutex<Vec<TaskStatus>>,
+        events: StdMutex<Vec<String>>,
+    }
+    #[async_trait]
+    impl TaskStatusSink for RecordingSink {
+        async fn set_status(&self, _task_id: &str, status: TaskStatus) {
+            self.statuses.lock().unwrap().push(status);
+        }
+        async fn notify_monitor_event(&self, _task_id: &str, event: &str) {
+            self.events.lock().unwrap().push(event.to_string());
+        }
+    }
+    impl RecordingSink {
+        fn last_status(&self) -> Option<TaskStatus> {
+            self.statuses.lock().unwrap().last().copied()
+        }
+        fn events(&self) -> Vec<String> {
+            self.events.lock().unwrap().clone()
+        }
+    }
+
+    // Minimal in-memory FileSystem (the spool target); output_manager only
+    // exercises create/append here.
+    struct InMemoryFs {
+        files: TokioMutex<StdHashMap<String, String>>,
+    }
+    impl InMemoryFs {
+        fn new() -> Self {
+            Self {
+                files: TokioMutex::new(StdHashMap::new()),
+            }
+        }
+    }
+    #[async_trait]
+    impl FileSystem for InMemoryFs {
+        async fn read_file(
+            &self,
+            path: &str,
+            _offset: Option<u64>,
+            _limit: Option<u64>,
+        ) -> Result<FileContent, FsError> {
+            let map = self.files.lock().await;
+            let content = map.get(path).cloned().unwrap_or_default();
+            let total_lines = content.lines().count() as u64;
+            Ok(FileContent {
+                content,
+                truncated: false,
+                total_lines,
+            })
+        }
+        async fn write_file(&self, path: &str, body: &str) -> Result<(), FsError> {
+            self.files
+                .lock()
+                .await
+                .insert(path.to_string(), body.to_string());
+            Ok(())
+        }
+        fn is_within_workspace(&self, _: &str) -> bool {
+            true
+        }
+        async fn watch(
+            &self,
+            _: &str,
+        ) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = FileEvent> + Send>>, FsError>
+        {
+            Err(FsError::Io("not supported".into()))
+        }
+        async fn append_file(&self, path: &str, body: &str) -> Result<(), FsError> {
+            self.files
+                .lock()
+                .await
+                .entry(path.to_string())
+                .or_default()
+                .push_str(body);
+            Ok(())
+        }
+        async fn truncate(&self, _: &str, _: u64) -> Result<(), FsError> {
+            Ok(())
+        }
+        async fn file_mtime(&self, _: &str) -> Result<std::time::SystemTime, FsError> {
+            Ok(std::time::SystemTime::UNIX_EPOCH)
+        }
+        async fn file_size(&self, path: &str) -> Result<u64, FsError> {
+            let map = self.files.lock().await;
+            Ok(map.get(path).map_or(0, |s| s.len() as u64))
+        }
+        async fn delete_file(&self, path: &str) -> Result<(), FsError> {
+            self.files.lock().await.remove(path);
+            Ok(())
+        }
+        async fn symlink(&self, _: &str, _: &str) -> Result<(), FsError> {
+            Ok(())
+        }
+        async fn flock_exclusive(&self, _: &str) -> Result<Box<dyn FlockGuard>, FsError> {
+            Err(FsError::Io("not supported".into()))
+        }
+        async fn fsync(&self, _: &str) -> Result<(), FsError> {
+            Ok(())
+        }
+    }
+
+    fn make_handler(
+        process: Arc<dyn ProcessRunner>,
+        sink: Arc<RecordingSink>,
+    ) -> (MonitorHandler, TaskContext) {
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let mgr = Arc::new(TaskOutputManager::new(PathBuf::from("/spool"), fs.clone()));
+        let handler =
+            MonitorHandler::new(process, Arc::new(StubSandbox), mgr).with_status_sink(sink);
+        let ctx = TaskContext {
+            fs,
+            runtime: Arc::new(MockRuntimeSpawner::default()),
+        };
+        (handler, ctx)
+    }
+
+    fn monitor_input() -> TaskSpawnInput {
+        TaskSpawnInput::Monitor {
+            command: "echo hi".into(),
+            timeout: None,
+            cwd: None,
+            tool_use_id: None,
+        }
+    }
+
+    async fn await_terminal(sink: &Arc<RecordingSink>) -> TaskStatus {
+        for _ in 0..5000 {
+            if let Some(s) = sink.last_status() {
+                if s.is_terminal() {
+                    return s;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("worker never reported a terminal status");
+    }
+
+    #[tokio::test]
+    async fn natural_completion_reports_completed_and_delivers_events() {
+        let sink = Arc::new(RecordingSink::default());
+        let (handler, ctx) = make_handler(MockRunner::new("hello\nworld\n", 0), sink.clone());
+        let _handle = handler.spawn(monitor_input(), ctx).await.unwrap();
+        assert_eq!(await_terminal(&sink).await, TaskStatus::Completed);
+        let events = sink.events();
+        assert!(
+            events.iter().any(|e| e.contains("hello") && e.contains("world")),
+            "batched output must reach the model; got {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn nonzero_exit_reports_failed() {
+        let sink = Arc::new(RecordingSink::default());
+        let (handler, ctx) = make_handler(MockRunner::new("", 1), sink.clone());
+        let _handle = handler.spawn(monitor_input(), ctx).await.unwrap();
+        assert_eq!(await_terminal(&sink).await, TaskStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn cancellation_reports_killed_not_failed() {
+        let sink = Arc::new(RecordingSink::default());
+        let (handler, ctx) = make_handler(BlockingRunner::new(), sink.clone());
+        let handle = handler.spawn(monitor_input(), ctx).await.unwrap();
+        // Let the worker register, mark Running, and park in run_streaming.
+        for _ in 0..200 {
+            tokio::task::yield_now().await;
+        }
+        // The cleanup closure cancels the token; the worker's cancelled arm runs
+        // its epilogue → Killed (the pre-fix code reported Failed once a
+        // stop_reason was set).
+        (handle.cleanup.expect("cleanup closure"))();
+        assert_eq!(await_terminal(&sink).await, TaskStatus::Killed);
     }
 }

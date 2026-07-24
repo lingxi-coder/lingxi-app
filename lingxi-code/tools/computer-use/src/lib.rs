@@ -345,6 +345,62 @@ fn multi_display_note(displays: &[traits::computer_control::DisplayInfo]) -> Opt
     ))
 }
 
+/// Build the `{"type":"image","file":{...}}` result shape for `screenshot`/
+/// `zoom` — parity with `tool-file`'s Read-on-image path
+/// (`tools/file/src/read.rs`'s `read_image_result`): the real captured
+/// pixels ride to the model via `content_blocks`, derived generically from
+/// this exact shape by `orchestrator`'s `image_tool_result_blocks`, instead
+/// of the metadata-only `{width,height,png_bytes_len}` this used to return —
+/// which told the model NOTHING about what was actually on screen, yet
+/// didn't stop it from confidently describing a screen it had never
+/// actually seen (confirmed via live interactive testing). Downsized/
+/// re-encoded through the SAME shared image budget every other tool in this
+/// codebase already uses (`tool_api::util::image_budget`), since a raw
+/// Retina screenshot (often 3000+ px wide) is well past both Anthropic's
+/// image size limit and this crate's own multi-MB context-bloat concern.
+fn image_action_result(
+    shot: traits::computer_control::Screenshot,
+    extra_note: Option<&str>,
+) -> Result<Value, ToolError> {
+    let original_size = u64::try_from(shot.png_bytes.len()).unwrap_or(u64::MAX);
+    let processed =
+        tool_api::util::image_budget::process_image(shot.png_bytes).map_err(ToolError::Internal)?;
+    let mut file = json!({
+        "base64": processed.base64,
+        "type": processed.media_type,
+        "originalSize": original_size,
+    });
+    let mut notes: Vec<String> = extra_note.map(str::to_string).into_iter().collect();
+    if let Some((ow, oh, dw, dh)) = processed.resized {
+        file["dimensions"] = json!({
+            "originalWidth": ow,
+            "originalHeight": oh,
+            "displayWidth": dw,
+            "displayHeight": dh,
+        });
+        // Click/scroll/drag coordinates are always in the REAL screen's
+        // pixel space (`width`/`height` below) — not the possibly-downscaled
+        // space of the image the model is actually looking at. Without this
+        // note the model would have no way to know the two differ, and
+        // every subsequent coordinate it picks off the image would land in
+        // the wrong place.
+        let scale = f64::from(ow) / f64::from(dw.max(1));
+        notes.push(format!(
+            "Image downscaled from {ow}x{oh} to {dw}x{dh} to fit size limits. Mouse/click coordinates must stay in the ORIGINAL {ow}x{oh} space (this result's width/height) — multiply any coordinate read off the displayed image by {scale:.2}."
+        ));
+    }
+    let mut data = json!({
+        "type": "image",
+        "file": file,
+        "width": shot.width,
+        "height": shot.height,
+    });
+    if !notes.is_empty() {
+        data["note"] = json!(notes.join(" "));
+    }
+    Ok(data)
+}
+
 /// Read a `[x, y]` tuple under `key`, falling back to the legacy flat `x`/`y`
 /// scalars when reading the `"coordinate"` key. Returns `None` if absent.
 fn coord(input: &Value, key: &str) -> Option<(u32, u32)> {
@@ -883,23 +939,14 @@ impl ComputerTool {
         match action {
             "screenshot" => {
                 let s = cc.screenshot().await.map_err(|e| map_err(&e))?;
-                // Compact descriptor — the base64 image is intentionally NOT
-                // embedded in the tool result. A real image-content-block egress
-                // for BUILTIN tools does not exist yet (only MCP results carry
-                // `model_content_blocks`), so embedding base64 in `content`
-                // would just be JSON-stringified into a multi-MB text blob the
-                // model cannot view (a context-bloat regression). Wire a real
-                // image block via `model_content_blocks` once that egress exists.
-                let mut data = json!({ "width": s.width, "height": s.height, "png_bytes_len": s.png_bytes.len() });
                 // Best-effort: a backend that can't enumerate displays (or
                 // reports just one) simply gets no note — never fail the
                 // screenshot itself over this.
-                if let Ok(displays) = cc.list_displays().await {
-                    if let Some(note) = multi_display_note(&displays) {
-                        data["note"] = json!(note);
-                    }
-                }
-                Ok(data)
+                let note = match cc.list_displays().await {
+                    Ok(displays) => multi_display_note(&displays),
+                    Err(_) => None,
+                };
+                image_action_result(s, note.as_deref())
             }
             "display_size" => {
                 let (w, h) = cc.display_size().await.map_err(|e| map_err(&e))?;
@@ -1014,7 +1061,7 @@ impl ComputerTool {
                     .zoom(x0, y0, x1 - x0, y1 - y0)
                     .await
                     .map_err(|e| map_err(&e))?;
-                Ok(json!({ "width": s.width, "height": s.height, "png_bytes_len": s.png_bytes.len() }))
+                image_action_result(s, None)
             }
             "read_clipboard" => {
                 self.require_grant_flag(GrantFlags::clipboard_read_enabled, "clipboardRead")?;
@@ -1113,9 +1160,23 @@ fn finish(mut data: Value, action: &str) -> ToolCallResult {
             obj.insert("summary".into(), json!(summary));
         }
     }
+    // The `{"type":"image","file":{...}}` shape (`image_action_result`,
+    // screenshot/zoom) rides its actual pixels to the model via
+    // `content_blocks` (orchestrator's `image_tool_result_blocks`, derived
+    // generically from this exact shape) — NOT via the JSON dump
+    // `tool_result_to_model_text` would otherwise fall back to (metadata
+    // only: width/height/byte-count). `model_content` here is deliberately a
+    // short placeholder plus any resize/multi-display note, matching
+    // `tool-file`'s Read-on-image path exactly.
+    let model_content = (data.get("type").and_then(Value::as_str) == Some("image")).then(|| {
+        match data.get("note").and_then(Value::as_str) {
+            Some(note) => format!("[Image content provided in tool result.] {note}"),
+            None => "[Image content provided in tool result.]".to_string(),
+        }
+    });
     ToolCallResult {
         data,
-        model_content: None,
+        model_content,
         new_messages: vec![],
         context_modifier: None,
         is_error: false,
@@ -1386,6 +1447,16 @@ mod integration_tests {
         }
     }
 
+    /// A real, tiny, decodable PNG — `image_action_result` runs every
+    /// screenshot through `tool_api::util::image_budget::process_image`,
+    /// which needs an actually-decodable image, not an empty placeholder.
+    fn tiny_png() -> Vec<u8> {
+        let img = image::DynamicImage::ImageRgb8(image::RgbImage::new(4, 4));
+        let mut buf = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut buf, image::ImageFormat::Png).unwrap();
+        buf.into_inner()
+    }
+
     #[async_trait]
     impl ComputerControl for MockCc {
         async fn screenshot(&self) -> Result<Screenshot, ComputerError> {
@@ -1393,7 +1464,7 @@ mod integration_tests {
                 Ok(Screenshot {
                     width: 100,
                     height: 100,
-                    png_bytes: vec![],
+                    png_bytes: tiny_png(),
                 })
             } else {
                 Err(ComputerError::Unsupported("mock".into()))

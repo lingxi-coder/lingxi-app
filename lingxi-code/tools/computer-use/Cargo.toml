@@ -36,6 +36,11 @@ nix = { version = "0.27", default-features = false, features = ["signal"] }
 tool-api = { path = "../../tool-api", features = ["test-support"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 telemetry = { path = "../../telemetry" }
+# Test-only: generates real (tiny, decodable) PNG bytes for the mock
+# screenshot backend — `tool_api::util::image_budget::process_image` needs
+# an actually-decodable image, not an empty placeholder. Same version
+# `tool-api` itself already pins (already resolved in the lockfile).
+image = { version = "=0.24.9", default-features = false, features = ["png"] }
 
 [lints]
 workspace = true

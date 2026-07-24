@@ -50,6 +50,11 @@ objc2 = "0.6"
 objc2-foundation = "0.3"
 objc2-app-kit = { version = "0.3", features = ["NSRunningApplication", "NSWorkspace", "NSApplication"] }
 tokio = { workspace = true, features = ["time"] }
+# Builds the `{ kAXTrustedCheckOptionPrompt: true }` options dictionary
+# `AXIsProcessTrustedWithOptions` takes (tcc.rs) — already in the dependency
+# graph transitively (via objc2/xcap's macOS bindings), pinned here directly
+# since this crate calls its types by name.
+core-foundation = "0.10"
 
 [lints]
 workspace = true

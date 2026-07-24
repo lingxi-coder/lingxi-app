@@ -35,7 +35,6 @@ use tool_api::ToolRegistryView as _;
 use traits::orchestrator::ModelListing;
 use traits::OutputStream;
 
-const TRANSCRIPT_PERSISTENCE_WARNING: &str = "Session transcript could not be saved. Your current response can continue, but recent messages may be unavailable after restart.";
 
 /// Minimal contract the orchestrator needs from the API client.
 ///
@@ -928,10 +927,6 @@ pub struct ConversationOrchestrator {
     /// Optional on-disk JSONL persistence (M5-07). `None` for in-memory
     /// tests; `Some` when the CLI binary wires `~/.lingxi/projects/.../<uuid>.jsonl`.
     pub(crate) jsonl_writer: Option<Arc<JsonlWriter>>,
-    /// Once-per-session latch for the user-visible transcript write warning.
-    /// Individual failures still reach telemetry, but repeated appends during
-    /// the same turn/session must not flood the transcript/status surface.
-    pub(crate) transcript_persistence_warning_emitted: std::sync::atomic::AtomicBool,
     /// Cached UUID of the last persisted JSONL entry — used to populate
     /// `parentUuid` on the next append. Reset to `None` for fresh sessions.
     pub(crate) last_jsonl_uuid: Mutex<Option<String>>,
@@ -1544,7 +1539,6 @@ impl ConversationOrchestrator {
             workspace_trusted: true,
             hooks_restricted: false,
             jsonl_writer: None,
-            transcript_persistence_warning_emitted: std::sync::atomic::AtomicBool::new(false),
             last_jsonl_uuid: Mutex::new(None),
             git_branch_cache: Mutex::new(None),
             current_prompt_id: Mutex::new(None),
@@ -4755,16 +4749,11 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         operation: &'static str,
         error: &(impl std::fmt::Display + ?Sized),
     ) {
+        // CC 2.1.218 logs + emits telemetry on a transcript-append failure but
+        // shows NO user-visible notice — the port's `TRANSCRIPT_PERSISTENCE_WARNING`
+        // system notice was an invented surface. Keep the log + telemetry only.
         tracing::error!(error = %error, operation, "jsonl writer append failed");
         telemetry::emit_session_corrupted(session_id, &error.to_string());
-        if !self
-            .transcript_persistence_warning_emitted
-            .swap(true, std::sync::atomic::Ordering::AcqRel)
-        {
-            self.output
-                .emit_system_notice(TRANSCRIPT_PERSISTENCE_WARNING, true)
-                .await;
-        }
     }
 
     /// Persist the compact-boundary system line (P1-05) — claude 2.1.207's
@@ -8579,13 +8568,20 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     // it says continue, inject the meta nudge, reset the A1
                     // recovery count, and loop again instead of ending. When the
                     // budget is off this is a no-op (parity default).
-                    if self
-                        .maybe_continue_for_budget(
-                            budget.as_mut(),
-                            &mut recovery,
-                            global_turn_tokens,
-                        )
-                        .await
+                    //
+                    // Gate on `end_turn` (matching `run_turn`): unlike the
+                    // streaming twin, which is structurally in the hardcoded
+                    // `"end_turn"` branch, this driver carries the live
+                    // `stop_reason`, so a TERMINAL end (blocking_limit /
+                    // prompt_too_long) must NOT trigger budget continuation.
+                    if stop_reason == "end_turn"
+                        && self
+                            .maybe_continue_for_budget(
+                                budget.as_mut(),
+                                &mut recovery,
+                                global_turn_tokens,
+                            )
+                            .await
                     {
                         continue;
                     }
@@ -8883,12 +8879,12 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             if let (Some(wanted), Some(catalog)) = (wanted.as_deref(), self.agent_catalog.as_ref())
             {
                 let catalog = catalog.read().await;
-                let suffix = format!(":{wanted}");
+                // CC 2.1.218 resolves the resumed agentType by EXACT equality
+                // only — no bare-name/suffix fallback (that belongs to the
+                // `--agent` startup surface, not resume).
                 resolved = catalog
                     .iter()
-                    .find(|definition| {
-                        definition.agent_type == wanted || definition.agent_type.ends_with(&suffix)
-                    })
+                    .find(|definition| definition.agent_type == wanted)
                     .cloned();
             }
         }
@@ -15162,7 +15158,7 @@ mod transcript_persistence_warning_tests {
     }
 
     #[tokio::test]
-    async fn every_transcript_append_path_warns_once_without_leaking_the_io_error() {
+    async fn transcript_append_failure_is_silent_to_the_user() {
         let dir = tempfile::tempdir().expect("tempdir");
         let (orch, output) = failing_orchestrator(dir.path());
 
@@ -15205,30 +15201,10 @@ mod transcript_persistence_warning_tests {
         };
         orch.persist_assistant_merged(&merged, None, None).await;
 
-        let notices: Vec<_> = output
-            .snapshot()
-            .await
-            .into_iter()
-            .filter_map(|event| match event {
-                traits::OutputEvent::SystemNotice { body, is_error } => Some((body, is_error)),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(notices.len(), 1, "append failures are deduped per session");
-        assert!(
-            notices[0].1,
-            "persistence failure is rendered as an error notice"
-        );
-        assert_eq!(notices[0].0, TRANSCRIPT_PERSISTENCE_WARNING);
-        assert!(
-            !notices[0].0.contains(dir.path().to_string_lossy().as_ref()),
-            "the user-facing notice must not expose the transcript path or raw I/O error"
-        );
-
-        <ConversationOrchestrator as traits::OrchestratorHandle>::clear_session(&orch)
-            .await
-            .expect("clear session remains fail-open");
-        orch.persist_message_to_jsonl(&user).await;
+        // CC 2.1.218 shows NO user-visible notice for a transcript-append
+        // failure — the handling is log + telemetry only. Every persist path
+        // above failed against the failing writer; none may surface a
+        // SystemNotice to the user.
         let notice_count = output
             .snapshot()
             .await
@@ -15236,8 +15212,8 @@ mod transcript_persistence_warning_tests {
             .filter(|event| matches!(event, traits::OutputEvent::SystemNotice { .. }))
             .count();
         assert_eq!(
-            notice_count, 2,
-            "a new session receives its own warning after the latch resets"
+            notice_count, 0,
+            "transcript-append failures must not surface a user-visible notice"
         );
     }
 }

@@ -53,8 +53,6 @@ impl ConversationOrchestrator {
         self.output_token_pool.store(0, Ordering::Relaxed);
         self.turn_start_output_baseline.store(0, Ordering::Relaxed);
         self.refusal_fallback_latched.store(false, Ordering::SeqCst);
-        self.transcript_persistence_warning_emitted
-            .store(false, Ordering::Release);
 
         self.tools
             .deferral()
@@ -199,8 +197,6 @@ impl OrchestratorHandle for ConversationOrchestrator {
         *self.last_jsonl_uuid.lock().await = last_jsonl_uuid;
         self.refusal_fallback_latched
             .store(false, std::sync::atomic::Ordering::SeqCst);
-        self.transcript_persistence_warning_emitted
-            .store(false, std::sync::atomic::Ordering::Release);
         self.hooks.clear_session_hooks(old_session_id).await;
         self.sync_active_goal_stop_hook_for_current_state().await;
         Ok(())

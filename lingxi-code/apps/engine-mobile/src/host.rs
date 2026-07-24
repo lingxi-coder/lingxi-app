@@ -2358,26 +2358,19 @@ impl cron::CronJobFirer for MobileTurnFirer {
 /// (`lastFiredAt ?? createdAt ?? now`). `None` for an unparseable / impossible
 /// expression.
 fn task_next_fire_ms(
+    id: &str,
     cron: &str,
     created_at_ms: u64,
     last_fired_at_ms: Option<u64>,
+    recurring: bool,
     now: std::time::SystemTime,
 ) -> Option<u64> {
-    let schedule = cron::parse_cron(cron).ok()?;
-    let anchor = last_fired_at_ms
-        .filter(|ms| *ms > 0)
-        .map(|ms| std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(ms))
-        .unwrap_or_else(|| {
-            if created_at_ms > 0 {
-                std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(created_at_ms)
-            } else {
-                now
-            }
-        });
-    schedule
-        .next_match_after(anchor)
-        .and_then(|st| st.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
-        .map(|d| d.as_millis() as u64)
+    // Delegate to the SAME jittered scheduler computation the Android alarm arms
+    // from (`next_cron_fire_time` → `cron::next_fire_epoch_ms`), so the per-task
+    // next fire the management UI shows is the instant the job will ACTUALLY
+    // fire. A raw `next_match_after` here omitted Claude Code's recurring jitter,
+    // making the displayed time disagree with the armed alarm by up to 30 min.
+    cron::next_fire_epoch_ms_for_task(id, cron, created_at_ms, last_fired_at_ms, recurring, now)
 }
 
 // The cron FFI surface — async UniFFI exports driven on the handle-owned runtime
@@ -2445,7 +2438,14 @@ impl MobileEngineHandle {
             .into_iter()
             .map(|t| CronTaskDto {
                 human: tool_cron::schedule_cron::cron_to_human(&t.cron),
-                next_fire_ms: task_next_fire_ms(&t.cron, t.created_at, t.last_fired_at, now),
+                next_fire_ms: task_next_fire_ms(
+                    &t.id,
+                    &t.cron,
+                    t.created_at,
+                    t.last_fired_at,
+                    t.recurring.unwrap_or(false),
+                    now,
+                ),
                 id: t.id,
                 cron: t.cron,
                 prompt: t.prompt,
@@ -2506,7 +2506,7 @@ impl MobileEngineHandle {
         .map_err(|e| MobileEngineError::Internal(format!("write scheduled_tasks.json: {e}")))?;
         Ok(CronTaskDto {
             human: tool_cron::schedule_cron::cron_to_human(&task.cron),
-            next_fire_ms: task_next_fire_ms(&task.cron, now_ms, None, now),
+            next_fire_ms: task_next_fire_ms(&task.id, &task.cron, now_ms, None, recurring, now),
             id: task.id,
             cron: task.cron,
             prompt: task.prompt,
@@ -2727,7 +2727,16 @@ mod tests {
                 .cron_create("0 0 1 1 *".to_string(), "happy new year".to_string(), true)
                 .await
                 .expect("create succeeds");
-            assert!(created.id.starts_with('d'), "claude-code id format");
+            // claude-code cron id = `randomUUID().slice(0,8)` → 8 lowercase hex
+            // chars (NOT a `[bartwmd]`-prefixed task id, and NOT deterministically
+            // 'd'-prefixed — the previous `starts_with('d')` assertion passed only
+            // ~1/16 of the time).
+            assert_eq!(created.id.len(), 8, "cron id is 8 chars: {}", created.id);
+            assert!(
+                created.id.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()),
+                "cron id is lowercase hex: {}",
+                created.id
+            );
             assert!(created.recurring);
             assert!(created.next_fire_ms.is_some());
 

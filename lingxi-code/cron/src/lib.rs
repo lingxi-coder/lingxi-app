@@ -38,7 +38,8 @@ pub use autonomous_loop::{
 };
 pub use lock::{release_lock, try_acquire_lock, CronLockError, LockRecord};
 pub use run_due::{
-    default_recurring_max_age, lock_cron_file, next_fire_epoch_ms, run_due_jobs, CronJobFirer,
+    default_recurring_max_age, lock_cron_file, next_fire_epoch_ms, next_fire_epoch_ms_for_task,
+    run_due_jobs, CronJobFirer,
     FireStatus, FiredJob,
 };
 pub use schedule::{parse_cron, CronExpression, CronField, CronParseError};

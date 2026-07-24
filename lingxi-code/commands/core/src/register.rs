@@ -5,7 +5,7 @@
 use command_api::CommandRegistry;
 use std::sync::Arc;
 
-/// Register all 106 built-in slash commands into `reg`.
+/// Register all 105 built-in slash commands into `reg`.
 ///
 /// The non-core names point at per-name instances of
 /// [`command_api::builtin_support::UnimplementedCommandHandler`] that return the locked
@@ -25,7 +25,7 @@ pub fn register_all_builtin_commands(reg: &mut CommandRegistry) {
         core_description, UnimplementedCommandHandler, BUILTIN_COMMAND_NAMES,
     };
 
-    // Pass 1: register all 106 with per-name unimplemented handler instances.
+    // Pass 1: register all 105 with per-name unimplemented handler instances.
     //
     // Each name needs its own handler **instance** because the handler
     // carries its own `name` field used to substitute the locked literal.
@@ -476,10 +476,10 @@ mod registry_tests {
     use command_api::model::CommandResult;
 
     #[test]
-    fn register_all_registers_exactly_106_names() {
+    fn register_all_registers_exactly_105_names() {
         let mut reg = CommandRegistry::new();
         register_all_builtin_commands(&mut reg);
-        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 106);
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 105);
         for name in BUILTIN_COMMAND_NAMES {
             assert!(
                 reg.resolve(name).is_some(),
@@ -637,19 +637,31 @@ mod batch_1_tests {
         let handle = Arc::new(MockOrchestratorHandle::new());
         register_core_batch_1(&mut reg, handle);
 
-        // x402 is not in the batch-1 list → still returns the M5-09 stub.
-        let h = reg.get_handler("x402").expect("x402 handler missing");
-        let args = ParsedSlashCommand {
-            name: "x402".to_string(),
-            raw_args: String::new(),
-            positional_args: vec![],
-        };
-        match h.handle(&args).await {
-            CommandResult::Done { display: Some(s) } => {
-                assert_eq!(s, "x402: not implemented in v0.6.0 (M5)");
+        // A builtin wired by NO batch still returns the M5-09 stub. Found
+        // dynamically rather than hard-coded (x402 was the old sample but was
+        // removed from the command set — 0 hits in the 2.1.216+ oracle), so this
+        // survives future name churn while still asserting the stub mechanism.
+        let mut found_stub = false;
+        for name in command_api::builtin_support::BUILTIN_COMMAND_NAMES {
+            let Some(h) = reg.get_handler(name) else {
+                continue;
+            };
+            let args = ParsedSlashCommand {
+                name: (*name).to_string(),
+                raw_args: String::new(),
+                positional_args: vec![],
+            };
+            if let CommandResult::Done { display: Some(s) } = h.handle(&args).await {
+                if s == format!("{name}: not implemented in v0.6.0 (M5)") {
+                    found_stub = true;
+                    break;
+                }
             }
-            other => panic!("expected Done, got {other:?}"),
         }
+        assert!(
+            found_stub,
+            "at least one non-batch builtin must still return the M5-09 stub"
+        );
     }
 
     #[test]

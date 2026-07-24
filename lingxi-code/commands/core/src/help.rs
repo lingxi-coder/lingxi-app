@@ -63,13 +63,15 @@ mod tests {
                 assert!(s.contains(
                     "(removed) Ask Claude to create/manage subagents, or edit .claude/agents/"
                 ));
-                // /x402 stays visible (claude-code ships it with no isHidden gate).
-                assert!(s.contains("/x402"));
+                // /reload-plugins stays visible (host-bound, no isHidden gate).
+                // (x402 was removed from the command set — 0 hits in 2.1.216+.)
+                assert!(s.contains("/reload-plugins"));
                 // Hidden/disabled commands are filtered out of /help.
                 assert!(!s.contains("  /heapdump "));
                 assert!(!s.contains("  /ant-trace "));
-                // 80 newlines total (1 header + 79 visible commands).
-                assert_eq!(s.matches('\n').count(), 80);
+                // 79 newlines total (1 header + 78 visible commands, after the
+                // removal of the previously-visible /x402).
+                assert_eq!(s.matches('\n').count(), 79);
             }
             other => panic!("expected Done, got {other:?}"),
         }

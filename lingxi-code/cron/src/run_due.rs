@@ -221,38 +221,68 @@ pub async fn next_fire_epoch_ms(
         .await
         .ok()?;
 
-    let mut earliest: Option<SystemTime> = None;
+    // The earliest jittered next-fire across all tasks. Each task is scored by
+    // the SAME per-task helper the management-UI display uses, so the armed alarm
+    // (this value) and the displayed per-task next fire cannot drift apart.
+    let mut earliest: Option<u64> = None;
     for t in parse_tasks(&body).tasks {
-        let Ok(schedule) = parse_cron(&t.cron) else {
-            continue;
-        };
-        let created_at = if t.created_at > 0 {
-            SystemTime::UNIX_EPOCH + Duration::from_millis(t.created_at)
-        } else {
-            now
-        };
-        let last_run = t
-            .last_fired_at
-            .filter(|ms| *ms > 0)
-            .map(|ms| SystemTime::UNIX_EPOCH + Duration::from_millis(ms));
-        let task = CronTaskDef {
-            id: t.id,
-            schedule,
-            prompt: t.prompt,
-            agent_type: None,
-            last_run,
-            enabled: true,
-            created_at,
-            recurring: t.recurring.unwrap_or(false),
-        };
-        if let Some(next) = next_fire_time(&task) {
-            earliest = Some(match earliest {
-                Some(e) if e <= next => e,
-                _ => next,
-            });
+        if let Some(next) = next_fire_epoch_ms_for_task(
+            &t.id,
+            &t.cron,
+            t.created_at,
+            t.last_fired_at,
+            t.recurring.unwrap_or(false),
+            now,
+        ) {
+            earliest = Some(earliest.map_or(next, |e| e.min(next)));
         }
     }
-    earliest.map(system_time_to_epoch_ms)
+    earliest
+}
+
+/// The jittered next-fire time of ONE task, epoch **milliseconds** — the same
+/// computation [`next_fire_epoch_ms`] applies per task ([`next_fire_time`],
+/// which includes Claude Code's recurring/one-shot jitter + cache-lead), exposed
+/// so a management-UI list can show the instant the job will ACTUALLY fire (the
+/// armed-alarm time), not the un-jittered nominal schedule. A caller that shows
+/// the raw schedule would display a time that disagrees with the scheduler's
+/// alarm by up to [`DEFAULT_RECURRING_JITTER_CAP`].
+///
+/// `created_at_ms` / `last_fired_at_ms` are the persisted task fields; `now` is
+/// the fallback anchor when the task carries no creation time. Returns `None`
+/// for an unparseable expression or a schedule that never fires again.
+#[must_use]
+pub fn next_fire_epoch_ms_for_task(
+    id: &str,
+    cron: &str,
+    created_at_ms: u64,
+    last_fired_at_ms: Option<u64>,
+    recurring: bool,
+    now: SystemTime,
+) -> Option<u64> {
+    // `id` and `recurring` are load-bearing: the jitter fraction is derived from
+    // the id and the recurring/one-shot arms differ, so passing placeholders
+    // would diverge from the scheduler's own per-task computation.
+    let schedule = parse_cron(cron).ok()?;
+    let created_at = if created_at_ms > 0 {
+        SystemTime::UNIX_EPOCH + Duration::from_millis(created_at_ms)
+    } else {
+        now
+    };
+    let last_run = last_fired_at_ms
+        .filter(|ms| *ms > 0)
+        .map(|ms| SystemTime::UNIX_EPOCH + Duration::from_millis(ms));
+    let task = CronTaskDef {
+        id: id.to_string(),
+        schedule,
+        prompt: String::new(),
+        agent_type: None,
+        last_run,
+        enabled: true,
+        created_at,
+        recurring,
+    };
+    next_fire_time(&task).map(system_time_to_epoch_ms)
 }
 
 /// `SystemTime` → epoch **milliseconds** (the on-disk / alarm unit). A

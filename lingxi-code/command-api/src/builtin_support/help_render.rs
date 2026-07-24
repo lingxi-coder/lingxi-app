@@ -85,18 +85,19 @@ mod tests {
 
     #[test]
     fn output_has_exactly_80_lines() {
-        // 1 header + 79 visible commands = 80 lines (each terminated by '\n').
+        // 1 header + 78 visible commands = 79 lines (each terminated by '\n').
         // The 27 hidden/disabled commands (is_palette_hidden) are filtered out,
         // matching claude-code's `!isHidden && !$te` help/palette filter.
-        // (106 builtins − 27 hidden = 79 visible, with no DISABLE_* env set.)
+        // (105 builtins − 27 hidden = 78 visible, with no DISABLE_* env set;
+        // x402 — a formerly-visible command — was removed from the set.)
         // Serialize with the env-gate mutators (names::ENV_LOCK) so a concurrent
         // `DISABLE_*_COMMAND` mutation can't transiently drop a counted command.
         let _g = crate::builtin_support::names::ENV_LOCK.lock().unwrap();
         let s = render_help_screen();
         let n = s.matches('\n').count();
         assert_eq!(
-            n, 80,
-            "expected 80 newlines (1 header + 79 visible commands), got {n}"
+            n, 79,
+            "expected 79 newlines (1 header + 78 visible commands), got {n}"
         );
     }
 
@@ -126,7 +127,7 @@ mod tests {
         let s = render_help_screen();
         for name in [
             "btw",
-            "x402",
+            // x402 was removed from the command set (0 hits in the 2.1.216+ oracle).
             "reload-plugins",
             "install-slack-app",
             "mobile",

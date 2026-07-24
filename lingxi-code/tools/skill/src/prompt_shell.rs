@@ -141,16 +141,33 @@ impl ShellSnapshot {
                 } else {
                     "\"$HOME/.bashrc\""
                 };
+                // Options + functions. The one-line-per-entry OPTION sections
+                // are capped at 1000 lines (oracle `head -n 1000`); the
+                // multi-line `typeset -f`/`declare -f` function dump is left
+                // uncapped since a line cap would truncate a definition mid-body.
+                // For bash, append `shopt -s expand_aliases` AFTER `shopt -p`
+                // (which captures the non-interactive default `shopt -u
+                // expand_aliases`), so alias expansion is ON when the snapshot is
+                // sourced — otherwise the subsequent `eval` never expands any
+                // alias (oracle: `echo "shopt -s expand_aliases" >> snapshot`).
                 let functions = if shell_path.contains("zsh") {
-                    "typeset -f; setopt | sed 's/^/setopt /'"
+                    "typeset -f; setopt | sed 's/^/setopt /' | head -n 1000"
                 } else {
-                    "declare -f; shopt -p; set +o"
+                    "declare -f; shopt -p | head -n 1000; set +o | head -n 1000; \
+                     echo 'shopt -s expand_aliases'"
                 };
+                // Normalize the alias dump so BOTH shells emit real
+                // `alias -- name=value` definitions (oracle `alias | sed
+                // 's/^alias //g' | sed 's/^/alias -- /' | head -n 1000`). Without
+                // this, zsh's prefix-less `name='value'` lines source as stray
+                // VARIABLE assignments, not aliases.
                 let script = format!(
                     "if [ -f {rc_file} ]; then . {rc_file} </dev/null; fi; \
                      {{ printf '%s\\n' '# LingXi shell snapshot' \
                         'unalias -a 2>/dev/null || true'; \
-                        {functions}; alias; printf 'export PATH=%q\\n' \"$PATH\"; \
+                        {functions}; \
+                        alias | sed 's/^alias //g' | sed 's/^/alias -- /' | head -n 1000; \
+                        printf 'export PATH=%q\\n' \"$PATH\"; \
                      }} > {}",
                     shell_quote(&self.path.to_string_lossy())
                 );

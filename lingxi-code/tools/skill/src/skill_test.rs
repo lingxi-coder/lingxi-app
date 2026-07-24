@@ -523,6 +523,52 @@ mod tests {
         assert_eq!(out.data["model_content"], json!("Launching skill: sh"));
     }
 
+    /// SKILLEXEC #26: the shell snapshot is SESSION-scoped — its creation shell
+    /// runs at most once per `SkillTool`, not once per `call()`. Two skill calls
+    /// with embedded commands therefore consume 3 process runs (1 snapshot + 2
+    /// commands), not 4 (which is what re-creating the provider per call did,
+    /// re-sourcing the user's rc file every invocation).
+    #[tokio::test]
+    async fn shell_snapshot_is_created_once_per_session_not_per_call() {
+        let desc = SkillDescriptor {
+            body: "before !`echo hi` after".into(),
+            ..prompt_desc("sh")
+        };
+        let stub = std::sync::Arc::new(StubProcess::with(vec![
+            dummy_out(),             // snapshot creation — expected exactly ONCE
+            out_with_stdout("hi\n"), // call 1's embedded command
+            out_with_stdout("hi\n"), // call 2's embedded command
+            dummy_out(),             // slack: consumed only if the snapshot re-runs
+        ]));
+        let mut ctx = shell_test_ctx(dummy_out());
+        ctx.process = stub.clone();
+        let tool = SkillTool::with_loader(ctx, Arc::new(FixedLoader(Some(desc))));
+
+        for _ in 0..2 {
+            let out = tool
+                .call(json!({"skill": "sh"}), fresh_ctx(), fresh_tx())
+                .await
+                .expect("ok");
+            match &out.new_messages[0] {
+                protocol::ConversationMessage::User { content, .. } => match content.first() {
+                    Some(protocol::ContentBlock::Text { text }) => {
+                        assert_eq!(text, "before hi after");
+                    }
+                    other => panic!("expected leading Text block, got {other:?}"),
+                },
+                other => panic!("expected injected User message, got {other:?}"),
+            }
+        }
+
+        // 4 queued − 3 consumed (1 snapshot + 2 commands) = 1 left. Re-creating
+        // the provider per call would have consumed all 4.
+        assert_eq!(
+            stub.remaining(),
+            1,
+            "the snapshot shell must run once per session, not once per skill call"
+        );
+    }
+
     /// SAFETY: a skill body with NO `!command` is byte-identical to the
     /// argument-substituted text — the shell-expansion engine returns the input
     /// unchanged and the fake process is NEVER invoked (it would error if it were:

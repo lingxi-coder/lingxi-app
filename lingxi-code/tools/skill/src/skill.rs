@@ -188,22 +188,36 @@ impl SkillLoader for EmptySkillLoader {
 pub struct SkillTool {
     pub(crate) ctx: tool_api::BuiltinToolContext,
     pub(crate) loader: Arc<dyn SkillLoader>,
+    /// SESSION-scoped prompt shell-expansion provider. `SkillTool` is registered
+    /// ONCE per session, so building the provider (and its lazily-created shell
+    /// snapshot) here — rather than fresh in every `call()` — makes the snapshot
+    /// shell run at most ONCE per session (the snapshot's `OnceCell`), matching
+    /// the oracle. Re-creating it per invocation re-executed the user's
+    /// `~/.zshrc`/`~/.bashrc` (unsandboxed, 10s budget) on every skill call.
+    pub(crate) prompt_shell: Arc<dyn command_api::ShellExpansionProvider>,
 }
 
 impl SkillTool {
     /// Construct with the default `EmptySkillLoader`.
     #[must_use]
     pub fn new(ctx: tool_api::BuiltinToolContext) -> Self {
+        let prompt_shell = crate::build_prompt_shell_provider(&ctx);
         Self {
             ctx,
             loader: Arc::new(EmptySkillLoader),
+            prompt_shell,
         }
     }
 
     /// Construct with a caller-supplied loader.
     #[must_use]
     pub fn with_loader(ctx: tool_api::BuiltinToolContext, loader: Arc<dyn SkillLoader>) -> Self {
-        Self { ctx, loader }
+        let prompt_shell = crate::build_prompt_shell_provider(&ctx);
+        Self {
+            ctx,
+            loader,
+            prompt_shell,
+        }
     }
 }
 
@@ -626,7 +640,8 @@ ALREADY been loaded - follow the instructions directly instead of calling this t
             // claude-code building a fresh `toolPermissionContext` before
             // `executeShellCommandsInPrompt`. The `shell` selector drives both the
             // gate's tool-name choice and the runner's routing.
-            let shell_ctx = crate::build_prompt_shell_provider(&self.ctx)
+            let shell_ctx = self
+                .prompt_shell
                 .build(&desc.allowed_tools, desc.shell);
             match command_api::execute_shell_commands_in_prompt(
                 &expanded_prompt,

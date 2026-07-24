@@ -217,6 +217,14 @@ impl StubProcess {
     pub fn single(output: ProcessOutput) -> Self {
         Self::with(vec![output])
     }
+
+    /// Number of queued outputs not yet consumed by a `run` call. Lets a test
+    /// assert HOW MANY process runs happened (e.g. that a cached shell snapshot
+    /// runs once, not per call).
+    #[must_use]
+    pub fn remaining(&self) -> usize {
+        self.queued.lock().unwrap().len()
+    }
 }
 
 #[async_trait]

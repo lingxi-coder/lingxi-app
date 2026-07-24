@@ -661,6 +661,17 @@ impl Tool for SendMessageTool {
         _ctx: &ToolUseContext,
     ) -> Result<(), ValidationError> {
         let to = input.get("to").and_then(Value::as_str).unwrap_or("");
+        // The 2.1.218 oracle's SendMessage validateInput STILL hard-rejects a
+        // broadcast unconditionally (`if(e.to==="*")return{result:!1,message:'…',
+        // errorCode:9}`). The internal fan-out plumbing (handle_broadcast /
+        // MailboxRouterHandle::broadcast) stays wired but DORMANT — unreachable
+        // through this gate — until the oracle re-adds broadcast; the model is
+        // not granted a fan-out capability the oracle denies.
+        if to == "*" {
+            return Err(ValidationError(
+                "broadcast (to: \"*\") is no longer supported — send a message per recipient".into(),
+            ));
+        }
         if to.trim().is_empty() {
             return Err(ValidationError("to must not be empty".into()));
         }
@@ -1286,14 +1297,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn validate_accepts_plain_broadcast_and_rejects_structured_at_call() {
+    async fn validate_broadcast_rejected_unconditionally() {
         let tool = SendMessageTool::new(shell_test_ctx(dummy_out()));
-        tool.validate_input(
-            &json!({ "to": "*", "summary": "all hands", "message": "standup in 5" }),
-            &fresh_ctx(),
-        )
-        .await
-        .expect("plain broadcast is supported");
+        // The oracle's validateInput hard-rejects `to: "*"` with a byte-exact
+        // message; broadcast is no longer a supported model-facing capability.
+        let err = tool
+            .validate_input(
+                &json!({ "to": "*", "summary": "all hands", "message": "standup in 5" }),
+                &fresh_ctx(),
+            )
+            .await
+            .expect_err("broadcast (to: \"*\") must be rejected");
+        assert_eq!(
+            err.0,
+            "broadcast (to: \"*\") is no longer supported — send a message per recipient"
+        );
     }
 
     #[tokio::test]
@@ -1461,6 +1479,10 @@ mod tests {
 
     #[tokio::test]
     async fn broadcast_returns_broadcast_shape() {
+        // DORMANT PLUMBING: the model can never reach this — validateInput now
+        // hard-rejects `to: "*"` (see validate_broadcast_rejected_unconditionally).
+        // This exercises the internal fan-out mechanism directly (bypassing the
+        // gate) so it stays functional for the day the oracle re-adds broadcast.
         let router = Arc::new(RecordingRouter::new());
         let tool = SendMessageTool::new(ctx_with(router.clone()));
         let res = tool

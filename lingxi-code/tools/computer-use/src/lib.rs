@@ -47,6 +47,7 @@ use tool_api::tool_trait::{
 use tool_api::BuiltinToolContext;
 
 mod access_resolver;
+mod lock;
 mod permission_model;
 mod validate;
 
@@ -58,9 +59,11 @@ pub const TOOL_NAME: &str = "computer";
 
 /// Cross-session lock-held error string (parity with `wrapper.tsx`
 /// `formatLockHeld`). `holder` is truncated to the first 8 chars, matching the
-/// upstream `holder.slice(0, 8)`. The lock itself needs engine wiring (session
-/// id, lockfile path, shutdown registration) outside this crate, so the helper
-/// lives here ready to use while the acquire path stays deferred.
+/// upstream `holder.slice(0, 8)`. Not currently called anywhere — the actual
+/// lock (see [`lock`]) identifies its holder by PID, not a session id, so
+/// there is no live call site for this UI-level "who's holding it" phrasing
+/// yet; kept for a future approval-time surface (e.g. `request_access`
+/// showing who's active) that does have a session id to report.
 #[must_use]
 pub fn format_lock_held(holder: &str) -> String {
     let short: String = holder.chars().take(8).collect();
@@ -76,10 +79,28 @@ pub const LOCK_HELD_AT_CALL: &str = "Another Claude session is currently using t
 
 /// Enter-notification message when the Esc abort hotkey is registered
 /// (`wrapper.tsx` `computer_use_enter`).
+///
+/// Not currently wired to a live call site. It needs a system-wide (NOT
+/// terminal-focus-scoped) Esc capture — the whole point is aborting a
+/// computer-use action while focus has moved to whatever app the model is
+/// driving — which on macOS means a `CGEventTap` in
+/// `platform-macos-computer-control` (the only crate here allowed `unsafe`
+/// for exactly this kind of native seam). That capability doesn't exist yet
+/// and isn't interactively testable in a non-GUI sandbox, so it's
+/// deliberately not implemented blind; [`NOTIFY_ENTER_CTRL_C`] is the
+/// already-real fallback (the TUI's existing Ctrl+C-cancels-the-turn path
+/// works today regardless of which app has focus, as long as the terminal
+/// itself is still the foreground window).
 pub const NOTIFY_ENTER_ESC: &str = "Claude is using your computer · press Esc to stop";
-/// Enter-notification message when only Ctrl+C is available.
+/// Enter-notification message when only Ctrl+C is available. Same "not yet
+/// wired to a live call site" status as [`NOTIFY_ENTER_ESC`] — showing
+/// EITHER enter notification needs a terminal-status surface this tool
+/// crate has no channel to (`tui-core`'s bridge pattern, e.g.
+/// `computer_access_bridge`, is the shape a future one would take).
 pub const NOTIFY_ENTER_CTRL_C: &str = "Claude is using your computer · press Ctrl+C to stop";
 /// Exit-notification message at turn end (`cleanup.ts` `computer_use_exit`).
+/// Same "not yet wired" status — pairs with [`NOTIFY_ENTER_ESC`]/
+/// [`NOTIFY_ENTER_CTRL_C`].
 pub const NOTIFY_EXIT: &str = "Claude is done using your computer";
 
 /// `ComputerTool` — screenshot + mouse/keyboard/clipboard/app automation.
@@ -88,6 +109,11 @@ pub struct ComputerTool {
     ctx: BuiltinToolContext,
     state: std::sync::Arc<Mutex<SessionState>>,
     access_resolver: std::sync::Arc<dyn ComputerAccessResolver>,
+    /// Resolved once at construction (not re-read per call) — the directory
+    /// [`Self::enforce_computer_lock`] locks in. Overridable in tests via
+    /// [`Self::with_lock_home`] so they never touch the real
+    /// `$HOME/.lingxi` (or a concurrently-running real session's lock).
+    lock_home: std::path::PathBuf,
 }
 
 impl ComputerTool {
@@ -112,7 +138,18 @@ impl ComputerTool {
             ctx,
             state: std::sync::Arc::new(Mutex::new(SessionState::default())),
             access_resolver,
+            lock_home: lock::lingxi_config_home_dir(),
         }
+    }
+
+    /// Redirect the cross-session lock to `home` instead of the real
+    /// `$HOME/.lingxi` — test-only, so the test suite never contends with
+    /// (or corrupts) an actual concurrently-running session's lock file.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_lock_home(mut self, home: std::path::PathBuf) -> Self {
+        self.lock_home = home;
+        self
     }
 }
 
@@ -454,6 +491,8 @@ impl Tool for ComputerTool {
             .unwrap_or("screenshot")
             .to_string();
 
+        self.enforce_computer_lock(&action)?;
+
         // Session-scoped meta actions never touch the ComputerControl seam.
         match action.as_str() {
             "request_access" => return self.handle_request_access(&input).await,
@@ -723,6 +762,32 @@ impl ComputerTool {
             json!({ "stepsCompleted": results.len(), "results": results }),
             "computer_batch",
         ))
+    }
+
+    /// Enforce the cross-session computer lock (parity with the binary's
+    /// `cu_lock_held` gate). Exempts the two purely session-local
+    /// bookkeeping actions (`request_access`, `list_granted_applications`) —
+    /// neither touches the shared physical machine, so two sessions doing
+    /// their OWN permission bookkeeping concurrently is harmless. Every
+    /// other action (including `switch_display` and `computer_batch`, which
+    /// dispatch outside [`Self::execute_one`]) claims — or re-claims — the
+    /// lock for this process, or fails with [`LOCK_HELD_AT_CALL`] when a
+    /// different live process already holds it.
+    fn enforce_computer_lock(&self, action: &str) -> Result<(), ToolError> {
+        if matches!(action, "request_access" | "list_granted_applications") {
+            return Ok(());
+        }
+        #[allow(clippy::cast_possible_wrap)] // real PIDs never approach i32::MAX
+        let my_pid = std::process::id() as i32;
+        match lock::check(&self.lock_home, my_pid) {
+            lock::Holder::Other { .. } => {
+                Err(ToolError::PermissionDenied(LOCK_HELD_AT_CALL.to_string()))
+            }
+            lock::Holder::Free | lock::Holder::Ourselves => {
+                lock::claim(&self.lock_home, my_pid);
+                Ok(())
+            }
+        }
     }
 
     /// Enforce the frontmost-app tier gate for actions that touch the screen.
@@ -1396,6 +1461,19 @@ mod integration_tests {
         }
     }
 
+    /// A fresh, isolated directory for the cross-session lock — every test
+    /// gets its own, so the suite never contends with (or corrupts) a real
+    /// concurrently-running session's `~/.lingxi/computer-use.lock`.
+    fn test_lock_home() -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "lingxi-computeruse-test-{}-{n}",
+            std::process::id()
+        ))
+    }
+
     fn tool_with(mock: MockCc) -> ComputerTool {
         let bus = std::sync::Arc::new(telemetry::AnalyticsBus::new());
         let fs = tool_api::test_support::make_dummy_fs();
@@ -1407,6 +1485,7 @@ mod integration_tests {
         // resolver's UI-vs-no-UI behavior (that's covered directly in
         // access_resolver.rs's own tests).
         ComputerTool::with_access_resolver(ctx, std::sync::Arc::new(AutoGrantResolver))
+            .with_lock_home(test_lock_home())
     }
 
     /// Like [`tool_with`], but also hands back the `Arc<MockCc>` so a test
@@ -1419,7 +1498,8 @@ mod integration_tests {
         let mut ctx = tool_api::test_support::ctx_for_file_tools(fs, bus, vec![]);
         ctx.computer_control = Some(cc.clone());
         (
-            ComputerTool::with_access_resolver(ctx, std::sync::Arc::new(AutoGrantResolver)),
+            ComputerTool::with_access_resolver(ctx, std::sync::Arc::new(AutoGrantResolver))
+                .with_lock_home(test_lock_home()),
             cc,
         )
     }
@@ -1683,7 +1763,7 @@ mod integration_tests {
         let mut mock = MockCc::default();
         *mock.frontmost.get_mut().unwrap() = Ok(Some(app("com.granted.app", "Granted")));
         ctx.computer_control = Some(std::sync::Arc::new(mock));
-        let tool = ComputerTool::new(ctx);
+        let tool = ComputerTool::new(ctx).with_lock_home(test_lock_home());
         let result = call(&tool, json!({ "action": "request_access", "apps": ["Granted"] }))
             .await
             .unwrap();
@@ -1726,7 +1806,8 @@ mod integration_tests {
         let fs = tool_api::test_support::make_dummy_fs();
         let mut ctx = tool_api::test_support::ctx_for_file_tools(fs, bus, vec![]);
         ctx.computer_control = Some(std::sync::Arc::new(MockCc::default()));
-        let tool = ComputerTool::with_access_resolver(ctx, std::sync::Arc::new(PartialGrantResolver));
+        let tool = ComputerTool::with_access_resolver(ctx, std::sync::Arc::new(PartialGrantResolver))
+            .with_lock_home(test_lock_home());
         let result = call(
             &tool,
             json!({ "action": "request_access", "apps": ["com.a.app", "com.b.app"] }),
@@ -1841,7 +1922,8 @@ mod integration_tests {
         let fs = tool_api::test_support::make_dummy_fs();
         let mut ctx = tool_api::test_support::ctx_for_file_tools(fs, bus, vec![]);
         ctx.computer_control = Some(std::sync::Arc::new(NoDisplaySupport));
-        let tool = ComputerTool::with_access_resolver(ctx, std::sync::Arc::new(AutoGrantResolver));
+        let tool = ComputerTool::with_access_resolver(ctx, std::sync::Arc::new(AutoGrantResolver))
+            .with_lock_home(test_lock_home());
         let result = call(&tool, json!({ "action": "switch_display", "display": "auto" }))
             .await
             .unwrap();
@@ -1877,5 +1959,76 @@ mod integration_tests {
         let tool = tool_with(mock);
         let result = call(&tool, json!({ "action": "screenshot" })).await.unwrap();
         assert!(result.data.get("note").is_none(), "{:?}", result.data);
+    }
+
+    /// Spawn a real, cheap, briefly-lived child process to stand in for "a
+    /// live pid belonging to another session" — mirrors `lock::tests`'s own
+    /// helper (kept separate: that one is private to its module).
+    fn spawn_other_process() -> std::process::Child {
+        std::process::Command::new(if cfg!(windows) { "cmd" } else { "sleep" })
+            .args(if cfg!(windows) {
+                vec!["/C", "ping -n 5 127.0.0.1 >NUL"]
+            } else {
+                vec!["5"]
+            })
+            .spawn()
+            .expect("spawn a short-lived child process")
+    }
+
+    #[tokio::test]
+    async fn a_live_other_session_sharing_the_lock_home_blocks_real_actions() {
+        let home = test_lock_home();
+        let mut other = spawn_other_process();
+        lock::claim(&home, other.id() as i32);
+
+        let tool = tool_with(MockCc::default()).with_lock_home(home);
+        let err = call(&tool, json!({ "action": "screenshot" })).await.unwrap_err();
+        assert_eq!(err.to_string(), format!("permission denied: {LOCK_HELD_AT_CALL}"));
+
+        let _ = other.kill();
+        let _ = other.wait();
+    }
+
+    #[tokio::test]
+    async fn request_access_and_list_granted_bypass_the_lock_entirely() {
+        let home = test_lock_home();
+        let mut other = spawn_other_process();
+        lock::claim(&home, other.id() as i32);
+
+        let tool = tool_with(MockCc::default()).with_lock_home(home);
+        // Neither of these touches the shared physical machine, so they must
+        // succeed even while a different live session holds the lock.
+        call(&tool, json!({ "action": "request_access", "apps": ["Slack"] }))
+            .await
+            .expect("request_access is exempt from the cross-session lock");
+        call(&tool, json!({ "action": "list_granted_applications" }))
+            .await
+            .expect("list_granted_applications is exempt from the cross-session lock");
+
+        let _ = other.kill();
+        let _ = other.wait();
+    }
+
+    #[tokio::test]
+    async fn a_stale_lock_from_a_dead_session_is_taken_over_rather_than_blocking() {
+        let home = test_lock_home();
+        let mut other = spawn_other_process();
+        let other_pid = other.id() as i32;
+        lock::claim(&home, other_pid);
+        let _ = other.kill();
+        let _ = other.wait(); // now genuinely dead — a stale lock, not a live holder
+
+        let tool = tool_with(MockCc {
+            screenshot_ok: true,
+            ..Default::default()
+        })
+        .with_lock_home(home.clone());
+        call(&tool, json!({ "action": "screenshot" }))
+            .await
+            .expect("a dead holder's lock must be treated as stale, not blocking");
+        // We took it over — it's now recorded as OUR pid, not the dead one.
+        #[allow(clippy::cast_possible_wrap)]
+        let my_pid = std::process::id() as i32;
+        assert_eq!(lock::check(&home, my_pid), lock::Holder::Ourselves);
     }
 }

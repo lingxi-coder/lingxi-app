@@ -17,11 +17,20 @@ permission = { path = "../../permission" }
 # `request_access`'s interactive resolver (mirrors `tool-ui`'s
 # `AskUserQuestionResolver`, which depends on `tui-core` the same way).
 tui-core = { path = "../../tui-core" }
+# Cross-session lock-file home dir resolution (parity with `tool-task`'s
+# `lingxi_config_home_dir`).
+branding.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 once_cell = "1"
 tokio = { workspace = true, features = ["sync"] }
+
+# `kill(pid, 0)` liveness probe for the cross-session lock's staleness check
+# (mirrors `apps/cli`'s `daemon_lock` module) — a safe wrapper, so this stays
+# compatible with this crate's `#![forbid(unsafe_code)]`.
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.27", default-features = false, features = ["signal"] }
 
 [dev-dependencies]
 tool-api = { path = "../../tool-api", features = ["test-support"] }

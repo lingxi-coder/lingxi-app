@@ -24,6 +24,11 @@ const TOKEN_CAPACITY: f64 = 10.0;
 const TOKEN_REFILL_SECS: f64 = 2.0;
 const HIGH_VOLUME_STOP: Duration = Duration::from_secs(30);
 const QUIET_RESET: Duration = Duration::from_secs(2);
+/// Upper bound on how long the worker waits for `TaskRegistry::spawn` to publish
+/// its registry row before giving up. Registration normally lands microseconds
+/// after `spawn` returns; a wait this long means the spawn future was dropped
+/// (turn/session teardown), so the worker exits instead of busy-polling forever.
+const REGISTRATION_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_EVENT_CHARS: usize = 500;
 const MAX_PENDING_LINES: usize = 256;
 
@@ -365,9 +370,30 @@ impl Task for MonitorHandler {
             // `TaskRegistry::spawn` can only insert the handler-generated id
             // after this method returns. Wait for that publication so an
             // `echo ready` monitor cannot finish before its event/status has a
-            // registry row to update.
-            while !status_sink.is_registered(&worker_id).await {
-                runtime.sleep(Duration::from_millis(1)).await;
+            // registry row to update — but BOUND the wait and honor cancellation
+            // so a dropped `TaskRegistry::spawn` future (turn/session teardown)
+            // cannot leave this detached worker busy-polling the registry every
+            // 1ms forever.
+            let registered = {
+                let wait = async {
+                    while !status_sink.is_registered(&worker_id).await {
+                        runtime.sleep(Duration::from_millis(1)).await;
+                    }
+                };
+                tokio::select! {
+                    () = wait => true,
+                    () = worker_cancel.cancelled() => false,
+                    () = runtime.sleep(REGISTRATION_TIMEOUT) => false,
+                }
+            };
+            if !registered {
+                // Never published (cancelled or timed out). Tear down the paired
+                // flush worker, drop our map entry, and exit. The monitored
+                // command was never started, so nothing runs unwatched.
+                flush_cancel.cancel();
+                let _ = worker_runtime.cancel(&worker_flush_handle).await;
+                workers.lock().await.remove(&worker_id);
+                return;
             }
             status_sink
                 .set_status(&worker_id, TaskStatus::Running)
@@ -793,9 +819,21 @@ mod tests {
         }
     }
 
+    /// A status sink whose task row is NEVER published — exercises the worker's
+    /// bounded/cancellable registration wait.
+    #[derive(Default)]
+    struct NeverRegisteredSink;
+    #[async_trait]
+    impl TaskStatusSink for NeverRegisteredSink {
+        async fn set_status(&self, _task_id: &str, _status: TaskStatus) {}
+        async fn is_registered(&self, _task_id: &str) -> bool {
+            false
+        }
+    }
+
     fn make_handler(
         process: Arc<dyn ProcessRunner>,
-        sink: Arc<RecordingSink>,
+        sink: Arc<dyn TaskStatusSink>,
     ) -> (MonitorHandler, TaskContext) {
         let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
         let mgr = Arc::new(TaskOutputManager::new(PathBuf::from("/spool"), fs.clone()));
@@ -864,5 +902,32 @@ mod tests {
         // stop_reason was set).
         (handle.cleanup.expect("cleanup closure"))();
         assert_eq!(await_terminal(&sink).await, TaskStatus::Killed);
+    }
+
+    #[tokio::test]
+    async fn worker_exits_when_registration_never_occurs() {
+        // The registry row is never published, so the worker's registration wait
+        // would busy-poll forever (the #47 bug). With the bounded/cancellable
+        // wait it must observe the cancellation and EXIT — proven by the worker
+        // dropping its own entry from the handler's `workers` map.
+        let (handler, ctx) = make_handler(BlockingRunner::new(), Arc::new(NeverRegisteredSink));
+        let handle = handler.spawn(monitor_input(), ctx).await.unwrap();
+        assert_eq!(
+            handler.workers.lock().await.len(),
+            1,
+            "the worker is registered in the handler map while it waits"
+        );
+        // Let the worker reach its registration wait, then cancel it.
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+        (handle.cleanup.expect("cleanup closure"))();
+        for _ in 0..5000 {
+            if handler.workers.lock().await.is_empty() {
+                return; // the worker exited the wait and tore itself down
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("worker never exited the registration wait after cancellation");
     }
 }

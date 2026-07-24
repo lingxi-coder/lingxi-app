@@ -99,7 +99,8 @@ pub use orchestrator::{
     provider_fallback_order, provider_has_curated_list, ActiveGoalSnapshot, AgentInfo, CheckStatus,
     CompactionSummary, ContextPressureBanner, ContextPressureLevel, CostSnapshot, DoctorCheck,
     DoctorReport, DoctorSummary, ForkOutcome, HandleError, HookInfo, McpActionState, McpServerInfo,
-    McpStatus, MemoryEditorOutcome, ModelListing, ModelUsageRow, OrchestratorHandle, OutputEvent,
+    McpStatus, McpToggleOutcome, MemoryEditorOutcome, ModelListing, ModelUsageRow,
+    OrchestratorHandle, OutputEvent,
     OutputStream, PlanSnapshot, RateLimitSnapshot, RecapOutcome, ResumeRuntimeSnapshot,
     RewindRowData, StatusSnapshot, TurnOutcome,
 };

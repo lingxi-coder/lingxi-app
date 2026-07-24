@@ -367,6 +367,25 @@ impl McpActionState {
     }
 }
 
+/// Post-op status of a single MCP server toggled by
+/// [`OrchestratorHandle::set_mcp_servers_disabled`] — the port's analog of one
+/// settled entry in claude-code's `Promise.allSettled(p.map(u))`. Only servers
+/// that were NOT already in the requested state appear (claude's `p` filter — a
+/// server already enabled/disabled is omitted), so an empty result marks the
+/// "already enabled/disabled" no-op branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpToggleOutcome {
+    /// Server name.
+    pub name: String,
+    /// The resulting action state when the per-server toggle settled
+    /// successfully (claude's fulfilled `{type}` — after enable this is the
+    /// live post-connect state, e.g. `Connected` / `Failed` / `NeedsAuth`),
+    /// or `None` when the per-server op was rejected (claude's rejected
+    /// promise — the server "couldn't be changed", counting toward the
+    /// aggregate `E` tally).
+    pub state: Option<McpActionState>,
+}
+
 /// One hook entry returned by [`OrchestratorHandle::list_hooks`].
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct HookInfo {
@@ -1097,13 +1116,16 @@ pub trait OrchestratorHandle: Send + Sync {
     /// `projects[<cwd>].disabledMcpjsonServers` list so the change survives a
     /// restart. `server = None` (or `"all"`) applies to every configured server;
     /// otherwise just the named one. `disabled = true` disables, `false`
-    /// re-enables. Returns the affected server names (empty when no server was
-    /// changed). The default (no MCP registry / config path wired) is a no-op.
+    /// re-enables. Returns one [`McpToggleOutcome`] per server that was NOT
+    /// already in the requested state (claude's `p` — the settled
+    /// `allSettled(p.map(u))` set); an empty vector marks the "already
+    /// enabled/disabled" no-op. The default (no MCP registry / config path
+    /// wired) is a no-op.
     async fn set_mcp_servers_disabled(
         &self,
         _server: Option<&str>,
         _disabled: bool,
-    ) -> Result<Vec<String>, String> {
+    ) -> Result<Vec<McpToggleOutcome>, String> {
         Ok(Vec::new())
     }
 

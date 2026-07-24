@@ -671,7 +671,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
         &self,
         server: Option<&str>,
         disabled: bool,
-    ) -> Result<Vec<String>, String> {
+    ) -> Result<Vec<traits::McpToggleOutcome>, String> {
         let Some(path) = migrations::global_config::global_config_path() else {
             return Err("global config path is unavailable".to_string());
         };
@@ -689,10 +689,10 @@ impl OrchestratorHandle for ConversationOrchestrator {
             return Ok(Vec::new());
         }
         // Read-modify-write `projects[<cwd>].disabledMcpjsonServers` — the list
-        // `mcp::apply_project_server_gate` reads at startup. `affected` records
-        // only the servers whose membership actually changed.
+        // `mcp::apply_project_server_gate` reads at startup. This persistence is
+        // a side effect; the returned outcome is driven by the live toggles
+        // below (claude's `p`/`allSettled` set), not by config membership.
         let key = migrations::global_config::project_path_for_config(&self.cwd);
-        let mut affected: Vec<String> = Vec::new();
         migrations::global_config::save_project_config(&path, &key, |mut proj| {
             let list: Vec<String> = proj
                 .get("disabledMcpjsonServers")
@@ -703,8 +703,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
                         .collect()
                 })
                 .unwrap_or_default();
-            let (next, changed) = apply_mcp_disabled(list, &targets, disabled);
-            affected = changed;
+            let (next, _changed) = apply_mcp_disabled(list, &targets, disabled);
             proj.insert(
                 "disabledMcpjsonServers".to_string(),
                 serde_json::json!(next),
@@ -712,18 +711,31 @@ impl OrchestratorHandle for ConversationOrchestrator {
             proj
         })
         .map_err(|e| e.to_string())?;
-        // Always reconcile the requested live state, even when the persisted
-        // list was already correct (for example after a prior transport teardown
-        // failed). Include live-only changes in the returned affected set.
+        // Toggle each target live — claude's `Promise.allSettled(p.map(u))`.
+        // Only servers that were NOT already in the requested state (claude's
+        // `p` filter) yield an outcome: `Ok(None)` means "already there" and is
+        // skipped; `Ok(Some(state))` is a settled outcome carrying the post-
+        // toggle state; `Err` is a rejected op ("couldn't be changed — may have
+        // been removed"), recorded as `state: None`. A failed enable *connect*
+        // is NOT an `Err` (see `McpRegistry::set_disabled`), so it lands here as
+        // a settled `Failed`, letting the handler emit the "…but it isn't
+        // connected yet." variant instead of a hard error.
+        let mut outcomes: Vec<traits::McpToggleOutcome> = Vec::new();
         for name in &targets {
-            let changed = registry.set_disabled(name, disabled).await.map_err(|e| {
-                format!("saved MCP setting for {name}, but the live session transition failed: {e}")
-            })?;
-            if changed && !affected.iter().any(|affected| affected == name) {
-                affected.push(name.clone());
-            }
+            let outcome = match registry.set_disabled(name, disabled).await {
+                Ok(None) => continue,
+                Ok(state @ Some(_)) => traits::McpToggleOutcome {
+                    name: name.clone(),
+                    state,
+                },
+                Err(_) => traits::McpToggleOutcome {
+                    name: name.clone(),
+                    state: None,
+                },
+            };
+            outcomes.push(outcome);
         }
-        Ok(affected)
+        Ok(outcomes)
     }
 
     async fn list_hooks(&self) -> Vec<HookInfo> {

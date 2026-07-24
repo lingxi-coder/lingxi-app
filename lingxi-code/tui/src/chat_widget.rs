@@ -2124,8 +2124,10 @@ impl ChatWidget {
         }
         let scope = if is_all { None } else { Some(target) };
         match handle.set_mcp_servers_disabled(scope, !enable).await {
-            Ok(names) if names.is_empty() => (mcp_already_msg(is_all, target, enable), false),
-            Ok(names) => (mcp_toggle_success_message(enable, is_all, target, &names), false),
+            // Empty result = every target was already in the requested state
+            // (claude's `p.length === 0`).
+            Ok(out) if out.is_empty() => (mcp_already_msg(is_all, target, enable), false),
+            Ok(out) => (mcp_toggle_success_message(enable, is_all, target, &out), false),
             Err(e) => (
                 format!(
                     "/mcp {} failed: {e}",
@@ -4104,28 +4106,94 @@ fn mcp_already_msg(is_all: bool, target: &str, enable: bool) -> String {
     }
 }
 
-/// Success message for a `/mcp enable|disable` that changed at least one server.
+/// Success message for a `/mcp enable|disable` that changed at least one server
+/// — a byte-exact port of claude-code's post-`allSettled` message set (the
+/// branch after `let f=await Promise.allSettled(p.map(u))`). `out` is the
+/// per-server settled outcome (claude's `f`): each entry is a server that was
+/// NOT already in the requested state (claude's `p`), carrying `Some(state)`
+/// when the toggle settled (fulfilled `value.type`) or `None` when it was
+/// rejected ("couldn't be changed").
 ///
-/// Mirrors the oracle's two reachable forms:
-/// - single named server → `Enabled "<name>".` / `Disabled "<name>".`
-/// - `all` → `<verb> <N> MCP server(s). Run \`/mcp\` in the terminal to see status.`
-///
-/// The oracle's richer single-enable variant (`…but it isn't connected yet
-/// (<state>). <hint>`) and the aggregate `y`/`E` sub-clauses require the
-/// per-server `allSettled` + already-in-state pre-check flow the port's
-/// fail-fast `set_mcp_servers_disabled` does not expose (a single enable that
-/// fails to connect returns `Err`, not a fulfilled-but-not-connected result),
-/// so they are unreachable on this success path.
-fn mcp_toggle_success_message(enable: bool, is_all: bool, target: &str, changed: &[String]) -> String {
+/// Forms produced:
+/// - single disable → `Disabled "<name>".` (settled) / `Couldn't disable
+///   "<name>" — …` (rejected).
+/// - single enable → `Enabled "<name>".` (connected) / `Enabled "<name>", but
+///   it isn't connected yet[ (<state>)]. <hint>` (settled-but-not-connected;
+///   the `(<state>)` parenthetical is omitted for `failed`) / `Couldn't enable
+///   "<name>" — …` (rejected).
+/// - `all` → `<verb> <m> MCP server(s)[ (<k> enabled but not yet connected)]
+///   [ (<E> couldn't be changed — may have been removed)]. Run \`/mcp\` in the
+///   terminal to see status.`
+fn mcp_toggle_success_message(
+    enable: bool,
+    is_all: bool,
+    target: &str,
+    out: &[traits::McpToggleOutcome],
+) -> String {
+    use traits::McpActionState;
     let verb = if enable { "Enabled" } else { "Disabled" };
-    if is_all {
-        format!(
-            "{verb} {} MCP server(s). Run `/mcp` in the terminal to see status.",
-            changed.len()
-        )
+    // claude `m` = settled (fulfilled) count.
+    let settled = out.iter().filter(|o| o.state.is_some()).count();
+    // claude `g` = connected count (enable only; for disable claude sets g = m).
+    let connected = if enable {
+        out.iter()
+            .filter(|o| o.state == Some(McpActionState::Connected))
+            .count()
     } else {
-        format!("{verb} \"{target}\".")
+        settled
+    };
+    // claude `y` = " (<m-g> enabled but not yet connected)" (enable && g<m).
+    let not_connected_clause = if enable && connected < settled {
+        format!(" ({} enabled but not yet connected)", settled - connected)
+    } else {
+        String::new()
+    };
+
+    if !is_all {
+        if !enable {
+            // Single disable.
+            return if settled > 0 {
+                format!("Disabled \"{target}\".")
+            } else {
+                format!(
+                    "Couldn't disable \"{target}\" \u{2014} it may have been removed, or its configuration couldn't be read. Run `/mcp` in the terminal to check."
+                )
+            };
+        }
+        // Single enable — keyed on the first (only) settled outcome (claude
+        // `f[0]`).
+        return match out.first().and_then(|o| o.state) {
+            None => format!(
+                "Couldn't enable \"{target}\" \u{2014} it may have been removed, or its configuration couldn't be read. Run `/mcp` in the terminal to check."
+            ),
+            Some(McpActionState::Connected) => format!("Enabled \"{target}\"."),
+            Some(state) => {
+                let hint = if state == McpActionState::NeedsAuth {
+                    "Authenticate with `/mcp` in the terminal."
+                } else {
+                    "Check its config with `/mcp` in the terminal."
+                };
+                // claude omits the "(<state>)" parenthetical for `failed`.
+                let paren = if state == McpActionState::Failed {
+                    String::new()
+                } else {
+                    format!(" ({})", state.label())
+                };
+                format!("Enabled \"{target}\", but it isn't connected yet{paren}. {hint}")
+            }
+        };
     }
+
+    // Aggregate ("all").
+    let rejected = out.len() - settled; // claude `E = p.length - m`.
+    let removed_clause = if rejected > 0 {
+        format!(" ({rejected} couldn't be changed \u{2014} may have been removed)")
+    } else {
+        String::new()
+    };
+    format!(
+        "{verb} {settled} MCP server(s){not_connected_clause}{removed_clause}. Run `/mcp` in the terminal to see status."
+    )
 }
 
 #[cfg(test)]
@@ -4280,25 +4348,125 @@ mod tests {
         assert_eq!(NeedsApproval.label(), "pending approval");
     }
 
+    fn toggle(name: &str, state: Option<traits::McpActionState>) -> traits::McpToggleOutcome {
+        traits::McpToggleOutcome {
+            name: name.to_string(),
+            state,
+        }
+    }
+
     #[test]
-    fn mcp_toggle_success_message_matches_the_oracle_reachable_forms() {
-        // Single named server: quoted name, no list.
+    fn mcp_toggle_success_message_single_forms_are_byte_exact() {
+        use traits::McpActionState::{Connected, Disabled, Failed, NeedsAuth, Pending};
+
+        // ── single enable ──
+        // Connected → plain quoted name.
         assert_eq!(
-            mcp_toggle_success_message(true, false, "myserver", &["myserver".into()]),
+            mcp_toggle_success_message(true, false, "myserver", &[toggle("myserver", Some(Connected))]),
             "Enabled \"myserver\".",
         );
+        // Failed → no "(state)" parenthetical, "Check its config" hint.
         assert_eq!(
-            mcp_toggle_success_message(false, false, "myserver", &["myserver".into()]),
+            mcp_toggle_success_message(true, false, "myserver", &[toggle("myserver", Some(Failed))]),
+            "Enabled \"myserver\", but it isn't connected yet. Check its config with `/mcp` in the terminal.",
+        );
+        // NeedsAuth → "(needs authentication)" + "Authenticate" hint.
+        assert_eq!(
+            mcp_toggle_success_message(true, false, "myserver", &[toggle("myserver", Some(NeedsAuth))]),
+            "Enabled \"myserver\", but it isn't connected yet (needs authentication). Authenticate with `/mcp` in the terminal.",
+        );
+        // Pending → "(connecting)" + "Check its config" hint.
+        assert_eq!(
+            mcp_toggle_success_message(true, false, "myserver", &[toggle("myserver", Some(Pending))]),
+            "Enabled \"myserver\", but it isn't connected yet (connecting). Check its config with `/mcp` in the terminal.",
+        );
+        // Rejected (None) → "Couldn't enable".
+        assert_eq!(
+            mcp_toggle_success_message(true, false, "myserver", &[toggle("myserver", None)]),
+            "Couldn't enable \"myserver\" \u{2014} it may have been removed, or its configuration couldn't be read. Run `/mcp` in the terminal to check.",
+        );
+
+        // ── single disable ──
+        assert_eq!(
+            mcp_toggle_success_message(false, false, "myserver", &[toggle("myserver", Some(Disabled))]),
             "Disabled \"myserver\".",
         );
-        // `all`: the "<N> MCP server(s)" aggregate with the status pointer.
         assert_eq!(
-            mcp_toggle_success_message(true, true, "all", &["a".into(), "b".into(), "c".into()]),
+            mcp_toggle_success_message(false, false, "myserver", &[toggle("myserver", None)]),
+            "Couldn't disable \"myserver\" \u{2014} it may have been removed, or its configuration couldn't be read. Run `/mcp` in the terminal to check.",
+        );
+    }
+
+    #[test]
+    fn mcp_toggle_success_message_aggregate_forms_are_byte_exact() {
+        use traits::McpActionState::{Connected, Disabled, Failed};
+
+        // enable-all, every server connected.
+        assert_eq!(
+            mcp_toggle_success_message(
+                true,
+                true,
+                "all",
+                &[
+                    toggle("a", Some(Connected)),
+                    toggle("b", Some(Connected)),
+                    toggle("c", Some(Connected)),
+                ],
+            ),
             "Enabled 3 MCP server(s). Run `/mcp` in the terminal to see status.",
         );
+        // enable-all with one settled-but-not-connected → the `y` clause.
         assert_eq!(
-            mcp_toggle_success_message(false, true, "all", &["a".into(), "b".into()]),
+            mcp_toggle_success_message(
+                true,
+                true,
+                "all",
+                &[
+                    toggle("a", Some(Connected)),
+                    toggle("b", Some(Connected)),
+                    toggle("c", Some(Failed)),
+                ],
+            ),
+            "Enabled 3 MCP server(s) (1 enabled but not yet connected). Run `/mcp` in the terminal to see status.",
+        );
+        // enable-all with a rejected server → both the `y` and `E` clauses,
+        // and the count is `m` (settled), not the target total.
+        assert_eq!(
+            mcp_toggle_success_message(
+                true,
+                true,
+                "all",
+                &[
+                    toggle("a", Some(Connected)),
+                    toggle("b", Some(Failed)),
+                    toggle("c", None),
+                ],
+            ),
+            "Enabled 2 MCP server(s) (1 enabled but not yet connected) (1 couldn't be changed \u{2014} may have been removed). Run `/mcp` in the terminal to see status.",
+        );
+        // disable-all — the `y` clause never applies to disable.
+        assert_eq!(
+            mcp_toggle_success_message(
+                false,
+                true,
+                "all",
+                &[toggle("a", Some(Disabled)), toggle("b", Some(Disabled))],
+            ),
             "Disabled 2 MCP server(s). Run `/mcp` in the terminal to see status.",
+        );
+        // disable-all with a rejected server → only the `E` clause.
+        assert_eq!(
+            mcp_toggle_success_message(
+                false,
+                true,
+                "all",
+                &[
+                    toggle("a", Some(Disabled)),
+                    toggle("b", Some(Disabled)),
+                    toggle("c", None),
+                ],
+            ),
+            "Disabled 2 MCP server(s) (1 couldn't be changed \u{2014} may have been removed). Run `/mcp` in the terminal to see status.",
         );
     }
 

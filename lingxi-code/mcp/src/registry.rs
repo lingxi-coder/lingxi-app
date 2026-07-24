@@ -1493,8 +1493,21 @@ impl McpRegistry {
     /// and dynamic tool partition without revoking OAuth credentials; enabling
     /// performs a fresh connect in the current session.
     ///
-    /// Returns `false` when the config was already in the requested state.
-    pub async fn set_disabled(&self, name: &str, disabled: bool) -> Result<bool, McpError> {
+    /// Returns `Ok(None)` when the config was already in the requested state (a
+    /// no-op — claude's `p` filter excludes it). Otherwise `Ok(Some(state))`
+    /// carries the server's post-toggle action state (claude's fulfilled
+    /// `u(name).type`): after disable it is [`traits::McpActionState::Disabled`];
+    /// after enable it is the live post-connect state read back from the
+    /// registry (`Connected` / `Failed` / `NeedsAuth` / …). Crucially, a failed
+    /// enable **connect** is NOT surfaced as `Err` — the server flips on but
+    /// stays disconnected, mirroring claude's `u(name)` fulfilling with
+    /// `{type:"failed"}`; only a failed **disable teardown** stays an `Err`
+    /// (claude's rejected promise → the server "couldn't be changed").
+    pub async fn set_disabled(
+        &self,
+        name: &str,
+        disabled: bool,
+    ) -> Result<Option<traits::McpActionState>, McpError> {
         let lifecycle = self.lifecycle_lock(name);
         let _guard = lifecycle.lock().await;
 
@@ -1506,7 +1519,7 @@ impl McpRegistry {
                 )));
             };
             if state.config().disabled == disabled {
-                return Ok(false);
+                return Ok(None);
             }
             let live_connection = match state {
                 McpConnectionState::Connected { connection_id, .. }
@@ -1539,7 +1552,7 @@ impl McpRegistry {
                     kind: McpCatalogKind::Tools,
                 });
             }
-            return Ok(true);
+            return Ok(Some(traits::McpActionState::Disabled));
         }
 
         config.disabled = false;
@@ -1550,19 +1563,20 @@ impl McpRegistry {
                 last_error: None,
             },
         );
-        match self.connect_locked(config.clone()).await {
-            Ok(_) => Ok(true),
-            Err(error) => {
-                self.connections.write().await.insert(
-                    name.to_string(),
-                    McpConnectionState::Disconnected {
-                        config,
-                        last_error: Some(error.to_string()),
-                    },
-                );
-                Err(error)
-            }
-        }
+        // A failed enable connect is a SETTLED "failed" outcome, not an error:
+        // `connect_locked` already records `Disconnected { last_error }` on
+        // failure, so the server flips on but reads back as `Failed`
+        // ("not connected"). This mirrors claude's `u(name)` fulfilling with
+        // `{type:"failed"}` rather than rejecting, so the /mcp handler can emit
+        // "Enabled …, but it isn't connected yet." instead of a hard error.
+        let _ = self.connect_locked(config).await;
+        let resulting = {
+            let conns = self.connections.read().await;
+            conns
+                .get(name)
+                .map_or(traits::McpActionState::Failed, project_action_state)
+        };
+        Ok(Some(resulting))
     }
 
     /// Reconnect a single known server by name (`/mcp reconnect <server>`):
@@ -1629,6 +1643,39 @@ impl McpRegistry {
         let mut out: Vec<(String, traits::McpActionState)> = conns
             .values()
             .map(|s| (s.name().to_string(), project_action_state(s)))
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    /// Failed servers with their sanitized error text, for the `ToolSearch`
+    /// empty-result diagnostics note — a port of claude-code's `wZr(u())`
+    /// (`failed_mcp_servers`). Every server whose action state projects to
+    /// [`traits::McpActionState::Failed`] ("not connected") is included,
+    /// carrying its recorded error where one exists, sanitized through
+    /// [`sanitize_diagnostic`] (claude's `xLt`). Both the name and the error are
+    /// sanitized (claude sanitizes both); the error is the untrusted, model-
+    /// visible part. Sorted by name.
+    ///
+    /// Unlike claude, the port carries no per-server `errorCode`, so it cannot
+    /// distinguish the `UNCONFIGURED` state claude's `kee` excludes — every
+    /// projected-`Failed` server is surfaced.
+    pub async fn failed_action_servers(&self) -> Vec<(String, Option<String>)> {
+        let conns = self.connections.read().await;
+        let mut out: Vec<(String, Option<String>)> = conns
+            .values()
+            .filter(|s| project_action_state(s) == traits::McpActionState::Failed)
+            .map(|s| {
+                let error = match s {
+                    McpConnectionState::Failed { error, .. } => Some(error.clone()),
+                    McpConnectionState::Disconnected { last_error, .. } => last_error.clone(),
+                    _ => None,
+                };
+                (
+                    sanitize_diagnostic(s.name()),
+                    error.map(|e| sanitize_diagnostic(&e)),
+                )
+            })
             .collect();
         out.sort_by(|a, b| a.0.cmp(&b.0));
         out
@@ -2028,6 +2075,117 @@ pub mod test_support {
     }
 }
 
+/// Sanitize a model-visible diagnostic string (an MCP server name or failure
+/// message) — a 1:1 port of claude-code's `xLt`, used to build the `ToolSearch`
+/// empty-result failed-server note. Steps mirror claude exactly:
+///
+/// 1. NFKC-normalize.
+/// 2. Replace control (`\p{Cc}`) / format (`\p{Cf}`) characters and
+///    U+2028/U+2029 with a space (claude's `qU`).
+/// 3. Replace angle brackets, `"`, `;` and a set of fancy quote / bracket
+///    characters with a space.
+/// 4. Collapse runs of whitespace to a single space and trim.
+/// 5. Truncate to 200 characters, appending `…` (U+2026) when it was longer.
+///
+/// Steps 2–4 all map their targets to a space and then collapse, so a single
+/// pass that treats every stripped-or-whitespace character as a collapsing
+/// space produces the same result.
+fn sanitize_diagnostic(input: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    /// claude's `RJu`.
+    const LIMIT: usize = 200;
+
+    // The explicit character class claude replaces with a space (step 3).
+    fn is_stripped(c: char) -> bool {
+        matches!(
+            c,
+            '<' | '>'
+                | '"'
+                | ';'
+                | '\u{2018}'
+                | '\u{2019}'
+                | '\u{201A}'
+                | '\u{201C}'
+                | '\u{201D}'
+                | '\u{201E}'
+                | '\u{00AB}'
+                | '\u{00BB}'
+                | '\u{2039}'
+                | '\u{203A}'
+                | '\u{2329}'
+                | '\u{232A}'
+                | '\u{27E8}'
+                | '\u{27E9}'
+                | '\u{27EA}'
+                | '\u{27EB}'
+                | '\u{3008}'
+                | '\u{3009}'
+                | '\u{300A}'
+                | '\u{300B}'
+        )
+    }
+
+    let normalized: String = input.nfkc().collect();
+    let mut collapsed = String::with_capacity(normalized.len());
+    let mut pending_space = false;
+    for c in normalized.chars() {
+        // Step 2 (`qU`): control / format chars + U+2028/U+2029, step 3's
+        // explicit class, and any other whitespace (step 4's `\s+`) all become
+        // collapsing spaces.
+        let is_control_or_format = c.is_control()
+            || matches!(c, '\u{2028}' | '\u{2029}')
+            || is_format_char(c);
+        if is_control_or_format || is_stripped(c) || c.is_whitespace() {
+            pending_space = true;
+            continue;
+        }
+        if pending_space && !collapsed.is_empty() {
+            collapsed.push(' ');
+        }
+        pending_space = false;
+        collapsed.push(c);
+    }
+    // `collapsed` already has no leading/interior double spaces or trailing
+    // space (pending_space is dropped at end), i.e. it is already trimmed.
+    if collapsed.chars().count() > LIMIT {
+        let head: String = collapsed.chars().take(LIMIT).collect();
+        format!("{head}\u{2026}")
+    } else {
+        collapsed
+    }
+}
+
+/// Whether `c` is a Unicode format character (general category `Cf`) — the
+/// portion of claude's `qU` (`\p{Cf}`) not covered by [`char::is_control`]
+/// (which is `Cc`). Enumerates the stable `Cf` code-point blocks.
+fn is_format_char(c: char) -> bool {
+    let cp = c as u32;
+    matches!(
+        cp,
+        0x00AD              // SOFT HYPHEN
+        | 0x0600..=0x0605   // Arabic number signs
+        | 0x061C            // Arabic Letter Mark
+        | 0x06DD            // Arabic End of Ayah
+        | 0x070F            // Syriac Abbreviation Mark
+        | 0x0890..=0x0891   // Arabic pound / piastre marks
+        | 0x08E2            // Arabic disputed end of ayah
+        | 0x180E            // Mongolian vowel separator
+        | 0x200B..=0x200F   // zero-width + LTR/RTL marks
+        | 0x202A..=0x202E   // directional formatting
+        | 0x2060..=0x2064   // word joiner + invisible operators
+        | 0x2066..=0x206F   // directionality + deprecated
+        | 0xFEFF            // ZERO WIDTH NO-BREAK SPACE / BOM
+        | 0xFFF9..=0xFFFB   // interlinear annotation
+        | 0x110BD           // Kaithi number sign
+        | 0x110CD           // Kaithi number sign above
+        | 0x13430..=0x1343F // Egyptian Hieroglyph format controls
+        | 0x1BCA0..=0x1BCA3 // Shorthand format controls
+        | 0x1D173..=0x1D17A // Musical symbol begin/end
+        | 0xE0001           // Language tag
+        | 0xE0020..=0xE007F // Tags block
+    )
+}
+
 /// Whether a state's config is flagged `disabled` (mid-reconnect guard).
 fn state_is_disabled(state: &McpConnectionState) -> bool {
     match state {
@@ -2415,7 +2573,10 @@ mod tests {
         let connection_id = registry.connect(cfg("mock")).await.unwrap();
         changes.recv().await.unwrap();
 
-        assert!(registry.set_disabled("mock", true).await.unwrap());
+        assert_eq!(
+            registry.set_disabled("mock", true).await.unwrap(),
+            Some(traits::McpActionState::Disabled)
+        );
         assert!(registry.get_client("mock").await.is_none());
         assert_eq!(
             registry.action_states().await,
@@ -2424,7 +2585,10 @@ mod tests {
         let retired = changes.recv().await.unwrap();
         assert_eq!(retired.retired_connection_id, Some(connection_id));
 
-        assert!(registry.set_disabled("mock", false).await.unwrap());
+        assert_eq!(
+            registry.set_disabled("mock", false).await.unwrap(),
+            Some(traits::McpActionState::Connected)
+        );
         assert!(registry.get_client("mock").await.is_some());
         assert_eq!(
             registry.action_states().await,
@@ -2453,6 +2617,90 @@ mod tests {
                 ..
             }) if *current == connection_id && !config.disabled
         ));
+    }
+
+    #[tokio::test]
+    async fn enabling_a_server_that_fails_to_connect_settles_as_failed_not_error() {
+        let mock = Arc::new(BridgeMock::new(&["read"]));
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock.clone() as Arc<dyn RawConnectionProvider>,
+        );
+        registry.connect(cfg("mock")).await.unwrap();
+        // Disabling settles as `Disabled`.
+        assert_eq!(
+            registry.set_disabled("mock", true).await.unwrap(),
+            Some(traits::McpActionState::Disabled)
+        );
+        // The next connect will fail (the catalog fetch errors out).
+        mock.list_tools_fails.store(true, Ordering::SeqCst);
+        // Re-enabling must NOT return `Err` — claude's `u(name)` fulfills with
+        // `{type:"failed"}` rather than rejecting. The registry flips the server
+        // on but reads it back as `Failed` ("not connected"), so the /mcp handler
+        // can render "Enabled …, but it isn't connected yet." instead of erroring.
+        assert_eq!(
+            registry.set_disabled("mock", false).await.unwrap(),
+            Some(traits::McpActionState::Failed)
+        );
+        assert_eq!(
+            registry.action_states().await,
+            vec![("mock".to_string(), traits::McpActionState::Failed)]
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_action_servers_reports_sanitized_errors_sorted() {
+        let mock = Arc::new(BridgeMock::new(&[]));
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock as Arc<dyn RawConnectionProvider>,
+        );
+        {
+            let mut conns = registry.connections.write().await;
+            conns.insert(
+                "zeta".into(),
+                McpConnectionState::Failed {
+                    config: cfg("zeta"),
+                    // The quotes must be stripped by the `xLt` sanitizer.
+                    error: "he said \"boom\"".into(),
+                    attempts: 3,
+                },
+            );
+            conns.insert(
+                "alpha".into(),
+                McpConnectionState::Failed {
+                    config: cfg("alpha"),
+                    error: "Blocked by enterprise managed policy".into(),
+                    attempts: 1,
+                },
+            );
+        }
+        // Sorted by name; each error run through `sanitize_diagnostic`.
+        assert_eq!(
+            registry.failed_action_servers().await,
+            vec![
+                (
+                    "alpha".to_string(),
+                    Some("Blocked by enterprise managed policy".to_string())
+                ),
+                ("zeta".to_string(), Some("he said boom".to_string())),
+            ]
+        );
+    }
+
+    #[test]
+    fn sanitize_diagnostic_strips_quotes_controls_and_caps_at_200() {
+        // Angle brackets, `"`, `;` and the fancy-quote set collapse to spaces.
+        assert_eq!(sanitize_diagnostic("hello \"world\""), "hello world");
+        assert_eq!(sanitize_diagnostic("angle <b> ; semi"), "angle b semi");
+        // Control chars (`\p{Cc}`) collapse to a single space.
+        assert_eq!(sanitize_diagnostic("a\u{0000}\u{0007}b"), "a b");
+        // Runs of whitespace collapse and the result is trimmed.
+        assert_eq!(sanitize_diagnostic("  trim   me  "), "trim me");
+        // Capped at 200 chars + `…` (U+2026).
+        let capped = sanitize_diagnostic(&"x".repeat(250));
+        assert_eq!(capped.chars().count(), 201);
+        assert!(capped.ends_with('\u{2026}'));
     }
 
     #[tokio::test]

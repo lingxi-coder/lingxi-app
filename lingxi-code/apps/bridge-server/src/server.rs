@@ -49,8 +49,9 @@ use bridge::{
     version_compatible, BridgeRequest, BridgeResponse, BridgeWireError, Capabilities, ClientHello,
     FramePump, FrameSink, ServerHello, BRIDGE_PROTOCOL_VERSION,
 };
-use client_adapter::{ClientEventSink, PermissionRequestSink};
+use client_adapter::{ClientEventSink, ComputerAccessRequestSink, PermissionRequestSink};
 use client_protocol::commands::{ClientCommand, ImageRefDto};
+use client_protocol::computer_access::{ComputerAccessRequestDto, ComputerAccessResponseDto};
 use client_protocol::events::ClientEvent;
 use client_protocol::permission::{PermissionKindDto, PermissionRequest, PermissionResponseDto};
 use msgqueue::{
@@ -58,8 +59,10 @@ use msgqueue::{
     QueuedCommandContent, TelemetryQueueRecorder,
 };
 use tokio::sync::Mutex;
+use tui_core::computer_access_bridge::ComputerAccessExchange;
 
 use client_adapter::AdapterPermissionGate;
+use client_adapter::BridgeComputerAccessBroker;
 
 use crate::router::CommandRouter;
 
@@ -154,6 +157,23 @@ impl PermissionRequestSink for FramePermissionSink {
     }
 }
 
+/// A [`ComputerAccessRequestSink`] that forwards each [`ComputerAccessRequestDto`]
+/// out as a [`Frame::ComputerAccessRequest`]. Unlike [`FramePermissionSink`] it
+/// needs no side-table: the DTO already carries everything `resolve`/`deny`
+/// need, keyed by `request_id` on the [`BridgeComputerAccessBroker`] itself.
+struct FrameComputerAccessSink {
+    out: SharedFrameSink,
+}
+
+#[async_trait]
+impl ComputerAccessRequestSink for FrameComputerAccessSink {
+    async fn emit_request(&self, request: ComputerAccessRequestDto) {
+        if let Some(sink) = self.out.lock().await.as_ref() {
+            let _ = sink.send(Frame::ComputerAccessRequest(request));
+        }
+    }
+}
+
 /// A bound connection: the [`bridge::FramePump`] the endpoint drives, holding the
 /// connection-scoped permission gate, the outbound sink cell, the turn driver,
 /// and the `request_id → tool_name` map.
@@ -167,6 +187,13 @@ pub struct BridgeConnection {
     out: SharedFrameSink,
     tool_names: Arc<Mutex<HashMap<u64, String>>>,
     gate: Option<Arc<AdapterPermissionGate>>,
+    /// The `computer`-tool `request_access` broker (Electron-facing sibling of
+    /// `gate`, see [`BridgeComputerAccessBroker`]'s own doc comment). `None`
+    /// when no computer-access channel was wired at boot (e.g. a test
+    /// connection that never calls [`Self::bind_computer_access`]) — the two
+    /// new [`ClientCommand`] variants are then silently dropped, exactly like
+    /// an unrouted command with no [`CommandRouter`] bound.
+    computer_access_broker: Option<Arc<BridgeComputerAccessBroker>>,
     driver: Option<Arc<dyn TurnDriver>>,
     /// The full command-routing seam (F2-08). When bound, every
     /// non-turn/non-permission [`ClientCommand`] (model, listings, slash, tasks,
@@ -311,6 +338,7 @@ impl BridgeConnection {
             out: Arc::new(Mutex::new(None)),
             tool_names: Arc::new(Mutex::new(HashMap::new())),
             gate: None,
+            computer_access_broker: None,
             driver: None,
             router: None,
             handshaken: Arc::new(AtomicBool::new(false)),
@@ -351,6 +379,16 @@ impl BridgeConnection {
         })
     }
 
+    /// The connection-scoped [`ComputerAccessRequestSink`] to bind into a
+    /// [`BridgeComputerAccessBroker`]. Every `request_access` exchange the
+    /// broker drains flows through here as a [`Frame::ComputerAccessRequest`].
+    #[must_use]
+    pub fn computer_access_sink(&self) -> Arc<dyn ComputerAccessRequestSink> {
+        Arc::new(FrameComputerAccessSink {
+            out: self.out.clone(),
+        })
+    }
+
     /// Attach the connection's permission gate (whose `resolve` the read task
     /// calls on an inbound approval) and the [`TurnDriver`] that drives
     /// `SendPrompt`. Yields the fully-bound pump.
@@ -358,6 +396,25 @@ impl BridgeConnection {
     pub fn bind(mut self, gate: Arc<AdapterPermissionGate>, driver: Arc<dyn TurnDriver>) -> Self {
         self.gate = Some(gate);
         self.driver = Some(driver);
+        self
+    }
+
+    /// Attach the connection's `computer`-tool `request_access` broker and
+    /// SPAWN its receive loop over `rx` (the receiving end of the SAME channel
+    /// whose sender was wired into `DesktopConfig::computer_access_tx`, which
+    /// drives the generic `tool_computer_use::TuiBridgeResolver` on the engine
+    /// side). Additive over [`Self::bind`]: a connection built without this
+    /// call (e.g. most existing tests) simply never receives a computer-access
+    /// channel, and `ApproveComputerAccess`/`DenyComputerAccess` are no-ops.
+    #[must_use]
+    pub fn bind_computer_access(
+        mut self,
+        broker: Arc<BridgeComputerAccessBroker>,
+        rx: tokio::sync::mpsc::Receiver<ComputerAccessExchange>,
+    ) -> Self {
+        let run_loop = broker.clone();
+        tokio::spawn(async move { run_loop.run(rx).await });
+        self.computer_access_broker = Some(broker);
         self
     }
 
@@ -392,6 +449,15 @@ impl BridgeConnection {
     #[must_use]
     pub fn gate_handle(&self) -> Arc<AdapterPermissionGate> {
         self.gate.clone().expect("gate_handle called before bind()")
+    }
+
+    /// A clone of the computer-access broker handle, for tests that need to
+    /// observe the parked / drained request count directly.
+    #[must_use]
+    pub fn computer_access_broker_handle(&self) -> Arc<BridgeComputerAccessBroker> {
+        self.computer_access_broker
+            .clone()
+            .expect("computer_access_broker_handle called before bind_computer_access()")
     }
 
     /// Claim the single active-client slot, or confirm that `out` belongs to the
@@ -518,6 +584,15 @@ impl BridgeConnection {
             ClientCommand::DenyPermission { request_id } => {
                 self.resolve_permission(request_id, PermissionResponseDto::Deny)
                     .await;
+            }
+            ClientCommand::ApproveComputerAccess {
+                request_id,
+                response,
+            } => {
+                self.resolve_computer_access(request_id, response).await;
+            }
+            ClientCommand::DenyComputerAccess { request_id } => {
+                self.deny_computer_access(request_id).await;
             }
             // A slash command may be a `type: "prompt"` command (`/loop`,
             // Markdown/Plugin): claude-code injects its expanded prompt as the
@@ -676,6 +751,36 @@ impl BridgeConnection {
             );
         }
     }
+
+    /// Resolve a parked `computer`-tool `request_access` prompt on the broker
+    /// (the WS read task side of the SAME inverted handshake shape the
+    /// permission gate uses).
+    async fn resolve_computer_access(&self, request_id: u64, response: ComputerAccessResponseDto) {
+        let Some(broker) = self.computer_access_broker.as_ref() else {
+            return;
+        };
+        let resolved = broker.resolve(request_id, response).await;
+        if !resolved {
+            tracing::debug!(
+                request_id,
+                "bridge-server: resolve for unknown / already-resolved computer-access id"
+            );
+        }
+    }
+
+    /// Deny a parked `computer`-tool `request_access` prompt on the broker.
+    async fn deny_computer_access(&self, request_id: u64) {
+        let Some(broker) = self.computer_access_broker.as_ref() else {
+            return;
+        };
+        let resolved = broker.deny(request_id).await;
+        if !resolved {
+            tracing::debug!(
+                request_id,
+                "bridge-server: deny for unknown / already-resolved computer-access id"
+            );
+        }
+    }
 }
 
 #[async_trait]
@@ -783,6 +888,19 @@ impl BridgeConnection {
                 tracing::debug!(
                     drained,
                     "bridge-server: drained parked permissions on close"
+                );
+            }
+        }
+
+        // Same fail-closed guarantee for the computer-access broker: drop
+        // every parked oneshot so an in-flight `TuiBridgeResolver::resolve`
+        // await resolves to the fully-denied default.
+        if let Some(broker) = self.computer_access_broker.as_ref() {
+            let drained = broker.drain().await;
+            if drained > 0 {
+                tracing::debug!(
+                    drained,
+                    "bridge-server: drained parked computer-access requests on close"
                 );
             }
         }

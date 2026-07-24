@@ -812,10 +812,12 @@ dependencies = [
  "tokio-tungstenite 0.21.0",
  "tokio-util",
  "tool-api",
+ "tool-computer-use",
  "tool-cron",
  "tracing",
  "tracing-subscriber",
  "traits",
+ "tui-core",
  "uuid",
 ]
 
@@ -1131,6 +1133,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "traits",
+ "tui-core",
  "uniffi",
  "uuid",
 ]

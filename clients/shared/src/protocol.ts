@@ -94,6 +94,9 @@ export type ClientCommand =
   | { type: 'approve_permission'; request_id: number; response: PermissionResponseDto }
   | { type: 'deny_permission'; request_id: number }
   | { type: 'set_permission_mode'; mode: PermissionModeId }
+  // ── `computer` tool request_access resolution ───────────────────────────────
+  | { type: 'approve_computer_access'; request_id: number; response: ComputerAccessResponseDto }
+  | { type: 'deny_computer_access'; request_id: number }
   // ── Provider credentials (authenticated local bridge only) ──────────────────
   | { type: 'list_provider_credentials'; operation_id: number; provider_ids: string[] }
   | { type: 'set_provider_credential'; operation_id: number; provider_id: string; credential: string }
@@ -191,6 +194,64 @@ export type PermissionModeId =
 export interface PermissionResolved {
   request_id: number;
   response: PermissionResponseDto;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// computer-access bridge — the `computer` tool's `request_access` prompt DTOs.
+//
+// Mirrors `tui-core/src/computer_access_bridge.rs` (`AccessTier`, `TccState`,
+// `RequestedApp`, `ComputerAccessRequest`, `ComputerAccessResponse`) at the
+// wire boundary the client-protocol crate adds alongside `permission.rs`.
+// Chosen over reusing {@link PermissionKindDto} for the same reason as the
+// Rust side: a title+message+options-list prompt can't express per-app
+// checkboxes, a tier, three independent capability flags, or a TCC
+// missing-permissions panel.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** One requested application, pre-checked in the app-allowlist panel (`RequestedAppDto`). */
+export interface RequestedAppDto {
+  label: string;
+}
+
+/**
+ * The per-app capability level `request_access` can grant — mirrors
+ * `computer_access_bridge::AccessTier::as_str()` exactly (`"read"` / `"click"` /
+ * `"full"`).
+ */
+export type AccessTierDto = 'read' | 'click' | 'full';
+
+/** Which macOS TCC permissions are missing (`TccStateDto`, mirrors `TccState`). */
+export interface TccStateDto {
+  accessibility: boolean;
+  screen_recording: boolean;
+}
+
+/**
+ * Outbound `computer` tool `request_access` prompt (`ComputerAccessRequestDto`).
+ * When {@link tcc_state} is present, the client shows the TCC panel instead of
+ * the app-allowlist panel (a required macOS permission is missing).
+ */
+export interface ComputerAccessRequestDto {
+  request_id: number;
+  reason: string;
+  apps: RequestedAppDto[];
+  tier: AccessTierDto;
+  clipboard_read: boolean;
+  clipboard_write: boolean;
+  system_key_combos: boolean;
+  tcc_state?: TccStateDto;
+}
+
+/**
+ * The user's resolution (`ComputerAccessResponseDto`). An empty `granted_apps`
+ * with every flag `false` means "denied" — there is no separate boolean,
+ * matching the Rust `Default` (also what Esc/deny sends).
+ */
+export interface ComputerAccessResponseDto {
+  granted_apps: string[];
+  clipboard_read: boolean;
+  clipboard_write: boolean;
+  system_key_combos: boolean;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -509,4 +570,5 @@ export type Frame =
   | { type: 'request'; payload: BridgeRequest }
   | { type: 'response'; payload: BridgeResponse }
   | { type: 'event'; payload: ClientEvent }
-  | { type: 'permission_request'; payload: PermissionRequest };
+  | { type: 'permission_request'; payload: PermissionRequest }
+  | { type: 'computer_access_request'; payload: ComputerAccessRequestDto };

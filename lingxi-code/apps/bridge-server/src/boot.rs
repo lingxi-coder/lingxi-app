@@ -394,8 +394,13 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         // session-scoped resolver unwired instead of creating an orphaned
         // channel whose questions can never be answered.
         ask_user_question_tx: None,
-        // Same rationale as `ask_user_question_tx` above — no mounted TUI to
-        // surface the `computer` tool's approval dialog.
+        // Placeholder — `resolve_desktop_config` has no live connection to
+        // build a sink from yet. `assemble_with_provider_keys` overwrites this
+        // to `Some(sender)` once the `BridgeConnection` (and therefore its
+        // `computer_access_sink()`) exists, wiring the Electron-facing
+        // `BridgeComputerAccessBroker`. Unlike `ask_user_question_tx` (which
+        // has no Electron-facing counterpart yet and stays `None` end to end),
+        // this one is a two-phase assignment, not a permanent no-op.
         computer_access_tx: None,
         // M10: the bridge-server does not start a coordinator session by
         // default (threading this from session metadata is a follow-up).
@@ -536,7 +541,7 @@ pub async fn assemble(cfg: DesktopConfig) -> Result<BoundServer, String> {
 /// Electron host owns persistent Keychain storage, so packaged startup does
 /// not write the same key into the Rust Keychain on every launch.
 pub async fn assemble_with_provider_keys(
-    cfg: DesktopConfig,
+    mut cfg: DesktopConfig,
     provider_keys: BTreeMap<String, String>,
 ) -> Result<BoundServer, String> {
     let connection = BridgeConnection::new();
@@ -562,6 +567,23 @@ pub async fn assemble_with_provider_keys(
     let output: Arc<dyn OutputStream> =
         Arc::new(client_adapter::AdapterOutputStream::new(event_sink.clone()));
     let permission_sink = connection.permission_sink();
+
+    // The `computer` tool's `request_access` approval — the Electron-facing
+    // sibling of the permission round-trip above. A fresh channel: the SENDER
+    // half fills `cfg.computer_access_tx`, which `engine_desktop::build` wires
+    // into the GENERIC `tool_computer_use::TuiBridgeResolver` (the same
+    // resolver the TUI host uses — see its own doc comment for why it is
+    // transport-agnostic); the RECEIVER half is drained by a connection-scoped
+    // `BridgeComputerAccessBroker`, which lowers each exchange into a
+    // `Frame::ComputerAccessRequest` push and parks the reply channel keyed by
+    // a fresh `request_id`, exactly mirroring the permission gate's shape.
+    let (computer_access_tx, computer_access_rx) = tokio::sync::mpsc::channel::<
+        tui_core::computer_access_bridge::ComputerAccessExchange,
+    >(8);
+    cfg.computer_access_tx = Some(computer_access_tx);
+    let computer_access_broker = Arc::new(client_adapter::BridgeComputerAccessBroker::new(
+        connection.computer_access_sink(),
+    ));
 
     let runtime = build(cfg, output, permission_sink)
         .await
@@ -668,7 +690,10 @@ pub async fn assemble_with_provider_keys(
         .with_session_store(session_store),
     );
 
-    let connection = connection.bind(gate, driver).bind_router(router);
+    let connection = connection
+        .bind(gate, driver)
+        .bind_router(router)
+        .bind_computer_access(computer_access_broker, computer_access_rx);
     Ok(BoundServer {
         connection,
         runtime,

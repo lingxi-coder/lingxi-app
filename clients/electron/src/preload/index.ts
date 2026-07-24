@@ -1,15 +1,26 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
-import type { ClientCommand, ClientEvent, PermissionRequest, PermissionResponseDto } from '@lingxi/bridge-client';
+import type {
+  ClientCommand,
+  ClientEvent,
+  ComputerAccessRequestDto,
+  ComputerAccessResponseDto,
+  PermissionRequest,
+  PermissionResponseDto,
+} from '@lingxi/bridge-client';
 
 const CH_SEND_PROMPT = 'lingxi:sendPrompt';
 const CH_APPROVE = 'lingxi:approve';
 const CH_DENY = 'lingxi:deny';
+const CH_APPROVE_COMPUTER_ACCESS = 'lingxi:approveComputerAccess';
+const CH_DENY_COMPUTER_ACCESS = 'lingxi:denyComputerAccess';
 const CH_CANCEL = 'lingxi:cancel';
 const CH_COMMAND = 'lingxi:command';
 const CH_CONNECTION_STATE = 'lingxi:connectionState';
 const CH_EVENT = 'lingxi:event';
 const CH_PERMISSION = 'lingxi:permission';
+const CH_COMPUTER_ACCESS = 'lingxi:computerAccess';
 const CH_STATE_CHANGED = 'lingxi:connectionStateChanged';
+const CH_OPEN_SYSTEM_SETTINGS = 'lingxi:openSystemSettings';
 const CH_BOOTSTRAP = 'lingxi:bootstrap';
 const CH_SETTINGS_GET = 'lingxi:settings:get';
 const CH_SETTINGS_UPDATE = 'lingxi:settings:update';
@@ -81,6 +92,9 @@ export interface WorkspaceFileSearchResult { files: string[]; truncated: boolean
 
 export type Unsubscribe = () => void;
 
+/** The two macOS System Settings deep links the computer-access TCC panel opens. */
+export type SystemSettingsPane = 'accessibility' | 'screen_recording';
+
 export interface LingxiApi {
   platform: NodeJS.Platform;
   isElectron: true;
@@ -104,12 +118,16 @@ export interface LingxiApi {
   sendPrompt(text: string): Promise<void>;
   approve(requestId: number, response?: PermissionResponseDto): Promise<void>;
   deny(requestId: number): Promise<void>;
+  approveComputerAccess(requestId: number, response: ComputerAccessResponseDto): Promise<void>;
+  denyComputerAccess(requestId: number): Promise<void>;
+  openSystemSettings(pane: SystemSettingsPane): Promise<void>;
   cancel(turnId?: number): Promise<void>;
   /** Only the bounded Desktop model/session/task/slash surface is accepted by the main process. */
   command(command: AllowedClientCommand): Promise<void>;
   connectionState(): Promise<ConnectionState>;
   onEvent(cb: (event: ClientEvent) => void): Unsubscribe;
   onPermission(cb: (request: PermissionRequest) => void): Unsubscribe;
+  onComputerAccess(cb: (request: ComputerAccessRequestDto) => void): Unsubscribe;
   onConnectionStateChanged(cb: (state: ConnectionState) => void): Unsubscribe;
 }
 
@@ -142,11 +160,15 @@ const api: LingxiApi = {
   sendPrompt: (text) => ipcRenderer.invoke(CH_SEND_PROMPT, text) as Promise<void>,
   approve: (requestId, response) => ipcRenderer.invoke(CH_APPROVE, requestId, response) as Promise<void>,
   deny: (requestId) => ipcRenderer.invoke(CH_DENY, requestId) as Promise<void>,
+  approveComputerAccess: (requestId, response) => ipcRenderer.invoke(CH_APPROVE_COMPUTER_ACCESS, requestId, response) as Promise<void>,
+  denyComputerAccess: (requestId) => ipcRenderer.invoke(CH_DENY_COMPUTER_ACCESS, requestId) as Promise<void>,
+  openSystemSettings: (pane) => ipcRenderer.invoke(CH_OPEN_SYSTEM_SETTINGS, pane) as Promise<void>,
   cancel: (turnId) => ipcRenderer.invoke(CH_CANCEL, turnId) as Promise<void>,
   command: (command) => ipcRenderer.invoke(CH_COMMAND, command) as Promise<void>,
   connectionState: () => ipcRenderer.invoke(CH_CONNECTION_STATE) as Promise<ConnectionState>,
   onEvent: (callback) => subscribe(CH_EVENT, callback),
   onPermission: (callback) => subscribe(CH_PERMISSION, callback),
+  onComputerAccess: (callback) => subscribe(CH_COMPUTER_ACCESS, callback),
   onConnectionStateChanged: (callback) => subscribe(CH_STATE_CHANGED, callback),
 };
 

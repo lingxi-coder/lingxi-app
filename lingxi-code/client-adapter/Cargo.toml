@@ -60,6 +60,15 @@ tokio-util = { workspace = true }
 # the single crate where `serde_json::Value` is lowered to a JSON String for the
 # `input_json` / `result_json` wire fields (governing decision §0.4 / §0.10).
 serde_json.workspace = true
+# `computer_access_bridge` DTOs (`ComputerAccessExchange` / `ComputerAccessRequest`
+# / `ComputerAccessResponse`) the `BridgeComputerAccessBroker` (F2-06-adjacent)
+# receives over the channel `engine_desktop::DesktopConfig::computer_access_tx`
+# feeds via `tool_computer_use::TuiBridgeResolver` (generic despite the name —
+# see that resolver's own doc comment). This is the SAME edge `tool-computer-use`
+# already takes on `tui-core` for the identical reason (a per-app-checkbox +
+# tier + capability-flags prompt can't ride the generic permission gate); it is
+# an `engine -> engine` edge, permitted by `scripts/check_deps.py`.
+tui-core = { path = "../tui-core" }
 # (3c) Best-effort `warn!` when persisting an `AllowAlways` choice to
 # `settings.local.json` fails — surfaced rather than swallowed (a silent
 # persist failure would mislead the user into thinking the rule was saved).

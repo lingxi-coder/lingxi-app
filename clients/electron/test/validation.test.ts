@@ -6,6 +6,7 @@ import {
   isAllowedIpcSender,
   validateBridgeLockfile,
   validateClientCommand,
+  validateComputerAccessResponse,
   validatePermissionResponse,
   validatePrompt,
 } from '../src/main/validation';
@@ -63,6 +64,54 @@ test('prompt and permission payloads are bounded and exact', () => {
   assert.deepEqual(validatePermissionResponse(undefined), { type: 'allow_once' });
   assert.deepEqual(validatePermissionResponse({ type: 'deny' }), { type: 'deny' });
   assert.throws(() => validatePermissionResponse({ type: 'allow_once', extra: true }), /unsupported fields/);
+});
+
+test('computer access responses are bounded and exact', () => {
+  assert.deepEqual(
+    validateComputerAccessResponse({
+      granted_apps: ['Slack'],
+      clipboard_read: false,
+      clipboard_write: false,
+      system_key_combos: false,
+    }),
+    { granted_apps: ['Slack'], clipboard_read: false, clipboard_write: false, system_key_combos: false },
+  );
+  assert.deepEqual(
+    validateComputerAccessResponse({
+      granted_apps: [],
+      clipboard_read: false,
+      clipboard_write: false,
+      system_key_combos: false,
+    }),
+    { granted_apps: [], clipboard_read: false, clipboard_write: false, system_key_combos: false },
+  );
+  assert.throws(
+    () => validateComputerAccessResponse({ granted_apps: ['Slack'], clipboard_read: false, clipboard_write: false }),
+    /invalid computer access response/,
+  );
+  assert.throws(
+    () => validateComputerAccessResponse({
+      granted_apps: ['Slack'],
+      clipboard_read: false,
+      clipboard_write: false,
+      system_key_combos: false,
+      extra: true,
+    }),
+    /unsupported fields/,
+  );
+  assert.throws(
+    () => validateComputerAccessResponse({ granted_apps: 'Slack', clipboard_read: false, clipboard_write: false, system_key_combos: false }),
+    /invalid computer access response/,
+  );
+  assert.throws(
+    () => validateComputerAccessResponse({
+      granted_apps: Array.from({ length: 65 }, (_, i) => `app-${i}`),
+      clipboard_read: false,
+      clipboard_write: false,
+      system_key_combos: false,
+    }),
+    /invalid computer access response/,
+  );
 });
 
 test('bridge discovery accepts only the spawned child identity and complete private body', () => {

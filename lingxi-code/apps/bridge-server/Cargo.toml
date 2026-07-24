@@ -58,6 +58,11 @@ tool-cron = { path = "../../tools/cron" }
 # production runtime through the desktop composition root. app→app is permitted
 # by the dependency gate (apps are leaves; the rule only forbids non-leaf→leaf).
 engine-desktop = { path = "../engine-desktop" }
+# `computer_access_bridge::ComputerAccessExchange` — the channel item type for
+# `DesktopConfig::computer_access_tx`; boot.rs constructs the channel directly
+# so it needs the type in scope (the same edge `tool-computer-use` and
+# `client-adapter` already take on `tui-core`, for the identical reason).
+tui-core = { path = "../../tui-core" }
 telemetry = { path = "../../telemetry" }
 # S2: `boot::load_settings_blocks` reads the layered settings `providers` /
 # `routing` blocks (same loader the CLI uses) to fill the DesktopConfig.
@@ -83,6 +88,11 @@ anyhow = "1"
 # is a normal dependency above (S1); the mocks it re-exports are available to
 # tests through it without a separate dev-dep entry.
 tool-api = { path = "../../tool-api" }
+# F2-06-adjacent e2e: the computer-access broker test drives the REAL
+# `tool_computer_use::TuiBridgeResolver` (generic despite the name) over a
+# fixture tool, exercising the exact resolver the production `computer` tool
+# uses — not a reinvented test double.
+tool-computer-use = { path = "../../tools/computer-use" }
 # F2-08 routing tests: the real builtin slash-command set the desktop
 # composition root seeds, so `RunSlashCommand` routes through the production
 # registry (not a test-only stub).

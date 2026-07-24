@@ -25,6 +25,19 @@ export const CH_BRIDGE_RESTART = 'lingxi:bridge:restart';
 export const CH_DIAGNOSTICS_GET = 'lingxi:diagnostics:get';
 export const CH_DIAGNOSTICS_COPY = 'lingxi:diagnostics:copy';
 export const CH_DIAGNOSTICS_EXPORT = 'lingxi:diagnostics:export';
+export const CH_OPEN_SYSTEM_SETTINGS = 'lingxi:openSystemSettings';
+
+/**
+ * The only two macOS System Settings deep links the `computer` tool's TCC
+ * panel ever opens (Accessibility / Screen Recording). A fixed allowlist, not
+ * a renderer-supplied URL — `shell.openExternal` must never be handed an
+ * arbitrary string from the renderer.
+ */
+const SYSTEM_SETTINGS_PANES = {
+  accessibility: 'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility',
+  screen_recording: 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture',
+} as const;
+export type SystemSettingsPane = keyof typeof SYSTEM_SETTINGS_PANES;
 
 export interface WorkspaceMetadata {
   path?: string;
@@ -59,6 +72,7 @@ const electronModule = require('electron');
 const app = typeof electronModule === 'string' ? undefined : electronModule.app;
 const clipboard = typeof electronModule === 'string' ? undefined : electronModule.clipboard;
 const dialog = typeof electronModule === 'string' ? undefined : electronModule.dialog;
+const shell = typeof electronModule === 'string' ? undefined : electronModule.shell;
 const ipcMain = (typeof electronModule === 'string' ? undefined : electronModule.ipcMain) ?? {
   handle: () => { throw new Error('ipcMain is unavailable outside Electron'); },
   removeHandler: () => undefined,
@@ -218,6 +232,13 @@ export class HostController {
       writeFileSync(result.filePath, this.diagnosticReport(), { encoding: 'utf8', mode: 0o600 });
       return result.filePath;
     });
+    ipcMain.handle(CH_OPEN_SYSTEM_SETTINGS, async (event: IpcMainInvokeEvent, pane: unknown) => {
+      this.assertSender(event);
+      if (typeof pane !== 'string' || !(pane in SYSTEM_SETTINGS_PANES)) {
+        throw new Error('unsupported System Settings pane');
+      }
+      await shell.openExternal(SYSTEM_SETTINGS_PANES[pane as SystemSettingsPane]);
+    });
   }
 
   private assertSender(event: IpcMainInvokeEvent): void {
@@ -350,7 +371,7 @@ export class HostController {
       CH_TRUST_SET, CH_CREDENTIAL_GET, CH_CREDENTIAL_SET, CH_CREDENTIAL_CLEAR,
       CH_PROVIDER_CREDENTIALS_GET, CH_PROVIDER_CREDENTIAL_SET, CH_PROVIDER_CREDENTIAL_CLEAR,
       CH_BRIDGE_RESTART, CH_DIAGNOSTICS_GET,
-      CH_DIAGNOSTICS_COPY, CH_DIAGNOSTICS_EXPORT,
+      CH_DIAGNOSTICS_COPY, CH_DIAGNOSTICS_EXPORT, CH_OPEN_SYSTEM_SETTINGS,
     ]) ipcMain.removeHandler(channel);
     this.registered = false;
     this.targets.clear();

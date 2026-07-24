@@ -194,6 +194,22 @@ function validateCommand(name: string, v: unknown): void {
     case 'deny_permission':
       assert.ok(isNumber(o['request_id']));
       break;
+    case 'approve_computer_access':
+      assert.ok(isNumber(o['request_id']));
+      {
+        const response = rec(o['response']);
+        assert.ok(Array.isArray(response['granted_apps']));
+        for (const label of response['granted_apps'] as unknown[]) assert.ok(isString(label));
+        assert.ok(
+          typeof response['clipboard_read'] === 'boolean' &&
+            typeof response['clipboard_write'] === 'boolean' &&
+            typeof response['system_key_combos'] === 'boolean',
+        );
+      }
+      break;
+    case 'deny_computer_access':
+      assert.ok(isNumber(o['request_id']));
+      break;
     case 'set_permission_mode':
       validatePermissionMode(o['mode']);
       break;
@@ -549,7 +565,7 @@ function validateError(v: unknown): void {
 
 test('every command snapshot parses as ClientCommand', () => {
   const files = listSnapshots('command');
-  assert.equal(files.length, 23, `expected 23 command snapshots, found ${files.length}`);
+  assert.equal(files.length, 25, `expected 25 command snapshots, found ${files.length}`);
   for (const file of files) {
     validateCommand(file, loadSnapshot('command', file));
   }

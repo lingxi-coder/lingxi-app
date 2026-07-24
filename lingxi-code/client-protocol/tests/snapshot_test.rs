@@ -40,6 +40,10 @@ use std::path::{Path, PathBuf};
 use client_protocol::commands::{
     ClientCommand, ImageRefDto, ListingKindDto, PromptModeDto, ProviderCredentialSecretDto,
 };
+use client_protocol::computer_access::{
+    AccessTierDto, ComputerAccessRequestDto, ComputerAccessResponseDto, RequestedAppDto,
+    TccStateDto,
+};
 use client_protocol::error::ClientError;
 use client_protocol::events::{ClientEvent, CostDto, ErrorKindDto, TurnOutcomeDto};
 use client_protocol::listings::{
@@ -467,6 +471,22 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
             ClientCommand::DenyPermission { request_id: 7 },
         ),
         (
+            "command/approve_computer_access.json",
+            ClientCommand::ApproveComputerAccess {
+                request_id: 42,
+                response: ComputerAccessResponseDto {
+                    granted_apps: vec!["Slack".to_string()],
+                    clipboard_read: false,
+                    clipboard_write: false,
+                    system_key_combos: false,
+                },
+            },
+        ),
+        (
+            "command/deny_computer_access.json",
+            ClientCommand::DenyComputerAccess { request_id: 42 },
+        ),
+        (
             "command/set_permission_mode.json",
             ClientCommand::SetPermissionMode {
                 mode: "acceptEdits".to_string(),
@@ -606,6 +626,52 @@ fn permission_request_goldens() -> Vec<(&'static str, PermissionRequest)> {
                     color: "cyan".to_string(),
                     team: None,
                 }),
+            },
+        ),
+    ]
+}
+
+/// The `computer` tool `request_access` DTOs — one golden per
+/// `ComputerAccessRequestDto` example (tcc_state present / absent) plus the
+/// response.
+fn computer_access_goldens() -> Vec<(&'static str, ComputerAccessRequestDto)> {
+    vec![
+        (
+            "computer_access/request_with_tcc_state.json",
+            ComputerAccessRequestDto {
+                request_id: 42,
+                reason: "automate chat".to_string(),
+                apps: vec![
+                    RequestedAppDto {
+                        label: "Slack".to_string(),
+                    },
+                    RequestedAppDto {
+                        label: "Chrome".to_string(),
+                    },
+                ],
+                tier: AccessTierDto::Full,
+                clipboard_read: false,
+                clipboard_write: false,
+                system_key_combos: false,
+                tcc_state: Some(TccStateDto {
+                    accessibility: true,
+                    screen_recording: false,
+                }),
+            },
+        ),
+        (
+            "computer_access/request_without_tcc_state.json",
+            ComputerAccessRequestDto {
+                request_id: 7,
+                reason: "read the clipboard".to_string(),
+                apps: vec![RequestedAppDto {
+                    label: "Notes".to_string(),
+                }],
+                tier: AccessTierDto::Read,
+                clipboard_read: true,
+                clipboard_write: false,
+                system_key_combos: false,
+                tcc_state: None,
             },
         ),
     ]
@@ -794,6 +860,27 @@ fn every_permission_dto_matches_golden() {
         &PermissionResolved {
             request_id: 7,
             response: PermissionResponseDto::AllowAlways,
+        },
+        &mut failures,
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// EVERY `ComputerAccessRequestDto` example (tcc_state present / absent) has a
+/// byte-stable golden, plus a standalone `ComputerAccessResponseDto` golden.
+#[test]
+fn every_computer_access_dto_matches_golden() {
+    let mut failures = Vec::new();
+    for (filename, req) in computer_access_goldens() {
+        check_golden(filename, &req, &mut failures);
+    }
+    check_golden(
+        "computer_access/response_granted.json",
+        &ComputerAccessResponseDto {
+            granted_apps: vec!["Slack".to_string()],
+            clipboard_read: false,
+            clipboard_write: false,
+            system_key_combos: false,
         },
         &mut failures,
     );

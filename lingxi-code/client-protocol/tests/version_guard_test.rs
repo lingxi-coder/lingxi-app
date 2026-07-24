@@ -366,6 +366,19 @@ fn current_contract_index() -> ContractIndex {
     put("ClientCommand::DenyPermission", "deny_permission");
     put("ClientCommand::DenyPermission.request_id", "u64");
 
+    put(
+        "ClientCommand::ApproveComputerAccess",
+        "approve_computer_access",
+    );
+    put("ClientCommand::ApproveComputerAccess.request_id", "u64");
+    put(
+        "ClientCommand::ApproveComputerAccess.response",
+        "ComputerAccessResponseDto",
+    );
+
+    put("ClientCommand::DenyComputerAccess", "deny_computer_access");
+    put("ClientCommand::DenyComputerAccess.request_id", "u64");
+
     put("ClientCommand::SetPermissionMode", "set_permission_mode");
     put("ClientCommand::SetPermissionMode.mode", "String");
 
@@ -536,6 +549,34 @@ fn current_contract_index() -> ContractIndex {
     put("PermissionResponseDto::AllowOnce", "allow_once");
     put("PermissionResponseDto::AllowAlways", "allow_always");
     put("PermissionResponseDto::Deny", "deny");
+
+    // ── ComputerAccessRequestDto / ComputerAccessResponseDto
+    //    (computer_access.rs) ────────────────────────────────────────────
+    put("ComputerAccessRequestDto.request_id", "u64");
+    put("ComputerAccessRequestDto.reason", "String");
+    put("ComputerAccessRequestDto.apps", "Vec<RequestedAppDto>");
+    put("ComputerAccessRequestDto.tier", "AccessTierDto");
+    put("ComputerAccessRequestDto.clipboard_read", "bool");
+    put("ComputerAccessRequestDto.clipboard_write", "bool");
+    put("ComputerAccessRequestDto.system_key_combos", "bool");
+    put(
+        "ComputerAccessRequestDto.tcc_state",
+        "Option<TccStateDto>",
+    );
+
+    put("RequestedAppDto.label", "String");
+
+    put("AccessTierDto::Read", "read");
+    put("AccessTierDto::Click", "click");
+    put("AccessTierDto::Full", "full");
+
+    put("TccStateDto.accessibility", "bool");
+    put("TccStateDto.screen_recording", "bool");
+
+    put("ComputerAccessResponseDto.granted_apps", "Vec<String>");
+    put("ComputerAccessResponseDto.clipboard_read", "bool");
+    put("ComputerAccessResponseDto.clipboard_write", "bool");
+    put("ComputerAccessResponseDto.system_key_combos", "bool");
 
     // ── ClientError (error.rs) ────────────────────────────────────────────
     put("ClientError::Transport", "transport");
@@ -846,6 +887,10 @@ fn contract_index_covers_every_dto() {
         ClientCommand, CommandResultDto, ImageRefDto, ListingKindDto, PromptModeDto,
         ProviderCredentialSecretDto,
     };
+    use client_protocol::computer_access::{
+        AccessTierDto, ComputerAccessRequestDto, ComputerAccessResponseDto, RequestedAppDto,
+        TccStateDto,
+    };
     use client_protocol::error::ClientError;
     use client_protocol::events::{ClientEvent, CostDto, ErrorKindDto, TurnOutcomeDto};
     use client_protocol::listings::{
@@ -905,6 +950,11 @@ fn contract_index_covers_every_dto() {
         },
         ClientCommand::ListModels,
         ClientCommand::RequestExit,
+        ClientCommand::ApproveComputerAccess {
+            request_id: 0,
+            response: ComputerAccessResponseDto::default(),
+        },
+        ClientCommand::DenyComputerAccess { request_id: 0 },
     ];
     let _mode = PromptModeDto::Normal;
     let _img = ImageRefDto {
@@ -937,6 +987,21 @@ fn contract_index_covers_every_dto() {
     let _resolved = PermissionResolved {
         request_id: 0,
         response: PermissionResponseDto::Deny,
+    };
+    let _computer_access = ComputerAccessRequestDto {
+        request_id: 0,
+        reason: String::new(),
+        apps: vec![RequestedAppDto {
+            label: String::new(),
+        }],
+        tier: AccessTierDto::Full,
+        clipboard_read: false,
+        clipboard_write: false,
+        system_key_combos: false,
+        tcc_state: Some(TccStateDto {
+            accessibility: false,
+            screen_recording: false,
+        }),
     };
     let _rows = (
         SessionRowDto {

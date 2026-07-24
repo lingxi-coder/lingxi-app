@@ -118,6 +118,39 @@ test('privileged bridge access re-checks current workspace trust before use', ()
   assert.throws(() => (manager as any).requireClient(), /workspace trust is required/);
 });
 
+test('computer access requests broadcast to renderers and are tracked as pending', async () => {
+  const manager = new BridgeManager({
+    launchConfig: () => ({ workspace: '/workspace', trusted: true }),
+  });
+  const broadcasts: Array<{ channel: string; payload: unknown }> = [];
+  (manager as any).broadcast = (channel: string, payload: unknown) => broadcasts.push({ channel, payload });
+  const handlers = new Map<string, (...args: unknown[]) => void>();
+  const fakeClient = {
+    on: (event: string, handler: (...args: unknown[]) => void) => { handlers.set(event, handler); return fakeClient; },
+  };
+
+  (manager as any).wireClient(fakeClient, 0);
+  const request = {
+    request_id: 5,
+    reason: 'automate chat',
+    apps: [{ label: 'Slack' }],
+    tier: 'full',
+    clipboard_read: false,
+    clipboard_write: false,
+    system_key_combos: false,
+  };
+  handlers.get('computerAccess')!(request);
+
+  assert.deepEqual(broadcasts, [{ channel: 'lingxi:computerAccess', payload: request }]);
+  assert.ok((manager as any).pendingComputerAccessIds.has(5));
+
+  // stopBridge (restart/disconnect) clears pending computer access ids, just
+  // like it clears pending permission ids.
+  (manager as any).child = null;
+  await (manager as any).stopBridge();
+  assert.equal((manager as any).pendingComputerAccessIds.size, 0);
+});
+
 test('provider credential status is sourced from the engine secure store', async () => {
   const commands: Array<Record<string, unknown>> = [];
   const manager = new BridgeManager({

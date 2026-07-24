@@ -7,6 +7,10 @@ use bridge::{
     AuthChallenge, AuthResponse, BridgeRequest, BridgeResponse, BridgeWireError, Capabilities,
     ClientHello, Frame, ServerHello, BRIDGE_PROTOCOL_VERSION,
 };
+use client_protocol::commands::ClientCommand;
+use client_protocol::computer_access::{
+    AccessTierDto, ComputerAccessRequestDto, ComputerAccessResponseDto, RequestedAppDto,
+};
 use client_protocol::events::{ClientEvent, ErrorKindDto};
 use client_protocol::permission::{PermissionKindDto, PermissionRequest};
 use client_protocol::version::CLIENT_PROTOCOL_VERSION;
@@ -189,6 +193,73 @@ fn frame_permission_request_round_trips() {
     // The inner request_id is the correlator (echoed by the inbound
     // ApprovePermission/DenyPermission command), carried under `payload`.
     assert_eq!(v["payload"]["request_id"], 42);
+}
+
+#[test]
+fn frame_computer_access_request_round_trips() {
+    // Mirrors `frame_permission_request_round_trips`: the `computer` tool's
+    // `request_access` prompt is a SEPARATE additive `Frame` arm (no `id`,
+    // no own `type` tag on the inner DTO — the tag lives on `Frame`).
+    let f = Frame::ComputerAccessRequest(ComputerAccessRequestDto {
+        request_id: 42,
+        reason: "automate chat".into(),
+        apps: vec![RequestedAppDto {
+            label: "Slack".into(),
+        }],
+        tier: AccessTierDto::Full,
+        clipboard_read: false,
+        clipboard_write: false,
+        system_key_combos: false,
+        tcc_state: None,
+    });
+    assert_eq!(roundtrip(&f), f);
+    let json = serde_json::to_string(&f).unwrap();
+    assert_eq!(
+        json,
+        r#"{"type":"computer_access_request","payload":{"request_id":42,"reason":"automate chat","apps":[{"label":"Slack"}],"tier":"full","clipboard_read":false,"clipboard_write":false,"system_key_combos":false}}"#,
+        "the computer_access_request wire envelope must match the frozen wire contract example byte-for-byte"
+    );
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(v["type"], "computer_access_request");
+    assert!(
+        v.get("id").is_none(),
+        "computer-access requests are unsolicited pushes — no correlation id"
+    );
+    assert_eq!(v["payload"]["request_id"], 42);
+}
+
+#[test]
+fn approve_and_deny_computer_access_commands_match_exact_wire_shape() {
+    let approve = ClientCommand::ApproveComputerAccess {
+        request_id: 42,
+        response: ComputerAccessResponseDto {
+            granted_apps: vec!["Slack".to_string()],
+            clipboard_read: false,
+            clipboard_write: false,
+            system_key_combos: false,
+        },
+    };
+    assert_eq!(roundtrip(&approve), approve);
+    let json = serde_json::to_string(&approve).unwrap();
+    assert_eq!(
+        json,
+        r#"{"type":"approve_computer_access","request_id":42,"response":{"granted_apps":["Slack"],"clipboard_read":false,"clipboard_write":false,"system_key_combos":false}}"#
+    );
+
+    let deny = ClientCommand::DenyComputerAccess { request_id: 42 };
+    assert_eq!(roundtrip(&deny), deny);
+    let json = serde_json::to_string(&deny).unwrap();
+    assert_eq!(json, r#"{"type":"deny_computer_access","request_id":42}"#);
+
+    // Both travel as a client→server `Frame::Request` (a `BridgeRequest` whose
+    // `params` is the serialized `ClientCommand`), the SAME envelope
+    // `ApprovePermission`/`DenyPermission` use.
+    let framed = Frame::Request(BridgeRequest {
+        id: 1,
+        method: "submit".into(),
+        params: serde_json::to_value(&approve).unwrap(),
+    });
+    assert_eq!(roundtrip(&framed), framed);
 }
 
 #[test]

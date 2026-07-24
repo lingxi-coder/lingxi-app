@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type {
   ClientEvent,
+  ComputerAccessRequestDto,
+  ComputerAccessResponseDto,
   PermissionModeId,
   PermissionRequest,
   PermissionResponseDto,
@@ -26,6 +28,7 @@ import type {
   DiagnosticEntry,
   ProviderCredentialMetadata,
   ProviderCredentialUpdate,
+  SystemSettingsPane,
   WorkspaceFileSearchResult,
   WorkspaceMetadata,
 } from './lingxi';
@@ -41,6 +44,7 @@ export interface UseBridge {
   readonly usage: UsageSnapshot | null;
   readonly running: boolean;
   readonly pendingPermission: PermissionRequest | null;
+  readonly pendingComputerAccess: ComputerAccessRequestDto | null;
   readonly error: string | null;
   clearError(): void;
   sendPrompt(text: string): Promise<void>;
@@ -48,6 +52,9 @@ export interface UseBridge {
   cancel(turnId?: number): Promise<void>;
   approve(requestId: number, response?: PermissionResponseDto): Promise<void>;
   deny(requestId: number): Promise<void>;
+  approveComputerAccess(requestId: number, response: ComputerAccessResponseDto): Promise<void>;
+  denyComputerAccess(requestId: number): Promise<void>;
+  openSystemSettings(pane: SystemSettingsPane): Promise<void>;
   pickWorkspace(): Promise<WorkspaceMetadata | null>;
   selectRecentWorkspace(path: string): Promise<WorkspaceMetadata>;
   searchWorkspaceFiles(query: string): Promise<WorkspaceFileSearchResult>;
@@ -95,11 +102,13 @@ export function resetBridgeRuntimeState(): {
   conversation: ConversationState;
   desktop: DesktopState;
   permissionQueue: PermissionRequest[];
+  computerAccessQueue: ComputerAccessRequestDto[];
 } {
   return {
     conversation: emptyConversation(),
     desktop: emptyDesktopState(),
     permissionQueue: [],
+    computerAccessQueue: [],
   };
 }
 
@@ -113,6 +122,7 @@ export function useBridge(): UseBridge {
   const [conversation, setConversation] = useState<ConversationState>(emptyConversation);
   const [desktop, setDesktop] = useState<DesktopState>(emptyDesktopState);
   const [permissionQueue, setPermissionQueue] = useState<PermissionRequest[]>([]);
+  const [computerAccessQueue, setComputerAccessQueue] = useState<ComputerAccessRequestDto[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   const capture = useCallback((cause: unknown) => {
@@ -126,6 +136,7 @@ export function useBridge(): UseBridge {
     setConversation(next.conversation);
     setDesktop(next.desktop);
     setPermissionQueue(next.permissionQueue);
+    setComputerAccessQueue(next.computerAccessQueue);
   }, []);
 
   const requestTaskList = useCallback(async () => {
@@ -157,6 +168,7 @@ export function useBridge(): UseBridge {
         setError(null);
       } else if (shouldClearPendingPermissions(state)) {
         setPermissionQueue([]);
+        setComputerAccessQueue([]);
       }
       if (state.status === 'error') setError(state.message);
       if (state.status === 'disconnected' && state.reason) setError(state.reason);
@@ -168,6 +180,12 @@ export function useBridge(): UseBridge {
     });
     const offPermission = host.onPermission((request: PermissionRequest) => {
       setPermissionQueue((previous) => [
+        ...previous.filter((entry) => entry.request_id !== request.request_id),
+        request,
+      ]);
+    });
+    const offComputerAccess = host.onComputerAccess((request: ComputerAccessRequestDto) => {
+      setComputerAccessQueue((previous) => [
         ...previous.filter((entry) => entry.request_id !== request.request_id),
         request,
       ]);
@@ -185,6 +203,7 @@ export function useBridge(): UseBridge {
       offEvent();
       offState();
       offPermission();
+      offComputerAccess();
     };
   }, [host]);
 
@@ -247,6 +266,10 @@ export function useBridge(): UseBridge {
     setPermissionQueue((previous) => previous.filter((entry) => entry.request_id !== requestId));
   }, []);
 
+  const dropPendingComputerAccess = useCallback((requestId: number) => {
+    setComputerAccessQueue((previous) => previous.filter((entry) => entry.request_id !== requestId));
+  }, []);
+
   const approve = useCallback(async (requestId: number, response?: PermissionResponseDto) => {
     if (!host) return;
     try {
@@ -262,6 +285,27 @@ export function useBridge(): UseBridge {
       dropPending(requestId);
     } catch (cause) { capture(cause); }
   }, [capture, dropPending, host]);
+
+  const approveComputerAccess = useCallback(async (requestId: number, response: ComputerAccessResponseDto) => {
+    if (!host) return;
+    try {
+      await host.approveComputerAccess(requestId, response);
+      dropPendingComputerAccess(requestId);
+    } catch (cause) { capture(cause); }
+  }, [capture, dropPendingComputerAccess, host]);
+
+  const denyComputerAccess = useCallback(async (requestId: number) => {
+    if (!host) return;
+    try {
+      await host.denyComputerAccess(requestId);
+      dropPendingComputerAccess(requestId);
+    } catch (cause) { capture(cause); }
+  }, [capture, dropPendingComputerAccess, host]);
+
+  const openSystemSettings = useCallback(async (pane: SystemSettingsPane) => {
+    if (!host) return;
+    try { await host.openSystemSettings(pane); } catch (cause) { capture(cause); }
+  }, [capture, host]);
 
   const pickWorkspace = useCallback(async () => {
     if (!host) return null;
@@ -417,6 +461,7 @@ export function useBridge(): UseBridge {
     usage: conversation.usage,
     running: conversation.running,
     pendingPermission: permissionQueue[0] ?? null,
+    pendingComputerAccess: computerAccessQueue[0] ?? null,
     error,
     clearError: () => setError(null),
     sendPrompt,
@@ -424,6 +469,9 @@ export function useBridge(): UseBridge {
     cancel,
     approve,
     deny,
+    approveComputerAccess,
+    denyComputerAccess,
+    openSystemSettings,
     pickWorkspace,
     selectRecentWorkspace,
     searchWorkspaceFiles,

@@ -10,6 +10,7 @@
 //! public types are re-exported at the crate root, so consumers write
 //! `bridge::ServerHello` regardless.
 
+use client_protocol::computer_access::ComputerAccessRequestDto;
 use client_protocol::events::ClientEvent;
 use client_protocol::permission::PermissionRequest;
 use client_protocol::version::CLIENT_PROTOCOL_VERSION;
@@ -185,6 +186,19 @@ pub struct AuthResponse {
 ///   [`PermissionRequest::request_id`] is the correlator the client echoes back
 ///   in the matching [`ClientCommand::ApprovePermission`]/`DenyPermission`
 ///   (which travel as [`Frame::Request`]).
+/// - [`Frame::ComputerAccessRequest`] — an UNSOLICITED server→client
+///   [`ComputerAccessRequestDto`] push, the SAME shape as
+///   [`Frame::PermissionRequest`] one level down: the `computer` tool's
+///   `request_access` prompt can't be expressed as a
+///   [`crate::wire::Frame::PermissionRequest`] (per-app checkboxes, a tier, and
+///   independent capability flags — see
+///   `tui_core::computer_access_bridge`'s own doc comment for why it bypasses
+///   the generic permission gate), so it gets its own additive arm. Carries
+///   **no** envelope `id`; the inner
+///   [`ComputerAccessRequestDto::request_id`] is the correlator the client
+///   echoes back in the matching
+///   [`ClientCommand::ApproveComputerAccess`]/`DenyComputerAccess`
+///   (which travel as [`Frame::Request`]).
 ///
 /// **Adjacently** tagged on `type` (`"request"` / `"response"` / `"event"`,
 /// `snake_case`) with the payload under `payload`. Adjacent (not internal)
@@ -207,6 +221,11 @@ pub enum Frame {
     /// `ApprovePermission`/`DenyPermission` correlated by
     /// [`PermissionRequest::request_id`].
     PermissionRequest(PermissionRequest),
+    /// An unsolicited server→client [`ComputerAccessRequestDto`] push (no
+    /// `id`). Answered by a separate [`Frame::Request`] carrying
+    /// `ApproveComputerAccess`/`DenyComputerAccess` correlated by
+    /// [`ComputerAccessRequestDto::request_id`].
+    ComputerAccessRequest(ComputerAccessRequestDto),
 }
 
 #[cfg(test)]

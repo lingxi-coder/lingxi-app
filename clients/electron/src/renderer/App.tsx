@@ -10,6 +10,7 @@ import {
   ErrorBanner,
   SetupCard,
 } from './components/BetaDesktop';
+import { ComputerAccessPrompt } from './components/ComputerAccessPrompt';
 import { PermissionPrompt } from './components/PermissionPrompt';
 import { Stage } from './components/Stage';
 import { Theme } from './theme/ThemeContext';
@@ -83,6 +84,13 @@ export function App() {
           request={bridge.pendingPermission}
           onApprove={(requestId, response) => { void bridge.approve(requestId, response).catch(() => undefined); }}
           onDeny={(requestId) => { void bridge.deny(requestId).catch(() => undefined); }}
+        />
+
+        <ComputerAccessPrompt
+          request={bridge.pendingComputerAccess}
+          onSubmit={(requestId, response) => { void bridge.approveComputerAccess(requestId, response).catch(() => undefined); }}
+          onDeny={(requestId) => { void bridge.denyComputerAccess(requestId).catch(() => undefined); }}
+          onOpenSystemSettings={(pane) => { void bridge.openSystemSettings(pane).catch(() => undefined); }}
         />
 
         {settingsOpen && (

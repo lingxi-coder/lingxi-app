@@ -18,9 +18,9 @@
  *      a `BridgeWireError` and bars subsequent commands), so the client
  *      verifies compatibility before proceeding.
  *   3. Subsequent commands ride as `Frame::Request { params: ClientCommand }`.
- *      Inbound `Frame::Event` / `Frame::PermissionRequest` are surfaced through
- *      {@link BridgeClient.events} (an `AsyncIterable`) and via the
- *      `'event'` / `'permission'` listener callbacks.
+ *      Inbound `Frame::Event` / `Frame::PermissionRequest` / `Frame::ComputerAccessRequest`
+ *      are surfaced through {@link BridgeClient.events} (an `AsyncIterable`) and via the
+ *      `'event'` / `'permission'` / `'computerAccess'` listener callbacks.
  */
 
 import { EventEmitter } from 'node:events';
@@ -31,6 +31,8 @@ import {
   CLIENT_PROTOCOL_VERSION,
   type ClientCommand,
   type ClientEvent,
+  type ComputerAccessRequestDto,
+  type ComputerAccessResponseDto,
   type Frame,
   type ImageRefDto,
   type PermissionRequest,
@@ -70,6 +72,7 @@ export interface BridgeClientOptions {
 export interface BridgeClientEvents {
   event: (event: ClientEvent) => void;
   permission: (request: PermissionRequest) => void;
+  computerAccess: (request: ComputerAccessRequestDto) => void;
   close: (code: number, reason: string) => void;
   error: (err: Error) => void;
 }
@@ -328,6 +331,16 @@ export class BridgeClient extends EventEmitter {
     this.sendCommand({ type: 'deny_permission', request_id: requestId });
   }
 
+  /** Approve a parked `computer` tool `request_access` request, correlated by `request_id`. */
+  approveComputerAccess(requestId: number, response: ComputerAccessResponseDto): void {
+    this.sendCommand({ type: 'approve_computer_access', request_id: requestId, response });
+  }
+
+  /** Deny a parked `computer` tool `request_access` request, correlated by `request_id`. */
+  denyComputerAccess(requestId: number): void {
+    this.sendCommand({ type: 'deny_computer_access', request_id: requestId });
+  }
+
   // ── Inbound frames ──────────────────────────────────────────────────────────
 
   private onMessage(data: WebSocket.RawData): void {
@@ -346,6 +359,9 @@ export class BridgeClient extends EventEmitter {
         break;
       case 'permission_request':
         this.emit('permission', frame.payload);
+        break;
+      case 'computer_access_request':
+        this.emit('computerAccess', frame.payload);
         break;
       case 'response': {
         const { id, result, error } = frame.payload;

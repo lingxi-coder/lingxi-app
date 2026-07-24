@@ -31,6 +31,7 @@
 //! bytes are a base64 [`String`] in [`ImageRefDto`]; `serde_json::Value` never
 //! enters this crate.
 
+use crate::computer_access::ComputerAccessResponseDto;
 use crate::listings::TaskStatusDto;
 use crate::permission::PermissionResponseDto;
 use serde::{Deserialize, Serialize};
@@ -129,6 +130,27 @@ pub enum ClientCommand {
     DenyPermission {
         /// Correlator with the originating
         /// [`PermissionRequest`](crate::permission::PermissionRequest).
+        request_id: u64,
+    },
+
+    // ── `computer` tool `request_access` resolution ──────────────────────────
+    /// Approve a parked `computer`-tool `request_access` prompt, correlated by
+    /// `request_id` (the connection-scoped
+    /// `BridgeComputerAccessBroker`). `response` carries the granted app
+    /// subset + capability flags.
+    ApproveComputerAccess {
+        /// Correlator with the originating
+        /// [`ComputerAccessRequestDto`](crate::computer_access::ComputerAccessRequestDto).
+        request_id: u64,
+        /// The user's grant.
+        response: ComputerAccessResponseDto,
+    },
+
+    /// Deny a parked `computer`-tool `request_access` prompt, correlated by
+    /// `request_id`.
+    DenyComputerAccess {
+        /// Correlator with the originating
+        /// [`ComputerAccessRequestDto`](crate::computer_access::ComputerAccessRequestDto).
         request_id: u64,
     },
 

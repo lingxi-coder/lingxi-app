@@ -1,4 +1,11 @@
-import type { ClientCommand, ClientEvent, PermissionRequest, PermissionResponseDto } from '@lingxi/bridge-client';
+import type {
+  ClientCommand,
+  ClientEvent,
+  ComputerAccessRequestDto,
+  ComputerAccessResponseDto,
+  PermissionRequest,
+  PermissionResponseDto,
+} from '@lingxi/bridge-client';
 
 export type ConnectionState =
   | { status: 'idle' }
@@ -50,6 +57,9 @@ export interface BootstrapState {
 export interface WorkspaceFileSearchResult { files: string[]; truncated: boolean }
 export type Unsubscribe = () => void;
 
+/** The two macOS System Settings deep links the computer-access TCC panel opens. */
+export type SystemSettingsPane = 'accessibility' | 'screen_recording';
+
 export interface LingxiApi {
   platform: NodeJS.Platform;
   isElectron: true;
@@ -73,11 +83,15 @@ export interface LingxiApi {
   sendPrompt(text: string): Promise<void>;
   approve(requestId: number, response?: PermissionResponseDto): Promise<void>;
   deny(requestId: number): Promise<void>;
+  approveComputerAccess(requestId: number, response: ComputerAccessResponseDto): Promise<void>;
+  denyComputerAccess(requestId: number): Promise<void>;
+  openSystemSettings(pane: SystemSettingsPane): Promise<void>;
   cancel(turnId?: number): Promise<void>;
   command(command: AllowedClientCommand): Promise<void>;
   connectionState(): Promise<ConnectionState>;
   onEvent(cb: (event: ClientEvent) => void): Unsubscribe;
   onPermission(cb: (request: PermissionRequest) => void): Unsubscribe;
+  onComputerAccess(cb: (request: ComputerAccessRequestDto) => void): Unsubscribe;
   onConnectionStateChanged(cb: (state: ConnectionState) => void): Unsubscribe;
 }
 

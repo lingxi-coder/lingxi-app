@@ -1,4 +1,4 @@
-import type { ClientCommand, PermissionResponseDto } from '@lingxi/bridge-client';
+import type { ClientCommand, ComputerAccessResponseDto, PermissionResponseDto } from '@lingxi/bridge-client';
 
 const MAX_PROMPT_LENGTH = 256 * 1024;
 const MAX_ID_LENGTH = 512;
@@ -62,6 +62,24 @@ export function validatePermissionResponse(value: unknown): PermissionResponseDt
     throw new Error('invalid permission response');
   }
   return { type: input['type'] };
+}
+
+export function validateComputerAccessResponse(value: unknown): ComputerAccessResponseDto {
+  const input = object(value);
+  exactKeys(input, ['granted_apps', 'clipboard_read', 'clipboard_write', 'system_key_combos']);
+  if (!Array.isArray(input['granted_apps']) || input['granted_apps'].length > 64) {
+    throw new Error('invalid computer access response');
+  }
+  const granted_apps = input['granted_apps'].map((label) => string(label, 'granted app label', 256));
+  for (const key of ['clipboard_read', 'clipboard_write', 'system_key_combos'] as const) {
+    if (typeof input[key] !== 'boolean') throw new Error('invalid computer access response');
+  }
+  return {
+    granted_apps,
+    clipboard_read: input['clipboard_read'] as boolean,
+    clipboard_write: input['clipboard_write'] as boolean,
+    system_key_combos: input['system_key_combos'] as boolean,
+  };
 }
 
 export function validateBridgeLockfile(

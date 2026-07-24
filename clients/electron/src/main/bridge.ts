@@ -10,6 +10,7 @@ import {
   BridgeClient,
   type ClientCommand,
   type ClientEvent,
+  type ComputerAccessRequestDto,
   type PermissionRequest,
 } from '@lingxi/bridge-client';
 
@@ -18,6 +19,7 @@ import {
   assertCommandAllowedDuringTurn,
   validateClientCommand,
   validateBridgeLockfile,
+  validateComputerAccessResponse,
   validateOptionalTurnId,
   validatePermissionResponse,
   validatePrompt,
@@ -27,11 +29,14 @@ import {
 export const CH_SEND_PROMPT = 'lingxi:sendPrompt';
 export const CH_APPROVE = 'lingxi:approve';
 export const CH_DENY = 'lingxi:deny';
+export const CH_APPROVE_COMPUTER_ACCESS = 'lingxi:approveComputerAccess';
+export const CH_DENY_COMPUTER_ACCESS = 'lingxi:denyComputerAccess';
 export const CH_CANCEL = 'lingxi:cancel';
 export const CH_COMMAND = 'lingxi:command';
 export const CH_CONNECTION_STATE = 'lingxi:connectionState';
 export const CH_EVENT = 'lingxi:event';
 export const CH_PERMISSION = 'lingxi:permission';
+export const CH_COMPUTER_ACCESS = 'lingxi:computerAccess';
 export const CH_STATE_CHANGED = 'lingxi:connectionStateChanged';
 
 export type ConnectionState =
@@ -95,6 +100,7 @@ interface PendingCredentialOperation {
 
 const SERVER_BIN_NAME = process.platform === 'win32' ? 'bridge-server.exe' : 'bridge-server';
 const MAX_PENDING_PERMISSIONS = 1_000;
+const MAX_PENDING_COMPUTER_ACCESS = 1_000;
 const require = createRequire(import.meta.url);
 const electronModule = require('electron');
 const ipcMain = (typeof electronModule === 'string' ? undefined : electronModule.ipcMain) ?? {
@@ -203,6 +209,7 @@ export class BridgeManager {
   private activeTurn = false;
   private lastRuntimeVersions: BridgeRuntimeVersions | undefined;
   private readonly pendingPermissionIds = new Set<number>();
+  private readonly pendingComputerAccessIds = new Set<number>();
   private readonly targets = new Map<WebContents, Set<string>>();
   private readonly diagnostics: DiagnosticBuffer;
 
@@ -584,6 +591,19 @@ export class BridgeManager {
         this.broadcast(CH_PERMISSION, request);
       }
     });
+    client.on('computerAccess', (request: ComputerAccessRequestDto) => {
+      if (Number.isSafeInteger(request.request_id) && request.request_id >= 0) {
+        if (
+          !this.pendingComputerAccessIds.has(request.request_id)
+          && this.pendingComputerAccessIds.size >= MAX_PENDING_COMPUTER_ACCESS
+        ) {
+          this.diagnostics.add('warn', 'bridge', 'computer access request limit reached');
+          return;
+        }
+        this.pendingComputerAccessIds.add(request.request_id);
+        this.broadcast(CH_COMPUTER_ACCESS, request);
+      }
+    });
     client.on('close', (code, reason) => {
       if (generation === this.generation && !this.disposed) this.setState({ status: 'disconnected', reason: reason || `ws closed (code=${code})` });
     });
@@ -660,6 +680,21 @@ export class BridgeManager {
       this.requireClient().denyPermission(id);
       this.pendingPermissionIds.delete(id);
     });
+    ipcMain.handle(CH_APPROVE_COMPUTER_ACCESS, (event: IpcMainInvokeEvent, requestId: unknown, response: unknown) => {
+      this.assertSender(event);
+      const id = validateRequestId(requestId);
+      const computerAccessResponse = validateComputerAccessResponse(response);
+      if (!this.pendingComputerAccessIds.has(id)) throw new Error('computer access request is not pending');
+      this.requireClient().approveComputerAccess(id, computerAccessResponse);
+      this.pendingComputerAccessIds.delete(id);
+    });
+    ipcMain.handle(CH_DENY_COMPUTER_ACCESS, (event: IpcMainInvokeEvent, requestId: unknown) => {
+      this.assertSender(event);
+      const id = validateRequestId(requestId);
+      if (!this.pendingComputerAccessIds.has(id)) throw new Error('computer access request is not pending');
+      this.requireClient().denyComputerAccess(id);
+      this.pendingComputerAccessIds.delete(id);
+    });
     ipcMain.handle(CH_CANCEL, (event: IpcMainInvokeEvent, turnId: unknown) => {
       this.assertSender(event);
       this.requireClient().cancel(validateOptionalTurnId(turnId));
@@ -676,7 +711,10 @@ export class BridgeManager {
 
   private unregisterIpc(): void {
     if (!this.ipcRegistered) return;
-    for (const channel of [CH_SEND_PROMPT, CH_APPROVE, CH_DENY, CH_CANCEL, CH_COMMAND, CH_CONNECTION_STATE]) {
+    for (const channel of [
+      CH_SEND_PROMPT, CH_APPROVE, CH_DENY, CH_APPROVE_COMPUTER_ACCESS, CH_DENY_COMPUTER_ACCESS,
+      CH_CANCEL, CH_COMMAND, CH_CONNECTION_STATE,
+    ]) {
       ipcMain.removeHandler(channel);
     }
     this.ipcRegistered = false;
@@ -749,6 +787,7 @@ export class BridgeManager {
   private async stopBridge(): Promise<void> {
     ++this.generation;
     this.pendingPermissionIds.clear();
+    this.pendingComputerAccessIds.clear();
     for (const pending of this.pendingCredentialOperations.values()) {
       clearTimeout(pending.timer);
       pending.reject(new Error('bridge credential operation was interrupted'));

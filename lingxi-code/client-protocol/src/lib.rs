@@ -3,9 +3,10 @@
 //! Electron, `UniFFI` for iOS/Android).
 //!
 //! This crate is **pure contract**: it defines the [`commands`], [`events`],
-//! [`message`], [`permission`], [`listings`], and [`error`] DTOs plus the
-//! [`version`] constant. It contains NO engine logic — the engine→DTO lowering
-//! lives in the separate `client-adapter` crate (governing decision §0.2).
+//! [`message`], [`permission`], [`computer_access`], [`listings`], and
+//! [`error`] DTOs plus the [`version`] constant. It contains NO engine logic —
+//! the engine→DTO lowering lives in the separate `client-adapter` crate
+//! (governing decision §0.2).
 //!
 //! Governing constraints frozen here (see the M10 foundation plan §0):
 //! - Tool payloads are JSON **Strings** on the wire (`input_json`/`result_json`,
@@ -20,6 +21,7 @@
 #![forbid(unsafe_code)]
 
 pub mod commands;
+pub mod computer_access;
 pub mod error;
 pub mod events;
 pub mod listings;

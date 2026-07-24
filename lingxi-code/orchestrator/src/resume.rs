@@ -60,8 +60,27 @@ impl ReplayedSession {
     #[must_use]
     pub fn handle_runtime_snapshot(&self) -> traits::ResumeRuntimeSnapshot {
         let tracking = &self.runtime_metadata.compaction_tracking;
+        // Only present a model in the snapshot when a REAL assistant model row
+        // was recovered from the transcript (same filter the replay uses:
+        // non-empty, not a `<synthetic>`-style placeholder). Otherwise emit an
+        // EMPTY model so the hot-resume consumer's `!model.is_empty()` guard
+        // keeps the live session model instead of adopting the `DEFAULT_MODEL`
+        // seed that `build_state_from_jsonl` left behind.
+        let model_recovered = self.messages.iter().any(|m| {
+            m.message_type == "assistant"
+                && m.message
+                    .get("model")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|s| {
+                        !s.is_empty() && !(s.starts_with('<') && s.ends_with('>'))
+                    })
+        });
         traits::ResumeRuntimeSnapshot {
-            model: self.state.model.clone(),
+            model: if model_recovered {
+                self.state.model.clone()
+            } else {
+                String::new()
+            },
             model_profile: self.state.model_profile.clone(),
             effort: self.runtime_metadata.effort.clone(),
             main_thread_agent_type: self.runtime_metadata.main_thread_agent_type.clone(),

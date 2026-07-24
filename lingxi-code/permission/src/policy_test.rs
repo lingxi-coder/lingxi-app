@@ -233,6 +233,37 @@ mod tests {
         );
     }
 
+    /// #25 (the allow direction): a `Bash(...)` ALLOW rule must AUTO-ALLOW the
+    /// equivalent command-Monitor — Monitor's command routes through the SAME
+    /// Bash resolver, so allow rules fire and the command isn't needlessly
+    /// re-prompted (the finding's "allow Bash(...) rules never auto-allow /
+    /// over-ask" concern).
+    #[test]
+    fn monitor_command_is_auto_allowed_by_a_bash_allow_rule() {
+        let rules = vec![PermissionRule {
+            value: PermissionRuleValue {
+                tool_name: "Bash".into(),
+                rule_content: Some("git status:*".into()),
+            },
+            behavior: PermissionBehavior::Allow,
+            source: PermissionRuleSource::ProjectSettings,
+        }];
+        let p = PermissionPolicy::from_rules(PermissionMode::Default, rules);
+
+        assert!(
+            matches!(
+                p.authorize("Monitor", &serde_json::json!({ "command": "git status --short" })),
+                PermissionResult::Allow { .. }
+            ),
+            "a Bash allow rule must auto-allow the equivalent Monitor command"
+        );
+        // Control: Bash itself is allowed identically for the same command.
+        assert!(matches!(
+            p.authorize("Bash", &serde_json::json!({ "command": "git status --short" })),
+            PermissionResult::Allow { .. }
+        ));
+    }
+
     #[test]
     fn dontask_denies_unmatched() {
         let p = PermissionPolicy::new(PermissionMode::DontAsk);

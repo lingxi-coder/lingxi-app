@@ -65,49 +65,87 @@ impl ToolSearchMode {
 /// Parse the tool-search mode from an enable value and the experimental-betas
 /// kill switch. Mirrors the shape of claude-code `e$r()`.
 ///
-/// - kill switch set → `Standard`.
-/// - enable unset → `Enabled` (claude-code default `tst`).
-/// - enable defined-falsy (`0`/`false`/`no`/`off`) → `Standard`.
-/// - `tst` or a truthy value → `Enabled`.
-/// - `tst-auto` / `auto` → `Auto { percentage: 10 }`.
-/// - `auto:N` clamps N to 0..100; 0 is always enabled and 100 is standard.
-/// - anything else → `Standard`.
+/// Byte-faithful port of claude-code `qzr()` (with `Yos`/`B5g`):
+/// - kill switch (`Q_e()`) set → `Standard`.
+/// - `auto:N` (case-sensitive) → `Yos` parses N and clamps to `0..=100`:
+///   `N==0` → `Enabled`, `N==100` (incl. any `N>100`) → `Standard`, otherwise
+///   `Auto { percentage: N }`.
+/// - `auto` (case-sensitive) → `Auto { percentage: 10 }`.
+/// - a defined-falsy value (`0`/`false`/`no`/`off`) → `Standard`.
+/// - EVERYTHING else — unset, empty, truthy, `tst`, `tst-auto`, or any
+///   unrecognized string — → `Enabled` (the oracle's `Jt`-then-`return "tst"`
+///   arms both resolve to enabled; only a defined-falsy value diverges).
+///
+/// Notably `tst-auto` as an INPUT is enabled (not auto — `B5g("tst-auto")` is
+/// false and it is truthy), `auto:99999` is `Standard` (clamped to 100, not a
+/// wrapped-integer `Auto`), and an unrecognized value is enabled (not standard).
 #[must_use]
 pub fn mode_from_values(enable: Option<&str>, disable_experimental_betas: bool) -> ToolSearchMode {
+    // Q_e() kill switch.
     if disable_experimental_betas {
         return ToolSearchMode::Standard;
     }
-    let Some(raw) = enable else {
-        return ToolSearchMode::Enabled;
-    };
-    let v = raw.trim().to_lowercase();
-    if v == "tst" {
-        return ToolSearchMode::Enabled;
+    // Yos(e): `auto:N` clamped to 0..=100; anything else → None. Case-SENSITIVE.
+    let auto_pct = enable.and_then(parse_auto_percentage);
+    match auto_pct {
+        Some(0) => return ToolSearchMode::Enabled, // t === 0 → "tst"
+        Some(100) => return ToolSearchMode::Standard, // t === 100 → "standard"
+        _ => {}
     }
-    if v == "tst-auto" || v == "auto" {
-        return ToolSearchMode::Auto { percentage: 10 };
-    }
-    if let Some(raw_percentage) = v.strip_prefix("auto:") {
-        let mut chars = raw_percentage.trim_start().chars().peekable();
-        let mut numeric = String::new();
-        if chars.peek().is_some_and(|c| matches!(c, '+' | '-')) {
-            numeric.push(chars.next().expect("peeked sign"));
+    // B5g(e): e && (e === "auto" || e.startsWith("auto:")) → "tst-auto".
+    if let Some(e) = enable {
+        if e == "auto" || e.starts_with("auto:") {
+            return ToolSearchMode::Auto {
+                percentage: auto_pct.unwrap_or(10),
+            };
         }
-        numeric.extend(chars.take_while(char::is_ascii_digit));
-        let signed = numeric.parse::<i16>().unwrap_or(10).clamp(0, 100) as u8;
-        return match signed {
-            0 => ToolSearchMode::Enabled,
-            100 => ToolSearchMode::Standard,
-            percentage => ToolSearchMode::Auto { percentage },
-        };
     }
-    if traits::env::is_env_defined_falsy(Some(&v)) {
+    // `if(Jt(e))return"tst"` and the final `return"tst"` are the same outcome;
+    // only a defined-falsy value (`nu`) diverges to "standard".
+    if traits::env::is_env_defined_falsy(enable) {
         return ToolSearchMode::Standard;
     }
-    if traits::env::is_env_truthy(Some(&v)) {
-        return ToolSearchMode::Enabled;
+    ToolSearchMode::Enabled
+}
+
+/// `Yos(e)`: parse a case-sensitive `auto:N` value, clamped to `0..=100`.
+/// Returns `None` for any value that does not start with `auto:` or whose `N`
+/// fails to parse (`parseInt` NaN), so the caller's `B5g` still classifies a
+/// malformed `auto:xxx` as auto with the default percentage.
+fn parse_auto_percentage(e: &str) -> Option<u8> {
+    let rest = e.strip_prefix("auto:")?;
+    let n = parse_int_prefix(rest.trim())?;
+    // Math.max(0, Math.min(100, n)).
+    Some(n.clamp(0, 100) as u8)
+}
+
+/// `Ld`/`parseInt(t, 10)` semantics: an optional leading sign followed by ASCII
+/// digits, stopping at the first non-digit; `None` (NaN) when no digits lead.
+/// A value beyond `i64` saturates by sign so the caller's `clamp(0,100)` maps a
+/// huge positive to 100 and a huge negative to 0, matching JS `Math` on floats.
+fn parse_int_prefix(s: &str) -> Option<i64> {
+    let mut chars = s.chars().peekable();
+    let mut buf = String::new();
+    if chars.peek().is_some_and(|c| matches!(c, '+' | '-')) {
+        buf.push(chars.next().expect("peeked sign"));
     }
-    ToolSearchMode::Standard
+    while let Some(c) = chars.peek() {
+        if c.is_ascii_digit() {
+            buf.push(chars.next().expect("peeked digit"));
+        } else {
+            break;
+        }
+    }
+    if buf.is_empty() || buf == "+" || buf == "-" {
+        return None;
+    }
+    Some(buf.parse::<i64>().unwrap_or_else(|_| {
+        if buf.starts_with('-') {
+            i64::MIN
+        } else {
+            i64::MAX
+        }
+    }))
 }
 
 /// Read [`mode_from_values`] from the live environment. Prefers the rebranded
@@ -327,15 +365,21 @@ mod tests {
             ToolSearchMode::Auto { percentage: 10 }
         );
         assert_eq!(
-            mode_from_values(Some("tst-auto"), false),
-            ToolSearchMode::Auto { percentage: 10 }
-        );
-        assert_eq!(
             mode_from_values(Some("auto:35junk"), false),
             ToolSearchMode::Auto { percentage: 35 }
         );
+        // A malformed `auto:xxx` is still auto (B5g), with the default percentage.
+        assert_eq!(
+            mode_from_values(Some("auto:xyz"), false),
+            ToolSearchMode::Auto { percentage: 10 }
+        );
         assert_eq!(
             mode_from_values(Some("auto:100"), false),
+            ToolSearchMode::Standard
+        );
+        // N > 100 clamps to 100 → Standard (NOT a wrapped-integer Auto).
+        assert_eq!(
+            mode_from_values(Some("auto:99999"), false),
             ToolSearchMode::Standard
         );
         let state = DeferralState::new(ToolSearchMode::Auto { percentage: 10 }, false);
@@ -345,8 +389,23 @@ mod tests {
     }
 
     #[test]
+    fn qzr_fallthrough_enables_non_falsy_values() {
+        // The oracle's `Jt`-then-`return "tst"` arms both enable, so any value
+        // that is neither auto-form nor DEFINED-falsy is enabled — including the
+        // literal `tst-auto` (not auto), an empty string, and unrecognized values.
+        for v in ["tst-auto", "", "enabled", "xyz", "TST"] {
+            assert_eq!(
+                mode_from_values(Some(v), false),
+                ToolSearchMode::Enabled,
+                "{v:?} should enable via the qzr fallthrough"
+            );
+        }
+    }
+
+    #[test]
     fn mode_falsy_disables() {
-        for v in ["0", "false", "off", "no", ""] {
+        // Only DEFINED-falsy values disable; an empty string is NOT defined-falsy.
+        for v in ["0", "false", "off", "no"] {
             assert_eq!(
                 mode_from_values(Some(v), false),
                 ToolSearchMode::Standard,

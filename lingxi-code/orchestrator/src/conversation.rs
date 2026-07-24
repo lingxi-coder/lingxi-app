@@ -1516,6 +1516,18 @@ impl ConversationOrchestrator {
         // `is_non_interactive_session == !interactive_permissions` (turn_loop's
         // own derivation).
         traits::session_flags::set_non_interactive_session(!config.interactive_permissions);
+        // Publish the session-scoped tool-search gate (Claude Code `$U()`) so the
+        // request builder branches `tool_reference` normalization on the SESSION
+        // decision, not on whether a given request's toolset carries a
+        // `ToolSearch` declaration. This init value uses no resolved profile yet
+        // (the CLI resolves it post-construction via `switch_model`); the
+        // per-request assembly refreshes it once the model/profile are known, so
+        // any side query fired before the first main-loop turn still sees the
+        // session's mode+provider decision rather than the bare `false` default.
+        traits::session_flags::set_tool_search_enabled(
+            tools.deferral().mode().is_enabled()
+                && tool_search_supported_for_request(&config.model, None),
+        );
         let session = SessionState::empty(SessionId::new(), config.model.clone());
         let current_effort = config.effort.clone();
         let current_effort_explicit = current_effort.is_some();
@@ -10325,6 +10337,16 @@ As you answer the user's questions, you can use the following context:\n\
         self.tools
             .deferral()
             .set_request_supported(request_supported);
+        // Refresh the session-scoped tool-search gate (Claude Code `$U()`) for the
+        // request builder now that the model/profile are resolved. Unlike
+        // `request_supported`, `$U()` depends ONLY on the session mode + provider
+        // support — never on a present `ToolSearch` tool or deferred candidates —
+        // so side queries assembled with an empty toolset take the same
+        // normalization branch as the main loop.
+        traits::session_flags::set_tool_search_enabled(
+            self.tools.deferral().mode().is_enabled()
+                && tool_search_supported_for_request(&model, model_profile.as_deref()),
+        );
         let complete_wire = wire.clone();
         // Tool Search (2.1.216): omit undiscovered deferred definitions and
         // stamp discovered definitions with `defer_loading: true`. The shared

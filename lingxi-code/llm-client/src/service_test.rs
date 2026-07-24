@@ -400,6 +400,115 @@ mod tests {
         }
     }
 
+    /// The `tool_reference` normalization branch is selected by the SESSION-scoped
+    /// tool-search gate (Claude Code `$U()`), NOT by whether the request's own
+    /// toolset carries a `ToolSearch` declaration. This is the compaction /
+    /// side-query shape: the request is assembled with an EMPTY toolset, so the
+    /// old code (`tools contains "ToolSearch"`) inferred disabled and emitted the
+    /// wrong placeholder. With the fix the branch follows the published session
+    /// flag, matching the oracle's `if(!$U())W=j6s(W);else W=xPy(W,a)`.
+    #[test]
+    fn build_request_tool_reference_branch_follows_session_gate_not_toolset() {
+        use crate::ContentBlock as LlmBlock;
+
+        // A user tool_result carrying a tool_reference to a tool absent from the
+        // (empty) availability set, paired with its assistant tool_use so
+        // `ensure_tool_result_pairing` is a strict no-op.
+        let convo = || {
+            vec![
+                ConversationMessage::Assistant {
+                    id: protocol::MessageId::new(),
+                    content: vec![ContentBlock::ToolUse {
+                        id: protocol::ToolUseId::from("toolu_ref"),
+                        name: "ToolSearch".to_string(),
+                        input: serde_json::json!({}),
+                        provider_id: Some("toolu_ref".to_string()),
+                    }],
+                    stop_reason: None,
+                },
+                ConversationMessage::User {
+                    id: protocol::MessageId::new(),
+                    content: vec![ContentBlock::ToolResult {
+                        tool_use_id: protocol::ToolUseId::from("toolu_ref"),
+                        content: String::new(),
+                        is_error: false,
+                        provider_tool_use_id: Some("toolu_ref".to_string()),
+                        content_blocks: Some(vec![serde_json::json!({
+                            "type": "tool_reference",
+                            "tool_name": "mcp__gone__write"
+                        })]),
+                    }],
+                    is_meta: false,
+                },
+            ]
+        };
+        // Read the placeholder text the converted tool_result carries.
+        let placeholder = |req: &LlmRequest| -> String {
+            for m in &req.messages {
+                for b in &m.content {
+                    if let LlmBlock::ToolResult { output, .. } = b {
+                        if let Some(text) = output
+                            .as_array()
+                            .and_then(|arr| arr.first())
+                            .and_then(|v| v.get("text"))
+                            .and_then(serde_json::Value::as_str)
+                        {
+                            return text.to_string();
+                        }
+                    }
+                }
+            }
+            panic!("no tool_result placeholder found in {req:?}");
+        };
+
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter(transport);
+        let prior = traits::session_flags::tool_search_enabled();
+
+        // Session gate ON, EMPTY toolset (no `ToolSearch` declaration present):
+        // the ENABLED branch filters the unavailable reference against the empty
+        // availability set and emits the "tools no longer available" placeholder.
+        traits::session_flags::set_tool_search_enabled(true);
+        let req = adapter
+            .build_request(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                convo(),
+                vec![],
+                false,
+                Some(1024),
+            )
+            .expect("build_request");
+        assert_eq!(
+            placeholder(&req),
+            "[Tool references removed - tools no longer available]",
+            "empty toolset in a tool-search-enabled session must take the enabled branch"
+        );
+
+        // Session gate OFF: the DISABLED branch strips every reference with the
+        // "tool search not enabled" placeholder, regardless of the toolset.
+        traits::session_flags::set_tool_search_enabled(false);
+        let req = adapter
+            .build_request(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                convo(),
+                vec![],
+                false,
+                Some(1024),
+            )
+            .expect("build_request");
+        assert_eq!(
+            placeholder(&req),
+            "[Tool references removed - tool search not enabled]",
+            "a tool-search-disabled session must take the disabled branch"
+        );
+
+        traits::session_flags::set_tool_search_enabled(prior);
+    }
+
     #[test]
     fn thinking_is_provider_aware() {
         use crate::model::thinking::ThinkingConfig;

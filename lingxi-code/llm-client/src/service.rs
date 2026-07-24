@@ -933,9 +933,17 @@ impl ApiService {
         // normalizeMessagesForAPI (consecutive-role merge) → ensureToolResultPairing
         // (SEND-time repair of orphaned/missing/duplicate tool_use↔tool_result on
         // resumed/interrupted transcripts; strict no-op on a clean turn).
-        let tool_search_enabled = tools
-            .iter()
-            .any(|tool| tool.get("name").and_then(serde_json::Value::as_str) == Some("ToolSearch"));
+        // Session-scoped tool-search gate (Claude Code `$U()`), published by the
+        // orchestrator. NOT inferred from whether THIS request's toolset carries
+        // a `ToolSearch` declaration: `$U()` reads only the session mode +
+        // provider, and the branch site `if(!$U())W=j6s(W);else W=xPy(W,a)` runs
+        // for main-loop AND side-query requests alike. A side query assembled
+        // with an empty toolset (compaction summarizer, recap) in a
+        // tool-search-enabled session must therefore still take the ENABLED
+        // branch — emitting "[…tools no longer available]" rather than the
+        // disabled branch's "[…tool search not enabled]". The request's `tools`
+        // remain the availability set (`a`) below.
+        let tool_search_enabled = traits::session_flags::tool_search_enabled();
         let available_tool_names: std::collections::HashSet<String> = tools
             .iter()
             .filter_map(|tool| tool.get("name").and_then(serde_json::Value::as_str))

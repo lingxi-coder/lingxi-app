@@ -21,6 +21,23 @@ static NON_INTERACTIVE_SESSION: AtomicBool = AtomicBool::new(false);
 /// whose provider adapter has no settings handle.
 static SHOW_THINKING_SUMMARIES: AtomicBool = AtomicBool::new(false);
 
+/// `$U()` (the "optimistic" tool-search gate) analog. SESSION-scoped in Claude
+/// Code: `$U()` reads the tool-search MODE (`ENABLE_TOOL_SEARCH` env /
+/// experimental-betas kill switch) and the active PROVIDER — never the current
+/// request's tools array. Every request assembly (main loop AND side queries)
+/// branches its `tool_reference` normalization on `$U()`
+/// (`if(!$U())W=j6s(W);else W=xPy(W,a)`), so a side query built with an EMPTY
+/// toolset (compaction summarizer, recap) in a tool-search-enabled session still
+/// takes the ENABLED branch and emits "[Tool references removed - tools no
+/// longer available]" — not the disabled branch's "[…tool search not enabled]".
+///
+/// The request builder (`llm-client`) is provider-agnostic and has no session
+/// handle, so it cannot compute this itself; the orchestrator — which knows the
+/// mode and resolved provider — publishes the decision here and the builder
+/// reads it. Defaults `false` (tool search off / no provider support). Set by
+/// the orchestrator at session init and refreshed as the model/profile resolve.
+static TOOL_SEARCH_ENABLED: AtomicBool = AtomicBool::new(false);
+
 /// Record whether the current process is a non-interactive (`-p`/print/headless)
 /// session. Idempotent; safe to call repeatedly (the value is fixed per process).
 pub fn set_non_interactive_session(non_interactive: bool) {
@@ -42,4 +59,40 @@ pub fn set_show_thinking_summaries(show: bool) {
 #[must_use]
 pub fn show_thinking_summaries() -> bool {
     SHOW_THINKING_SUMMARIES.load(Ordering::Relaxed)
+}
+
+/// Publish the session-scoped tool-search gate (Claude Code `$U()`) for the
+/// request builder's `tool_reference` normalization branch. Set by the
+/// orchestrator from the session mode + resolved provider support; the value is
+/// stable within a session (it changes only if the model/provider is switched).
+pub fn set_tool_search_enabled(enabled: bool) {
+    TOOL_SEARCH_ENABLED.store(enabled, Ordering::Relaxed);
+}
+
+/// Whether tool search is enabled for this session (Claude Code `$U()`), default
+/// `false`. Read by the request builder to select the `tool_reference`
+/// normalization branch for EVERY request — including side queries whose
+/// per-request toolset is empty — instead of inferring it from whether the
+/// request's tools array happens to carry a `ToolSearch` declaration.
+#[must_use]
+pub fn tool_search_enabled() -> bool {
+    TOOL_SEARCH_ENABLED.load(Ordering::Relaxed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_search_flag_round_trips() {
+        // Serialize with the interactivity test which mutates a sibling global —
+        // these are process-wide, so keep tool-search mutation self-contained and
+        // restore the prior value so parallel tests observe no side effect.
+        let prior = tool_search_enabled();
+        set_tool_search_enabled(true);
+        assert!(tool_search_enabled(), "true must be observable");
+        set_tool_search_enabled(false);
+        assert!(!tool_search_enabled(), "false must be observable");
+        set_tool_search_enabled(prior);
+    }
 }

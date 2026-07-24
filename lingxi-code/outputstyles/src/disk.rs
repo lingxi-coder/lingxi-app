@@ -35,11 +35,10 @@ pub struct DiskOutputStyle {
     /// `keepCodingInstructions` (TS, default `true`): when `false`, the
     /// coding-instructions section is omitted from the assembled system prompt.
     pub keep_coding_instructions: bool,
-    /// `force-for-plugin` (binary bytes 189331814, 206814560): when set on a
-    /// plugin-owned output style, the style activates automatically when the
-    /// plugin is enabled. Parsed and stored; enforcement is in the plugin
-    /// activation layer (not yet wired in LingXi).
-    pub force_for_plugin: Option<String>,
+    /// `force-for-plugin` (oracle schema `Oit()` = BOOLEAN): when true on a
+    /// plugin-owned output style, the style activates automatically while its
+    /// plugin is enabled. Enforcement is in the registry activation layer.
+    pub force_for_plugin: bool,
 }
 
 /// The active output style resolved for system-prompt assembly — OWNED (unlike
@@ -65,14 +64,21 @@ pub struct ResolvedOutputStyle {
 struct DiskFrontmatter {
     name: Option<String>,
     description: Option<String>,
-    #[serde(rename = "keepCodingInstructions")]
+    // The oracle canonicalizes author key variants (LXc), so accept kebab (the
+    // schema's canonical `keep-coding-instructions`) and snake alongside camel.
+    #[serde(
+        rename = "keepCodingInstructions",
+        alias = "keep-coding-instructions",
+        alias = "keep_coding_instructions"
+    )]
     keep_coding_instructions: bool,
-    /// Plugin this output style is automatically applied for when the plugin is
-    /// active. Binary bytes 189331814, 206814560. When set on a non-plugin style
-    /// the binary logs a warning (not yet implemented in LingXi). For plugin
-    /// styles, the style activates automatically when the plugin is enabled.
-    #[serde(rename = "force-for-plugin")]
-    force_for_plugin: Option<String>,
+    /// `force-for-plugin` (oracle schema `Oit()` = a BOOLEAN, `r0e` coercion):
+    /// when true, a plugin-owned style activates automatically while its plugin
+    /// is enabled. A non-plugin style declaring it is warned + ignored. Parsed
+    /// with the lenient `r0e` bool so the canonical `force-for-plugin: true` (and
+    /// `"true"`/`1`/`yes` variants) no longer breaks the whole frontmatter parse.
+    #[serde(rename = "force-for-plugin", deserialize_with = "de_lenient_bool_false")]
+    force_for_plugin: bool,
 }
 
 impl Default for DiskFrontmatter {
@@ -81,8 +87,41 @@ impl Default for DiskFrontmatter {
             name: None,
             description: None,
             keep_coding_instructions: true,
-            force_for_plugin: None,
+            force_for_plugin: false,
         }
+    }
+}
+
+/// Deserialize claude-code's `Oit()` boolean field via the `r0e` coercion: a
+/// native bool as-is; a string/number coerced through truthy (`1`/`true`/`yes`/
+/// `on`) / defined-falsy (`0`/`false`/`no`/`off`); anything else (unrecognized,
+/// null, absent) → the field default `false`. Returning a value rather than an
+/// error means a stray value never discards the entire frontmatter.
+fn de_lenient_bool_false<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_yaml::Value::deserialize(deserializer)?;
+    Ok(coerce_r0e_bool(&value).unwrap_or(false))
+}
+
+/// `r0e(e)`: native bool as-is; string/number via truthy/defined-falsy; else
+/// `None` (undefined).
+fn coerce_r0e_bool(value: &serde_yaml::Value) -> Option<bool> {
+    match value {
+        serde_yaml::Value::Bool(b) => Some(*b),
+        serde_yaml::Value::Number(n) => n.as_i64().map(|i| i != 0),
+        serde_yaml::Value::String(s) => {
+            let t = s.trim().to_lowercase();
+            if matches!(t.as_str(), "1" | "true" | "yes" | "on") {
+                Some(true)
+            } else if matches!(t.as_str(), "0" | "false" | "no" | "off") {
+                Some(false)
+            } else {
+                None
+            }
+        }
+        _ => None,
     }
 }
 
@@ -136,7 +175,7 @@ pub fn load_output_styles_from_dir(dir: &Path) -> Vec<DiskOutputStyle> {
             .and_then(|s| s.to_str())
             .unwrap_or_default();
         let style = parse_output_style(&raw, stem);
-        if style.force_for_plugin.is_some() {
+        if style.force_for_plugin {
             eprintln!(
                 "warning: output style '{}' declares force-for-plugin outside a plugin; ignoring automatic activation",
                 style.name
@@ -232,7 +271,7 @@ mod tests {
             description: String::new(),
             prompt: prompt.into(),
             keep_coding_instructions: true,
-            force_for_plugin: None,
+            force_for_plugin: false,
         }
     }
 
@@ -281,19 +320,45 @@ mod tests {
     // ---- force-for-plugin (P2 gap, binary bytes 189331814) ------------------
 
     #[test]
-    fn force_for_plugin_parsed() {
-        let raw = "---\nname: MyStyle\nforce-for-plugin: my-plugin\n---\nBe concise.\n";
+    fn force_for_plugin_parsed_as_boolean() {
+        // The CANONICAL form is a YAML boolean — this previously discarded the
+        // ENTIRE frontmatter (name fell back to the stem, description lost).
+        let raw = "---\nname: MyStyle\ndescription: d\nforce-for-plugin: true\n---\nBe concise.\n";
         let s = parse_output_style(raw, "my-style");
-        assert_eq!(
-            s.force_for_plugin.as_deref(),
-            Some("my-plugin"),
-            "force-for-plugin must be parsed from frontmatter"
-        );
+        assert_eq!(s.name, "MyStyle", "frontmatter must survive a boolean flag");
+        assert_eq!(s.description, "d");
+        assert!(s.force_for_plugin, "force-for-plugin: true must parse");
+
+        // r0e coercion: string/number semantic-boolean forms are accepted.
+        for v in ["\"true\"", "1", "yes", "on"] {
+            let raw = format!("---\nname: S\nforce-for-plugin: {v}\n---\nB.\n");
+            assert!(
+                parse_output_style(&raw, "s").force_for_plugin,
+                "force-for-plugin: {v} must coerce to true"
+            );
+        }
+        for v in ["false", "0", "no", "off", "bogus"] {
+            let raw = format!("---\nname: S\nforce-for-plugin: {v}\n---\nB.\n");
+            let s = parse_output_style(&raw, "s");
+            assert!(!s.force_for_plugin, "force-for-plugin: {v} must be false");
+            assert_eq!(s.name, "S", "a stray value must not discard the frontmatter");
+        }
     }
 
     #[test]
-    fn force_for_plugin_defaults_none() {
+    fn force_for_plugin_defaults_false() {
         let s = parse_output_style("Just a body.", "no-plugin");
-        assert_eq!(s.force_for_plugin, None, "force-for-plugin absent → None");
+        assert!(!s.force_for_plugin, "force-for-plugin absent → false");
+    }
+
+    #[test]
+    fn keep_coding_instructions_accepts_kebab_key() {
+        // The oracle's canonical schema key is kebab-case.
+        let raw = "---\nname: S\nkeep-coding-instructions: false\n---\nB.\n";
+        let s = parse_output_style(raw, "s");
+        assert!(
+            !s.keep_coding_instructions,
+            "kebab keep-coding-instructions must be honored"
+        );
     }
 }

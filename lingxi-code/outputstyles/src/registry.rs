@@ -130,7 +130,7 @@ impl OutputStyleRegistry {
                     default: true,
                     format: OutputFormat::Markdown,
                     keep_coding_instructions: true,
-                    force_for_plugin: None,
+                    force_for_plugin: false,
                 },
                 system_prompt_addendum: String::new(),
                 source_path: None,
@@ -203,11 +203,10 @@ impl OutputStyleRegistry {
     pub fn register_plugin_styles(&mut self, plugin_id: PluginId, styles: Vec<OutputStyle>) {
         let names: Vec<String> = styles.iter().map(|s| s.name.clone()).collect();
         for s in styles {
-            let plugin_name = s
-                .name
-                .split_once(':')
-                .map_or(s.name.as_str(), |(name, _)| name);
-            if s.frontmatter.force_for_plugin.as_deref() == Some(plugin_name) {
+            // `force-for-plugin` is a BOOLEAN (oracle schema): a plugin-owned
+            // style activates automatically when the flag is set. The plugin
+            // association comes from the style's `source`/owner, not the flag.
+            if matches!(s.source, OutputStyleSource::Plugin) && s.frontmatter.force_for_plugin {
                 self.forced_plugin_styles
                     .retain(|(owner, _)| owner != &plugin_id);
                 self.forced_plugin_styles.push((plugin_id, s.name.clone()));
@@ -263,7 +262,7 @@ mod tests {
                 source: OutputStyleSource::Plugin,
                 frontmatter: OutputStyleFrontmatter {
                     name: "demo:terse".into(),
-                    force_for_plugin: Some("demo".into()),
+                    force_for_plugin: true,
                     ..OutputStyleFrontmatter::default()
                 },
                 system_prompt_addendum: "Be terse.".into(),

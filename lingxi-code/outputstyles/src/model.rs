@@ -37,11 +37,20 @@ pub struct OutputStyleFrontmatter {
     /// Wire-level output format this style renders to.
     pub format: OutputFormat,
     /// Preserve the standard coding instructions when this style is active.
-    #[serde(rename = "keepCodingInstructions")]
+    /// The oracle canonicalizes author key variants (LXc: strip `-`/`_` +
+    /// lowercase), so kebab (`keep-coding-instructions`, the schema's canonical
+    /// key) and snake forms are accepted alongside camelCase.
+    #[serde(
+        rename = "keepCodingInstructions",
+        alias = "keep-coding-instructions",
+        alias = "keep_coding_instructions"
+    )]
     pub keep_coding_instructions: bool,
-    /// Plugin name that activates this style while that plugin is enabled.
-    #[serde(rename = "force-for-plugin", skip_serializing_if = "Option::is_none")]
-    pub force_for_plugin: Option<String>,
+    /// `force-for-plugin` (oracle schema `Oit()` = a BOOLEAN): when true on a
+    /// plugin-owned style, the style activates automatically while its plugin is
+    /// enabled. It is `@internal` — only meaningful for plugin-bundled styles.
+    #[serde(rename = "force-for-plugin", default)]
+    pub force_for_plugin: bool,
 }
 
 impl Default for OutputStyleFrontmatter {
@@ -52,7 +61,7 @@ impl Default for OutputStyleFrontmatter {
             default: false,
             format: OutputFormat::default(),
             keep_coding_instructions: true,
-            force_for_plugin: None,
+            force_for_plugin: false,
         }
     }
 }

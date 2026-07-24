@@ -72,6 +72,11 @@ pub struct StdioControlPlane {
     /// unaffected. Twin of claude-code's `setUnexpectedResponseCallback` →
     /// `enqueue({mode:'orphaned-permission'})` (print.ts:2767, 5291).
     orphan_tx: Mutex<Option<tokio::sync::mpsc::UnboundedSender<msgqueue::QueuedCommand>>>,
+    /// GATE-SYSMSG-01: the session-id handle SHARED with `StreamJsonStream` (set
+    /// once via [`Self::set_session_id`] at boot), read to stamp the `session_id`
+    /// on an emitted `permission_denied` system message. Unset ⇒ the frame omits
+    /// `session_id` (only in tests that never wire a stream).
+    session_id: std::sync::OnceLock<Arc<Mutex<String>>>,
 }
 
 impl StdioControlPlane {
@@ -84,7 +89,61 @@ impl StdioControlPlane {
             resolved_tool_use_ids: Mutex::new(VecDeque::new()),
             active_turn_cancel: Mutex::new(None),
             orphan_tx: Mutex::new(None),
+            session_id: std::sync::OnceLock::new(),
         })
+    }
+
+    /// GATE-SYSMSG-01: wire the session-id handle shared with `StreamJsonStream`
+    /// so an emitted `permission_denied` system message carries the same
+    /// `session_id` as every data frame. Set once at boot (idempotent; later calls
+    /// are ignored).
+    pub fn set_session_id(&self, handle: Arc<Mutex<String>>) {
+        let _ = self.session_id.set(handle);
+    }
+
+    /// GATE-SYSMSG-01: emit the `permission_denied` system message on the shared
+    /// outbound NDJSON channel — 1:1 with claude-code `createCanUseTool`'s deny
+    /// arm (`{type:"system", subtype:"permission_denied", tool_name, tool_use_id,
+    /// agent_id, decision_reason_type, decision_reason, message, uuid,
+    /// session_id}`). Optional fields (`tool_use_id`/`agent_id`/
+    /// `decision_reason_type`/`decision_reason`) are OMITTED when absent, matching
+    /// the oracle's `.optional()` shape.
+    pub async fn emit_permission_denied(
+        &self,
+        tool_name: &str,
+        tool_use_id: Option<&str>,
+        agent_id: Option<&str>,
+        decision_reason_type: Option<&str>,
+        decision_reason: Option<&str>,
+        message: &str,
+    ) {
+        let session_id = match self.session_id.get() {
+            Some(handle) => handle.lock().await.clone(),
+            None => String::new(),
+        };
+        let mut frame = json!({
+            "type": "system",
+            "subtype": "permission_denied",
+            "tool_name": tool_name,
+            "message": message,
+            "uuid": Uuid::new_v4().to_string(),
+            "session_id": session_id,
+        });
+        if let Some(id) = tool_use_id {
+            frame["tool_use_id"] = json!(id);
+        }
+        if let Some(agent) = agent_id {
+            frame["agent_id"] = json!(agent);
+        }
+        if let Some(rt) = decision_reason_type {
+            frame["decision_reason_type"] = json!(rt);
+        }
+        if let Some(reason) = decision_reason {
+            frame["decision_reason"] = json!(reason);
+        }
+        let _ = self
+            .outbound_tx
+            .send(OutboundMsg::Line(serialize_ndjson_line(&frame)));
     }
 
     /// Wire the orphaned-permission recovery sink (the run loop's mpsc receiver
@@ -880,6 +939,30 @@ impl PermissionGate for StdioControlPermissionGate {
     async fn persist_permission_updates(&self, updates: &[Value]) {
         self.persist_permission_updates_to_disk(updates).await;
     }
+
+    /// GATE-SYSMSG-01: emit the `permission_denied` system message when the OUTER
+    /// `PolicyPermissionGate` locally denies a tool. Mirrors `createCanUseTool`'s
+    /// deny arm; the `agent_id` comes from the worker context exactly like the
+    /// `can_use_tool` request.
+    async fn on_permission_denied(
+        &self,
+        name: &str,
+        ctx: &PermissionCheckContext,
+        decision_reason_type: Option<&str>,
+        decision_reason: Option<&str>,
+        message: &str,
+    ) {
+        self.plane
+            .emit_permission_denied(
+                name,
+                ctx.tool_use_id.as_deref(),
+                ctx.worker.as_ref().map(|w| w.name.as_str()),
+                decision_reason_type,
+                decision_reason,
+                message,
+            )
+            .await;
+    }
 }
 
 #[cfg(test)]
@@ -912,6 +995,73 @@ mod tests {
                 "response": payload,
             }
         })
+    }
+
+    // ── GATE-SYSMSG-01: permission_denied system message ──
+
+    #[tokio::test]
+    async fn emit_permission_denied_full_frame_shape() {
+        let (plane, mut rx) = plane_with_channel();
+        let sid = Arc::new(Mutex::new("sess-123".to_string()));
+        plane.set_session_id(sid);
+
+        plane
+            .emit_permission_denied(
+                "Bash",
+                Some("tu-9"),
+                Some("agent-A"),
+                Some("safetyCheck"),
+                Some("dangerous rm"),
+                "Permission denied: rm",
+            )
+            .await;
+
+        let f: Value = serde_json::from_str(&outbound_line(rx.recv().await.unwrap())).unwrap();
+        assert_eq!(f["type"], "system");
+        assert_eq!(f["subtype"], "permission_denied");
+        assert_eq!(f["tool_name"], "Bash");
+        assert_eq!(f["tool_use_id"], "tu-9");
+        assert_eq!(f["agent_id"], "agent-A");
+        assert_eq!(f["decision_reason_type"], "safetyCheck");
+        assert_eq!(f["decision_reason"], "dangerous rm");
+        assert_eq!(f["message"], "Permission denied: rm");
+        assert_eq!(f["session_id"], "sess-123");
+        assert!(f["uuid"].as_str().is_some_and(|u| !u.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn emit_permission_denied_omits_absent_optionals() {
+        let (plane, mut rx) = plane_with_channel();
+        // No session id wired, no optionals — the oracle `.optional()` fields are
+        // OMITTED (never emitted as null).
+        plane
+            .emit_permission_denied("Read", None, None, None, None, "denied")
+            .await;
+        let f: Value = serde_json::from_str(&outbound_line(rx.recv().await.unwrap())).unwrap();
+        assert_eq!(f["subtype"], "permission_denied");
+        assert_eq!(f["tool_name"], "Read");
+        assert_eq!(f["message"], "denied");
+        assert!(f.get("tool_use_id").is_none());
+        assert!(f.get("agent_id").is_none());
+        assert!(f.get("decision_reason_type").is_none());
+        assert!(f.get("decision_reason").is_none());
+        // session_id is present-but-empty when no stream handle is wired.
+        assert_eq!(f["session_id"], "");
+    }
+
+    #[tokio::test]
+    async fn permission_denied_session_id_reflects_late_set() {
+        let (plane, mut rx) = plane_with_channel();
+        // Wire an EMPTY handle (as at boot), then let the "stream" set the real id
+        // afterwards through the SAME shared Mutex.
+        let sid = Arc::new(Mutex::new(String::new()));
+        plane.set_session_id(sid.clone());
+        *sid.lock().await = "sess-late".to_string();
+        plane
+            .emit_permission_denied("Bash", None, None, None, None, "x")
+            .await;
+        let f: Value = serde_json::from_str(&outbound_line(rx.recv().await.unwrap())).unwrap();
+        assert_eq!(f["session_id"], "sess-late");
     }
 
     #[tokio::test]

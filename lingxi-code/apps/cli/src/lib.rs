@@ -700,7 +700,12 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         // The output-only print path keeps the headless deny-on-ask default
         // (no stdin reader to answer a control_response).
         let control_plane = if parsed.is_stream_json_input() {
-            Some(control_plane::StdioControlPlane::new(stream.outbound_tx()))
+            let plane = control_plane::StdioControlPlane::new(stream.outbound_tx());
+            // GATE-SYSMSG-01: share the stream's session-id handle so a locally
+            // denied tool emits a `permission_denied` system message stamped with
+            // the same `session_id` as every data frame.
+            plane.set_session_id(stream.session_id_handle());
+            Some(plane)
         } else {
             None
         };

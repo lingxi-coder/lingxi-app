@@ -535,9 +535,20 @@ impl PolicyPermissionGate {
                 reason,
                 explanation,
                 ..
-            } => PermissionOutcome::Deny {
-                reason: explanation.unwrap_or_else(|| deny_reason_string(&reason, name)),
-            },
+            } => {
+                // GATE-SYSMSG-01: notify the transport of this LOCAL deny so the
+                // stdio control-plane can emit a `permission_denied` system message
+                // (createCanUseTool's deny arm). Compute the reason discriminant +
+                // `oin`-filtered reason text from the deny reason BEFORE it is moved
+                // into the rendered message. No-op on non-stdio transports.
+                let drt = decision_reason_type(&reason);
+                let dr = sysmsg_decision_reason(&reason);
+                let message = explanation.unwrap_or_else(|| deny_reason_string(&reason, name));
+                self.inner
+                    .on_permission_denied(name, ctx, drt, dr.as_deref(), &message)
+                    .await;
+                PermissionOutcome::Deny { reason: message }
+            }
             PermissionResult::Ask {
                 ref reason,
                 ref metadata,
@@ -1509,6 +1520,29 @@ pub(crate) fn decision_reason_type(reason: &PermissionDecisionReason) -> Option<
     })
 }
 
+/// GATE-SYSMSG-01 `oin(decisionReason)`: the reason TEXT surfaced in a
+/// `permission_denied` system message. Only the free-text reason kinds expose
+/// their reason; `rule`/`mode`/`subcommandResults`/`permissionPromptTool` return
+/// `None` (byte-faithful to `oin`).
+///
+/// Divergence: the oracle also returns `e.reason` for `classifier` and
+/// `sandboxOverride`, but the port's `ClassifierApproved`/`ClassifierRejected`
+/// carry no free-text reason (only `classifier` + `score`) and `SandboxOverride`
+/// carries a structured [`SandboxOverrideReason`] rather than the oracle's plain
+/// string. Both return `None` here — `decision_reason` is an OPTIONAL frame field,
+/// so this only OMITS the text for those two rare deny kinds (never changes the
+/// deny itself), while `decision_reason_type` is still emitted.
+pub(crate) fn sysmsg_decision_reason(reason: &PermissionDecisionReason) -> Option<String> {
+    match reason {
+        PermissionDecisionReason::HookOverride { reason, .. } => reason.clone(),
+        PermissionDecisionReason::AsyncAgent { reason } => Some(reason.clone()),
+        PermissionDecisionReason::WorkingDirectory { reason } => Some(reason.clone()),
+        PermissionDecisionReason::SafetyCheck { reason, .. } => Some(reason.clone()),
+        PermissionDecisionReason::Other { reason } => Some(reason.clone()),
+        _ => None,
+    }
+}
+
 /// Map a [`PermissionDecisionReason`] to the coarse [`PermissionDecisionSource`]
 /// the turn loop gates its permission hooks on (claude-code `decisionReason.type`).
 /// Only the classifier source unblocks the `PermissionDenied` hook.
@@ -1524,3 +1558,137 @@ fn map_decision_source(reason: &PermissionDecisionReason) -> PermissionDecisionS
 #[cfg(test)]
 #[path = "policy_gate_test.rs"]
 mod policy_gate_test;
+
+// GATE-SYSMSG-01: separate inline module (kept out of the concurrently-edited
+// policy_gate_test.rs) covering the `oin` reason filter and the
+// `on_permission_denied` hook firing on a local Deny.
+#[cfg(test)]
+mod gate_sysmsg_test {
+    use super::*;
+    use crate::{
+        PermissionBehavior, PermissionMode, PermissionPolicy, PermissionRule, PermissionRuleSource,
+        PermissionRuleValue,
+    };
+    use serde_json::json;
+    use std::sync::Mutex as StdMutex;
+
+    #[test]
+    fn sysmsg_decision_reason_matches_oin_filter() {
+        // Free-text kinds expose their reason.
+        assert_eq!(
+            sysmsg_decision_reason(&PermissionDecisionReason::Other {
+                reason: "nope".into()
+            })
+            .as_deref(),
+            Some("nope")
+        );
+        assert_eq!(
+            sysmsg_decision_reason(&PermissionDecisionReason::SafetyCheck {
+                reason: "danger".into(),
+                classifier_approvable: false,
+            })
+            .as_deref(),
+            Some("danger")
+        );
+        assert_eq!(
+            sysmsg_decision_reason(&PermissionDecisionReason::WorkingDirectory {
+                reason: "escapes".into()
+            })
+            .as_deref(),
+            Some("escapes")
+        );
+        // rule / mode → None (byte-faithful to `oin`).
+        assert_eq!(
+            sysmsg_decision_reason(&PermissionDecisionReason::PermissionMode {
+                mode: PermissionMode::Default
+            }),
+            None
+        );
+        // classifier → None (documented divergence: no free-text reason stored).
+        assert_eq!(
+            sysmsg_decision_reason(&PermissionDecisionReason::ClassifierRejected {
+                classifier: crate::ClassifierKind::Bash,
+                score: 0.9,
+            }),
+            None
+        );
+    }
+
+    #[derive(Default)]
+    struct RecordingGate {
+        denied: Arc<StdMutex<Vec<(String, Option<String>, Option<String>, Option<String>, String)>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::gate::PermissionGate for RecordingGate {
+        async fn check(&self, _name: &str, _input: &Value) -> PermissionDecision {
+            PermissionDecision::Allow
+        }
+        async fn on_permission_denied(
+            &self,
+            name: &str,
+            ctx: &PermissionCheckContext,
+            decision_reason_type: Option<&str>,
+            decision_reason: Option<&str>,
+            message: &str,
+        ) {
+            self.denied.lock().unwrap().push((
+                name.to_string(),
+                ctx.tool_use_id.clone(),
+                decision_reason_type.map(str::to_string),
+                decision_reason.map(str::to_string),
+                message.to_string(),
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn deny_fires_on_permission_denied_with_ctx_and_reason() {
+        // A tool-wide Bash DENY rule → any Bash call denies.
+        let deny = PermissionRule {
+            value: PermissionRuleValue {
+                tool_name: "Bash".into(),
+                rule_content: None,
+            },
+            behavior: PermissionBehavior::Deny,
+            source: PermissionRuleSource::UserSettings,
+        };
+        let policy = Arc::new(PermissionPolicy::from_rules(PermissionMode::Default, vec![deny]));
+        let recorder = Arc::new(RecordingGate::default());
+        let calls = recorder.denied.clone();
+        let gate = PolicyPermissionGate::new(policy, recorder);
+
+        let ctx = PermissionCheckContext {
+            tool_use_id: Some("tu-77".into()),
+            ..PermissionCheckContext::default()
+        };
+        let outcome = gate
+            .check_with_context("Bash", &json!({"command": "rm -rf /"}), &ctx)
+            .await;
+        assert!(matches!(outcome, PermissionOutcome::Deny { .. }));
+
+        let recorded = calls.lock().unwrap();
+        assert_eq!(recorded.len(), 1, "on_permission_denied fired exactly once");
+        let (name, tuid, drt, _dr, message) = &recorded[0];
+        assert_eq!(name, "Bash");
+        assert_eq!(tuid.as_deref(), Some("tu-77"));
+        assert_eq!(drt.as_deref(), Some("rule")); // a deny RULE → type "rule"
+        assert!(!message.is_empty());
+    }
+
+    #[tokio::test]
+    async fn allow_does_not_fire_on_permission_denied() {
+        // No rules, Default mode: a read-only tool allows → no deny notification.
+        let policy = Arc::new(PermissionPolicy::from_rules(
+            PermissionMode::Default,
+            std::iter::empty(),
+        ));
+        let recorder = Arc::new(RecordingGate::default());
+        let calls = recorder.denied.clone();
+        let gate = PolicyPermissionGate::new(policy, recorder);
+        let _ = gate
+            .check_with_context("Read", &json!({}), &PermissionCheckContext::default())
+            .await;
+        assert!(calls.lock().unwrap().is_empty());
+    }
+}

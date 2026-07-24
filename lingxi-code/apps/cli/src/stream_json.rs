@@ -333,8 +333,10 @@ pub struct StreamJsonStream {
     /// 0 = drain not yet spawned, 1 = spawned (use AtomicUsize as a flag).
     drain_started: AtomicUsize,
     /// Session id threaded in from the orchestrator after build. `Mutex`
-    /// so the caller can set it post-construction (before emit_init).
-    session_id: Mutex<String>,
+    /// so the caller can set it post-construction (before emit_init). `Arc` so the
+    /// handle can be SHARED with the `StdioControlPlane` (GATE-SYSMSG-01), which
+    /// reads the same value to stamp `session_id` on a `permission_denied` frame.
+    session_id: Arc<Mutex<String>>,
     /// Init-frame parameters. Wrapped in `Mutex` so the caller can fill
     /// them in after `build_runtime` supplies the real session_id / tool list.
     init_params: Mutex<Option<StreamJsonInitParams>>,
@@ -383,7 +385,7 @@ impl StreamJsonStream {
             out_tx: Arc::new(tx),
             drain_rx: Mutex::new(Some(rx)),
             drain_started: AtomicUsize::new(0),
-            session_id: Mutex::new(session_id),
+            session_id: Arc::new(Mutex::new(session_id)),
             init_params: Mutex::new(init_params),
             accum: Arc::new(Mutex::new(MessageAccum::default())),
             suppress_frames,
@@ -464,6 +466,13 @@ impl StreamJsonStream {
     /// (Phase 1+) can share the same drain queue without extra plumbing.
     pub fn outbound_tx(&self) -> Arc<OutboundTx> {
         Arc::clone(&self.out_tx)
+    }
+
+    /// GATE-SYSMSG-01: a clone of the shared session-id handle so the
+    /// `StdioControlPlane` stamps `permission_denied` frames with the SAME
+    /// `session_id` this stream sets post-build (they share one `Mutex`).
+    pub fn session_id_handle(&self) -> Arc<Mutex<String>> {
+        Arc::clone(&self.session_id)
     }
 
     /// Construct a placeholder stream: the streaming callbacks (emit_text,

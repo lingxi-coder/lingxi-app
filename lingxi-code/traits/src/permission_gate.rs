@@ -373,6 +373,34 @@ pub trait PermissionGate: Send + Sync {
     /// are permitted. The default is a no-op for transports without persistence.
     fn set_permission_persistence_enabled(&self, _enabled: bool) {}
 
+    /// GATE-SYSMSG-01: notify the transport that a tool call was DENIED by the
+    /// local policy pre-check, so a stdio/SDK transport can emit a
+    /// `permission_denied` system message on its output stream — 1:1 with
+    /// claude-code `createCanUseTool`'s deny arm (`{type:"system",
+    /// subtype:"permission_denied", tool_name, tool_use_id, agent_id,
+    /// decision_reason_type, decision_reason, message, uuid, session_id}`).
+    ///
+    /// `decision_reason_type` is the discriminated reason kind
+    /// (`rule`/`mode`/`safetyCheck`/…, the `decisionReason?.type`), and
+    /// `decision_reason` is the `oin(decisionReason)`-filtered reason text (only
+    /// the classifier/hook/asyncAgent/sandboxOverride/workingDir/safetyCheck/other
+    /// kinds surface text). `message` is the rendered deny message.
+    ///
+    /// Called by [`PolicyPermissionGate`] on its local Deny decision. Additive
+    /// DEFAULTED no-op (frozen-trait safe): only the stdio control-plane gate
+    /// overrides it to enqueue the frame; interactive/headless transports (which
+    /// have no outbound NDJSON stream) keep the no-op.
+    async fn on_permission_denied(
+        &self,
+        name: &str,
+        ctx: &PermissionCheckContext,
+        decision_reason_type: Option<&str>,
+        decision_reason: Option<&str>,
+        message: &str,
+    ) {
+        let _ = (name, ctx, decision_reason_type, decision_reason, message);
+    }
+
     /// Resolve permission when a `PreToolUse` / `PermissionRequest` hook has
     /// already returned `allow` (`HookDecision::Approve`).
     ///

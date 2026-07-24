@@ -97,32 +97,25 @@ fn confined_settings_path(
     let Some(display) = paths.destination_path(dest) else {
         return Ok(None);
     };
+    // The confinement ROOT is the settings DIRECTORY itself (`~/.lingxi` or
+    // `<cwd>/.lingxi`), and `relative` is only the FINAL file name. This mirrors
+    // the 2.1.218 oracle's hardened atomic write, which opens the STAGING DIR
+    // with `O_RDONLY|O_DIRECTORY|O_NOFOLLOW` (after intermediate components — a
+    // symlinked `.lingxi`, a common dotfiles pattern — resolve normally) and
+    // keeps `O_NOFOLLOW` only on the final file + staging temp. `rooted_fs`
+    // canonicalizes the root before its no-follow open, so a symlinked settings
+    // DIR is ACCEPTED while a symlinked settings FILE is still rejected.
     let (root, relative) = match dest {
         PermissionUpdateDestination::UserSettings => {
-            let Some(root) = paths.lingxi_home.parent() else {
-                return Err(PersistError::Confined {
-                    path: display,
-                    source: FsError::OutsideWorkspace(paths.lingxi_home.display().to_string()),
-                });
-            };
-            let Some(home_name) = paths.lingxi_home.file_name() else {
-                return Err(PersistError::Confined {
-                    path: display,
-                    source: FsError::OutsideWorkspace(paths.lingxi_home.display().to_string()),
-                });
-            };
-            (
-                root.to_path_buf(),
-                PathBuf::from(home_name).join("settings.json"),
-            )
+            (paths.lingxi_home.clone(), PathBuf::from("settings.json"))
         }
         PermissionUpdateDestination::ProjectSettings => (
-            paths.cwd.clone(),
-            PathBuf::from(branding::DOT_DIR).join("settings.json"),
+            paths.cwd.join(branding::DOT_DIR),
+            PathBuf::from("settings.json"),
         ),
         PermissionUpdateDestination::LocalSettings => (
-            paths.cwd.clone(),
-            PathBuf::from(branding::DOT_DIR).join("settings.local.json"),
+            paths.cwd.join(branding::DOT_DIR),
+            PathBuf::from("settings.local.json"),
         ),
         PermissionUpdateDestination::Session | PermissionUpdateDestination::CliArg => {
             return Ok(None);
@@ -151,50 +144,120 @@ fn lock_relative_path(relative: &Path) -> Result<PathBuf, FsError> {
     Ok(lock)
 }
 
-fn ensure_local_settings_ignored(paths: &PermissionPaths) -> Result<(), PersistError> {
-    let path = ConfinedSettingsPath {
-        root: paths.cwd.clone(),
-        relative: PathBuf::from(".gitignore"),
-        display: paths.cwd.join(".gitignore"),
-    };
-    let _lock = rooted_fs::lock_exclusive(
-        &path.root,
-        Path::new(".gitignore.lock"),
-        PRIVATE_DIR_MODE,
-        PRIVATE_FILE_MODE,
-    )
-    .map_err(|source| confined_error(&path, source))?;
-    let raw = match rooted_fs::read_to_string(&path.root, &path.relative) {
-        Ok(raw) => raw,
-        Err(FsError::NotFound(_)) => String::new(),
-        Err(source) => return Err(confined_error(&path, source)),
-    };
-    let rooted_rule = format!("/{}/settings.local.json", branding::DOT_DIR);
-    let relative_rule = format!("{}/settings.local.json", branding::DOT_DIR);
-    if raw
-        .lines()
-        .map(str::trim)
-        .any(|line| line == rooted_rule || line == relative_rule)
-    {
-        return Ok(());
+/// Best-effort mirror of claude-code `a9n` (`gitignore.ts`): ensure the local
+/// settings file is git-ignored by appending a `**/<relpath>` rule to the user's
+/// GLOBAL git excludes file — NOT the project `.gitignore`.
+///
+/// The 2.1.218 oracle NEVER modifies a tracked file for this: it (a) bails unless
+/// the cwd is inside a git work tree, (b) skips if `git check-ignore` already
+/// covers the path, then (c) resolves the global excludes file (`git config
+/// --global core.excludesfile` → `$XDG_CONFIG_HOME/git/ignore` →
+/// `~/.config/git/ignore`) and appends the rule there. The whole thing is
+/// fire-and-forget — every failure is swallowed. Consequently NO `.gitignore` or
+/// `.gitignore.lock` artifacts are left in the user's repository (the previous
+/// port wrote `/.lingxi/settings.local.json` into `<cwd>/.gitignore` under a
+/// confinement lock, which the oracle does not do).
+fn ensure_local_settings_ignored(paths: &PermissionPaths) {
+    // (a9n) Do nothing outside a git work tree.
+    if !is_inside_git_work_tree(&paths.cwd) {
+        return;
     }
-    let mut updated = raw;
-    if !updated.is_empty() && !updated.ends_with('\n') {
-        updated.push('\n');
+    let relpath = format!("{}/settings.local.json", branding::DOT_DIR);
+    // Already ignored (by the project `.gitignore`, `.git/info/exclude`, or the
+    // global excludes) → nothing to do.
+    if git_check_ignore(&relpath, &paths.cwd) {
+        return;
     }
-    updated.push_str(&rooted_rule);
-    updated.push('\n');
-    rooted_fs::atomic_write(
-        &path.root,
-        &path.relative,
-        updated.as_bytes(),
-        AtomicWriteOptions {
-            file_mode: 0o644,
-            create_parents: false,
-            ..AtomicWriteOptions::default()
-        },
+    // Oracle rule is a repo-anchored glob: `**/<relpath>`.
+    let rule = format!("**/{relpath}");
+    let excludes = resolve_global_git_excludes(&paths.cwd);
+    if let Some(dir) = excludes.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    match std::fs::read_to_string(&excludes) {
+        // Present already (but check-ignore said not-ignored) → the oracle warns
+        // and leaves it; do NOT duplicate the line.
+        Ok(existing) if existing.contains(&rule) => {}
+        // Append `\n<rule>\n` (oracle `appendFile(i, `\n${n}\n`)`).
+        Ok(_) => {
+            use std::io::Write as _;
+            if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&excludes) {
+                let _ = write!(f, "\n{rule}\n");
+            }
+        }
+        // Missing → create with `<rule>\n` (oracle ENOENT `writeFile(i, `${n}\n`)`).
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let _ = std::fs::write(&excludes, format!("{rule}\n"));
+        }
+        Err(_) => {}
+    }
+}
+
+/// `git rev-parse --is-inside-work-tree` in `cwd` (claude-code `hDi`): true only
+/// when the directory is inside a git work tree. Best-effort — any spawn failure
+/// (git absent, not a repo) is treated as "not a repo".
+fn is_inside_git_work_tree(cwd: &Path) -> bool {
+    std::process::Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(cwd)
+        .output()
+        .map(|o| o.status.success() && o.stdout.starts_with(b"true"))
+        .unwrap_or(false)
+}
+
+/// `git check-ignore -- <pathspec>` in `cwd` (claude-code `s9n`): exit 0 ⇒ the
+/// path is already ignored.
+fn git_check_ignore(pathspec: &str, cwd: &Path) -> bool {
+    std::process::Command::new("git")
+        .args(["check-ignore", "--", pathspec])
+        .current_dir(cwd)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Resolve the user's global git excludes file (claude-code `uEh`): prefer
+/// `git config --global core.excludesfile`, then `$XDG_CONFIG_HOME/git/ignore`,
+/// then `~/.config/git/ignore`.
+fn resolve_global_git_excludes(cwd: &Path) -> PathBuf {
+    let configured = std::process::Command::new("git")
+        .args(["config", "--global", "--get", "core.excludesfile"])
+        .current_dir(cwd)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+    excludes_path_from(
+        configured.as_deref(),
+        &std::env::var("HOME").unwrap_or_default(),
+        std::env::var("XDG_CONFIG_HOME").ok().as_deref(),
     )
-    .map_err(|source| confined_error(&path, source))
+}
+
+/// Pure resolution of `uEh` given the raw inputs (extracted so the `~`/XDG/HOME
+/// fallback chain is hermetically testable without spawning git or mutating the
+/// process environment).
+fn excludes_path_from(configured: Option<&str>, home: &str, xdg: Option<&str>) -> PathBuf {
+    if let Some(n) = configured {
+        let n = n.trim();
+        if !n.is_empty() {
+            // `~` ⇒ home; `~/x` ⇒ home/x (oracle `join(homedir(), n.slice(2))`).
+            if n == "~" || n.starts_with("~/") {
+                return PathBuf::from(home).join(n.get(2..).unwrap_or(""));
+            }
+            let p = PathBuf::from(n);
+            if p.is_absolute() {
+                return p;
+            }
+        }
+    }
+    if let Some(xdg) = xdg {
+        let p = PathBuf::from(xdg);
+        if p.is_absolute() {
+            return p.join("git").join("ignore");
+        }
+    }
+    PathBuf::from(home).join(".config").join("git").join("ignore")
 }
 
 fn mutate_settings_file<F>(
@@ -209,6 +272,12 @@ where
     let Some(path) = confined_settings_path(paths, dest)? else {
         return Ok(false);
     };
+    // Ensure the settings DIR exists (oracle mkdir -p of the staging dir). This
+    // resolves symlinks normally, so a symlinked `.lingxi` is followed to its
+    // real location and ACCEPTED — the root-confined ops below still keep the
+    // final file + staging no-follow. Any failure here is surfaced by the
+    // subsequent `lock_exclusive`/`open_root` as a `Confined` error.
+    let _ = std::fs::create_dir_all(&path.root);
     let lock_relative =
         lock_relative_path(&path.relative).map_err(|source| confined_error(&path, source))?;
     let _lock = rooted_fs::lock_exclusive(
@@ -231,7 +300,10 @@ where
         return Ok(false);
     };
     if dest == PermissionUpdateDestination::LocalSettings {
-        ensure_local_settings_ignored(paths)?;
+        // Fire-and-forget, like the oracle — this writes the user's GLOBAL git
+        // excludes (never the project `.gitignore`) and can never abort the
+        // settings write below.
+        ensure_local_settings_ignored(paths);
     }
     // Mark AFTER a successful write. Marking before (the prior order) left a
     // stale suppression mark on a FAILED write — the settings watcher would then
@@ -473,18 +545,21 @@ pub async fn replace_permission_rules(
 }
 
 /// Persist a `setMode` permission update as `permissions.defaultMode`.
-/// `bypassPermissions` is intentionally session-scoped and is never written.
+///
+/// The 2.1.218 oracle's persist arm writes `{permissions:{defaultMode:e.mode}}`
+/// UNCONDITIONALLY — including `bypassPermissions` (the bypass-availability gate
+/// lives only on the LIVE-apply arm, `isBypassPermissionsModeAvailable`, which
+/// this port applies separately). So every recognized mode is persisted here;
+/// an unrecognized mode string is ignored (`Ok(false)`).
 pub async fn persist_permission_mode(
     mode: &str,
     destination: PermissionUpdateDestination,
     paths: &PermissionPaths,
 ) -> Result<bool, PersistError> {
-    if mode == "bypassPermissions"
-        || !matches!(
-            mode,
-            "default" | "acceptEdits" | "plan" | "dontAsk" | "auto"
-        )
-    {
+    if !matches!(
+        mode,
+        "default" | "acceptEdits" | "plan" | "dontAsk" | "auto" | "bypassPermissions"
+    ) {
         return Ok(false);
     }
     mutate_settings_file(paths, destination, true, |raw| {
@@ -815,10 +890,10 @@ mod tests {
         let written = std::fs::read_to_string(&path).unwrap();
         let v: Value = serde_json::from_str(&written).unwrap();
         assert_eq!(v["permissions"]["allow"], json!(["Bash"]));
-        assert_eq!(
-            std::fs::read_to_string(tmp.join("proj/.gitignore")).unwrap(),
-            "/.lingxi/settings.local.json\n"
-        );
+        // The oracle git-ignores the file via the GLOBAL git excludes, never the
+        // project `.gitignore` — and only when the cwd is a git repo (this temp
+        // dir is not). So no project `.gitignore` is ever created here.
+        assert!(!tmp.join("proj/.gitignore").exists());
 
         // Second persist of the same rule is a no-op (idempotent).
         assert!(!persist_permission_update(&update, &paths).await.unwrap());
@@ -827,7 +902,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persistent_variants_survive_reload_and_bypass_mode_does_not() {
+    async fn persistent_variants_survive_reload_including_bypass_mode() {
         let tmp = std::env::temp_dir().join(format!("lx-persist-variants-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join("proj")).unwrap();
@@ -845,21 +920,32 @@ mod tests {
         assert!(persist_permission_mode("plan", destination, &paths)
             .await
             .unwrap());
+        // The oracle's persist arm writes ANY mode, including bypassPermissions
+        // (the availability gate is live-apply-only) — so this now persists and
+        // overwrites the prior defaultMode.
         assert!(
-            !persist_permission_mode("bypassPermissions", destination, &paths)
+            persist_permission_mode("bypassPermissions", destination, &paths)
                 .await
                 .unwrap()
         );
         let body = std::fs::read_to_string(tmp.join("proj/.lingxi/settings.local.json")).unwrap();
         let value: Value = serde_json::from_str(&body).unwrap();
         assert_eq!(value["permissions"]["allow"], json!(["Read"]));
-        assert_eq!(value["permissions"]["defaultMode"], "plan");
+        assert_eq!(value["permissions"]["defaultMode"], "bypassPermissions");
+        // An unrecognized mode string is still ignored.
+        assert!(!persist_permission_mode("nonsense", destination, &paths)
+            .await
+            .unwrap());
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    /// A symlinked settings DIRECTORY (`.lingxi` → elsewhere) is ACCEPTED — the
+    /// common dotfiles pattern. The oracle opens the (resolved) staging dir with
+    /// O_NOFOLLOW but resolves intermediate components normally, so the write
+    /// lands in the symlink's target.
     #[cfg(unix)]
     #[tokio::test]
-    async fn confined_persistence_rejects_symlinked_settings_directory() {
+    async fn confined_persistence_accepts_symlinked_settings_directory() {
         use std::os::unix::fs::symlink;
 
         let tmp = std::env::temp_dir().join(format!("lx-persist-link-{}", std::process::id()));
@@ -872,25 +958,33 @@ mod tests {
             cwd: tmp.join("proj"),
         };
         let update = allow_rule("Bash", PermissionUpdateDestination::LocalSettings);
-        let error = persist_permission_update(&update, &paths)
-            .await
-            .unwrap_err();
-        assert!(matches!(error, PersistError::Confined { .. }));
-        assert!(!tmp.join("outside/settings.local.json").exists());
+        assert!(persist_permission_update(&update, &paths).await.unwrap());
+        // The write followed the symlink to its target.
+        let body = std::fs::read_to_string(tmp.join("outside/settings.local.json")).unwrap();
+        let v: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["permissions"]["allow"], json!(["Bash"]));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    /// SECURITY: a symlinked settings FILE (`settings.local.json` itself → an
+    /// outside path) is STILL rejected — the final file (and its staging temp)
+    /// keep O_NOFOLLOW, so the write can never be redirected out of the resolved
+    /// settings dir by swapping the file for a symlink.
     #[cfg(unix)]
     #[tokio::test]
-    async fn local_persistence_rejects_symlinked_gitignore_before_writing_settings() {
+    async fn confined_persistence_still_rejects_symlinked_settings_file() {
         use std::os::unix::fs::symlink;
 
-        let tmp =
-            std::env::temp_dir().join(format!("lx-persist-gitignore-link-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("lx-persist-flink-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(tmp.join("proj")).unwrap();
-        std::fs::write(tmp.join("outside-gitignore"), "outside\n").unwrap();
-        symlink(tmp.join("outside-gitignore"), tmp.join("proj/.gitignore")).unwrap();
+        std::fs::create_dir_all(tmp.join("proj/.lingxi")).unwrap();
+        std::fs::write(tmp.join("outside-secret"), "secret\n").unwrap();
+        // The settings FILE is a symlink pointing outside the settings dir.
+        symlink(
+            tmp.join("outside-secret"),
+            tmp.join("proj/.lingxi/settings.local.json"),
+        )
+        .unwrap();
         let paths = PermissionPaths {
             lingxi_home: tmp.join("home/.lingxi"),
             cwd: tmp.join("proj"),
@@ -900,12 +994,75 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, PersistError::Confined { .. }));
-        assert!(!tmp.join("proj/.lingxi/settings.local.json").exists());
+        // The outside target was NOT written through the symlink.
+        assert_eq!(
+            std::fs::read_to_string(tmp.join("outside-secret")).unwrap(),
+            "secret\n"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn project_gitignore_is_never_touched_by_persistence() {
+        use std::os::unix::fs::symlink;
+
+        let tmp =
+            std::env::temp_dir().join(format!("lx-persist-gitignore-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("proj")).unwrap();
+        std::fs::write(tmp.join("outside-gitignore"), "outside\n").unwrap();
+        // A hostile symlinked project `.gitignore` pointing outside the repo.
+        symlink(tmp.join("outside-gitignore"), tmp.join("proj/.gitignore")).unwrap();
+        let paths = PermissionPaths {
+            lingxi_home: tmp.join("home/.lingxi"),
+            cwd: tmp.join("proj"),
+        };
+        let update = allow_rule("Bash", PermissionUpdateDestination::LocalSettings);
+        // Settings persistence succeeds…
+        assert!(persist_permission_update(&update, &paths).await.unwrap());
+        assert!(tmp.join("proj/.lingxi/settings.local.json").exists());
+        // …and the oracle NEVER writes the project `.gitignore` (it uses the
+        // global git excludes), so a symlinked project `.gitignore` can never be
+        // followed out of the repo — the outside target is untouched.
         assert_eq!(
             std::fs::read_to_string(tmp.join("outside-gitignore")).unwrap(),
             "outside\n"
         );
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn excludes_path_resolution_matches_uEh_fallbacks() {
+        use super::excludes_path_from;
+        // `git config` gave an absolute path → used verbatim.
+        assert_eq!(
+            excludes_path_from(Some("/etc/gitignore_global"), "/home/u", None),
+            PathBuf::from("/etc/gitignore_global")
+        );
+        // `~` ⇒ home; `~/x` ⇒ home/x.
+        assert_eq!(
+            excludes_path_from(Some("~"), "/home/u", None),
+            PathBuf::from("/home/u")
+        );
+        assert_eq!(
+            excludes_path_from(Some("~/gitignore"), "/home/u", None),
+            PathBuf::from("/home/u/gitignore")
+        );
+        // Empty / relative config → fall through to XDG, then the ~/.config default.
+        assert_eq!(
+            excludes_path_from(Some(""), "/home/u", Some("/xdg")),
+            PathBuf::from("/xdg/git/ignore")
+        );
+        assert_eq!(
+            excludes_path_from(Some("relative/path"), "/home/u", None),
+            PathBuf::from("/home/u/.config/git/ignore")
+        );
+        // A relative XDG is ignored (oracle `isAbsolute` guard).
+        assert_eq!(
+            excludes_path_from(None, "/home/u", Some("rel")),
+            PathBuf::from("/home/u/.config/git/ignore")
+        );
     }
 
     #[tokio::test]

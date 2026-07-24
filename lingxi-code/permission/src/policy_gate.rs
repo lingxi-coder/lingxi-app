@@ -319,18 +319,43 @@ impl PolicyPermissionGate {
                 );
                 PermissionDecision::Deny { reason: msg }
             }
-            Some(PermissionResult::Ask { ref reason, .. }) => {
+            Some(PermissionResult::Ask {
+                ref reason,
+                ref metadata,
+                ..
+            }) => {
                 tracing::warn!(
                     target: "permission",
                     "Hook returned 'allow' for {name}, but ask rule/safety check requires full permission pipeline"
                 );
-                let ctx2 = PermissionCheckContext {
-                    decision_reason: serialize_decision_reason(reason),
-                    decision_reason_type: decision_reason_type(reason).map(str::to_string),
-                    ..ctx.clone()
-                };
+                // Re-check stays MODE-LESS (`rule_or_safety_verdict` evaluated
+                // under `PermissionMode::Default`) — the oracle's post-hook-allow
+                // handler hands the ask to the permission pipeline WITHOUT a mode
+                // backstop, so we must not re-run the auto-mode classifier here
+                // (HOOKALLOW-01). We DO carry the same control-request metadata the
+                // normal Ask delegation builds so the stdio `can_use_tool` payload
+                // matches, and apply any `updatedPermissions` the host allow
+                // returns to the live session (parity with `setToolPermissionContext`).
+                let mut ctx2 = ctx.clone();
+                ctx2.decision_reason = serialize_decision_reason(reason);
+                ctx2.decision_reason_type = decision_reason_type(reason).map(str::to_string);
+                ctx2.classifier_approvable = classifier_approvable(reason);
+                ctx2.matched_ask_rule = matched_ask_rule(reason);
+                if metadata.permission_suggestions.is_some() {
+                    ctx2.permission_suggestions = metadata.permission_suggestions.clone();
+                }
+                if metadata.blocked_path.is_some() {
+                    ctx2.blocked_path = metadata.blocked_path.clone();
+                }
                 match self.inner.check_with_context(name, input, &ctx2).await {
-                    PermissionOutcome::Allow { .. } => PermissionDecision::Allow,
+                    PermissionOutcome::Allow {
+                        permission_updates, ..
+                    } => {
+                        if !permission_updates.is_empty() {
+                            self.apply_permission_updates(&permission_updates);
+                        }
+                        PermissionDecision::Allow
+                    }
                     PermissionOutcome::Deny { reason } => PermissionDecision::Deny { reason },
                 }
             }
@@ -1375,18 +1400,25 @@ fn classifier_approvable(reason: &PermissionDecisionReason) -> Option<bool> {
     has_safety_check.then_some(all_approvable)
 }
 
-/// Preserve an explicit Ask rule in the structured control request.  Every
-/// field comes directly from the matched rule; no path/command inference is
-/// performed here.
-fn matched_ask_rule(reason: &PermissionDecisionReason) -> Option<MatchedAskRule> {
-    let PermissionDecisionReason::MatchedRule { rule } = reason else {
-        return None;
-    };
-    Some(MatchedAskRule {
-        source: rule.source.lingxi_settings_source().to_string(),
-        tool_name: rule.value.tool_name.clone(),
-        rule_content: rule.value.rule_content.clone(),
-    })
+/// The `matched_ask_rule` control-request field — 1:1 with the 2.1.218
+/// `matched_ask_rule` SDK schema (`b.object({source,tool_name,rule_content?})`).
+///
+/// The oracle sets this ONLY in the *ask-rule substitution* case: a
+/// `permissions.ask` rule forced the prompt **but the ask carries the tool's own
+/// `decision_reason`** (a richer tool-minted ask), so the rule "rides here
+/// **instead of** `decision_reason_type: 'rule'`". `matched_ask_rule` and
+/// `decision_reason_type: "rule"` are therefore MUTUALLY EXCLUSIVE.
+///
+/// This port collapses a plain ask-RULE match into a top-level
+/// [`PermissionDecisionReason::MatchedRule`] ⇒ `decision_reason_type: "rule"`, so
+/// the rule is already conveyed by the type and there is no tool-minted reason to
+/// substitute against — the substitution case is never produced. Deriving the
+/// field from a bare `MatchedRule` (the previous behavior) emitted BOTH
+/// `decision_reason_type: "rule"` AND `matched_ask_rule` for the same ask, which
+/// the oracle never does. There is no substitution producer in the port, so this
+/// is always `None`.
+fn matched_ask_rule(_reason: &PermissionDecisionReason) -> Option<MatchedAskRule> {
+    None
 }
 
 /// Serialize a [`PermissionDecisionReason`] to the free-text `decision_reason`

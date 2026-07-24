@@ -1153,14 +1153,14 @@ mod tests {
         let seen = inner.ctx.lock().unwrap().clone().expect("inner consulted");
         assert_eq!(seen.decision_reason_type.as_deref(), Some("rule"));
         assert_eq!(seen.requires_user_interaction, true);
-        assert_eq!(
-            seen.matched_ask_rule,
-            Some(MatchedAskRule {
-                source: "userSettings".into(),
-                tool_name: "Bash".into(),
-                rule_content: None,
-            })
-        );
+        // A PLAIN ask-rule ask conveys the rule via `decision_reason_type: "rule"`
+        // and carries NO `matched_ask_rule`: the 2.1.218 schema sets that field
+        // ONLY in the substitution case (a rule forces the prompt but the ask
+        // keeps the tool's own decision_reason, so the rule rides in
+        // matched_ask_rule *instead of* the "rule" type). The two are mutually
+        // exclusive; emitting both (the prior behavior) is not something the
+        // oracle does.
+        assert_eq!(seen.matched_ask_rule, None);
         // The oracle's `_pt` ask-rule arm carries NO `permission_suggestions`
         // (the previously-emitted addRules/allow/session payload was invented +
         // inert — review finding).

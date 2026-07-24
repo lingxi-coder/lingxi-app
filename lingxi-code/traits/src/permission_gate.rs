@@ -392,6 +392,27 @@ pub trait PermissionGate: Send + Sync {
         PermissionDecision::Allow
     }
 
+    /// [`Self::check_after_hook_allow`] carrying the dispatch [`PermissionCheckContext`].
+    ///
+    /// When a hook `allow` is overridden by an ask rule/safety check, the oracle's
+    /// `lin` re-enters the FULL permission pipeline WITH the real `toolUseId` and
+    /// rule metadata (`o(t,c,n,i,s)`), so the resulting stdio `can_use_tool`
+    /// request is byte-faithful (correlatable id + `decision_reason`). The
+    /// no-context [`Self::check_after_hook_allow`] instead reached the inner
+    /// transport with a default context (a random id, no reason). This method
+    /// threads the context so a rule-evaluating gate can delegate that ask via
+    /// [`Self::check_with_context`]. Additive DEFAULTED (frozen-trait safe):
+    /// defaults to the context-less method.
+    async fn check_after_hook_allow_ctx(
+        &self,
+        name: &str,
+        input: &Value,
+        ctx: &PermissionCheckContext,
+    ) -> PermissionDecision {
+        let _ = ctx;
+        self.check_after_hook_allow(name, input).await
+    }
+
     /// The PERMISSION-REQUEST-hook twin of [`Self::check_after_hook_allow`].
     ///
     /// claude-code has TWO hook-allow resolvers and they differ in what an

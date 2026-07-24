@@ -2730,8 +2730,14 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         } else if plan_mode {
             orch.perms.check_in_plan_mode(name, &effective_input).await
         } else if hook_allowed {
+            // Carry the REAL tool_use_id so a hook-allow→ask-rule re-check emits a
+            // byte-faithful stdio `can_use_tool` (correlatable id + decision_reason).
+            let ctx = traits::permission_gate::PermissionCheckContext {
+                tool_use_id: Some(tool_use_id.to_string()),
+                ..Default::default()
+            };
             orch.perms
-                .check_after_hook_allow(name, &effective_input)
+                .check_after_hook_allow_ctx(name, &effective_input, &ctx)
                 .await
         } else {
             // NORMAL permission path. Resolve the decision SOURCE first (without
@@ -2847,8 +2853,12 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                                     .check_after_hook_allow_rewritten(name, &effective_input)
                                     .await
                             } else {
+                                let ctx = traits::permission_gate::PermissionCheckContext {
+                                    tool_use_id: Some(tool_use_id.to_string()),
+                                    ..Default::default()
+                                };
                                 orch.perms
-                                    .check_after_hook_allow(name, &effective_input)
+                                    .check_after_hook_allow_ctx(name, &effective_input, &ctx)
                                     .await
                             }
                         }

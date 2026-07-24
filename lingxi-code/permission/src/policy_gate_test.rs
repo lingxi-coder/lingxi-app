@@ -1069,6 +1069,39 @@ mod tests {
         assert_eq!(seen.matched_ask_rule, None);
     }
 
+    /// Review MED: a hook-allow overridden by an ASK RULE re-checks via
+    /// `check_after_hook_allow_ctx`, which must delegate to the inner transport
+    /// carrying the REAL tool_use_id (was a fresh UUID) + the serialized ask
+    /// reason — so the stdio `can_use_tool` is byte-faithful, matching `lin`.
+    #[tokio::test]
+    async fn hook_allow_ask_delegation_carries_tool_use_id_and_reason() {
+        let policy = policy_with(r#"{ "permissions": { "ask": ["Bash"] } }"#, PermissionMode::Default);
+        let inner = Arc::new(ContextRecordingInner {
+            ctx: std::sync::Mutex::new(None),
+        });
+        let gate = PolicyPermissionGate::new(policy, inner.clone());
+        let ctx = PermissionCheckContext {
+            tool_use_id: Some("toolu_hook_99".into()),
+            ..Default::default()
+        };
+        let _ = gate
+            .check_after_hook_allow_ctx("Bash", &serde_json::json!({ "command": "ls" }), &ctx)
+            .await;
+        let seen = inner
+            .ctx
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("ask rule must delegate to the inner transport");
+        assert_eq!(
+            seen.tool_use_id.as_deref(),
+            Some("toolu_hook_99"),
+            "the real tool_use_id must reach the inner (not a fresh UUID)"
+        );
+        // An ask RULE serializes to a reason (MatchedRule → decision_reason_type "rule").
+        assert_eq!(seen.decision_reason_type.as_deref(), Some("rule"));
+    }
+
     #[tokio::test]
     async fn interaction_metadata_does_not_create_a_duplicate_permission_prompt() {
         let policy = policy_with(r#"{ "permissions": {} }"#, PermissionMode::Default);

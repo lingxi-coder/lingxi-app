@@ -76,7 +76,7 @@ pub const TOOL_SEARCH_MAX_RESULTS: usize = 20;
 // escapes; the `\n\n` paragraph breaks are real newlines in the binary source.
 
 /// `UZh` — head paragraph (no unicode escapes; real `\n\n`).
-const TOOL_SEARCH_DESC_HEAD: &str = "Fetches full schema definitions for deferred tools so they can be called.\n\nDeferred tools appear by name in <available-deferred-tools> messages.";
+const TOOL_SEARCH_DESC_HEAD: &str = "Fetches full schema definitions for deferred tools so they can be called.\n\nDeferred tools appear by name in <system-reminder> messages.";
 
 /// `qZh` — default sentence appended when `Qbc()` is `false` (the binary
 /// default, and LingXi's fixed value).
@@ -655,9 +655,22 @@ impl Tool for ToolSearchTool {
         let model_content = if matches.is_empty() {
             let mut text = "No matching deferred tools found".to_string();
             if !pending_mcp_servers.is_empty() {
+                // Oracle caps the list at `oP` = 30, then ", …and N more".
+                const CAP: usize = 30;
+                let listed = if pending_mcp_servers.len() > CAP {
+                    format!(
+                        "{}, …and {} more",
+                        pending_mcp_servers[..CAP].join(", "),
+                        pending_mcp_servers.len() - CAP
+                    )
+                } else {
+                    pending_mcp_servers.join(", ")
+                };
                 text.push_str(". Some MCP servers are still connecting: ");
-                text.push_str(&pending_mcp_servers.join(", "));
-                text.push_str(". Their tools will become available shortly — try searching again.");
+                text.push_str(&listed);
+                // The capability-guidance sentence is part of this pending branch
+                // in the oracle (`mcpToToolResultBlockParam`), not always-on.
+                text.push_str(". Their tools will become available shortly — try searching again. If you're looking for a capability rather than a specific tool name, try keywords that might match the server's purpose (e.g., 'slack message', 'calendar event'). Once you find a matching tool, call it directly — do not stop after searching.");
             }
             Some(text)
         } else {
@@ -1110,7 +1123,7 @@ mod tests {
     /// Byte-exact CC 2.1.207 `FGn()` default (gate `Qbc()` == false): the
     /// concatenation `UZh + qZh + WZh`. Em-dashes are U+2014; blank lines are
     /// the `\n\n` paragraph breaks from the binary's template literals.
-    const EXPECTED_DEFAULT_DESC: &str = "Fetches full schema definitions for deferred tools so they can be called.\n\nDeferred tools appear by name in <available-deferred-tools> messages. Until fetched, only the name is known \u{2014} there is no parameter schema, so the tool cannot be invoked. This tool takes a query, matches it against the deferred tool list, and returns the matched tools' complete JSONSchema definitions inside a <functions> block. Once a tool's schema appears in that result, it is callable exactly like any tool defined at the top of the prompt.\n\nResult format: each matched tool appears as one <function>{\"description\": \"...\", \"name\": \"...\", \"parameters\": {...}}</function> line inside the <functions> block \u{2014} the same encoding as the tool list at the top of this prompt.\n\nQuery forms:\n- \"select:Read,Edit,Grep\" \u{2014} fetch these exact tools by name\n- \"notebook jupyter\" \u{2014} keyword search, up to max_results best matches\n- \"+slack send\" \u{2014} require \"slack\" in the name, rank by remaining terms";
+    const EXPECTED_DEFAULT_DESC: &str = "Fetches full schema definitions for deferred tools so they can be called.\n\nDeferred tools appear by name in <system-reminder> messages. Until fetched, only the name is known \u{2014} there is no parameter schema, so the tool cannot be invoked. This tool takes a query, matches it against the deferred tool list, and returns the matched tools' complete JSONSchema definitions inside a <functions> block. Once a tool's schema appears in that result, it is callable exactly like any tool defined at the top of the prompt.\n\nResult format: each matched tool appears as one <function>{\"description\": \"...\", \"name\": \"...\", \"parameters\": {...}}</function> line inside the <functions> block \u{2014} the same encoding as the tool list at the top of this prompt.\n\nQuery forms:\n- \"select:Read,Edit,Grep\" \u{2014} fetch these exact tools by name\n- \"notebook jupyter\" \u{2014} keyword search, up to max_results best matches\n- \"+slack send\" \u{2014} require \"slack\" in the name, rank by remaining terms";
 
     #[test]
     fn description_default_is_byte_exact() {

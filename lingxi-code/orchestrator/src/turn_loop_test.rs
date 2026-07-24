@@ -3146,6 +3146,8 @@ mod pre_tool_hook_tests {
             PermissionResolution::Deny {
                 reason: "sourced-deny".into(),
                 source: self.0,
+                decision_reason_type: None,
+                decision_reason: None,
                 behavior_ask: false,
                 content_blocks: Vec::new(),
             }

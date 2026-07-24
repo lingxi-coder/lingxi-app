@@ -230,6 +230,18 @@ pub enum PermissionResolution {
         reason: String,
         /// Where the denial came from (gates the `PermissionDenied` hook).
         source: PermissionDecisionSource,
+        /// GATE-SYSMSG-01: the discriminated reason kind
+        /// (`decisionReason?.type` — `rule`/`mode`/`safetyCheck`/…), pre-computed
+        /// where the full [`crate`]-external `PermissionDecisionReason` is in scope
+        /// (that type lives in the `permission` crate, which depends on this one,
+        /// so it cannot be a field here). Feeds the `permission_denied` system
+        /// message the turn loop emits on the main-conversation deny path. `None`
+        /// for producers without a structured reason.
+        decision_reason_type: Option<String>,
+        /// GATE-SYSMSG-01: the `oin(decisionReason)`-filtered reason TEXT (only
+        /// the free-text reason kinds surface it). Pre-computed alongside
+        /// [`Self::Deny::decision_reason_type`]; `None` otherwise.
+        decision_reason: Option<String>,
         /// `true` when the underlying `permissionDecision.behavior === 'ask'`
         /// (a rejection that came from an ASK prompt the user declined), vs a
         /// rule/mode `deny`. claude-code only appends the rejection's
@@ -536,6 +548,11 @@ pub trait PermissionGate: Send + Sync {
             PermissionDecision::Deny { reason } => PermissionResolution::Deny {
                 reason,
                 source: PermissionDecisionSource::Unspecified,
+                // The default has only a rendered String reason (no structured
+                // `PermissionDecisionReason`), so the system-message discriminants
+                // are unavailable here.
+                decision_reason_type: None,
+                decision_reason: None,
                 behavior_ask: false,
                 content_blocks: Vec::new(),
             },

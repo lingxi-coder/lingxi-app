@@ -2771,6 +2771,8 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 PermissionResolution::Deny {
                     reason,
                     source,
+                    decision_reason_type,
+                    decision_reason,
                     behavior_ask,
                     content_blocks,
                 } => {
@@ -2810,6 +2812,26 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                             deny_hook_says_retry = true;
                         }
                     }
+                    // GATE-SYSMSG-01: emit the `permission_denied` system message on
+                    // the stdio outbound. The MAIN-conversation deny path resolves
+                    // via `resolve_detailed` (source-first, for the source-gated
+                    // hooks), NOT `check_with_context`, so the gate's own
+                    // `decide_outcome_with_context` emission (subagent dispatch) is
+                    // never reached here — emit through the outer gate, which
+                    // forwards to the stdio transport. No-op on non-stdio transports.
+                    let sysmsg_ctx = traits::permission_gate::PermissionCheckContext {
+                        tool_use_id: Some(tool_use_id.to_string()),
+                        ..Default::default()
+                    };
+                    orch.perms
+                        .on_permission_denied(
+                            name,
+                            &sysmsg_ctx,
+                            decision_reason_type.as_deref(),
+                            decision_reason.as_deref(),
+                            &reason,
+                        )
+                        .await;
                     PermissionDecision::Deny { reason }
                 }
                 PermissionResolution::Ask => {

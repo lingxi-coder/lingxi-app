@@ -648,6 +648,13 @@ impl PolicyPermissionGate {
                 ..
             } => PermissionResolution::Deny {
                 source: map_decision_source(&reason),
+                // GATE-SYSMSG-01: pre-compute the system-message discriminants from
+                // the FULL reason (in scope here) so the turn loop can emit the
+                // `permission_denied` frame on the main-conversation deny path —
+                // faithful for rule/mode AND classifier (the classifier deny
+                // recurses back into this arm with a `ClassifierRejected` reason).
+                decision_reason_type: decision_reason_type(&reason).map(str::to_string),
+                decision_reason: sysmsg_decision_reason(&reason),
                 reason: explanation.unwrap_or_else(|| deny_reason_string(&reason, name)),
                 // The policy gate's rule/mode/classifier denials are never an
                 // `ask`-behavior rejection carrying contentBlocks (the external
@@ -1069,6 +1076,25 @@ impl PermissionGate for PolicyPermissionGate {
         self.inner.set_permission_persistence_enabled(
             enabled && !self.policy.allow_managed_permission_rules_only,
         );
+    }
+
+    /// GATE-SYSMSG-01: forward a deny notification to the inner transport (the
+    /// only layer with an outbound stream). The main turn loop calls this on the
+    /// OUTER gate for a main-conversation deny (which resolves via
+    /// `resolve_detailed`, not `check_with_context`), so the stdio control-plane
+    /// still emits the `permission_denied` system message; the subagent-dispatch
+    /// path emits directly from `decide_outcome_with_context`.
+    async fn on_permission_denied(
+        &self,
+        name: &str,
+        ctx: &PermissionCheckContext,
+        decision_reason_type: Option<&str>,
+        decision_reason: Option<&str>,
+        message: &str,
+    ) {
+        self.inner
+            .on_permission_denied(name, ctx, decision_reason_type, decision_reason, message)
+            .await;
     }
 
     /// A PreToolUse / PermissionRequest hook `allow` skips the PROMPT but still

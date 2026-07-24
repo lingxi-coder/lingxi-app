@@ -121,29 +121,33 @@ impl StdioControlPlane {
             Some(handle) => handle.lock().await.clone(),
             None => String::new(),
         };
-        let mut frame = json!({
-            "type": "system",
-            "subtype": "permission_denied",
-            "tool_name": tool_name,
-            "message": message,
-            "uuid": Uuid::new_v4().to_string(),
-            "session_id": session_id,
-        });
+        // Build in the ORACLE key order (serde_json `preserve_order` is on, so
+        // insertion order is the wire order): type, subtype, tool_name,
+        // tool_use_id, agent_id, decision_reason_type, decision_reason, message,
+        // uuid, session_id. Optional fields are inserted at their position and
+        // omitted entirely when absent (never null).
+        let mut map = serde_json::Map::new();
+        map.insert("type".into(), json!("system"));
+        map.insert("subtype".into(), json!("permission_denied"));
+        map.insert("tool_name".into(), json!(tool_name));
         if let Some(id) = tool_use_id {
-            frame["tool_use_id"] = json!(id);
+            map.insert("tool_use_id".into(), json!(id));
         }
         if let Some(agent) = agent_id {
-            frame["agent_id"] = json!(agent);
+            map.insert("agent_id".into(), json!(agent));
         }
         if let Some(rt) = decision_reason_type {
-            frame["decision_reason_type"] = json!(rt);
+            map.insert("decision_reason_type".into(), json!(rt));
         }
         if let Some(reason) = decision_reason {
-            frame["decision_reason"] = json!(reason);
+            map.insert("decision_reason".into(), json!(reason));
         }
+        map.insert("message".into(), json!(message));
+        map.insert("uuid".into(), json!(Uuid::new_v4().to_string()));
+        map.insert("session_id".into(), json!(session_id));
         let _ = self
             .outbound_tx
-            .send(OutboundMsg::Line(serialize_ndjson_line(&frame)));
+            .send(OutboundMsg::Line(serialize_ndjson_line(&Value::Object(map))));
     }
 
     /// Wire the orphaned-permission recovery sink (the run loop's mpsc receiver
@@ -1016,7 +1020,26 @@ mod tests {
             )
             .await;
 
-        let f: Value = serde_json::from_str(&outbound_line(rx.recv().await.unwrap())).unwrap();
+        let line = outbound_line(rx.recv().await.unwrap());
+        // Key ORDER must match the oracle (serde_json preserve_order → wire order).
+        let map: serde_json::Map<String, Value> = serde_json::from_str(&line).unwrap();
+        let keys: Vec<&str> = map.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            vec![
+                "type",
+                "subtype",
+                "tool_name",
+                "tool_use_id",
+                "agent_id",
+                "decision_reason_type",
+                "decision_reason",
+                "message",
+                "uuid",
+                "session_id",
+            ]
+        );
+        let f: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(f["type"], "system");
         assert_eq!(f["subtype"], "permission_denied");
         assert_eq!(f["tool_name"], "Bash");

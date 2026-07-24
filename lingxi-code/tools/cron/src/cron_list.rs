@@ -87,8 +87,9 @@ fn truncate_single_line(s: &str, max_width: usize) -> String {
 }
 
 /// Read the single `<root>/.lingxi/scheduled_tasks.json` file into the `jobs`
-/// shape, sorted by id for determinism. A missing / unparseable file yields no
-/// jobs. Every persisted task is durable by definition, so the `durable:false`
+/// shape, in FILE order (the oracle `bFe` does not sort). A missing /
+/// unparseable file yields no jobs. Every persisted task is durable by
+/// definition, so the `durable:false`
 /// key (CronListTool.ts' `durable === false` spread, which only applies to the
 /// separate in-memory session tasks) is never emitted here.
 async fn read_durable_jobs(fs: &dyn traits::FileSystem, project_root: &Path) -> Vec<Value> {
@@ -114,12 +115,8 @@ async fn read_durable_jobs(fs: &dyn traits::FileSystem, project_root: &Path) -> 
             Value::Object(obj)
         })
         .collect();
-    jobs.sort_by(|a, b| {
-        a.get("id")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .cmp(b.get("id").and_then(Value::as_str).unwrap_or(""))
-    });
+    // Oracle `bFe` preserves the tasks file's order — NO id sort (the model-
+    // facing `jobs` array and rendered lines follow file order).
     jobs
 }
 
@@ -142,35 +139,34 @@ async fn read_all_jobs(
     };
     if let Some(registry) = &tool_ctx.task_registry {
         if let Ok(session) = cron::session_jobs(registry).await {
-            jobs.extend(
-                session
-                    .into_iter()
-                    .filter(|task| {
-                        owner
-                            .as_deref()
-                            .is_none_or(|owner| task.owner.as_deref() == Some(owner))
-                    })
-                    .map(|task| {
-                        let mut obj = Map::new();
-                        obj.insert("id".into(), json!(task.id));
-                        obj.insert("cron".into(), json!(task.cron));
-                        obj.insert("humanSchedule".into(), json!(cron_to_human(&task.cron)));
-                        obj.insert("prompt".into(), json!(task.prompt));
-                        if task.recurring {
-                            obj.insert("recurring".into(), json!(true));
-                        }
-                        obj.insert("durable".into(), json!(false));
-                        Value::Object(obj)
-                    }),
-            );
+            // Oracle `bFe` = `[...durableFromFile, ...sessionStore]` unsorted:
+            // session jobs follow the durable file-order block, in session
+            // CREATION order (the in-memory store is HashMap-backed here, so
+            // sort by created_at — ties broken by id — to recover that order).
+            let mut session: Vec<_> = session
+                .into_iter()
+                .filter(|task| {
+                    owner
+                        .as_deref()
+                        .is_none_or(|owner| task.owner.as_deref() == Some(owner))
+                })
+                .collect();
+            session.sort_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.id.cmp(&b.id)));
+            jobs.extend(session.into_iter().map(|task| {
+                let mut obj = Map::new();
+                obj.insert("id".into(), json!(task.id));
+                obj.insert("cron".into(), json!(task.cron));
+                obj.insert("humanSchedule".into(), json!(cron_to_human(&task.cron)));
+                obj.insert("prompt".into(), json!(task.prompt));
+                if task.recurring {
+                    obj.insert("recurring".into(), json!(true));
+                }
+                obj.insert("durable".into(), json!(false));
+                Value::Object(obj)
+            }));
         }
     }
-    jobs.sort_by(|a, b| {
-        a.get("id")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .cmp(b.get("id").and_then(Value::as_str).unwrap_or(""))
-    });
+    // NO final merge sort — durable file-order followed by session creation-order.
     jobs
 }
 
@@ -412,7 +408,8 @@ mod tests {
     #[tokio::test]
     async fn lists_created_jobs() {
         let tmp = tempfile::tempdir().unwrap();
-        // Insert out of order; the tool sorts by id. Both are durable (on disk).
+        // The oracle preserves FILE order — no id sort — so these come back in
+        // the order they appear on disk. Both are durable (on disk).
         seed_tasks(
             tmp.path(),
             vec![
@@ -429,12 +426,12 @@ mod tests {
             .expect("ok");
         let jobs = out.data["jobs"].as_array().unwrap();
         assert_eq!(jobs.len(), 2);
-        // Sorted by id.
-        assert_eq!(jobs[0]["id"], json!("daaaa0000"));
-        assert_eq!(jobs[1]["id"], json!("dbbbb1111"));
+        // File order (NOT id-sorted): dbbbb1111 was written first.
+        assert_eq!(jobs[0]["id"], json!("dbbbb1111"));
+        assert_eq!(jobs[1]["id"], json!("daaaa0000"));
         // humanSchedule rendered.
-        assert_eq!(jobs[0]["humanSchedule"], json!("Every 5 minutes"));
-        assert_eq!(jobs[1]["humanSchedule"], json!("Every day at 9:00 AM"));
+        assert_eq!(jobs[0]["humanSchedule"], json!("Every day at 9:00 AM"));
+        assert_eq!(jobs[1]["humanSchedule"], json!("Every 5 minutes"));
         // recurring present (true) on both. Every persisted task is durable, so
         // the `durable` key is never emitted.
         assert_eq!(jobs[0]["recurring"], json!(true));

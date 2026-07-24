@@ -1444,7 +1444,7 @@ impl PermissionPolicy {
         // xDs whole-command sed gate (redirect-borne / over-length): runs ONCE
         // before the per-sed auto-allow pass, gated on there being >=1 sed
         // subcommand — mirroring `_gd` consulting `xDs` before `gpr`.
-        if subs.iter().any(|sub| base_command(sub) == Some("sed")) {
+        if subs.iter().any(|sub| subcommand_is_sed(sub)) {
             if let Some(crate::sed_validation::SedVerdict::Unsafe { message, reason }) =
                 crate::sed_validation::sed_redirect_borne_verdict(command)
             {
@@ -1499,7 +1499,7 @@ impl PermissionPolicy {
         // xDs whole-command sed gate (redirect-borne / over-length): runs ONCE
         // before the per-sed constraint loop, gated on there being >=1 sed
         // subcommand — mirroring `_gd` consulting `xDs` before `gpr`.
-        if subs.iter().any(|sub| base_command(sub) == Some("sed")) {
+        if subs.iter().any(|sub| subcommand_is_sed(sub)) {
             if let Some(crate::sed_validation::SedVerdict::Unsafe { message, reason }) =
                 crate::sed_validation::sed_redirect_borne_verdict(command)
             {
@@ -2108,6 +2108,23 @@ impl PermissionPolicy {
 /// Returns `None` for an empty subcommand.
 fn base_command(sub: &str) -> Option<&str> {
     sub.split_whitespace().next()
+}
+
+/// Whether `sub` is a `sed` subcommand for the redirect-borne / `xDs` gate. The
+/// oracle `_gd` gates `xDs` on `ygd(o)!==null`, which unquotes and strips safe
+/// wrappers before checking the command name. Under `bash-ast` this uses that
+/// unquoting/wrapper-aware `kds` so a quoted (`"sed"`) or wrapped (`command sed`,
+/// `\sed`) invocation still enters the gate; the bare `base_command == "sed"` is
+/// kept as a floor and is the only check on the minimal build (where the
+/// redirect-borne branch is a documented no-op anyway).
+fn subcommand_is_sed(sub: &str) -> bool {
+    #[cfg(feature = "bash-ast")]
+    {
+        if crate::sed_redirect_borne::is_sed_command(sub) {
+            return true;
+        }
+    }
+    base_command(sub) == Some("sed")
 }
 
 /// Parsed MCP tool/rule name — 1:1 with claude-code

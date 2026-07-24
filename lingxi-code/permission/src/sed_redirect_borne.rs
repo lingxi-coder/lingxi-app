@@ -24,11 +24,15 @@
 //!
 //! # Documented divergences (see the individual `fn` docs)
 //! - **`xse` (env/wrapper strip).** The oracle's `xse` strips
-//!   `Hon`-allowlisted env assignments + safe wrappers + unquotes + strips
-//!   comments. This port reuses [`crate::shell_command::strip_safe_wrappers`],
-//!   which covers the SAFE-env allowlist + the same timeout/nice/stdbuf/nohup/time
-//!   wrappers + comment lines, but does NOT unquote. Over-detecting a command as
-//!   `sed` only ever OVER-asks (never under-asks), so the divergence is safe.
+//!   `Hon`-allowlisted env assignments + comment lines + all EIGHT safe wrappers
+//!   + unquotes the command name. This port's [`xse`] reuses
+//!   [`crate::shell_command::strip_safe_wrappers`] for the SAFE-env allowlist +
+//!   comment lines + the five `timeout/time/nice/stdbuf/nohup` wrappers, and adds
+//!   the missing `command`/`builtin`/`noglob` wrappers
+//!   ([`strip_command_builtin_noglob`]) and the first-token unquote
+//!   ([`unquote_first_token`]) — driven to a fixed point. The only structural
+//!   difference from the oracle is the interleaving order of the strip passes,
+//!   which cannot change the converged first token the isSed check reads.
 //! - **`\s` / `trimStart`.** JS `\s` and `String.prototype.trimStart` are
 //!   approximated by [`char::is_whitespace`]. The tiny code-point differences
 //!   (BOM, NEL) are immaterial to `sed` detection and can only over-ask.
@@ -500,11 +504,132 @@ pub fn sed_command_has_redirect_borne_risk(whole_command: &str) -> bool {
 
 // ── isSed chain: kDs / ygd / d$_ / hpr / p$_ / mgd / V0e / xse ────────────────
 
-/// `xse(text)` role — reuse [`crate::shell_command::strip_safe_wrappers`] (SAFE
-/// env allowlist + timeout/nice/stdbuf/nohup/time wrappers + comment lines).
-/// See the module-level divergence note.
+/// `command`/`builtin`/`noglob` wrappers (`^command(?:[ \t]+-p+)*(?:[ \t]+--)?[ \t]+(?!-)`,
+/// `^builtin(?:[ \t]+--)?[ \t]+(?!-)`, `^noglob[ \t]+(?!-)`). Rust `regex` has no
+/// look-ahead, so each is matched THROUGH its trailing `[ \t]+` and then the
+/// `(?!-)` is enforced by requiring the remaining text not to start with `-`.
+/// The port's [`crate::shell_command::strip_safe_wrappers`] covers the other five
+/// wrappers (timeout/time/nice/stdbuf/nohup) + the SAFE-env allowlist + comment
+/// lines, but NOT these three — the gap the reviewers flagged.
+static CMD_RE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"^command(?:[ \t]+-p+)*(?:[ \t]+--)?[ \t]+").unwrap());
+static BUILTIN_RE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"^builtin(?:[ \t]+--)?[ \t]+").unwrap());
+static NOGLOB_RE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"^noglob[ \t]+").unwrap());
+
+/// Strip a leading `command`/`builtin`/`noglob` wrapper (once each), enforcing
+/// the oracle's `(?!-)` tail: only strip when the token after the wrapper is a
+/// real word (not a `-flag`). Not stripping a `<wrapper> -flag` form only ever
+/// UNDER-detects a NON-sed command, so it never causes an under-ask for a real
+/// `sed` (the security-relevant direction).
+fn strip_command_builtin_noglob(text: &str) -> String {
+    let mut s = text.to_string();
+    for re in [&*CMD_RE, &*BUILTIN_RE, &*NOGLOB_RE] {
+        let stripped = match re.find(&s) {
+            Some(m) if !s[m.end()..].starts_with('-') => Some(s[m.end()..].to_string()),
+            _ => None,
+        };
+        if let Some(new_s) = stripped {
+            s = new_s;
+        }
+    }
+    s
+}
+
+/// `xse(text)`'s first-token unquote closure `i`: unquote the leading
+/// (`^([^\s]+)`) token, char-by-char, with bash single/double-quote + backslash
+/// rules. If the token has an UNTERMINATED quote or a trailing escape, the
+/// oracle returns the input unchanged (`if(c!==null||u)return s`).
+fn unquote_first_token(s: &str) -> String {
+    // `^([^\s]+)([\s\S]*)$` requires a leading non-whitespace run.
+    if s.is_empty() || s.starts_with(char::is_whitespace) {
+        return s.to_string();
+    }
+    let split_at = s.find(char::is_whitespace).unwrap_or(s.len());
+    let l: Vec<char> = s[..split_at].chars().collect();
+    let rest = &s[split_at..];
+    let mut c: Option<char> = None;
+    let mut u = false;
+    let mut d = String::new();
+    let mut p = 0;
+    while p < l.len() {
+        u = false;
+        let f = l[p];
+        if c == Some('\'') {
+            if f == '\'' {
+                c = None;
+            } else {
+                d.push(f);
+            }
+        } else if c == Some('"') {
+            if f == '\\' {
+                match l.get(p + 1) {
+                    Some(&m) if matches!(m, '$' | '`' | '"' | '\\') => {
+                        d.push(m);
+                        p += 1;
+                    }
+                    None => u = true,
+                    Some(_) => d.push(f),
+                }
+            } else if f == '"' {
+                c = None;
+            } else {
+                d.push(f);
+            }
+        } else if f == '\\' {
+            match l.get(p + 1) {
+                None => u = true,
+                Some(&m) => {
+                    d.push(m);
+                    p += 1;
+                }
+            }
+        } else if f == '"' || f == '\'' {
+            c = Some(f);
+        } else {
+            d.push(f);
+        }
+        p += 1;
+    }
+    if c.is_some() || u {
+        return s.to_string();
+    }
+    format!("{d}{rest}")
+}
+
+/// `xse(text)`: strip SAFE-env assignments + comment lines + ALL EIGHT safe
+/// wrappers (timeout/time/nice/stdbuf/nohup via
+/// [`crate::shell_command::strip_safe_wrappers`], plus command/builtin/noglob
+/// here) + unquote the command name — to a fixed point. The oracle applies the
+/// env/comment strip, then the unquote, then the wrapper strips with a re-unquote
+/// after each pass; this fixed-point loop converges to the SAME fully-stripped
+/// command (all that the isSed check reads is the first token), and additionally
+/// handles a QUOTED wrapper name (e.g. `"timeout" 5 sed`) revealed after an
+/// unquote pass.
 fn xse(text: &str) -> String {
-    crate::shell_command::strip_safe_wrappers(text)
+    let mut n = text.to_string();
+    loop {
+        let before = n.clone();
+        // env allowlist + comment lines + timeout/time/nice/stdbuf/nohup
+        n = crate::shell_command::strip_safe_wrappers(&n);
+        // command/builtin/noglob (the three the port's helper omits)
+        n = strip_command_builtin_noglob(&n);
+        // unquote the leading command name (`\sed`, `"sed"`, `'sed'` → `sed`)
+        n = unquote_first_token(&n);
+        if n == before {
+            break;
+        }
+    }
+    n.trim().to_string()
+}
+
+/// Public isSed predicate for the whole-command sed-presence gate (the `_gd`
+/// `ygd(o)!==null` check). Unquoting- and wrapper-aware, unlike a bare
+/// `base_command == "sed"` test.
+#[must_use]
+pub fn is_sed_command(text: &str) -> bool {
+    kds(text)
 }
 
 /// `a.split(/\s+/)[0]` — JS split-on-whitespace first element. A string starting
@@ -741,7 +866,6 @@ fn d_dollar(e: &str) -> Option<String> {
     let Some(tree) = crate::bash_tree_sitter::parse_raw(e) else {
         return sed_or_null(hpr(e));
     };
-    let src = e.as_bytes();
     let root = tree.root_node();
     if don(root) {
         return sed_or_null(hpr(e));
@@ -806,6 +930,40 @@ mod tests {
         assert!(!kds("cat f"));
         assert!(!kds("grep x f"));
         assert!(!kds(""));
+    }
+
+    #[test]
+    fn is_sed_command_wrapper_and_quote_forms() {
+        // command/builtin/noglob wrappers (the 3 `strip_safe_wrappers` omits).
+        assert!(kds("command sed -i s/x/y/ f"));
+        assert!(kds("builtin sed s/x/y/ f"));
+        assert!(kds("noglob sed s/x/y/ f"));
+        // quoted / backslash-escaped command name (the `xse` unquote step).
+        assert!(kds("\"sed\" -i s/x/y/ f"));
+        assert!(kds("'sed' s/x/y/ f"));
+        assert!(kds("\\sed s/x/y/ f"));
+        // `command -v sed` is a LOOKUP, not a wrapper (`(?!-)` tail) — NOT sed.
+        assert!(!kds("command -v sed"));
+        // a genuinely different wrapped/quoted command stays non-sed.
+        assert!(!kds("command cat f"));
+        assert!(!kds("\"cat\" f"));
+    }
+
+    #[test]
+    fn wrapper_and_quoted_sed_with_risky_redirect_asks() {
+        // The reviewer-found under-asks: a wrapper- or quote-nested `sed` whose
+        // redirect is redirect-borne must still ASK (isSed now unquoting/wrapper
+        // aware). Before the fix these all returned `false` (silent passthrough).
+        assert!(risk("command sed -i s/x/y/ f >$(evil)"));
+        assert!(risk("builtin sed -i s/x/y/ f >$(evil)"));
+        assert!(risk("noglob sed -i s/x/y/ f >$(evil)"));
+        assert!(risk("\"sed\" -i s/x/y/ f >$(evil)"));
+        assert!(risk("'sed' -i s/x/y/ f >*.txt"));
+        assert!(risk("\\sed -i s/x/y/ f >${VAR}"));
+        // …but a wrapped/quoted NON-sed command with the same redirect does NOT
+        // ask (the redirect is only checked for a sed command).
+        assert!(!risk("command cat f >$(evil)"));
+        assert!(!risk("\"cat\" f >$(evil)"));
     }
 
     // ── positive cases (must ASK) ───────────────────────────────────────────

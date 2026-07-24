@@ -546,20 +546,25 @@ pub async fn replace_permission_rules(
 
 /// Persist a `setMode` permission update as `permissions.defaultMode`.
 ///
-/// The 2.1.218 oracle's persist arm writes `{permissions:{defaultMode:e.mode}}`
-/// UNCONDITIONALLY — including `bypassPermissions` (the bypass-availability gate
-/// lives only on the LIVE-apply arm, `isBypassPermissionsModeAvailable`, which
-/// this port applies separately). So every recognized mode is persisted here;
-/// an unrecognized mode string is ignored (`Ok(false)`).
+/// The 2.1.218 oracle's persist function `eSe` guards its TOP with a dedicated
+/// session-scoped early-return: `if(e.type==="setMode"&&e.mode==="bypassPermissions")
+/// {C("setMode:'bypassPermissions' is session-scoped; not persisting as
+/// defaultMode…");return}`. So `bypassPermissions` is DELIBERATELY never written
+/// to disk — persisting it would silently re-enter bypass mode on the next
+/// session load (a persistent privilege escalation, since the load path gates
+/// only on the `bypass_disabled` kill switch, not the runtime availability
+/// re-check). Every OTHER recognized mode IS persisted; an unrecognized mode
+/// string is ignored (`Ok(false)`).
 pub async fn persist_permission_mode(
     mode: &str,
     destination: PermissionUpdateDestination,
     paths: &PermissionPaths,
 ) -> Result<bool, PersistError> {
-    if !matches!(
-        mode,
-        "default" | "acceptEdits" | "plan" | "dontAsk" | "auto" | "bypassPermissions"
-    ) {
+    // `eSe`'s session-scoped guard: bypassPermissions is never persisted.
+    if mode == "bypassPermissions" {
+        return Ok(false);
+    }
+    if !matches!(mode, "default" | "acceptEdits" | "plan" | "dontAsk" | "auto") {
         return Ok(false);
     }
     mutate_settings_file(paths, destination, true, |raw| {
@@ -902,7 +907,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persistent_variants_survive_reload_including_bypass_mode() {
+    async fn persistent_variants_survive_reload_but_bypass_mode_does_not() {
         let tmp = std::env::temp_dir().join(format!("lx-persist-variants-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join("proj")).unwrap();
@@ -920,18 +925,22 @@ mod tests {
         assert!(persist_permission_mode("plan", destination, &paths)
             .await
             .unwrap());
-        // The oracle's persist arm writes ANY mode, including bypassPermissions
-        // (the availability gate is live-apply-only) — so this now persists and
-        // overwrites the prior defaultMode.
+        // SECURITY: `bypassPermissions` is session-scoped and is NEVER persisted
+        // (oracle `eSe`'s top-of-function guard). The call is a no-op that
+        // returns false and leaves the prior defaultMode untouched — persisting
+        // it would silently re-enter bypass mode on the next session load.
         assert!(
-            persist_permission_mode("bypassPermissions", destination, &paths)
+            !persist_permission_mode("bypassPermissions", destination, &paths)
                 .await
                 .unwrap()
         );
         let body = std::fs::read_to_string(tmp.join("proj/.lingxi/settings.local.json")).unwrap();
         let value: Value = serde_json::from_str(&body).unwrap();
         assert_eq!(value["permissions"]["allow"], json!(["Read"]));
-        assert_eq!(value["permissions"]["defaultMode"], "bypassPermissions");
+        assert_eq!(
+            value["permissions"]["defaultMode"], "plan",
+            "the last non-bypass mode survives; bypassPermissions is not written"
+        );
         // An unrecognized mode string is still ignored.
         assert!(!persist_permission_mode("nonsense", destination, &paths)
             .await

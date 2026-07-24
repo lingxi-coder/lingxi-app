@@ -248,7 +248,14 @@ mod tests {
             behavior: PermissionBehavior::Allow,
             source: PermissionRuleSource::ProjectSettings,
         }];
-        let p = PermissionPolicy::from_rules(PermissionMode::Default, rules);
+        // `with_roots` is required here: `shell_exact_allow`/`shell_allow` (the
+        // real content-pattern matchers, `authorize_inner` steps 2c-exact/3) are
+        // gated on `self.roots.is_some()` — without roots the allow walk falls
+        // back to the phase-2 tool-name-only match (`rule_matches`'s no-roots
+        // branch), which would report Allow for ANY Bash command regardless of
+        // whether it actually matches `git status:*`, making the assertions
+        // below vacuously true.
+        let p = PermissionPolicy::from_rules(PermissionMode::Default, rules).with_roots(roots());
 
         assert!(
             matches!(
@@ -262,6 +269,15 @@ mod tests {
             p.authorize("Bash", &serde_json::json!({ "command": "git status --short" })),
             PermissionResult::Allow { .. }
         ));
+        // Contrast: an unrelated command is NOT covered by the same rule — proves
+        // the allow is content-specific, not a name-only rewrite artifact.
+        assert!(
+            !matches!(
+                p.authorize("Monitor", &serde_json::json!({ "command": "npm install left-pad" })),
+                PermissionResult::Allow { .. }
+            ),
+            "the git-status allow rule must not auto-allow an unrelated Monitor command"
+        );
     }
 
     #[test]

@@ -69,7 +69,8 @@ struct DiskFrontmatter {
     #[serde(
         rename = "keepCodingInstructions",
         alias = "keep-coding-instructions",
-        alias = "keep_coding_instructions"
+        alias = "keep_coding_instructions",
+        deserialize_with = "de_lenient_bool_true"
     )]
     keep_coding_instructions: bool,
     /// `force-for-plugin` (oracle schema `Oit()` = a BOOLEAN, `r0e` coercion):
@@ -105,12 +106,28 @@ where
     Ok(coerce_r0e_bool(&value).unwrap_or(false))
 }
 
+/// Same lenient `r0e` coercion, but an unrecognized / absent value defaults to
+/// `true` — the `keep-coding-instructions` `Oit()` field's default (oracle
+/// `r0e → undefined → schema optional → keep`). A stray value therefore no
+/// longer discards the whole frontmatter parse (the strict `bool` did).
+fn de_lenient_bool_true<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_yaml::Value::deserialize(deserializer)?;
+    Ok(coerce_r0e_bool(&value).unwrap_or(true))
+}
+
 /// `r0e(e)`: native bool as-is; string/number via truthy/defined-falsy; else
 /// `None` (undefined).
 fn coerce_r0e_bool(value: &serde_yaml::Value) -> Option<bool> {
     match value {
         serde_yaml::Value::Bool(b) => Some(*b),
-        serde_yaml::Value::Number(n) => n.as_i64().map(|i| i != 0),
+        // `r0e` stringifies a number and token-matches it (NOT nonzero-is-true),
+        // so only `1`/`0` map to true/false; every other number → None (default).
+        serde_yaml::Value::Number(n) => {
+            coerce_r0e_bool(&serde_yaml::Value::String(n.to_string()))
+        }
         serde_yaml::Value::String(s) => {
             let t = s.trim().to_lowercase();
             if matches!(t.as_str(), "1" | "true" | "yes" | "on") {
@@ -360,5 +377,33 @@ mod tests {
             !s.keep_coding_instructions,
             "kebab keep-coding-instructions must be honored"
         );
+    }
+
+    #[test]
+    fn keep_coding_instructions_is_lenient_and_never_discards_frontmatter() {
+        // Same `r0e` leniency as force-for-plugin, defaulting to TRUE. A stray
+        // value must NOT discard the whole frontmatter (the strict bool did).
+        let raw = "---\nname: Keep\ndescription: d\nkeep-coding-instructions: bogus\n---\nB.\n";
+        let s = parse_output_style(raw, "keep");
+        assert_eq!(s.name, "Keep", "a stray value must not discard the frontmatter");
+        assert!(s.keep_coding_instructions, "unrecognized → default true");
+        // Semantic-boolean string/number forms coerce.
+        for v in ["\"false\"", "0", "no", "off"] {
+            let raw = format!("---\nname: S\nkeep-coding-instructions: {v}\n---\nB.\n");
+            assert!(
+                !parse_output_style(&raw, "s").keep_coding_instructions,
+                "keep-coding-instructions: {v} must coerce to false"
+            );
+        }
+    }
+
+    #[test]
+    fn r0e_number_coercion_matches_the_oracle_token_match() {
+        // `r0e` stringifies numbers and token-matches — only 1/0, NOT
+        // nonzero-is-true. `force-for-plugin: 2` is unrecognized → default false.
+        assert!(parse_output_style("---\nname: S\nforce-for-plugin: 1\n---\nB.\n", "s").force_for_plugin);
+        assert!(!parse_output_style("---\nname: S\nforce-for-plugin: 0\n---\nB.\n", "s").force_for_plugin);
+        assert!(!parse_output_style("---\nname: S\nforce-for-plugin: 2\n---\nB.\n", "s").force_for_plugin);
+        assert!(!parse_output_style("---\nname: S\nforce-for-plugin: -1\n---\nB.\n", "s").force_for_plugin);
     }
 }

@@ -114,38 +114,16 @@ pub fn mode_from_values(enable: Option<&str>, disable_experimental_betas: bool) 
 /// malformed `auto:xxx` as auto with the default percentage.
 fn parse_auto_percentage(e: &str) -> Option<u8> {
     let rest = e.strip_prefix("auto:")?;
-    let n = parse_int_prefix(rest.trim())?;
-    // Math.max(0, Math.min(100, n)).
-    Some(n.clamp(0, 100) as u8)
-}
-
-/// `Ld`/`parseInt(t, 10)` semantics: an optional leading sign followed by ASCII
-/// digits, stopping at the first non-digit; `None` (NaN) when no digits lead.
-/// A value beyond `i64` saturates by sign so the caller's `clamp(0,100)` maps a
-/// huge positive to 100 and a huge negative to 0, matching JS `Math` on floats.
-fn parse_int_prefix(s: &str) -> Option<i64> {
-    let mut chars = s.chars().peekable();
-    let mut buf = String::new();
-    if chars.peek().is_some_and(|c| matches!(c, '+' | '-')) {
-        buf.push(chars.next().expect("peeked sign"));
-    }
-    while let Some(c) = chars.peek() {
-        if c.is_ascii_digit() {
-            buf.push(chars.next().expect("peeked digit"));
-        } else {
-            break;
-        }
-    }
-    if buf.is_empty() || buf == "+" || buf == "-" {
+    // `Yos(e)`: `Ld(e.slice(5))` = the full `WLm(t) ?? parseInt(t,10)` coercion
+    // (scientific-notation + digit-separator forms, NOT just a leading
+    // `parseInt`), via the already-ported `traits::env::parse_int_env`.
+    let r = traits::env::parse_int_env(rest);
+    if r.is_nan() {
+        // Yos: `if(isNaN(r)) return null`.
         return None;
     }
-    Some(buf.parse::<i64>().unwrap_or_else(|_| {
-        if buf.starts_with('-') {
-            i64::MIN
-        } else {
-            i64::MAX
-        }
-    }))
+    // `Math.max(0, Math.min(100, r))`.
+    Some(r.clamp(0.0, 100.0) as u8)
 }
 
 /// Read [`mode_from_values`] from the live environment. Prefers the rebranded
@@ -380,6 +358,18 @@ mod tests {
         // N > 100 clamps to 100 → Standard (NOT a wrapped-integer Auto).
         assert_eq!(
             mode_from_values(Some("auto:99999"), false),
+            ToolSearchMode::Standard
+        );
+        // `Ld` uses the full WLm ?? parseInt coercion, so scientific-notation
+        // and digit-separator forms parse (a leading-digits-only parser would
+        // read `auto:1e2` as 1 → Auto{1}). `1e2`/`1_0_0` = 100 → Standard.
+        assert_eq!(
+            mode_from_values(Some("auto:1e2"), false),
+            ToolSearchMode::Standard
+        );
+        // A valid 3-digit-group separator form (1_000 = 1000, clamped to 100).
+        assert_eq!(
+            mode_from_values(Some("auto:1_000"), false),
             ToolSearchMode::Standard
         );
         let state = DeferralState::new(ToolSearchMode::Auto { percentage: 10 }, false);

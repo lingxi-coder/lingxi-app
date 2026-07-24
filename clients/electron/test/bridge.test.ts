@@ -225,6 +225,40 @@ test('legacy desktop credentials migrate only when the shared store has no value
   assert.deepEqual(migrated, ['deepseek', 'openrouter']);
 });
 
+test('legacy credential migration is deferred when the engine store list fails', async () => {
+  const migrated: string[] = [];
+  const writes: Array<[string, string]> = [];
+  const manager = new BridgeManager({
+    providerIds: ['deepseek', 'openrouter'],
+    launchConfig: () => ({ workspace: '/workspace', trusted: true }),
+    onProviderCredentialMigrated: (providerId) => migrated.push(providerId),
+  });
+  (manager as any).generation = 7;
+  // The engine-store read FAILS (e.g. keychain unlock timeout). persistedCredentialProviders
+  // stays reset-empty, but that emptiness is NOT authoritative — migrating would
+  // clobber whatever newer key the user stored via CLI/TUI in the shared store.
+  (manager as any).listProviderCredentials = async () => {
+    throw new Error('keychain unavailable');
+  };
+  (manager as any).setProviderCredential = async (providerId: string, credential: string) => {
+    writes.push([providerId, credential]);
+    (manager as any).persistedCredentialProviders.add(providerId);
+  };
+
+  await (manager as any).refreshAndMigrateProviderCredentials({
+    workspace: '/workspace',
+    trusted: true,
+    providerCredentialsToMigrate: {
+      deepseek: 'sk-legacy-deepseek',
+      openrouter: 'sk-legacy-openrouter',
+    },
+  }, 7);
+
+  // The whole migration loop is skipped when the persisted-state read is unknown.
+  assert.deepEqual(writes, []);
+  assert.deepEqual(migrated, []);
+});
+
 test('clean child exit clears the SIGKILL timer so the process group is not signalled twice', async () => {
   const manager = new BridgeManager({
     launchConfig: () => ({ workspace: '/workspace', trusted: true }),

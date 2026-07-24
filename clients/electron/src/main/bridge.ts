@@ -344,14 +344,35 @@ export class BridgeManager {
     generation: number,
   ): Promise<void> {
     const providerIds = this.opts.providerIds ?? [];
+    // Whether the engine-store read that populates `persistedCredentialProviders`
+    // actually succeeded. When there is nothing to list, the reset-empty state
+    // is authoritative; when a list is attempted, it is only authoritative if it
+    // resolved (the op has a hard 10s timeout and consults the keychain).
+    let persistedStateKnown = true;
     if (providerIds.length > 0) {
+      persistedStateKnown = false;
       try {
         await this.listProviderCredentials(providerIds);
+        persistedStateKnown = true;
       } catch (error) {
         this.diagnostics.add('warn', 'bridge', error);
       }
     }
     if (generation !== this.generation || this.disposed) return;
+
+    if (!persistedStateKnown) {
+      // The persisted-state read failed/timed out, so `persistedCredentialProviders`
+      // is unreliably empty. Migrating now would treat every provider as absent
+      // and clobber a newer CLI/TUI credential in the SHARED engine store (the
+      // legacy copy is then deleted, making the overwrite the only survivor).
+      // Defer legacy migration to the next connect, when the read may succeed.
+      this.diagnostics.add(
+        'warn',
+        'bridge',
+        'deferring legacy credential migration: engine credential list unavailable',
+      );
+      return;
+    }
 
     for (const [providerId, credential] of Object.entries(launch.providerCredentialsToMigrate ?? {})) {
       if (generation !== this.generation || this.disposed) return;
@@ -568,15 +589,26 @@ export class BridgeManager {
 
   private handleProviderCredentialStatus(event: ProviderCredentialStatus): void {
     const pending = this.pendingCredentialOperations.get(event.operation_id);
-    if (!pending) return;
-    clearTimeout(pending.timer);
-    this.pendingCredentialOperations.delete(event.operation_id);
+    if (pending) {
+      clearTimeout(pending.timer);
+      this.pendingCredentialOperations.delete(event.operation_id);
+    }
     const configured = new Set(event.configured_provider_ids);
     const unavailable = new Set(event.unavailable_provider_ids ?? []);
-    for (const providerId of pending.providerIds) {
+    // The configured/unavailable id sets are authoritative regardless of whether
+    // the originating promise is still pending — a LATE (post-timeout) event must
+    // still fold into the cached state, or providerCredentialSnapshot() reports
+    // engine-persisted CLI/TUI credentials as not configured. With no pending
+    // entry the event only speaks to the providers it names.
+    const scope = pending ? pending.providerIds : [...configured, ...unavailable];
+    // Absence is only authoritative on a NON-error event: on an error the
+    // enumeration may be partial, so a provider merely absent from the lists must
+    // NOT have its persisted flag cleared (it may still hold credentials).
+    const clearAbsent = !event.error;
+    for (const providerId of scope) {
       if (unavailable.has(providerId)) continue;
       if (configured.has(providerId)) this.persistedCredentialProviders.add(providerId);
-      else this.persistedCredentialProviders.delete(providerId);
+      else if (clearAbsent) this.persistedCredentialProviders.delete(providerId);
     }
     this.credentialStorageEncrypted = event.storage_encrypted;
     this.activeCredentialProviders = new Set([
@@ -584,11 +616,10 @@ export class BridgeManager {
       ...this.persistedCredentialProviders,
     ]);
     if (this.state.status === 'connected') this.broadcast(CH_STATE_CHANGED, this.state);
-    if (event.error) {
-      pending.reject(new Error(sanitizeDiagnostic(event.error)));
-      return;
+    if (pending) {
+      if (event.error) pending.reject(new Error(sanitizeDiagnostic(event.error)));
+      else pending.resolve(event);
     }
-    pending.resolve(event);
   }
 
   private assertSender(event: IpcMainInvokeEvent): void {

@@ -106,8 +106,12 @@ export function validateClientCommand(value: unknown, workspace?: string): Clien
       return { type, model: string(input['model'], 'model', 256) };
     case 'set_permission_mode': {
       exactKeys(input, ['type', 'mode']);
-      const mode = input['mode'];
-      if (!['default', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions'].includes(String(mode))) {
+      // Type-check BEFORE the allow-list: String(mode) coercion would let a
+      // structured-clone array like ['default'] through (String(['default'])
+      // === 'default') and forward the ARRAY over the bridge, where Rust serde
+      // rejects the frame. Every other validator here type-checks first.
+      const mode = string(input['mode'], 'permission mode', 64);
+      if (!['default', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions'].includes(mode)) {
         throw new Error('invalid permission mode');
       }
       return { type, mode } as Extract<ClientCommand, { type: 'set_permission_mode' }>;

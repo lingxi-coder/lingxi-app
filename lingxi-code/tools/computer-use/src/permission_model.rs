@@ -100,12 +100,12 @@ pub struct SessionState {
     pub allowed_apps: Vec<AllowedApp>,
     /// Active capability grants.
     pub grant_flags: GrantFlags,
-    /// The display id pinned by `switch_display`, or `None` for automatic
-    /// selection.
+    /// The display id pinned by `switch_display` (already resolved against a
+    /// live `list_displays()` call), or `None` for automatic selection.
     pub selected_display: Option<u32>,
-    /// The monitor NAME last passed to `switch_display` (before it's
-    /// resolved to a concrete id against a live display list). Surfaced via
-    /// `list_granted_applications`-style introspection.
+    /// The monitor name last resolved by `switch_display` — session-level
+    /// bookkeeping; the backend's own pin (set via `ComputerControl::
+    /// select_display`) is what actually targets `screenshot`/`zoom`.
     pub pinned_display_name: Option<String>,
     /// Whether `left_mouse_down` has fired without a matching
     /// `left_mouse_up` yet (guards the "already held" `state_conflict`).
@@ -142,13 +142,20 @@ impl SessionState {
         self.apps.get(bundle_id).copied()
     }
 
-    /// Pin the selected display by name. Resolving the name to a concrete
-    /// display id happens at the next `screenshot`/`zoom` call against the
-    /// live display list (this just records the pin request) — needs a live
-    /// backend, which this module doesn't depend on, so `selected_display`
-    /// stays `None` (auto) until a resolution pass fills it in.
-    pub fn pin_display_by_name(&mut self, name: &str) {
+    /// Record a resolved display pin: `switch_display` already matched
+    /// `name` to `id` against a live `list_displays()` call and pinned it on
+    /// the backend via `ComputerControl::select_display` — this mirrors
+    /// that outcome into session-level bookkeeping.
+    pub fn pin_display(&mut self, id: u32, name: &str) {
+        self.selected_display = Some(id);
         self.pinned_display_name = Some(name.to_string());
+    }
+
+    /// Clear the pin: `switch_display("auto")` already reset the backend
+    /// via `select_display(None)` — this mirrors that back into bookkeeping.
+    pub fn clear_display_pin(&mut self) {
+        self.selected_display = None;
+        self.pinned_display_name = None;
     }
 
     fn rebuild_allowed_apps(&mut self) {

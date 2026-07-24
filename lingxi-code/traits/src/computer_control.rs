@@ -172,6 +172,17 @@ pub trait ComputerControl: Send + Sync {
     async fn list_displays(&self) -> Result<Vec<DisplayInfo>, ComputerError> {
         Err(ComputerError::Unsupported("list_displays".into()))
     }
+    /// Pin subsequent [`Self::screenshot`]/[`Self::zoom`] captures to the
+    /// display with this id (one returned by [`Self::list_displays`]), or
+    /// `None` to return to automatic (primary-display) selection. Parity
+    /// with `switch_display`: the caller resolves a human-readable monitor
+    /// name to an id via `list_displays` first, then pins it here — a
+    /// single-display backend (or one with no display-switching concept,
+    /// e.g. mobile) can leave this at its default.
+    async fn select_display(&self, id: Option<u32>) -> Result<(), ComputerError> {
+        let _ = id;
+        Err(ComputerError::Unsupported("select_display".into()))
+    }
     /// Hide one application's windows (parity with `prepareForAction`'s
     /// pre-action hide sequence).
     async fn hide_app(&self, bundle_id: &str) -> Result<(), ComputerError> {

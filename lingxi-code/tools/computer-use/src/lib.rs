@@ -284,6 +284,30 @@ fn map_err(e: &ComputerError) -> ToolError {
     }
 }
 
+/// A note guiding the model to `switch_display` when more than one display
+/// is connected — the schema's only real way to discover monitor names
+/// (there's no standalone `list_displays` action exposed to the model).
+/// `None` when there's nothing to switch between (0 or 1 display).
+fn multi_display_note(displays: &[traits::computer_control::DisplayInfo]) -> Option<String> {
+    if displays.len() < 2 {
+        return None;
+    }
+    let names = displays
+        .iter()
+        .map(|d| {
+            if d.is_primary {
+                format!("\"{}\" (primary)", d.name)
+            } else {
+                format!("\"{}\"", d.name)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "Multiple displays connected: {names}. Call switch_display with one of these names to target it."
+    ))
+}
+
 /// Read a `[x, y]` tuple under `key`, falling back to the legacy flat `x`/`y`
 /// scalars when reading the `"coordinate"` key. Returns `None` if absent.
 fn coord(input: &Value, key: &str) -> Option<(u32, u32)> {
@@ -434,7 +458,7 @@ impl Tool for ComputerTool {
         match action.as_str() {
             "request_access" => return self.handle_request_access(&input).await,
             "list_granted_applications" => return Ok(self.handle_list_granted()),
-            "switch_display" => return self.handle_switch_display(&input),
+            "switch_display" => return self.handle_switch_display(&input).await,
             "computer_batch" => return self.handle_batch(&input, &ctx, &progress_tx).await,
             _ => {}
         }
@@ -577,23 +601,37 @@ impl ComputerTool {
         finish(data, "list_granted_applications")
     }
 
-    fn handle_switch_display(&self, input: &Value) -> Result<ToolCallResult, ToolError> {
+    async fn handle_switch_display(&self, input: &Value) -> Result<ToolCallResult, ToolError> {
         let display = input
             .get("display")
             .and_then(Value::as_str)
             .ok_or_else(|| ToolError::InvalidInput("display is required".into()))?;
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| ToolError::Internal("computer-use session state poisoned".into()))?;
+
         if display.eq_ignore_ascii_case("auto") {
-            state.selected_display = None;
+            // Best-effort: sync the backend's own pin back to automatic
+            // selection too (a prior named switch_display may have pinned
+            // it there). `Unsupported` means the backend has no such
+            // concept at all (single-display / mobile) — nothing to reset,
+            // not a failure. Any other error is real and surfaces.
+            if let Some(cc) = self.ctx.computer_control.as_ref() {
+                if let Err(e) = cc.select_display(None).await {
+                    if !matches!(e, ComputerError::Unsupported(_)) {
+                        return Err(map_err(&e));
+                    }
+                }
+            }
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| ToolError::Internal("computer-use session state poisoned".into()))?;
+            state.clear_display_pin();
             drop(state);
             return Ok(finish(
                 json!({ "ok": true, "note": "Returned to automatic monitor selection. Call screenshot to continue." }),
                 "switch_display",
             ));
         }
+
         // Resolving a name to a display id needs a live backend; without one
         // there is nothing to switch between (`feature_unavailable` in the
         // binary's own wording for this exact case).
@@ -602,11 +640,33 @@ impl ComputerTool {
                 "Display switching is not available in this session.".into(),
             ));
         };
-        state.pin_display_by_name(display);
+        let displays = cc.list_displays().await.map_err(|e| map_err(&e))?;
+        let Some(matched) = displays.iter().find(|d| d.name.eq_ignore_ascii_case(display)) else {
+            let available = if displays.is_empty() {
+                "none detected".to_string()
+            } else {
+                displays
+                    .iter()
+                    .map(|d| format!("\"{}\"", d.name))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            return Err(ToolError::InvalidInput(format!(
+                "No display named \"{display}\". Available: {available}."
+            )));
+        };
+        let id = matched.id;
+        let resolved_name = matched.name.clone();
+        cc.select_display(Some(id)).await.map_err(|e| map_err(&e))?;
+
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| ToolError::Internal("computer-use session state poisoned".into()))?;
+        state.pin_display(id, &resolved_name);
         drop(state);
-        let _ = cc; // resolution against live display list happens in execute_one's screenshot/zoom path
         Ok(finish(
-            json!({ "ok": true, "note": format!("Switched to monitor \"{display}\". Call screenshot to see it.") }),
+            json!({ "ok": true, "note": format!("Switched to monitor \"{resolved_name}\". Call screenshot to see it.") }),
             "switch_display",
         ))
     }
@@ -765,7 +825,16 @@ impl ComputerTool {
                 // would just be JSON-stringified into a multi-MB text blob the
                 // model cannot view (a context-bloat regression). Wire a real
                 // image block via `model_content_blocks` once that egress exists.
-                Ok(json!({ "width": s.width, "height": s.height, "png_bytes_len": s.png_bytes.len() }))
+                let mut data = json!({ "width": s.width, "height": s.height, "png_bytes_len": s.png_bytes.len() });
+                // Best-effort: a backend that can't enumerate displays (or
+                // reports just one) simply gets no note — never fail the
+                // screenshot itself over this.
+                if let Ok(displays) = cc.list_displays().await {
+                    if let Some(note) = multi_display_note(&displays) {
+                        data["note"] = json!(note);
+                    }
+                }
+                Ok(data)
             }
             "display_size" => {
                 let (w, h) = cc.display_size().await.map_err(|e| map_err(&e))?;
@@ -1210,6 +1279,15 @@ mod integration_tests {
         installed: Vec<AppInfo>,
         mouse_down_ok: bool,
         mouse_up_ok: bool,
+        /// The displays `list_displays`/`switch_display` resolve against.
+        displays: Vec<DisplayInfo>,
+        /// Records the last `select_display` call, so tests can assert the
+        /// tool resolved a name to the RIGHT id (not just that resolution
+        /// succeeded) without a real backend to observe.
+        selected_display: StdMutex<Option<u32>>,
+        /// `screenshot()` returns `Unsupported` unless a test opts in — most
+        /// scenarios here don't care about the captured image itself.
+        screenshot_ok: bool,
     }
 
     impl Default for MockCc {
@@ -1219,6 +1297,9 @@ mod integration_tests {
                 installed: vec![],
                 mouse_down_ok: true,
                 mouse_up_ok: true,
+                displays: vec![],
+                selected_display: StdMutex::new(None),
+                screenshot_ok: false,
             }
         }
     }
@@ -1230,10 +1311,28 @@ mod integration_tests {
         }
     }
 
+    fn display(id: u32, name: &str, is_primary: bool) -> DisplayInfo {
+        DisplayInfo {
+            id,
+            name: name.to_string(),
+            width: 1920,
+            height: 1080,
+            is_primary,
+        }
+    }
+
     #[async_trait]
     impl ComputerControl for MockCc {
         async fn screenshot(&self) -> Result<Screenshot, ComputerError> {
-            Err(ComputerError::Unsupported("mock".into()))
+            if self.screenshot_ok {
+                Ok(Screenshot {
+                    width: 100,
+                    height: 100,
+                    png_bytes: vec![],
+                })
+            } else {
+                Err(ComputerError::Unsupported("mock".into()))
+            }
         }
         async fn display_size(&self) -> Result<(u32, u32), ComputerError> {
             Err(ComputerError::Unsupported("mock".into()))
@@ -1284,7 +1383,16 @@ mod integration_tests {
             Ok(self.installed.clone())
         }
         async fn list_displays(&self) -> Result<Vec<DisplayInfo>, ComputerError> {
-            Ok(vec![])
+            Ok(self.displays.clone())
+        }
+        async fn select_display(&self, id: Option<u32>) -> Result<(), ComputerError> {
+            if let Some(id) = id {
+                if !self.displays.iter().any(|d| d.id == id) {
+                    return Err(ComputerError::Other(format!("display {id} not found")));
+                }
+            }
+            *self.selected_display.lock().unwrap() = id;
+            Ok(())
         }
     }
 
@@ -1299,6 +1407,21 @@ mod integration_tests {
         // resolver's UI-vs-no-UI behavior (that's covered directly in
         // access_resolver.rs's own tests).
         ComputerTool::with_access_resolver(ctx, std::sync::Arc::new(AutoGrantResolver))
+    }
+
+    /// Like [`tool_with`], but also hands back the `Arc<MockCc>` so a test
+    /// can inspect `selected_display` afterward — the tool itself doesn't
+    /// surface the pinned display anywhere in its public JSON responses.
+    fn tool_with_shared_cc(mock: MockCc) -> (ComputerTool, std::sync::Arc<MockCc>) {
+        let cc = std::sync::Arc::new(mock);
+        let bus = std::sync::Arc::new(telemetry::AnalyticsBus::new());
+        let fs = tool_api::test_support::make_dummy_fs();
+        let mut ctx = tool_api::test_support::ctx_for_file_tools(fs, bus, vec![]);
+        ctx.computer_control = Some(cc.clone());
+        (
+            ComputerTool::with_access_resolver(ctx, std::sync::Arc::new(AutoGrantResolver)),
+            cc,
+        )
     }
 
     async fn call(tool: &ComputerTool, input: Value) -> Result<ToolCallResult, ToolError> {
@@ -1612,5 +1735,147 @@ mod integration_tests {
         .unwrap();
         assert_eq!(result.data["granted"], json!(["com.a.app"]));
         assert_eq!(result.data["denied"], json!(["com.b.app"]));
+    }
+
+    #[tokio::test]
+    async fn switch_display_resolves_name_case_insensitively_and_pins_the_backend() {
+        let mock = MockCc {
+            displays: vec![
+                display(1, "Built-in Retina Display", true),
+                display(2, "LG UltraFine", false),
+            ],
+            ..Default::default()
+        };
+        let (tool, cc) = tool_with_shared_cc(mock);
+        let result = call(
+            &tool,
+            json!({ "action": "switch_display", "display": "lg ultrafine" }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.data["ok"], true);
+        assert!(
+            result.data["note"]
+                .as_str()
+                .unwrap()
+                .contains("LG UltraFine"),
+            "{:?}",
+            result.data
+        );
+        assert_eq!(*cc.selected_display.lock().unwrap(), Some(2));
+    }
+
+    #[tokio::test]
+    async fn switch_display_rejects_an_unknown_name_and_lists_the_real_ones() {
+        let mock = MockCc {
+            displays: vec![display(1, "Built-in Retina Display", true)],
+            ..Default::default()
+        };
+        let tool = tool_with(mock);
+        let err = call(
+            &tool,
+            json!({ "action": "switch_display", "display": "Nonexistent Monitor" }),
+        )
+        .await
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("Nonexistent Monitor"), "{msg}");
+        assert!(msg.contains("Built-in Retina Display"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn switch_display_auto_resets_the_backend_pin() {
+        let mock = MockCc {
+            displays: vec![display(1, "A", true), display(2, "B", false)],
+            ..Default::default()
+        };
+        let (tool, cc) = tool_with_shared_cc(mock);
+        call(&tool, json!({ "action": "switch_display", "display": "B" }))
+            .await
+            .unwrap();
+        assert_eq!(*cc.selected_display.lock().unwrap(), Some(2));
+        let result = call(&tool, json!({ "action": "switch_display", "display": "auto" }))
+            .await
+            .unwrap();
+        assert_eq!(result.data["ok"], true);
+        assert_eq!(*cc.selected_display.lock().unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn switch_display_auto_succeeds_even_when_the_backend_never_supported_pinning() {
+        // A minimal backend that doesn't override `select_display` at all —
+        // exercises the trait's real default (`Unsupported`), proving `auto`
+        // treats that as "nothing to reset" rather than a hard failure.
+        struct NoDisplaySupport;
+        #[async_trait]
+        impl ComputerControl for NoDisplaySupport {
+            async fn screenshot(&self) -> Result<Screenshot, ComputerError> {
+                Err(ComputerError::Unsupported("mock".into()))
+            }
+            async fn display_size(&self) -> Result<(u32, u32), ComputerError> {
+                Err(ComputerError::Unsupported("mock".into()))
+            }
+            async fn mouse_move(&self, _x: u32, _y: u32) -> Result<(), ComputerError> {
+                Ok(())
+            }
+            async fn left_click(&self, _x: u32, _y: u32) -> Result<(), ComputerError> {
+                Ok(())
+            }
+            async fn right_click(&self, _x: u32, _y: u32) -> Result<(), ComputerError> {
+                Ok(())
+            }
+            async fn double_click(&self, _x: u32, _y: u32) -> Result<(), ComputerError> {
+                Ok(())
+            }
+            async fn type_text(&self, _text: String) -> Result<(), ComputerError> {
+                Ok(())
+            }
+            async fn key(&self, _key: String) -> Result<(), ComputerError> {
+                Ok(())
+            }
+            async fn scroll(&self, _x: u32, _y: u32, _dx: i32, _dy: i32) -> Result<(), ComputerError> {
+                Ok(())
+            }
+        }
+        let bus = std::sync::Arc::new(telemetry::AnalyticsBus::new());
+        let fs = tool_api::test_support::make_dummy_fs();
+        let mut ctx = tool_api::test_support::ctx_for_file_tools(fs, bus, vec![]);
+        ctx.computer_control = Some(std::sync::Arc::new(NoDisplaySupport));
+        let tool = ComputerTool::with_access_resolver(ctx, std::sync::Arc::new(AutoGrantResolver));
+        let result = call(&tool, json!({ "action": "switch_display", "display": "auto" }))
+            .await
+            .unwrap();
+        assert_eq!(result.data["ok"], true);
+    }
+
+    #[tokio::test]
+    async fn screenshot_note_lists_display_names_when_more_than_one_is_connected() {
+        let mock = MockCc {
+            displays: vec![
+                display(1, "Built-in Retina Display", true),
+                display(2, "LG UltraFine", false),
+            ],
+            screenshot_ok: true,
+            ..Default::default()
+        };
+        let tool = tool_with(mock);
+        let result = call(&tool, json!({ "action": "screenshot" })).await.unwrap();
+        let note = result.data["note"]
+            .as_str()
+            .expect("note present for multi-display");
+        assert!(note.contains("Built-in Retina Display"), "{note}");
+        assert!(note.contains("LG UltraFine"), "{note}");
+    }
+
+    #[tokio::test]
+    async fn screenshot_omits_the_note_for_a_single_display() {
+        let mock = MockCc {
+            displays: vec![display(1, "Built-in Retina Display", true)],
+            screenshot_ok: true,
+            ..Default::default()
+        };
+        let tool = tool_with(mock);
+        let result = call(&tool, json!({ "action": "screenshot" })).await.unwrap();
+        assert!(result.data.get("note").is_none(), "{:?}", result.data);
     }
 }

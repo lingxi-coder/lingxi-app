@@ -37,6 +37,23 @@ fn primary_monitor() -> Result<xcap::Monitor, ComputerError> {
         .ok_or_else(|| ComputerError::Other("no display found".into()))
 }
 
+/// The monitor `screenshot`/`zoom` should capture: whichever id
+/// `select_display` last pinned, or the primary display when nothing (or
+/// "auto") is pinned. A pin that no longer matches a connected display
+/// (unplugged since `select_display`) is a hard error rather than a silent
+/// fallback — the model asked for a specific screen, and it would rather
+/// hear "gone" than see a different one without knowing.
+fn target_monitor(pinned: Option<u32>) -> Result<xcap::Monitor, ComputerError> {
+    let Some(id) = pinned else {
+        return primary_monitor();
+    };
+    xcap::Monitor::all()
+        .map_err(|e| ComputerError::Other(format!("listing displays failed: {e}")))?
+        .into_iter()
+        .find(|m| m.id().ok() == Some(id))
+        .ok_or_else(|| ComputerError::Other(format!("display {id} is no longer connected")))
+}
+
 fn monitor_error(e: &xcap::XCapError) -> ComputerError {
     ComputerError::Other(format!("display error: {e}"))
 }
@@ -59,13 +76,17 @@ fn unpx(v: i32) -> u32 {
 
 /// Real macOS automation backend.
 ///
-/// Zero-sized: `Enigo` wraps a raw `CGEventSource` handle that is neither
-/// `Send` nor `Sync`, so it can't live as a field on a type shared behind
-/// `Arc<dyn ComputerControl>` (the trait requires `Send + Sync`). Each call
+/// Holds only the `select_display` pin (`Mutex<Option<u32>>` — cheap,
+/// `Send + Sync`). Everything else is constructed fresh per call: `Enigo`
+/// wraps a raw `CGEventSource` handle that is neither `Send` nor `Sync`, so
+/// it can't live as a field on a type shared behind `Arc<dyn
+/// ComputerControl>` (the trait requires `Send + Sync`). Each call
 /// constructs, uses, and drops its own `Enigo` entirely within one
 /// synchronous closure — never held across an `.await` — so the type never
 /// needs to cross a thread boundary.
-pub struct MacosComputerControl;
+pub struct MacosComputerControl {
+    selected_display: std::sync::Mutex<Option<u32>>,
+}
 
 impl Default for MacosComputerControl {
     fn default() -> Self {
@@ -78,7 +99,42 @@ impl MacosComputerControl {
     /// actual action runs.
     #[must_use]
     pub fn new() -> Self {
-        Self
+        Self {
+            selected_display: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// The currently pinned display id, if `select_display` has pinned one.
+    fn pinned_display(&self) -> Option<u32> {
+        *self
+            .selected_display
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The pinned display's origin `(x, y)` in the global desktop coordinate
+    /// space enigo's `Coordinate::Abs` operates in, or `(0, 0)` for
+    /// automatic/primary selection — macOS defines the primary display's
+    /// origin as `(0, 0)`, so "no translation" is already exactly correct
+    /// there. Every pixel-coordinate action below adds this offset before
+    /// handing coordinates to enigo, and [`Self::cursor_position`] subtracts
+    /// it back out, so a caller's coordinates always stay relative to
+    /// whichever display `screenshot`/`zoom` are currently capturing —
+    /// without this a click computed from a secondary display's screenshot
+    /// would land on the primary display instead.
+    fn target_origin(&self) -> Result<(i32, i32), ComputerError> {
+        let Some(id) = self.pinned_display() else {
+            return Ok((0, 0));
+        };
+        let monitor = xcap::Monitor::all()
+            .map_err(|e| ComputerError::Other(format!("listing displays failed: {e}")))?
+            .into_iter()
+            .find(|m| m.id().ok() == Some(id))
+            .ok_or_else(|| ComputerError::Other(format!("display {id} is no longer connected")))?;
+        Ok((
+            monitor.x().map_err(|e| monitor_error(&e))?,
+            monitor.y().map_err(|e| monitor_error(&e))?,
+        ))
     }
 
     // `&self` is unused (Enigo is constructed fresh per call, see the struct
@@ -139,7 +195,7 @@ fn app_info_from(app: &NSRunningApplication) -> Option<AppInfo> {
 #[async_trait]
 impl ComputerControl for MacosComputerControl {
     async fn screenshot(&self) -> Result<Screenshot, ComputerError> {
-        let monitor = primary_monitor()?;
+        let monitor = target_monitor(self.pinned_display())?;
         let img = monitor.capture_image().map_err(|e| monitor_error(&e))?;
         let (width, height) = (img.width(), img.height());
         let png_bytes = encode_png(img)?;
@@ -151,7 +207,7 @@ impl ComputerControl for MacosComputerControl {
     }
 
     async fn display_size(&self) -> Result<(u32, u32), ComputerError> {
-        let monitor = primary_monitor()?;
+        let monitor = target_monitor(self.pinned_display())?;
         Ok((
             monitor.width().map_err(|e| monitor_error(&e))?,
             monitor.height().map_err(|e| monitor_error(&e))?,
@@ -159,26 +215,30 @@ impl ComputerControl for MacosComputerControl {
     }
 
     async fn mouse_move(&self, x: u32, y: u32) -> Result<(), ComputerError> {
-        self.with_enigo(|e| e.move_mouse(px(x), px(y), Coordinate::Abs))
+        let (ox, oy) = self.target_origin()?;
+        self.with_enigo(|e| e.move_mouse(px(x) + ox, px(y) + oy, Coordinate::Abs))
     }
 
     async fn left_click(&self, x: u32, y: u32) -> Result<(), ComputerError> {
+        let (ox, oy) = self.target_origin()?;
         self.with_enigo(|e| {
-            e.move_mouse(px(x), px(y), Coordinate::Abs)?;
+            e.move_mouse(px(x) + ox, px(y) + oy, Coordinate::Abs)?;
             e.button(Button::Left, Direction::Click)
         })
     }
 
     async fn right_click(&self, x: u32, y: u32) -> Result<(), ComputerError> {
+        let (ox, oy) = self.target_origin()?;
         self.with_enigo(|e| {
-            e.move_mouse(px(x), px(y), Coordinate::Abs)?;
+            e.move_mouse(px(x) + ox, px(y) + oy, Coordinate::Abs)?;
             e.button(Button::Right, Direction::Click)
         })
     }
 
     async fn double_click(&self, x: u32, y: u32) -> Result<(), ComputerError> {
+        let (ox, oy) = self.target_origin()?;
         self.with_enigo(|e| {
-            e.move_mouse(px(x), px(y), Coordinate::Abs)?;
+            e.move_mouse(px(x) + ox, px(y) + oy, Coordinate::Abs)?;
             e.button(Button::Left, Direction::Click)?;
             e.button(Button::Left, Direction::Click)
         })
@@ -195,8 +255,9 @@ impl ComputerControl for MacosComputerControl {
     }
 
     async fn scroll(&self, x: u32, y: u32, dx: i32, dy: i32) -> Result<(), ComputerError> {
+        let (ox, oy) = self.target_origin()?;
         self.with_enigo(|e| {
-            e.move_mouse(px(x), px(y), Coordinate::Abs)?;
+            e.move_mouse(px(x) + ox, px(y) + oy, Coordinate::Abs)?;
             if dy != 0 {
                 e.scroll(dy, Axis::Vertical)?;
             }
@@ -208,15 +269,17 @@ impl ComputerControl for MacosComputerControl {
     }
 
     async fn middle_click(&self, x: u32, y: u32) -> Result<(), ComputerError> {
+        let (ox, oy) = self.target_origin()?;
         self.with_enigo(|e| {
-            e.move_mouse(px(x), px(y), Coordinate::Abs)?;
+            e.move_mouse(px(x) + ox, px(y) + oy, Coordinate::Abs)?;
             e.button(Button::Middle, Direction::Click)
         })
     }
 
     async fn triple_click(&self, x: u32, y: u32) -> Result<(), ComputerError> {
+        let (ox, oy) = self.target_origin()?;
         self.with_enigo(|e| {
-            e.move_mouse(px(x), px(y), Coordinate::Abs)?;
+            e.move_mouse(px(x) + ox, px(y) + oy, Coordinate::Abs)?;
             e.button(Button::Left, Direction::Click)?;
             e.button(Button::Left, Direction::Click)?;
             e.button(Button::Left, Direction::Click)
@@ -224,12 +287,13 @@ impl ComputerControl for MacosComputerControl {
     }
 
     async fn drag(&self, from: Option<(u32, u32)>, to: (u32, u32)) -> Result<(), ComputerError> {
+        let (ox, oy) = self.target_origin()?;
         self.with_enigo(|e| {
             if let Some((fx, fy)) = from {
-                e.move_mouse(px(fx), px(fy), Coordinate::Abs)?;
+                e.move_mouse(px(fx) + ox, px(fy) + oy, Coordinate::Abs)?;
             }
             e.button(Button::Left, Direction::Press)?;
-            let result = e.move_mouse(px(to.0), px(to.1), Coordinate::Abs);
+            let result = e.move_mouse(px(to.0) + ox, px(to.1) + oy, Coordinate::Abs);
             // Always release, even if the move failed — otherwise the button
             // stays stuck-down (matches executor.ts's drag `finally`).
             let release = e.button(Button::Left, Direction::Release);
@@ -246,8 +310,9 @@ impl ComputerControl for MacosComputerControl {
     }
 
     async fn cursor_position(&self) -> Result<(u32, u32), ComputerError> {
+        let (ox, oy) = self.target_origin()?;
         self.with_enigo(|e| e.location())
-            .map(|(x, y)| (unpx(x), unpx(y)))
+            .map(|(x, y)| (unpx(x - ox), unpx(y - oy)))
     }
 
     async fn hold_key(&self, key: String, duration_ms: u64) -> Result<(), ComputerError> {
@@ -312,7 +377,7 @@ impl ComputerControl for MacosComputerControl {
         // xcap 0.5's `Monitor` has no `capture_region` — crop the full-display
         // capture instead (still a single native capture call, just cropped
         // client-side rather than by the OS).
-        let monitor = primary_monitor()?;
+        let monitor = target_monitor(self.pinned_display())?;
         let full = monitor.capture_image().map_err(|e| monitor_error(&e))?;
         let (full_w, full_h) = (full.width(), full.height());
         let x = x.min(full_w);
@@ -416,6 +481,21 @@ impl ComputerControl for MacosComputerControl {
             });
         }
         Ok(out)
+    }
+
+    async fn select_display(&self, id: Option<u32>) -> Result<(), ComputerError> {
+        if let Some(id) = id {
+            let monitors = xcap::Monitor::all()
+                .map_err(|e| ComputerError::Other(format!("listing displays failed: {e}")))?;
+            if !monitors.iter().any(|m| m.id().ok() == Some(id)) {
+                return Err(ComputerError::Other(format!("display {id} not found")));
+            }
+        }
+        *self
+            .selected_display
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = id;
+        Ok(())
     }
 
     async fn hide_app(&self, bundle_id: &str) -> Result<(), ComputerError> {

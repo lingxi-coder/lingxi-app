@@ -213,18 +213,51 @@ pub fn process_line(
         "keep_alive" => Ok(FrameAction::Consumed),
 
         "update_environment_variables" => {
-            // Claude Code's structuredIO applies every entry from the canonical
-            // `variables` map directly to the live process. This channel is
-            // print-mode SDK input and already shares the same trust boundary as
-            // user/control frames; restricting it breaks credential refresh and
-            // provider/runtime reconfiguration. Non-string values are rejected
-            // by Claude's schema and ignored here rather than coerced.
-            if let Some(env_vars) = frame.get("variables").and_then(Value::as_object) {
-                for (k, v) in env_vars {
-                    if let Some(val) = v.as_str() {
-                        std::env::set_var(k, val);
-                    }
+            // SECURITY: Claude Code's structuredIO does NOT apply arbitrary env
+            // keys — it enforces a two-key ALLOWLIST and refuses everything else.
+            // An SDK peer driving stream-json input must not be able to set e.g.
+            // `BASH_ENV=/tmp/evil.sh` (sourced by the next Bash-tool `/bin/sh -c`
+            // child) or overwrite auth/config the CLI protects.
+            //
+            // Oracle: `UtS = new Set(["CLAUDE_CODE_SESSION_ACCESS_TOKEN",
+            // "CLAUDE_CODE_OAUTH_TOKEN"])`; the frame is DROPPED (`must be an
+            // object of string values`) if `variables` is not an object of
+            // strings; allowlisted keys are applied, non-allowlisted keys are
+            // collected and refused with a log.
+            const ALLOWLIST: [&str; 2] =
+                ["CLAUDE_CODE_SESSION_ACCESS_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"];
+            let Some(env_vars) = frame.get("variables").and_then(Value::as_object) else {
+                eprintln!(
+                    "[structuredIO] dropped update_environment_variables: variables must be an object of string values"
+                );
+                return Ok(FrameAction::Consumed);
+            };
+            // Every value must be a string (oracle schema `z.record(z.string())`);
+            // any non-string drops the WHOLE frame — nothing is applied.
+            // (The oracle also emits a `control_response` error when the frame
+            // carries a `request_id`; this parse fn only routes frames, so the
+            // drop is surfaced via the same stderr log the port uses for other
+            // structuredIO validation failures.)
+            if env_vars.values().any(|v| !v.is_string()) {
+                eprintln!(
+                    "[structuredIO] dropped update_environment_variables: variables must be an object of string values"
+                );
+                return Ok(FrameAction::Consumed);
+            }
+            let mut refused: Vec<&str> = Vec::new();
+            for (k, v) in env_vars {
+                let Some(val) = v.as_str() else { continue };
+                if ALLOWLIST.contains(&k.as_str()) {
+                    std::env::set_var(k, val);
+                } else {
+                    refused.push(k.as_str());
                 }
+            }
+            if !refused.is_empty() {
+                eprintln!(
+                    "[structuredIO] refused update_environment_variables for non-allowlisted keys: {}",
+                    refused.join(", ")
+                );
             }
             Ok(FrameAction::Consumed)
         }
@@ -1279,18 +1312,61 @@ mod tests {
     // ── update_environment_variables ─────────────────────────────────────────
 
     #[test]
-    fn update_env_vars_is_consumed() {
-        let key = format!("LINGXI_STREAM_JSON_ENV_TEST_{}", std::process::id());
-        std::env::remove_var(&key);
+    fn update_env_vars_applies_only_allowlisted_keys() {
+        // SECURITY: the oracle allowlist is {CLAUDE_CODE_SESSION_ACCESS_TOKEN,
+        // CLAUDE_CODE_OAUTH_TOKEN}. A non-allowlisted key (e.g. an injection
+        // vector like BASH_ENV) MUST be refused, never applied to the live env.
+        //
+        // Uses SESSION_ACCESS_TOKEN (not OAUTH_TOKEN): both are allowlisted, but
+        // OAUTH_TOKEN is read by `apiKeySource` (stream_json.rs) and mutating it
+        // would race parallel tests. SESSION_ACCESS_TOKEN is read nowhere. The
+        // original value is saved + restored so we never clobber the test env.
+        let allow = "CLAUDE_CODE_SESSION_ACCESS_TOKEN";
+        let saved = std::env::var(allow).ok();
+        let arbitrary = format!("LINGXI_STREAM_JSON_ENV_TEST_{}", std::process::id());
+        std::env::remove_var(allow);
+        std::env::remove_var(&arbitrary);
         let line = serde_json::json!({
             "type": "update_environment_variables",
-            "variables": { key.clone(): "value" }
+            "variables": { allow: "tok", arbitrary.clone(): "evil" }
         })
         .to_string();
         let result = process_line(&line, &mut fresh_seen()).unwrap();
         assert!(matches!(result, FrameAction::Consumed));
-        assert_eq!(std::env::var(&key).as_deref(), Ok("value"));
-        std::env::remove_var(key);
+        // Allowlisted key applied…
+        assert_eq!(std::env::var(allow).as_deref(), Ok("tok"));
+        // …the arbitrary key REFUSED (this is the fix for the env-injection hole).
+        assert!(
+            std::env::var(&arbitrary).is_err(),
+            "a non-allowlisted key must NOT reach the process env"
+        );
+        match saved {
+            Some(v) => std::env::set_var(allow, v),
+            None => std::env::remove_var(allow),
+        }
+        std::env::remove_var(arbitrary);
+    }
+
+    #[test]
+    fn update_env_vars_drops_frame_with_non_string_value() {
+        // A non-string value drops the WHOLE frame — no key (allowlisted or not)
+        // is applied (oracle: `variables must be an object of string values`).
+        // Uses a pid-unique NON-allowlisted key so this test never touches a
+        // globally-read auth var (it must be refused regardless, and dropped here
+        // by the non-string guard before the allowlist check).
+        let key = format!("LINGXI_STREAM_JSON_NONSTR_{}", std::process::id());
+        std::env::remove_var(&key);
+        let line = serde_json::json!({
+            "type": "update_environment_variables",
+            "variables": { key.clone(): 123 }
+        })
+        .to_string();
+        let result = process_line(&line, &mut fresh_seen()).unwrap();
+        assert!(matches!(result, FrameAction::Consumed));
+        assert!(
+            std::env::var(&key).is_err(),
+            "a non-string value drops the frame; nothing is applied"
+        );
     }
 
     #[test]

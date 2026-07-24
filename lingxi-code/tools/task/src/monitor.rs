@@ -285,13 +285,16 @@ impl Tool for MonitorTool {
     }
 
     async fn check_permissions(&self, _input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
-        // PARITY: binary routes `command` through the shared Bash permission
-        // resolver `m5t`. The port's BashTool currently allows-all at the
-        // tool-level (the M4-02 gate; AST permission lives in the permission
-        // gate), so Monitor mirrors that — same effective policy as Bash.
+        // The oracle routes a command-Monitor through the FULL Bash resolver
+        // (`Lon({...e,command},t)`). In the port that routing lives in the
+        // PERMISSION GATE, which rewrites the effective tool name "Monitor"→"Bash"
+        // for a command-monitor (see `PermissionPolicy::authorize_with_mode`), so
+        // deny/ask rules keyed `Bash(...)`, the bash-safety AST, and the `&`
+        // downgrade ALL apply. This tool-level check therefore allows (like
+        // BashTool's tool-level allow-all); the gate is the authoritative barrier.
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
-                reason: "Monitor: command permission mirrors Bash (allow-all-gate)".into(),
+                reason: "Monitor: command permission resolved as Bash by the gate".into(),
             },
             updated_input: None,
             update_destination: None,

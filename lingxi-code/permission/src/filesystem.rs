@@ -262,14 +262,59 @@ fn resolve_deepest_existing_ancestor(absolute_path: &Path) -> Option<PathBuf> {
         let Ok(meta) = std::fs::symlink_metadata(ancestor) else {
             continue;
         };
-        let Ok(resolved_ancestor) = std::fs::canonicalize(ancestor) else {
-            continue;
+        let resolved_ancestor = match std::fs::canonicalize(ancestor) {
+            Ok(resolved) => resolved,
+            // SECURITY: canonicalize FOLLOWS the link, so it fails (ENOENT) on a
+            // DANGLING symlink — one whose target does not exist yet, i.e. a link
+            // you can CREATE a file through. Falling through to the parent here
+            // (the old behaviour) re-attached the link NAME lexically and never
+            // saw the OUTSIDE target, so a write through `ws/link → /etc/cron.d/x`
+            // stayed lexically inside the workspace and evaded the containment
+            // ask. The oracle (`XW`) resolves such links via `readlinkSync`, so
+            // its check set contains the outside target. Mirror that: chase the
+            // link chain to the dangling target and use it.
+            Err(_) if meta.file_type().is_symlink() => match resolve_dangling_symlink(ancestor) {
+                Some(target) => target,
+                // Not resolvable (cycle / too many hops) — fail closed by
+                // skipping this ancestor, so containment falls back to the
+                // lexical form and, at worst, over-asks.
+                None => continue,
+            },
+            // A non-symlink canonicalize failure (e.g. EACCES) keeps the prior
+            // skip-to-parent behaviour.
+            Err(_) => continue,
         };
-        // Existing special files are still permission-relevant; let
-        // canonicalize decide their real location just like symlinks/dirs/files.
-        let _ = meta;
         let tail = absolute_path.strip_prefix(ancestor).ok()?;
         return Some(resolved_ancestor.join(tail));
+    }
+    None
+}
+
+/// Resolve a DANGLING symlink (one `canonicalize` can't follow because its
+/// target does not exist) to the outside path it ultimately points at, chasing
+/// the link chain lexically — the port of the oracle's manual 64-hop
+/// `readlinkSync` walk (`XW`), which stops at the first non-existent component
+/// (`lstatSync` throwing) and returns that target.
+fn resolve_dangling_symlink(link: &Path) -> Option<PathBuf> {
+    let mut current = link.to_path_buf();
+    for _ in 0..64 {
+        let target = std::fs::read_link(&current).ok()?;
+        let resolved = if target.is_absolute() {
+            target
+        } else {
+            // Relative to the link's PARENT directory, matching
+            // `path.resolve(path.dirname(link), target)`.
+            current.parent()?.join(target)
+        };
+        let resolved = normalize_lexically(&resolved);
+        match std::fs::symlink_metadata(&resolved) {
+            // The chain continues through another symlink — keep chasing.
+            Ok(meta) if meta.file_type().is_symlink() => current = resolved,
+            // The chain ends at an existing non-symlink OR (the exploit case) a
+            // non-existent path: this is the real target the OS would create
+            // through, so it is what containment must judge.
+            _ => return Some(resolved),
+        }
     }
     None
 }
@@ -923,6 +968,55 @@ mod tests {
                 &roots
             ),
             "a non-existent tail beneath a symlinked parent must still resolve outside"
+        );
+    }
+
+    /// SECURITY (ultra-review HIGH): a DANGLING symlink — one whose target does
+    /// NOT exist yet — is exactly the exploitable case: a link you can CREATE a
+    /// file through. `canonicalize` fails on it (ENOENT), so the resolver must
+    /// `readlink` to the outside target rather than skip to the parent and
+    /// re-attach the link name (which kept it lexically inside the workspace and
+    /// evaded the containment ask).
+    #[cfg(unix)]
+    #[test]
+    fn allowed_working_path_rejects_write_through_dangling_symlink() {
+        let tmp = unique_temp_dir("dangling_symlink");
+        let workspace = tmp.join("workspace");
+        std::fs::create_dir_all(workspace.join("build")).unwrap();
+        // Target does NOT exist — a dangling link pointing outside the workspace.
+        let outside_target = tmp.join("outside").join("cron.d").join("job");
+        std::os::unix::fs::symlink(&outside_target, workspace.join("build/out")).unwrap();
+
+        let roots = FsRoots {
+            cwd: workspace.clone(),
+            home: None,
+            lingxi_home: tmp.join(".lingxi"),
+        };
+
+        // The resolver must surface the outside target…
+        let resolved = resolve_dangling_symlink(&workspace.join("build/out"))
+            .expect("dangling link resolves to its target");
+        assert!(
+            !resolved.starts_with(&workspace),
+            "resolved dangling target must be OUTSIDE the workspace, got {resolved:?}"
+        );
+        // …so a write through it is NOT contained (the exploit is blocked).
+        assert!(
+            !path_in_allowed_working_path(
+                &workspace.join("build/out"),
+                &[workspace.clone()],
+                &roots
+            ),
+            "writing through a dangling symlink to an outside target must not be contained"
+        );
+
+        // A dangling link whose target is INSIDE the workspace stays contained
+        // (no over-ask on a legitimate not-yet-created in-workspace file).
+        let inside_target = workspace.join("data").join("real.txt");
+        std::os::unix::fs::symlink(&inside_target, workspace.join("build/in")).unwrap();
+        assert!(
+            path_in_allowed_working_path(&workspace.join("build/in"), &[workspace], &roots),
+            "a dangling link to an in-workspace target stays contained"
         );
     }
 }

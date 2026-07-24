@@ -1507,6 +1507,11 @@ pub fn register_desktop_tools(
     tool_web::register_all(reg, ctx.clone(), web_side_query);
     tool_plan::register_all(reg, ctx.clone());
     tool_meta::register_all(reg, ctx.clone());
+    // The `computer` tool (M8-P11b). Cross-platform-registerable — its own
+    // `is_enabled()` gates on `ctx.computer_control` being wired (real backend
+    // only on macOS today), so registering it unconditionally here is safe:
+    // it simply advertises as disabled wherever no backend exists.
+    tool_computer_use::register_all(reg, ctx.clone());
     // `RemoteTrigger` gets the credential-store auth provider on desktop so it
     // can drive the claude.ai CCR API in-process. `register_all_with_auth`
     // registers `ScheduleCron` + `RemoteTrigger` (the latter with `cron_auth`)

@@ -131,6 +131,7 @@ tool-mcp = { path = "../../tools/mcp" }
 tool-lsp = { path = "../../tools/lsp" }
 tool-team = { path = "../../tools/team" }
 tool-worktree = { path = "../../tools/worktree" }
+tool-computer-use = { path = "../../tools/computer-use" }
 
 # (`!` bash mode) The TUI's `BashRunner` seam — engine-desktop constructs the
 # sandboxed host impl (over the same `BuiltinToolContext` + `tool-shell::BashTool`

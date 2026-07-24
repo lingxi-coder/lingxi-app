@@ -1816,6 +1816,7 @@ dependencies = [
  "tokio-util",
  "tool-agent",
  "tool-api",
+ "tool-computer-use",
  "tool-cron",
  "tool-file",
  "tool-lsp",

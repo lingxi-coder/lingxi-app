@@ -152,6 +152,16 @@ pub struct DeferralState {
     loaded: RwLock<HashSet<String>>,
     auto_active: AtomicBool,
     request_supported: AtomicBool,
+    /// Deferred-tool names already ANNOUNCED to the model as available this
+    /// session (claude-code `A1s` accumulator `s`, replayed from prior
+    /// `deferred_tools_delta` attachments). We track it directly instead of
+    /// scanning history because the port does not persist the transient
+    /// reminder into `session.history`.
+    announced: RwLock<HashSet<String>>,
+    /// Deferred-tool names ever announced as GENUINELY NEW (not via a reconnect)
+    /// this session (claude-code `A1s` accumulator `a`). Distinguishes a
+    /// first-time announcement (`addedLines`) from a re-appearance (`readded`).
+    ever_added: RwLock<HashSet<String>>,
 }
 
 impl DeferralState {
@@ -164,6 +174,8 @@ impl DeferralState {
             loaded: RwLock::new(HashSet::new()),
             auto_active: AtomicBool::new(false),
             request_supported: AtomicBool::new(true),
+            announced: RwLock::new(HashSet::new()),
+            ever_added: RwLock::new(HashSet::new()),
         }
     }
 
@@ -256,6 +268,19 @@ impl DeferralState {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         g.clear();
         g.extend(names.into_iter().map(Into::into));
+        // The newly adopted session has not announced anything yet: the
+        // deferred-tools delta must re-announce its searchable set on the first
+        // post-resume/-clear turn rather than treating the prior conversation's
+        // announcements as current.
+        drop(g);
+        self.announced
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        self.ever_added
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
     }
 
     /// Whether a tool has been discovered this session.
@@ -308,6 +333,230 @@ impl DeferralState {
         }
         wants_defer
     }
+
+    /// Compute the deferred-tools delta for THIS outgoing model step against the
+    /// previously announced set, then fold the result into the announced /
+    /// ever-added tracking.
+    ///
+    /// Byte-faithful port of the claude-code `A1s` accumulation (the
+    /// deferred-tools subset; the `pendingMcpServers` / `needsAuthMcpServers` /
+    /// `failedMcpServers` branches are not modeled here). `current` is the
+    /// currently-deferred (undiscovered) tool-name set — the oracle
+    /// `g = messages.filter(LK)`, i.e. the searchable view minus tools already
+    /// loaded this session.
+    ///
+    /// MUTATES the announced / ever-added tracking, so it must be invoked at most
+    /// ONCE per outgoing model step (retries of the same step reuse the cached
+    /// result). The next step compares against the now-advanced state, which is
+    /// how a re-request with an unchanged deferred set yields an empty delta.
+    #[must_use]
+    pub fn compute_deferred_delta(&self, current: &[String]) -> DeferredToolsDelta {
+        let current_set: HashSet<&str> = current.iter().map(String::as_str).collect();
+        let mut announced = self
+            .announced
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut ever_added = self
+            .ever_added
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let loaded = self
+            .loaded
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        // y = current \ announced — names newly available this step.
+        let mut new_names: Vec<String> = current
+            .iter()
+            .filter(|n| !announced.contains(n.as_str()))
+            .cloned()
+            .collect();
+        // E (addedLines) = current \ ever_added — never announced-as-new.
+        let mut added_lines: Vec<String> = current
+            .iter()
+            .filter(|n| !ever_added.contains(n.as_str()))
+            .cloned()
+            .collect();
+        // v (readdedNames) = y ∩ ever_added — announced earlier, gone, now back.
+        let mut readded: Vec<String> = new_names
+            .iter()
+            .filter(|n| ever_added.contains(n.as_str()))
+            .cloned()
+            .collect();
+        // S (removedNames) = announced \ current \ loaded — was announced, no
+        // longer deferred, and not merely discovered (loaded stays present in
+        // the full tool set `_`, so the oracle does not report it removed).
+        let mut removed: Vec<String> = announced
+            .iter()
+            .filter(|n| !current_set.contains(n.as_str()) && !loaded.contains(n.as_str()))
+            .cloned()
+            .collect();
+
+        new_names.sort();
+        new_names.dedup();
+        added_lines.sort();
+        added_lines.dedup();
+        readded.sort();
+        readded.dedup();
+        removed.sort();
+        removed.dedup();
+
+        let added_any = !new_names.is_empty();
+
+        // Fold state exactly as the oracle replay does once this delta is stored:
+        //   addedNames AN = dedup(y ∪ E);
+        //   announced := (announced ∪ AN) \ S;
+        //   ever_added := ever_added ∪ (AN \ v).
+        // AN ∩ S = ∅ (AN ⊆ current, S disjoint from current), so order is safe.
+        for n in new_names.iter().chain(added_lines.iter()) {
+            announced.insert(n.clone());
+        }
+        for n in &removed {
+            announced.remove(n);
+        }
+        let readded_set: HashSet<&str> = readded.iter().map(String::as_str).collect();
+        for n in new_names.iter().chain(added_lines.iter()) {
+            if !readded_set.contains(n.as_str()) {
+                ever_added.insert(n.clone());
+            }
+        }
+
+        DeferredToolsDelta {
+            added_lines,
+            readded,
+            removed,
+            added_any,
+        }
+    }
+}
+
+/// Byte-locked tool name the deferred-tools reminder text refers to (oracle
+/// `ZE = "ToolSearch"`).
+const TOOL_SEARCH_TOOL_NAME: &str = "ToolSearch";
+
+/// Oracle `oP`: the removed-tool count above which the notice is summarized
+/// (grouped `mcp__<server>__*` counts) rather than listed one per line.
+const DEFERRED_SUMMARY_THRESHOLD: usize = 30;
+
+/// Oracle `Mdn`: the ambient-context trailer appended after a removed-tools
+/// notice. `\u{2014}` is the U+2014 em dash present in the binary literal.
+const AMBIENT_CONTEXT_TRAILER: &str = "This is ambient context \u{2014} do not narrate it to the user unless they ask or it is directly relevant to their request.";
+
+/// One deferred-tools delta (oracle `deferred_tools_delta` attachment, restricted
+/// to the tool-set fields). Produced by [`DeferralState::compute_deferred_delta`]
+/// and rendered by [`DeferredToolsDelta::render_reminder`].
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct DeferredToolsDelta {
+    /// Genuinely-new (never announced-as-new) deferred tool names, sorted
+    /// (oracle `addedLines` = `E.map(jas).sort()`). Listed in the "now
+    /// available via ToolSearch" notice.
+    pub added_lines: Vec<String>,
+    /// Deferred tool names announced earlier, gone, and now back, sorted (oracle
+    /// `readdedNames` = `v.sort()`). Listed in the "available again" notice.
+    pub readded: Vec<String>,
+    /// Previously-announced names no longer available and not loaded, sorted
+    /// (oracle `removedNames` = `S.sort()`). Listed in the "no longer available"
+    /// notice.
+    pub removed: Vec<String>,
+    /// Whether any newly-available name appeared (oracle `y`); part of the emit
+    /// gate (`v ⊆ y`, so a pure re-add still sets this).
+    added_any: bool,
+}
+
+impl DeferredToolsDelta {
+    /// Whether this delta yields no reminder (oracle: `y`, `E`, and `S` all
+    /// empty return `null`).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        !self.added_any && self.added_lines.is_empty() && self.removed.is_empty()
+    }
+
+    /// Render the `<system-reminder>` body for this delta, byte-faithful to the
+    /// claude-code `deferred_tools_delta` attachment renderer (`BC(i.join("\n\n"))`).
+    /// `None` when nothing changed.
+    #[must_use]
+    pub fn render_reminder(&self) -> Option<String> {
+        if self.is_empty() {
+            return None;
+        }
+        let tool = TOOL_SEARCH_TOOL_NAME;
+        let mut parts: Vec<String> = Vec::new();
+        // "now available via ToolSearch" — oracle guard `r.length>0 && n.length>0`
+        // with `r = addedLines`; `addedNames ⊇ addedLines`, so `addedLines`
+        // non-empty is the effective condition, and the list uses `addedLines`.
+        if !self.added_lines.is_empty() {
+            parts.push(format!(
+                "The following deferred tools are now available via {tool}. Their schemas are NOT loaded \u{2014} calling them directly will fail with InputValidationError. Use {tool} with query \"select:<name>[,<name>...]\" to load tool schemas before calling them:\n{names}",
+                tool = tool,
+                names = self.added_lines.join("\n"),
+            ));
+        }
+        // "available again (MCP server reconnected …)" — oracle readddedNames branch.
+        if !self.readded.is_empty() {
+            let verb = if self.readded.len() == 1 { " is" } else { "s are" };
+            parts.push(format!(
+                "{count} deferred tool{verb} available again (MCP server reconnected \u{2014} names announced earlier in this conversation): {names}. Load via {tool} as before.",
+                count = self.readded.len(),
+                verb = verb,
+                names = group_mcp_names(&self.readded),
+                tool = tool,
+            ));
+        }
+        // "no longer available (… disconnected)" — oracle removedNames branch,
+        // followed by the ambient-context trailer (`Mdn`).
+        if !self.removed.is_empty() {
+            if self.removed.len() > DEFERRED_SUMMARY_THRESHOLD {
+                parts.push(format!(
+                    "{count} deferred tools are no longer available (MCP server disconnected): {names}. Do not search for them \u{2014} {tool} will return no match.",
+                    count = self.removed.len(),
+                    names = group_mcp_names(&self.removed),
+                    tool = tool,
+                ));
+            } else {
+                parts.push(format!(
+                    "The following deferred tools are no longer available (their MCP server disconnected). Do not search for them \u{2014} {tool} will return no match:\n{names}",
+                    tool = tool,
+                    names = self.removed.join("\n"),
+                ));
+            }
+            parts.push(AMBIENT_CONTEXT_TRAILER.to_string());
+        }
+        if parts.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "<system-reminder>\n{}\n</system-reminder>",
+            parts.join("\n\n")
+        ))
+    }
+}
+
+/// Group tool names for the "available again" / "no longer available" notices,
+/// byte-faithful to claude-code `AIo`: collapse `mcp__<server>__<tool>` names to
+/// a single `mcp__<server>__*` bucket, count duplicates, sort by bucket key, and
+/// render `key (n)` when a bucket has more than one member (else just `key`),
+/// joined with `", "`.
+fn group_mcp_names(names: &[String]) -> String {
+    use std::collections::BTreeMap;
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for name in names {
+        // `r.split("__",2).join("__")` keeps the first two `__`-delimited
+        // segments (`mcp__<server>`), then appends `__*`.
+        let key = if name.starts_with("mcp__") {
+            let mut it = name.splitn(3, "__");
+            let a = it.next().unwrap_or("");
+            let b = it.next().unwrap_or("");
+            format!("{a}__{b}__*")
+        } else {
+            name.clone()
+        };
+        *counts.entry(key).or_insert(0) += 1;
+    }
+    counts
+        .into_iter()
+        .map(|(k, n)| if n > 1 { format!("{k} ({n})") } else { k })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 impl Default for DeferralState {
@@ -474,5 +723,81 @@ mod tests {
         // Non-bg session: EnterWorktree follows the normal predicate.
         let fg = DeferralState::new(ToolSearchMode::Enabled, false);
         assert!(fg.should_defer(ENTER_WORKTREE_TOOL_NAME, true));
+    }
+
+    /// gap218 #10 (cc 2.1.218 `deferred_tools_delta`) — the announce → unchanged →
+    /// remove → re-add state machine, with the BYTE-EXACT model-visible
+    /// `<system-reminder>` bodies (extracted from the 2.1.218 binary at offset
+    /// ~116526080). A DELTA is emitted only when the searchable set CHANGES; an
+    /// unchanged step yields `None` (no full-catalog repeat).
+    #[test]
+    fn deferred_delta_announce_unchanged_remove_readd_bodies() {
+        let d = DeferralState::new(ToolSearchMode::Enabled, false);
+
+        // (1) First announcement: both names are genuinely new (addedLines).
+        let delta = d.compute_deferred_delta(&["Alpha".to_string(), "Beta".to_string()]);
+        assert_eq!(delta.added_lines, vec!["Alpha".to_string(), "Beta".to_string()]);
+        assert!(delta.readded.is_empty() && delta.removed.is_empty());
+        assert_eq!(
+            delta.render_reminder().expect("announce reminder"),
+            "<system-reminder>\nThe following deferred tools are now available via ToolSearch. Their schemas are NOT loaded \u{2014} calling them directly will fail with InputValidationError. Use ToolSearch with query \"select:<name>[,<name>...]\" to load tool schemas before calling them:\nAlpha\nBeta\n</system-reminder>"
+        );
+
+        // (2) Same set on the next step: empty delta ⇒ NO reminder.
+        let delta = d.compute_deferred_delta(&["Alpha".to_string(), "Beta".to_string()]);
+        assert!(delta.is_empty());
+        assert_eq!(delta.render_reminder(), None);
+
+        // (3) Beta disappears (MCP server disconnected): removed + ambient trailer.
+        let delta = d.compute_deferred_delta(&["Alpha".to_string()]);
+        assert_eq!(delta.removed, vec!["Beta".to_string()]);
+        assert!(delta.added_lines.is_empty() && delta.readded.is_empty());
+        assert_eq!(
+            delta.render_reminder().expect("removed reminder"),
+            "<system-reminder>\nThe following deferred tools are no longer available (their MCP server disconnected). Do not search for them \u{2014} ToolSearch will return no match:\nBeta\n\nThis is ambient context \u{2014} do not narrate it to the user unless they ask or it is directly relevant to their request.\n</system-reminder>"
+        );
+
+        // (4) Beta returns (server reconnected): announced earlier ⇒ readded, not new.
+        let delta = d.compute_deferred_delta(&["Alpha".to_string(), "Beta".to_string()]);
+        assert_eq!(delta.readded, vec!["Beta".to_string()]);
+        assert!(delta.added_lines.is_empty() && delta.removed.is_empty());
+        assert_eq!(
+            delta.render_reminder().expect("readded reminder"),
+            "<system-reminder>\n1 deferred tool is available again (MCP server reconnected \u{2014} names announced earlier in this conversation): Beta. Load via ToolSearch as before.\n</system-reminder>"
+        );
+    }
+
+    /// gap218 #10 — `AIo` name grouping: `mcp__<server>__<tool>` names collapse to
+    /// a single `mcp__<server>__* (n)` bucket in the re-add notice, and the plural
+    /// "tools ... are" verb agrees with the raw name count.
+    #[test]
+    fn deferred_delta_groups_mcp_names_on_readd() {
+        let d = DeferralState::new(ToolSearchMode::Enabled, false);
+        d.compute_deferred_delta(&["mcp__srv__a".to_string(), "mcp__srv__b".to_string()]);
+        d.compute_deferred_delta(&[]); // both removed
+        let delta = d.compute_deferred_delta(&["mcp__srv__a".to_string(), "mcp__srv__b".to_string()]);
+        assert_eq!(
+            delta.readded,
+            vec!["mcp__srv__a".to_string(), "mcp__srv__b".to_string()]
+        );
+        assert_eq!(
+            delta.render_reminder().expect("readded reminder"),
+            "<system-reminder>\n2 deferred tools are available again (MCP server reconnected \u{2014} names announced earlier in this conversation): mcp__srv__* (2). Load via ToolSearch as before.\n</system-reminder>"
+        );
+    }
+
+    /// gap218 #10 — a name DISCOVERED via ToolSearch (loaded) leaves the searchable
+    /// view but stays in the full tool set, so the oracle does NOT report it
+    /// removed. The delta must be empty (no spurious "no longer available").
+    #[test]
+    fn deferred_delta_discovered_tool_is_not_reported_removed() {
+        let d = DeferralState::new(ToolSearchMode::Enabled, false);
+        d.compute_deferred_delta(&["Alpha".to_string(), "Beta".to_string()]);
+        d.mark_loaded(["Beta"]);
+        // Beta is now loaded, so the currently-deferred set is just Alpha.
+        let delta = d.compute_deferred_delta(&["Alpha".to_string()]);
+        assert!(delta.removed.is_empty(), "a discovered tool is not 'removed'");
+        assert!(delta.is_empty());
+        assert_eq!(delta.render_reminder(), None);
     }
 }

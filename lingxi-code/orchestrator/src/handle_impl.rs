@@ -1476,6 +1476,147 @@ mod tests {
         assert!(!orch.hooks.has_hooks_for(&hooks::HookEventType::Stop).await);
     }
 
+    /// gap218 #43 — a minimal resumed agent definition carrying `model`.
+    #[cfg(test)]
+    fn resume_definition_with_model(model: agent::AgentModel) -> agent::AgentDefinition {
+        agent::AgentDefinition {
+            agent_type: "modelful".to_string(),
+            when_to_use: "does things".to_string(),
+            tools: agent::AgentToolPolicy::Explicit(Vec::new()),
+            max_turns: 4,
+            model,
+            permission_mode: agent::AgentPermissionMode::Bubble,
+            source: agent::AgentSource::UserDefined,
+            base_dir: std::env::temp_dir(),
+            system_prompt: Some("do it".to_string()),
+            mcp_servers: Vec::new(),
+            frontmatter_hooks: Vec::new(),
+            icon: None,
+            allowed_tools: Vec::new(),
+            worktree_requirement: None,
+            disallowed_tools: Vec::new(),
+            skills: Vec::new(),
+            required_mcp_servers: Vec::new(),
+            background: false,
+            isolation: None,
+            memory: None,
+            effort: None,
+            initial_prompt: None,
+            color: None,
+        }
+    }
+
+    /// gap218 #43 (cc 2.1.218 `NQe`) — the in-place resume adopts the resumed
+    /// agent's frontmatter `model` (resolved alias → wire id) when the user did
+    /// NOT pass `--model` (`apply_resumed_agent_model == true`). Locks the
+    /// resolved id against the SAME resolver (no invented bytes).
+    #[tokio::test]
+    async fn hot_resume_adopts_agent_frontmatter_model_when_no_user_model() {
+        use crate::test_support::{
+            noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+            StaticMemoryProvider,
+        };
+        use std::sync::Arc;
+
+        let orch = crate::ConversationOrchestrator::new(
+            crate::OrchestratorConfig {
+                apply_resumed_agent_model: true,
+                ..crate::OrchestratorConfig::default()
+            },
+            Arc::new(MockApiClient::new(Vec::new())),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+        let sentinel = "sentinel-session-model".to_string();
+        orch.session.lock().await.model = sentinel.clone();
+
+        let def = resume_definition_with_model(agent::AgentModel::Alias("opus".to_string()));
+        orch.restore_main_thread_agent_from_resume(
+            Some("modelful".to_string()),
+            Some(serde_json::to_value(&def).expect("serialize agent snapshot")),
+        )
+        .await;
+
+        let expected = agent::model_resolution::resolve_user_specified_model("opus");
+        let got = orch.session.lock().await.model.clone();
+        assert_eq!(
+            got, expected,
+            "resumed agent's frontmatter model replaces the session model"
+        );
+        assert_ne!(got, sentinel, "the session model actually changed");
+    }
+
+    /// gap218 #43 — the gate. When the user DID pass `--model`
+    /// (`apply_resumed_agent_model == false`, the parity default), the resumed
+    /// agent's frontmatter model must NOT override the session model; and an
+    /// `Inherit` agent never overrides even with the gate open.
+    #[tokio::test]
+    async fn hot_resume_keeps_session_model_when_gated_or_inherit() {
+        use crate::test_support::{
+            noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+            StaticMemoryProvider,
+        };
+        use std::sync::Arc;
+
+        // (1) Gate CLOSED (explicit --model): an aliased agent model is ignored.
+        let orch = crate::ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(), // apply_resumed_agent_model == false
+            Arc::new(MockApiClient::new(Vec::new())),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+        let user_model = "user-picked-model".to_string();
+        orch.session.lock().await.model = user_model.clone();
+        let def = resume_definition_with_model(agent::AgentModel::Alias("opus".to_string()));
+        orch.restore_main_thread_agent_from_resume(
+            Some("modelful".to_string()),
+            Some(serde_json::to_value(&def).expect("serialize agent snapshot")),
+        )
+        .await;
+        assert_eq!(
+            orch.session.lock().await.model,
+            user_model,
+            "an explicit --model is never overridden by agent frontmatter"
+        );
+
+        // (2) Gate OPEN but agent inherits: still no override.
+        let orch2 = crate::ConversationOrchestrator::new(
+            crate::OrchestratorConfig {
+                apply_resumed_agent_model: true,
+                ..crate::OrchestratorConfig::default()
+            },
+            Arc::new(MockApiClient::new(Vec::new())),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+        let inherited = "inherited-session-model".to_string();
+        orch2.session.lock().await.model = inherited.clone();
+        let def2 = resume_definition_with_model(agent::AgentModel::Inherit);
+        orch2
+            .restore_main_thread_agent_from_resume(
+                Some("modelful".to_string()),
+                Some(serde_json::to_value(&def2).expect("serialize agent snapshot")),
+            )
+            .await;
+        assert_eq!(
+            orch2.session.lock().await.model,
+            inherited,
+            "AgentModel::Inherit keeps the session model"
+        );
+    }
+
     #[test]
     fn apply_mcp_disabled_adds_removes_and_is_idempotent() {
         let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();

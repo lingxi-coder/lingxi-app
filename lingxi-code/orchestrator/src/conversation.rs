@@ -6989,10 +6989,15 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
 
             // Rebuild on every model step: a ToolSearch result marks schemas as
             // discovered, so the immediately following request must include
-            // those schemas with `defer_loading:true`. The accompanying catalog
-            // is transient and prepended exactly once per outgoing request.
+            // those schemas with `defer_loading:true`. The accompanying
+            // `deferred_tools_delta` reminder is transient and prepended exactly
+            // once per outgoing request. `deferred_tools_reminder_message`
+            // ADVANCES the announced-set tracking, so compute it ONCE per model
+            // step here and reuse this value on every retry/fallback re-snapshot
+            // below (each of which rebuilds the SAME step's request).
             let wire_tools = self.build_wire_tools().await;
-            if let Some(reminder) = self.deferred_tools_reminder_message() {
+            let deferred_reminder = self.deferred_tools_reminder_message();
+            if let Some(reminder) = deferred_reminder.clone() {
                 snapshot.insert(0, reminder);
             }
 
@@ -7151,7 +7156,9 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     if let Some(ctx_msg) = self.additional_context_message().await {
                         recov_snapshot.insert(0, ctx_msg);
                     }
-                    if let Some(reminder) = self.deferred_tools_reminder_message() {
+                    // Reuse THIS step's delta (already computed above); do not
+                    // re-invoke, which would advance the announced-set tracking.
+                    if let Some(reminder) = deferred_reminder.clone() {
                         recov_snapshot.insert(0, reminder);
                     }
                     match call_api_with_ptl_recovery(
@@ -7381,7 +7388,9 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                                 if let Some(ctx_msg) = self.additional_context_message().await {
                                     re_snapshot.insert(0, ctx_msg);
                                 }
-                                if let Some(reminder) = self.deferred_tools_reminder_message() {
+                                // Reuse THIS step's delta (computed above); do not
+                                // re-invoke and re-advance the announced set.
+                                if let Some(reminder) = deferred_reminder.clone() {
                                     re_snapshot.insert(0, reminder);
                                 }
                                 match self
@@ -7524,7 +7533,9 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                             if let Some(ctx_msg) = self.additional_context_message().await {
                                 non_stream_snapshot.insert(0, ctx_msg);
                             }
-                            if let Some(reminder) = self.deferred_tools_reminder_message() {
+                            // Reuse THIS step's delta (computed above); do not
+                            // re-invoke and re-advance the announced set.
+                            if let Some(reminder) = deferred_reminder.clone() {
                                 non_stream_snapshot.insert(0, reminder);
                             }
                             let tools_for_fallback = wire_tools.clone();
@@ -8907,12 +8918,31 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                         false,
                     );
                 }
+                // (gap218 #43 / cc 2.1.218 `NQe`) Adopt the resumed agent's
+                // frontmatter `model`, resolved to a wire id — the hot-resume twin
+                // of the composition root's COLD-resume gate. Applied ONLY when the
+                // user did NOT pass `--model` (`apply_resumed_agent_model` is
+                // `!default_model_explicit`, set at the root) AND the agent declares
+                // a concrete model (`AgentModel != Inherit`, oracle `i.model &&
+                // i.model!=="inherit"`); an explicit `--model` is never overridden.
+                // `resolve_user_specified_model` is `Zo` (alias → wire id).
+                // Evaluated BEFORE `definition.*` moves into the call below.
+                let model_override = if self.config.apply_resumed_agent_model {
+                    match &definition.model {
+                        agent::AgentModel::Alias(spec) | agent::AgentModel::Explicit(spec) => {
+                            Some(agent::model_resolution::resolve_user_specified_model(spec))
+                        }
+                        agent::AgentModel::Inherit => None,
+                    }
+                } else {
+                    None
+                };
                 self.set_main_thread_agent(
                     definition.agent_type,
                     definition.system_prompt,
                     definition.tools,
                     definition.disallowed_tools,
-                    None,
+                    model_override,
                 )
                 .await;
                 if hooks_trusted {
@@ -10383,32 +10413,47 @@ As you answer the user's questions, you can use the following context:\n\
         wire
     }
 
-    /// Per-request deferred-tool catalog, prepended to the outgoing history and
-    /// never persisted. This is Claude Code's fallback
-    /// `<available-deferred-tools>` message when delta attachments are off.
+    /// `deferred_tools_delta` reminder for THIS outgoing model step, prepended to
+    /// the transient snapshot and never persisted.
+    ///
+    /// Claude Code (`A1s` + the `deferred_tools_delta` attachment renderer)
+    /// announces the searchable deferred set as a `<system-reminder>` only when
+    /// that set has CHANGED since the prior request — listing the newly-available
+    /// names, re-appearing names (MCP reconnect), and removed names — rather than
+    /// repeating the whole catalog every turn. The announced / ever-added state
+    /// is tracked in the session's [`DeferralState`].
+    ///
+    /// MUTATES the delta tracking (via `compute_deferred_delta`), so it must be
+    /// called at most ONCE per outgoing model step. Callers that rebuild the
+    /// snapshot for a retry of the SAME step (streaming recovery / non-streaming
+    /// fallback) reuse the value computed here instead of re-invoking it.
     pub(crate) fn deferred_tools_reminder_message(&self) -> Option<ConversationMessage> {
         if !self.tools.deferral().is_enabled() {
             return None;
         }
-        let mut names: Vec<String> = self
+        // Currently-deferred (undiscovered) set = oracle `g`: the searchable
+        // view minus tools already loaded this session. The view is the
+        // `wants_defer` candidate set (which still includes loaded tools), so
+        // subtract the loaded names to obtain the `should_defer` set.
+        let loaded: std::collections::HashSet<String> = self
+            .tools
+            .deferral()
+            .loaded_tool_names()
+            .into_iter()
+            .collect();
+        let mut current: Vec<String> = self
             .tools
             .tool_search_view()
             .entries()
             .into_iter()
             .map(|entry| entry.name)
+            .filter(|name| !loaded.contains(name))
             .collect();
-        names.sort();
-        names.dedup();
-        if names.is_empty() {
-            return None;
-        }
-        Some(ConversationMessage::user_meta(
-            MessageId::new(),
-            format!(
-                "<available-deferred-tools>\n{}\n</available-deferred-tools>",
-                names.join("\n")
-            ),
-        ))
+        current.sort();
+        current.dedup();
+        let delta = self.tools.deferral().compute_deferred_delta(&current);
+        let body = delta.render_reminder()?;
+        Some(ConversationMessage::user_meta(MessageId::new(), body))
     }
 
     /// Return the live, policy-filtered tool catalog in MCP's 2025-06-18

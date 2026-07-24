@@ -4940,6 +4940,13 @@ pub async fn build(
     // CLI `--exclude-dynamic-system-prompt-sections`: move the per-machine env
     // block out of the (cacheable) system prompt into the first user message.
     orch_cfg.exclude_dynamic_system_prompt_sections = cfg.exclude_dynamic_system_prompt_sections;
+    // (gap218 #43) The in-place (bridge/desktop) resume adopts a resumed agent's
+    // frontmatter `model` ONLY when the user did NOT pass `--model` — the
+    // hot-resume twin of the COLD-resume gate below (`!cfg.default_model_explicit`).
+    // The root owns `--model`, so we resolve the gate here; the orchestrator then
+    // resolves the alias → wire id and applies it. An explicit `--model` sets this
+    // `false`, so it is never overridden by agent frontmatter.
+    orch_cfg.apply_resumed_agent_model = !cfg.default_model_explicit;
     // CLI `--append-system-prompt` / `--append-system-prompt-file`: text to
     // append after the assembled system prompt (or after `system_prompt_override`
     // when both are set). Appended with a newline separator.

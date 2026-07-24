@@ -274,6 +274,25 @@ pub struct OrchestratorConfig {
     /// effort keep byte-identical transcripts.
     #[serde(default)]
     pub effort: Option<String>,
+
+    /// (gap218 #43) Whether an IN-PLACE resume (`resume_session`, the bridge /
+    /// desktop hot-resume surface) may adopt the resumed agent's frontmatter
+    /// `model` — the hot-path twin of claude-code `NQe`'s
+    /// `if(!bC()&&i.model&&i.model!=="inherit")` gate, where `!bC()` is
+    /// `!userSpecifiedModel`. The composition root owns `--model`, so it sets
+    /// this to `!default_model_explicit`; the orchestrator then resolves the
+    /// agent's `AgentModel` (alias → wire id) and applies it to the session on
+    /// resume, exactly as the COLD-resume path already does at the root
+    /// (engine-desktop `lib.rs`).
+    ///
+    /// `false` (the parity default) is byte-identical to before this field
+    /// existed: the hot resume passes `model_override: None` and never overrides
+    /// the session model — so a root that does not opt in (or a user who DID pass
+    /// `--model`, where the root sets this `false`) is unchanged. Only set `true`
+    /// when the user did NOT specify a model, so an explicit `--model` is never
+    /// overridden by agent frontmatter.
+    #[serde(default)]
+    pub apply_resumed_agent_model: bool,
 }
 
 impl Default for OrchestratorConfig {
@@ -300,6 +319,7 @@ impl Default for OrchestratorConfig {
             plan_mode_instructions: None,
             plans_directory: None,
             effort: None,
+            apply_resumed_agent_model: false,
         }
     }
 }
@@ -352,6 +372,7 @@ mod tests {
             plan_mode_instructions: Some("MY BODY".into()),
             plans_directory: Some("docs/plans".into()),
             effort: Some("high".into()),
+            apply_resumed_agent_model: true,
         };
         let s = serde_json::to_string(&cfg).unwrap();
         let back: OrchestratorConfig = serde_json::from_str(&s).unwrap();
@@ -380,6 +401,12 @@ mod tests {
         assert_eq!(back.user_email.as_deref(), Some("u@example.com"));
         assert_eq!(back.plan_mode_instructions.as_deref(), Some("MY BODY"));
         assert_eq!(back.plans_directory.as_deref(), Some("docs/plans"));
+        assert!(back.apply_resumed_agent_model);
+    }
+
+    #[test]
+    fn default_apply_resumed_agent_model_is_false() {
+        assert!(!OrchestratorConfig::default().apply_resumed_agent_model);
     }
 
     #[test]

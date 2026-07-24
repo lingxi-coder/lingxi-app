@@ -528,6 +528,47 @@ mod tests {
         );
     }
 
+    /// cc 2.1.218 `Fxy` STANDING allow (HOOKALLOW-01, gap218 #11) — no
+    /// `updatedInput` and the tool does not `requiresUserInteraction`, so the
+    /// oracle's re-check gate `if(a.updatedInput||e.requiresUserInteraction?.())`
+    /// is FALSE and the allow returns unchecked. An ask rule — the reason the
+    /// gate resolved `Ask` and fired the PermissionRequest hook — must NOT be
+    /// re-evaluated here, or the rescue is defeated in its primary use case.
+    /// Contrast [`rewritten_hook_allow_turns_an_ask_rule_into_a_hard_deny`] above,
+    /// which turns the SAME ask rule into a hard deny.
+    #[tokio::test]
+    async fn honour_hook_allow_lets_an_ask_rule_stand_without_a_re_check() {
+        let inner = RecordingInner::new(PermissionDecision::Deny {
+            reason: "must not prompt".into(),
+        });
+        let policy = policy_with(
+            r#"{ "permissions": { "ask": ["Bash"] } }"#,
+            PermissionMode::Default,
+        );
+        let gate = PolicyPermissionGate::new(policy, inner.clone());
+
+        assert_eq!(
+            gate.honour_hook_allow("Bash", &serde_json::json!({}))
+                .await,
+            PermissionDecision::Allow,
+            "the standing PermissionRequest-hook allow stands over an ask rule"
+        );
+        assert_eq!(
+            inner.calls(),
+            0,
+            "the standing allow must NOT delegate to the prompt transport"
+        );
+
+        // The REWRITTEN twin, on the SAME ask rule, is a hard deny — the two arms
+        // deliberately diverge (Fxy's `updatedInput || requiresUserInteraction`
+        // re-check gate).
+        assert!(matches!(
+            gate.check_after_hook_allow_rewritten("Bash", &serde_json::json!({}))
+                .await,
+            PermissionDecision::Deny { .. }
+        ));
+    }
+
     /// Neither resolver may over-block a call the rules genuinely permit.
     #[tokio::test]
     async fn hook_allow_paths_keep_an_explicit_allow_rule() {

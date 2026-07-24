@@ -1144,6 +1144,21 @@ impl PermissionGate for PolicyPermissionGate {
         }
     }
 
+    /// claude-code `Fxy` — the STANDING PermissionRequest-hook `allow` (no
+    /// `updatedInput`, tool does not `requiresUserInteraction`). The oracle SKIPS
+    /// the `_pt` re-check entirely and returns the allow, so we must NOT run
+    /// [`Self::rule_or_safety_verdict`]: an ask rule (the reason the gate resolved
+    /// `Ask` in the first place) would otherwise re-prompt / hard-deny and defeat
+    /// the rescue. A matching deny rule cannot reach here — it resolves `Deny`
+    /// before the PermissionRequest hook fires — so honouring the unchanged input
+    /// is safe. We keep only the mode-less auto-mode non-deny bookkeeping every
+    /// allow arm records (reset of the classifier breaker's consecutive-denial
+    /// counter), matching the pre-HOOKALLOW-01 behavior for this arm.
+    async fn honour_hook_allow(&self, name: &str, _input: &Value) -> PermissionDecision {
+        self.record_auto_mode_non_deny(self.effective_mode_for_tool(name));
+        PermissionDecision::Allow
+    }
+
     /// In PLAN mode the gate authorizes under [`PermissionMode::Plan`] regardless
     /// of the policy's boot mode, so a runtime `EnterPlanMode` dynamically
     /// activates the mutation backstop: a plan-safe READ-ONLY tool falls through

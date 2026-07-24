@@ -2833,32 +2833,39 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                     match req_agg.decision {
                         Some(HookDecision::Approve | HookDecision::Allow) => {
                             // (cc 2.1.218 `Fxy`) The headless PermissionRequest
-                            // rescue re-checks the rules ONLY when the hook
-                            // supplied `updatedInput` — and there an ask rule
-                            // becomes a HARD DENY (no prompt is available on this
-                            // surface). A rescue WITHOUT a rewrite keeps the
-                            // PreToolUse-style resolution.
-                            //
-                            // NOT WIRED: the oracle's second trigger
-                            // `e.requiresUserInteraction?.()`. The tool handle is
-                            // not in scope here; today only `AskUserQuestion`
-                            // returns true and it resolves Allow before reaching
-                            // this branch.
+                            // rescue re-checks the rules (`epr(_pt(...))`, where an
+                            // ask rule becomes a HARD DENY — no prompt is available
+                            // on this surface) ONLY when the hook supplied
+                            // `updatedInput` OR the tool `requiresUserInteraction`:
+                            //   if(a.updatedInput||e.requiresUserInteraction?.()){…}
+                            //   return {behavior:"allow", updatedInput:l, …}
+                            // With NEITHER trigger the allow STANDS UNCHECKED — we
+                            // must NOT re-run the rule/mode verdict, or the rescue is
+                            // defeated in its primary use case (an ordinary ask rule
+                            // the hook meant to pre-approve would re-prompt / hard
+                            // deny). Both the reachable ask rule and a deny rule were
+                            // already resolved before this Ask branch, so honouring
+                            // the unchanged input directly is safe.
                             let rewritten = req_agg.modified_input.is_some();
                             if let Some(updated) = req_agg.modified_input {
                                 effective_input = updated;
                             }
-                            if rewritten {
+                            if rewritten || requires_user_interaction {
+                                // Rewritten input, or a tool that requires user
+                                // interaction: re-check via `epr(_pt(...))` — an ask
+                                // becomes a hard deny carrying the ask's `c.message`
+                                // (identical for both triggers), so the rewritten
+                                // resolver serves both.
                                 orch.perms
                                     .check_after_hook_allow_rewritten(name, &effective_input)
                                     .await
                             } else {
-                                let ctx = traits::permission_gate::PermissionCheckContext {
-                                    tool_use_id: Some(tool_use_id.to_string()),
-                                    ..Default::default()
-                                };
+                                // Standing allow (`Fxy`'s no-recheck arm): honour the
+                                // allow directly, keeping the auto-mode non-deny
+                                // bookkeeping every allow arm records — mode-less, no
+                                // rule re-check, no backstop.
                                 orch.perms
-                                    .check_after_hook_allow_ctx(name, &effective_input, &ctx)
+                                    .honour_hook_allow(name, &effective_input)
                                     .await
                             }
                         }

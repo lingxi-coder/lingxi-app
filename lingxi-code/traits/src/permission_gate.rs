@@ -438,6 +438,26 @@ pub trait PermissionGate: Send + Sync {
         self.check_after_hook_allow(name, input).await
     }
 
+    /// `Fxy`'s STANDING PermissionRequest-hook `allow` — the arm where the hook
+    /// supplied no `updatedInput` and the tool does not require user interaction,
+    /// so the oracle's re-check gate `if(a.updatedInput||e.requiresUserInteraction
+    /// ?.())` is false and the allow returns UNCHECKED
+    /// (`return {behavior:"allow", updatedInput:l, decisionReason:{type:"hook",…}}`).
+    ///
+    /// Unlike [`Self::check_after_hook_allow`] (`lin`, PreToolUse) and
+    /// [`Self::check_after_hook_allow_rewritten`] (`Fxy` WITH a re-check), this
+    /// runs NO rule/mode verdict at all: an ordinary ask rule — the very reason
+    /// the gate resolved `Ask` and fired the PermissionRequest hook — must not be
+    /// re-evaluated, or the headless rescue is defeated in its primary use case.
+    /// A rule-evaluating gate still records its per-allow auto-mode bookkeeping.
+    ///
+    /// Additive DEFAULTED method (frozen-trait safe): the default is a wholesale
+    /// [`PermissionDecision::Allow`], correct for gates with no rule layer.
+    async fn honour_hook_allow(&self, name: &str, input: &Value) -> PermissionDecision {
+        let _ = (name, input);
+        PermissionDecision::Allow
+    }
+
     /// Resolve permission when the session is in PLAN mode — i.e. the model has
     /// run `EnterPlanMode` and not yet exited.
     ///

@@ -28,6 +28,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use tokio_util::sync::CancellationToken;
 use tui_core::ask_user_question_bridge::AskUserQuestionExchange;
+use tui_core::computer_access_bridge::ComputerAccessExchange;
 use tui_core::message::CurrentTodo;
 use tui_core::message::RenderedMessage;
 use tui_core::orchestrator_bridge::{RunningAgentStatus, TurnEvent};
@@ -35,6 +36,7 @@ use tui_core::permission_bridge::PermissionExchange;
 use tui_core::theme::{theme_for, Theme, ThemeName, ThemeSetting};
 
 use crate::bottom_pane::ask_user_question_view::AskUserQuestionView;
+use crate::bottom_pane::computer_access_view::ComputerAccessView;
 use crate::bottom_pane::permission_view::PermissionView;
 use crate::bottom_pane::permissions_editor_view::PermissionsSnapshot;
 use crate::bottom_pane::screen_view::ScreenView;
@@ -198,6 +200,7 @@ pub enum ChatOutcome {
 enum PendingPrompt {
     Permission(PermissionExchange),
     AskUserQuestion(AskUserQuestionExchange),
+    ComputerAccess(ComputerAccessExchange),
 }
 
 /// A `/sandbox` off-loop effect handed to the embedder via
@@ -1685,6 +1688,18 @@ impl ChatWidget {
         }
     }
 
+    /// Open the `computer` tool's `request_access` approval prompt. Like the
+    /// other interactive prompts, it serializes behind any currently open one
+    /// and surfaces once the keyboard is free.
+    pub fn open_computer_access(&mut self, exchange: ComputerAccessExchange) {
+        if self.has_open_interactive_prompt() {
+            self.pending_prompts
+                .push_back(PendingPrompt::ComputerAccess(exchange));
+        } else {
+            self.bottom_pane.show_computer_access(exchange);
+        }
+    }
+
     /// Whether a permission prompt is anywhere on the view stack (queued
     /// exchanges wait in [`Self::open_permission`]'s queue until it resolves).
     #[must_use]
@@ -1700,8 +1715,15 @@ impl ChatWidget {
     }
 
     #[must_use]
+    pub fn has_open_computer_access(&self) -> bool {
+        self.bottom_pane
+            .view_stack()
+            .contains::<ComputerAccessView>()
+    }
+
+    #[must_use]
     fn has_open_interactive_prompt(&self) -> bool {
-        self.has_open_permission() || self.has_open_ask_user_question()
+        self.has_open_permission() || self.has_open_ask_user_question() || self.has_open_computer_access()
     }
 
     /// Route a recognized slash command through the [`crate::command`]
@@ -3703,6 +3725,9 @@ impl ChatWidget {
                     }
                     PendingPrompt::AskUserQuestion(exchange) => {
                         self.bottom_pane.show_ask_user_question(exchange);
+                    }
+                    PendingPrompt::ComputerAccess(exchange) => {
+                        self.bottom_pane.show_computer_access(exchange);
                     }
                 }
             }

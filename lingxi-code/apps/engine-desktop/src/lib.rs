@@ -1183,6 +1183,7 @@ pub fn desktop_tool_registry(
         ctx,
         coordinator,
         None,
+        None,
         cron_auth,
         None,
         None,
@@ -1482,6 +1483,7 @@ pub fn register_desktop_tools(
     ask_user_question_resolver: Option<
         Arc<dyn tool_ui::ask_user_question::AskUserQuestionResolver>,
     >,
+    computer_access_resolver: Option<Arc<dyn tool_computer_use::ComputerAccessResolver>>,
     cron_auth: Option<Arc<dyn tool_cron::ClaudeAiAuthProvider>>,
     skill_loader: Option<Arc<dyn tool_skill::skill::SkillLoader>>,
     cwd_changed_firer: hooks::OptionalCwdChangedFirer,
@@ -1510,8 +1512,16 @@ pub fn register_desktop_tools(
     // The `computer` tool (M8-P11b). Cross-platform-registerable — its own
     // `is_enabled()` gates on `ctx.computer_control` being wired (real backend
     // only on macOS today), so registering it unconditionally here is safe:
-    // it simply advertises as disabled wherever no backend exists.
-    tool_computer_use::register_all(reg, ctx.clone());
+    // it simply advertises as disabled wherever no backend exists. Real
+    // sessions supply a `TuiBridgeResolver` so `request_access` surfaces the
+    // approval dialog; `None` (offline/mobile) keeps the fail-closed
+    // `DenyAllResolver` default.
+    match computer_access_resolver {
+        Some(resolver) => {
+            tool_computer_use::register_all_with_access_resolver(reg, ctx.clone(), resolver);
+        }
+        None => tool_computer_use::register_all(reg, ctx.clone()),
+    }
     // `RemoteTrigger` gets the credential-store auth provider on desktop so it
     // can drive the claude.ai CCR API in-process. `register_all_with_auth`
     // registers `ScheduleCron` + `RemoteTrigger` (the latter with `cron_auth`)
@@ -1697,6 +1707,8 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 ///     bg_session_forker: None,
 ///     // `None` ⟶ AskUserQuestion uses the non-TUI fallback path.
 ///     ask_user_question_tx: None,
+///     // `None` ⟶ `request_access` uses the fail-closed DenyAllResolver.
+///     computer_access_tx: None,
 /// };
 ///
 /// assert_eq!(cfg.cwd, PathBuf::from("/tmp/project"));
@@ -2017,6 +2029,14 @@ pub struct DesktopConfig {
     pub ask_user_question_tx: Option<
         tokio::sync::mpsc::Sender<tui_core::ask_user_question_bridge::AskUserQuestionExchange>,
     >,
+    /// Optional per-runtime TUI `computer` tool `request_access` bridge
+    /// sender. Interactive TUI hosts fill this so the approval dialog opens
+    /// in the mounted bottom-pane view; non-TUI hosts (and hosts without a
+    /// computer-control backend) leave it `None`, which keeps
+    /// `request_access` on the fail-closed `DenyAllResolver` default.
+    pub computer_access_tx: Option<
+        tokio::sync::mpsc::Sender<tui_core::computer_access_bridge::ComputerAccessExchange>,
+    >,
 }
 
 /// `--safe-mode` / `--bare` reduced-mode customization gates (M3, cc 2.1.198).
@@ -2198,6 +2218,10 @@ impl std::fmt::Debug for DesktopConfig {
                 "ask_user_question_tx",
                 &self.ask_user_question_tx.as_ref().map(|_| "<configured>"),
             )
+            .field(
+                "computer_access_tx",
+                &self.computer_access_tx.as_ref().map(|_| "<configured>"),
+            )
             .field("add_dir", &self.add_dir)
             .field("cli_mcp_server_count", &self.cli_mcp_servers.len())
             .field(
@@ -2287,6 +2311,7 @@ impl Default for DesktopConfig {
             // fails with a clear ActionFailed until `apps/cli` injects one.
             bg_session_forker: None,
             ask_user_question_tx: None,
+            computer_access_tx: None,
         }
     }
 }
@@ -6776,11 +6801,16 @@ pub async fn build(
             tx,
         )) as Arc<dyn tool_ui::ask_user_question::AskUserQuestionResolver>
     });
+    let computer_access_resolver = cfg.computer_access_tx.clone().map(|tx| {
+        Arc::new(tool_computer_use::TuiBridgeResolver::new(tx))
+            as Arc<dyn tool_computer_use::ComputerAccessResolver>
+    });
     let wakeup_scheduler_cell = register_desktop_tools(
         &mut tools_inner,
         tool_ctx,
         coordinator_wiring,
         ask_user_question_resolver,
+        computer_access_resolver,
         Some(cron_auth),
         Some(skill_loader),
         cwd_changed_firer,
@@ -8714,6 +8744,7 @@ mod tests {
             // The generic desktop test host does not mount an interactive TUI
             // questionnaire surface.
             ask_user_question_tx: None,
+            computer_access_tx: None,
         };
         (tmp, cfg)
     }

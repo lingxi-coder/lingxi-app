@@ -17,6 +17,7 @@
 pub mod ask_user_question_view;
 pub mod cd_confirm_view;
 pub mod completion_view;
+pub mod computer_access_view;
 pub mod connect_key_view;
 pub mod connect_method_view;
 pub mod connect_picker_view;
@@ -51,6 +52,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 use tui_core::ask_user_question_bridge::AskUserQuestionExchange;
+use tui_core::computer_access_bridge::ComputerAccessExchange;
 use tui_core::orchestrator_bridge::RunningAgentStatus;
 use tui_core::permission_bridge::PermissionExchange;
 use tui_core::theme::Theme;
@@ -59,6 +61,7 @@ use crate::bottom_pane::ask_user_question_view::AskUserQuestionView;
 use crate::bottom_pane::completion_view::{
     command_items_merged, emoji_items, exact_emoji, CompletionView, RegistrySlashRow,
 };
+use crate::bottom_pane::computer_access_view::ComputerAccessView;
 use crate::bottom_pane::model_picker_view::ModelPickerView;
 use crate::bottom_pane::pending_input_preview::PendingInputPreview;
 use crate::bottom_pane::permission_view::PermissionView;
@@ -614,6 +617,12 @@ impl BottomPane {
     pub fn show_ask_user_question(&mut self, exchange: AskUserQuestionExchange) {
         self.view_stack
             .push(Box::new(AskUserQuestionView::new(exchange)));
+    }
+
+    /// Open the `computer` tool's `request_access` approval dialog.
+    pub fn show_computer_access(&mut self, exchange: ComputerAccessExchange) {
+        self.view_stack
+            .push(Box::new(ComputerAccessView::new(exchange)));
     }
 
     /// Open the model picker over `rows` (an empty list renders the picker's

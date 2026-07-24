@@ -22,6 +22,7 @@ use ratatui::backend::{Backend, CrosstermBackend};
 use tokio::sync::mpsc::{Receiver, UnboundedReceiver};
 use tokio_util::sync::CancellationToken;
 use tui_core::ask_user_question_bridge::AskUserQuestionExchange;
+use tui_core::computer_access_bridge::ComputerAccessExchange;
 use tui_core::message::RenderedMessage;
 use tui_core::orchestrator_bridge::TurnEvent;
 use tui_core::permission_bridge::PermissionExchange;
@@ -172,6 +173,9 @@ pub struct RataApp<'cb> {
     /// Interactive AskUserQuestion exchanges, drained into the dedicated
     /// questionnaire view.
     ask_user_question_rx: Receiver<AskUserQuestionExchange>,
+    /// Interactive `computer` tool `request_access` exchanges, drained into
+    /// the dedicated approval view.
+    computer_access_rx: Receiver<ComputerAccessExchange>,
     /// Off-thread clipboard-image paste results (`ChatOutcome::PasteImage`):
     /// the loop spawns the (slow) clipboard read + PNG encode on a worker
     /// thread and drains its result here each tick.
@@ -195,6 +199,7 @@ impl<'cb> RataApp<'cb> {
         events_rx: UnboundedReceiver<TurnEvent>,
         permission_rx: Receiver<PermissionExchange>,
         ask_user_question_rx: Receiver<AskUserQuestionExchange>,
+        computer_access_rx: Receiver<ComputerAccessExchange>,
         callbacks: AppCallbacks<'cb>,
     ) -> Self {
         let (paste_tx, paste_rx) = std::sync::mpsc::channel();
@@ -203,6 +208,7 @@ impl<'cb> RataApp<'cb> {
             events_rx,
             permission_rx,
             ask_user_question_rx,
+            computer_access_rx,
             paste_tx,
             paste_rx,
             callbacks,
@@ -231,6 +237,9 @@ impl<'cb> RataApp<'cb> {
             }
             while let Ok(exchange) = self.ask_user_question_rx.try_recv() {
                 self.open_ask_user_question(exchange);
+            }
+            while let Ok(exchange) = self.computer_access_rx.try_recv() {
+                self.open_computer_access(exchange);
             }
             // Off-thread clipboard-image paste results (Ctrl+V): attach the
             // temp PNG (or surface the error) as soon as the worker delivers.
@@ -444,6 +453,10 @@ impl<'cb> RataApp<'cb> {
         self.chat_widget.open_ask_user_question(exchange);
     }
 
+    fn open_computer_access(&mut self, exchange: ComputerAccessExchange) {
+        self.chat_widget.open_computer_access(exchange);
+    }
+
     /// Route one key press into the chat widget.
     fn on_key(&mut self, key: KeyEvent) -> ChatOutcome {
         self.chat_widget.handle_key(key)
@@ -559,6 +572,7 @@ pub fn run_app(
     events_rx: UnboundedReceiver<TurnEvent>,
     permission_rx: Receiver<PermissionExchange>,
     ask_user_question_rx: Receiver<AskUserQuestionExchange>,
+    computer_access_rx: Receiver<ComputerAccessExchange>,
     subscription: Option<traits::subscription::SharedSubscription>,
     status_line: Option<crate::status_line::SharedStatusLine>,
     web_snapshot: Option<std::sync::Arc<std::sync::Mutex<crate::web::picker::WebConfigSnapshot>>>,
@@ -622,6 +636,7 @@ pub fn run_app(
         events_rx,
         permission_rx,
         ask_user_question_rx,
+        computer_access_rx,
         AppCallbacks {
             on_submit: Box::new(on_submit),
             on_switch_model: Box::new(on_switch_model),
@@ -745,12 +760,14 @@ mod tests {
         let (_events_tx, events_rx) = tokio::sync::mpsc::unbounded_channel();
         let (_permission_tx, permission_rx) = tokio::sync::mpsc::channel(1);
         let (_ask_user_question_tx, ask_user_question_rx) = tokio::sync::mpsc::channel(1);
+        let (_computer_access_tx, computer_access_rx) = tokio::sync::mpsc::channel(1);
         let app = RataApp::new(
             messages,
             SessionInfo::default(),
             events_rx,
             permission_rx,
             ask_user_question_rx,
+            computer_access_rx,
             AppCallbacks {
                 on_submit: Box::new(|_, _, _| {}),
                 on_switch_model: Box::new(|_, _| {}),

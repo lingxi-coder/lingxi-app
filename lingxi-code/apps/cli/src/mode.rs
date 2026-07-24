@@ -260,16 +260,19 @@ pub(crate) async fn run_ratatui_with_initial_prompt(
     // captured before `tui_build` is partly consumed below).
     let initial_permission_mode = tui_build.initial_permission_mode;
     let bypass_available = tui_build.bypass_available;
-    let (bridge_rx, permission_rx, ask_user_question_rx) = match &registration {
+    let (bridge_rx, permission_rx, ask_user_question_rx, computer_access_rx) = match &registration
+    {
         Some(reg) => (
             spawn_status_bridge_forwarder(tui_build.bridge_rx, reg.clone()),
             spawn_status_permission_forwarder(tui_build.permission_rx, reg.clone()),
             spawn_status_ask_user_question_forwarder(tui_build.ask_user_question_rx, reg.clone()),
+            spawn_status_computer_access_forwarder(tui_build.computer_access_rx, reg.clone()),
         ),
         None => (
             tui_build.bridge_rx,
             tui_build.permission_rx,
             tui_build.ask_user_question_rx,
+            tui_build.computer_access_rx,
         ),
     };
     let turn_tx = tui_build.turn_tx;
@@ -1018,6 +1021,7 @@ pub(crate) async fn run_ratatui_with_initial_prompt(
             bridge_rx,
             permission_rx,
             ask_user_question_rx,
+            computer_access_rx,
             Some(subscription),
             Some(status_line),
             Some(web_snapshot),
@@ -2127,6 +2131,32 @@ fn spawn_status_ask_user_question_forwarder(
     tokio::spawn(async move {
         while let Some(mut exchange) = src.recv().await {
             reg.update_status("waiting", Some("question prompt"));
+            let (wrapped_tx, wrapped_rx) = tokio::sync::oneshot::channel();
+            let original_tx = std::mem::replace(&mut exchange.resp_tx, wrapped_tx);
+            let reg = reg.clone();
+            tokio::spawn(async move {
+                let resolved = wrapped_rx.await;
+                reg.update_status("busy", None);
+                if let Ok(resp) = resolved {
+                    let _ = original_tx.send(resp);
+                }
+            });
+            if tx.send(exchange).await.is_err() {
+                break;
+            }
+        }
+    });
+    rx
+}
+
+fn spawn_status_computer_access_forwarder(
+    mut src: tokio::sync::mpsc::Receiver<tui_core::computer_access_bridge::ComputerAccessExchange>,
+    reg: Arc<crate::agents_registry::SessionRegistration>,
+) -> tokio::sync::mpsc::Receiver<tui_core::computer_access_bridge::ComputerAccessExchange> {
+    let (tx, rx) = tokio::sync::mpsc::channel(16);
+    tokio::spawn(async move {
+        while let Some(mut exchange) = src.recv().await {
+            reg.update_status("waiting", Some("computer access prompt"));
             let (wrapped_tx, wrapped_rx) = tokio::sync::oneshot::channel();
             let original_tx = std::mem::replace(&mut exchange.resp_tx, wrapped_tx);
             let reg = reg.clone();

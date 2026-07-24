@@ -199,6 +199,10 @@ pub struct TuiBuild {
     /// routing those tools through the generic permission prompt.
     pub ask_user_question_rx:
         tokio::sync::mpsc::Receiver<tui_core::ask_user_question_bridge::AskUserQuestionExchange>,
+    /// Receiver for interactive `computer` tool `request_access` exchanges.
+    /// The TUI drains this into the dedicated approval bottom-pane view.
+    pub computer_access_rx:
+        tokio::sync::mpsc::Receiver<tui_core::computer_access_bridge::ComputerAccessExchange>,
     /// (/permissions) The gate's shared session-scoped allow-rule list. The
     /// `/permissions` editor pushes an ADDED allow rule here (in addition to
     /// the disk persist) so it takes effect THIS session — the same in-memory
@@ -901,6 +905,7 @@ pub(crate) fn resolve_desktop_config(
             ),
         )),
         ask_user_question_tx: None,
+        computer_access_tx: None,
     }
     // NOTE: claude-code's `--add-dir` is "Additional directories to allow TOOL
     // ACCESS to" (NOT LINGXI.md search — an earlier comment here misread it). It
@@ -1058,6 +1063,10 @@ pub async fn build_runtime_for_tui_inner_with_parent(
         tui_core::ask_user_question_bridge::AskUserQuestionExchange,
     >(16);
     cfg.ask_user_question_tx = Some(ask_user_question_tx);
+    let (computer_access_tx, computer_access_rx) = tokio::sync::mpsc::channel::<
+        tui_core::computer_access_bridge::ComputerAccessExchange,
+    >(16);
+    cfg.computer_access_tx = Some(computer_access_tx);
     let session_allow_rules = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
     // (/permissions) The interactive editor reuses BOTH the gate's live
     // allow-rule bucket (for this-session effect of an added allow rule) and
@@ -1092,6 +1101,7 @@ pub async fn build_runtime_for_tui_inner_with_parent(
         turn_tx,
         permission_rx: perm_rx,
         ask_user_question_rx,
+        computer_access_rx,
         session_allow_rules: editor_session_allow_rules,
         permission_paths,
         company_announcements,
@@ -1144,6 +1154,14 @@ mod tests {
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty)
             ),
             "ask_user_question_rx must be wired + open (resolver holds the sender)"
+        );
+        let mut computer_access_rx = build.computer_access_rx;
+        assert!(
+            matches!(
+                computer_access_rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ),
+            "computer_access_rx must be wired + open (resolver holds the sender)"
         );
     }
 

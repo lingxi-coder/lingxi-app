@@ -394,6 +394,9 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         // session-scoped resolver unwired instead of creating an orphaned
         // channel whose questions can never be answered.
         ask_user_question_tx: None,
+        // Same rationale as `ask_user_question_tx` above — no mounted TUI to
+        // surface the `computer` tool's approval dialog.
+        computer_access_tx: None,
         // M10: the bridge-server does not start a coordinator session by
         // default (threading this from session metadata is a follow-up).
         session_started_as_coordinator: false,
@@ -1002,6 +1005,7 @@ mod tests {
             deny_unresolved_ask: false,
             injected_permission_gate: None,
             ask_user_question_tx: None,
+            computer_access_tx: None,
             session_started_as_coordinator: false,
             // Deterministic test: empty memory, never the real FS.
             memory_provider: None,

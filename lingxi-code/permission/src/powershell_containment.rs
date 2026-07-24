@@ -936,15 +936,29 @@ pub fn param_in_list(short: &str, list: &[&str]) -> bool {
 /// `element_types[i + 1]` is the type of `args[i]` (`_Br`-mapped, e.g.
 /// `"StringConstant"`, `"Parameter"`, `"SubExpression"`, `"Variable"`). A missing
 /// entry (short vector) reads as "unknown", exactly like JS `a[p+1] === undefined`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PsCommand {
     /// The command name as written (alias or canonical cmdlet, any casing).
     pub name: String,
+    /// The command NAME's resolved kind (claude-code `nameType`): `"cmdlet"`
+    /// (Verb-Noun), `"application"` (path-like / non-ASCII → resolved from a
+    /// path), or `"unknown"`. Used by the `acceptEdits` whole-pipeline validator
+    /// (`zLs`) to refuse a path-resolved application name. Default `""` reads as
+    /// "not classified" (never `"application"`), so a hand-built command is never
+    /// wrongly refused by the application check.
+    pub name_type: String,
     /// The command's arguments, in order, as reconstructed token text.
     pub args: Vec<String>,
     /// Simplified AST element types: `[0]` is the name's type; `[i + 1]` is the
     /// type of `args[i]`. A short vector reads as "unknown" for missing entries.
     pub element_types: Vec<String>,
+    /// Per-argument inline-value children (claude-code `children`): for a
+    /// `-Param:value` argument, `children[i]` holds the simplified element type(s)
+    /// of the bound value (e.g. an array literal → `["Other"]`). Aligned with
+    /// [`Self::args`]; `None` when the argument has no inline value. Empty vector
+    /// = "no children array" (claude-code `l.children === undefined`). Consulted
+    /// by the `acceptEdits` validator's `h3` unvalidatable-argument check.
+    pub children: Vec<Option<Vec<String>>>,
     /// This command's output redirections (claude-code `l.redirections`).
     pub redirections: Vec<PsRedirection>,
 }
@@ -980,6 +994,43 @@ pub struct PsStatement {
     pub nested_commands: Vec<PsCommand>,
     /// Statement-level output redirections.
     pub redirections: Vec<PsRedirection>,
+    /// The raw AST statement type (claude-code `statementType`, e.g.
+    /// `"PipelineAst"` / `"AssignmentStatementAst"`). The `acceptEdits` validator
+    /// treats `"AssignmentStatementAst"` as an assignment feature (→ passthrough).
+    /// Default `""` (no assignment).
+    pub statement_type: String,
+    /// Dangerous-construct flags discovered anywhere in this statement's AST
+    /// (claude-code `securityPatterns`). The `acceptEdits` validator's `Voe`
+    /// feature aggregate ORs these into its member-invocation / sub-expression /
+    /// expandable-string / script-block features. Default all-false.
+    pub security_patterns: PsSecurityPatterns,
+}
+
+/// Dangerous-construct flags for a statement (claude-code `securityPatterns`).
+/// Populated by the `pwsh` parse (`Get-SecurityPatterns`), which finds member /
+/// sub / array / paren / expandable-string / script-block expressions anywhere in
+/// the statement AST. Consumed by the `acceptEdits` validator's `Voe` aggregate.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PsSecurityPatterns {
+    /// A member access / method invocation (`$x.Prop`, `$x.Method()`).
+    pub has_member_invocations: bool,
+    /// A sub-expression / array-expression / paren-expression (`$( )`, `@( )`, `( )`).
+    pub has_sub_expressions: bool,
+    /// An expandable (double-quoted / interpolating) string.
+    pub has_expandable_strings: bool,
+    /// A script block (`{ … }`).
+    pub has_script_blocks: bool,
+}
+
+/// A variable reference discovered by the `pwsh` parse (claude-code
+/// `parseResult.variables[]`). The `acceptEdits` validator's `Voe` aggregate uses
+/// [`Self::is_splatted`] to detect splatting (`@args`), which is unvalidatable.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PsVariable {
+    /// The variable path text (e.g. `"args"` for `$args` / `@args`).
+    pub path: String,
+    /// Whether the variable was splatted (`@name`) — feeds `hasSplatting`.
+    pub is_splatted: bool,
 }
 
 /// Result of [`extract_paths`] (claude-code `X_u`): the file-path arguments, the
@@ -3063,6 +3114,473 @@ pub fn powershell_git_battery(
     }
 
     None
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// acceptEdits whole-pipeline auto-allow — claude-code `zLs` (2.1.218).
+//
+// In `AcceptEdits` mode, CC auto-allows a STRUCTURALLY-SAFE PowerShell write
+// pipeline via a whole-pipeline validator. This port covers the `acceptEdits`
+// arm of `zLs`: the `Voe` feature aggregate, the New-Item link check (`VLs`), the
+// compound cd+write guard (`gsn`/`GLs`), and the per-command / nested-command
+// structural loops (`ANt`/`ULs`/`GLs`/`h3`). It ONLY ever ALLOWS or passes
+// through — it never denies or asks. PATH containment stays the job of
+// [`validate_ps_statements`]; the policy orchestrator composes them so an
+// out-of-cwd containment ASK still overrides this structural ALLOW (see
+// `PermissionPolicy::check_powershell_containment`). Consequently, being
+// conservative here (passing through where the oracle would allow) is always the
+// SAFE direction — it can only ask MORE, never auto-allow something dangerous.
+// ───────────────────────────────────────────────────────────────────────────
+
+/// Outcome of the `acceptEdits` whole-pipeline validator (claude-code `zLs`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PsAcceptEditsResult {
+    /// The whole pipeline is structurally safe → auto-allow under `AcceptEdits`.
+    Allow,
+    /// Not auto-allowable — fall through to the normal permission flow (which may
+    /// ask). Carries the claude-code passthrough reason (for diagnostics/tests).
+    Passthrough(String),
+}
+
+/// `fG_` — cmdlets that WRITE a file (claude-code `GLs = fG_.has(wb(name))`).
+const FG_WRITE: [&str; 4] = ["set-content", "add-content", "remove-item", "clear-content"];
+/// `Y8_` — the out-null sink (claude-code `ANt = Y8_.has(wb(name))`): safe, no file.
+const Y8_OUT_NULL: [&str; 1] = ["out-null"];
+/// `J8_` — read-only formatting/display cmdlets (claude-code `ULs`'s set half).
+const J8_FORMATTING: [&str; 11] = [
+    "format-table",
+    "format-list",
+    "format-wide",
+    "format-custom",
+    "measure-object",
+    "select-object",
+    "sort-object",
+    "group-object",
+    "where-object",
+    "out-string",
+    "out-host",
+];
+/// `mG_` — New-Item link item-types (claude-code `VLs`).
+const MG_SYMLINK_TYPES: [&str; 3] = ["symboliclink", "junction", "hardlink"];
+
+/// `GLs(name)` — is `name` a write cmdlet (post-`wb` normalization)?
+fn gls_is_write(name: &str) -> bool {
+    FG_WRITE.contains(&normalize_cmdlet(name).as_str())
+}
+
+/// `ANt(name)` — is `name` the out-null sink (post-`wb` normalization)?
+fn ant_is_out_null(name: &str) -> bool {
+    Y8_OUT_NULL.contains(&normalize_cmdlet(name).as_str())
+}
+
+/// `ULs(cmd, command)` — is `cmd` a read-only formatting/display cmdlet whose
+/// arguments the read-only-command validator (`wNt`) accepts?
+///
+/// The `J8_` formatting SET is ported faithfully. The `wNt` half — CC's large
+/// read-only-command validator (its own `jRd` regex/callback table + `X8_`
+/// application whitelist) — is NOT ported here and is treated as UNSATISFIED
+/// (returns `false`). Because `zLs` only ever ALLOWS or passes through, refusing
+/// to treat a formatting cmdlet as auto-safe merely makes the pipeline fall to
+/// `!GLs` → passthrough (an ASK). That is strictly the SAFE (over-ask) direction:
+/// it can NEVER auto-allow a formatting-cmdlet pipeline the oracle would reject.
+/// The residual is a bounded OVER-ASK (a pipeline that pipes through
+/// `Select-Object`/`Sort-Object`/… into a write asks instead of auto-allowing);
+/// porting `wNt` in a follow-up would close it without weakening safety.
+fn uls_is_safe_formatting(cmd: &PsCommand) -> bool {
+    if !J8_FORMATTING.contains(&normalize_cmdlet(&cmd.name).as_str()) {
+        return false;
+    }
+    // wNt(cmd, command) conservatively unsatisfied — see the doc comment above.
+    false
+}
+
+/// claude-code `/[$(@{[]/` — does `s` contain a metacharacter that begins an
+/// expression (variable / subexpression / splat / hashtable / array)?
+fn contains_expr_meta(s: &str) -> bool {
+    s.chars().any(|c| matches!(c, '$' | '(' | '@' | '{' | '['))
+}
+
+/// `hG_(l)` — is `l` an `-ItemType` / `-Type` parameter name (≥3-char unambiguous
+/// prefix)?
+fn hg_is_itemtype(l: &str) -> bool {
+    (l.len() >= 3 && "-itemtype".starts_with(l)) || (l.len() >= 3 && "-type".starts_with(l))
+}
+
+/// `gsn(name)` — a directory-CHANGING command (claude-code): the literal
+/// `cd..`/`cd\`/`cd/`/`cd~` forms, a bare drive letter (`^[a-z]:$`), or a name
+/// normalizing to `set-location`/`push-location`/`pop-location`/`new-psdrive`
+/// (plus the Windows `ndr`/`mount` aliases). Sibling of `ps_element_is_cd_like`
+/// in the policy layer; kept here because `zLs`'s compound-cd guard needs it.
+fn gsn_is_dir_changing(name: &str) -> bool {
+    let t = name.to_lowercase();
+    if matches!(t.as_str(), "cd.." | "cd\\" | "cd/" | "cd~") {
+        return true;
+    }
+    let b = t.as_bytes();
+    if b.len() == 2 && b[0].is_ascii_lowercase() && b[1] == b':' {
+        return true;
+    }
+    let r = normalize_cmdlet(name);
+    matches!(
+        r.as_str(),
+        "set-location" | "push-location" | "pop-location" | "new-psdrive"
+    ) || (cfg!(target_os = "windows") && matches!(r.as_str(), "ndr" | "mount"))
+}
+
+/// `VLs(cmd)` — a `New-Item` that creates a filesystem LINK (a `-ItemType` /
+/// `-Type` value that is (a prefix of) SymbolicLink/Junction/HardLink, or a
+/// glob/expression that cannot be statically validated). Such a command cannot
+/// auto-allow because later path validation cannot follow a just-created link.
+fn vls_is_symlink_new_item(cmd: &PsCommand) -> bool {
+    if normalize_cmdlet(&cmd.name) != "new-item" {
+        return false;
+    }
+    for r in 0..cmd.args.len() {
+        let n = &cmd.args[r];
+        if n.is_empty() {
+            continue;
+        }
+        let first = n.chars().next().unwrap();
+        // i = (fZ.has(n[0]) || n[0]==='/' ? "-"+n.slice(1) : n).toLowerCase().
+        let i: String = if EY.contains(&first) || first == '/' {
+            format!("-{}", &n[first.len_utf8()..])
+        } else {
+            n.clone()
+        }
+        .to_lowercase();
+        // s = i.indexOf(":",1) with s>0 semantics — first ':' byte at position ≥1
+        // (`:` is ASCII, never inside a multi-byte sequence).
+        let s = i
+            .bytes()
+            .enumerate()
+            .skip(1)
+            .find(|&(_, byte)| byte == b':')
+            .map(|(idx, _)| idx);
+        // a = s>0 ? i.slice(0,s) : i ; l = TV(a…).toLowerCase().
+        let a: &str = match s {
+            Some(si) => &i[..si],
+            None => &i,
+        };
+        let l = battery_backtick_decode(a).to_lowercase();
+        if !hg_is_itemtype(&l) {
+            continue;
+        }
+        // c = s>0 ? i.slice(s+1) : args[r+1]?.toLowerCase() ?? "".
+        let c: String = match s {
+            Some(si) => i[si + 1..].to_string(),
+            None => cmd
+                .args
+                .get(r + 1)
+                .map(|x| x.to_lowercase())
+                .unwrap_or_default(),
+        };
+        // u = OF(Ose(TV(c…))).toLowerCase() — backtick-decode, strip comments/ws,
+        // strip surrounding quotes (`OF(Ose(…))` == `clean_value`).
+        let decoded = battery_backtick_decode(&c);
+        let u = strip_surrounding_quotes(strip_comments_and_leading_ws(&decoded)).to_lowercase();
+        // A glob / expression value cannot be validated → treat as a link.
+        if u.chars().any(|ch| matches!(ch, '?' | '*' | '[' | ']' | '(' | '$')) {
+            return true;
+        }
+        // A (prefix of a) link item-type → a link.
+        for d in MG_SYMLINK_TYPES {
+            if !u.is_empty() && d.starts_with(u.as_str()) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// The `Voe` feature aggregate (claude-code): dangerous constructs anywhere in the
+/// parse that make the whole command unvalidatable for auto-allow. The seven
+/// boolean features mirror the oracle's `Voe` object one-for-one.
+#[allow(clippy::struct_excessive_bools)]
+struct VoeFeatures {
+    has_sub_expressions: bool,
+    has_script_blocks: bool,
+    has_splatting: bool,
+    has_expandable_strings: bool,
+    has_member_invocations: bool,
+    has_assignments: bool,
+    has_stop_parsing: bool,
+}
+
+impl VoeFeatures {
+    /// Any dangerous feature present → the command passes through (never allows).
+    fn any(&self) -> bool {
+        self.has_sub_expressions
+            || self.has_script_blocks
+            || self.has_member_invocations
+            || self.has_splatting
+            || self.has_assignments
+            || self.has_stop_parsing
+            || self.has_expandable_strings
+    }
+}
+
+/// `r(command)` in `Voe` — OR the command's simplified element types into the
+/// feature aggregate.
+fn voe_scan(cmd: &PsCommand, t: &mut VoeFeatures) {
+    for o in &cmd.element_types {
+        match o.as_str() {
+            "ScriptBlock" => t.has_script_blocks = true,
+            "SubExpression" => t.has_sub_expressions = true,
+            "ExpandableString" => t.has_expandable_strings = true,
+            "MemberInvocation" => t.has_member_invocations = true,
+            _ => {}
+        }
+    }
+}
+
+/// `Voe(t)` — aggregate the dangerous features across all statements + variables.
+fn voe(statements: &[PsStatement], variables: &[PsVariable], has_stop_parsing: bool) -> VoeFeatures {
+    let mut t = VoeFeatures {
+        has_sub_expressions: false,
+        has_script_blocks: false,
+        has_splatting: false,
+        has_expandable_strings: false,
+        has_member_invocations: false,
+        has_assignments: false,
+        has_stop_parsing,
+    };
+    for n in statements {
+        if n.statement_type == "AssignmentStatementAst" {
+            t.has_assignments = true;
+        }
+        // CC scans every `n.commands` element via `r(o)`. An Expression pipeline
+        // element carries only a single element type in CC; every feature-setting
+        // type (Sub/Script/Expandable/Member) is ALSO reported by the statement's
+        // `securityPatterns` (folded in below), so scanning only Command elements
+        // here loses no feature — verified against `Get-SecurityPatterns`.
+        for el in &n.commands {
+            if let PsElement::Command(c) = el {
+                voe_scan(c, &mut t);
+            }
+        }
+        for c in &n.nested_commands {
+            voe_scan(c, &mut t);
+        }
+        let sp = &n.security_patterns;
+        if sp.has_member_invocations {
+            t.has_member_invocations = true;
+        }
+        if sp.has_sub_expressions {
+            t.has_sub_expressions = true;
+        }
+        if sp.has_expandable_strings {
+            t.has_expandable_strings = true;
+        }
+        if sp.has_script_blocks {
+            t.has_script_blocks = true;
+        }
+    }
+    for v in variables {
+        if v.is_splatted {
+            t.has_splatting = true;
+            break;
+        }
+    }
+    t
+}
+
+/// `h3(cmd)` — do the command's arguments contain something that cannot be
+/// statically validated (a non-literal element type carrying an expression, or a
+/// Parameter with an expression-typed inline value / colon-bound expression)?
+fn h3_has_unvalidatable_args(cmd: &PsCommand) -> bool {
+    // r = elementTypes.slice(1) ; n = args ; o = children (aligned with args).
+    let types = cmd.element_types.get(1..).unwrap_or(&[]);
+    for (i, ty) in types.iter().enumerate() {
+        let ty = ty.as_str();
+        if ty != "StringConstant" && ty != "Parameter" {
+            let arg = cmd.args.get(i).map_or("", String::as_str);
+            if !contains_expr_meta(arg) {
+                continue;
+            }
+            return true;
+        }
+        if ty == "Parameter" {
+            match cmd.children.get(i).and_then(Option::as_ref) {
+                // A parsed inline value (`-Param:value`): a non-StringConstant
+                // child (array literal, etc.) is unvalidatable.
+                Some(child_types) => {
+                    if child_types.iter().any(|c| c != "StringConstant") {
+                        return true;
+                    }
+                }
+                // No parsed child → check the raw colon-bound value for an
+                // expression metacharacter.
+                None => {
+                    let arg = cmd.args.get(i).map_or("", String::as_str);
+                    if let Some(ci) = arg.find(':') {
+                        if ci > 0 && contains_expr_meta(&arg[ci + 1..]) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// The shared per-command tail of `zLs` (`ANt`/`ULs` safe-continue → `!GLs`
+/// passthrough → `h3` passthrough). Returns `Some(reason)` to pass through, or
+/// `None` when the command is safe (a recognized read-only/out-null cmdlet, or a
+/// write cmdlet with statically-validatable arguments). `nested` selects the
+/// nested-command variant of the `h3` message.
+fn zls_command_tail(cmd: &PsCommand, nested: bool) -> Option<String> {
+    if ant_is_out_null(&cmd.name) || uls_is_safe_formatting(cmd) {
+        return None;
+    }
+    if !gls_is_write(&cmd.name) {
+        return Some(format!(
+            "No mode-specific handling for '{}' in acceptEdits mode",
+            cmd.name
+        ));
+    }
+    if h3_has_unvalidatable_args(cmd) {
+        return Some(if nested {
+            format!(
+                "Arguments in nested '{}' cannot be statically validated in acceptEdits mode",
+                cmd.name
+            )
+        } else {
+            format!(
+                "Arguments in '{}' cannot be statically validated in acceptEdits mode",
+                cmd.name
+            )
+        });
+    }
+    None
+}
+
+/// The `acceptEdits` whole-pipeline validator (claude-code `zLs`, `acceptEdits`
+/// arm). Returns [`PsAcceptEditsResult::Allow`] only for a fully structurally-safe
+/// write pipeline; otherwise [`PsAcceptEditsResult::Passthrough`] with the reason.
+///
+/// The caller MUST gate this on `mode == AcceptEdits` and a valid parse, and MUST
+/// compose it so a path-containment ASK ([`validate_ps_statements`]) overrides
+/// this ALLOW (an out-of-cwd write still asks). This function performs NO path
+/// containment — it is purely structural.
+#[must_use]
+pub fn ps_accept_edits_validate(
+    statements: &[PsStatement],
+    variables: &[PsVariable],
+    has_stop_parsing: bool,
+) -> PsAcceptEditsResult {
+    use PsAcceptEditsResult::{Allow, Passthrough};
+
+    // Voe feature aggregate — any dangerous feature → passthrough.
+    if voe(statements, variables, has_stop_parsing).any() {
+        return Passthrough(
+            "Command contains subexpressions, script blocks, or member invocations that require approval"
+                .to_string(),
+        );
+    }
+    if statements.is_empty() {
+        return Passthrough("No commands found to validate for acceptEdits mode".to_string());
+    }
+    // i = total pipeline element count across all statements.
+    let total: usize = statements.iter().map(|s| s.commands.len()).sum();
+
+    // New-Item symlink/junction/hardlink → passthrough.
+    let creates_link = statements.iter().any(|s| {
+        s.commands.iter().any(|el| match el {
+            PsElement::Command(c) => vls_is_symlink_new_item(c),
+            PsElement::Expression { .. } => false,
+        })
+    });
+    if creates_link {
+        return Passthrough(
+            "Command creates a filesystem link (New-Item -ItemType SymbolicLink/Junction/HardLink) \u{2014} cannot auto-allow because later path validation cannot follow just-created links"
+                .to_string(),
+        );
+    }
+
+    // Compound cd + write → passthrough (path validation would use a stale cwd).
+    if total > 1 {
+        let mut has_cd = false;
+        let mut has_write = false;
+        for s in statements {
+            for el in &s.commands {
+                if let PsElement::Command(c) = el {
+                    if gsn_is_dir_changing(&c.name) {
+                        has_cd = true;
+                    }
+                    if gls_is_write(&c.name) {
+                        has_write = true;
+                    }
+                }
+            }
+        }
+        if has_cd && has_write {
+            return Passthrough(
+                "Compound command contains a directory-changing command (Set-Location/Push-Location/Pop-Location) with a write operation \u{2014} cannot auto-allow because path validation uses stale cwd"
+                    .to_string(),
+            );
+        }
+    }
+
+    // Per-statement command + nested-command structural checks.
+    for s in statements {
+        for el in &s.commands {
+            let c = match el {
+                PsElement::Expression { text } => {
+                    return Passthrough(format!(
+                        "Pipeline contains expression source ({text}) that cannot be statically validated"
+                    ));
+                }
+                PsElement::Command(c) => c,
+            };
+            if c.name_type == "application" {
+                return Passthrough(format!(
+                    "Command '{}' resolved from a path-like name and requires approval",
+                    c.name
+                ));
+            }
+            // elementTypes[1..]: every arg type must be StringConstant|Parameter;
+            // a Parameter with a colon-bound expression is unvalidatable.
+            for idx in 1..c.element_types.len() {
+                let u = c.element_types[idx].as_str();
+                if u != "StringConstant" && u != "Parameter" {
+                    return Passthrough(format!(
+                        "Command argument has unvalidatable type ({u}) \u{2014} variable paths cannot be statically resolved"
+                    ));
+                }
+                if u == "Parameter" {
+                    let d = c.args.get(idx - 1).map_or("", String::as_str);
+                    if let Some(p) = d.find(':') {
+                        if p > 0 && contains_expr_meta(&d[p + 1..]) {
+                            return Passthrough(
+                                "Colon-bound parameter contains an expression that cannot be statically validated"
+                                    .to_string(),
+                            );
+                        }
+                    }
+                }
+            }
+            if let Some(reason) = zls_command_tail(c, false) {
+                return Passthrough(reason);
+            }
+        }
+        // Nested commands (script blocks / control flow). CC's nested loop omits
+        // the per-arg type / colon loop (h3 re-checks types internally) but keeps
+        // the application check + the ANt/ULs/GLs/h3 tail.
+        for c in &s.nested_commands {
+            if c.name_type == "application" {
+                return Passthrough(format!(
+                    "Nested command '{}' resolved from a path-like name and requires approval",
+                    c.name
+                ));
+            }
+            if let Some(reason) = zls_command_tail(c, true) {
+                return Passthrough(reason);
+            }
+        }
+    }
+
+    Allow
 }
 
 #[cfg(test)]

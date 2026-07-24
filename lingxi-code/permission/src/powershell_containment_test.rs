@@ -129,6 +129,7 @@ fn cmd(name: &str, args: &[&str]) -> PsCommand {
         args: args.iter().map(|s| (*s).to_string()).collect(),
         element_types: Vec::new(),
         redirections: Vec::new(),
+        ..PsCommand::default()
     }
 }
 
@@ -139,6 +140,7 @@ fn cmd_typed(name: &str, args: &[&str], types: &[&str]) -> PsCommand {
         args: args.iter().map(|s| (*s).to_string()).collect(),
         element_types: types.iter().map(|s| (*s).to_string()).collect(),
         redirections: Vec::new(),
+        ..PsCommand::default()
     }
 }
 
@@ -613,6 +615,7 @@ fn one_cmd_stmt(command: PsCommand) -> PsStatement {
         commands: vec![PsElement::Command(command)],
         nested_commands: Vec::new(),
         redirections: Vec::new(),
+        ..PsStatement::default()
     }
 }
 
@@ -690,6 +693,7 @@ fn vrg_gate_matrix_main_pipeline_and_nested() {
         commands: vec![PsElement::Command(cmd("Write-Output", &["run"]))],
         nested_commands: vec![write()],
         redirections: Vec::new(),
+        ..PsStatement::default()
     };
     match validate_ps_statement(&nested_stmt, &ctx_of(&roots, &[]), false) {
         PsContainmentResult::Ask { message, .. } => assert!(
@@ -844,6 +848,7 @@ fn xgg_pipeline_source_before_cmdlet_asks() {
         ],
         nested_commands: Vec::new(),
         redirections: Vec::new(),
+        ..PsStatement::default()
     };
     match validate_ps_statement(&stmt, &ctx_of(&roots, &[]), false) {
         PsContainmentResult::Ask { message, .. } => {
@@ -870,6 +875,7 @@ fn xgg_nested_control_flow_source_asks() {
         }],
         nested_commands: vec![cmd("Get-Content", &["notes.txt"])],
         redirections: Vec::new(),
+        ..PsStatement::default()
     };
     match validate_ps_statement(&stmt, &ctx_of(&roots, &[]), false) {
         PsContainmentResult::Ask { message, reason } => {
@@ -892,6 +898,7 @@ fn xgg_nested_without_pipeline_expression_no_control_flow_ask() {
         commands: vec![PsElement::Command(cmd("Write-Output", &["hi"]))],
         nested_commands: vec![cmd("Get-Content", &["notes.txt"])],
         redirections: Vec::new(),
+        ..PsStatement::default()
     };
     assert_eq!(
         validate_ps_statement(&stmt, &ctx_of(&roots, &[]), false),
@@ -911,6 +918,7 @@ fn xgg_nested_remove_recurse_cwd_asks_via_vrg_gate() {
         commands: vec![PsElement::Command(cmd("Write-Output", &["run"]))],
         nested_commands: vec![cmd("Remove-Item", &["-Recurse", "/proj/work"])],
         redirections: Vec::new(),
+        ..PsStatement::default()
     };
     match validate_ps_statement(&stmt, &ctx_of(&roots, &[]), false) {
         PsContainmentResult::Ask { message, .. } => assert!(
@@ -945,6 +953,7 @@ fn xgg_nested_remove_protected_still_denies() {
         commands: vec![PsElement::Command(cmd("Write-Output", &["run"]))],
         nested_commands: vec![cmd("Remove-Item", &["/etc"])],
         redirections: Vec::new(),
+        ..PsStatement::default()
     };
     assert!(matches!(
         validate_ps_statement(&stmt, &ctx_of(&roots, &[]), false),
@@ -962,6 +971,7 @@ fn xgg_redirection_outside_cwd_asks() {
             target: "/etc/evil".to_string(),
             is_merging: false,
         }],
+        ..PsStatement::default()
     };
     match validate_ps_statement(&stmt, &ctx_of(&roots, &[]), false) {
         PsContainmentResult::Ask { message, .. } => assert_eq!(
@@ -988,6 +998,7 @@ fn xgg_merging_and_empty_redirections_skipped() {
                 is_merging: false,
             },
         ],
+        ..PsStatement::default()
     };
     assert_eq!(
         validate_ps_statement(&stmt, &ctx_of(&roots, &[]), false),
@@ -1071,6 +1082,7 @@ fn bstmt(cmds: Vec<PsCommand>) -> PsStatement {
         commands: cmds.into_iter().map(PsElement::Command).collect(),
         nested_commands: Vec::new(),
         redirections: Vec::new(),
+        ..PsStatement::default()
     }
 }
 
@@ -1323,4 +1335,388 @@ fn battery_zbu_and_kbu_segment_matchers() {
     assert!(battery_kbu(".git/hooks/x"));
     assert!(!battery_kbu("head")); // dotgit does NOT match bare HEAD
     assert!(!battery_kbu("objects/pack"));
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// ps-acceptedits — the `zLs` whole-pipeline auto-allow validator.
+//
+// SAFETY CONTRACT: `ps_accept_edits_validate` performs NO path containment — it
+// only ever ALLOWs (structurally safe) or passes through. The out-of-cwd ASK
+// that stops a dangerous write comes from `validate_ps_statements`, which the
+// policy orchestrator composes ABOVE this allow (covered by the inline policy
+// test `ps_acceptedits_policy_test`). These tests pin the STRUCTURAL matrix.
+// ───────────────────────────────────────────────────────────────────────────
+
+/// Build a `zLs`-shaped command with explicit `name_type` + element types.
+fn zc(name: &str, name_type: &str, args: &[&str], types: &[&str]) -> PsCommand {
+    PsCommand {
+        name: name.to_string(),
+        name_type: name_type.to_string(),
+        args: args.iter().map(|s| (*s).to_string()).collect(),
+        element_types: types.iter().map(|s| (*s).to_string()).collect(),
+        ..PsCommand::default()
+    }
+}
+
+/// A single-pipeline statement built from `commands`.
+fn zstmt(commands: Vec<PsElement>) -> PsStatement {
+    PsStatement {
+        commands,
+        ..PsStatement::default()
+    }
+}
+
+fn ae(statements: &[PsStatement]) -> PsAcceptEditsResult {
+    ps_accept_edits_validate(statements, &[], false)
+}
+
+fn ae_passes(statements: &[PsStatement]) -> bool {
+    matches!(ae(statements), PsAcceptEditsResult::Passthrough(_))
+}
+
+#[test]
+fn zls_allows_simple_in_cwd_write() {
+    // Set-Content ./f.txt x — a single structurally-safe write → ALLOW.
+    let c = zc(
+        "Set-Content",
+        "cmdlet",
+        &["./f.txt", "x"],
+        &["StringConstant", "StringConstant", "StringConstant"],
+    );
+    assert_eq!(
+        ae(&[zstmt(vec![PsElement::Command(c)])]),
+        PsAcceptEditsResult::Allow
+    );
+}
+
+#[test]
+fn zls_allows_write_piped_to_out_null() {
+    // Set-Content ./f.txt x | Out-Null → the out-null sink is safe (ANt) → ALLOW.
+    let set = zc(
+        "Set-Content",
+        "cmdlet",
+        &["./f.txt", "x"],
+        &["StringConstant", "StringConstant", "StringConstant"],
+    );
+    let out = zc("Out-Null", "cmdlet", &[], &["StringConstant"]);
+    assert_eq!(
+        ae(&[zstmt(vec![
+            PsElement::Command(set),
+            PsElement::Command(out),
+        ])]),
+        PsAcceptEditsResult::Allow
+    );
+}
+
+#[test]
+fn zls_is_path_agnostic_but_containment_asks_out_of_cwd() {
+    // zLs is PURELY structural: Set-Content /etc/passwd x is structurally safe →
+    // it ALLOWs. The under-ask is prevented by the SEPARATE containment check,
+    // which asks on the same out-of-cwd write (even in acceptEdits mode).
+    let c = zc(
+        "Set-Content",
+        "cmdlet",
+        &["/etc/passwd", "x"],
+        &["StringConstant", "StringConstant", "StringConstant"],
+    );
+    assert_eq!(
+        ae(&[zstmt(vec![PsElement::Command(c.clone())])]),
+        PsAcceptEditsResult::Allow
+    );
+    let roots = ps_roots();
+    assert!(matches!(
+        validate_ps_statement(
+            &one_cmd_stmt(c),
+            &ctx_of_mode(&roots, &[], PermissionMode::AcceptEdits),
+            false,
+        ),
+        PsContainmentResult::Ask { .. }
+    ));
+}
+
+#[test]
+fn zls_passthrough_on_each_security_pattern_feature() {
+    let base = || {
+        zc(
+            "Set-Content",
+            "cmdlet",
+            &["./f.txt", "x"],
+            &["StringConstant", "StringConstant", "StringConstant"],
+        )
+    };
+    for sp in [
+        PsSecurityPatterns {
+            has_sub_expressions: true,
+            ..Default::default()
+        },
+        PsSecurityPatterns {
+            has_script_blocks: true,
+            ..Default::default()
+        },
+        PsSecurityPatterns {
+            has_member_invocations: true,
+            ..Default::default()
+        },
+        PsSecurityPatterns {
+            has_expandable_strings: true,
+            ..Default::default()
+        },
+    ] {
+        let s = PsStatement {
+            commands: vec![PsElement::Command(base())],
+            security_patterns: sp,
+            ..PsStatement::default()
+        };
+        assert!(ae_passes(&[s]));
+    }
+}
+
+#[test]
+fn zls_passthrough_on_assignment_statement() {
+    let s = PsStatement {
+        commands: vec![PsElement::Command(zc(
+            "Set-Content",
+            "cmdlet",
+            &["./f.txt", "x"],
+            &["StringConstant", "StringConstant", "StringConstant"],
+        ))],
+        statement_type: "AssignmentStatementAst".to_string(),
+        ..PsStatement::default()
+    };
+    assert!(ae_passes(&[s]));
+}
+
+#[test]
+fn zls_passthrough_on_stop_parsing_token() {
+    let s = zstmt(vec![PsElement::Command(zc(
+        "Set-Content",
+        "cmdlet",
+        &["./f.txt", "x"],
+        &["StringConstant", "StringConstant", "StringConstant"],
+    ))]);
+    // has_stop_parsing = true → passthrough.
+    assert!(matches!(
+        ps_accept_edits_validate(std::slice::from_ref(&s), &[], true),
+        PsAcceptEditsResult::Passthrough(_)
+    ));
+}
+
+#[test]
+fn zls_passthrough_on_splatting_variable() {
+    let s = zstmt(vec![PsElement::Command(zc(
+        "Set-Content",
+        "cmdlet",
+        &["./f.txt", "x"],
+        &["StringConstant", "StringConstant", "StringConstant"],
+    ))]);
+    let vars = [PsVariable {
+        path: "args".to_string(),
+        is_splatted: true,
+    }];
+    assert!(matches!(
+        ps_accept_edits_validate(std::slice::from_ref(&s), &vars, false),
+        PsAcceptEditsResult::Passthrough(_)
+    ));
+}
+
+#[test]
+fn zls_passthrough_on_element_type_feature() {
+    // A SubExpression-typed arg is folded by Voe's element-type scan even without
+    // a `securityPatterns` object → passthrough.
+    let c = zc(
+        "Set-Content",
+        "cmdlet",
+        &["./f.txt", "$(danger)"],
+        &["StringConstant", "StringConstant", "SubExpression"],
+    );
+    assert!(ae_passes(&[zstmt(vec![PsElement::Command(c)])]));
+}
+
+#[test]
+fn zls_passthrough_on_new_item_symlink_types() {
+    for ty in ["SymbolicLink", "Junction", "HardLink"] {
+        let c = zc(
+            "New-Item",
+            "cmdlet",
+            &["-ItemType", ty, "-Path", "./link"],
+            &[
+                "StringConstant",
+                "Parameter",
+                "StringConstant",
+                "Parameter",
+                "StringConstant",
+            ],
+        );
+        match ae(&[zstmt(vec![PsElement::Command(c)])]) {
+            PsAcceptEditsResult::Passthrough(r) => {
+                assert!(r.contains("creates a filesystem link"), "{ty}: {r}");
+            }
+            other => panic!("{ty}: expected passthrough, got {other:?}"),
+        }
+    }
+    // Alias `ni` + `-Type` abbreviation + item-type PREFIX (`sym`) also caught.
+    let c = zc(
+        "ni",
+        "cmdlet",
+        &["-Type", "sym", "-Path", "./link"],
+        &[
+            "StringConstant",
+            "Parameter",
+            "StringConstant",
+            "Parameter",
+            "StringConstant",
+        ],
+    );
+    assert!(ae_passes(&[zstmt(vec![PsElement::Command(c)])]));
+}
+
+#[test]
+fn zls_passthrough_on_compound_cd_plus_write() {
+    // A write FIRST then a cd — the compound-cd guard (which runs before the
+    // per-command loop) is what fires, with its distinct message.
+    let write = zc(
+        "Set-Content",
+        "cmdlet",
+        &["./f.txt", "x"],
+        &["StringConstant", "StringConstant", "StringConstant"],
+    );
+    let cd = zc("Set-Location", "cmdlet", &["sub"], &["StringConstant", "StringConstant"]);
+    let stmts = [
+        zstmt(vec![PsElement::Command(write)]),
+        zstmt(vec![PsElement::Command(cd)]),
+    ];
+    match ae(&stmts) {
+        PsAcceptEditsResult::Passthrough(r) => {
+            assert!(r.contains("directory-changing"), "{r}");
+        }
+        other => panic!("expected passthrough, got {other:?}"),
+    }
+}
+
+#[test]
+fn zls_passthrough_on_non_write_and_unknown_cmdlets() {
+    // Get-Process: recognized but not write/out-null/formatting → no handling.
+    let c = zc("Get-Process", "cmdlet", &[], &["StringConstant"]);
+    match ae(&[zstmt(vec![PsElement::Command(c)])]) {
+        PsAcceptEditsResult::Passthrough(r) => {
+            assert!(r.contains("No mode-specific handling for 'Get-Process'"), "{r}");
+        }
+        other => panic!("expected passthrough, got {other:?}"),
+    }
+    // Unknown cmdlet → also passthrough (never auto-allowed).
+    let c = zc(
+        "Some-Custom",
+        "cmdlet",
+        &["x"],
+        &["StringConstant", "StringConstant"],
+    );
+    assert!(ae_passes(&[zstmt(vec![PsElement::Command(c)])]));
+}
+
+#[test]
+fn zls_passthrough_on_pipeline_expression_source() {
+    // $x | Set-Content ./f.txt — the leading expression source cannot be validated.
+    let stmt = zstmt(vec![
+        PsElement::Expression {
+            text: "$x".to_string(),
+        },
+        PsElement::Command(zc(
+            "Set-Content",
+            "cmdlet",
+            &["./f.txt"],
+            &["StringConstant", "StringConstant"],
+        )),
+    ]);
+    match ae(&[stmt]) {
+        PsAcceptEditsResult::Passthrough(r) => assert!(r.contains("expression source"), "{r}"),
+        other => panic!("expected passthrough, got {other:?}"),
+    }
+}
+
+#[test]
+fn zls_passthrough_on_application_resolved_name() {
+    let c = zc(
+        "./evil.sh",
+        "application",
+        &["x"],
+        &["StringConstant", "StringConstant"],
+    );
+    match ae(&[zstmt(vec![PsElement::Command(c)])]) {
+        PsAcceptEditsResult::Passthrough(r) => {
+            assert!(r.contains("resolved from a path-like name"), "{r}");
+        }
+        other => panic!("expected passthrough, got {other:?}"),
+    }
+}
+
+#[test]
+fn zls_passthrough_on_unvalidatable_arg_element_type() {
+    // Set-Content -Path $dest — the $dest arg is a Variable (not literal) → the
+    // per-command element-type check refuses it.
+    let c = zc(
+        "Set-Content",
+        "cmdlet",
+        &["-Path", "$dest"],
+        &["StringConstant", "Parameter", "Variable"],
+    );
+    match ae(&[zstmt(vec![PsElement::Command(c)])]) {
+        PsAcceptEditsResult::Passthrough(r) => {
+            assert!(r.contains("unvalidatable type (Variable)"), "{r}");
+        }
+        other => panic!("expected passthrough, got {other:?}"),
+    }
+}
+
+#[test]
+fn zls_passthrough_on_colon_bound_expression_parameter() {
+    // Set-Content -Path ./f.txt -Encoding:$x — a colon-bound expression parameter.
+    let c = zc(
+        "Set-Content",
+        "cmdlet",
+        &["-Path", "./f.txt", "-Encoding:$x"],
+        &["StringConstant", "Parameter", "StringConstant", "Parameter"],
+    );
+    match ae(&[zstmt(vec![PsElement::Command(c)])]) {
+        PsAcceptEditsResult::Passthrough(r) => assert!(r.contains("Colon-bound parameter"), "{r}"),
+        other => panic!("expected passthrough, got {other:?}"),
+    }
+}
+
+#[test]
+fn zls_passthrough_on_h3_array_literal_child() {
+    // Set-Content -Value:2,3 -Path ./f.txt — the inline `-Value:2,3` parses to an
+    // array literal (a non-StringConstant `children[0]` → "Other"), which `h3`
+    // rejects. WITHOUT the `children` thread this would be an UNDER-ASK
+    // (auto-allow) because the raw colon-value "2,3" has no expr metacharacter.
+    let c = PsCommand {
+        name: "Set-Content".to_string(),
+        name_type: "cmdlet".to_string(),
+        args: vec![
+            "-Value:2,3".to_string(),
+            "-Path".to_string(),
+            "./f.txt".to_string(),
+        ],
+        element_types: vec![
+            "StringConstant".to_string(),
+            "Parameter".to_string(),
+            "Parameter".to_string(),
+            "StringConstant".to_string(),
+        ],
+        children: vec![Some(vec!["Other".to_string()]), None, None],
+        redirections: Vec::new(),
+    };
+    match ae(&[zstmt(vec![PsElement::Command(c)])]) {
+        PsAcceptEditsResult::Passthrough(r) => {
+            assert!(r.contains("cannot be statically validated"), "{r}");
+        }
+        other => panic!("expected passthrough, got {other:?}"),
+    }
+}
+
+#[test]
+fn zls_passthrough_on_empty_statements() {
+    assert!(matches!(
+        ps_accept_edits_validate(&[], &[], false),
+        PsAcceptEditsResult::Passthrough(_)
+    ));
 }

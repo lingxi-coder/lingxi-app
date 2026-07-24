@@ -17,7 +17,9 @@
 //! injected by the caller (the permission gate wiring), keeping the transform
 //! fully testable.
 
-use crate::powershell_containment::{PsCommand, PsElement, PsRedirection, PsStatement};
+use crate::powershell_containment::{
+    PsCommand, PsElement, PsRedirection, PsSecurityPatterns, PsStatement, PsVariable,
+};
 use serde_json::Value;
 
 /// The embedded PowerShell parse script (claude-code `Fhu`) — verbatim. It reads
@@ -96,6 +98,14 @@ pub struct ParseResult {
     pub valid: bool,
     /// The transformed statements to validate.
     pub statements: Vec<PsStatement>,
+    /// Variable references discovered in the parse (claude-code
+    /// `parseResult.variables[]`) — the `acceptEdits` `Voe` aggregate reads
+    /// `isSplatted` to detect splatting.
+    pub variables: Vec<PsVariable>,
+    /// Whether the command contains a `--%` stop-parsing token (claude-code
+    /// `parseResult.hasStopParsing`) — an unvalidatable construct that blocks the
+    /// `acceptEdits` auto-allow.
+    pub has_stop_parsing: bool,
     /// Optional explicit invalid/error signal from the parser/precheck. When
     /// present, callers can fail closed to an Ask instead of silently passing
     /// through on an otherwise-invalid parse.
@@ -107,6 +117,8 @@ impl ParseResult {
         Self {
             valid: false,
             statements: Vec::new(),
+            variables: Vec::new(),
+            has_stop_parsing: false,
             invalid_reason: Some(reason.into()),
         }
     }
@@ -214,12 +226,55 @@ fn transform_redirection(raw: &Value) -> Redir {
     }
 }
 
+/// `gXi` — classify a command NAME (already stripped of one surrounding quote,
+/// BEFORE module-path stripping / dash normalization): `"cmdlet"` for a Verb-Noun
+/// form, `"application"` for a path-like name (contains `.`/`\`/`/`), else
+/// `"unknown"`.
+fn gxi(f: &str) -> &'static str {
+    // Verb-Noun: `^[A-Za-z]+-[A-Za-z][A-Za-z0-9_]*$`.
+    let bytes = f.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() && bytes[i].is_ascii_alphabetic() {
+        i += 1;
+    }
+    let verb_ok = i > 0 && i < bytes.len() && bytes[i] == b'-';
+    if verb_ok {
+        let noun = &bytes[i + 1..];
+        let noun_ok = !noun.is_empty()
+            && noun[0].is_ascii_alphabetic()
+            && noun[1..]
+                .iter()
+                .all(|&b| b.is_ascii_alphanumeric() || b == b'_');
+        if noun_ok {
+            return "cmdlet";
+        }
+    }
+    if f.contains('.') || f.contains('\\') || f.contains('/') {
+        return "application";
+    }
+    "unknown"
+}
+
+/// The command NAME's resolved kind (claude-code `nameType`): a name containing
+/// any non-ASCII char (`/[-￿]/`, incl. astral via surrogates) is an
+/// `"application"`; otherwise defer to [`gxi`].
+fn compute_name_type(f: &str) -> String {
+    if f.chars().any(|c| c as u32 >= 0x80) {
+        "application".to_string()
+    } else {
+        gxi(f).to_string()
+    }
+}
+
 /// `Nhu` — transform a raw `CommandAst` element into a [`PsCommand`].
 fn transform_command(raw: &Value) -> PsCommand {
     let elems = cae(raw.get("commandElements"));
     let mut name = String::new();
+    let mut name_type = "unknown".to_string();
     let mut args: Vec<String> = Vec::new();
     let mut element_types: Vec<String> = Vec::new();
+    let mut children: Vec<Option<Vec<String>>> = Vec::new();
+    let mut any_child = false;
 
     if let Some((first, rest)) = elems.split_first() {
         let ftype = str_field(first, "type").unwrap_or("");
@@ -232,6 +287,7 @@ fn transform_command(raw: &Value) -> PsCommand {
         }
         .unwrap_or_else(|| str_field(first, "text").unwrap_or(""));
         let f = strip_one_quote(raw_name);
+        name_type = compute_name_type(f);
         name = yve(strip_module_path(f));
         element_types.push(br_map(ftype, str_field(first, "expressionType")));
 
@@ -247,8 +303,32 @@ fn transform_command(raw: &Value) -> PsCommand {
             .unwrap_or_else(|| str_field(g, "text").unwrap_or(""));
             args.push(yve(text));
             element_types.push(br_map(gtype, str_field(g, "expressionType")));
+
+            // Per-arg inline-value children (claude-code `Cde(g.children)`): the
+            // simplified element type(s) of a `-Param:value` bound argument.
+            let child = cae(g.get("children"));
+            if child.is_empty() {
+                children.push(None);
+            } else {
+                any_child = true;
+                children.push(Some(
+                    child
+                        .iter()
+                        .map(|c| {
+                            br_map(
+                                str_field(c, "type").unwrap_or(""),
+                                str_field(c, "expressionType"),
+                            )
+                        })
+                        .collect(),
+                ));
+            }
         }
     }
+
+    // claude-code attaches `children` only when SOME arg had an inline value
+    // (`...s&&{children:i}`); an all-`None` vector reads as "undefined".
+    let children = if any_child { children } else { Vec::new() };
 
     let redirections = cae(raw.get("redirections"))
         .iter()
@@ -263,8 +343,10 @@ fn transform_command(raw: &Value) -> PsCommand {
 
     PsCommand {
         name,
+        name_type,
         args,
         element_types,
+        children,
         redirections,
     }
 }
@@ -328,7 +410,38 @@ fn transform_statement(raw: &Value) -> PsStatement {
                 is_merging: r.is_merging,
             })
             .collect(),
+        statement_type: str_field(raw, "type").unwrap_or("").to_string(),
+        security_patterns: transform_security_patterns(raw.get("securityPatterns")),
     }
+}
+
+/// Read the raw `securityPatterns` object (absent → all-false) into a
+/// [`PsSecurityPatterns`]. Only the four flags the `acceptEdits` `Voe` aggregate
+/// consumes are threaded; unset/absent fields default to `false`.
+fn transform_security_patterns(raw: Option<&Value>) -> PsSecurityPatterns {
+    let flag = |key: &str| {
+        raw.and_then(|v| v.get(key))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    };
+    PsSecurityPatterns {
+        has_member_invocations: flag("hasMemberInvocations"),
+        has_sub_expressions: flag("hasSubExpressions"),
+        has_expandable_strings: flag("hasExpandableStrings"),
+        has_script_blocks: flag("hasScriptBlocks"),
+    }
+}
+
+/// Read the top-level `variables` array (claude-code `parseResult.variables[]`)
+/// into [`PsVariable`]s carrying `path` + `isSplatted`.
+fn transform_variables(raw: Option<&Value>) -> Vec<PsVariable> {
+    cae(raw)
+        .iter()
+        .map(|v| PsVariable {
+            path: str_field(v, "path").unwrap_or("").to_string(),
+            is_splatted: v.get("isSplatted").and_then(Value::as_bool).unwrap_or(false),
+        })
+        .collect()
 }
 
 /// Parse the `pwsh` JSON output into a [`ParseResult`] (the pure half). Returns
@@ -365,6 +478,11 @@ pub fn parse_ps_ast_json(json: &str) -> ParseResult {
     ParseResult {
         valid: true,
         statements,
+        variables: transform_variables(root.get("variables")),
+        has_stop_parsing: root
+            .get("hasStopParsing")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         invalid_reason: None,
     }
 }

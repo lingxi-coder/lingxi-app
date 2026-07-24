@@ -276,7 +276,33 @@ impl PermissionPolicy {
             return Some(ask_powershell_containment(message, reason));
         }
         match gtu {
-            crate::powershell_containment::PsContainmentResult::Passthrough => None,
+            // ps-acceptedits (`zLs`): when path containment passes through (no
+            // out-of-cwd / unvalidatable-path violation) AND the session is in
+            // `AcceptEdits` mode, consult the whole-pipeline structural validator.
+            // A structurally-safe write pipeline auto-allows with a `PermissionMode
+            // acceptEdits` reason; anything else passes through (→ normal flow /
+            // ask). This is the LOWEST-priority positive result: a `gTu` DENY
+            // (above), a battery ASK (above), and a `gTu` ASK (the arm below) all
+            // still win, so an out-of-cwd `Set-Content /etc/passwd` in acceptEdits
+            // STILL ASKS — the containment ask overrides this structural allow.
+            // Strictly gated on `mode == AcceptEdits`, so default/plan are
+            // unaffected.
+            crate::powershell_containment::PsContainmentResult::Passthrough => {
+                if mode == PermissionMode::AcceptEdits {
+                    match crate::powershell_containment::ps_accept_edits_validate(
+                        &parse.statements,
+                        &parse.variables,
+                        parse.has_stop_parsing,
+                    ) {
+                        crate::powershell_containment::PsAcceptEditsResult::Allow => {
+                            Some(allow_with_mode(PermissionMode::AcceptEdits))
+                        }
+                        crate::powershell_containment::PsAcceptEditsResult::Passthrough(_) => None,
+                    }
+                } else {
+                    None
+                }
+            }
             crate::powershell_containment::PsContainmentResult::Ask { message, reason } => {
                 Some(ask_powershell_containment(message, reason))
             }
@@ -2968,5 +2994,128 @@ mod classify_all_shell_policy_test {
         assert!(!p.rule_is_available_in_mode(&rule, PermissionMode::Auto));
         // flag ON but a NON-auto mode: available — the escalation is auto-only.
         assert!(p.rule_is_available_in_mode(&rule, PermissionMode::Default));
+    }
+}
+
+// ps-acceptedits: the `zLs` whole-pipeline auto-allow COMPOSED with path
+// containment. A separate inline module (kept OUT of `policy_test.rs`, which is
+// concurrently edited elsewhere). Exercises the composition directly via
+// `check_powershell_containment` with a stub parser.
+#[cfg(test)]
+mod ps_acceptedits_policy_test {
+    use super::*;
+    use crate::powershell_containment::{PsCommand, PsElement, PsStatement};
+    use crate::powershell_parse::{ParseResult, PwshParser};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    /// A parser returning a fixed [`ParseResult`], ignoring the command text — the
+    /// real `pwsh` spawn is not needed to drive the pure composition.
+    struct StubParser {
+        result: ParseResult,
+    }
+    impl PwshParser for StubParser {
+        fn parse(&self, _command: &str) -> ParseResult {
+            self.result.clone()
+        }
+    }
+
+    /// A single structurally-safe `Set-Content <path> x` write parse.
+    fn set_content(path: &str) -> ParseResult {
+        let c = PsCommand {
+            name: "Set-Content".to_string(),
+            name_type: "cmdlet".to_string(),
+            args: vec![path.to_string(), "x".to_string()],
+            element_types: vec![
+                "StringConstant".to_string(),
+                "StringConstant".to_string(),
+                "StringConstant".to_string(),
+            ],
+            ..PsCommand::default()
+        };
+        ParseResult {
+            valid: true,
+            statements: vec![PsStatement {
+                commands: vec![PsElement::Command(c)],
+                ..PsStatement::default()
+            }],
+            ..ParseResult::default()
+        }
+    }
+
+    fn roots() -> FsRoots {
+        FsRoots {
+            cwd: PathBuf::from("/proj/work"),
+            home: Some(PathBuf::from("/home/u")),
+            lingxi_home: PathBuf::from("/home/u/.lingxi"),
+        }
+    }
+
+    fn policy_with(parse: ParseResult) -> PermissionPolicy {
+        PermissionPolicy::new(PermissionMode::AcceptEdits)
+            .with_pwsh_parser(Arc::new(StubParser { result: parse }))
+    }
+
+    #[test]
+    fn accept_edits_in_cwd_write_auto_allows() {
+        // An in-cwd `Set-Content` in acceptEdits: containment passes through and
+        // the structural `zLs` validator allows → allow with a PermissionMode
+        // acceptEdits reason (the over-ask fix).
+        let p = policy_with(set_content("/proj/work/f.txt"));
+        match p.check_powershell_containment(
+            "Set-Content /proj/work/f.txt x",
+            &roots(),
+            PermissionMode::AcceptEdits,
+        ) {
+            Some(PermissionResult::Allow {
+                reason: PermissionDecisionReason::PermissionMode { mode },
+                ..
+            }) => assert_eq!(mode, PermissionMode::AcceptEdits),
+            other => panic!("expected acceptEdits allow, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn accept_edits_out_of_cwd_write_still_asks() {
+        // UNDER-ASK GUARD: `Set-Content /etc/passwd x` in acceptEdits — `zLs` alone
+        // would allow it (it is STRUCTURALLY safe), but path containment ASKS, and
+        // the containment ask OVERRIDES the structural allow. Must NOT auto-allow.
+        let p = policy_with(set_content("/etc/passwd"));
+        let r = p.check_powershell_containment(
+            "Set-Content /etc/passwd x",
+            &roots(),
+            PermissionMode::AcceptEdits,
+        );
+        assert!(
+            matches!(r, Some(PermissionResult::Ask { .. })),
+            "out-of-cwd write must ask (containment overrides zLs), got {r:?}"
+        );
+        assert!(
+            !matches!(r, Some(PermissionResult::Allow { .. })),
+            "out-of-cwd write must never auto-allow"
+        );
+    }
+
+    #[test]
+    fn non_accept_edits_modes_never_auto_allow() {
+        // The `zLs` allow is strictly gated on acceptEdits. In default/plan mode
+        // the SAME in-cwd write is NOT auto-allowed — it asks via containment,
+        // exactly as before this feature (no acceptEdits Allow ever appears).
+        for mode in [PermissionMode::Default, PermissionMode::Plan] {
+            let p = policy_with(set_content("/proj/work/f.txt"));
+            let r = p.check_powershell_containment(
+                "Set-Content /proj/work/f.txt x",
+                &roots(),
+                mode,
+            );
+            assert!(
+                !matches!(r, Some(PermissionResult::Allow { .. })),
+                "{mode:?}: must not auto-allow a PowerShell write"
+            );
+            assert!(
+                matches!(r, Some(PermissionResult::Ask { .. })),
+                "{mode:?}: in-cwd write asks via containment, got {r:?}"
+            );
+        }
     }
 }

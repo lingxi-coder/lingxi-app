@@ -115,6 +115,7 @@ fn powershell_without_parser_passes_through() {
             invalid_reason: Some(
                 "PowerShell parser precheck rejected unsupported `u{...}` escape".to_string(),
             ),
+            ..ParseResult::default()
         })));
     let result = policy.authorize("PowerShell", &json!({ "command": "echo `u{263A}" }));
     match result {

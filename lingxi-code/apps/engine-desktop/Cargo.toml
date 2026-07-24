@@ -81,6 +81,11 @@ coordinator = { path = "../../coordinator" }
 # `notify` is already a workspace dependency via this crate. App→platform is
 # allowed by the dep-graph gate.
 platform-posix = { path = "../../platforms/posix" }
+# M8-P11b follow-up: real screenshot + mouse/keyboard/clipboard/app-management
+# backend for the `computer` tool. Only functional on `target_os = "macos"`
+# (matching claude-code's own darwin-only automation stack); the crate still
+# builds everywhere so this composition root doesn't need its own cfg-gating.
+platform-macos-computer-control = { path = "../../platforms/macos-computer-control" }
 
 # F2-01: the engine→DTO adapter sinks (`AdapterOutputStream` /
 # `AdapterPermissionGate`) `build()` binds when a transport (not the CLI) drives

@@ -84,6 +84,7 @@ members = [
     "platforms/android-libcap",
     "platforms/android-minijail",
     "platforms/android-shellbin",
+    "platforms/macos-computer-control",
     "platforms/posix/tests/fixtures/mock_stdio_mcp",
 ]
 
@@ -169,6 +170,7 @@ default-members = [
     "platforms/windows",
     "platforms/ios",
     "platforms/android",
+    "platforms/macos-computer-control",
 ]
 
 [workspace.package]
@@ -196,7 +198,10 @@ serde_json = { version = "1", features = ["preserve_order"] }
 # `headers` so the `getServerKey` config hash byte-matches claude-code, whose
 # `JSON.stringify({type,url,headers})` serializes header keys in the config's
 # insertion order (not sorted). See `traits::McpHeaders` / `oauth::server_key`.
-indexmap = { version = "2", features = ["serde"] }
+# Capped below 2.8: newer indexmap releases require the `edition2024` Cargo
+# feature, which the workspace's pinned toolchain (rust-toolchain.toml,
+# 1.82.0) cannot parse.
+indexmap = { version = ">=2, <2.8", features = ["serde"] }
 thiserror = "2"
 tracing = "0.1"
 async-trait = "0.1"

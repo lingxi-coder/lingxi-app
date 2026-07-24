@@ -6553,7 +6553,7 @@ pub async fn build(
         share: None,
         notifications: None,
         clipboard: None,
-        computer_control: None,
+        computer_control: platform_macos_computer_control::new_if_supported(),
         android_shell: None,
         android_git: None,
         android_git_secret: None,

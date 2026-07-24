@@ -1310,44 +1310,64 @@ impl McpRegistry {
         let max = self.max_retry_count.max(1);
 
         for attempt in 1..=max {
-            // Disabled/stopped guard: re-read state before each attempt.
-            match self.connections.read().await.get(&name) {
-                Some(McpConnectionState::Stopped { .. }) | None => {
-                    tracing::debug!(server = %name, "reconnect aborted: server stopped");
-                    return;
-                }
-                Some(state) if state_is_disabled(state) => {
-                    tracing::debug!(server = %name, "reconnect aborted: server disabled");
-                    return;
-                }
-                _ => {}
-            }
+            // Everything except the inter-attempt backoff runs UNDER the
+            // per-server lifecycle lock, so the guard-read + `Reconnecting`
+            // insert + connect (+ the terminal `Failed` insert) form ONE
+            // critical section that cannot interleave with a locked
+            // set_disabled/disconnect/connect. Previously the guard-read and the
+            // `Reconnecting` insert ran unlocked, and only the inner connect took
+            // the lock — a TOCTOU that could overwrite a `Connected{connection_id}`
+            // won by a concurrent connect, stranding that id (unreachable for
+            // teardown = a leaked remote connection). `true` ⇒ back off + retry.
+            let retry = {
+                let lifecycle = self.lifecycle_lock(&name);
+                let _guard = lifecycle.lock().await;
 
-            // `next_retry_at` is the wall-clock time the NEXT attempt would fire
-            // if this one fails; the final attempt has no successor, so it
-            // points at the present.
-            let next_retry_at = match post_attempt_backoff(attempt, max) {
-                Some(backoff) => SystemTime::now() + backoff,
-                None => SystemTime::now(),
-            };
-            self.connections.write().await.insert(
-                name.clone(),
-                McpConnectionState::Reconnecting {
-                    config: config.clone(),
-                    retry_count: attempt,
-                    next_retry_at,
-                },
-            );
-
-            // claude-code runs attempt 1 IMMEDIATELY — there is NO leading
-            // sleep before the first connect (`useManageMCPConnections.ts:372`).
-            match self.connect(config.clone()).await {
-                Ok(_) => {
-                    tracing::info!(server = %name, attempt, "MCP reconnect succeeded");
-                    return;
+                match self.connections.read().await.get(&name) {
+                    Some(McpConnectionState::Stopped { .. }) | None => {
+                        tracing::debug!(server = %name, "reconnect aborted: server stopped");
+                        return;
+                    }
+                    // A concurrent connect/reconnect already brought the server
+                    // up — leave its live connection alone; overwriting it with
+                    // `Reconnecting` would leak that connection id.
+                    Some(McpConnectionState::Connected { .. }) => {
+                        tracing::debug!(server = %name, "reconnect aborted: already connected");
+                        return;
+                    }
+                    Some(state) if state_is_disabled(state) => {
+                        tracing::debug!(server = %name, "reconnect aborted: server disabled");
+                        return;
+                    }
+                    _ => {}
                 }
-                Err(e) => {
-                    if attempt == max {
+
+                // `next_retry_at` is the wall-clock time the NEXT attempt would
+                // fire if this one fails; the final attempt has no successor, so
+                // it points at the present.
+                let next_retry_at = match post_attempt_backoff(attempt, max) {
+                    Some(backoff) => SystemTime::now() + backoff,
+                    None => SystemTime::now(),
+                };
+                self.connections.write().await.insert(
+                    name.clone(),
+                    McpConnectionState::Reconnecting {
+                        config: config.clone(),
+                        retry_count: attempt,
+                        next_retry_at,
+                    },
+                );
+
+                // claude-code runs attempt 1 IMMEDIATELY — there is NO leading
+                // sleep before the first connect (`useManageMCPConnections.ts:372`).
+                // `connect_locked` (NOT `connect`) — the lifecycle lock is already
+                // held; `connect` would re-acquire it and deadlock.
+                match self.connect_locked(config.clone()).await {
+                    Ok(_) => {
+                        tracing::info!(server = %name, attempt, "MCP reconnect succeeded");
+                        return;
+                    }
+                    Err(e) if attempt == max => {
                         tracing::warn!(
                             server = %name,
                             attempts = attempt,
@@ -1364,18 +1384,24 @@ impl McpRegistry {
                         );
                         return;
                     }
-                    tracing::debug!(
-                        server = %name,
-                        attempt,
-                        error = %e,
-                        "MCP reconnect attempt failed; backing off"
-                    );
-                    // Back off ONLY after a failed NON-final attempt; the final
-                    // attempt has no trailing sleep (claude-code schedules the
-                    // *next* retry, never one after the last).
-                    if let Some(backoff) = post_attempt_backoff(attempt, max) {
-                        tokio::time::sleep(backoff).await;
+                    Err(e) => {
+                        tracing::debug!(
+                            server = %name,
+                            attempt,
+                            error = %e,
+                            "MCP reconnect attempt failed; backing off"
+                        );
+                        true
                     }
+                }
+            };
+
+            // Back off ONLY after a failed NON-final attempt (lock released); the
+            // final attempt has no trailing sleep (claude-code schedules the
+            // *next* retry, never one after the last).
+            if retry {
+                if let Some(backoff) = post_attempt_backoff(attempt, max) {
+                    tokio::time::sleep(backoff).await;
                 }
             }
         }
@@ -2453,6 +2479,56 @@ mod tests {
 
         mock.disconnect_release.notify_one();
         disconnect.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn reconnect_one_does_not_clobber_an_already_connected_server() {
+        let mock = Arc::new(BridgeMock::new(&["read"]));
+        let registry = Arc::new(McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock.clone() as Arc<dyn RawConnectionProvider>,
+        ));
+        let id1 = registry.connect(cfg("mock")).await.unwrap();
+
+        // A stale reconnect candidate fires for a server that is now Connected
+        // (a concurrent connect won the race). Under the fix it aborts on the
+        // Connected guard instead of overwriting the live connection with
+        // `Reconnecting` — which would strand `id1`, unreachable for teardown.
+        Arc::clone(&registry).reconnect_one(cfg("mock")).await;
+
+        let conns = registry.connections.read().await;
+        match conns.get("mock") {
+            Some(McpConnectionState::Connected { connection_id, .. }) => {
+                assert_eq!(*connection_id, id1, "the live connection id must be preserved");
+            }
+            other => panic!("expected the connection to stay Connected, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn reconnect_one_reconnects_a_disconnected_server() {
+        // Regression: the reconnect path still works for a genuinely
+        // reconnect-worthy (non-Connected) state.
+        let mock = Arc::new(BridgeMock::new(&["read"]));
+        let registry = Arc::new(McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock.clone() as Arc<dyn RawConnectionProvider>,
+        ));
+        registry.connections.write().await.insert(
+            "mock".into(),
+            McpConnectionState::Disconnected {
+                config: cfg("mock"),
+                last_error: Some("boom".into()),
+            },
+        );
+
+        Arc::clone(&registry).reconnect_one(cfg("mock")).await;
+
+        let conns = registry.connections.read().await;
+        match conns.get("mock") {
+            Some(McpConnectionState::Connected { .. }) => {}
+            other => panic!("expected reconnect to reach Connected, got {other:?}"),
+        }
     }
 
     #[tokio::test]

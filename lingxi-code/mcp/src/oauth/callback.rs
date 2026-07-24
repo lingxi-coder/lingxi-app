@@ -323,6 +323,25 @@ mod tests {
     const RU: &str = "http://localhost:5000/callback";
 
     #[tokio::test]
+    async fn accept_is_interruptible_by_a_timeout() {
+        // The connect path (registry #18) bounds this wait so a never-completed
+        // browser OAuth cannot hold the per-server lifecycle lock forever.
+        // `accept()` must therefore be a well-behaved cancellable future: with no
+        // callback delivered, a timeout fires (and drops the accept) instead of
+        // hanging.
+        let listener = CallbackListener::bind(0).await.expect("bind");
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            listener.accept("S", RU),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "accept must be interruptible by the surrounding timeout"
+        );
+    }
+
+    #[tokio::test]
     async fn returns_params_on_valid_callback() {
         let listener = CallbackListener::bind(0).await.expect("bind");
         let port = listener.port();

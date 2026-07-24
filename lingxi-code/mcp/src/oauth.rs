@@ -69,6 +69,15 @@ pub use callback::{CallbackError, CallbackListener, CallbackParams};
 /// claude-code's 15-second auth-request deadline.
 const OAUTH_HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Upper bound on the browser-authorization (loopback callback) wait in the
+/// non-interactive (auto-browser) flow. Mirrors claude-code's browser-auth
+/// deadline ("The browser authorization timed out after 5 minutes."). Without
+/// it the callback `accept()` waits forever — and, on the MCP connect path,
+/// holds the per-server lifecycle lock for that whole time (the connect
+/// MCP_TIMEOUT covers only transport connect/initialize, not the OAuth stage),
+/// blocking every other lifecycle op for that server.
+const OAUTH_CALLBACK_TIMEOUT: Duration = Duration::from_secs(300);
+
 /// Stages of the OAuth handshake.
 ///
 /// `Secret<T>` deliberately does not implement `Clone`, so neither does
@@ -836,7 +845,23 @@ async fn perform_oauth_flow_inner(
             }
         }
     } else {
-        listener.accept(&state, &redirect_uri).await?.code
+        // Bound the browser-callback wait: an OAuth that the user never
+        // completes must not hang forever (nor, on the MCP connect path, hold
+        // the per-server lifecycle lock indefinitely). 5 minutes mirrors the
+        // oracle's browser-authorization deadline.
+        match tokio::time::timeout(
+            OAUTH_CALLBACK_TIMEOUT,
+            listener.accept(&state, &redirect_uri),
+        )
+        .await
+        {
+            Ok(result) => result?.code,
+            Err(_elapsed) => {
+                return Err(OAuthError::Callback(
+                    "The browser authorization timed out after 5 minutes.".into(),
+                ))
+            }
+        }
     };
 
     // 7. Exchange the code for tokens.

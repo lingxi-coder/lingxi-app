@@ -225,14 +225,19 @@ fn normalize_tool_references(
             if !tool_search_enabled {
                 return false;
             }
-            candidate
+            // Oracle xPy: `let a=s.tool_name; if(!a)return!0; return t.has(W4(a))`.
+            // A reference with a falsy tool_name (missing, non-string, or empty)
+            // is KEPT; otherwise it survives iff its normalized name is available.
+            let Some(name) = candidate
                 .get("tool_name")
                 .and_then(Value::as_str)
-                .is_some_and(|name| {
-                    available_tool_names.map_or(true, |available| {
-                        available.contains(normalize_legacy_tool_name(name))
-                    })
-                })
+                .filter(|name| !name.is_empty())
+            else {
+                return true;
+            };
+            available_tool_names.map_or(true, |available| {
+                available.contains(normalize_legacy_tool_name(name))
+            })
         });
         has_surviving_reference |= blocks.iter().any(is_tool_reference);
         if blocks.is_empty() {
@@ -261,12 +266,20 @@ fn normalize_tool_references(
 
 /// Claude's persisted-tool alias normalization used when validating historical
 /// tool_reference blocks against the current catalog.
+/// The full 2.1.218 `W4`/`TOi` legacy tool-name alias map (12 entries). A
+/// tool_reference whose (normalized) name is absent from the available set is
+/// dropped, so every historical alias must be present or valid references get
+/// silently stripped from the API-bound message.
 fn normalize_legacy_tool_name(name: &str) -> &str {
     match name {
         "Task" => "Agent",
         "KillShell" | "KillBash" => "TaskStop",
-        "AgentOutputTool" | "BashOutputTool" => "TaskOutput",
+        "AgentOutputTool" | "BashOutputTool" | "AgentOutput" | "BashOutput" => "TaskOutput",
+        "ListPeers" => "ListAgents",
         "Brief" => "SendUserMessage",
+        "ListMcpResources" => "ListMcpResourcesTool",
+        "ReadMcpResource" => "ReadMcpResourceTool",
+        "ReadMcpResourceDir" => "ReadMcpResourceDirTool",
         current => current,
     }
 }

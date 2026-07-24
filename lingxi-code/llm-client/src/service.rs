@@ -104,13 +104,24 @@ fn strip_signature_blocks(messages: &mut [crate::Message]) {
     }
 }
 
-/// Claude Code currently gates cross-model signature stripping to its internal
-/// account class. Preserve that observable gate while keeping the pure transform
-/// separately testable.
+/// Claude Code gates cross-model signature stripping on its internal account
+/// class `T2o()`. In the shipped 2.1.218 binary that predicate is a compile-time
+/// constant `"external"` (there is NO `process.env.USER_TYPE` read in the CLI
+/// bundle for this) — so the strip never runs in the released build. Modeled
+/// here as the same inert constant rather than reading `USER_TYPE`, which the
+/// oracle does not do for this path. The pure [`strip_signature_blocks`]
+/// transform stays separately tested and ready for when the internal account
+/// class is actually plumbed.
 fn strip_signature_blocks_for_fallback(messages: &mut [crate::Message]) {
-    if std::env::var("USER_TYPE").ok().as_deref() == Some("ant") {
+    if is_internal_account_class() {
         strip_signature_blocks(messages);
     }
+}
+
+/// claude-code `T2o()` — the account class, a compile-time `"external"` constant
+/// in the shipped binary. `false` until an internal account class is plumbed.
+fn is_internal_account_class() -> bool {
+    false
 }
 
 /// Bound `max_tokens` so `input_tokens + output` fit `context_window`: reserve

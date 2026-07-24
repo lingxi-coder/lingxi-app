@@ -235,6 +235,14 @@ const WORKFLOW_SCRIPT_FIELD: &str = "script";
 /// Applied to EVERY assistant tool_use, with `Workflow.script` restored verbatim.
 #[must_use]
 pub fn repair_tool_input(tool_name: &str, input: &Value) -> (Value, RepairStats) {
+    // Oracle `Uun` guard: repair only a plain OBJECT input —
+    // `typeof i==="object" && i!==null && !dRt(i)`. `dRt` flags only the special
+    // parse-failure marker `{[O7t]:{raw,len}}`, which this port never
+    // constructs, so the guard reduces to "is a JSON object". A non-object input
+    // (string/number/array/null) is passed through verbatim.
+    if !input.is_object() {
+        return (input.clone(), RepairStats::default());
+    }
     let mut stats = RepairStats::default();
     let mut repaired = repair_value(input, &mut stats);
 
@@ -411,11 +419,13 @@ mod tests {
         let (out, _) = repair_tool_input("Workflow", &obj);
         assert_eq!(out["script"], json!({"k": "A"}));
 
-        // Absent `script`, and a non-object input, must not misbehave.
+        // Absent `script` still repairs other object fields.
         let (out, _) = repair_tool_input("Workflow", &json!({"other": "\\u0041"}));
         assert_eq!(out["other"], "A");
+        // A NON-OBJECT input is passed through verbatim — the oracle `Uun` guard
+        // (`typeof i==="object"`) never repairs a top-level string.
         let (out, _) = repair_tool_input("Workflow", &json!("\\u0041"));
-        assert_eq!(out, json!("A"));
+        assert_eq!(out, json!("\\u0041"));
     }
 
     #[test]

@@ -193,10 +193,16 @@ fn render_one(n: &TaskNotification) -> String {
             )
         }
         "monitor_ws" if n.status == "running" => {
+            // `dY` → `Vq` running-event field set: task-id + summary + a
+            // `<event>` body ONLY. `Vq` skips falsy fields and this call passes
+            // toolUseId/taskType/outputFile/status as undefined, so they are
+            // OMITTED for this arm. Summary is `Monitor event: "{desc}"` and the
+            // event rides in `<event>…</event>` (not `<result>`). The optional
+            // push-notification hint clause is omitted (that surface is off).
             let event = n.result.as_deref().unwrap_or_default();
-            let summary = format!("Monitor \"{}\" event", n.description);
+            let summary = format!("Monitor event: \"{}\"", n.description);
             format!(
-                "<task-notification>\n<task-id>{}</task-id>{tool_use_id_line}\n<output-file>{output_file}</output-file>\n<status>running</status>\n<summary>{}</summary>\n<result>{}</result>\n</task-notification>",
+                "<task-notification>\n<task-id>{}</task-id>\n<summary>{}</summary>\n<event>{}</event>\n</task-notification>",
                 n.task_id,
                 escape_xml(&summary),
                 escape_xml(event)
@@ -571,9 +577,14 @@ mod tests {
         let mut n = base("m12345678", "monitor_ws", "running", "watch <log>");
         n.result = Some("ERROR: a < b && c > d".to_string());
         let block = render_one(&n);
-        assert!(block.contains("<summary>Monitor \"watch &lt;log&gt;\" event</summary>"));
-        assert!(block.contains("<result>ERROR: a &lt; b &amp;&amp; c &gt; d</result>"));
+        // dY → Vq field set: `Monitor event: "{desc}"` summary + `<event>` body.
+        assert!(block.contains("<summary>Monitor event: \"watch &lt;log&gt;\"</summary>"));
+        assert!(block.contains("<event>ERROR: a &lt; b &amp;&amp; c &gt; d</event>"));
+        // tool-use-id / output-file / status / task-type are OMITTED for this arm.
         assert!(!block.contains("<task-type>"));
+        assert!(!block.contains("<status>"));
+        assert!(!block.contains("<output-file>"));
+        assert!(!block.contains("<result>"));
     }
 
     #[test]

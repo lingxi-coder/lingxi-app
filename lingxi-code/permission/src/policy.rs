@@ -1441,6 +1441,16 @@ impl PermissionPolicy {
         if subs.is_empty() {
             return None;
         }
+        // xDs whole-command sed gate (redirect-borne / over-length): runs ONCE
+        // before the per-sed auto-allow pass, gated on there being >=1 sed
+        // subcommand — mirroring `_gd` consulting `xDs` before `gpr`.
+        if subs.iter().any(|sub| base_command(sub) == Some("sed")) {
+            if let Some(crate::sed_validation::SedVerdict::Unsafe { message, reason }) =
+                crate::sed_validation::sed_redirect_borne_verdict(command)
+            {
+                return Some(ask_sed_constraint(message, reason));
+            }
+        }
         // FIRST pass mirrors the TS step ordering (sed-constraints BEFORE the
         // mode auto-allow): an UNSAFE sed subcommand asks immediately, even when
         // another subcommand would otherwise disqualify the whole command from
@@ -1485,8 +1495,19 @@ impl PermissionPolicy {
         roots: &FsRoots,
         mode: PermissionMode,
     ) -> Option<PermissionResult> {
+        let subs = shell_command::split_command(command);
+        // xDs whole-command sed gate (redirect-borne / over-length): runs ONCE
+        // before the per-sed constraint loop, gated on there being >=1 sed
+        // subcommand — mirroring `_gd` consulting `xDs` before `gpr`.
+        if subs.iter().any(|sub| base_command(sub) == Some("sed")) {
+            if let Some(crate::sed_validation::SedVerdict::Unsafe { message, reason }) =
+                crate::sed_validation::sed_redirect_borne_verdict(command)
+            {
+                return Some(ask_sed_constraint(message, reason));
+            }
+        }
         let allow_file_writes = mode == PermissionMode::AcceptEdits;
-        for sub in shell_command::split_command(command) {
+        for sub in subs {
             if base_command(&sub) != Some("sed") {
                 continue;
             }

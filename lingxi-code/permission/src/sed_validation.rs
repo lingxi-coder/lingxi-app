@@ -144,6 +144,49 @@ fn sed_precheck_verdict(command: &str) -> Option<SedVerdict> {
     None
 }
 
+/// 2.1.218 `xDs` whole-command sed-validation gate (the `_gd` pre-pass that runs
+/// ONCE per whole command, before the per-sed constraint loop). Mirrors `xDs`:
+///
+/// 1. Over-length / untokenizable whole command
+///    ([`sed_precheck_verdict`]) → [`SedVerdict::Unsafe`] with
+///    [`SED_OVER_LENGTH_REASON`] (the first `xDs` branch).
+/// 2. Under the `bash-ast` feature, a redirect-borne risk
+///    ([`crate::sed_redirect_borne::sed_command_has_redirect_borne_risk`], the
+///    `bgd` walk) → [`SedVerdict::Unsafe`] with [`SED_REDIRECT_BORNE_REASON`]
+///    (the second `xDs` branch).
+/// 3. Otherwise `None` (the `xDs` passthrough).
+///
+/// The caller ([`crate::policy`]) runs this once when the whole command has at
+/// least one `sed` subcommand, and returns its ask BEFORE the per-sed
+/// constraint loop — mirroring `_gd` consulting `xDs` before `gpr`.
+///
+/// ## Divergence (documented)
+/// Under a NON-`bash-ast` build the tree-sitter parser is unavailable, so the
+/// redirect-borne branch is a documented no-op: only the over-length /
+/// untokenizable precheck runs. This mirrors the port's existing AST-gating
+/// philosophy (the `bash-ast` feature is enabled in the desktop production
+/// build) and can only UNDER-detect on the minimal build, never over-allow on
+/// the production build.
+#[must_use]
+pub fn sed_redirect_borne_verdict(whole_command: &str) -> Option<SedVerdict> {
+    // xDs branch 1: over-length / untokenizable (SED_OVER_LENGTH_REASON).
+    if let Some(v) = sed_precheck_verdict(whole_command) {
+        return Some(v);
+    }
+    // xDs branch 2: redirect-borne risk (SED_REDIRECT_BORNE_REASON). Needs the
+    // tree-sitter parser; a documented no-op under non-`bash-ast` builds.
+    #[cfg(feature = "bash-ast")]
+    {
+        if crate::sed_redirect_borne::sed_command_has_redirect_borne_risk(whole_command) {
+            return Some(SedVerdict::Unsafe {
+                message: SED_ASK_MESSAGE.to_string(),
+                reason: SED_REDIRECT_BORNE_REASON.to_string(),
+            });
+        }
+    }
+    None
+}
+
 /// Verdict for whether a single `sed` subcommand may be auto-allowed in
 /// `acceptEdits` mode.
 #[derive(Debug, Clone, PartialEq, Eq)]

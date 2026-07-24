@@ -41,6 +41,8 @@ pub mod read_only_command;
 pub mod result;
 pub mod rule;
 pub mod sandbox_auto_allow;
+#[cfg(feature = "bash-ast")]
+pub mod sed_redirect_borne;
 pub mod sed_validation;
 pub mod shadow;
 pub mod shell_command;

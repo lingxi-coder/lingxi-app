@@ -5843,7 +5843,9 @@ mod tests {
         widget.pump_view_timeout();
 
         let answers = ask_rx.blocking_recv().expect("timeout answers returned");
-        assert_eq!(answers.get("Pick one?").map(String::as_str), Some("Alpha"));
+        // The afk timeout must NOT fabricate an answer for an unconfirmed
+        // question — the map is empty rather than defaulting to the first option.
+        assert_eq!(answers.get("Pick one?"), None);
         assert!(
             !widget.has_open_ask_user_question(),
             "expired questionnaire must be popped without keyboard input"

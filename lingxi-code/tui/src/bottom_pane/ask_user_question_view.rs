@@ -295,16 +295,12 @@ impl AskUserQuestionView {
     /// selection (highlight/checkmarks) so the map is complete, then the whole
     /// map is resolved. Called by the app loop when [`Self::is_expired_at`].
     pub fn auto_submit(&mut self) -> ViewOutcome {
-        // Fill remaining questions from their current selection state.
-        for idx in self.current..self.questions.len() {
-            let saved = self.current;
-            self.current = idx;
-            let answer = self.active_answer();
-            self.answers
-                .insert(self.questions[idx].question.clone(), answer);
-            self.current = saved;
-        }
-        self.current = self.questions.len().saturating_sub(1);
+        // afk idle-timeout: resolve with ONLY the questions the user already
+        // CONFIRMED (present in `self.answers`). Do NOT fabricate answers for
+        // unanswered questions by back-filling their current highlight / first
+        // option — the timeout must never invent a selection the user never
+        // made. (The `q.options[0]` fallback stays only on the explicit-Enter
+        // `confirm_and_advance` path.)
         self.submit()
     }
 
@@ -1041,7 +1037,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_submit_resolves_with_current_selections() {
+    fn auto_submit_never_fabricates_unanswered_questions() {
         let (mut view, rx) = exchange(
             vec![
                 q("Q1?", "H1", &["A1", "B1"], false),
@@ -1049,11 +1045,34 @@ mod tests {
             ],
             Some(60),
         );
-        // Auto-advance with the default highlights (first option each).
+        // The afk timeout fires with NOTHING confirmed → no answers are
+        // fabricated from the default highlights.
         let outcome = view.auto_submit();
         assert!(matches!(outcome, ViewOutcome::Accepted(_)));
         let answers = rx.blocking_recv().expect("auto-submitted");
+        assert!(
+            answers.is_empty(),
+            "auto_submit must not invent selections the user never confirmed"
+        );
+    }
+
+    #[test]
+    fn auto_submit_resolves_only_confirmed_answers() {
+        let (mut view, rx) = exchange(
+            vec![
+                q("Q1?", "H1", &["A1", "B1"], false),
+                q("Q2?", "H2", &["A2", "B2"], false),
+            ],
+            Some(60),
+        );
+        // The user explicitly confirms Q1 (Enter), then the afk timeout fires
+        // before Q2 is answered.
+        view.handle_key(press(KeyCode::Enter));
+        let outcome = view.auto_submit();
+        assert!(matches!(outcome, ViewOutcome::Accepted(_)));
+        let answers = rx.blocking_recv().expect("auto-submitted");
+        // Only the confirmed Q1 is present; Q2 is NOT back-filled.
         assert_eq!(answers.get("Q1?").map(String::as_str), Some("A1"));
-        assert_eq!(answers.get("Q2?").map(String::as_str), Some("A2"));
+        assert_eq!(answers.get("Q2?"), None);
     }
 }

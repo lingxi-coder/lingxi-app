@@ -80,27 +80,34 @@ impl MultiCredentialProvider {
         if let Some(key) = self.anthropic_api_key.clone() {
             return Ok(Credential::ApiKey(key));
         }
-        match self.credentials.get_anthropic_api_key().await {
-            Ok(Some(key)) => return Ok(Credential::ApiKey(key.expose_secret().clone())),
-            Ok(None) => {}
-            // Preserve the existing helper fallback when the OS store is
-            // unavailable; a configured helper may still supply the key.
-            Err(_) => {}
-        }
-        let Some(helper) = self.anthropic_api_key_helper.as_deref() else {
-            return Err(LlmError::Authentication);
+        // claude-code `jM()` (getAnthropicApiKeyWithSource) resolves in order:
+        // approved env → managed → apiKeyHelper → config/macOS-keychain → none.
+        // So the `apiKeyHelper` runs BEFORE the OS secure store and a configured
+        // helper SHADOWS a stored key (the port previously consulted the store
+        // first, inverting this). A helper that yields nothing (or fails) falls
+        // through to the store; only when the store is ALSO empty does a helper
+        // failure surface, preserving its diagnostic message.
+        let helper_error = if let Some(helper) = self.anthropic_api_key_helper.as_deref() {
+            let ttl_ms = llm_client::oauth::anthropic::api_key_helper_ttl_ms();
+            match llm_client::oauth::anthropic::fetch_api_key_result(
+                helper,
+                &self.anthropic_api_key_helper_cache,
+                ttl_ms,
+            )
+            .await
+            {
+                Ok(key) => return Ok(Credential::ApiKey(key)),
+                Err(e) => Some(LlmError::InvalidRequest {
+                    message: format!("apiKeyHelper failed: {e}"),
+                }),
+            }
+        } else {
+            None
         };
-        let ttl_ms = llm_client::oauth::anthropic::api_key_helper_ttl_ms();
-        llm_client::oauth::anthropic::fetch_api_key_result(
-            helper,
-            &self.anthropic_api_key_helper_cache,
-            ttl_ms,
-        )
-        .await
-        .map(Credential::ApiKey)
-        .map_err(|e| LlmError::InvalidRequest {
-            message: format!("apiKeyHelper failed: {e}"),
-        })
+        if let Ok(Some(key)) = self.credentials.get_anthropic_api_key().await {
+            return Ok(Credential::ApiKey(key.expose_secret().clone()));
+        }
+        Err(helper_error.unwrap_or(LlmError::Authentication))
     }
 
     /// Resolve a non-Anthropic provider key: keychain[id] → env[var] → Authentication.

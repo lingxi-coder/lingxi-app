@@ -218,7 +218,7 @@ impl SendMessageTool {
         }
         if trimmed.contains('@') {
             return Err(ToolError::InvalidInput(
-                "to must be a bare teammate name or \"*\" — there is only one team per session"
+                "to must be a bare teammate name — there is only one team per session"
                     .into(),
             ));
         }
@@ -677,7 +677,7 @@ impl Tool for SendMessageTool {
         }
         if to.contains('@') {
             return Err(ValidationError(
-                "to must be a bare teammate name or \"*\" — there is only one team per session"
+                "to must be a bare teammate name — there is only one team per session"
                     .into(),
             ));
         }
@@ -1279,7 +1279,7 @@ mod tests {
             .expect_err("`@` in `to` must reject");
         assert_eq!(
             err.0,
-            "to must be a bare teammate name or \"*\" — there is only one team per session"
+            "to must be a bare teammate name — there is only one team per session"
         );
     }
 

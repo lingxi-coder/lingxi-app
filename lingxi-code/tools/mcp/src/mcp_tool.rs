@@ -656,22 +656,34 @@ async fn process_mcp_call_result(
             // with read-it-from-file instructions; images / a falsy
             // ENABLE_MCP_LARGE_OUTPUT_FILES / a failed write fall back to
             // truncation. Under-threshold content is forwarded verbatim.
+            // Second stage of the oracle's `AJr` guard: once the rough estimate
+            // clears the 12 500-token threshold, count the FULL content (image
+            // blocks INCLUDED — the oracle's `aHt` passes the whole content to
+            // the count endpoint, so the count is not skipped for image-bearing
+            // results). The count route drives which fallback the large-output
+            // handler applies (see `ExactCountOutcome`).
             let exact_token_count =
-                if crate::large_output::mcp_content_needs_exact_count(&model_content)
-                    && !crate::large_output::content_contains_images(&model_content)
-                {
+                if crate::large_output::mcp_content_needs_exact_count(&model_content) {
                     match token_counter
                         .count_mcp_content_tokens(&default_model, &model_content)
                         .await
                     {
-                        Ok(count) => count,
-                        // Counting is an optimization gate, not a reason to lose a
-                        // valid MCP result. Any route/transport failure keeps the
-                        // conservative persistence/truncation behavior.
-                        Err(_error) => None,
+                        // The active route returned an exact count.
+                        Ok(Some(count)) => {
+                            crate::large_output::ExactCountOutcome::Counted(count)
+                        }
+                        // The route has NO exact-count endpoint (a non-Anthropic
+                        // multi-provider route): stay conservative (accepted
+                        // divergence — the oracle is always Anthropic).
+                        Ok(None) => crate::large_output::ExactCountOutcome::Unsupported,
+                        // The route HAS a count endpoint (Anthropic) but the
+                        // count call FAILED. Mirror the oracle's `AJr`
+                        // `catch`→`false`: forward the content verbatim rather
+                        // than losing a valid MCP result to a transient failure.
+                        Err(_error) => crate::large_output::ExactCountOutcome::CountFailed,
                     }
                 } else {
-                    None
+                    crate::large_output::ExactCountOutcome::Unsupported
                 };
             let content = crate::large_output::process_mcp_result_with_exact_count(
                 &model_content,

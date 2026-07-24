@@ -15,11 +15,15 @@
 //!   viewability), or when the `ENABLE_MCP_LARGE_OUTPUT_FILES` env flag is set
 //!   to a falsy value, or when the file write fails.
 //!
-//! The size decision mirrors Claude's two-stage guard: a cheap 12 500-token
-//! estimate first, followed by an exact provider count against the 25 000-token
-//! cap. Routes without a token-count endpoint retain the safe conservative
-//! behavior. The image branch reuses the shared image codec and compresses a
-//! valid image to the remaining character budget.
+//! The size decision mirrors Claude's two-stage guard (`AJr`): a cheap
+//! 12 500-token estimate first, followed by an exact provider count of the FULL
+//! content (image blocks included) against the 25 000-token cap. A count-call
+//! FAILURE on a route that HAS a count endpoint (Anthropic) forwards the content
+//! verbatim (`AJr`'s `catch`→`false`); only routes with NO count endpoint retain
+//! the conservative persist/truncate fallback (the accepted multi-provider
+//! divergence). The image branch reuses the shared image codec and compresses a
+//! valid image to the remaining character budget — but is reached only AFTER the
+//! exact count confirms the content exceeds the cap.
 //!
 //! Persistence REUSES the MCP-5d storage helper
 //! [`mcp::persist_binary_content`] (writing the serialized UTF-8 string as bytes
@@ -74,13 +78,37 @@ pub fn process_mcp_result(
         tool_name,
         output_dir,
         now_millis,
-        None,
+        ExactCountOutcome::Unsupported,
     )
 }
 
+/// Outcome of the exact provider token-count stage for the large-output guard.
+///
+/// Distinguishes the three branches of the oracle's needs-truncation predicate
+/// `AJr` (`client.ts`, binary offset 229866928):
+/// `async function AJr(e){if(!e)return!1;if(iHt(e)<=Fmo()*Ds_)return!1;try{let
+/// n=await aHt([{role:"user",content:e}],[]);return!!(n&&n>Fmo())}catch(r){return
+/// ke(r),!1}}` — the exact count (`aHt`) receives the FULL content (image blocks
+/// included), and a count-call FAILURE (`catch`) returns `false`, i.e. the
+/// content is forwarded to the model VERBATIM.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExactCountOutcome {
+    /// The active route returned an exact token count (`aHt` resolved to a
+    /// number). Compared against the 25 000-token cap.
+    Counted(u64),
+    /// The route HAS an exact-count endpoint (Anthropic) but the count call
+    /// FAILED. Mirrors `AJr`'s `catch`→`false`: forward the content verbatim
+    /// rather than losing a valid MCP result to a transient count failure.
+    CountFailed,
+    /// The route has NO exact-count endpoint. This is the accepted
+    /// multi-provider divergence (the oracle is always on an Anthropic route):
+    /// stay conservative and apply large-output handling from the rough
+    /// estimate alone.
+    Unsupported,
+}
+
 /// Process an MCP result with the provider's exact token count when available.
-/// `None` preserves the conservative fallback used by providers that do not
-/// expose token counting.
+/// See [`ExactCountOutcome`] for the three route states this handles.
 #[must_use]
 pub fn process_mcp_result_with_exact_count(
     content: &Value,
@@ -88,7 +116,7 @@ pub fn process_mcp_result_with_exact_count(
     tool_name: &str,
     output_dir: &Path,
     now_millis: u128,
-    exact_token_count: Option<u64>,
+    exact_token_count: ExactCountOutcome,
 ) -> Value {
     // IDE tools are not going to the model directly (client.ts:2727-2731).
     if server_name == "ide" {
@@ -100,10 +128,20 @@ pub fn process_mcp_result_with_exact_count(
         return content.clone();
     }
 
-    // Claude only enters large-output handling when the exact count exceeds
-    // the full cap. An unsupported count route (`None`) stays conservative.
-    if exact_token_count.is_some_and(|tokens| tokens <= DEFAULT_MAX_MCP_OUTPUT_TOKENS) {
-        return content.clone();
+    // The `AJr` needs-truncation predicate: Claude only enters large-output
+    // handling when the exact count exceeds the full cap.
+    match exact_token_count {
+        // `AJr` `catch`→`false`: a count-endpoint failure on a route that HAS a
+        // count endpoint (Anthropic) forwards the content verbatim.
+        ExactCountOutcome::CountFailed => return content.clone(),
+        // `!!(n && n > Fmo())` is false when the exact count is within the cap.
+        ExactCountOutcome::Counted(tokens) if tokens <= DEFAULT_MAX_MCP_OUTPUT_TOKENS => {
+            return content.clone();
+        }
+        // Exact count over the cap, OR a route with no exact-count endpoint
+        // (the accepted multi-provider divergence stays conservative): fall
+        // through to large-output handling.
+        ExactCountOutcome::Counted(_) | ExactCountOutcome::Unsupported => {}
     }
 
     // Feature gate: an explicitly-falsy ENABLE_MCP_LARGE_OUTPUT_FILES reverts to
@@ -652,7 +690,7 @@ mod tests {
             "tool",
             dir.path(),
             1700,
-            Some(DEFAULT_MAX_MCP_OUTPUT_TOKENS),
+            ExactCountOutcome::Counted(DEFAULT_MAX_MCP_OUTPUT_TOKENS),
         );
 
         assert_eq!(out, content);
@@ -670,11 +708,136 @@ mod tests {
             "tool",
             dir.path(),
             1700,
-            Some(DEFAULT_MAX_MCP_OUTPUT_TOKENS + 1),
+            ExactCountOutcome::Counted(DEFAULT_MAX_MCP_OUTPUT_TOKENS + 1),
         );
 
         assert!(out.as_str().is_some());
         assert!(dir.path().join("mcp-srv-tool-1700.txt").exists());
+    }
+
+    #[test]
+    fn count_failed_forwards_content_verbatim() {
+        // Oracle `AJr` `catch`→`false`: when the route HAS a count endpoint
+        // (Anthropic) but the count call fails, the over-rough-threshold content
+        // is forwarded VERBATIM — it is NOT persisted or truncated.
+        let dir = tempfile::tempdir().unwrap();
+        let content = Value::Array(vec![text_of_len(60_000)]);
+        assert!(mcp_content_needs_exact_count(&content));
+
+        let out = process_mcp_result_with_exact_count(
+            &content,
+            "srv",
+            "tool",
+            dir.path(),
+            1700,
+            ExactCountOutcome::CountFailed,
+        );
+
+        assert_eq!(out, content, "count failure forwards content verbatim");
+        assert!(
+            std::fs::read_dir(dir.path()).unwrap().next().is_none(),
+            "nothing persisted on a count failure"
+        );
+    }
+
+    #[test]
+    fn count_failed_forwards_image_content_verbatim() {
+        // A count failure forwards image-bearing content verbatim too — the
+        // image-truncate branch is only reached AFTER an exact count exceeds the
+        // cap, never on a count failure.
+        let dir = tempfile::tempdir().unwrap();
+        let content = Value::Array(vec![
+            text_of_len(60_000),
+            json!({ "type": "image", "source": { "type": "base64", "data": "x", "media_type": "image/png" } }),
+        ]);
+
+        let out = process_mcp_result_with_exact_count(
+            &content,
+            "srv",
+            "tool",
+            dir.path(),
+            1700,
+            ExactCountOutcome::CountFailed,
+        );
+
+        assert_eq!(out, content, "image content forwarded verbatim on failure");
+        assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn unsupported_route_stays_conservative() {
+        // No exact-count endpoint (multi-provider divergence): over-rough-
+        // threshold content still enters large-output handling from the rough
+        // estimate — pure text persists to disk.
+        let dir = tempfile::tempdir().unwrap();
+        let content = Value::Array(vec![text_of_len(60_000)]);
+
+        let out = process_mcp_result_with_exact_count(
+            &content,
+            "srv",
+            "tool",
+            dir.path(),
+            1700,
+            ExactCountOutcome::Unsupported,
+        );
+
+        assert!(out.as_str().is_some(), "unsupported route persists/truncates");
+        assert!(dir.path().join("mcp-srv-tool-1700.txt").exists());
+    }
+
+    #[test]
+    fn counted_image_content_within_cap_forwards_verbatim() {
+        // The `!content_contains_images` guard is gone: image-bearing content
+        // whose exact count is within the cap is forwarded VERBATIM (image
+        // preserved), not truncated. This is the primary parity fix — the old
+        // code skipped counting for images and always truncated.
+        let dir = tempfile::tempdir().unwrap();
+        let content = Value::Array(vec![
+            text_of_len(60_000),
+            json!({ "type": "image", "source": { "type": "base64", "data": "x", "media_type": "image/png" } }),
+        ]);
+        assert!(mcp_content_needs_exact_count(&content));
+
+        let out = process_mcp_result_with_exact_count(
+            &content,
+            "srv",
+            "tool",
+            dir.path(),
+            1700,
+            ExactCountOutcome::Counted(DEFAULT_MAX_MCP_OUTPUT_TOKENS),
+        );
+
+        assert_eq!(out, content, "image content within cap forwarded whole");
+        assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn counted_image_content_over_cap_truncates() {
+        // Once the exact count exceeds the cap, image-bearing content DOES take
+        // the truncate branch (persisting images as JSON defeats compression).
+        let dir = tempfile::tempdir().unwrap();
+        let content = Value::Array(vec![
+            text_of_len(60_000),
+            json!({ "type": "image", "source": { "type": "base64", "data": "x", "media_type": "image/png" } }),
+        ]);
+
+        let out = process_mcp_result_with_exact_count(
+            &content,
+            "srv",
+            "tool",
+            dir.path(),
+            1700,
+            ExactCountOutcome::Counted(DEFAULT_MAX_MCP_OUTPUT_TOKENS + 1),
+        );
+
+        // Truncation keeps the array shape and appends the truncation message.
+        let blocks = out.as_array().expect("truncate path returns an array");
+        assert_eq!(
+            blocks.last().unwrap().get("text").and_then(Value::as_str),
+            Some(truncation_message().as_str())
+        );
+        assert!(blocks.iter().any(is_image_block), "image kept");
+        assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
     }
 
     #[test]

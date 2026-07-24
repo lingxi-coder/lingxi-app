@@ -2125,10 +2125,7 @@ impl ChatWidget {
         let scope = if is_all { None } else { Some(target) };
         match handle.set_mcp_servers_disabled(scope, !enable).await {
             Ok(names) if names.is_empty() => (mcp_already_msg(is_all, target, enable), false),
-            Ok(names) => {
-                let verb = if enable { "Enabled" } else { "Disabled" };
-                (format!("{verb} {}.", names.join(", ")), false)
-            }
+            Ok(names) => (mcp_toggle_success_message(enable, is_all, target, &names), false),
             Err(e) => (
                 format!(
                     "/mcp {} failed: {e}",
@@ -4107,6 +4104,30 @@ fn mcp_already_msg(is_all: bool, target: &str, enable: bool) -> String {
     }
 }
 
+/// Success message for a `/mcp enable|disable` that changed at least one server.
+///
+/// Mirrors the oracle's two reachable forms:
+/// - single named server → `Enabled "<name>".` / `Disabled "<name>".`
+/// - `all` → `<verb> <N> MCP server(s). Run \`/mcp\` in the terminal to see status.`
+///
+/// The oracle's richer single-enable variant (`…but it isn't connected yet
+/// (<state>). <hint>`) and the aggregate `y`/`E` sub-clauses require the
+/// per-server `allSettled` + already-in-state pre-check flow the port's
+/// fail-fast `set_mcp_servers_disabled` does not expose (a single enable that
+/// fails to connect returns `Err`, not a fulfilled-but-not-connected result),
+/// so they are unreachable on this success path.
+fn mcp_toggle_success_message(enable: bool, is_all: bool, target: &str, changed: &[String]) -> String {
+    let verb = if enable { "Enabled" } else { "Disabled" };
+    if is_all {
+        format!(
+            "{verb} {} MCP server(s). Run `/mcp` in the terminal to see status.",
+            changed.len()
+        )
+    } else {
+        format!("{verb} \"{target}\".")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::any::Any;
@@ -4257,6 +4278,28 @@ mod tests {
         assert_eq!(Failed.label(), "not connected");
         assert_eq!(NeedsAuth.label(), "needs authentication");
         assert_eq!(NeedsApproval.label(), "pending approval");
+    }
+
+    #[test]
+    fn mcp_toggle_success_message_matches_the_oracle_reachable_forms() {
+        // Single named server: quoted name, no list.
+        assert_eq!(
+            mcp_toggle_success_message(true, false, "myserver", &["myserver".into()]),
+            "Enabled \"myserver\".",
+        );
+        assert_eq!(
+            mcp_toggle_success_message(false, false, "myserver", &["myserver".into()]),
+            "Disabled \"myserver\".",
+        );
+        // `all`: the "<N> MCP server(s)" aggregate with the status pointer.
+        assert_eq!(
+            mcp_toggle_success_message(true, true, "all", &["a".into(), "b".into(), "c".into()]),
+            "Enabled 3 MCP server(s). Run `/mcp` in the terminal to see status.",
+        );
+        assert_eq!(
+            mcp_toggle_success_message(false, true, "all", &["a".into(), "b".into()]),
+            "Disabled 2 MCP server(s). Run `/mcp` in the terminal to see status.",
+        );
     }
 
     #[test]

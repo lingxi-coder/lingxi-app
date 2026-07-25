@@ -139,6 +139,32 @@ pub const AUTO_MODE_DECISION: &str = "tengu_auto_mode_decision";
 /// 5 AgentTool-flow events); its name is byte-locked by its own test.
 pub const AUTO_MODE_DENIAL_LIMIT_EXCEEDED: &str = "tengu_auto_mode_denial_limit_exceeded";
 
+// WIZARD-06: the `/auto-mode-setup` wizard telemetry events. Like the two
+// auto-mode consts above, these belong to the auto-mode-setup flow and are kept
+// OUT of the count-locked [`NAMES`]/`ALL_EVENT_NAMES` registry fixture (an
+// older-claude snapshot); each name is byte-locked by its own test.
+
+/// `tengu_auto_mode_setup_wizard_shown` — the `/auto-mode-setup` review UI was
+/// presented. Fields include `has_existing` (whether the user already had custom
+/// auto-mode rules).
+pub const AUTO_MODE_SETUP_WIZARD_SHOWN: &str = "tengu_auto_mode_setup_wizard_shown";
+
+/// `tengu_auto_mode_setup_wizard_answers` — the user's per-category posture
+/// answers during the review (fields include `posture`).
+pub const AUTO_MODE_SETUP_WIZARD_ANSWERS: &str = "tengu_auto_mode_setup_wizard_answers";
+
+/// `tengu_auto_mode_setup_wizard_resolved` — the wizard finished; `choice`
+/// records how it ended (applied / cancelled / …).
+pub const AUTO_MODE_SETUP_WIZARD_RESOLVED: &str = "tengu_auto_mode_setup_wizard_resolved";
+
+/// The 3 `/auto-mode-setup` wizard events, for the string-lock test. Kept
+/// separate from [`NAMES`] (the count-locked registry) — see the note above.
+pub const AUTO_MODE_SETUP_WIZARD_NAMES: &[&str] = &[
+    AUTO_MODE_SETUP_WIZARD_SHOWN,
+    AUTO_MODE_SETUP_WIZARD_ANSWERS,
+    AUTO_MODE_SETUP_WIZARD_RESOLVED,
+];
+
 /// The 5 claude-named `AgentTool` flow events (see the consts above). Kept
 /// SEPARATE from [`NAMES`] so the byte-for-byte `ALL_EVENT_NAMES` registry
 /// fixture (an older-claude snapshot) stays locked. Used by string-lock tests.
@@ -598,6 +624,25 @@ mod agent_tool_event_name_tests {
             AUTO_MODE_DENIAL_LIMIT_EXCEEDED,
             "tengu_auto_mode_denial_limit_exceeded"
         );
+    }
+
+    /// WIZARD-06: string-lock the 3 `/auto-mode-setup` wizard event names
+    /// byte-for-byte vs 2.1.218.
+    #[test]
+    fn auto_mode_setup_wizard_event_names_are_locked() {
+        assert_eq!(
+            AUTO_MODE_SETUP_WIZARD_SHOWN,
+            "tengu_auto_mode_setup_wizard_shown"
+        );
+        assert_eq!(
+            AUTO_MODE_SETUP_WIZARD_ANSWERS,
+            "tengu_auto_mode_setup_wizard_answers"
+        );
+        assert_eq!(
+            AUTO_MODE_SETUP_WIZARD_RESOLVED,
+            "tengu_auto_mode_setup_wizard_resolved"
+        );
+        assert_eq!(AUTO_MODE_SETUP_WIZARD_NAMES.len(), 3);
     }
 
     #[test]

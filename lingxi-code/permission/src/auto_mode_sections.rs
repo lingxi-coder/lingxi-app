@@ -190,6 +190,18 @@ No destructive entries in user-settings permissions.allow.";
 /// Infix for the truncated-flagged-list count line.
 pub const ADDITIONAL_FLAGGED_INFIX: &str = r" additional flagged ";
 
+/// The flagged `permissions.allow` list of entries auto mode ignores.
+///
+/// [`crate::auto_mode_propose::check_unknown_removal`] scans for this heading:
+/// a proposed removal is only honoured when the recon actually offered that
+/// rule under one of the two flagged lists.
+pub const HEADING_FLAGGED_CLASSIFIER_BYPASSING: &str =
+    "#### permissions.allow entries auto mode ignores (classifier-bypassing, in your user settings)";
+
+/// The flagged `permissions.allow` list of destructive entries.
+pub const HEADING_FLAGGED_DESTRUCTIVE: &str =
+    "#### Destructive permissions.allow entries (honored at runtime \u{2014} auto-approved with no prompt, in your user settings)";
+
 /// Every `####` sub-section heading, for the shape tests below.
 pub const SUBSECTION_HEADINGS: [&str; 23] = [
     HEADING_ORG_REPO_SPLIT,

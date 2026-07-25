@@ -837,8 +837,8 @@ fn round_div(n: usize, d: usize) -> usize {
 /// it EXTENDS the shipped built-in rules instead of REPLACING them.
 pub const AUTO_MODE_DEFAULTS_SENTINEL: &str = "$defaults";
 
-/// `oDo` — the maximum characters (JS UTF-16 length) of a single rule entry.
-const MAX_ENTRY_LEN_UTF16: usize = 10_000;
+/// `kPo` — the maximum characters (JS UTF-16 length) of a single rule entry.
+pub const MAX_ENTRY_LEN_UTF16: usize = 10_000;
 
 /// The rule-array categories checked after `environment` (`man`).
 const AUTO_MODE_RULE_KEYS: [&str; 3] = ["allow", "soft_deny", "hard_deny"];
@@ -953,6 +953,15 @@ fn validate_save_array(name: &str, entries: &[&str]) -> Option<String> {
         }
     }
     None
+}
+
+/// Validate the proposal's `notes` array with the same per-entry rules as a
+/// rule array (`xPo("notes", ...)`). Notes are rendered to the user, so they
+/// get the same renderability and template-token guards.
+#[must_use]
+pub fn validate_notes(notes: &[String]) -> Option<String> {
+    let refs: Vec<&str> = notes.iter().map(String::as_str).collect();
+    validate_save_array("notes", &refs)
 }
 
 /// Read a JSON string array as `Vec<&str>`, or `None` when the value is not an

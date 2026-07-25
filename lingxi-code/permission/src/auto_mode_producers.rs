@@ -14,6 +14,34 @@ use crate::auto_mode_defaults::{
 use crate::auto_mode_facts::DEFAULT_LABELS_GUIDANCE;
 use crate::auto_mode_sections::{HEADING_DEFAULT_ALLOW_LABELS, HEADING_DEFAULT_SOFT_DENY_LABELS};
 
+// ── producer read caps ───────────────────────────────────────────────────────
+
+/// `Scn` — read cap for `CLAUDE.md` files.
+pub const DOC_READ_CAP_CLAUDE_MD: usize = 200_000;
+/// `yFt` — default read cap for project docs.
+pub const DOC_READ_CAP: usize = 10_000;
+/// `uae` — how many flagged `permissions.allow` entries are listed before the
+/// list is capped.
+pub const FLAGGED_LIST_CAP: usize = 20;
+/// How many leading lines of `README.md` are kept.
+pub const README_HEAD_LINES: usize = 40;
+/// `RPo`'s directory-depth limit when globbing project docs.
+pub const DOC_GLOB_MAX_DEPTH: usize = 4;
+/// `RPo`'s result cap when globbing project docs.
+pub const DOC_GLOB_LIMIT: usize = 10;
+
+/// `Z1d`'s truncation suffix: appended when a read hit its cap.
+///
+/// A truncated read must announce itself — silently returning the first N
+/// bytes would let the model treat a partial file as the whole of it.
+#[must_use]
+pub fn read_truncated_marker(cap: usize) -> String {
+    format!(
+        "{}{cap} bytes]",
+        crate::auto_mode_facts::TRUNCATED_AT_PREFIX
+    )
+}
+
 /// Render one label list as `- {label}` bullets.
 fn label_bullets(labels: &[&str]) -> String {
     labels
@@ -58,6 +86,20 @@ mod tests {
                 "label {label:?} must appear exactly once"
             );
         }
+    }
+
+    #[test]
+    fn producer_caps_match_the_oracle() {
+        assert_eq!(DOC_READ_CAP_CLAUDE_MD, 200_000);
+        assert_eq!(DOC_READ_CAP, 10_000);
+        assert_eq!(FLAGGED_LIST_CAP, 20);
+        assert_eq!(README_HEAD_LINES, 40);
+        assert_eq!(DOC_GLOB_MAX_DEPTH, 4);
+        assert_eq!(DOC_GLOB_LIMIT, 10);
+        assert_eq!(
+            read_truncated_marker(10_000),
+            "\n\u{2026}[truncated at 10000 bytes]"
+        );
     }
 
     #[test]

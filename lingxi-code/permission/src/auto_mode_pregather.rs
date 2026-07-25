@@ -706,7 +706,7 @@ mod tests {
     fn partial_gating_withholds_only_what_was_declined() {
         // depth = "shell": history is allowed, the home walk is not.
         let producers = RecordingProducers::default();
-        build_recon_block(
+        let _ = build_recon_block(
             gather_options_from_answers(Some("project"), Some("shell")),
             &producers,
         );

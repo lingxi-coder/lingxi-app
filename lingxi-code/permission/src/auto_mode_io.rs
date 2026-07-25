@@ -18,14 +18,12 @@
 //! * **Never block forever.** Subprocesses are killed at
 //!   [`crate::auto_mode_producers::SUBPROCESS_TIMEOUT_MS`], and reads are capped.
 //!
-//! RESIDUAL: [`rg_files`] spawns `rg` off `PATH`. claude-code ships an embedded
-//! ripgrep and resolves it through the logic modelled in
-//! `tools/file/src/ripgrep_mode.rs`, whose own docs record that the system-`rg`
-//! subprocess backend is not implemented here yet. Where no `rg` resolves, the
-//! oracle's `RPo` also returns an empty list (`catch { return [] }`), so this
-//! matches its behaviour — but note the consequence: the glob-backed sections
-//! then render as "nothing found" rather than as "could not look". Wiring this
-//! to the embedded binary is what makes those sections trustworthy.
+//! The glob-backed scans run IN-PROCESS on the `ignore` crate — claude-code's
+//! own "embedded ripgrep" mode, and what `tools/file`'s Grep already does here.
+//! Spawning `rg` instead would make every glob-backed recon section depend on a
+//! binary being on `PATH`, and a missing binary renders "nothing found" rather
+//! than "could not look" — the exact confusion the rest of this subsystem
+//! works to prevent.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -235,10 +233,17 @@ fn finalize_glob(mut paths: Vec<String>, limit: usize) -> Vec<String> {
 
 /// `RPo` — list files under `root` matching `patterns`.
 ///
-/// `.git` and `node_modules` are excluded, the walk is depth-limited, and the
-/// results are filtered by `keep` before being capped. Any failure (including a
-/// missing `rg`) yields an empty list rather than an error, matching the
-/// oracle's `catch { return [] }`.
+/// Runs IN-PROCESS on the `ignore` crate rather than spawning `rg`. That is
+/// claude-code's own "embedded ripgrep" mode, and it is what `tools/file`'s
+/// Grep already does here — `ignore` is the same library ripgrep is built on.
+/// Spawning instead would make every glob-backed recon section depend on a
+/// binary being on `PATH`, and when it is not there the section renders
+/// "nothing found" rather than "could not look", which is precisely the
+/// confusion the rest of this subsystem works to avoid.
+///
+/// `.git` and `node_modules` are excluded, the walk is depth-limited, hidden
+/// files are included, and `.gitignore` is respected — matching
+/// `rg --files --hidden --max-depth N -g '!.git' -g '!node_modules'`.
 #[must_use]
 pub fn rg_files(
     root: &Path,
@@ -247,37 +252,39 @@ pub fn rg_files(
     depth: usize,
     keep: Option<&regex::Regex>,
 ) -> Vec<String> {
-    let mut cmd = Command::new("rg");
-    cmd.current_dir(root);
-    cmd.args([
-        "--files",
-        "--hidden",
-        "--max-depth",
-        &depth.to_string(),
-        "-g",
-        "!.git",
-        "-g",
-        "!node_modules",
-    ]);
-    for p in patterns {
-        cmd.args(["-g", p]);
-    }
-    let Some((_, out, _)) = run_capped(cmd, recon_timeout()) else {
+    let Some(overrides) = build_overrides(root, patterns) else {
         return Vec::new();
     };
-    // `zsy` — make the paths relative to the root.
-    let root_prefix = format!("{}/", root.display());
-    let listed: Vec<String> = out
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(|l| {
-            l.strip_prefix(&root_prefix)
-                .unwrap_or(l)
-                .replace('\\', "/")
-        })
-        .filter(|l| keep.is_none_or(|re| re.is_match(l)))
-        .collect();
-    finalize_glob(listed, limit)
+    let mut out = Vec::new();
+    let walker = ignore::WalkBuilder::new(root)
+        .hidden(false)
+        .max_depth(Some(depth))
+        .overrides(overrides)
+        .build();
+    for entry in walker.flatten() {
+        if !entry.file_type().is_some_and(|t| t.is_file()) {
+            continue;
+        }
+        let Ok(rel) = entry.path().strip_prefix(root) else {
+            continue;
+        };
+        let rel = rel.to_string_lossy().replace('\\', "/");
+        if keep.is_none_or(|re| re.is_match(&rel)) {
+            out.push(rel);
+        }
+    }
+    finalize_glob(out, limit)
+}
+
+/// Build the `-g` override set: the two standing exclusions plus `patterns`.
+fn build_overrides(root: &Path, patterns: &[&str]) -> Option<ignore::overrides::Override> {
+    let mut builder = ignore::overrides::OverrideBuilder::new(root);
+    builder.add("!.git").ok()?;
+    builder.add("!node_modules").ok()?;
+    for p in patterns {
+        builder.add(p).ok()?;
+    }
+    builder.build().ok()
 }
 
 // ── concrete sources ─────────────────────────────────────────────────────────
@@ -408,39 +415,13 @@ impl crate::auto_mode_producers::ConfigScanSource for FsConfigScanSource {
     fn bucket_scan(&self) -> Option<crate::auto_mode_producers::BucketScan> {
         use crate::auto_mode_producers::{
             bucket_prefix_clusters, extract_bucket_names, BucketCount, BucketScan,
-            BUCKET_SCAN_DISTINCT_CAP, BUCKET_SCAN_GLOBS, BUCKET_SCAN_MAX_FILESIZE,
-            BUCKET_SCAN_TIMEOUT_MS, FLAGGED_LIST_CAP,
+            BUCKET_SCAN_DISTINCT_CAP, BUCKET_SCAN_GLOBS, BUCKET_SCAN_MAX_FILESIZE_BYTES,
+            BUCKET_SCAN_TIMEOUT_MS, DOC_GLOB_MAX_DEPTH, FLAGGED_LIST_CAP,
         };
 
-        let mut cmd = Command::new("rg");
-        cmd.current_dir(&self.root);
-        cmd.args([
-            "-o",
-            "-H",
-            "--no-line-number",
-            "--no-messages",
-            "--no-heading",
-            "--color=never",
-            "--null",
-            "--hidden",
-            "-g",
-            "!.git",
-            "-g",
-            "!node_modules",
-        ]);
-        for g in BUCKET_SCAN_GLOBS {
-            cmd.args(["-g", g]);
-        }
-        cmd.args([
-            "--max-filesize",
-            BUCKET_SCAN_MAX_FILESIZE,
-            "-e",
-            "[a-z0-9.+-]?(s3|gs|az)://[a-z0-9][a-z0-9._-]*",
-        ]);
-
-        // A scan that could not start at all is a FAILURE, not an empty result.
-        let (code, out, timed_out) =
-            run_capped(cmd, Duration::from_millis(BUCKET_SCAN_TIMEOUT_MS))?;
+        // In-process, like `rg_files` — see the note there.
+        let overrides = build_overrides(&self.root, &BUCKET_SCAN_GLOBS)?;
+        let deadline = Instant::now() + Duration::from_millis(BUCKET_SCAN_TIMEOUT_MS);
 
         struct Tally {
             occurrences: usize,
@@ -450,11 +431,37 @@ impl crate::auto_mode_producers::ConfigScanSource for FsConfigScanSource {
         let mut tallies: std::collections::HashMap<String, Tally> =
             std::collections::HashMap::new();
         let mut hit_cap = false;
+        let mut timed_out = false;
 
-        'lines: for line in out.split('\n') {
-            let Some(nul) = line.find('\0') else { continue };
-            let (path, rest) = (&line[..nul], &line[nul + 1..]);
-            for name in extract_bucket_names(rest) {
+        let walker = ignore::WalkBuilder::new(&self.root)
+            .hidden(false)
+            .max_depth(Some(DOC_GLOB_MAX_DEPTH))
+            .overrides(overrides)
+            .build();
+
+        'files: for entry in walker.flatten() {
+            if Instant::now() >= deadline {
+                timed_out = true;
+                break;
+            }
+            if !entry.file_type().is_some_and(|t| t.is_file()) {
+                continue;
+            }
+            // `--max-filesize`: an oversized config file is skipped, not read.
+            if entry
+                .metadata()
+                .is_ok_and(|m| m.len() > BUCKET_SCAN_MAX_FILESIZE_BYTES)
+            {
+                continue;
+            }
+            let Ok(rel) = entry.path().strip_prefix(&self.root) else {
+                continue;
+            };
+            let path = rel.to_string_lossy().replace('\\', "/");
+            let Ok(content) = std::fs::read_to_string(entry.path()) else {
+                continue;
+            };
+            for name in extract_bucket_names(&content) {
                 if name.len() > 256 {
                     continue;
                 }
@@ -462,19 +469,19 @@ impl crate::auto_mode_producers::ConfigScanSource for FsConfigScanSource {
                     t.occurrences += 1;
                     if t.last_file != path {
                         t.files += 1;
-                        t.last_file = path.to_string();
+                        t.last_file = path.clone();
                     }
                 } else {
                     if tallies.len() >= BUCKET_SCAN_DISTINCT_CAP {
                         hit_cap = true;
-                        break 'lines;
+                        break 'files;
                     }
                     tallies.insert(
                         name,
                         Tally {
                             occurrences: 1,
                             files: 1,
-                            last_file: path.to_string(),
+                            last_file: path.clone(),
                         },
                     );
                 }
@@ -506,8 +513,7 @@ impl crate::auto_mode_producers::ConfigScanSource for FsConfigScanSource {
             top,
             distinct,
             clusters: bucket_prefix_clusters(names.iter()),
-            // `rg` exit 2 is a real error; exit 1 just means no matches.
-            truncated: hit_cap || timed_out || code == 2,
+            truncated: hit_cap || timed_out,
         })
     }
 }
@@ -811,17 +817,6 @@ mod tests {
         }
     }
 
-    /// Can a `rg` actually be spawned here? See the RESIDUAL in the module
-    /// docs — the glob-backed scans are inert without one.
-    fn ripgrep_available() -> bool {
-        Command::new("rg")
-            .arg("--version")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok()
-    }
-
     #[test]
     fn the_four_ported_producers_run_against_a_real_repository() {
         let dir = tempfile::tempdir().unwrap();
@@ -837,6 +832,11 @@ mod tests {
             &root,
             "package.json",
             r#"{"scripts":{"build":"tsc","test":"vitest"}}"#,
+        );
+        write(
+            &root,
+            "deploy.yaml",
+            "logs: s3://acme-logs/x\ndata: gs://acme-data/y\nagain: s3://acme-logs/z\n",
         );
         write(&config, "CLAUDE.md", "user rules");
         write(
@@ -888,11 +888,14 @@ mod tests {
         assert!(block.text.contains("#### package.json scripts"));
         assert!(block.text.contains("- build"));
         assert!(block.text.contains("- test"));
-        // ...and the glob-backed scans, where a ripgrep can be spawned.
-        if ripgrep_available() {
-            assert!(block.text.contains("#### Makefile/justfile targets"));
-            assert!(block.text.contains("- deploy"));
-        }
+        // ...and the glob-backed scans, which need no external binary.
+        assert!(block.text.contains("#### Makefile/justfile targets"));
+        assert!(block.text.contains("- build"));
+        assert!(block.text.contains("- deploy"));
+        // The repo-wide bucket scan found the names in the config file.
+        assert!(block.text.contains("#### Bucket names in config"));
+        assert!(block.text.contains("- acme-logs"));
+        assert!(block.text.contains("- acme-data"));
         // ...and the shipped default labels are listed.
         assert!(block.text.contains("#### Default allow labels"));
         assert!(block.text.contains("- Read-Only Operations"));

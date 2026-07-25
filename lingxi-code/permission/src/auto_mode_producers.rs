@@ -612,6 +612,8 @@ pub const BUCKET_SCAN_TIMEOUT_MS: u64 = 8_000;
 pub const BUCKET_SCAN_DISTINCT_CAP: usize = 20_000;
 /// `uay` — `rg --max-filesize` for the bucket scan.
 pub const BUCKET_SCAN_MAX_FILESIZE: &str = "4M";
+/// [`BUCKET_SCAN_MAX_FILESIZE`] in bytes.
+pub const BUCKET_SCAN_MAX_FILESIZE_BYTES: u64 = 4 * 1024 * 1024;
 /// `day` — the smallest cluster worth reporting.
 pub const BUCKET_CLUSTER_MIN: usize = 3;
 /// `pay` — how many clusters are reported.

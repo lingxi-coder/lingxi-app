@@ -17,6 +17,15 @@
 //!   the filesystem monitor and the credential prompt.
 //! * **Never block forever.** Subprocesses are killed at
 //!   [`crate::auto_mode_producers::SUBPROCESS_TIMEOUT_MS`], and reads are capped.
+//!
+//! RESIDUAL: [`rg_files`] spawns `rg` off `PATH`. claude-code ships an embedded
+//! ripgrep and resolves it through the logic modelled in
+//! `tools/file/src/ripgrep_mode.rs`, whose own docs record that the system-`rg`
+//! subprocess backend is not implemented here yet. Where no `rg` resolves, the
+//! oracle's `RPo` also returns an empty list (`catch { return [] }`), so this
+//! matches its behaviour — but note the consequence: the glob-backed sections
+//! then render as "nothing found" rather than as "could not look". Wiring this
+//! to the embedded binary is what makes those sections trustworthy.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -129,11 +138,16 @@ pub fn path_symlink_check(root: &Path, relative: &str) -> Option<bool> {
     Some(false)
 }
 
-/// Run a command, killing it at `timeout`. `None` on spawn failure or timeout.
+/// Run a command, killing it at `timeout`. `None` only when it could not be
+/// spawned at all.
+///
+/// On timeout the child is killed and whatever it had already written is
+/// returned with `timed_out = true` — a streaming scan needs its partial
+/// results AND the fact that they are partial.
 ///
 /// stdout is drained on its own thread: an 8 MB pipe would otherwise fill and
 /// deadlock the child while we sat polling for its exit.
-fn run_capped(mut cmd: Command, timeout: Duration) -> Option<(i32, String)> {
+fn run_capped(mut cmd: Command, timeout: Duration) -> Option<(i32, String, bool)> {
     let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -158,8 +172,8 @@ fn run_capped(mut cmd: Command, timeout: Duration) -> Option<(i32, String)> {
                 if started.elapsed() >= timeout {
                     let _ = child.kill();
                     let _ = child.wait();
-                    let _ = reader.join();
-                    return None;
+                    let partial = reader.join().unwrap_or_default();
+                    return Some((-1, String::from_utf8_lossy(&partial).into_owned(), true));
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
@@ -174,6 +188,7 @@ fn run_capped(mut cmd: Command, timeout: Duration) -> Option<(i32, String)> {
     Some((
         status.code().unwrap_or(-1),
         String::from_utf8_lossy(&bytes).into_owned(),
+        false,
     ))
 }
 
@@ -190,7 +205,7 @@ pub fn git_output(root: &Path, args: &[&str]) -> String {
     cmd.args(GIT_HARDENING_FLAGS);
     cmd.args(args);
     match run_capped(cmd, recon_timeout()) {
-        Some((0, out)) => out.strip_suffix('\n').unwrap_or(&out).to_string(),
+        Some((0, out, false)) => out.strip_suffix('\n').unwrap_or(&out).to_string(),
         _ => String::new(),
     }
 }
@@ -204,7 +219,7 @@ pub fn git_line_count(root: &Path, args: &[&str]) -> usize {
     cmd.args(GIT_HARDENING_FLAGS);
     cmd.args(args);
     match run_capped(cmd, recon_timeout()) {
-        Some((0, out)) if !out.is_empty() => out.matches('\n').count(),
+        Some((0, out, false)) if !out.is_empty() => out.matches('\n').count(),
         _ => 0,
     }
 }
@@ -247,7 +262,7 @@ pub fn rg_files(
     for p in patterns {
         cmd.args(["-g", p]);
     }
-    let Some((_, out)) = run_capped(cmd, recon_timeout()) else {
+    let Some((_, out, _)) = run_capped(cmd, recon_timeout()) else {
         return Vec::new();
     };
     // `zsy` — make the paths relative to the root.
@@ -339,6 +354,161 @@ impl RepoFactsSource for FsRepoFactsSource {
     }
     fn repo_path(&self) -> String {
         self.root.display().to_string()
+    }
+}
+
+/// Real-filesystem [`crate::auto_mode_producers::ConfigScanSource`].
+pub struct FsConfigScanSource {
+    root: PathBuf,
+}
+
+impl FsConfigScanSource {
+    /// Build a source for the repository at `root`.
+    #[must_use]
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+}
+
+impl crate::auto_mode_producers::ConfigScanSource for FsConfigScanSource {
+    fn scan_files(&self, globs: &[&str], path_filter: Option<&regex::Regex>) -> Vec<String> {
+        use crate::auto_mode_producers::{
+            CONFIG_SCAN_FILE_LIMIT, CONFIG_SCAN_READ_CAP, DOC_GLOB_MAX_DEPTH,
+        };
+        rg_files(
+            &self.root,
+            globs,
+            CONFIG_SCAN_FILE_LIMIT,
+            DOC_GLOB_MAX_DEPTH,
+            path_filter,
+        )
+        .into_iter()
+        .filter_map(|p| contained_read(&self.root, &p, CONFIG_SCAN_READ_CAP))
+        .collect()
+    }
+
+    fn list_paths(
+        &self,
+        globs: &[&str],
+        limit: usize,
+        depth: usize,
+        filter: Option<&regex::Regex>,
+    ) -> Vec<String> {
+        rg_files(&self.root, globs, limit, depth, filter)
+    }
+
+    fn package_json(&self) -> Option<String> {
+        contained_read(
+            &self.root,
+            "package.json",
+            crate::auto_mode_producers::PACKAGE_JSON_READ_CAP,
+        )
+    }
+
+    fn bucket_scan(&self) -> Option<crate::auto_mode_producers::BucketScan> {
+        use crate::auto_mode_producers::{
+            bucket_prefix_clusters, extract_bucket_names, BucketCount, BucketScan,
+            BUCKET_SCAN_DISTINCT_CAP, BUCKET_SCAN_GLOBS, BUCKET_SCAN_MAX_FILESIZE,
+            BUCKET_SCAN_TIMEOUT_MS, FLAGGED_LIST_CAP,
+        };
+
+        let mut cmd = Command::new("rg");
+        cmd.current_dir(&self.root);
+        cmd.args([
+            "-o",
+            "-H",
+            "--no-line-number",
+            "--no-messages",
+            "--no-heading",
+            "--color=never",
+            "--null",
+            "--hidden",
+            "-g",
+            "!.git",
+            "-g",
+            "!node_modules",
+        ]);
+        for g in BUCKET_SCAN_GLOBS {
+            cmd.args(["-g", g]);
+        }
+        cmd.args([
+            "--max-filesize",
+            BUCKET_SCAN_MAX_FILESIZE,
+            "-e",
+            "[a-z0-9.+-]?(s3|gs|az)://[a-z0-9][a-z0-9._-]*",
+        ]);
+
+        // A scan that could not start at all is a FAILURE, not an empty result.
+        let (code, out, timed_out) =
+            run_capped(cmd, Duration::from_millis(BUCKET_SCAN_TIMEOUT_MS))?;
+
+        struct Tally {
+            occurrences: usize,
+            files: usize,
+            last_file: String,
+        }
+        let mut tallies: std::collections::HashMap<String, Tally> =
+            std::collections::HashMap::new();
+        let mut hit_cap = false;
+
+        'lines: for line in out.split('\n') {
+            let Some(nul) = line.find('\0') else { continue };
+            let (path, rest) = (&line[..nul], &line[nul + 1..]);
+            for name in extract_bucket_names(rest) {
+                if name.len() > 256 {
+                    continue;
+                }
+                if let Some(t) = tallies.get_mut(&name) {
+                    t.occurrences += 1;
+                    if t.last_file != path {
+                        t.files += 1;
+                        t.last_file = path.to_string();
+                    }
+                } else {
+                    if tallies.len() >= BUCKET_SCAN_DISTINCT_CAP {
+                        hit_cap = true;
+                        break 'lines;
+                    }
+                    tallies.insert(
+                        name,
+                        Tally {
+                            occurrences: 1,
+                            files: 1,
+                            last_file: path.to_string(),
+                        },
+                    );
+                }
+            }
+        }
+
+        let mut top: Vec<(String, BucketCount)> = tallies
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    BucketCount {
+                        occurrences: v.occurrences,
+                        files: v.files,
+                    },
+                )
+            })
+            .collect();
+        top.sort_by(|a, b| {
+            b.1.occurrences
+                .cmp(&a.1.occurrences)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        let distinct = top.len();
+        let names: Vec<String> = top.iter().map(|(k, _)| k.clone()).collect();
+        top.truncate(FLAGGED_LIST_CAP);
+
+        Some(BucketScan {
+            top,
+            distinct,
+            clusters: bucket_prefix_clusters(names.iter()),
+            // `rg` exit 2 is a real error; exit 1 just means no matches.
+            truncated: hit_cap || timed_out || code == 2,
+        })
     }
 }
 
@@ -553,7 +723,8 @@ mod tests {
         let mut cmd = Command::new("sleep");
         cmd.arg("30");
         let started = Instant::now();
-        assert_eq!(run_capped(cmd, Duration::from_millis(300)), None);
+        let (_, _, timed_out) = run_capped(cmd, Duration::from_millis(300)).unwrap();
+        assert!(timed_out, "must report that it was cut short");
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "must not wait for the child"
@@ -630,9 +801,25 @@ mod tests {
                 false,
             ))
         }
+        fn config_scans(&self) -> Result<String, ()> {
+            Ok(crate::auto_mode_producers::config_scans_section(
+                &FsConfigScanSource::new(&self.root),
+            ))
+        }
         fn default_labels(&self) -> Result<String, ()> {
             Ok(crate::auto_mode_producers::default_labels_section())
         }
+    }
+
+    /// Can a `rg` actually be spawned here? See the RESIDUAL in the module
+    /// docs — the glob-backed scans are inert without one.
+    fn ripgrep_available() -> bool {
+        Command::new("rg")
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok()
     }
 
     #[test]
@@ -645,6 +832,12 @@ mod tests {
 
         write(&root, "CLAUDE.md", "project rules");
         write(&root, ".gitignore", "target/\n.env\nMY_TOKEN\n");
+        write(&root, "Makefile", "build:\n\tcargo build\ndeploy:\n\techo go\n");
+        write(
+            &root,
+            "package.json",
+            r#"{"scripts":{"build":"tsc","test":"vitest"}}"#,
+        );
         write(&config, "CLAUDE.md", "user rules");
         write(
             &config,
@@ -669,14 +862,11 @@ mod tests {
             &producers,
         );
 
-        // Exactly the two ungated producers that are not ported yet degrade;
-        // the four that ARE ported all produced real content.
+        // Only the one ungated producer that is not ported yet degrades; the
+        // five that ARE ported all produced real content.
         assert_eq!(
             block.failed_sections,
-            vec![
-                "Recent usage in this project (names only)",
-                "Config scans (names only)",
-            ]
+            vec!["Recent usage in this project (names only)"]
         );
         // ...docs read off the real disk,
         assert!(block.text.contains("#### ~/.lingxi/CLAUDE.md"));
@@ -694,6 +884,15 @@ mod tests {
         // ...the project-local autoMode keys were reported as found content,
         assert!(block.text.contains("NOT pre-approved config"));
         assert!(block.text.contains("Bash(x:*)"));
+        // ...config scans read package.json directly (no glob needed),
+        assert!(block.text.contains("#### package.json scripts"));
+        assert!(block.text.contains("- build"));
+        assert!(block.text.contains("- test"));
+        // ...and the glob-backed scans, where a ripgrep can be spawned.
+        if ripgrep_available() {
+            assert!(block.text.contains("#### Makefile/justfile targets"));
+            assert!(block.text.contains("- deploy"));
+        }
         // ...and the shipped default labels are listed.
         assert!(block.text.contains("#### Default allow labels"));
         assert!(block.text.contains("- Read-Only Operations"));

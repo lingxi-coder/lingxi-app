@@ -596,6 +596,503 @@ pub fn repo_facts_section(source: &dyn RepoFactsSource) -> RepoFacts {
     }
 }
 
+// ── `gay` — config scans (names only) ────────────────────────────────────────
+
+/// Read cap for a file `bcn` scans.
+pub const CONFIG_SCAN_READ_CAP: usize = 64_000;
+/// `RPo` result cap inside `bcn`.
+pub const CONFIG_SCAN_FILE_LIMIT: usize = 40;
+/// Read cap for `package.json`.
+pub const PACKAGE_JSON_READ_CAP: usize = 256_000;
+/// Cap on rendered sensitive paths.
+pub const SENSITIVE_PATH_LIMIT: usize = 72;
+/// `lay` — the bucket scan's own deadline, in milliseconds.
+pub const BUCKET_SCAN_TIMEOUT_MS: u64 = 8_000;
+/// `cay` — how many DISTINCT bucket names the scan will hold before giving up.
+pub const BUCKET_SCAN_DISTINCT_CAP: usize = 20_000;
+/// `uay` — `rg --max-filesize` for the bucket scan.
+pub const BUCKET_SCAN_MAX_FILESIZE: &str = "4M";
+/// `day` — the smallest cluster worth reporting.
+pub const BUCKET_CLUSTER_MIN: usize = 3;
+/// `pay` — how many clusters are reported.
+pub const BUCKET_CLUSTER_LIMIT: usize = 10;
+
+/// Globs whose files are read for package-registry hosts.
+pub const REGISTRY_GLOBS: [&str; 3] = [".npmrc", "pip.conf", "pyproject.toml"];
+/// Globs whose files are read for container image registries.
+pub const IMAGE_GLOBS: [&str; 3] = ["Dockerfile*", "**/Dockerfile*", "docker-compose*.yml"];
+/// Globs whose files are read for CI secret names.
+pub const CI_GLOBS: [&str; 1] = ["*.yml"];
+/// Globs whose files are read for build targets.
+pub const MAKE_GLOBS: [&str; 2] = ["Makefile", "justfile"];
+/// Globs whose files are read for secrets-manager markers.
+pub const SECRETS_MARKER_GLOBS: [&str; 5] = ["*.toml", "*.yaml", "*.yml", "*.sh", ".envrc"];
+/// Globs matched by NAME for the sensitive-paths listing.
+pub const SENSITIVE_PATH_GLOBS: [&str; 23] = [
+    "**/*terraform*",
+    "**/*.tf",
+    "**/*k8s*",
+    "**/*kubernetes*",
+    "**/helm[-._]*",
+    "**/*[-._]helm[-._]*",
+    "**/iam[-._]*",
+    "**/*[-._]iam[-._]*",
+    "**/prod[-._]*",
+    "**/*[-._]prod[-._]*",
+    "**/egress[-._]*",
+    "**/*[-._]egress[-._]*",
+    "**/*rbac*",
+    "**/*secret*",
+    "**/*credential*",
+    "**/*pii*",
+    "**/.env*",
+    "**/*.cedar",
+    "**/*allowlist*",
+    "**/network-polic*",
+    "**/*classification*",
+    "**/*retention*",
+    "**/*_encrypted*",
+];
+/// Globs matched by DIRECTORY for the sensitive-paths listing.
+pub const SENSITIVE_DIR_GLOBS: [&str; 6] = [
+    "**/helm/**",
+    "**/iam/**",
+    "**/prod/**",
+    "**/k8s/**",
+    "**/kubernetes/**",
+    "**/rbac/**",
+];
+/// Globs the bucket scan searches.
+pub const BUCKET_SCAN_GLOBS: [&str; 5] = ["*.toml", "*.yaml", "*.yml", "*.json", "*.cfg"];
+
+fn re(pattern: &str) -> regex::Regex {
+    regex::Regex::new(pattern).expect("static regex")
+}
+
+/// `(?:registry|index-url)\s*=\s*(https?://…)`
+#[must_use]
+pub fn registry_url_regex() -> regex::Regex {
+    re(r#"(?:registry|index-url)\s*=\s*(https?://[^\s"'`]+)"#)
+}
+/// `FROM\s+(?:[^/\s]*@)?([a-z0-9][a-z0-9.-]*\.[a-z]+)/`
+#[must_use]
+pub fn image_from_regex() -> regex::Regex {
+    re(r"FROM\s+(?:[^/\s]*@)?([a-z0-9][a-z0-9.-]*\.[a-z]+)/")
+}
+/// `secrets\.([A-Z0-9_]+)`
+#[must_use]
+pub fn ci_secret_regex() -> regex::Regex {
+    re(r"secrets\.([A-Z0-9_]+)")
+}
+/// `(?m)^([a-zA-Z0-9_][a-zA-Z0-9_-]*):`
+#[must_use]
+pub fn make_target_regex() -> regex::Regex {
+    re(r"(?m)^([a-zA-Z0-9_][a-zA-Z0-9_-]*):")
+}
+/// `(VAULT_ADDR|SOPS_[A-Z_]*|op read|aws secretsmanager|gcloud secrets)`
+#[must_use]
+pub fn secrets_marker_regex() -> regex::Regex {
+    re(r"(VAULT_ADDR|SOPS_[A-Z_]*|op read|aws secretsmanager|gcloud secrets)")
+}
+/// `^\.github/workflows/|^\.gitlab-ci\.yml$` — which `*.yml` files are CI.
+#[must_use]
+pub fn ci_path_regex() -> regex::Regex {
+    re(r"^\.github/workflows/|^\.gitlab-ci\.yml$")
+}
+/// `V1d` — `(^|/)(helm|iam|prod|k8s|kubernetes|rbac)/`
+#[must_use]
+pub fn sensitive_dir_regex() -> regex::Regex {
+    re(r"(^|/)(helm|iam|prod|k8s|kubernetes|rbac)/")
+}
+
+/// `G1d` — registries so well-known that naming them says nothing about the
+/// user's infrastructure, so they are dropped from both registry sections.
+pub const PUBLIC_REGISTRIES: [&str; 13] = [
+    "docker.io",
+    "ghcr.io",
+    "registry.npmjs.org",
+    "pypi.org",
+    "mcr.microsoft.com",
+    "nvcr.io",
+    "gcr.io",
+    "public.ecr.aws",
+    "lscr.io",
+    "quay.io",
+    "registry-1.docker.io",
+    "127.0.0.1",
+    "localhost",
+];
+
+/// `Fhr` — every capture-group-1 match of `pattern` in `text`.
+#[must_use]
+pub fn collect_captures(text: &str, pattern: &regex::Regex) -> Vec<String> {
+    pattern
+        .captures_iter(text)
+        .filter_map(|c| c.get(1).map(|m| m.as_str().to_string()))
+        .collect()
+}
+
+/// `eNd` — de-duplicate, drop over-long entries, sort, cap.
+#[must_use]
+pub fn finalize_names(mut names: Vec<String>, limit: usize) -> Vec<String> {
+    names.retain(|n| n.len() <= 256);
+    names.sort_unstable();
+    names.dedup();
+    names.truncate(limit);
+    names
+}
+
+/// `tNd` — the host of a package-registry URL, or `None` when it is not one we
+/// can safely name.
+///
+/// A URL carrying credentials is only accepted when the part after the
+/// authority holds no further `@` and the hostname is dotted — the shapes where
+/// the host is unambiguous. Otherwise it is dropped rather than guessed at.
+#[must_use]
+pub fn registry_host(raw: &str) -> Option<String> {
+    let lower = raw.to_lowercase();
+    let stripped = if lower.starts_with("https://") {
+        &raw[8..]
+    } else if lower.starts_with("http://") {
+        &raw[7..]
+    } else {
+        raw
+    };
+
+    if !stripped.contains('@') {
+        let host: String = stripped
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-')
+            .collect();
+        let ok = host
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '.');
+        return ok.then_some(host);
+    }
+
+    let parsed = url::Url::parse(raw).ok()?;
+    let hostname = parsed.host_str().unwrap_or("");
+    if !parsed.username().is_empty() || parsed.password().is_some_and(|p| !p.is_empty()) {
+        let after = stripped
+            .find(['/', '?', '#'])
+            .map_or("", |i| &stripped[i + 1..]);
+        if after.contains('@') || !hostname.contains('.') {
+            return None;
+        }
+    }
+    let shape_ok = {
+        let mut chars = hostname.chars();
+        chars
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '.')
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+    };
+    (!hostname.is_empty() && shape_ok).then(|| hostname.to_string())
+}
+
+/// One bucket name's tally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BucketCount {
+    /// How many times the name appeared.
+    pub occurrences: usize,
+    /// How many distinct files it appeared in.
+    pub files: usize,
+}
+
+/// The outcome of the repo-wide bucket scan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BucketScan {
+    /// The most-frequent names, highest first.
+    pub top: Vec<(String, BucketCount)>,
+    /// How many distinct names were seen in total.
+    pub distinct: usize,
+    /// First-dash prefixes shared by at least [`BUCKET_CLUSTER_MIN`] names.
+    pub clusters: Vec<(String, usize)>,
+    /// The scan stopped early, so the counts are a lower bound.
+    pub truncated: bool,
+}
+
+/// `Q1d` — bucket names in a chunk of text.
+///
+/// Matches `s3://`, `gs://` and `az://` only when NOT preceded by a character
+/// that would make it part of a longer token, which is the lookbehind the
+/// oracle's regex uses.
+#[must_use]
+pub fn extract_bucket_names(text: &str) -> Vec<String> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    for scheme in ["s3://", "gs://", "az://"] {
+        let mut from = 0usize;
+        while let Some(rel) = text[from..].find(scheme) {
+            let at = from + rel;
+            let preceded = at > 0
+                && {
+                    let p = bytes[at - 1];
+                    p.is_ascii_lowercase()
+                        || p.is_ascii_digit()
+                        || matches!(p, b'.' | b'+' | b'-')
+                };
+            if !preceded {
+                let rest = &text[at + scheme.len()..];
+                let name: String = rest
+                    .chars()
+                    .take_while(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'))
+                    .collect();
+                let first_ok = name
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
+                if first_ok {
+                    out.push(name);
+                }
+            }
+            from = at + scheme.len();
+        }
+    }
+    out
+}
+
+/// `may` — group bucket names by the text before their first `-`.
+///
+/// A prefix shared by several names is what licenses treating it as
+/// org-specific; a prefix seen once or twice is not evidence of anything.
+#[must_use]
+pub fn bucket_prefix_clusters<'a>(names: impl Iterator<Item = &'a String>) -> Vec<(String, usize)> {
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for name in names {
+        let Some(dash) = name.find('-') else { continue };
+        if dash == 0 {
+            continue;
+        }
+        *counts.entry(name[..dash].to_string()).or_insert(0) += 1;
+    }
+    let mut out: Vec<(String, usize)> = counts
+        .into_iter()
+        .filter(|(_, n)| *n >= BUCKET_CLUSTER_MIN)
+        .collect();
+    out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    out.truncate(BUCKET_CLUSTER_LIMIT);
+    out
+}
+
+/// `hay` — render the bucket sub-sections.
+///
+/// `None` means the scan FAILED, which renders as unavailable-not-absent. A
+/// scan that completed and genuinely found nothing renders as empty, because
+/// that IS evidence.
+#[must_use]
+pub fn render_bucket_section(scan: Option<&BucketScan>) -> String {
+    use crate::auto_mode_facts as facts;
+    let Some(scan) = scan else {
+        return crate::auto_mode_sections::BUCKET_SCAN_FAILED.to_string();
+    };
+    if scan.top.is_empty() {
+        return if scan.truncated {
+            crate::auto_mode_sections::BUCKET_SCAN_COLLECTED_NOTHING.to_string()
+        } else {
+            String::new()
+        };
+    }
+    let mut parts: Vec<String> = vec![
+        crate::auto_mode_sections::HEADING_BUCKET_NAMES_BY_COUNT.to_string(),
+    ];
+    for (name, count) in &scan.top {
+        let files = if count.files == 1 { "file" } else { "files" };
+        parts.push(format!(
+            "- {name} ({}\u{d7}, {} {files})",
+            count.occurrences, count.files
+        ));
+    }
+    if scan.distinct > scan.top.len() {
+        parts.push(format!(
+            "\n_{}{}{} shown._",
+            scan.distinct,
+            facts::BUCKET_TOTAL_INFIX,
+            scan.top.len()
+        ));
+    }
+    if scan.truncated {
+        parts.push(crate::auto_mode_gates::BUCKET_SCAN_ENDED_EARLY.to_string());
+    }
+    if !scan.clusters.is_empty() {
+        parts.push(format!(
+            "{}{}",
+            crate::auto_mode_sections::HEADING_BUCKET_PREFIX_CLUSTERS,
+            scan.clusters
+                .iter()
+                .map(|(p, n)| format!("- {p}-* ({n} distinct names)"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+    }
+    parts.retain(|p| !p.is_empty());
+    parts.join("\n")
+}
+
+/// Supplies what the config scans read.
+pub trait ConfigScanSource {
+    /// `bcn`'s file half: list files matching `globs` (optionally filtered by
+    /// path) and return their contents.
+    fn scan_files(&self, globs: &[&str], path_filter: Option<&regex::Regex>) -> Vec<String>;
+    /// `RPo` — list paths only.
+    fn list_paths(
+        &self,
+        globs: &[&str],
+        limit: usize,
+        depth: usize,
+        filter: Option<&regex::Regex>,
+    ) -> Vec<String>;
+    /// `package.json`, capped.
+    fn package_json(&self) -> Option<String>;
+    /// The repo-wide bucket scan; `None` when it failed outright.
+    fn bucket_scan(&self) -> Option<BucketScan>;
+}
+
+/// `bcn` — collect every capture of `pattern` across the matching files.
+fn scan_for(
+    source: &dyn ConfigScanSource,
+    globs: &[&str],
+    pattern: &regex::Regex,
+    limit: usize,
+    path_filter: Option<&regex::Regex>,
+) -> Vec<String> {
+    let mut found = Vec::new();
+    for content in source.scan_files(globs, path_filter) {
+        found.extend(collect_captures(&content, pattern));
+    }
+    finalize_names(found, limit)
+}
+
+/// `gay` — the "Config scans (names only)" section body.
+#[must_use]
+pub fn config_scans_section(source: &dyn ConfigScanSource) -> String {
+    use crate::auto_mode_sections as sections;
+
+    let is_public = |h: &String| PUBLIC_REGISTRIES.contains(&h.as_str());
+
+    let registries: Vec<String> = scan_for(source, &REGISTRY_GLOBS, &registry_url_regex(), 10, None)
+        .iter()
+        .filter_map(|u| registry_host(u))
+        .filter(|h| !is_public(h))
+        .collect();
+    let images: Vec<String> = scan_for(source, &IMAGE_GLOBS, &image_from_regex(), 10, None)
+        .into_iter()
+        .filter(|h| !is_public(h))
+        .collect();
+    let buckets = source.bucket_scan();
+    let ci_secrets = scan_for(
+        source,
+        &CI_GLOBS,
+        &ci_secret_regex(),
+        FLAGGED_LIST_CAP,
+        Some(&ci_path_regex()),
+    );
+    let make_targets = scan_for(source, &MAKE_GLOBS, &make_target_regex(), FLAGGED_LIST_CAP, None);
+    let markers = scan_for(source, &SECRETS_MARKER_GLOBS, &secrets_marker_regex(), 10, None);
+
+    // Sensitive paths: name matches first, then up to two examples per
+    // sensitive DIRECTORY, so a big `prod/` tree cannot crowd out everything.
+    let by_name = source.list_paths(&SENSITIVE_PATH_GLOBS, 60, DOC_GLOB_MAX_DEPTH, None);
+    let dir_re = sensitive_dir_regex();
+    let mut per_dir: Vec<String> = Vec::new();
+    {
+        let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for path in source.list_paths(&SENSITIVE_DIR_GLOBS, 1000, DOC_GLOB_MAX_DEPTH, Some(&dir_re))
+        {
+            let Some(kind) = dir_re
+                .captures(&path)
+                .and_then(|c| c.get(2).map(|m| m.as_str().to_string()))
+            else {
+                continue;
+            };
+            let n = seen.entry(kind).or_insert(0);
+            if *n < 2 {
+                *n += 1;
+                per_dir.push(path);
+            }
+        }
+    }
+    let name_set: std::collections::HashSet<&String> = by_name.iter().collect();
+    let mut sensitive: Vec<String> = by_name.clone();
+    sensitive.extend(per_dir.into_iter().filter(|p| !name_set.contains(p)));
+    sensitive.truncate(SENSITIVE_PATH_LIMIT);
+
+    let scripts: Vec<String> = source
+        .package_json()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|v| {
+            v.get("scripts")
+                .and_then(serde_json::Value::as_object)
+                .map(|o| o.keys().take(FLAGGED_LIST_CAP).cloned().collect())
+        })
+        .unwrap_or_default();
+
+    let bullets = |items: &[String]| {
+        items
+            .iter()
+            .map(|i| format!("- {i}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let redacted_bullets = |items: &[String]| {
+        items
+            .iter()
+            .map(|i| format!("- {}", display_name(i)))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let section = |heading: &str, body: String, present: bool| {
+        if present {
+            format!("{heading}{body}")
+        } else {
+            String::new()
+        }
+    };
+
+    // NOTE the first heading carries no leading newline while the rest do --
+    // the constants hold that difference, so they are used as-is.
+    vec![
+        section(
+            sections::HEADING_PACKAGE_REGISTRY_HOSTS,
+            bullets(&registries),
+            !registries.is_empty(),
+        ),
+        section(
+            sections::HEADING_CONTAINER_REGISTRIES,
+            bullets(&images),
+            !images.is_empty(),
+        ),
+        render_bucket_section(buckets.as_ref()),
+        section(
+            sections::HEADING_CI_SECRET_NAMES,
+            bullets(&ci_secrets),
+            !ci_secrets.is_empty(),
+        ),
+        section(
+            sections::HEADING_MAKE_TARGETS,
+            bullets(&make_targets),
+            !make_targets.is_empty(),
+        ),
+        section(
+            sections::HEADING_PACKAGE_JSON_SCRIPTS,
+            redacted_bullets(&scripts),
+            !scripts.is_empty(),
+        ),
+        section(
+            sections::HEADING_SECRETS_MANAGER_MARKERS,
+            bullets(&markers),
+            !markers.is_empty(),
+        ),
+        section(
+            sections::HEADING_SENSITIVE_PATHS,
+            redacted_bullets(&sensitive),
+            !sensitive.is_empty(),
+        ),
+    ]
+    .join("\n")
+}
+
 // ── `Zsy` — existing auto-mode settings (selective read) ─────────────────────
 
 /// `Usy` — cap on the rendered project-local `autoMode` block.
@@ -1278,6 +1775,212 @@ mod tests {
         assert_eq!(SUBPROCESS_TIMEOUT_MS, 4_000);
         assert_eq!(REMOTE_LINE_CAP, 40);
         assert_eq!(CONTRIBUTING_READ_CAP, 2_000);
+    }
+
+    // ── `gay` ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn registry_hosts_drop_credentials_and_ambiguous_shapes() {
+        assert_eq!(registry_host("https://npm.acme.io/x"), Some("npm.acme.io".into()));
+        assert_eq!(registry_host("https://npm.acme.io"), Some("npm.acme.io".into()));
+        // Credentialed but unambiguous: the host survives, the credentials do not.
+        assert_eq!(
+            registry_host("https://user:tok@npm.acme.io/x"),
+            Some("npm.acme.io".into())
+        );
+        // A second `@` after the authority makes the host ambiguous -> dropped.
+        assert_eq!(registry_host("https://user:tok@npm.acme.io/a@b"), None);
+        // Credentialed with an undotted host -> dropped.
+        assert_eq!(registry_host("https://user:tok@localhost/x"), None);
+        assert_eq!(registry_host("::::"), None);
+    }
+
+    #[test]
+    fn well_known_public_registries_are_not_reported() {
+        // Naming docker.io says nothing about the user's infrastructure.
+        for h in ["docker.io", "ghcr.io", "pypi.org", "localhost", "127.0.0.1"] {
+            assert!(PUBLIC_REGISTRIES.contains(&h), "{h}");
+        }
+        assert_eq!(PUBLIC_REGISTRIES.len(), 13);
+    }
+
+    #[test]
+    fn bucket_names_are_extracted_only_at_a_token_boundary() {
+        assert_eq!(
+            extract_bucket_names("aws s3://acme-logs/x and gs://acme-data"),
+            vec!["acme-logs", "acme-data"]
+        );
+        // Preceded by a token character -> not a bucket reference.
+        assert!(extract_bucket_names("xs3://nope").is_empty());
+        assert!(extract_bucket_names("v1.s3://nope").is_empty());
+        // A separator is fine.
+        assert_eq!(extract_bucket_names("(s3://ok)"), vec!["ok"]);
+    }
+
+    #[test]
+    fn bucket_clusters_need_several_names_to_count() {
+        let names: Vec<String> = [
+            "acme-logs", "acme-data", "acme-backup", "other-x", "other-y", "nodash",
+        ]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+        // `other-` has only 2 -> below the floor; `acme-` has 3 -> reported.
+        assert_eq!(
+            bucket_prefix_clusters(names.iter()),
+            vec![("acme".to_string(), 3)]
+        );
+    }
+
+    #[test]
+    fn a_failed_bucket_scan_is_unavailable_not_absent() {
+        let rendered = render_bucket_section(None);
+        assert!(rendered.contains("treat bucket evidence as unavailable, not absent"));
+        // A scan that completed and found nothing renders EMPTY -- that is
+        // real evidence, unlike a failure.
+        let empty = BucketScan {
+            top: Vec::new(),
+            distinct: 0,
+            clusters: Vec::new(),
+            truncated: false,
+        };
+        assert_eq!(render_bucket_section(Some(&empty)), "");
+        // ...but a truncated empty scan is unavailable again.
+        let cut = BucketScan {
+            truncated: true,
+            ..empty
+        };
+        assert!(render_bucket_section(Some(&cut))
+            .contains("treat bucket evidence as unavailable, not absent"));
+    }
+
+    #[test]
+    fn bucket_counts_render_with_their_spread() {
+        let scan = BucketScan {
+            top: vec![
+                (
+                    "acme-logs".to_string(),
+                    BucketCount { occurrences: 30, files: 1 },
+                ),
+                (
+                    "acme-data".to_string(),
+                    BucketCount { occurrences: 4, files: 4 },
+                ),
+            ],
+            distinct: 9,
+            clusters: vec![("acme".to_string(), 5)],
+            truncated: true,
+        };
+        let out = render_bucket_section(Some(&scan));
+        // The spread is what the propose prompt weighs, so both numbers show.
+        assert!(out.contains("- acme-logs (30\u{d7}, 1 file)"));
+        assert!(out.contains("- acme-data (4\u{d7}, 4 files)"));
+        assert!(out.contains("_9 distinct bucket names in total; top 2 shown._"));
+        assert!(out.contains("counts are a lower bound"));
+        assert!(out.contains("- acme-* (5 distinct names)"));
+    }
+
+    #[derive(Default)]
+    struct FakeScans {
+        files: std::collections::HashMap<String, Vec<String>>,
+        paths: std::collections::HashMap<String, Vec<String>>,
+        package_json: Option<String>,
+        buckets: Option<BucketScan>,
+    }
+    impl ConfigScanSource for FakeScans {
+        fn scan_files(&self, globs: &[&str], _f: Option<&regex::Regex>) -> Vec<String> {
+            self.files.get(globs[0]).cloned().unwrap_or_default()
+        }
+        fn list_paths(
+            &self,
+            globs: &[&str],
+            _l: usize,
+            _d: usize,
+            _f: Option<&regex::Regex>,
+        ) -> Vec<String> {
+            self.paths.get(globs[0]).cloned().unwrap_or_default()
+        }
+        fn package_json(&self) -> Option<String> {
+            self.package_json.clone()
+        }
+        fn bucket_scan(&self) -> Option<BucketScan> {
+            self.buckets.clone()
+        }
+    }
+
+    #[test]
+    fn config_scans_render_only_the_sections_with_content() {
+        let mut s = FakeScans::default();
+        s.files.insert(
+            ".npmrc".to_string(),
+            vec!["registry=https://npm.acme.io/\nregistry=https://registry.npmjs.org/".to_string()],
+        );
+        s.files.insert(
+            "Makefile".to_string(),
+            vec!["build:\n\tcargo build\ndeploy:\n".to_string()],
+        );
+        s.package_json = Some(r#"{"scripts":{"test":"x","build":"y"}}"#.to_string());
+
+        let body = config_scans_section(&s);
+        assert!(body.contains("#### Package registry hosts\n- npm.acme.io"));
+        // The public registry was filtered out.
+        assert!(!body.contains("registry.npmjs.org"));
+        assert!(body.contains("#### Makefile/justfile targets"));
+        assert!(body.contains("- build"));
+        assert!(body.contains("- deploy"));
+        assert!(body.contains("#### package.json scripts"));
+        // Sections with nothing to say are omitted entirely.
+        assert!(!body.contains("#### Container image registries"));
+        assert!(!body.contains("#### Secrets-manager markers"));
+        assert!(!body.contains("#### Sensitive-looking paths"));
+    }
+
+    #[test]
+    fn ci_secret_names_are_collected_without_their_values() {
+        let mut s = FakeScans::default();
+        s.files.insert(
+            "*.yml".to_string(),
+            vec!["run: deploy\n  env:\n    K: ${{ secrets.DEPLOY_KEY }}\n    T: ${{ secrets.NPM_TOKEN }}".to_string()],
+        );
+        let body = config_scans_section(&s);
+        assert!(body.contains("names only \u{2014} a deploy key exists, not its value"));
+        assert!(body.contains("- DEPLOY_KEY"));
+        assert!(body.contains("- NPM_TOKEN"));
+    }
+
+    #[test]
+    fn sensitive_directory_examples_are_capped_at_two_per_kind() {
+        // Otherwise a large `prod/` tree would crowd out every other signal.
+        let mut s = FakeScans::default();
+        s.paths.insert(
+            SENSITIVE_DIR_GLOBS[0].to_string(),
+            vec![
+                "prod/a.yml".to_string(),
+                "prod/b.yml".to_string(),
+                "prod/c.yml".to_string(),
+                "iam/x.tf".to_string(),
+            ],
+        );
+        let body = config_scans_section(&s);
+        assert!(body.contains("- prod/a.yml"));
+        assert!(body.contains("- prod/b.yml"));
+        assert!(!body.contains("prod/c.yml"), "third example must be dropped");
+        assert!(body.contains("- iam/x.tf"));
+    }
+
+    #[test]
+    fn config_scan_caps_match_the_oracle() {
+        assert_eq!(CONFIG_SCAN_READ_CAP, 64_000);
+        assert_eq!(CONFIG_SCAN_FILE_LIMIT, 40);
+        assert_eq!(PACKAGE_JSON_READ_CAP, 256_000);
+        assert_eq!(SENSITIVE_PATH_LIMIT, 72);
+        assert_eq!(BUCKET_SCAN_TIMEOUT_MS, 8_000);
+        assert_eq!(BUCKET_SCAN_DISTINCT_CAP, 20_000);
+        assert_eq!(BUCKET_SCAN_MAX_FILESIZE, "4M");
+        assert_eq!(BUCKET_CLUSTER_MIN, 3);
+        assert_eq!(BUCKET_CLUSTER_LIMIT, 10);
+        assert_eq!(SENSITIVE_PATH_GLOBS.len(), 23);
+        assert_eq!(SENSITIVE_DIR_GLOBS.len(), 6);
     }
 
     // ── `Zsy` / `Qsy` ────────────────────────────────────────────────────────

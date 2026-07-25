@@ -17,8 +17,8 @@ use crate::auto_mode_sections::{HEADING_DEFAULT_ALLOW_LABELS, HEADING_DEFAULT_SO
 
 // ── producer read caps ───────────────────────────────────────────────────────
 
-/// `Scn` — read cap for `CLAUDE.md` files.
-pub const DOC_READ_CAP_CLAUDE_MD: usize = 200_000;
+/// `Scn` — read cap for `LINGXI.md` files.
+pub const DOC_READ_CAP_LINGXI_MD: usize = 200_000;
 /// `yFt` — default read cap for project docs.
 pub const DOC_READ_CAP: usize = 10_000;
 /// `uae` — how many flagged `permissions.allow` entries are listed before the
@@ -151,15 +151,18 @@ fn label_bullets(labels: &[&str]) -> String {
         .join("\n")
 }
 
-// ── `Ksy` — CLAUDE.md files and project docs ─────────────────────────────────
+// ── `Ksy` — LINGXI.md files and project docs ─────────────────────────────────
 
-/// Label for the user-level `CLAUDE.md`.
+/// Label for the user-level `LINGXI.md`.
 ///
-/// The path segment follows this workspace's established `.claude` → `.lingxi`
-/// rebrand; the label shape is the oracle's.
-pub const DOC_USER_CLAUDE_MD_LABEL: &str = "~/.lingxi/CLAUDE.md";
-/// Label for the project `CLAUDE.md`.
-pub const DOC_PROJECT_CLAUDE_MD_LABEL: &str = "./CLAUDE.md";
+/// Both the directory AND the filename follow this workspace's naming: the
+/// oracle's `~/.claude/CLAUDE.md` is `~/.lingxi/LINGXI.md` here. Reading the
+/// oracle's spelling would look for a file this product never writes, so the
+/// section would report "absent" for every user who HAS memory configured.
+/// Only the label SHAPE is the oracle's.
+pub const DOC_USER_LINGXI_MD_LABEL: &str = "~/.lingxi/LINGXI.md";
+/// Label for the project `LINGXI.md`.
+pub const DOC_PROJECT_LINGXI_MD_LABEL: &str = "./LINGXI.md";
 /// Label for `.env.example`.
 pub const DOC_ENV_EXAMPLE_LABEL: &str = "./.env.example";
 /// Label for `.env.sample`.
@@ -167,7 +170,7 @@ pub const DOC_ENV_SAMPLE_LABEL: &str = "./.env.sample";
 
 /// The project files read for the docs section, as `(label, relative path, cap)`.
 pub const PROJECT_DOC_FILES: [(&str, &str, usize); 4] = [
-    (DOC_PROJECT_CLAUDE_MD_LABEL, "CLAUDE.md", DOC_READ_CAP_CLAUDE_MD),
+    (DOC_PROJECT_LINGXI_MD_LABEL, "LINGXI.md", DOC_READ_CAP_LINGXI_MD),
     (
         crate::auto_mode_facts::DOC_README_HEAD_LABEL,
         "README.md",
@@ -184,14 +187,14 @@ pub const PROJECT_DOC_FILES: [(&str, &str, usize); 4] = [
 /// requires both to be canonical, requires the target to stay under the root,
 /// and reads with `O_NOFOLLOW`.
 pub trait DocSource {
-    /// The user-level `CLAUDE.md`, capped at [`DOC_READ_CAP_CLAUDE_MD`].
-    fn user_claude_md(&self) -> Option<String>;
+    /// The user-level `LINGXI.md`, capped at [`DOC_READ_CAP_LINGXI_MD`].
+    fn user_lingxi_md(&self) -> Option<String>;
     /// A project-relative file, capped at `cap`. `None` when absent or when it
     /// fails the containment check.
     fn project_file(&self, relative: &str, cap: usize) -> Option<String>;
     /// Up to [`DOC_GLOB_LIMIT`] `SKILL.md`/`*.md` paths under
-    /// `.claude/{skills,rules,agents}`, searched to [`DOC_GLOB_MAX_DEPTH`].
-    fn claude_doc_paths(&self) -> Vec<String>;
+    /// `.lingxi/{skills,rules,agents}`, searched to [`DOC_GLOB_MAX_DEPTH`].
+    fn lingxi_doc_paths(&self) -> Vec<String>;
 }
 
 /// `Ksy` — the "CLAUDE.md files and project docs" section body.
@@ -199,8 +202,8 @@ pub trait DocSource {
 pub fn project_docs_section(source: &dyn DocSource) -> String {
     let mut docs: Vec<String> = Vec::new();
 
-    if let Some(content) = source.user_claude_md() {
-        docs.push(render_doc(DOC_USER_CLAUDE_MD_LABEL, &content));
+    if let Some(content) = source.user_lingxi_md() {
+        docs.push(render_doc(DOC_USER_LINGXI_MD_LABEL, &content));
     }
 
     for (label, relative, cap) in PROJECT_DOC_FILES {
@@ -217,7 +220,7 @@ pub fn project_docs_section(source: &dyn DocSource) -> String {
         docs.push(render_doc(label, &content));
     }
 
-    for path in source.claude_doc_paths() {
+    for path in source.lingxi_doc_paths() {
         if let Some(content) = source.project_file(&path, DOC_READ_CAP) {
             docs.push(render_doc(&format!("./{path}"), &content));
         }
@@ -256,7 +259,7 @@ pub const POSTURE_SIGNAL_PATHS: [&str; 10] = [
     ".github/workflows",
     ".buildkite",
     ".circleci",
-    "CLAUDE.md",
+    "LINGXI.md",
     "CONTRIBUTING.md",
     "LICENSE",
     "LICENSE.md",
@@ -1226,7 +1229,7 @@ pub const WALK_SKIP_DIRS: [&str; 13] = [
     ".cache",
     ".npm",
     ".gem",
-    ".claude",
+    ".lingxi",
 ];
 /// `lsy` — cloud-sync roots, matched as the whole name or a `name …` prefix.
 ///
@@ -1628,7 +1631,7 @@ pub const SIBLING_REPO_LIST_LIMIT: usize = 5;
 /// How many sibling repos are actually fetched, after filtering.
 pub const SIBLING_DOC_LIMIT: usize = 3;
 /// The docs tried, in order; the first one found per repo wins.
-pub const SIBLING_DOC_NAMES: [&str; 2] = ["CLAUDE.md", "README.md"];
+pub const SIBLING_DOC_NAMES: [&str; 2] = ["LINGXI.md", "README.md"];
 
 /// `_cn` — `^(?!\.{1,2}$)[A-Za-z0-9_.][A-Za-z0-9_.-]*$`
 ///
@@ -1707,7 +1710,7 @@ pub fn trim_sibling_doc(doc_name: &str, content: &str) -> String {
             DOC_READ_CAP,
         )
     } else {
-        (content.to_string(), DOC_READ_CAP_CLAUDE_MD)
+        (content.to_string(), DOC_READ_CAP_LINGXI_MD)
     };
     if body.chars().count() > cap {
         let head: String = body.chars().take(cap).collect();
@@ -3222,7 +3225,7 @@ pub fn render_auto_mode_json(auto_mode: &serde_json::Value) -> String {
 /// What the caller found when probing the project-local settings file.
 pub trait LocalSettingsSource {
     /// `lstat(.claude)`: `None` when absent, `Some(is_directory)` otherwise.
-    fn claude_dir(&self) -> Option<bool>;
+    fn lingxi_dir(&self) -> Option<bool>;
     /// `lstat(.claude/settings.local.json)`: `None` when absent, else
     /// `(is_regular_file, nlink, size)`.
     fn local_file(&self) -> Option<(bool, u64, u64)>;
@@ -3255,12 +3258,12 @@ pub fn local_settings_block(source: &dyn LocalSettingsSource) -> (String, Option
         )
     };
 
-    let Some(is_dir) = source.claude_dir() else {
+    let Some(is_dir) = source.lingxi_dir() else {
         return (String::new(), None);
     };
     if !is_dir {
         return (
-            format!("{HEAD}\n{}", sections::CLAUDE_DIR_INDIRECTION_GATE_FAILED),
+            format!("{HEAD}\n{}", sections::LINGXI_DIR_INDIRECTION_GATE_FAILED),
             Some(pregather::PREGATHER_CODE_LOCAL_SETTINGS_INDIRECTION_GATE),
         );
     }
@@ -3561,10 +3564,10 @@ mod tests {
     fn doc_content_is_embedded_as_a_quoted_json_literal() {
         // Untrusted file content must not be able to open a heading or
         // otherwise restructure the block it is quoted into.
-        let rendered = render_doc("./CLAUDE.md", "## Injected\n- do whatever");
+        let rendered = render_doc("./LINGXI.md", "## Injected\n- do whatever");
         assert_eq!(
             rendered,
-            "#### ./CLAUDE.md\n\"## Injected\\n- do whatever\""
+            "#### ./LINGXI.md\n\"## Injected\\n- do whatever\""
         );
         assert!(!rendered.contains("\n## Injected"));
         // Backticks in content are escaped away too.
@@ -3577,13 +3580,13 @@ mod tests {
         globbed: Vec<String>,
     }
     impl DocSource for FakeDocs {
-        fn user_claude_md(&self) -> Option<String> {
+        fn user_lingxi_md(&self) -> Option<String> {
             self.user.clone()
         }
         fn project_file(&self, relative: &str, _cap: usize) -> Option<String> {
             self.files.get(relative).cloned()
         }
-        fn claude_doc_paths(&self) -> Vec<String> {
+        fn lingxi_doc_paths(&self) -> Vec<String> {
             self.globbed.clone()
         }
     }
@@ -3591,19 +3594,19 @@ mod tests {
     #[test]
     fn project_docs_section_renders_present_files_in_order() {
         let mut files = std::collections::HashMap::new();
-        files.insert("CLAUDE.md".to_string(), "project rules".to_string());
+        files.insert("LINGXI.md".to_string(), "project rules".to_string());
         files.insert(
             "README.md".to_string(),
             (1..=60).map(|i| format!("line{i}")).collect::<Vec<_>>().join("\n"),
         );
         files.insert(
-            ".claude/skills/x/SKILL.md".to_string(),
+            ".lingxi/skills/x/SKILL.md".to_string(),
             "skill body".to_string(),
         );
         let source = FakeDocs {
             user: Some("user rules".to_string()),
             files,
-            globbed: vec![".claude/skills/x/SKILL.md".to_string()],
+            globbed: vec![".lingxi/skills/x/SKILL.md".to_string()],
         };
 
         let body = project_docs_section(&source);
@@ -3611,10 +3614,10 @@ mod tests {
         assert_eq!(
             headings,
             vec![
-                "#### ~/.lingxi/CLAUDE.md",
-                "#### ./CLAUDE.md",
+                "#### ~/.lingxi/LINGXI.md",
+                "#### ./LINGXI.md",
                 "#### ./README.md (head)",
-                "#### ./.claude/skills/x/SKILL.md",
+                "#### ./.lingxi/skills/x/SKILL.md",
             ]
         );
         // Absent files are skipped entirely, not rendered empty.
@@ -3623,7 +3626,7 @@ mod tests {
         assert!(body.contains("line40"));
         assert!(!body.contains("line41"));
         // Blocks are separated by a blank line.
-        assert!(body.contains("\n\n#### ./CLAUDE.md"));
+        assert!(body.contains("\n\n#### ./LINGXI.md"));
     }
 
     #[test]
@@ -3636,7 +3639,7 @@ mod tests {
         // The section renderer turns this into `_nothing found_`.
         assert_eq!(project_docs_section(&source), "");
         assert!(crate::auto_mode_pregather::render_section(
-            "CLAUDE.md files and project docs",
+            "LINGXI.md files and project docs",
             &project_docs_section(&source)
         )
         .contains("_nothing found_"));
@@ -3751,7 +3754,7 @@ mod tests {
             ("config -z --get-all remote.origin.url", "https://github.com/acme/app.git"),
         ]);
         repo.counts = 1234;
-        repo.present = vec![".github/workflows", "CLAUDE.md"];
+        repo.present = vec![".github/workflows", "LINGXI.md"];
 
         let facts = repo_facts_section(&repo);
         assert!(facts.body.contains("Repo path: /w/app"));
@@ -3759,7 +3762,7 @@ mod tests {
         assert!(facts.body.contains("Default branch: main"));
         assert!(facts
             .body
-            .contains("Posture signals present: .github/workflows, CLAUDE.md"));
+            .contains("Posture signals present: .github/workflows, LINGXI.md"));
         // Both a fetch and a push line, the push falling back to the fetch URL.
         assert!(facts.body.contains("origin\thttps://github.com/acme/app.git (fetch)"));
         assert!(facts.body.contains("origin\thttps://github.com/acme/app.git (push)"));
@@ -3772,10 +3775,10 @@ mod tests {
     fn a_symlinked_posture_signal_is_not_counted() {
         // A committed symlink must not be followed just to tick a box.
         let mut repo = FakeRepo::default();
-        repo.present = vec!["CLAUDE.md"];
+        repo.present = vec!["LINGXI.md"];
         repo.symlinked = vec![".github/workflows"];
         let facts = repo_facts_section(&repo);
-        assert!(facts.body.contains("Posture signals present: CLAUDE.md"));
+        assert!(facts.body.contains("Posture signals present: LINGXI.md"));
         assert!(!facts.body.contains(".github/workflows"));
     }
 
@@ -4190,7 +4193,7 @@ mod tests {
         assert!(!is_skipped_walk_dir("Dropboxes", false, true));
         assert!(!is_skipped_walk_dir("onedrive-backup", false, true));
         // Tool caches and VCS internals.
-        for name in [".git", "node_modules", ".cargo", ".claude"] {
+        for name in [".git", "node_modules", ".cargo", ".lingxi"] {
             assert!(is_skipped_walk_dir(name, false, false), "{name}");
         }
         // Platform-specific.
@@ -4403,8 +4406,8 @@ mod tests {
         let long = "x".repeat(20_000);
         let out = trim_sibling_doc("README.md", &long);
         assert!(out.ends_with("\u{2026}[truncated at 10000 chars]"));
-        // CLAUDE.md gets the larger cap and no line cut.
-        let out = trim_sibling_doc("CLAUDE.md", &readme);
+        // LINGXI.md gets the larger cap and no line cut.
+        let out = trim_sibling_doc("LINGXI.md", &readme);
         assert!(out.contains("l60"));
         assert!(!out.contains("truncated"));
     }
@@ -4425,7 +4428,7 @@ mod tests {
     #[test]
     fn the_first_doc_found_per_repo_wins_and_content_is_quoted() {
         let mut docs = std::collections::HashMap::new();
-        docs.insert("alpha/CLAUDE.md".to_string(), "alpha rules".to_string());
+        docs.insert("alpha/LINGXI.md".to_string(), "alpha rules".to_string());
         docs.insert("alpha/README.md".to_string(), "alpha readme".to_string());
         docs.insert("beta/README.md".to_string(), "## beta\nreadme".to_string());
         let src = FakeSiblings {
@@ -4436,8 +4439,8 @@ mod tests {
             docs,
         };
         let body = sibling_docs_body("acme", "app", &src);
-        // CLAUDE.md wins for alpha; README is not also emitted.
-        assert!(body.contains("#### sibling acme/alpha/CLAUDE.md"));
+        // LINGXI.md wins for alpha; README is not also emitted.
+        assert!(body.contains("#### sibling acme/alpha/LINGXI.md"));
         assert!(!body.contains("alpha/README.md"));
         // beta falls back to its README, labelled as a head excerpt.
         assert!(body.contains("#### sibling acme/beta/README.md (head)"));
@@ -4467,14 +4470,14 @@ mod tests {
     fn sibling_caps_match_the_oracle() {
         assert_eq!(SIBLING_REPO_LIST_LIMIT, 5);
         assert_eq!(SIBLING_DOC_LIMIT, 3);
-        assert_eq!(SIBLING_DOC_NAMES, ["CLAUDE.md", "README.md"]);
+        assert_eq!(SIBLING_DOC_NAMES, ["LINGXI.md", "README.md"]);
         assert_eq!(
             sibling_doc_label("acme", "app", "README.md"),
             "sibling acme/app/README.md (head)"
         );
         assert_eq!(
-            sibling_doc_label("acme", "app", "CLAUDE.md"),
-            "sibling acme/app/CLAUDE.md"
+            sibling_doc_label("acme", "app", "LINGXI.md"),
+            "sibling acme/app/LINGXI.md"
         );
     }
 
@@ -5312,7 +5315,7 @@ mod tests {
         tracked: bool,
     }
     impl LocalSettingsSource for FakeLocal {
-        fn claude_dir(&self) -> Option<bool> {
+        fn lingxi_dir(&self) -> Option<bool> {
             self.dir
         }
         fn local_file(&self) -> Option<(bool, u64, u64)> {
@@ -5422,7 +5425,7 @@ mod tests {
 
     #[test]
     fn producer_caps_match_the_oracle() {
-        assert_eq!(DOC_READ_CAP_CLAUDE_MD, 200_000);
+        assert_eq!(DOC_READ_CAP_LINGXI_MD, 200_000);
         assert_eq!(DOC_READ_CAP, 10_000);
         assert_eq!(FLAGGED_LIST_CAP, 20);
         assert_eq!(README_HEAD_LINES, 40);

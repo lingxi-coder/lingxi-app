@@ -378,7 +378,7 @@ mod tests {
         let config = dir.path().join("config");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::create_dir_all(&config).unwrap();
-        std::fs::write(root.join("CLAUDE.md"), "project rules").unwrap();
+        std::fs::write(root.join("LINGXI.md"), "project rules").unwrap();
 
         let gather = FsProposeGather {
             root: root.clone(),

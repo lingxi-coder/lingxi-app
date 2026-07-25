@@ -90,7 +90,7 @@ pub const NOT_QUERYABLE_NOT_GITHUB_PREFIX: &str = r"_Not queryable here (origin 
 pub const NOT_QUERYABLE_ORG_REPO_UNDERIVABLE_PREFIX: &str = r"_Not queryable here (org/repo not derivable from origin remote — missing, an unsupported or GHE host, or not a plain owner/repo URL shape). ";
 
 /// The sibling-docs lookup ran and found nothing.
-pub const NO_SIBLING_DOCS_FOUND: &str = r"_No sibling docs found (org repos have no CLAUDE.md/README, or none listed)._";
+pub const NO_SIBLING_DOCS_FOUND: &str = r"_No sibling docs found (org repos have no LINGXI.md/README, or none listed)._";
 
 /// The home walk ran to completion and found no other repos.
 pub const NO_OTHER_REPOS_FOUND: &str = r"_No other git repos found under the home directory._";
@@ -218,7 +218,7 @@ mod tests {
         );
         assert_eq!(
             NO_SIBLING_DOCS_FOUND,
-            "_No sibling docs found (org repos have no CLAUDE.md/README, or none listed)._"
+            "_No sibling docs found (org repos have no LINGXI.md/README, or none listed)._"
         );
         assert_eq!(
             NO_OTHER_REPOS_FOUND,

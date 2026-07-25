@@ -55,7 +55,7 @@ pub const DEFAULT_ALLOW_LABELS: [&str; 17] = [
     r"Scheduled-Task Fires",
     r"Multi-Agent Coordination",
     r"Memory Directory",
-    r"CLAUDE.md Content",
+    r"LINGXI.md Content",
     r"Claude Code Scheduling",
     r"Browser Trusted Navigation",
 ];

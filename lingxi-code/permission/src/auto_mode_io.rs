@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 
 use crate::auto_mode_producers::{
     DocSource, LocalSettingsSource, RepoFactsSource, SettingsReconSource, DOC_GLOB_LIMIT,
-    DOC_GLOB_MAX_DEPTH, DOC_READ_CAP_CLAUDE_MD, GIT_HARDENING_FLAGS, SUBPROCESS_TIMEOUT_MS,
+    DOC_GLOB_MAX_DEPTH, DOC_READ_CAP_LINGXI_MD, GIT_HARDENING_FLAGS, SUBPROCESS_TIMEOUT_MS,
     WalkLimit,
 };
 
@@ -702,31 +702,31 @@ pub struct FsDocSource {
 
 impl FsDocSource {
     /// Build a source for `root`, with the user's config directory for the
-    /// user-level `CLAUDE.md`.
+    /// user-level `LINGXI.md`.
     #[must_use]
     pub fn new(root: impl Into<PathBuf>, user_config_dir: impl Into<PathBuf>) -> Self {
         Self {
             root: root.into(),
             user_config_dir: user_config_dir.into(),
-            // `^\.claude\/(skills|rules|agents)\/`
-            doc_glob: regex::Regex::new(r"^\.claude/(skills|rules|agents)/")
+            // `^\.lingxi\/(skills|rules|agents)\/`
+            doc_glob: regex::Regex::new(r"^\.lingxi/(skills|rules|agents)/")
                 .expect("static regex"),
         }
     }
 }
 
 impl DocSource for FsDocSource {
-    fn user_claude_md(&self) -> Option<String> {
+    fn user_lingxi_md(&self) -> Option<String> {
         secure_read_capped(
-            &self.user_config_dir.join("CLAUDE.md"),
-            DOC_READ_CAP_CLAUDE_MD,
+            &self.user_config_dir.join("LINGXI.md"),
+            DOC_READ_CAP_LINGXI_MD,
             false,
         )
     }
     fn project_file(&self, relative: &str, cap: usize) -> Option<String> {
         contained_read(&self.root, relative, cap)
     }
-    fn claude_doc_paths(&self) -> Vec<String> {
+    fn lingxi_doc_paths(&self) -> Vec<String> {
         rg_files(
             &self.root,
             &["SKILL.md", "*.md"],
@@ -970,7 +970,7 @@ impl crate::auto_mode_producers::ProjectUsageSource for FsProjectUsageSource {
     }
 }
 
-/// Real-filesystem [`LocalSettingsSource`] for `.claude/settings.local.json`.
+/// Real-filesystem [`LocalSettingsSource`] for `.lingxi/settings.local.json`.
 pub struct FsLocalSettingsSource {
     root: PathBuf,
 }
@@ -982,7 +982,7 @@ impl FsLocalSettingsSource {
         Self { root: root.into() }
     }
     fn dir(&self) -> PathBuf {
-        self.root.join(".claude")
+        self.root.join(".lingxi")
     }
     fn file(&self) -> PathBuf {
         self.dir().join("settings.local.json")
@@ -990,7 +990,7 @@ impl FsLocalSettingsSource {
 }
 
 impl LocalSettingsSource for FsLocalSettingsSource {
-    fn claude_dir(&self) -> Option<bool> {
+    fn lingxi_dir(&self) -> Option<bool> {
         let meta = std::fs::symlink_metadata(self.dir()).ok()?;
         Some(meta.is_dir())
     }
@@ -1015,7 +1015,7 @@ impl LocalSettingsSource for FsLocalSettingsSource {
     fn tracked_in_git(&self) -> bool {
         !git_output(
             &self.root,
-            &["ls-files", "--", ".claude/settings.local.json"],
+            &["ls-files", "--", ".lingxi/settings.local.json"],
         )
         .is_empty()
     }
@@ -1781,7 +1781,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::create_dir_all(&config).unwrap();
 
-        write(&root, "CLAUDE.md", "project rules");
+        write(&root, "LINGXI.md", "project rules");
         write(&root, ".gitignore", "target/\n.env\nMY_TOKEN\n");
         write(&root, "Makefile", "build:\n\tcargo build\ndeploy:\n\techo go\n");
         write(
@@ -1808,7 +1808,7 @@ mod tests {
             ]
             .join("\n"),
         );
-        write(&config, "CLAUDE.md", "user rules");
+        write(&config, "LINGXI.md", "user rules");
         write(
             &config,
             "settings.json",
@@ -1819,7 +1819,7 @@ mod tests {
         );
         write(
             &root,
-            ".claude/settings.local.json",
+            ".lingxi/settings.local.json",
             &serde_json::json!({ "autoMode": { "allow": ["Bash(x:*)"] } }).to_string(),
         );
 
@@ -1841,7 +1841,7 @@ mod tests {
             block.failed_sections
         );
         // ...docs read off the real disk,
-        assert!(block.text.contains("#### ~/.lingxi/CLAUDE.md"));
+        assert!(block.text.contains("#### ~/.lingxi/LINGXI.md"));
         assert!(block.text.contains("\"user rules\""));
         assert!(block.text.contains("\"project rules\""));
         // ...repo facts ran git and reported the sensitive gitignore lines,
@@ -2044,27 +2044,27 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let src = FsLocalSettingsSource::new(dir.path());
         // Nothing there at all.
-        assert_eq!(src.claude_dir(), None);
+        assert_eq!(src.lingxi_dir(), None);
 
-        std::fs::create_dir_all(dir.path().join(".claude")).unwrap();
-        assert_eq!(src.claude_dir(), Some(true));
+        std::fs::create_dir_all(dir.path().join(".lingxi")).unwrap();
+        assert_eq!(src.lingxi_dir(), Some(true));
         assert_eq!(src.local_file(), None);
 
-        write(dir.path(), ".claude/settings.local.json", "{\"autoMode\":{}}");
+        write(dir.path(), ".lingxi/settings.local.json", "{\"autoMode\":{}}");
         let (is_file, nlink, size) = src.local_file().unwrap();
         assert!(is_file);
         assert_eq!(nlink, 1);
         assert_eq!(size, 15);
 
-        // `.claude` as a symlink is reported as not-a-directory, so the gate
+        // `.lingxi` as a symlink is reported as not-a-directory, so the gate
         // ladder refuses without probing behind it.
         #[cfg(unix)]
         {
             let dir2 = tempfile::tempdir().unwrap();
-            std::os::unix::fs::symlink(dir.path().join(".claude"), dir2.path().join(".claude"))
+            std::os::unix::fs::symlink(dir.path().join(".lingxi"), dir2.path().join(".lingxi"))
                 .unwrap();
             let src2 = FsLocalSettingsSource::new(dir2.path());
-            assert_eq!(src2.claude_dir(), Some(false));
+            assert_eq!(src2.lingxi_dir(), Some(false));
         }
     }
 

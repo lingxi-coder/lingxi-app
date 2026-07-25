@@ -38,14 +38,14 @@ pub const PREGATHER_CODE_ORG_LIST_GH_PARSE_FAILED: &str = "org_list_gh_parse_fai
 pub const PREGATHER_CODE_SIBLING_GH_LIST_FAILED: &str = "sibling_gh_list_failed";
 /// The sibling-docs `gh` reply could not be parsed.
 pub const PREGATHER_CODE_SIBLING_GH_PARSE_FAILED: &str = "sibling_gh_parse_failed";
-/// `.claude/settings.local.json` was present but failed the indirection gate.
+/// `.lingxi/settings.local.json` was present but failed the indirection gate.
 pub const PREGATHER_CODE_LOCAL_SETTINGS_INDIRECTION_GATE: &str =
     "local_settings_indirection_gate";
-/// `.claude/settings.local.json` exceeded the read cap.
+/// `.lingxi/settings.local.json` exceeded the read cap.
 pub const PREGATHER_CODE_LOCAL_SETTINGS_OVERSIZED: &str = "local_settings_oversized";
-/// `.claude/settings.local.json` could not be read.
+/// `.lingxi/settings.local.json` could not be read.
 pub const PREGATHER_CODE_LOCAL_SETTINGS_UNREADABLE: &str = "local_settings_unreadable";
-/// `.claude/settings.local.json` was not valid JSON.
+/// `.lingxi/settings.local.json` was not valid JSON.
 pub const PREGATHER_CODE_LOCAL_SETTINGS_INVALID_JSON: &str = "local_settings_invalid_json";
 
 /// Telemetry field recording whether the section rendered.
@@ -89,7 +89,7 @@ pub const NOTHING_FOUND_MARKER: &str = "_nothing found_";
 /// marker from [`crate::auto_mode_gates`], so the model can tell a declined
 /// gate apart from an empty result.
 pub const SECTION_TITLES: [&str; 11] = [
-    "CLAUDE.md files and project docs",
+    "LINGXI.md files and project docs",
     "Repo facts",
     "Repo visibility & branch protection (via gh)",
     "Sibling repo docs (via gh \u{2014} unverified provenance)",
@@ -105,7 +105,7 @@ pub const SECTION_TITLES: [&str; 11] = [
 /// The recon sections, in the order the block renders them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReconSection {
-    /// `CLAUDE.md` and project documentation.
+    /// `LINGXI.md` and project documentation.
     ProjectDocs,
     /// Repository facts (remotes, branches, tracked files, posture signals).
     RepoFacts,
@@ -281,7 +281,7 @@ where
 /// declined answer is enforced by not running the code at all rather than by
 /// trusting the producer to check.
 pub trait ReconProducers {
-    /// `CLAUDE.md` and project documentation.
+    /// `LINGXI.md` and project documentation.
     fn project_docs(&self) -> Result<String, ()> {
         Err(())
     }
@@ -492,7 +492,7 @@ mod tests {
         assert_eq!(
             SECTION_TITLES,
             [
-                "CLAUDE.md files and project docs",
+                "LINGXI.md files and project docs",
                 "Repo facts",
                 "Repo visibility & branch protection (via gh)",
                 "Sibling repo docs (via gh \u{2014} unverified provenance)",
@@ -828,5 +828,49 @@ mod tests {
             render_pregather_block(&[]),
             format!("{PREGATHER_HEADING}\n")
         );
+    }
+}
+#[cfg(test)]
+mod branding_guard {
+    //! This workspace stores its config in `.lingxi/` and its memory in
+    //! `LINGXI.md`. A recon that read the oracle's `.claude/` spellings would
+    //! look for files this product never writes, so the sections would report
+    //! "absent" for every user who actually HAS them configured — a silent
+    //! wrong answer, not a cosmetic one. These guards mirror the ones the
+    //! bundled skills already carry.
+
+    /// Every WIZARD-06 module whose strings reach the model or the filesystem.
+    const SOURCES: [(&str, &str); 7] = [
+        ("auto_mode_pregather", include_str!("auto_mode_pregather.rs")),
+        ("auto_mode_producers", include_str!("auto_mode_producers.rs")),
+        ("auto_mode_sections", include_str!("auto_mode_sections.rs")),
+        ("auto_mode_gates", include_str!("auto_mode_gates.rs")),
+        ("auto_mode_defaults", include_str!("auto_mode_defaults.rs")),
+        ("auto_mode_propose", include_str!("auto_mode_propose.rs")),
+        ("auto_mode_io", include_str!("auto_mode_io.rs")),
+    ];
+
+    #[test]
+    fn no_unbranded_config_paths_survive() {
+        for (name, src) in SOURCES {
+            for (line_no, line) in src.lines().enumerate() {
+                let code = line.trim_start();
+                // Prose that documents the oracle's own spelling is fine; only
+                // string literals and path joins are load-bearing.
+                if code.starts_with("//") || code.starts_with("///") {
+                    continue;
+                }
+                // Built from a stem rather than written out, so this scan
+                // does not flag its own needles.
+                const STEM: &str = "CLAUDE";
+                for needle in [format!(".{}", STEM.to_lowercase()), format!("{STEM}.md")] {
+                    assert!(
+                        !line.contains(&needle),
+                        "{name}.rs:{}: unbranded `{needle}` in code: {line}",
+                        line_no + 1
+                    );
+                }
+            }
+        }
     }
 }

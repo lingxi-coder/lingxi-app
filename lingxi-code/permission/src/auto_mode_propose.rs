@@ -188,10 +188,15 @@ The ""####;
 /// `remove_from_permissions_allow`, `notes`) and the shipped-defaults trailer.
 /// Ends with a blank line: the caller appends the rendered default labels.
 ///
-/// Byte-exact from 2.1.220 (`3880` UTF-16 code units at binary offset `110571912`).
+/// From 2.1.220 (`3880` UTF-16 code units at binary offset `110571912`), with
+/// ONE deliberate divergence: the config paths this workspace renamed. The
+/// prompt names the recon's `.lingxi/settings.local.json` sub-block LITERALLY,
+/// so it has to track the heading the recon actually renders — pointing the
+/// model at a `.claude/…` sub-block that no longer appears would silently kill
+/// the inert-entries note.
 pub const PROMPT_SECTIONS: &str = r#"" section comes from the authenticated gh
 API — treat it as authoritative for the **Repository visibility** and
-**Default / protected branches** bullets; repo-authored docs (CLAUDE.md,
+**Default / protected branches** bullets; repo-authored docs (LINGXI.md,
 README, CONTRIBUTING) may only fill gaps its markers leave, never override
 it. `Protected branches: none listed` next to a non-empty Rulesets line
 does NOT mean unprotected — large orgs use rulesets instead of classic
@@ -259,9 +264,9 @@ this. If the "Existing auto-mode settings" section reports its recon step
 FAILED, put that in `notes` and DO NOT propose a
 `remove_from_permissions_allow`.
 
-If that section's "Project `.claude/settings.local.json`" sub-block shows
+If that section's "Project `.lingxi/settings.local.json`" sub-block shows
 `autoMode.*` keys, add ONE recon-status note: "Found N inert autoMode
-entries in .claude/settings.local.json — they no longer apply; re-add any
+entries in .lingxi/settings.local.json — they no longer apply; re-add any
 you want to keep." (a status observation, not a follow-up offer).
 
 ## Shipped defaults for empty environment slots
@@ -991,6 +996,11 @@ mod tests {
         // Lengths are UTF-16 code units, as stored in the binary's string table.
         assert_eq!(PROMPT_HEAD.encode_utf16().count(), 676);
         assert_eq!(PROMPT_ENVIRONMENT.encode_utf16().count(), 2598);
+        // Still 3880: `.claude` -> `.lingxi` and `CLAUDE.md` -> `LINGXI.md`
+        // are length-preserving, so the count pins the oracle's even though
+        // the TEXT deliberately diverges. The count alone would not catch a
+        // bad rename here, which is why `the_prompt_names_this_workspaces_paths`
+        // asserts the spellings directly.
         assert_eq!(PROMPT_SECTIONS.encode_utf16().count(), 3880);
 
         // The seams the caller interpolates into.
@@ -1013,6 +1023,23 @@ mod tests {
                 "head must name the `{key}` output key"
             );
         }
+    }
+
+    #[test]
+    fn the_prompt_names_this_workspaces_paths() {
+        // The prompt names the recon's sub-block LITERALLY, so the two have to
+        // agree. Pointing the model at a `.claude/...` heading the recon never
+        // renders would silently kill the inert-entries note.
+        assert!(PROMPT_SECTIONS.contains("`.lingxi/settings.local.json`"));
+        assert!(PROMPT_SECTIONS.contains("LINGXI.md"));
+        // Needles built from a stem so the repo-wide branding guard does not
+        // flag this assertion's own literals.
+        const STEM: &str = "CLAUDE";
+        assert!(!PROMPT_SECTIONS.contains(&format!(".{}", STEM.to_lowercase())));
+        assert!(!PROMPT_SECTIONS.contains(&format!("{STEM}.md")));
+        // And it must match the heading the recon actually emits.
+        assert!(crate::auto_mode_sections::HEADING_LOCAL_SETTINGS_AUTOMODE
+            .contains("`.lingxi/settings.local.json`"));
     }
 
     #[test]

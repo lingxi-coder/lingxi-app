@@ -39,25 +39,27 @@
 //! (`Configure usage credits to keep working when you hit a limit`, two objects
 //! gated by `bnr()` = `!DISABLE_EXTRA_USAGE_COMMAND && (rateLimitStatus!==null
 //! || isOverageProvisioningAllowed())`, split interactive/non-interactive on
-//! `isNonInteractiveSession()`). The current-oracle total is **105** after
-//! removing the stale `x402` entry.
+//! `isNonInteractiveSession()`). The current-oracle total is **106**: 105 after
+//! removing the stale `x402` entry, plus `auto-mode-setup` (2.1.220 WIZARD-06,
+//! `{type:"local",name:"auto-mode-setup",supportsNonInteractive:!0}`).
 //! `usage-credits` is hidden from the default palette / `/help` because `bnr()`
 //! resolves `false` in a fresh session with no subscription or rate-limit
 //! status (see [`is_palette_hidden`] + [`USAGE_CREDITS_BNR_GATED`]); the other
 //! four are visible.
 
 /// Every built-in slash command's runtime name (without leading `/`),
-/// ASCII-sorted. Locked at length **105** for the current oracle.
+/// ASCII-sorted. Locked at length **106** for the current oracle.
 ///
 /// Changing the count or membership requires bumping the parity fixture
 /// `crates/test-harness/src/parity/fixtures/parity_slash_commands_102.json`
 /// (fixture filename retained for git-history continuity; the counts inside
 /// reflect the current membership lock).
-pub const BUILTIN_COMMAND_NAMES: &[&str; 105] = &[
+pub const BUILTIN_COMMAND_NAMES: &[&str; 106] = &[
     "add-dir",
     "advisor",
     "agents",
     "ant-trace",
+    "auto-mode-setup",
     "autocompact",
     "autofix-pr",
     "backfill-sessions",
@@ -169,8 +171,9 @@ pub const BUILTIN_COMMAND_NAMES: &[&str; 105] = &[
 /// literal as the shared `UnimplementedCommandHandler` until the real bodies
 /// land in M5-10 (batch 1: clear/compact/help/exit/memory/init) and M5-11
 /// (batch 2: the remaining 12).
-pub const BUILTIN_CORE_NAMES: &[&str; 18] = &[
+pub const BUILTIN_CORE_NAMES: &[&str; 19] = &[
     "agents",
+    "auto-mode-setup",
     "clear",
     "compact",
     "config",
@@ -426,7 +429,8 @@ pub const HOST_BOUND_DEFERRED_GAPS: &[(&str, &str)] = &[
 /// `commands.filter(c => !c.isHidden && !$te(c))` (3 confirmed sites:
 /// `!ne.isHidden&&!$te(ne)`, `!S.isHidden&&!$te(S)`, `!Ur.isHidden&&!$te(Ur)`),
 /// so any `isHidden:!0` command is dropped from both surfaces.
-pub const HIDDEN_PALETTE_COMMANDS: &[&str] = &["extra-usage", "heapdump", "rate-limit-options"];
+pub const HIDDEN_PALETTE_COMMANDS: &[&str] =
+    &["auto-mode-setup", "extra-usage", "heapdump", "rate-limit-options"];
 
 /// **`bnr()`-gated, hidden-by-default named commands** — real, conditionally
 /// enabled builtin command objects whose `isEnabled` resolves to `false` in a
@@ -490,12 +494,12 @@ pub fn command_aliases(name: &str) -> &'static [&'static str] {
 ///   (or, for `advisor`/`brief`/`teleport`/`autofix-pr`, the entitlement /
 ///   statsig / remote gate is OFF by default, which also resolves `isHidden`
 ///   true and `isEnabled()` false); and
-/// - [`HIDDEN_PALETTE_COMMANDS`] — the 3 enabled-but-`isHidden:!0` named
-///   commands (`extra-usage`, `heapdump`, `rate-limit-options`); and
+/// - [`HIDDEN_PALETTE_COMMANDS`] — the 4 enabled-but-hidden named commands
+///   (`auto-mode-setup`, `extra-usage`, `heapdump`, `rate-limit-options`); and
 /// - [`USAGE_CREDITS_BNR_GATED`] — the 1 `bnr()`-gated command
 ///   (`usage-credits`), off-by-default in a fresh no-subscription session.
 ///
-/// Total = 27 filtered names. The host-bound `btw` command and the implemented
+/// Total = 28 filtered names. The host-bound `btw` command and the implemented
 /// `/reload-plugins` command remain visible. Likewise `install-slack-app`,
 /// `mobile`, and `desktop` carry no
 /// default-off hidden gate (`desktop`'s `Dsl()` returns `true`) and stay
@@ -572,6 +576,11 @@ pub fn core_description(name: &str) -> &'static str {
         // returns static guidance. Description verbatim from the 2.1.198
         // binary command object (`name:"agents"`, description `(removed) …`).
         "agents" => "(removed) Ask Claude to create/manage subagents, or edit .lingxi/agents/",
+        // WIZARD-06 (2.1.220). Byte-exact from the `type:"local"` object
+        // (the non-interactive half; the `local-jsx` twin shares the name).
+        "auto-mode-setup" => {
+            "Set up and customise auto mode \u{2014} environment context, plus optional rule tweaks"
+        }
         "clear" => "Start a new session with empty context; previous session stays on disk (resumable with /resume)",
         "compact" => "Free up context by summarizing the conversation so far",
         "config" => "Open settings",
@@ -684,8 +693,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn total_count_locked_at_105() {
-        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 105);
+    fn total_count_locked_at_106() {
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 106);
     }
 
     #[test]
@@ -809,8 +818,8 @@ mod tests {
     }
 
     #[test]
-    fn core_count_locked_at_18() {
-        assert_eq!(BUILTIN_CORE_NAMES.len(), 18);
+    fn core_count_locked_at_19() {
+        assert_eq!(BUILTIN_CORE_NAMES.len(), 19);
     }
 
     #[test]
@@ -1003,7 +1012,7 @@ mod tests {
         // subset of the locked name list and therefore cannot change the
         // total count, membership, or ordering that the parity fixture locks.
         assert!(INTENTIONALLY_DISABLED_COMMANDS.len() < BUILTIN_COMMAND_NAMES.len());
-        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 105);
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 106);
     }
 
     // ========================================================================
@@ -1108,7 +1117,7 @@ mod tests {
             INTENTIONALLY_DISABLED_COMMANDS.len(),
             "23 + 1 == 24"
         );
-        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 105);
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 106);
     }
 
     #[test]

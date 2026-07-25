@@ -36,7 +36,7 @@ mod tests {
     use command_api::parser::ParsedSlashCommand;
 
     #[test]
-    fn all_18_core_names_resolve_after_register_all() {
+    fn all_19_core_names_resolve_after_register_all() {
         let mut reg = command_api::CommandRegistry::new();
         crate::register_all_builtin_commands(&mut reg);
         for name in BUILTIN_CORE_NAMES {
@@ -77,7 +77,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn all_18_core_names_return_locked_literal_before_batch_overwrites() {
+    async fn all_19_core_names_return_locked_literal_before_batch_overwrites() {
         let mut reg = command_api::CommandRegistry::new();
         crate::register_all_builtin_commands(&mut reg);
         for name in BUILTIN_CORE_NAMES {
@@ -87,6 +87,13 @@ mod tests {
             // batch-5 UsageHandler wiring it returns the interactive-only
             // notice — not the M5 stub literal. Exempt it here.
             if *name == "usage" {
+                continue;
+            }
+            // Same shape as `usage` above: `register_all_builtin_commands`
+            // itself wires the real `/auto-mode-setup` handler (Pass 4b — it
+            // is handle-free), so it never shows the M5 stub literal. Its
+            // no-args output is the oracle's usage block.
+            if *name == "auto-mode-setup" {
                 continue;
             }
             let h = reg

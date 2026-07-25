@@ -18,6 +18,10 @@ skill-api = { path = "../../skill-api" }
 # autonomous-loop module (binary `Xpc` imports `QVe = io(T3e)`): loop.md detection,
 # the preamble, the sentinels, and `logAutonomousLoopActivation`.
 cron = { path = "../../cron" }
+# WIZARD-06: `/auto-mode-setup` shares the flag grammar + apply pipeline with
+# the `lingxi-cli auto-mode-setup` subcommand (`permission::auto_mode_argv`),
+# so neither surface can drift from the other's parsing.
+permission = { path = "../../permission" }
 traits = { path = "../../traits" }
 telemetry = { path = "../../telemetry" }
 # `/usage` renders the byte-exact claude-code `i6e()` cost-summary block via

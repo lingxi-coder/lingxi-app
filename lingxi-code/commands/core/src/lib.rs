@@ -11,6 +11,7 @@
 #![forbid(unsafe_code)]
 
 pub mod agents;
+pub mod auto_mode_setup;
 pub mod autocompact;
 pub mod bundled;
 pub mod cd;
@@ -64,6 +65,7 @@ pub mod version;
 mod core_placeholders;
 
 pub use agents::AgentsHandler;
+pub use auto_mode_setup::{ApplyRunner, AutoModeSetupHandler, ProposeRunner};
 pub use autocompact::AutocompactHandler;
 pub use bundled::register_bundled_skills;
 pub use clear::ClearHandler;

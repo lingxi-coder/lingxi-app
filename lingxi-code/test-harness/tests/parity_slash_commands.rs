@@ -1,11 +1,11 @@
-//! Parity: lock the 105 builtin slash-command names plus the per-command
+//! Parity: lock the 106 builtin slash-command names plus the per-command
 //! command/target status matrix across the full surface.
 //!
 //! See plan `docs/superpowers/plans/2026-05-25-m5-09-commands-surface.md`
 //! Task 6. Locks (2026-06-20 slash-parity pass #66/#67 re-locked from 99→94 —
 //! removed cost/stats as /usage aliases + deleted vim/pr-comments/output-style):
 //!
-//! - Total name count = 105
+//! - Total name count = 106
 //! - Core name count = 18
 //! - Target implemented status is explicit per command
 //! - Stub literal template = "{name}: not implemented in v0.6.0 (M5)"
@@ -135,6 +135,7 @@ struct ParityCommandV2 {
 const TARGET_IMPLEMENTED: &[&str] = &[
     "add-dir",
     "agents",
+    "auto-mode-setup",
     "autocompact",
     "background",
     "branch",
@@ -208,9 +209,9 @@ fn fixture_v2() -> ParityFileV2 {
 #[test]
 fn fixture_total_matches_constant() {
     let f = fixture();
-    assert_eq!(f.meta.total_count_lock, 105);
-    assert_eq!(f.commands.len(), 105);
-    assert_eq!(BUILTIN_COMMAND_NAMES.len(), 105);
+    assert_eq!(f.meta.total_count_lock, 106);
+    assert_eq!(f.commands.len(), 106);
+    assert_eq!(BUILTIN_COMMAND_NAMES.len(), 106);
     assert_eq!(f.commands.len(), BUILTIN_COMMAND_NAMES.len());
 }
 
@@ -223,9 +224,9 @@ fn fixture_core_matches_constant() {
         .filter(|c| c.is_core)
         .map(|c| c.name.as_str())
         .collect();
-    assert_eq!(fixture_core.len(), 18);
-    assert_eq!(f.meta.core_count_lock, 18);
-    assert_eq!(BUILTIN_CORE_NAMES.len(), 18);
+    assert_eq!(fixture_core.len(), 19);
+    assert_eq!(f.meta.core_count_lock, 19);
+    assert_eq!(BUILTIN_CORE_NAMES.len(), 19);
 
     // Order-sensitive equality (both are ASCII-sorted by construction).
     let const_core: Vec<&str> = BUILTIN_CORE_NAMES.to_vec();

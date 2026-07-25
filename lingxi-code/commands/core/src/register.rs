@@ -5,7 +5,7 @@
 use command_api::CommandRegistry;
 use std::sync::Arc;
 
-/// Register all 105 built-in slash commands into `reg`.
+/// Register all 106 built-in slash commands into `reg`.
 ///
 /// The non-core names point at per-name instances of
 /// [`command_api::builtin_support::UnimplementedCommandHandler`] that return the locked
@@ -25,7 +25,7 @@ pub fn register_all_builtin_commands(reg: &mut CommandRegistry) {
         core_description, UnimplementedCommandHandler, BUILTIN_COMMAND_NAMES,
     };
 
-    // Pass 1: register all 105 with per-name unimplemented handler instances.
+    // Pass 1: register all 106 with per-name unimplemented handler instances.
     //
     // Each name needs its own handler **instance** because the handler
     // carries its own `name` field used to substitute the locked literal.
@@ -53,6 +53,15 @@ pub fn register_all_builtin_commands(reg: &mut CommandRegistry) {
     // `/skills` and opens the full-screen viewer; this handler covers registry
     // / bridge / headless paths with the same text rendering.
     register_core_batch_7(reg);
+
+    // Pass 4b: `/auto-mode-setup` (WIZARD-06). Handle-free in its default
+    // shape — the grammar, `--help` and every rejection path need nothing — so
+    // it is wired unconditionally here. A composition root that has an LLM
+    // stack and a settings writer re-registers it with those runners attached
+    // (`AutoModeSetupHandler::with_propose` / `with_apply`); until then the two
+    // branches that would touch a model or the settings file say so rather than
+    // reporting work they never did.
+    reg.register_builtin_handler(Arc::new(crate::AutoModeSetupHandler::new()));
 
     // Pass 5: overwrite the batch-6 handle-free `/keybindings` handler. Like
     // batch-3 it carries no orchestrator/auth handle, so it is wired here
@@ -476,10 +485,10 @@ mod registry_tests {
     use command_api::model::CommandResult;
 
     #[test]
-    fn register_all_registers_exactly_105_names() {
+    fn register_all_registers_exactly_106_names() {
         let mut reg = CommandRegistry::new();
         register_all_builtin_commands(&mut reg);
-        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 105);
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 106);
         for name in BUILTIN_COMMAND_NAMES {
             assert!(
                 reg.resolve(name).is_some(),

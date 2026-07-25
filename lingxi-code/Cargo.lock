@@ -1201,6 +1201,7 @@ dependencies = [
  "indexmap 2.7.1",
  "llm-client",
  "orchestrator",
+ "permission",
  "protocol",
  "regex",
  "serde",

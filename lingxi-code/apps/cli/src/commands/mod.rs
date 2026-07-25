@@ -23,6 +23,7 @@ pub mod agents;
 pub mod attach;
 pub mod auth;
 pub mod auto_mode;
+pub mod auto_mode_setup;
 pub mod bg_worker;
 pub mod daemon;
 pub mod doctor;

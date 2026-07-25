@@ -400,8 +400,12 @@ pub fn build_recon_block(options: GatherOptions, producers: &dyn ReconProducers)
         sections.push(rendered);
     }
 
+    // `a.replace(X1d, "://")` — the LAST thing the gather does. Any credential
+    // that reached the block inside a URL (a remote, a registry, a config
+    // value) is stripped here, once, rather than relying on each producer to
+    // have remembered.
     ReconBlock {
-        text: render_pregather_block(&sections),
+        text: crate::auto_mode_producers::strip_url_userinfo(&render_pregather_block(&sections)),
         failed_sections,
         gated_sections,
     }
@@ -680,6 +684,22 @@ mod tests {
         for title in SECTION_TITLES {
             assert!(block.text.contains(title), "missing section: {title}");
         }
+    }
+
+    #[test]
+    fn the_assembled_block_has_url_credentials_stripped() {
+        // Whatever a producer hands back, the block-level pass removes URL
+        // userinfo once, so no producer can leak a credential by forgetting.
+        struct LeakyProducers;
+        impl ReconProducers for LeakyProducers {
+            fn repo_facts(&self) -> Result<String, ()> {
+                Ok("origin https://bot:ghp_SECRET@github.com/acme/app.git".to_string())
+            }
+        }
+        let block = build_recon_block(GatherOptions::default(), &LeakyProducers);
+        assert!(block.text.contains("https://github.com/acme/app.git"));
+        assert!(!block.text.contains("ghp_SECRET"));
+        assert!(!block.text.contains('@'));
     }
 
     #[test]

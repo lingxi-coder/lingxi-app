@@ -1,11 +1,11 @@
-//! Parity: lock the 106 builtin slash-command names plus the per-command
+//! Parity: lock the 105 builtin slash-command names plus the per-command
 //! command/target status matrix across the full surface.
 //!
 //! See plan `docs/superpowers/plans/2026-05-25-m5-09-commands-surface.md`
 //! Task 6. Locks (2026-06-20 slash-parity pass #66/#67 re-locked from 99→94 —
 //! removed cost/stats as /usage aliases + deleted vim/pr-comments/output-style):
 //!
-//! - Total name count = 106
+//! - Total name count = 105
 //! - Core name count = 18
 //! - Target implemented status is explicit per command
 //! - Stub literal template = "{name}: not implemented in v0.6.0 (M5)"
@@ -208,9 +208,9 @@ fn fixture_v2() -> ParityFileV2 {
 #[test]
 fn fixture_total_matches_constant() {
     let f = fixture();
-    assert_eq!(f.meta.total_count_lock, 106);
-    assert_eq!(f.commands.len(), 106);
-    assert_eq!(BUILTIN_COMMAND_NAMES.len(), 106);
+    assert_eq!(f.meta.total_count_lock, 105);
+    assert_eq!(f.commands.len(), 105);
+    assert_eq!(BUILTIN_COMMAND_NAMES.len(), 105);
     assert_eq!(f.commands.len(), BUILTIN_COMMAND_NAMES.len());
 }
 
@@ -394,7 +394,10 @@ fn implemented_set_matches_target_implemented_names() {
 #[test]
 fn correct_by_design_and_host_bound_sets_remain_explicit() {
     assert_eq!(CORRECT_BY_DESIGN_STUBS.len(), 23);
-    assert_eq!(HOST_BOUND_DEFERRED_GAPS.len(), 3);
+    // `x402` and `reload-plugins` left this set with the 105-name re-lock:
+    // `x402` is gone from the oracle entirely, `reload-plugins` is no longer
+    // classified host-bound. `btw` is the only remaining host-bound gap.
+    assert_eq!(HOST_BOUND_DEFERRED_GAPS.len(), 1);
 }
 
 #[tokio::test]

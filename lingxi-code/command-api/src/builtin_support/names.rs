@@ -571,7 +571,7 @@ pub fn core_description(name: &str) -> &'static str {
         // (M4 cc2.1.198) The /agents wizard was removed; the command now
         // returns static guidance. Description verbatim from the 2.1.198
         // binary command object (`name:"agents"`, description `(removed) …`).
-        "agents" => "(removed) Ask Claude to create/manage subagents, or edit .claude/agents/",
+        "agents" => "(removed) Ask Claude to create/manage subagents, or edit .lingxi/agents/",
         "clear" => "Start a new session with empty context; previous session stays on disk (resumable with /resume)",
         "compact" => "Free up context by summarizing the conversation so far",
         "config" => "Open settings",

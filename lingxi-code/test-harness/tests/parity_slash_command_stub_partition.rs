@@ -58,11 +58,11 @@ fn correct_by_design_set_is_locked_at_23() {
 }
 
 #[test]
-fn host_bound_deferred_set_is_locked_at_3() {
+fn host_bound_deferred_set_is_locked_at_1() {
     assert_eq!(
         HOST_BOUND_DEFERRED_GAPS.len(),
-        3,
-        "the host-bound-deferred (genuine gap) set is locked at 3 commands"
+        1,
+        "the host-bound-deferred (genuine gap) set is locked at 1 command"
     );
 }
 
@@ -80,18 +80,19 @@ fn correct_by_design_and_host_bound_deferred_are_disjoint() {
 }
 
 #[test]
-fn host_bound_deferred_is_exactly_btw_x402_reload_plugins() {
-    // Verified against claude-code/src/commands/{btw,x402,reload-plugins}:
-    //   - btw/index.ts:           type 'local-jsx', enabled, NO isEnabled gate
-    //   - x402/index.ts:          type 'local', supportsNonInteractive, NO gate
-    //   - reload-plugins/index.ts:type 'local', NO gate (SDK control-request)
-    // i.e. claude-code IMPLEMENTS all three for ordinary users; the Rust stub
-    // is a deferred gap, NOT correct-by-design.
+fn host_bound_deferred_is_exactly_btw() {
+    // Verified against the current oracle:
+    //   - btw/index.ts: type 'local-jsx', enabled, NO isEnabled gate — i.e.
+    //     claude-code implements it for ordinary users, so the Rust stub is a
+    //     deferred gap, NOT correct-by-design.
+    //   - x402 is gone from the oracle entirely (0 hits in the binary), so it
+    //     is not a gap — there is nothing left to be missing.
+    //   - reload-plugins is no longer classified host-bound.
     let gaps = names_of(HOST_BOUND_DEFERRED_GAPS);
-    let expected: HashSet<&str> = ["btw", "x402", "reload-plugins"].into_iter().collect();
+    let expected: HashSet<&str> = ["btw"].into_iter().collect();
     assert_eq!(
         gaps, expected,
-        "host-bound-deferred must be exactly the three commands claude-code implements"
+        "host-bound-deferred must be exactly the commands claude-code implements"
     );
 }
 

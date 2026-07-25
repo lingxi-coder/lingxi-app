@@ -163,7 +163,7 @@ mod tests {
         // spaces; then the (M4 cc2.1.198) removed-wizard description, verbatim
         // from the binary's `name:"agents"` command object.
         let expected = format!(
-            "  /agents{}  (removed) Ask Claude to create/manage subagents, or edit .claude/agents/",
+            "  /agents{}  (removed) Ask Claude to create/manage subagents, or edit .lingxi/agents/",
             " ".repeat(20 - 7)
         );
         assert_eq!(line, expected);

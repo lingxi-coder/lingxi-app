@@ -32,10 +32,12 @@ async fn happy_path_known_core_command() {
 #[tokio::test]
 async fn happy_path_known_unimplemented_command() {
     let d = build_dispatcher();
-    let outcome = d.dispatch("/x402").await;
+    // `x402` left the 105-name surface with the re-lock; `ant-trace` is a
+    // still-registered stub.
+    let outcome = d.dispatch("/ant-trace").await;
     match outcome {
         SlashDispatchResult::Handled { display } => {
-            assert_eq!(display, "x402: not implemented in v0.6.0 (M5)");
+            assert_eq!(display, "ant-trace: not implemented in v0.6.0 (M5)");
         }
         other => panic!("expected Handled, got {other:?}"),
     }
@@ -76,7 +78,7 @@ async fn non_slash_input_path() {
 #[tokio::test]
 async fn many_dispatches_against_one_registry() {
     let d = build_dispatcher();
-    for name in ["clear", "compact", "ant-trace", "version", "x402"] {
+    for name in ["clear", "compact", "ant-trace", "version", "help"] {
         let raw = format!("/{name}");
         let outcome = d.dispatch(&raw).await;
         let expected = format!("{name}: not implemented in v0.6.0 (M5)");

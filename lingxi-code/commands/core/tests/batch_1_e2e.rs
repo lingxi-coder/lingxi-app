@@ -60,11 +60,12 @@ async fn help_dispatch() {
             assert!(display.starts_with("Commands:\n"));
             // (M4 cc2.1.198) /agents carries the removed-wizard description.
             assert!(display.contains(
-                "(removed) Ask Claude to create/manage subagents, or edit .claude/agents/"
+                "(removed) Ask Claude to create/manage subagents, or edit .lingxi/agents/"
             ));
-            // 80 newlines (header + 79 visible lines); the 27 hidden/disabled
-            // commands are filtered out to match claude-code's /help.
-            assert_eq!(display.matches('\n').count(), 80);
+            // 79 newlines (header + 78 visible lines) after the 105-name
+            // re-lock dropped `x402`; the hidden/disabled commands are
+            // filtered out to match claude-code's /help.
+            assert_eq!(display.matches('\n').count(), 79);
         }
         other => panic!("{other:?}"),
     }
@@ -114,10 +115,12 @@ async fn init_dispatch_returns_handled_with_template_text() {
 #[tokio::test]
 async fn non_batch_1_command_still_returns_stub() {
     let (d, _) = fresh();
-    let r = d.dispatch("/x402").await;
+    // `x402` left the 105-name surface, so it is no longer a registered stub;
+    // `ant-trace` is the sample `register.rs` itself uses for one.
+    let r = d.dispatch("/ant-trace").await;
     match r {
         SlashDispatchResult::Handled { display } => {
-            assert_eq!(display, "x402: not implemented in v0.6.0 (M5)");
+            assert_eq!(display, "ant-trace: not implemented in v0.6.0 (M5)");
         }
         other => panic!("{other:?}"),
     }

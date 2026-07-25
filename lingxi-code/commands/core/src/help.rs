@@ -61,7 +61,7 @@ mod tests {
                 assert!(s.starts_with("Commands:\n"));
                 // (M4 cc2.1.198) /agents carries the removed-wizard description.
                 assert!(s.contains(
-                    "(removed) Ask Claude to create/manage subagents, or edit .claude/agents/"
+                    "(removed) Ask Claude to create/manage subagents, or edit .lingxi/agents/"
                 ));
                 // /reload-plugins stays visible (host-bound, no isHidden gate).
                 // (x402 was removed from the command set — 0 hits in 2.1.216+.)

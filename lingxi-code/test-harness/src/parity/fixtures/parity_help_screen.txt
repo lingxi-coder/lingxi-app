@@ -1,6 +1,6 @@
 Commands:
   /add-dir              Add a new working directory
-  /agents               (removed) Ask Claude to create/manage subagents, or edit .claude/agents/
+  /agents               (removed) Ask Claude to create/manage subagents, or edit .lingxi/agents/
   /autocompact          Configure the auto-compact window size
   /background           Send this session to the background and free the terminal
   /branch               Create a branch of the current conversation at this point
@@ -77,4 +77,3 @@ Commands:
   /usage                Show session cost, plan usage, and what's contributing to your limits
   /version              Print version information
   /voice                Toggle voice mode
-  /x402                 Configure x402 crypto payments (USDC on Base)

@@ -3,7 +3,7 @@
 //! claude-code 2.1.198 REMOVED the `/agents` wizard (changelog "Removed
 //! /agents wizard"). The command object is now (binary `Ltf` @ the `Hrc`
 //! module): `{type:"local", name:"agents", description:"(removed) Ask Claude
-//! to create/manage subagents, or edit .claude/agents/",
+//! to create/manage subagents, or edit .lingxi/agents/",
 //! supportsNonInteractive:!0, load:()=>Promise.resolve({call:Otf})}`, where
 //! `Otf` returns a static `{type:"text"}` guidance message (extracted verbatim
 //! from the binary — see [`AGENTS_REMOVED_MESSAGE`]).
@@ -119,14 +119,14 @@ mod tests {
     }
 
     /// Name + the byte-verbatim 2.1.198 description (oracle: `(removed) Ask
-    /// Claude to create/manage subagents, or edit .claude/agents/`).
+    /// Claude to create/manage subagents, or edit .lingxi/agents/`).
     #[tokio::test]
     async fn name_and_description() {
         let h = AgentsHandler::new(Arc::new(MockOrchestratorHandle::new()));
         assert_eq!(h.name(), "agents");
         assert_eq!(
             h.description(),
-            "(removed) Ask Claude to create/manage subagents, or edit .claude/agents/"
+            "(removed) Ask Claude to create/manage subagents, or edit .lingxi/agents/"
         );
     }
 }

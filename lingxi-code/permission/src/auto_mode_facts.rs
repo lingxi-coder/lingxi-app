@@ -86,6 +86,9 @@ pub const TRANSCRIPTS_DENY_SKIPPED: &str = r" not read — a permissions.deny ru
 pub const READ_DENY_GATE_PREFIX: &str = r"
 _Skipped by the read-deny gate: ";
 
+/// Tail of the aggregate/deadline notices.
+pub const NOT_SCANNED_SUFFIX: &str = r" not scanned._";
+
 /// The aggregate byte cap stopped the scan.
 pub const AGGREGATE_BYTE_CAP_PREFIX: &str = r"
 _Aggregate byte cap reached (";

@@ -597,6 +597,186 @@ pub fn repo_facts_section(source: &dyn RepoFactsSource) -> RepoFacts {
     }
 }
 
+// ── `W1d` — recent usage across all projects (names only) ────────────────────
+
+/// `qsy` — per-transcript read cap (4 MiB).
+pub const ALL_PROJECTS_PER_FILE_CAP: u64 = 4 * 1024 * 1024;
+/// `jsy` — total bytes the scan will read (100 MiB).
+pub const ALL_PROJECTS_AGGREGATE_CAP: u64 = 100 * 1024 * 1024;
+/// `Wsy` — the scan's deadline, in milliseconds.
+pub const ALL_PROJECTS_DEADLINE_MS: u64 = 8_000;
+/// `Gsy` — how many entries the enumeration will stat.
+pub const ALL_PROJECTS_STAT_CAP: usize = 2_000;
+/// `K1d` — how many of the most recent transcripts are actually read.
+pub const ALL_PROJECTS_FILE_LIMIT: usize = 50;
+
+/// What one all-projects scan collected, and every way it fell short.
+///
+/// The shortfall counters are not bookkeeping: each one renders a line telling
+/// the model that coverage was partial, so an incomplete sweep can never read
+/// as "these are all the projects".
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AllProjectsScan {
+    /// Transcripts actually read.
+    pub scanned: usize,
+    /// Transcripts selected for reading (the most recent `fileLimit`).
+    pub selected: usize,
+    /// Transcripts found by the enumeration.
+    pub enumerated: usize,
+    /// Bash tool uses seen.
+    pub commands_seen: usize,
+    /// Command words mined, in order.
+    pub words: Vec<String>,
+    /// The enumeration hit its stat cap.
+    pub enumeration_capped: bool,
+    /// Transcripts whose stat failed.
+    pub stat_failed: usize,
+    /// Project directories that could not be listed.
+    pub unreadable_dirs: usize,
+    /// Transcripts the read-deny gate refused.
+    pub denied: usize,
+    /// Transcripts that vanished or were refused as an alias.
+    pub unreadable: usize,
+    /// Transcripts longer than the per-file cap.
+    pub per_file_capped: usize,
+    /// Set with the number left unscanned when the aggregate cap was hit.
+    pub aggregate_capped_remaining: Option<usize>,
+    /// Set with the number left unscanned when the deadline was hit.
+    pub deadline_remaining: Option<usize>,
+    /// Command-word extraction itself ran out of room.
+    pub words_incomplete: bool,
+}
+
+fn plural(n: usize, one: &str, many: &str) -> String {
+    if n == 1 {
+        one.to_string()
+    } else {
+        many.to_string()
+    }
+}
+
+/// `W1d`'s rendering half — the section body for a completed scan.
+#[must_use]
+pub fn render_all_projects_usage(scan: &AllProjectsScan) -> String {
+    use crate::auto_mode_facts as facts;
+    use crate::auto_mode_sections as sections;
+
+    let mib = |b: u64| (b as f64 / (1024.0 * 1024.0)).round() as u64;
+    // `Transcripts scanned: {A} of {selected} selected (from {enumerated}
+    //  enumerated); Bash commands seen: {C}`
+    let mut parts: Vec<String> = vec![format!(
+        "{}{} of {}{}{}{}{}",
+        facts::TRANSCRIPTS_SCANNED_PREFIX,
+        scan.scanned,
+        scan.selected,
+        facts::SELECTED_FROM_INFIX,
+        scan.enumerated,
+        facts::ENUMERATED_BASH_COMMANDS_INFIX,
+        scan.commands_seen,
+    )];
+
+    if scan.enumeration_capped {
+        parts.push(format!(
+            "{}{}{}{}{}",
+            facts::ENUMERATION_CAP_PREFIX,
+            ALL_PROJECTS_STAT_CAP,
+            facts::FIRST_ENUMERATED_OF_INFIX,
+            scan.enumerated,
+            facts::TRANSCRIPT_SELECTION_CAVEAT
+        ));
+    }
+    if scan.stat_failed + scan.unreadable_dirs > 0 {
+        parts.push(format!(
+            "\n_{} {} and {} project {}{}",
+            scan.stat_failed,
+            plural(scan.stat_failed, "transcript", "transcripts"),
+            scan.unreadable_dirs,
+            plural(scan.unreadable_dirs, "directory", "directories"),
+            facts::PROJECTS_PARTIAL_COVERAGE
+        ));
+    }
+    if scan.denied > 0 {
+        parts.push(format!(
+            "{}{} {}{}",
+            facts::READ_DENY_GATE_PREFIX,
+            scan.denied,
+            plural(scan.denied, "transcript", "transcripts"),
+            facts::TRANSCRIPTS_DENY_SKIPPED
+        ));
+    }
+    if scan.unreadable > 0 {
+        parts.push(format!(
+            "\n_{} {}{}",
+            scan.unreadable,
+            plural(scan.unreadable, "transcript", "transcripts"),
+            facts::TRANSCRIPTS_UNREADABLE
+        ));
+    }
+    if scan.per_file_capped > 0 {
+        parts.push(format!(
+            "\n_{} {} exceeded the {}{}",
+            scan.per_file_capped,
+            plural(scan.per_file_capped, "transcript", "transcripts"),
+            mib(ALL_PROJECTS_PER_FILE_CAP),
+            facts::PER_FILE_CAP_SUFFIX
+        ));
+    }
+    if let Some(remaining) = scan.aggregate_capped_remaining {
+        parts.push(format!(
+            "{}{}{}{} {}{}",
+            facts::AGGREGATE_BYTE_CAP_PREFIX,
+            mib(ALL_PROJECTS_AGGREGATE_CAP),
+            facts::AGGREGATE_BYTE_CAP_INFIX,
+            remaining,
+            plural(remaining, "transcript", "transcripts"),
+            facts::NOT_SCANNED_SUFFIX
+        ));
+    }
+    if let Some(remaining) = scan.deadline_remaining {
+        parts.push(format!(
+            "{}{} {}{}",
+            facts::DEADLINE_REACHED_PREFIX,
+            remaining,
+            plural(remaining, "transcript", "transcripts"),
+            facts::NOT_SCANNED_SUFFIX
+        ));
+    }
+    if scan.words_incomplete {
+        parts.push(crate::auto_mode_gates::COMMAND_WORDS_INCOMPLETE.to_string());
+    }
+
+    let counted = frequency(&scan.words, FLAGGED_LIST_CAP * 2);
+    if !counted.is_empty() {
+        parts.push(format!(
+            "{}{}",
+            sections::HEADING_TOOLS_OTHER_PROJECTS,
+            counted
+                .into_iter()
+                .map(|(w, n)| format!("- {} ({n}\u{d7})", display_name(&w)))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+    }
+    parts.push(facts::OTHER_PROJECTS_PROVENANCE_NOTE.to_string());
+    parts.join("\n")
+}
+
+/// Supplies the all-projects sweep.
+pub trait AllProjectsSource {
+    /// Run the sweep, or `None` when the projects root is absent, unreadable,
+    /// or enumeration exceeded its deadline.
+    fn scan(&self) -> Option<AllProjectsScan>;
+}
+
+/// `W1d` — the "Recent usage across all projects (names only)" section body.
+#[must_use]
+pub fn all_projects_usage_section(source: &dyn AllProjectsSource) -> String {
+    source.scan().as_ref().map_or_else(
+        || crate::auto_mode_gates::OTHER_PROJECT_TRANSCRIPTS_UNAVAILABLE.to_string(),
+        render_all_projects_usage,
+    )
+}
+
 // ── `q1d` — shell history (command words only) ───────────────────────────────
 
 /// `M1d` — how many bytes of the TAIL of a history file are read.
@@ -2479,6 +2659,109 @@ mod tests {
         assert_eq!(SUBPROCESS_TIMEOUT_MS, 4_000);
         assert_eq!(REMOTE_LINE_CAP, 40);
         assert_eq!(CONTRIBUTING_READ_CAP, 2_000);
+    }
+
+    // ── `W1d` ────────────────────────────────────────────────────────────────
+
+    struct FakeAllProjects(Option<AllProjectsScan>);
+    impl AllProjectsSource for FakeAllProjects {
+        fn scan(&self) -> Option<AllProjectsScan> {
+            self.0.clone()
+        }
+    }
+
+    #[test]
+    fn an_unavailable_projects_root_is_unknown_not_empty() {
+        let body = all_projects_usage_section(&FakeAllProjects(None));
+        assert!(body.contains("Treat other-project usage as unknown, not empty"));
+    }
+
+    #[test]
+    fn a_clean_sweep_reports_counts_and_words_only() {
+        let scan = AllProjectsScan {
+            scanned: 3,
+            selected: 3,
+            enumerated: 3,
+            commands_seen: 5,
+            words: vec!["terraform".into(), "terraform".into(), "helm".into()],
+            ..AllProjectsScan::default()
+        };
+        let body = render_all_projects_usage(&scan);
+        assert!(body.contains("Transcripts scanned: 3 of 3 selected (from 3 enumerated); Bash commands seen: 5"));
+        assert!(body.contains("#### Tools run in other projects"));
+        assert!(body.contains("- terraform (2\u{d7})"));
+        assert!(body.contains("- helm (1\u{d7})"));
+        assert!(body.contains("Raw command lines were never read into the transcript"));
+        // A clean sweep carries none of the shortfall notices.
+        for absent in [
+            "Enumeration cap",
+            "read-deny gate",
+            "could not be read",
+            "Aggregate byte cap",
+            "Deadline reached",
+        ] {
+            assert!(!body.contains(absent), "unexpected notice: {absent}");
+        }
+    }
+
+    #[test]
+    fn every_way_the_sweep_falls_short_is_reported() {
+        // Each counter exists so an incomplete sweep can never read as "these
+        // are all the projects".
+        let scan = AllProjectsScan {
+            scanned: 10,
+            selected: 50,
+            enumerated: 5_000,
+            commands_seen: 40,
+            words: vec!["helm".into()],
+            enumeration_capped: true,
+            stat_failed: 2,
+            unreadable_dirs: 1,
+            denied: 3,
+            unreadable: 4,
+            per_file_capped: 1,
+            aggregate_capped_remaining: Some(7),
+            deadline_remaining: Some(9),
+            words_incomplete: true,
+        };
+        let body = render_all_projects_usage(&scan);
+        assert!(body.contains("_Enumeration cap reached \u{2014} the 2000 first-enumerated of 5000 transcripts"));
+        assert!(body.contains("_2 transcripts and 1 project directory could not be enumerated"));
+        assert!(body.contains("treat missing projects as unknown, not empty"));
+        assert!(body.contains("_Skipped by the read-deny gate: 3 transcripts not read"));
+        assert!(body.contains("_4 transcripts could not be read"));
+        assert!(body.contains("_1 transcript exceeded the 4 MiB per-file cap"));
+        assert!(body.contains("_Aggregate byte cap reached (100 MiB) \u{2014} remaining 7 transcripts not scanned._"));
+        assert!(body.contains("_Deadline reached \u{2014} remaining 9 transcripts not scanned._"));
+        assert!(body.contains("_Command-word extraction hit its line cap or deadline"));
+    }
+
+    #[test]
+    fn shortfall_notices_use_singular_and_plural_correctly() {
+        let scan = AllProjectsScan {
+            stat_failed: 1,
+            unreadable_dirs: 2,
+            denied: 1,
+            unreadable: 1,
+            per_file_capped: 1,
+            aggregate_capped_remaining: Some(1),
+            deadline_remaining: Some(1),
+            ..AllProjectsScan::default()
+        };
+        let body = render_all_projects_usage(&scan);
+        assert!(body.contains("_1 transcript and 2 project directories"));
+        assert!(body.contains("gate: 1 transcript not read"));
+        assert!(body.contains("_1 transcript could not be read"));
+        assert!(body.contains("remaining 1 transcript not scanned._"));
+    }
+
+    #[test]
+    fn all_projects_caps_match_the_oracle() {
+        assert_eq!(ALL_PROJECTS_PER_FILE_CAP, 4 * 1024 * 1024);
+        assert_eq!(ALL_PROJECTS_AGGREGATE_CAP, 100 * 1024 * 1024);
+        assert_eq!(ALL_PROJECTS_DEADLINE_MS, 8_000);
+        assert_eq!(ALL_PROJECTS_STAT_CAP, 2_000);
+        assert_eq!(ALL_PROJECTS_FILE_LIMIT, 50);
     }
 
     // ── `q1d` ────────────────────────────────────────────────────────────────

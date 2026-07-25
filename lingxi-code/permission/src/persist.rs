@@ -544,6 +544,60 @@ pub async fn replace_permission_rules(
     })
 }
 
+/// The outcome of an [`persist_auto_mode_save`] write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AutoModeSaveOutcome {
+    /// `true` when the settings file was written (the `autoMode` block or a
+    /// removal changed something); `false` for a no-op or a non-persistable
+    /// destination.
+    pub wrote: bool,
+    /// How many `permissions.allow` entries the removal set actually filtered
+    /// out. `0` while a removal WAS requested is the oracle's
+    /// `permissions_allow_skipped` telemetry branch.
+    pub removed_count: usize,
+}
+
+/// Persist a WIZARD-06 auto-mode save (oracle `rFt`): set the top-level
+/// `autoMode` block and remove the offered `removeFromPermissionsAllow` rules
+/// from `permissions.allow`, in the ONE `destination` settings file, atomically
+/// (one exclusive lock, one atomic write). The caller has already run
+/// [`crate::auto_mode_setup::validate_auto_mode_save`], so an empty/"nothing to
+/// save" payload never reaches here.
+///
+/// A missing settings file is treated as empty (the write creates it), matching
+/// the wizard's "harden BEFORE enabling auto mode" first-run flow. Session and
+/// CLI destinations are live-only and no-op (`wrote: false`).
+///
+/// # Errors
+/// [`PersistError::BrokenJson`] if the destination file is non-empty and not a
+/// JSON object (left untouched); [`PersistError::Confined`] on a hardened
+/// filesystem failure.
+pub async fn persist_auto_mode_save(
+    auto_mode_block: Option<&Value>,
+    remove: &[String],
+    destination: PermissionUpdateDestination,
+    paths: &PermissionPaths,
+) -> Result<AutoModeSaveOutcome, PersistError> {
+    let removed = std::cell::Cell::new(0usize);
+    let wrote = mutate_settings_file(paths, destination, true, |raw| {
+        match crate::auto_mode_setup::apply_auto_mode_save_to_settings_json(
+            raw,
+            auto_mode_block,
+            remove,
+        )? {
+            Some(result) => {
+                removed.set(result.removed_count);
+                Ok(Some(result.json))
+            }
+            None => Ok(None),
+        }
+    })?;
+    Ok(AutoModeSaveOutcome {
+        wrote,
+        removed_count: removed.get(),
+    })
+}
+
 /// Persist a `setMode` permission update as `permissions.defaultMode`.
 ///
 /// The 2.1.218 oracle's persist function `eSe` guards its TOP with a dedicated
@@ -1196,6 +1250,65 @@ mod tests {
         assert!(removed);
         let body2 = std::fs::read_to_string(&path).unwrap();
         assert!(!body2.contains("/work/extra"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn auto_mode_save_writes_block_and_removes_allow_atomically() {
+        let tmp = std::env::temp_dir().join(format!("lx-automode-save-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("proj")).unwrap();
+        let paths = PermissionPaths {
+            lingxi_home: tmp.join("home/.lingxi"),
+            cwd: tmp.join("proj"),
+        };
+        let destination = PermissionUpdateDestination::LocalSettings;
+        let path = tmp.join("proj/.lingxi/settings.local.json");
+
+        // Seed an existing allow list with a destructive rule the offer removes.
+        let seed = [
+            allow_rule("Bash(rm:*)", destination).rule,
+            allow_rule("Read", destination).rule,
+        ];
+        assert!(
+            replace_permission_rules(PermissionBehavior::Allow, &seed, destination, &paths)
+                .await
+                .unwrap()
+        );
+
+        let block =
+            json!({ "environment": ["Solo laptop"], "hard_deny": ["Bash(curl:*)", "$defaults"] });
+        let outcome =
+            persist_auto_mode_save(Some(&block), &["Bash(rm:*)".to_string()], destination, &paths)
+                .await
+                .unwrap();
+        assert!(outcome.wrote);
+        assert_eq!(outcome.removed_count, 1);
+
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["autoMode"], block);
+        assert_eq!(
+            v["permissions"]["allow"],
+            json!(["Read"]),
+            "destructive rule removed"
+        );
+
+        // Re-applying the identical block with no fresh removal is a no-op.
+        let again = persist_auto_mode_save(Some(&block), &[], destination, &paths)
+            .await
+            .unwrap();
+        assert!(!again.wrote, "unchanged block + no removal writes nothing");
+        assert_eq!(again.removed_count, 0);
+
+        // A requested removal that no longer matches → wrote:false, removed_count:0
+        // (the oracle's permissions_allow_skipped telemetry branch).
+        let skipped =
+            persist_auto_mode_save(Some(&block), &["Bash(rm:*)".to_string()], destination, &paths)
+                .await
+                .unwrap();
+        assert!(!skipped.wrote);
+        assert_eq!(skipped.removed_count, 0);
+
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

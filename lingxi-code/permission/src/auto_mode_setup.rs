@@ -370,6 +370,103 @@ pub fn remove_rules_from_permissions_allow(
     (kept, removed)
 }
 
+// ── rFt: the settings-file write transform (2.1.218) ─────────────────────────
+
+/// The outcome of applying an auto-mode save to a settings-file's JSON text: the
+/// re-serialized settings body (pretty + trailing newline) plus how many
+/// `permissions.allow` rules the removal set actually filtered out.
+///
+/// `removed_count == 0` while a non-empty `removeFromPermissionsAllow` was
+/// requested is the oracle's `permissions_allow_skipped` telemetry branch (the
+/// offered rules were already gone) — the caller still writes the `autoMode`
+/// block, so the write is not necessarily a no-op.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutoModeSaveResult {
+    /// The updated settings JSON (`serde_json` pretty + `"\n"`), preserving every
+    /// other key and its order.
+    pub json: String,
+    /// How many `permissions.allow` entries the removal set filtered out.
+    pub removed_count: usize,
+}
+
+/// Apply an auto-mode save to a settings file's raw JSON text (the pure core of
+/// oracle `rFt`): set the top-level `autoMode` block (when one was accepted) and
+/// filter the `removeFromPermissionsAllow` rule strings out of
+/// `permissions.allow`. Both mutations land in the ONE target settings file,
+/// atomically, matching the wizard's single-file apply.
+///
+/// Returns:
+/// - `Ok(Some(result))` — the settings changed; `result.json` is the pretty
+///   re-serialized body (trailing newline), `result.removed_count` the number of
+///   `permissions.allow` entries actually removed.
+/// - `Ok(None)` — nothing changed (the `autoMode` block already matched AND no
+///   offered removal was present); no write needed.
+/// - `Err(())` — `raw` is non-empty and not a JSON object, or
+///   `permissions`/`permissions.allow` is present but the wrong type (the caller
+///   maps this to a broken-settings error and must NOT overwrite the file).
+///
+/// The `autoMode` block is placed at the top level (a fresh key is appended;
+/// `serde_json`'s `preserve_order` keeps existing keys in place). Removal
+/// matching is EXACT/verbatim — the offer only ever carries rule strings copied
+/// verbatim from the existing allow list (see [`remove_rules_from_permissions_allow`]).
+///
+/// # Errors
+/// Returns `Err(())` when `raw` is malformed as described above.
+pub fn apply_auto_mode_save_to_settings_json(
+    raw: &str,
+    auto_mode_block: Option<&Value>,
+    remove: &[String],
+) -> Result<Option<AutoModeSaveResult>, ()> {
+    let mut root: Value = if raw.trim().is_empty() {
+        Value::Object(serde_json::Map::new())
+    } else {
+        serde_json::from_str(raw).map_err(|_| ())?
+    };
+    let obj = root.as_object_mut().ok_or(())?;
+
+    let mut changed = false;
+
+    // Set the top-level `autoMode` block (only when a block was accepted).
+    if let Some(block) = auto_mode_block {
+        if obj.get("autoMode") != Some(block) {
+            obj.insert("autoMode".to_string(), block.clone());
+            changed = true;
+        }
+    }
+
+    // Filter the offered removals out of `permissions.allow` (verbatim match).
+    let mut removed_count = 0usize;
+    if !remove.is_empty() {
+        if let Some(perms) = obj.get_mut("permissions") {
+            let perms_obj = perms.as_object_mut().ok_or(())?;
+            if let Some(allow) = perms_obj.get_mut("allow") {
+                let allow_vec = allow.as_array_mut().ok_or(())?;
+                let remove_set: std::collections::HashSet<&str> =
+                    remove.iter().map(String::as_str).collect();
+                let before = allow_vec.len();
+                allow_vec.retain(|entry| {
+                    entry
+                        .as_str()
+                        .is_none_or(|value| !remove_set.contains(value))
+                });
+                removed_count = before - allow_vec.len();
+                if removed_count > 0 {
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    if !changed {
+        return Ok(None);
+    }
+    let serialized = serde_json::to_string_pretty(&root).map_err(|_| ())?;
+    Ok(Some(AutoModeSaveResult {
+        json: serialized + "\n",
+        removed_count,
+    }))
+}
+
 // ── vNs: the save-payload validator (2.1.218) ────────────────────────────────
 
 /// The `$defaults` sentinel (`pV`) that an `autoMode` rule array must include so
@@ -1197,5 +1294,98 @@ mod tests {
             remove_rules_from_permissions_allow(&allow, &["Bash(ls:*)".into()]);
         assert_eq!(kept.len(), 4);
         assert_eq!(removed, 0);
+    }
+
+    // ── rFt: settings-file write transform ───────────────────────────────────
+
+    #[test]
+    fn write_transform_sets_automode_and_removes_allow_preserving_other_keys() {
+        let raw = r#"{
+  "model": "claude-opus-4-8",
+  "permissions": { "allow": ["Bash(*)", "Read", "Bash(rm:*)"], "deny": ["Bash(curl:*)"] }
+}"#;
+        let block = json!({
+            "environment": ["Solo dev on a laptop"],
+            "allow": ["Bash(ls:*)", "$defaults"],
+        });
+        let result = apply_auto_mode_save_to_settings_json(
+            raw,
+            Some(&block),
+            &["Bash(*)".into(), "Bash(rm:*)".into()],
+        )
+        .unwrap()
+        .expect("a change was made");
+        assert_eq!(result.removed_count, 2);
+        let v: Value = serde_json::from_str(&result.json).unwrap();
+        // autoMode block written verbatim at top level.
+        assert_eq!(v["autoMode"], block);
+        // Offered removals filtered from permissions.allow; the rest kept in order.
+        assert_eq!(v["permissions"]["allow"], json!(["Read"]));
+        // Untouched keys preserved.
+        assert_eq!(v["model"], "claude-opus-4-8");
+        assert_eq!(v["permissions"]["deny"], json!(["Bash(curl:*)"]));
+        // Pretty-printed with a trailing newline.
+        assert!(result.json.ends_with("}\n"));
+    }
+
+    #[test]
+    fn write_transform_creates_from_empty_and_skipped_removal_is_noop_count() {
+        // Empty settings → autoMode block created; no permissions to remove from.
+        let block = json!({ "environment": ["x"] });
+        let result = apply_auto_mode_save_to_settings_json("", Some(&block), &["Bash(*)".into()])
+            .unwrap()
+            .expect("a change was made (the block)");
+        // The removal was requested but nothing matched → permissions_allow_skipped.
+        assert_eq!(result.removed_count, 0);
+        let v: Value = serde_json::from_str(&result.json).unwrap();
+        assert_eq!(v["autoMode"], block);
+        assert!(v.get("permissions").is_none());
+
+        // Block identical to what's already on disk AND no removal match → no-op.
+        let existing = serde_json::to_string(&json!({ "autoMode": block })).unwrap();
+        assert_eq!(
+            apply_auto_mode_save_to_settings_json(&existing, Some(&block), &[]).unwrap(),
+            None,
+            "an unchanged block with no removals writes nothing"
+        );
+    }
+
+    #[test]
+    fn write_transform_rejects_broken_settings() {
+        // Non-object root.
+        assert_eq!(
+            apply_auto_mode_save_to_settings_json("[1,2,3]", Some(&json!({"environment":["x"]})), &[]),
+            Err(())
+        );
+        // permissions.allow is the wrong type → fail-closed (never overwrite).
+        let raw = r#"{ "permissions": { "allow": "Bash(*)" } }"#;
+        assert_eq!(
+            apply_auto_mode_save_to_settings_json(raw, None, &["Bash(*)".into()]),
+            Err(())
+        );
+    }
+
+    #[test]
+    fn write_transform_round_trips_through_a_real_settings_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{ "permissions": { "allow": ["Bash(*)", "Read"] } }"#,
+        )
+        .unwrap();
+
+        // Read → transform → write back, exactly as the fs writer does.
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let block = json!({ "environment": ["laptop"], "hard_deny": ["Bash(rm:*)", "$defaults"] });
+        let result = apply_auto_mode_save_to_settings_json(&raw, Some(&block), &["Bash(*)".into()])
+            .unwrap()
+            .unwrap();
+        std::fs::write(&path, &result.json).unwrap();
+
+        let reloaded: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(reloaded["autoMode"], block);
+        assert_eq!(reloaded["permissions"]["allow"], json!(["Read"]));
+        assert_eq!(result.removed_count, 1);
     }
 }

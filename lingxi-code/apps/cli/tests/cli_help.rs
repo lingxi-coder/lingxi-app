@@ -98,9 +98,23 @@ fn help_documents_the_attach_v2_detach_chord() {
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "attach          Open a background session here; Ctrl+Z returns to the shell",
-        ));
+        // Clap right-pads every subcommand name to the longest one, so hard-coding
+        // the gap makes this test fail whenever a longer subcommand is added
+        // (WIZARD-06's 15-char `auto-mode-setup` displaced the 14-char
+        // `remote-control` and did exactly that). Assert the name and its
+        // description independently — the alignment is clap's business.
+        // The subcommand and its description are asserted separately, and the
+        // regex tolerates any run of spaces between them: clap right-pads every
+        // name to the longest one, so a hard-coded gap breaks whenever a longer
+        // subcommand appears (WIZARD-06's 15-char `auto-mode-setup` displaced
+        // the 14-char `remote-control` and did exactly that). The alignment is
+        // clap's business; what this test owns is that the row exists.
+        .stdout(
+            predicate::str::is_match(
+                r"\battach\s+Open a background session here; Ctrl\+Z returns to the shell",
+            )
+            .unwrap(),
+        );
 }
 
 #[test]

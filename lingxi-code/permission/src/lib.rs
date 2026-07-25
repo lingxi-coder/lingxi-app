@@ -12,6 +12,7 @@ pub mod auto_mode_defaults;
 pub mod auto_mode_destructive;
 pub mod auto_mode_facts;
 pub mod auto_mode_gates;
+pub mod auto_mode_io;
 pub mod auto_mode_pregather;
 pub mod auto_mode_producers;
 pub mod auto_mode_propose;

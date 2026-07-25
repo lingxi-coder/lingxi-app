@@ -535,6 +535,82 @@ pub fn denied_under_either_alias(
     false
 }
 
+// ── the assembled gather ──────────────────────────────────────────────────────
+
+/// Every recon producer wired to the real filesystem.
+///
+/// The seven producers with real I/O run; the four whose I/O is not wired yet
+/// (the home walk, the projects-root enumeration and the two `gh` capabilities)
+/// fall back to [`crate::auto_mode_pregather::ReconProducers`]'s default, which
+/// renders the failure marker. That is the designed degradation path: those
+/// sections report "data unavailable" rather than an empty result.
+///
+/// Note which ones those are — all four are GATED. With the conservative
+/// answers (`scope=project`, `depth=here`) none of them is even reached, so the
+/// block is complete.
+pub struct FsReconProducers {
+    root: PathBuf,
+    user_config_dir: PathBuf,
+    transcript_dir: PathBuf,
+    classify_all_shell: bool,
+}
+
+impl FsReconProducers {
+    /// Wire the producers for `root`, with the user config and transcript
+    /// directories they read outside it.
+    #[must_use]
+    pub fn new(
+        root: impl Into<PathBuf>,
+        user_config_dir: impl Into<PathBuf>,
+        transcript_dir: impl Into<PathBuf>,
+        classify_all_shell: bool,
+    ) -> Self {
+        Self {
+            root: root.into(),
+            user_config_dir: user_config_dir.into(),
+            transcript_dir: transcript_dir.into(),
+            classify_all_shell,
+        }
+    }
+}
+
+impl crate::auto_mode_pregather::ReconProducers for FsReconProducers {
+    fn project_docs(&self) -> Result<String, ()> {
+        Ok(crate::auto_mode_producers::project_docs_section(
+            &FsDocSource::new(&self.root, &self.user_config_dir),
+        ))
+    }
+    fn repo_facts(&self) -> Result<String, ()> {
+        Ok(
+            crate::auto_mode_producers::repo_facts_section(&FsRepoFactsSource::new(&self.root))
+                .body,
+        )
+    }
+    fn existing_settings(&self) -> Result<String, ()> {
+        let (local, _) = crate::auto_mode_producers::local_settings_block(
+            &FsLocalSettingsSource::new(&self.root),
+        );
+        crate::auto_mode_producers::existing_settings_section(&FsSettingsReconSource::new(
+            self.user_config_dir.join("settings.json"),
+            local,
+            self.classify_all_shell,
+        ))
+    }
+    fn project_usage(&self) -> Result<String, ()> {
+        Ok(crate::auto_mode_producers::project_usage_section(
+            &FsProjectUsageSource::new(&self.transcript_dir),
+        ))
+    }
+    fn config_scans(&self) -> Result<String, ()> {
+        Ok(crate::auto_mode_producers::config_scans_section(
+            &FsConfigScanSource::new(&self.root),
+        ))
+    }
+    fn default_labels(&self) -> Result<String, ()> {
+        Ok(crate::auto_mode_producers::default_labels_section())
+    }
+}
+
 // ── concrete sources ─────────────────────────────────────────────────────────
 
 /// Real-filesystem [`DocSource`] rooted at a project directory.
@@ -1078,46 +1154,6 @@ mod tests {
         }
     }
 
-    /// Wires the four ported producers to real filesystem sources.
-    struct RealProducers {
-        root: PathBuf,
-        config: PathBuf,
-    }
-    impl crate::auto_mode_pregather::ReconProducers for RealProducers {
-        fn project_docs(&self) -> Result<String, ()> {
-            Ok(crate::auto_mode_producers::project_docs_section(
-                &FsDocSource::new(&self.root, &self.config),
-            ))
-        }
-        fn repo_facts(&self) -> Result<String, ()> {
-            Ok(crate::auto_mode_producers::repo_facts_section(&FsRepoFactsSource::new(&self.root))
-                .body)
-        }
-        fn existing_settings(&self) -> Result<String, ()> {
-            let (local, _) = crate::auto_mode_producers::local_settings_block(
-                &FsLocalSettingsSource::new(&self.root),
-            );
-            crate::auto_mode_producers::existing_settings_section(&FsSettingsReconSource::new(
-                self.config.join("settings.json"),
-                local,
-                false,
-            ))
-        }
-        fn project_usage(&self) -> Result<String, ()> {
-            Ok(crate::auto_mode_producers::project_usage_section(
-                &FsProjectUsageSource::new(self.root.join(".transcripts")),
-            ))
-        }
-        fn config_scans(&self) -> Result<String, ()> {
-            Ok(crate::auto_mode_producers::config_scans_section(
-                &FsConfigScanSource::new(&self.root),
-            ))
-        }
-        fn default_labels(&self) -> Result<String, ()> {
-            Ok(crate::auto_mode_producers::default_labels_section())
-        }
-    }
-
     #[test]
     fn the_four_ported_producers_run_against_a_real_repository() {
         let dir = tempfile::tempdir().unwrap();
@@ -1168,10 +1204,12 @@ mod tests {
             &serde_json::json!({ "autoMode": { "allow": ["Bash(x:*)"] } }).to_string(),
         );
 
-        let producers = RealProducers {
-            root: root.clone(),
-            config: config.clone(),
-        };
+        let producers = FsReconProducers::new(
+            root.clone(),
+            config.clone(),
+            root.join(".transcripts"),
+            false,
+        );
         let block = crate::auto_mode_pregather::build_recon_block(
             crate::auto_mode_pregather::GatherOptions::default(),
             &producers,

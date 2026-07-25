@@ -1555,6 +1555,11 @@ fn zls_passthrough_on_new_item_symlink_types() {
         }
     }
     // Alias `ni` + `-Type` abbreviation + item-type PREFIX (`sym`) also caught.
+    //
+    // This must match on the REASON, not merely on Passthrough: `New-Item`/`ni`
+    // is never in the write set, so it returns Passthrough unconditionally and a
+    // bare `ae_passes` assertion would hold even if the link detection never
+    // fired at all.
     let c = zc(
         "ni",
         "cmdlet",
@@ -1567,7 +1572,35 @@ fn zls_passthrough_on_new_item_symlink_types() {
             "StringConstant",
         ],
     );
-    assert!(ae_passes(&[zstmt(vec![PsElement::Command(c)])]));
+    match ae(&[zstmt(vec![PsElement::Command(c)])]) {
+        PsAcceptEditsResult::Passthrough(r) => {
+            assert!(r.contains("creates a filesystem link"), "ni -Type sym: {r}");
+        }
+        other => panic!("ni -Type sym: expected passthrough, got {other:?}"),
+    }
+
+    // ...and the non-link item types must NOT report the link reason, so the
+    // assertion above can only pass when the detection actually distinguishes.
+    for ty in ["File", "Directory"] {
+        let c = zc(
+            "New-Item",
+            "cmdlet",
+            &["-ItemType", ty, "-Path", "./thing"],
+            &[
+                "StringConstant",
+                "Parameter",
+                "StringConstant",
+                "Parameter",
+                "StringConstant",
+            ],
+        );
+        if let PsAcceptEditsResult::Passthrough(r) = ae(&[zstmt(vec![PsElement::Command(c)])]) {
+            assert!(
+                !r.contains("creates a filesystem link"),
+                "{ty} must not be reported as a link: {r}"
+            );
+        }
+    }
 }
 
 #[test]

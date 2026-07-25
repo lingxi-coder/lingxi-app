@@ -53,7 +53,8 @@ fn apply_file_writes_automode_settings_end_to_end() {
     let written = std::fs::read_to_string(home.path().join("settings.json")).unwrap();
     let v: serde_json::Value = serde_json::from_str(&written).unwrap();
     assert_eq!(v["autoMode"]["environment"], serde_json::json!(["Solo dev on a laptop"]));
-    assert_eq!(v["autoMode"]["allow"], serde_json::json!(["Bash(ls:*)", "$defaults"]));
+    // Rule arrays are MERGED with what is on disk, so `$defaults` leads.
+    assert_eq!(v["autoMode"]["allow"], serde_json::json!(["$defaults", "Bash(ls:*)"]));
 }
 
 /// A tampered digest is refused (`hash_mismatch`) and NOTHING is written.

@@ -367,7 +367,14 @@ pub fn parse_apply_file_args(args: &[String]) -> Result<AutoModeSetupInvocation,
                 if inline.is_some() {
                     return Err(grammar(EXPECT_EQ_FORM));
                 }
-                if i + 1 >= args.len() || args[i + 1].is_empty() {
+                // `d === void 0 || d.startsWith("--")` — a following FLAG is not
+                // taken as the digest. Without this the flag is consumed as the
+                // hash and the walk reports a misleading ordering error instead
+                // of "needs a value".
+                if i + 1 >= args.len()
+                    || args[i + 1].is_empty()
+                    || args[i + 1].starts_with("--")
+                {
                     return Err(grammar(EXPECT_NEEDS_VALUE));
                 }
                 expect_sha256 = Some(args[i + 1].clone());
@@ -528,11 +535,17 @@ pub async fn execute_apply_file(
         })
         .unwrap_or_default();
 
+    // The proposal's own `mode` decides whether this merges with the block
+    // already on disk. It defaults to `append`, so a proposal that omits the
+    // key must NOT clobber the user's existing auto-mode configuration.
+    let mode = pipeline::AutoModeSaveMode::from_proposal(proposal.get("mode"));
+
     let outcome = persist_auto_mode_save(
         Some(&block),
         &remove_strings,
         destination_for(inv.apply_target),
         paths,
+        mode,
     )
     .await?;
 
@@ -641,7 +654,20 @@ pub async fn run(cli: &Cli) -> i32 {
 
 async fn run_apply_file(inv: &ApplyFileInvocation) -> i32 {
     let lingxi_home = crate::run::lingxi_home_dir();
-    let roots = vec![std::env::temp_dir(), lingxi_home.clone()];
+    // `uNd` seeds its root set with BOTH `path.resolve(n)` and `fs.realpath(n)`
+    // for each root, so either spelling of a root matches. On macOS this is not
+    // optional: `temp_dir()` yields `/var/folders/…` while `/var` is a symlink
+    // to `/private/var`, so a reviewing host that realpath'd the proposal path
+    // would otherwise be refused as `bad_path` for a file that is literally in
+    // the system temp directory.
+    let mut roots = vec![std::env::temp_dir(), lingxi_home.clone()];
+    for root in roots.clone() {
+        if let Ok(canonical) = std::fs::canonicalize(&root) {
+            if !roots.contains(&canonical) {
+                roots.push(canonical);
+            }
+        }
+    }
     let paths = PermissionPaths {
         lingxi_home,
         cwd: std::env::current_dir().unwrap_or_default(),
@@ -872,6 +898,46 @@ mod tests {
     }
 
     #[test]
+    fn expect_sha256_does_not_swallow_a_following_flag() {
+        // The oracle guards with `d.startsWith("--")`; taking the flag as the
+        // digest reports an ordering error for what is really a missing value.
+        assert_eq!(
+            err(&["--expect-sha256", "--apply-file", "/p"]).message,
+            EXPECT_NEEDS_VALUE
+        );
+        assert_eq!(err(&["--expect-sha256"]).message, EXPECT_NEEDS_VALUE);
+        // A real digest still parses.
+        let got = parse_apply_file_args(&v(&["--expect-sha256", HEX, "--apply-file", "/p"])).unwrap();
+        let AutoModeSetupInvocation::ApplyFile(inv) = got else {
+            panic!("expected ApplyFile");
+        };
+        assert_eq!(inv.expect_sha256.as_deref(), Some(HEX));
+    }
+
+    #[tokio::test]
+    async fn containment_roots_accept_a_canonicalized_temp_path() {
+        // On macOS temp_dir() is /var/folders/... while /var symlinks to
+        // /private/var, so the realpath'd spelling must still be contained.
+        let temp = std::env::temp_dir();
+        let Ok(canonical) = std::fs::canonicalize(&temp) else {
+            return;
+        };
+        let mut roots = vec![temp.clone()];
+        for root in roots.clone() {
+            if let Ok(c) = std::fs::canonicalize(&root) {
+                if !roots.contains(&c) {
+                    roots.push(c);
+                }
+            }
+        }
+        let probe = canonical.join("wizard06-canonical-probe.json");
+        assert!(
+            pipeline::path_under_containment_root(&probe, &roots),
+            "canonicalized temp path {probe:?} must be contained by roots {roots:?}"
+        );
+    }
+
+    #[test]
     fn propose_form_parses_the_three_answers() {
         let got = parse_apply_file_args(&v(&[
             "--wizard",
@@ -999,7 +1065,94 @@ mod tests {
         let settings = std::fs::read_to_string(dir.path().join("home/.lingxi/settings.json")).unwrap();
         let v: Value = serde_json::from_str(&settings).unwrap();
         assert_eq!(v["autoMode"]["environment"], json!(["Solo dev on a laptop"]));
-        assert_eq!(v["autoMode"]["allow"], json!(["Bash(ls:*)", "$defaults"]));
+        // The rule array is merged, so `$defaults` leads it.
+        assert_eq!(v["autoMode"]["allow"], json!(["$defaults", "Bash(ls:*)"]));
+    }
+
+    #[tokio::test]
+    async fn append_is_the_default_and_preserves_existing_configuration() {
+        // A proposal with no `mode` must NOT clobber what the user already has.
+        let proposal = json!({
+            "environment": ["### Org-wide", "**Organization**: acme"],
+            "hard_deny": ["Bash(rm:*)", "$defaults"],
+        });
+        let (dir, path, root, sha) = stage_proposal(&proposal);
+        let paths = paths_under(dir.path());
+        let settings_path = dir.path().join("home/.lingxi/settings.json");
+        std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &settings_path,
+            serde_json::to_string_pretty(&json!({
+                "autoMode": {
+                    "environment": ["### Org-wide", "**Source control**: github"],
+                    "hard_deny": ["$defaults", "Bash(dd:*)"],
+                    "soft_deny": ["$defaults", "Bash(kubectl:*)"],
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        execute_apply_file(&inv(&path, Some(&sha)), &[root], |_| false, &paths)
+            .await
+            .unwrap();
+        let v: Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
+
+        // The prior environment bullet survives, and the new one joins its section.
+        assert_eq!(
+            v["autoMode"]["environment"],
+            json!(["### Org-wide", "**Source control**: github", "**Organization**: acme"])
+        );
+        // The prior hard_deny entry survives alongside the proposed one...
+        assert_eq!(
+            v["autoMode"]["hard_deny"],
+            json!(["$defaults", "Bash(dd:*)", "Bash(rm:*)"])
+        );
+        // ...and a category the proposal never mentioned is untouched.
+        assert_eq!(
+            v["autoMode"]["soft_deny"],
+            json!(["$defaults", "Bash(kubectl:*)"])
+        );
+    }
+
+    #[tokio::test]
+    async fn replace_mode_replaces_only_the_environment_section() {
+        let proposal = json!({
+            "environment": ["**Organization**: acme"],
+            "hard_deny": ["Bash(rm:*)", "$defaults"],
+            "mode": "replace",
+        });
+        let (dir, path, root, sha) = stage_proposal(&proposal);
+        let paths = paths_under(dir.path());
+        let settings_path = dir.path().join("home/.lingxi/settings.json");
+        std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &settings_path,
+            serde_json::to_string_pretty(&json!({
+                "autoMode": {
+                    "environment": ["**Source control**: github"],
+                    "hard_deny": ["$defaults", "Bash(dd:*)"],
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        execute_apply_file(&inv(&path, Some(&sha)), &[root], |_| false, &paths)
+            .await
+            .unwrap();
+        let v: Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
+
+        // environment replaced wholesale...
+        assert_eq!(v["autoMode"]["environment"], json!(["**Organization**: acme"]));
+        // ...but the rule arrays still merge, per the wizard's own answer label
+        // ("replaces the environment section").
+        assert_eq!(
+            v["autoMode"]["hard_deny"],
+            json!(["$defaults", "Bash(dd:*)", "Bash(rm:*)"])
+        );
     }
 
     #[tokio::test]

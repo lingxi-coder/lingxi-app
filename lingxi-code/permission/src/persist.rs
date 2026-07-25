@@ -74,6 +74,13 @@ pub enum PersistError {
     BrokenJson(PathBuf),
     /// A root-confined read, lock, or atomic replacement failed. This includes
     /// symlink/reparse-point traversal attempts, which are deliberately rejected.
+    /// Merging the proposed `autoMode` block with the one already in the file
+    /// would produce an invalid result, so nothing was written
+    /// (`invalid_merged`). Carries the validator's reason.
+    #[error("auto-mode merge produced an invalid result: {0}")]
+    InvalidMerged(String),
+    /// A root-confined read, lock, or atomic replacement failed. This includes
+    /// symlink/reparse-point traversal attempts, which are deliberately rejected.
     #[error("confined settings operation failed on {path}: {source}")]
     Confined {
         /// The logical destination settings file.
@@ -545,16 +552,27 @@ pub async fn replace_permission_rules(
 }
 
 /// The outcome of an [`persist_auto_mode_save`] write.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AutoModeSaveOutcome {
     /// `true` when the settings file was written (the `autoMode` block or a
     /// removal changed something); `false` for a no-op or a non-persistable
     /// destination.
     pub wrote: bool,
     /// How many `permissions.allow` entries the removal set actually filtered
-    /// out. `0` while a removal WAS requested is the oracle's
-    /// `permissions_allow_skipped` telemetry branch.
+    /// out (`permissionsAllowRemoved`).
     pub removed_count: usize,
+    /// How many requested removals matched nothing (`permissionsAllowNotFound`).
+    pub not_found_count: usize,
+    /// `permissions.allow` was absent or not an array, so the removals were
+    /// skipped rather than applied (`permissionsAllowSkipped`).
+    pub permissions_allow_skipped: bool,
+    /// How many pre-existing `environment` entries the merge preserved
+    /// (`environmentEntriesPreserved`).
+    pub environment_entries_preserved: usize,
+    /// The `autoMode` keys written (`autoModeKeysWritten`).
+    pub auto_mode_keys_written: Vec<String>,
+    /// Post-write size advisories.
+    pub warnings: Vec<String>,
 }
 
 /// Persist a WIZARD-06 auto-mode save (oracle `rFt`): set the top-level
@@ -577,25 +595,72 @@ pub async fn persist_auto_mode_save(
     remove: &[String],
     destination: PermissionUpdateDestination,
     paths: &PermissionPaths,
+    mode: crate::auto_mode_setup::AutoModeSaveMode,
 ) -> Result<AutoModeSaveOutcome, PersistError> {
-    let removed = std::cell::Cell::new(0usize);
+    use crate::auto_mode_setup::AutoModeSaveError;
+
+    // The transform runs inside the closure, under the same exclusive lock as
+    // the write, so the merge always sees the bytes it is about to replace.
+    let captured: std::cell::RefCell<Option<AutoModeSaveResultParts>> =
+        std::cell::RefCell::new(None);
+    let invalid_merged: std::cell::RefCell<Option<String>> = std::cell::RefCell::new(None);
+
     let wrote = mutate_settings_file(paths, destination, true, |raw| {
         match crate::auto_mode_setup::apply_auto_mode_save_to_settings_json(
             raw,
             auto_mode_block,
             remove,
-        )? {
-            Some(result) => {
-                removed.set(result.removed_count);
+            mode,
+        ) {
+            Ok(Some(result)) => {
+                *captured.borrow_mut() = Some(AutoModeSaveResultParts {
+                    removed_count: result.removed_count,
+                    not_found_count: result.not_found_count,
+                    permissions_allow_skipped: result.permissions_allow_skipped,
+                    environment_entries_preserved: result.environment_entries_preserved,
+                    auto_mode_keys_written: result.auto_mode_keys_written,
+                    warnings: result.warnings,
+                });
                 Ok(Some(result.json))
             }
-            None => Ok(None),
+            Ok(None) => Ok(None),
+            Err(AutoModeSaveError::InvalidMerged(reason)) => {
+                *invalid_merged.borrow_mut() = Some(reason);
+                Err(())
+            }
+            Err(AutoModeSaveError::BrokenSettings) => Err(()),
         }
-    })?;
+    });
+
+    // An invalid MERGE is not a broken settings file: report it as its own
+    // error so the caller can emit `invalid_merged` rather than `write_failed`.
+    if let Some(reason) = invalid_merged.into_inner() {
+        return Err(PersistError::InvalidMerged(reason));
+    }
+    let wrote = wrote?;
+
+    let parts = captured.into_inner().unwrap_or_default();
     Ok(AutoModeSaveOutcome {
         wrote,
-        removed_count: removed.get(),
+        removed_count: parts.removed_count,
+        not_found_count: parts.not_found_count,
+        permissions_allow_skipped: parts.permissions_allow_skipped,
+        environment_entries_preserved: parts.environment_entries_preserved,
+        auto_mode_keys_written: parts.auto_mode_keys_written,
+        warnings: parts.warnings,
     })
+}
+
+/// The parts of an [`crate::auto_mode_setup::AutoModeSaveResult`] threaded out
+/// of the mutation closure.
+#[derive(Default)]
+struct AutoModeSaveResultParts {
+    removed_count: usize,
+    not_found_count: usize,
+    permissions_allow_skipped: bool,
+    environment_entries_preserved: usize,
+    auto_mode_keys_written: Vec<String>,
+    warnings: Vec<String>,
 }
 
 /// Persist a `setMode` permission update as `permissions.defaultMode`.
@@ -1279,14 +1344,18 @@ mod tests {
         let block =
             json!({ "environment": ["Solo laptop"], "hard_deny": ["Bash(curl:*)", "$defaults"] });
         let outcome =
-            persist_auto_mode_save(Some(&block), &["Bash(rm:*)".to_string()], destination, &paths)
+            persist_auto_mode_save(Some(&block), &["Bash(rm:*)".to_string()], destination, &paths, crate::auto_mode_setup::AutoModeSaveMode::Append)
                 .await
                 .unwrap();
         assert!(outcome.wrote);
         assert_eq!(outcome.removed_count, 1);
 
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(v["autoMode"], block);
+        // Rule arrays are MERGED, so `$defaults` leads the written array.
+        assert_eq!(
+            v["autoMode"],
+            json!({ "environment": ["Solo laptop"], "hard_deny": ["$defaults", "Bash(curl:*)"] })
+        );
         assert_eq!(
             v["permissions"]["allow"],
             json!(["Read"]),
@@ -1294,7 +1363,7 @@ mod tests {
         );
 
         // Re-applying the identical block with no fresh removal is a no-op.
-        let again = persist_auto_mode_save(Some(&block), &[], destination, &paths)
+        let again = persist_auto_mode_save(Some(&block), &[], destination, &paths, crate::auto_mode_setup::AutoModeSaveMode::Append)
             .await
             .unwrap();
         assert!(!again.wrote, "unchanged block + no removal writes nothing");
@@ -1303,7 +1372,7 @@ mod tests {
         // A requested removal that no longer matches → wrote:false, removed_count:0
         // (the oracle's permissions_allow_skipped telemetry branch).
         let skipped =
-            persist_auto_mode_save(Some(&block), &["Bash(rm:*)".to_string()], destination, &paths)
+            persist_auto_mode_save(Some(&block), &["Bash(rm:*)".to_string()], destination, &paths, crate::auto_mode_setup::AutoModeSaveMode::Append)
                 .await
                 .unwrap();
         assert!(!skipped.wrote);

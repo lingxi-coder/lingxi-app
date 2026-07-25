@@ -505,6 +505,113 @@ pub fn validate_auto_mode_save(auto_mode: Option<&Value>, remove: Option<&Value>
     validate_remove_from_permissions_allow(remove)
 }
 
+// ── apply-file pre-write pipeline (2.1.218) ──────────────────────────────────
+
+/// The outcome of the secure proposal-file read the COMMAND layer performs
+/// (open `O_NOFOLLOW` → regular file → `nlink == 1` → read up to the 1 MB cap),
+/// plus the sha256 the command layer computes over the exact bytes.
+#[derive(Debug, Clone)]
+pub enum ProposalRead {
+    /// The file could not be securely read (missing / symlink / not a regular
+    /// file / `nlink != 1` / io error) → `read_failed`.
+    Failed,
+    /// The file exceeded the read cap and was truncated → `too_large`.
+    TooLarge,
+    /// The exact bytes + their lowercase-hex sha256.
+    Read { bytes: Vec<u8>, sha256_hex: String },
+}
+
+/// The `--apply-file` invocation arguments (the parsed CLI flags).
+pub struct ApplyFileArgs<'a> {
+    /// The `--apply-file` path.
+    pub path: &'a std::path::Path,
+    /// The resolved temp/config containment roots (see [`path_under_containment_root`]).
+    pub roots: &'a [std::path::PathBuf],
+    /// The `--expect-sha256` argument, if any.
+    pub expect_sha256: Option<&'a str>,
+    /// The `--apply-target` argument, if any (present ⇒ the scope check runs).
+    pub apply_target: Option<&'a str>,
+    /// The scope `--apply-target` expects (`YQ_[target]`), supplied by the caller.
+    pub expected_scope: Option<&'a str>,
+}
+
+/// Result of the apply-file PRE-WRITE pipeline (everything up to the point the
+/// proposal is ready to validate + write). On success the caller runs
+/// [`validate_auto_mode_save`] then persists via the command layer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApplyFilePipeline {
+    /// A gate rejected the request. `code` is the byte-exact
+    /// `auto_mode_setup_write` code; `reason` the byte-exact message.
+    Rejected { code: String, reason: String },
+    /// All pre-write gates passed; `proposal` is the parsed proposal object.
+    Proceed { proposal: Value },
+}
+
+/// The byte-exact `scope_mismatch` reason (interpolated with `--apply-target`).
+#[must_use]
+pub fn scope_mismatch_reason(proposal_scope: Option<&str>, target: &str, expected: &str) -> String {
+    match proposal_scope {
+        None => format!(
+            "This proposal was generated before save scope was recorded, so --apply-target {target} can\u{2019}t confirm it matches. Regenerate the proposal with --propose, answering scope={expected}."
+        ),
+        Some(s) => format!(
+            "This proposal was generated for a different save scope ({s}) than --apply-target {target} expects ({expected}). Regenerate the proposal with --propose, answering scope={expected}."
+        ),
+    }
+}
+
+/// Run the `--apply-file` PRE-WRITE pipeline (2.1.218): path gate → secure read →
+/// hash verify → parse → scope check. Pure/testable: the caller performs the
+/// actual fs read + sha256 and passes [`ProposalRead`]; `is_read_denied` comes
+/// from the live policy's `Read`-`deny` rules.
+#[must_use]
+pub fn evaluate_apply_file(
+    args: &ApplyFileArgs,
+    is_read_denied: impl Fn(&std::path::Path) -> bool,
+    read: ProposalRead,
+) -> ApplyFilePipeline {
+    let reject = |gate: ApplyFileGate| ApplyFilePipeline::Rejected {
+        code: gate.code().to_string(),
+        reason: gate.reason().to_string(),
+    };
+    // 1. path gate (bad_path / read_denied).
+    if let Some(gate) = apply_file_pre_read_gate(args.path, args.roots, &is_read_denied) {
+        return reject(gate);
+    }
+    // 2. secure read (read_failed / too_large).
+    let (bytes, sha256) = match read {
+        ProposalRead::Failed => return reject(ApplyFileGate::ReadFailed),
+        ProposalRead::TooLarge => return reject(ApplyFileGate::TooLarge),
+        ProposalRead::Read { bytes, sha256_hex } => (bytes, sha256_hex),
+    };
+    // 3. hash verify (missing_hash_arg / bad_hash_arg / hash_mismatch).
+    if let Some(gate) = verify_proposal_hash(&sha256, args.expect_sha256) {
+        return reject(gate);
+    }
+    // 4. parse (parse_failed when the bytes are not a readable proposal object).
+    let proposal: Value = match serde_json::from_slice(&bytes) {
+        Ok(v @ Value::Object(_)) => v,
+        _ => {
+            return ApplyFilePipeline::Rejected {
+                code: "parse_failed".to_string(),
+                reason: "That file doesn\u{2019}t contain a proposal this command can read. Regenerate it with --propose and pass that output.".to_string(),
+            }
+        }
+    };
+    // 5. scope check (only when --apply-target is provided).
+    if let Some(target) = args.apply_target {
+        let expected = args.expected_scope.unwrap_or("");
+        let proposal_scope = proposal.get("scope").and_then(Value::as_str);
+        if proposal_scope != args.expected_scope {
+            return ApplyFilePipeline::Rejected {
+                code: "scope_mismatch".to_string(),
+                reason: scope_mismatch_reason(proposal_scope, target, expected),
+            };
+        }
+    }
+    ApplyFilePipeline::Proceed { proposal }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -733,6 +840,94 @@ mod tests {
         // Empty everything → just an (empty) environment array.
         let e = build_auto_mode_settings(&[], &[], &[], &[]);
         assert_eq!(e, json!({ "environment": [] }));
+    }
+
+    #[test]
+    fn apply_file_pipeline_all_branches() {
+        fn run(
+            path: &str,
+            expect: Option<&str>,
+            target: Option<&str>,
+            scope: Option<&str>,
+            denied: bool,
+            read: ProposalRead,
+        ) -> ApplyFilePipeline {
+            let roots = [PathBuf::from("/tmp/rev")];
+            let args = ApplyFileArgs {
+                path: Path::new(path),
+                roots: &roots,
+                expect_sha256: expect,
+                apply_target: target,
+                expected_scope: scope,
+            };
+            evaluate_apply_file(&args, |_| denied, read)
+        }
+        let digest = "a".repeat(64);
+        let ok = |v: serde_json::Value| ProposalRead::Read {
+            bytes: serde_json::to_vec(&v).unwrap(),
+            sha256_hex: digest.clone(),
+        };
+        let g = "/tmp/rev/p.json";
+
+        // bad_path (out of containment).
+        assert!(matches!(
+            run("/etc/passwd", Some(&digest), None, None, false, ok(json!({}))),
+            ApplyFilePipeline::Rejected { code, .. } if code == "bad_path"
+        ));
+        // read_denied.
+        assert!(matches!(
+            run(g, Some(&digest), None, None, true, ok(json!({}))),
+            ApplyFilePipeline::Rejected { code, .. } if code == "read_denied"
+        ));
+        // read_failed / too_large.
+        assert!(matches!(
+            run(g, Some(&digest), None, None, false, ProposalRead::Failed),
+            ApplyFilePipeline::Rejected { code, .. } if code == "read_failed"
+        ));
+        assert!(matches!(
+            run(g, Some(&digest), None, None, false, ProposalRead::TooLarge),
+            ApplyFilePipeline::Rejected { code, .. } if code == "too_large"
+        ));
+        // hash: missing / mismatch.
+        assert!(matches!(
+            run(g, None, None, None, false, ok(json!({}))),
+            ApplyFilePipeline::Rejected { code, .. } if code == "missing_hash_arg"
+        ));
+        let other = "b".repeat(64);
+        assert!(matches!(
+            run(g, Some(&other), None, None, false, ok(json!({}))),
+            ApplyFilePipeline::Rejected { code, .. } if code == "hash_mismatch"
+        ));
+        // parse_failed (non-object bytes).
+        assert_eq!(
+            run(g, Some(&digest), None, None, false, ProposalRead::Read { bytes: b"not json".to_vec(), sha256_hex: digest.clone() }),
+            ApplyFilePipeline::Rejected {
+                code: "parse_failed".to_string(),
+                reason: "That file doesn\u{2019}t contain a proposal this command can read. Regenerate it with --propose and pass that output.".to_string()
+            }
+        );
+        // scope_mismatch — undefined scope.
+        assert_eq!(
+            run(g, Some(&digest), Some("user"), Some("user-scope"), false, ok(json!({"autoMode": {}}))),
+            ApplyFilePipeline::Rejected {
+                code: "scope_mismatch".to_string(),
+                reason: "This proposal was generated before save scope was recorded, so --apply-target user can\u{2019}t confirm it matches. Regenerate the proposal with --propose, answering scope=user-scope.".to_string()
+            }
+        );
+        // scope_mismatch — different scope.
+        assert!(matches!(
+            run(g, Some(&digest), Some("user"), Some("user-scope"), false, ok(json!({"scope": "project-scope"}))),
+            ApplyFilePipeline::Rejected { code, reason } if code == "scope_mismatch" && reason.contains("different save scope (project-scope)")
+        ));
+        // Proceed — scope matches, and (separately) no target.
+        assert!(matches!(
+            run(g, Some(&digest), Some("user"), Some("user-scope"), false, ok(json!({"scope": "user-scope", "autoMode": {"environment": ["x"]}}))),
+            ApplyFilePipeline::Proceed { .. }
+        ));
+        assert!(matches!(
+            run(g, Some(&digest), None, None, false, ok(json!({"autoMode": {}}))),
+            ApplyFilePipeline::Proceed { .. }
+        ));
     }
 
     #[test]

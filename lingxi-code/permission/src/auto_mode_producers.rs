@@ -597,6 +597,419 @@ pub fn repo_facts_section(source: &dyn RepoFactsSource) -> RepoFacts {
     }
 }
 
+// ── `q1d` — shell history (command words only) ───────────────────────────────
+
+/// `M1d` — how many bytes of the TAIL of a history file are read.
+pub const HISTORY_TAIL_BYTES: u64 = 262_144;
+/// `n$s` — how many of the most recent parsed lines are mined.
+pub const HISTORY_LINE_CAP: usize = 4_000;
+/// `o$s` — the walk's time budget, in milliseconds.
+#[must_use]
+pub fn history_budget_ms(windows: bool) -> u64 {
+    if windows {
+        8_000
+    } else {
+        4_000
+    }
+}
+
+/// `Hsy` — POSIX prefixes whose NEXT word is the real command.
+pub const POSIX_COMMAND_PREFIXES: [&str; 3] = ["sudo", "doas", "env"];
+/// `Lsy` — the same for PowerShell history.
+pub const PSREADLINE_COMMAND_PREFIXES: [&str; 2] = ["sudo", "gsudo"];
+/// `P1d` — the fish history entry prefix.
+pub const FISH_ENTRY_PREFIX: &str = "- cmd: ";
+
+/// How a history file is laid out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoryFormat {
+    /// bash / zsh.
+    Posix,
+    /// PowerShell PSReadLine.
+    PsReadline,
+    /// fish's YAML-ish log.
+    Fish,
+}
+
+impl HistoryFormat {
+    /// `Nsy` — the format implied by a history file's base name.
+    #[must_use]
+    pub fn from_basename(name: &str) -> Self {
+        match name.to_lowercase().as_str() {
+            "fish_history" => HistoryFormat::Fish,
+            "consolehost_history.txt" => HistoryFormat::PsReadline,
+            _ => HistoryFormat::Posix,
+        }
+    }
+    /// The line-continuation character for this format.
+    fn continuation(self) -> char {
+        if self == HistoryFormat::PsReadline {
+            '`'
+        } else {
+            '\\'
+        }
+    }
+}
+
+/// One history file the recon may read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistorySource {
+    /// The label reported in `filesRead` (a `~`-style name, never a full path).
+    pub label: String,
+    /// Absolute path.
+    pub path: std::path::PathBuf,
+    /// Layout.
+    pub format: HistoryFormat,
+}
+
+/// The environment `N1d` resolves history files against.
+#[derive(Debug, Clone, Default)]
+pub struct ShellHistoryEnv {
+    /// Windows or not — decides which sources apply and how paths compare.
+    pub windows: bool,
+    /// The user's home directory.
+    pub home_dir: String,
+    /// `%APPDATA%`.
+    pub app_data: Option<String>,
+    /// `$XDG_DATA_HOME`.
+    pub xdg_data_home: Option<String>,
+    /// `$HISTFILE`.
+    pub hist_file: Option<String>,
+}
+
+fn join_path(windows: bool, parts: &[&str]) -> String {
+    let sep = if windows { '\\' } else { '/' };
+    parts.join(&sep.to_string())
+}
+
+fn is_absolute_for(windows: bool, p: &str) -> bool {
+    if windows {
+        p.len() > 2 && p.as_bytes()[1] == b':' || p.starts_with('\\')
+    } else {
+        p.starts_with('/')
+    }
+}
+
+/// `L1d` — `$XDG_DATA_HOME` when absolute, else `~/.local/share`.
+fn data_home(env: &ShellHistoryEnv) -> String {
+    match env.xdg_data_home.as_deref().map(str::trim) {
+        Some(x) if !x.is_empty() && is_absolute_for(env.windows, x) => x.to_string(),
+        _ => join_path(env.windows, &[&env.home_dir, ".local", "share"]),
+    }
+}
+
+/// `N1d` — the history files to consider, de-duplicated by path.
+#[must_use]
+pub fn history_sources(env: &ShellHistoryEnv) -> Vec<HistorySource> {
+    let mut out: Vec<HistorySource> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut push = |label: &str, path: String, format: HistoryFormat| {
+        let key = if env.windows {
+            path.to_lowercase()
+        } else {
+            path.clone()
+        };
+        if seen.insert(key) {
+            out.push(HistorySource {
+                label: label.to_string(),
+                path: path.into(),
+                format,
+            });
+        }
+    };
+
+    // `$HISTFILE` — only when absolute; its format comes from the base name.
+    if let Some(hist) = env.hist_file.as_deref().map(str::trim) {
+        if !hist.is_empty() && is_absolute_for(env.windows, hist) {
+            let base = hist.rsplit(['/', '\\']).next().unwrap_or(hist);
+            push("$HISTFILE", hist.to_string(), HistoryFormat::from_basename(base));
+        }
+    }
+    if !env.windows {
+        push(
+            "~/.zsh_history",
+            join_path(false, &[&env.home_dir, ".zsh_history"]),
+            HistoryFormat::Posix,
+        );
+    }
+    push(
+        "~/.bash_history",
+        join_path(env.windows, &[&env.home_dir, ".bash_history"]),
+        HistoryFormat::Posix,
+    );
+    if env.windows {
+        if let Some(app) = env.app_data.as_deref() {
+            push(
+                r"%APPDATA%\...\PSReadLine\ConsoleHost_history.txt",
+                join_path(
+                    true,
+                    &[
+                        app,
+                        "Microsoft",
+                        "Windows",
+                        "PowerShell",
+                        "PSReadLine",
+                        "ConsoleHost_history.txt",
+                    ],
+                ),
+                HistoryFormat::PsReadline,
+            );
+        }
+    } else {
+        let data = data_home(env);
+        push(
+            "~/.local/share/powershell/PSReadLine/ConsoleHost_history.txt",
+            join_path(false, &[&data, "powershell", "PSReadLine", "ConsoleHost_history.txt"]),
+            HistoryFormat::PsReadline,
+        );
+        push(
+            "~/.local/share/fish/fish_history",
+            join_path(false, &[&data, "fish", "fish_history"]),
+            HistoryFormat::Fish,
+        );
+    }
+    out
+}
+
+/// `Msy` — strip zsh's extended-history `: <start>:<elapsed>;` prefix.
+fn strip_zsh_metadata(line: &str) -> &str {
+    let Some(rest) = line.strip_prefix(": ") else {
+        return line;
+    };
+    let digits = |s: &str| s.len() - s.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    let a = digits(rest);
+    if a == 0 || rest.as_bytes().get(a) != Some(&b':') {
+        return line;
+    }
+    let after = &rest[a + 1..];
+    let b = digits(after);
+    if b == 0 || after.as_bytes().get(b) != Some(&b';') {
+        return line;
+    }
+    &after[b + 1..]
+}
+
+/// `Bsy` — a fish entry ends at its first UNESCAPED `\n` escape sequence.
+fn fish_entry(raw: &str) -> &str {
+    let bytes = raw.as_bytes();
+    let mut from = 0usize;
+    while let Some(rel) = raw[from..].find("\\n") {
+        let at = from + rel;
+        let mut backslashes = 0usize;
+        let mut i = at;
+        while i > 0 && bytes[i - 1] == b'\\' {
+            backslashes += 1;
+            i -= 1;
+        }
+        if backslashes % 2 == 0 {
+            return &raw[..at];
+        }
+        from = at + 1;
+    }
+    raw
+}
+
+/// `F1d` — turn a history file's text into candidate command lines.
+///
+/// A `truncated` tail may open mid-continuation, so the leading continued line
+/// is skipped rather than mined as if it were a command of its own.
+#[must_use]
+pub fn parse_history(content: &str, format: HistoryFormat, truncated: bool) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut skipping_continuation = truncated && format != HistoryFormat::Fish;
+    let cont = format.continuation();
+    let body = content.strip_prefix('\u{feff}').unwrap_or(content);
+
+    for raw in body.split('\n') {
+        let line = raw.strip_suffix('\r').unwrap_or(raw);
+        if format == HistoryFormat::Fish {
+            if let Some(rest) = line.strip_prefix(FISH_ENTRY_PREFIX) {
+                out.push(fish_entry(rest).to_string());
+            }
+            continue;
+        }
+        if skipping_continuation {
+            skipping_continuation = line.ends_with(cont);
+            continue;
+        }
+        if line.is_empty() {
+            continue;
+        }
+        // bash's `#<epoch>` timestamp lines are not commands.
+        if format == HistoryFormat::Posix
+            && line.starts_with('#')
+            && line.len() > 1
+            && line[1..].chars().all(|c| c.is_ascii_digit())
+        {
+            continue;
+        }
+        let cleaned = if format == HistoryFormat::Posix {
+            strip_zsh_metadata(line)
+        } else {
+            line
+        };
+        out.push(cleaned.to_string());
+        skipping_continuation = line.ends_with(cont);
+    }
+    out
+}
+
+/// `O1d` — `^[a-z][\w.+-]{0,19}$`
+fn is_command_word(w: &str) -> bool {
+    let mut chars = w.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_lowercase() {
+        return false;
+    }
+    let rest: Vec<char> = chars.collect();
+    rest.len() <= 19
+        && rest
+            .iter()
+            .all(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | '+' | '-'))
+}
+
+/// The first two words of a POSIX command line, skipping `VAR=value` prefixes.
+///
+/// The oracle runs the line through its bash parser here. This is a
+/// tokeniser-level approximation of the same thing: it drops leading
+/// assignments, which is what the parse would do before reporting the command
+/// word. It feeds a NAMES-ONLY frequency list, not a security decision.
+fn posix_head_words(line: &str) -> (Option<&str>, Option<&str>) {
+    let mut words = line
+        .split_whitespace()
+        .filter(|w| !(w.contains('=') && !w.starts_with('=')));
+    (words.next(), words.next())
+}
+
+/// `i$s` — the command word of each history line.
+///
+/// A `sudo`/`doas`/`env` (or `sudo`/`gsudo`) prefix is stepped over so the tool
+/// that actually ran is what gets counted.
+#[must_use]
+pub fn extract_command_words(lines: &[String], format: HistoryFormat) -> Vec<String> {
+    let prefixes: &[&str] = if format == HistoryFormat::PsReadline {
+        &PSREADLINE_COMMAND_PREFIXES
+    } else {
+        &POSIX_COMMAND_PREFIXES
+    };
+    let mut out = Vec::new();
+    for line in lines {
+        let (mut first, second) = if format == HistoryFormat::PsReadline {
+            let mut w = line.trim_start().split_whitespace();
+            (w.next(), w.next())
+        } else {
+            posix_head_words(line)
+        };
+        if let (Some(f), Some(s)) = (first, second) {
+            if prefixes.contains(&f) && is_command_word(s) {
+                first = Some(s);
+            }
+        }
+        if let Some(f) = first {
+            if is_command_word(f) {
+                out.push(f.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// What one history file contributed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryReadOutcome {
+    /// The label to report as read.
+    pub label: String,
+    /// Command words mined from it.
+    pub words: Vec<String>,
+    /// The read was cut short in some way.
+    pub partial: bool,
+}
+
+/// Supplies shell-history bytes.
+pub trait ShellHistorySource {
+    /// The environment the sources are resolved against.
+    fn env(&self) -> ShellHistoryEnv;
+    /// `true` when the home directory is a network path, so nothing is touched.
+    fn home_is_network(&self) -> bool;
+    /// Read the tail of one history file: `Ok(None)` when absent, `Err(())`
+    /// when present but unreadable, else the content and whether it was cut.
+    fn read_tail(&self, source: &HistorySource) -> Result<Option<(String, bool)>, ()>;
+}
+
+/// `q1d` — the "Shell history (command words only)" section body.
+///
+/// Returns `None` when the gate is closed or no home directory is known; the
+/// caller renders the matching marker.
+#[must_use]
+pub fn shell_history_section(source: &dyn ShellHistorySource) -> String {
+    use crate::auto_mode_facts as facts;
+    use crate::auto_mode_sections as sections;
+
+    if source.home_is_network() {
+        return crate::auto_mode_gates::SHELL_HISTORY_NETWORK_HOME.to_string();
+    }
+
+    let env = source.env();
+    let mut words: Vec<String> = Vec::new();
+    let mut files_read: Vec<String> = Vec::new();
+    let mut partial = false;
+
+    for src in history_sources(&env) {
+        match source.read_tail(&src) {
+            Err(()) => partial = true,
+            Ok(None) => {}
+            Ok(Some((content, truncated))) => {
+                files_read.push(src.label.clone());
+                let parsed = parse_history(&content, src.format, truncated);
+                let kept = if parsed.len() > HISTORY_LINE_CAP {
+                    partial = true;
+                    parsed[parsed.len() - HISTORY_LINE_CAP..].to_vec()
+                } else {
+                    parsed
+                };
+                if truncated {
+                    partial = true;
+                }
+                words.extend(extract_command_words(&kept, src.format));
+            }
+        }
+    }
+
+    let counted = frequency(&words, FLAGGED_LIST_CAP * 2);
+    let files = if files_read.is_empty() {
+        "none".to_string()
+    } else {
+        files_read
+            .iter()
+            .map(|f| display_name(f).to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+
+    let mut parts = vec![format!(
+        "{}{}{}{}{files}",
+        facts::STATUS_PREFIX,
+        if partial { "partial" } else { "complete" },
+        facts::STATUS_SEPARATOR,
+        format_args!("{}{}", files_read.len(), facts::FILES_READ_INFIX),
+    )];
+    if !counted.is_empty() {
+        parts.push(format!(
+            "{}{}",
+            sections::HEADING_TOOLS_OUTSIDE_CLAUDE,
+            counted
+                .into_iter()
+                .map(|(w, n)| format!("- {} ({n}\u{d7})", display_name(&w)))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+    }
+    parts.push(facts::SHELL_HISTORY_PROVENANCE_NOTE.to_string());
+    parts.join("\n")
+}
+
 // ── `iay` — recent usage in this project (names only) ────────────────────────
 
 /// `K1d` — how many transcripts are mined, newest first.
@@ -2066,6 +2479,205 @@ mod tests {
         assert_eq!(SUBPROCESS_TIMEOUT_MS, 4_000);
         assert_eq!(REMOTE_LINE_CAP, 40);
         assert_eq!(CONTRIBUTING_READ_CAP, 2_000);
+    }
+
+    // ── `q1d` ────────────────────────────────────────────────────────────────
+
+    fn unix_env() -> ShellHistoryEnv {
+        ShellHistoryEnv {
+            windows: false,
+            home_dir: "/home/u".to_string(),
+            ..ShellHistoryEnv::default()
+        }
+    }
+
+    #[test]
+    fn history_sources_are_platform_specific_and_deduplicated() {
+        let sources = history_sources(&unix_env());
+        let labels: Vec<&str> = sources.iter().map(|s| s.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec![
+                "~/.zsh_history",
+                "~/.bash_history",
+                "~/.local/share/powershell/PSReadLine/ConsoleHost_history.txt",
+                "~/.local/share/fish/fish_history",
+            ]
+        );
+        // `$HISTFILE` leads, and its format comes from the base name.
+        let env = ShellHistoryEnv {
+            hist_file: Some("/home/u/.zsh_history".to_string()),
+            ..unix_env()
+        };
+        let sources = history_sources(&env);
+        assert_eq!(sources[0].label, "$HISTFILE");
+        // ...and the duplicate ~/.zsh_history entry is dropped.
+        assert!(!sources.iter().skip(1).any(|s| s.label == "~/.zsh_history"));
+
+        // A relative HISTFILE is ignored.
+        let env = ShellHistoryEnv {
+            hist_file: Some("relative/hist".to_string()),
+            ..unix_env()
+        };
+        assert!(!history_sources(&env).iter().any(|s| s.label == "$HISTFILE"));
+
+        // Windows swaps zsh/fish for the PSReadLine path.
+        let env = ShellHistoryEnv {
+            windows: true,
+            home_dir: r"C:\Users\u".to_string(),
+            app_data: Some(r"C:\Users\u\AppData\Roaming".to_string()),
+            ..ShellHistoryEnv::default()
+        };
+        let labels: Vec<String> = history_sources(&env).into_iter().map(|s| s.label).collect();
+        assert!(labels.iter().any(|l| l.contains("PSReadLine")));
+        assert!(!labels.iter().any(|l| l.contains("zsh")));
+    }
+
+    #[test]
+    fn posix_history_drops_timestamps_and_zsh_metadata() {
+        let text = ": 1700000000:0;git status\n#1700000001\nls -la\n\ncargo build\n";
+        assert_eq!(
+            parse_history(text, HistoryFormat::Posix, false),
+            vec!["git status", "ls -la", "cargo build"]
+        );
+    }
+
+    #[test]
+    fn a_truncated_tail_skips_the_line_it_opened_mid_way_through() {
+        // The tail began inside a continued command; mining that fragment as a
+        // command of its own would invent one that was never run.
+        let text = "still-part-of-a-previous-command \\\nand-its-tail\nreal-command\n";
+        assert_eq!(
+            parse_history(text, HistoryFormat::Posix, true),
+            vec!["real-command"]
+        );
+        // Untruncated, the command is kept -- but its CONTINUATION line is
+        // still not mined as a command of its own.
+        assert_eq!(
+            parse_history(text, HistoryFormat::Posix, false),
+            vec!["still-part-of-a-previous-command \\", "real-command"]
+        );
+    }
+
+    #[test]
+    fn fish_entries_stop_at_their_first_unescaped_newline_escape() {
+        let text = "- cmd: terraform apply\\nSECRET\n  when: 1\n- cmd: kubectl get pods\n";
+        let parsed = parse_history(text, HistoryFormat::Fish, false);
+        assert_eq!(parsed, vec!["terraform apply", "kubectl get pods"]);
+        assert!(!parsed.iter().any(|l| l.contains("SECRET")));
+    }
+
+    #[test]
+    fn command_words_step_over_sudo_and_assignments() {
+        let lines: Vec<String> = [
+            "sudo terraform apply",
+            "doas kubectl get",
+            "env FOO=1 helm upgrade",
+            "FOO=1 BAR=2 pulumi up",
+            "ls -la",
+            "./local-script.sh",
+            "9front",
+        ]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+        assert_eq!(
+            extract_command_words(&lines, HistoryFormat::Posix),
+            vec!["terraform", "kubectl", "helm", "pulumi", "ls"]
+        );
+        // PowerShell uses its own prefix set.
+        let ps: Vec<String> = ["gsudo winget install", "Get-Item x"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        assert_eq!(
+            extract_command_words(&ps, HistoryFormat::PsReadline),
+            vec!["winget"]
+        );
+    }
+
+    struct FakeHistory {
+        env: ShellHistoryEnv,
+        network: bool,
+        files: std::collections::HashMap<String, Result<Option<(String, bool)>, ()>>,
+    }
+    impl ShellHistorySource for FakeHistory {
+        fn env(&self) -> ShellHistoryEnv {
+            self.env.clone()
+        }
+        fn home_is_network(&self) -> bool {
+            self.network
+        }
+        fn read_tail(&self, source: &HistorySource) -> Result<Option<(String, bool)>, ()> {
+            self.files
+                .get(&source.label)
+                .cloned()
+                .unwrap_or(Ok(None))
+        }
+    }
+
+    #[test]
+    fn a_network_home_is_refused_before_any_file_is_touched() {
+        let src = FakeHistory {
+            env: unix_env(),
+            network: true,
+            files: std::collections::HashMap::new(),
+        };
+        let body = shell_history_section(&src);
+        assert!(body.contains("resolves to a network path"));
+        assert!(body.contains("Do not read history files yourself"));
+    }
+
+    #[test]
+    fn shell_history_reports_words_counts_and_which_files_it_read() {
+        let mut files = std::collections::HashMap::new();
+        files.insert(
+            "~/.bash_history".to_string(),
+            Ok(Some((
+                "terraform apply\nterraform plan\nls\nsudo helm upgrade\n".to_string(),
+                false,
+            ))),
+        );
+        let src = FakeHistory {
+            env: unix_env(),
+            network: false,
+            files,
+        };
+        let body = shell_history_section(&src);
+        assert!(body.contains("Status: complete \u{2014} 1 file(s) read: ~/.bash_history"));
+        assert!(body.contains("#### Tools run outside Claude (shell history)"));
+        assert!(body.contains("- terraform (2\u{d7})"));
+        assert!(body.contains("- helm (1\u{d7})"));
+        // Standard commands are still reported here (this list is not filtered
+        // the way the transcript one is) but raw lines never are.
+        assert!(!body.contains("apply"));
+        assert!(body.contains("Raw history lines were never read into the transcript"));
+    }
+
+    #[test]
+    fn an_unreadable_history_file_makes_the_status_partial() {
+        // "Partial" is what stops a half-read history passing for a full one.
+        let mut files = std::collections::HashMap::new();
+        files.insert("~/.bash_history".to_string(), Err(()));
+        let src = FakeHistory {
+            env: unix_env(),
+            network: false,
+            files,
+        };
+        assert!(shell_history_section(&src).contains("Status: partial \u{2014} 0 file(s) read: none"));
+
+        // A truncated tail is also partial, even though it was read.
+        let mut files = std::collections::HashMap::new();
+        files.insert(
+            "~/.bash_history".to_string(),
+            Ok(Some(("git status\n".to_string(), true))),
+        );
+        let src = FakeHistory {
+            env: unix_env(),
+            network: false,
+            files,
+        };
+        assert!(shell_history_section(&src).contains("Status: partial"));
     }
 
     // ── `iay` ────────────────────────────────────────────────────────────────

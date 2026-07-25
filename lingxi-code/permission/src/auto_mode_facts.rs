@@ -117,6 +117,11 @@ pub const CONFIG_READ_TIMED_OUT: &str = r"config read timed out";
 /// One of the shell-history files considered.
 pub const FISH_HISTORY_FILE: &str = r"fish_history";
 
+/// Prefix of the shell-history status line.
+pub const STATUS_PREFIX: &str = r"Status: ";
+/// Separator between the status word and the file count.
+pub const STATUS_SEPARATOR: &str = " \u{2014} ";
+
 /// Shell-history status infix.
 pub const FILES_READ_INFIX: &str = r" file(s) read: ";
 

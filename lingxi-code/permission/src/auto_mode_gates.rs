@@ -38,6 +38,12 @@ pub const SIBLING_DOCS_NOT_GATHERED: &str = r#"_NOT GATHERED — the user picked
 /// Shell history was not read: the user did not opt in at Q3.
 pub const SHELL_HISTORY_NOT_GATHERED: &str = r#"_NOT GATHERED — the user did not opt in at Q3, or was not asked before this ran. Treat shell history as "not queryable here". Do not read history files yourself._"#;
 
+/// `U1d` — the home directory is a network path, so history was not read.
+///
+/// Distinct from the Q3 marker: nothing was declined here, the path itself is
+/// one that cannot be touched without reaching a host.
+pub const SHELL_HISTORY_NETWORK_HOME: &str = "_NOT GATHERED \u{2014} the home directory resolves to a network path. Treat shell history as \"not queryable here\". Do not read history files yourself._";
+
 /// Shell history was not read: no home directory could be determined.
 pub const SHELL_HISTORY_NO_HOME: &str = r#"_NOT GATHERED — no home directory could be determined. Treat shell history as "not queryable here". Do not read history files yourself._"#;
 

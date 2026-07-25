@@ -280,10 +280,10 @@ pub struct DangerousPermissionInfo {
     pub source: PermissionRuleSource,
     /// The rule formatted for display, e.g. `"Bash(*)"` or `"Bash(python:*)"`.
     pub rule_display: String,
-    /// The source formatted for display (the source variant name in this port;
-    /// TS resolves settings sources to a relative file path via
-    /// `formatPermissionSource`, which needs the on-disk settings layout — out
-    /// of scope for the pure predicate, so the source identifier is surfaced).
+    /// The source formatted for display, byte-exact with claude-code
+    /// `formatPermissionSource` (`XUl`) via [`crate::shadow::format_source`]:
+    /// e.g. `"user settings"`, `"shared project settings"`, `"CLI argument"`,
+    /// `"enterprise managed settings"`. (WIZARD-06 S1 — the review UI shows this.)
     pub source_display: String,
 }
 
@@ -335,7 +335,7 @@ pub fn find_dangerous_classifier_permissions_with_flag(
                 rule_value: rule.value.clone(),
                 source: rule.source,
                 rule_display: rule_string,
-                source_display: format!("{:?}", rule.source),
+                source_display: crate::shadow::format_source(rule.source).to_string(),
             });
         }
     }
@@ -764,6 +764,9 @@ mod tests {
         assert_eq!(found.len(), 2);
         assert_eq!(found[0].rule_display, "Bash(python:*)");
         assert_eq!(found[1].rule_display, "Agent(*)");
+        // WIZARD-06 S1: source_display is byte-exact `formatPermissionSource`.
+        assert_eq!(found[0].source_display, "user settings");
+        assert_eq!(found[1].source_display, "CLI argument");
     }
 
     #[test]

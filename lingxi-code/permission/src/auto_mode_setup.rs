@@ -258,6 +258,63 @@ pub fn apply_file_pre_read_gate(
     None
 }
 
+// ── apply/write settings mutation (2.1.218) ──────────────────────────────────
+
+/// Build the `autoMode` settings object an accepted proposal writes. 1:1 with
+/// the oracle:
+/// ```js
+/// {
+///   environment: proposal.environment,
+///   ...(proposal.allow.length>0 && {allow: proposal.allow}),
+///   ...(proposal.soft_deny.length>0 && {soft_deny: proposal.soft_deny}),
+///   ...(proposal.hard_deny.length>0 && {hard_deny: proposal.hard_deny})
+/// }
+/// ```
+/// `environment` is ALWAYS written; the three rule arrays are included only when
+/// non-empty (an empty category is omitted, not written as `[]`). Key insertion
+/// order matches the oracle (environment, allow, soft_deny, hard_deny) — the
+/// crate's `serde_json` has `preserve_order`.
+#[must_use]
+pub fn build_auto_mode_settings(
+    environment: &[Value],
+    allow: &[Value],
+    soft_deny: &[Value],
+    hard_deny: &[Value],
+) -> Value {
+    let mut map = serde_json::Map::new();
+    map.insert("environment".into(), Value::Array(environment.to_vec()));
+    if !allow.is_empty() {
+        map.insert("allow".into(), Value::Array(allow.to_vec()));
+    }
+    if !soft_deny.is_empty() {
+        map.insert("soft_deny".into(), Value::Array(soft_deny.to_vec()));
+    }
+    if !hard_deny.is_empty() {
+        map.insert("hard_deny".into(), Value::Array(hard_deny.to_vec()));
+    }
+    Value::Object(map)
+}
+
+/// Apply a `removeFromPermissionsAllow` set to a `permissions.allow` array:
+/// return the array with every verbatim `to_remove` rule string filtered out,
+/// plus the count removed. String comparison is EXACT (the offer only ever
+/// carries strings copied verbatim from the existing allow list).
+#[must_use]
+pub fn remove_rules_from_permissions_allow(
+    allow: &[String],
+    to_remove: &[String],
+) -> (Vec<String>, usize) {
+    let removed_set: std::collections::HashSet<&str> =
+        to_remove.iter().map(String::as_str).collect();
+    let kept: Vec<String> = allow
+        .iter()
+        .filter(|rule| !removed_set.contains(rule.as_str()))
+        .cloned()
+        .collect();
+    let removed = allow.len() - kept.len();
+    (kept, removed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -403,5 +460,44 @@ mod tests {
             apply_file_pre_read_gate(Path::new("/tmp/rev/p.json"), &roots, |_| false),
             None
         );
+    }
+
+    #[test]
+    fn build_auto_mode_settings_omits_empty_categories_in_order() {
+        // environment always; allow/soft_deny/hard_deny only when non-empty.
+        let s = build_auto_mode_settings(
+            &[json!("uses git")],
+            &[json!("read files")],
+            &[],
+            &[json!("rm -rf /")],
+        );
+        let keys: Vec<&str> = s.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(keys, vec!["environment", "allow", "hard_deny"]); // no soft_deny
+        assert_eq!(s["environment"], json!(["uses git"]));
+        assert_eq!(s["allow"], json!(["read files"]));
+        assert_eq!(s["hard_deny"], json!(["rm -rf /"]));
+        assert!(s.get("soft_deny").is_none());
+        // Empty everything → just an (empty) environment array.
+        let e = build_auto_mode_settings(&[], &[], &[], &[]);
+        assert_eq!(e, json!({ "environment": [] }));
+    }
+
+    #[test]
+    fn remove_rules_filters_verbatim_and_counts() {
+        let allow = vec![
+            "Bash(*)".to_string(),
+            "Bash(rm:*)".to_string(),
+            "Edit".to_string(),
+            "Read(./x)".to_string(),
+        ];
+        let (kept, removed) =
+            remove_rules_from_permissions_allow(&allow, &["Bash(*)".into(), "Read(./x)".into()]);
+        assert_eq!(kept, vec!["Bash(rm:*)".to_string(), "Edit".to_string()]);
+        assert_eq!(removed, 2);
+        // A removal entry not present in allow is a no-op (exact match only).
+        let (kept, removed) =
+            remove_rules_from_permissions_allow(&allow, &["Bash(ls:*)".into()]);
+        assert_eq!(kept.len(), 4);
+        assert_eq!(removed, 0);
     }
 }

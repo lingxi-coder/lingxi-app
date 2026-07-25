@@ -907,6 +907,434 @@ pub fn render_rulesets(res: &GhResult) -> String {
     format!("{}{more_note}{redacted_note}{capped}", head.join(", "))
 }
 
+// ── `j1d` — other git repos under the home directory ─────────────────────────
+
+/// `rsy` — how many directories the walk will visit.
+pub const HOME_WALK_MAX_DIRS: usize = 4_000;
+/// `nsy` — how many repos it will report.
+pub const HOME_WALK_MAX_REPOS: usize = 20;
+/// `tsy` — how deep below the home directory it will descend.
+pub const HOME_WALK_MAX_DEPTH: usize = 2;
+/// `isy` — the walk's time budget, in milliseconds.
+pub const HOME_WALK_TIMEOUT_MS: u64 = 8_000;
+/// `osy` — how many remotes are reported per repo.
+pub const REPO_REMOTE_LIMIT: usize = 5;
+/// `ssy` — read cap for a `.git/config`.
+pub const GIT_CONFIG_READ_CAP: usize = 128_000;
+/// `g1d` — read cap for a `.git` FILE (the `gitdir:` pointer).
+pub const GITDIR_FILE_READ_CAP: usize = 4_096;
+/// How many lines of a `.git/config` are parsed.
+pub const GIT_CONFIG_MAX_LINES: usize = 2_000;
+
+/// `asy` — directories never descended into.
+pub const WALK_SKIP_DIRS: [&str; 13] = [
+    ".git",
+    "node_modules",
+    ".oh-my-zsh",
+    ".vim",
+    ".tmux",
+    ".nvm",
+    ".rustup",
+    ".cargo",
+    ".local",
+    ".cache",
+    ".npm",
+    ".gem",
+    ".claude",
+];
+/// `lsy` — cloud-sync roots, matched as the whole name or a `name …` prefix.
+///
+/// Descending into one would touch a synced folder and can wake a sync client
+/// or pull content down from the network.
+pub const WALK_SKIP_SYNC_ROOTS: [&str; 3] = ["onedrive", "dropbox", "google drive"];
+/// `csy` — additionally skipped on Windows.
+pub const WALK_SKIP_WINDOWS: [&str; 2] = ["appdata", "application data"];
+/// `usy` — additionally skipped on macOS.
+pub const WALK_SKIP_MACOS: [&str; 1] = ["library"];
+
+/// `msy` — should the walk refuse to descend into this directory name?
+#[must_use]
+pub fn is_skipped_walk_dir(name: &str, windows: bool, macos: bool) -> bool {
+    if WALK_SKIP_DIRS.contains(&name) {
+        return true;
+    }
+    let lower = name.to_lowercase();
+    if WALK_SKIP_SYNC_ROOTS
+        .iter()
+        .any(|s| lower == *s || lower.starts_with(&format!("{s} ")))
+    {
+        return true;
+    }
+    if windows && WALK_SKIP_WINDOWS.contains(&lower.as_str()) {
+        return true;
+    }
+    macos && WALK_SKIP_MACOS.contains(&lower.as_str())
+}
+
+/// `hsy` — read a `.git` FILE's `gitdir: <path>` pointer.
+#[must_use]
+pub fn parse_gitdir_pointer(text: &str) -> Option<String> {
+    let rest = text.strip_prefix("gitdir: ")?;
+    let trimmed = rest.trim_end_matches(['\r', '\n']);
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+/// `YBs` — is `path` strictly below `root`?
+#[must_use]
+pub fn is_strictly_under(path: &str, root: &str, windows: bool) -> bool {
+    let Some(rel) = crate::auto_mode_io::rebase_path(path, root, "", windows) else {
+        return false;
+    };
+    let rel = rel.trim_start_matches(if windows { '\\' } else { '/' });
+    let cmp = if windows { rel.to_lowercase() } else { rel.to_string() };
+    !cmp.is_empty()
+        && cmp != ".."
+        && !cmp.starts_with("../")
+        && !cmp.starts_with(r"..\")
+        && !is_absolute_for(windows, &cmp)
+}
+
+/// `fsy` — render a path as `~` or `~/relative`.
+#[must_use]
+pub fn home_relative(path: &str, home: &str, windows: bool) -> String {
+    let norm = |s: &str| {
+        if windows {
+            s.to_lowercase()
+        } else {
+            s.to_string()
+        }
+    };
+    if norm(path) == norm(home) {
+        return "~".to_string();
+    }
+    let sep = if windows { '\\' } else { '/' };
+    let prefix = if home.ends_with(sep) {
+        home.to_string()
+    } else {
+        format!("{home}{sep}")
+    };
+    if !norm(path).starts_with(&norm(&prefix)) {
+        return path.to_string();
+    }
+    let rel = &path[prefix.len()..];
+    let rel = if windows { rel.replace('\\', "/") } else { rel.to_string() };
+    format!("~/{rel}")
+}
+
+fn is_config_key_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '-'
+}
+
+fn skip_config_ws(s: &[char], mut i: usize) -> usize {
+    while i < s.len() && matches!(s[i], ' ' | '\t' | '\r') {
+        i += 1;
+    }
+    i
+}
+
+/// `Qiy` — parse a `[section]` / `[section "sub"]` header.
+///
+/// Returns whether it opened a NAMED remote section and where it ended.
+fn parse_config_section(s: &[char], at: usize) -> Option<(bool, usize)> {
+    let mut r = at + 1;
+    let start = r;
+    while r < s.len() && (is_config_key_char(s[r]) || s[r] == '.') {
+        r += 1;
+    }
+    let name: String = s[start..r].iter().collect();
+    if s.get(r) == Some(&']') {
+        if name.is_empty() {
+            return None;
+        }
+        let named = name
+            .find('.')
+            .is_some_and(|d| name[..d].eq_ignore_ascii_case("remote"));
+        return Some((named, r + 1));
+    }
+    if !matches!(s.get(r), Some(' ' | '\t' | '\r')) {
+        return None;
+    }
+    r = skip_config_ws(s, r);
+    if s.get(r) != Some(&'"') {
+        return None;
+    }
+    r += 1;
+    loop {
+        let c = *s.get(r)?;
+        if c == '\\' {
+            r += 2;
+            continue;
+        }
+        r += 1;
+        if c == '"' {
+            break;
+        }
+    }
+    if s.get(r) != Some(&']') {
+        return None;
+    }
+    let lower = name.to_lowercase();
+    Some((lower == "remote" || lower.starts_with("remote."), r + 1))
+}
+
+/// `Ziy` — parse a config value, following `\` line continuations.
+fn parse_config_value(
+    line: &[char],
+    from: usize,
+    lines: &[Vec<char>],
+    mut next: usize,
+) -> (Option<String>, usize) {
+    let mut cur: Vec<char> = line.to_vec();
+    let mut value = String::new();
+    let mut pending_space = String::new();
+    let mut in_quotes = false;
+    let mut i = from;
+    loop {
+        if i >= cur.len() {
+            if in_quotes {
+                return (None, next);
+            }
+            break;
+        }
+        let c = cur[i];
+        if !in_quotes && matches!(c, ' ' | '\t' | '\r') {
+            if !value.is_empty() {
+                pending_space = " ".to_string();
+            }
+            i += 1;
+            continue;
+        }
+        if !in_quotes && (c == ';' || c == '#') {
+            break;
+        }
+        value.push_str(&pending_space);
+        pending_space.clear();
+        if c == '\\' {
+            if i + 1 >= cur.len() {
+                if next >= lines.len() {
+                    return (None, next);
+                }
+                cur = lines[next].clone();
+                next += 1;
+                i = 0;
+                continue;
+            }
+            let escaped = match cur[i + 1] {
+                '\\' => '\\',
+                '"' => '"',
+                'n' => '\n',
+                't' => '\t',
+                'b' => '\u{8}',
+                _ => return (None, next),
+            };
+            value.push(escaped);
+            i += 2;
+            continue;
+        }
+        if c == '"' {
+            in_quotes = !in_quotes;
+            i += 1;
+            continue;
+        }
+        value.push(c);
+        i += 1;
+    }
+    // A NUL truncates the value.
+    let cut = match value.find('\0') {
+        Some(n) => value[..n].to_string(),
+        None => value,
+    };
+    (Some(cut), next)
+}
+
+/// `GBs` — the `url`/`pushurl` values of every named remote in a `.git/config`.
+///
+/// This is a parser rather than a `git config` call on purpose: these are OTHER
+/// people's repositories under the home directory, and running git inside one
+/// would let its own config, hooks and credential helpers act.
+#[must_use]
+pub fn parse_config_remote_urls(text: &str) -> Vec<String> {
+    let body = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let lines: Vec<Vec<char>> = body
+        .split('\n')
+        .map(|l| l.strip_suffix('\r').unwrap_or(l).chars().collect())
+        .take(GIT_CONFIG_MAX_LINES)
+        .collect();
+
+    let mut out = Vec::new();
+    let mut in_named_remote = false;
+    let mut i = 0usize;
+    while i < lines.len() {
+        let s = lines[i].clone();
+        i += 1;
+        let mut a = skip_config_ws(&s, 0);
+        while s.get(a) == Some(&'[') {
+            match parse_config_section(&s, a) {
+                None => {
+                    in_named_remote = false;
+                    a = s.len();
+                    break;
+                }
+                Some((named, end)) => {
+                    in_named_remote = named;
+                    a = skip_config_ws(&s, end);
+                }
+            }
+        }
+        let Some(&first) = s.get(a) else { continue };
+        if first == '#' || first == ';' {
+            continue;
+        }
+        if !first.is_ascii_alphabetic() {
+            in_named_remote = false;
+            continue;
+        }
+        let key_start = a;
+        while a < s.len() && is_config_key_char(s[a]) {
+            a += 1;
+        }
+        let key: String = s[key_start..a].iter().collect::<String>().to_lowercase();
+        while a < s.len() && matches!(s[a], ' ' | '\t') {
+            a += 1;
+        }
+        if a >= s.len() {
+            continue;
+        }
+        if s[a] != '=' {
+            in_named_remote = false;
+            continue;
+        }
+        let (value, next) = parse_config_value(&s, a + 1, &lines, i);
+        i = next;
+        let Some(value) = value else {
+            in_named_remote = false;
+            continue;
+        };
+        if !value.is_empty() && in_named_remote && (key == "url" || key == "pushurl") {
+            out.push(value);
+        }
+    }
+    out
+}
+
+/// `psy` — the reportable remotes of a repo: parsed, reduced to
+/// `host/org/repo`, de-duplicated and capped.
+#[must_use]
+pub fn config_remotes(config: &str, this_repo_host: Option<&str>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for url in parse_config_remote_urls(config) {
+        let Some(reduced) = remote_to_host_org_repo(&url, this_repo_host) else {
+            continue;
+        };
+        if !out.contains(&reduced) {
+            out.push(reduced);
+            if out.len() >= REPO_REMOTE_LIMIT {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Why a discovered repo has no remotes to show.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HomeRepoNote {
+    /// Its gitdir points outside the home directory, so it was not read.
+    GitdirOutsideHome,
+    /// It genuinely has no remote configured.
+    NoRemote,
+}
+
+/// One repository found under the home directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HomeRepo {
+    /// `~/relative` form.
+    pub path: String,
+    /// Reduced remotes.
+    pub remotes: Vec<String>,
+    /// Why remotes are absent, when they are.
+    pub note: Option<HomeRepoNote>,
+}
+
+/// How the walk ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WalkLimit {
+    /// It finished.
+    None,
+    /// The home directory is a network path.
+    NetworkHome,
+    /// The home directory could not be read.
+    HomeUnreadable,
+    /// It ran out of time.
+    Timeout,
+    /// It ran out of directory visits.
+    VisitBudget,
+    /// It hit the repo cap.
+    RepoCap,
+}
+
+/// `aay` — the note explaining an incomplete walk.
+#[must_use]
+pub fn walk_limit_note(limit: WalkLimit) -> &'static str {
+    use crate::auto_mode_facts as facts;
+    use crate::auto_mode_gates as gates;
+    match limit {
+        WalkLimit::None | WalkLimit::NetworkHome | WalkLimit::HomeUnreadable => "",
+        WalkLimit::Timeout => gates::WALK_HIT_TIME_BUDGET,
+        WalkLimit::VisitBudget => gates::WALK_HIT_DIRECTORY_BUDGET,
+        WalkLimit::RepoCap => facts::RESULT_CAP_REACHED,
+    }
+}
+
+/// `j1d` — the "Other git repos under the home directory" section body.
+#[must_use]
+pub fn home_repos_body(repos: &[HomeRepo], limit: WalkLimit) -> String {
+    use crate::auto_mode_facts as facts;
+    use crate::auto_mode_gates as gates;
+
+    match limit {
+        WalkLimit::NetworkHome => return gates::HOME_REPOS_NETWORK_HOME.to_string(),
+        WalkLimit::HomeUnreadable => return gates::HOME_REPOS_UNREADABLE.to_string(),
+        _ => {}
+    }
+
+    let lines: Vec<String> = repos
+        .iter()
+        .map(|r| {
+            let joined = r
+                .remotes
+                .iter()
+                .map(|m| display_name(m).to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let detail = match r.note {
+                Some(HomeRepoNote::GitdirOutsideHome) => facts::GITDIR_OUTSIDE_HOME.to_string(),
+                Some(HomeRepoNote::NoRemote) => facts::NO_REMOTE_CONFIGURED.to_string(),
+                None if joined.is_empty() => facts::REMOTE_NOT_KNOWN_HOST.to_string(),
+                None => joined,
+            };
+            format!("- `{}` \u{2014} {detail}", display_name(&r.path))
+        })
+        .collect();
+
+    let head = if lines.is_empty() {
+        if limit == WalkLimit::None {
+            gates::NO_OTHER_REPOS_FOUND.to_string()
+        } else {
+            // Cut short with nothing found is UNKNOWN, not "there are none".
+            gates::NO_REPOS_FOUND_WALK_CUT_SHORT.to_string()
+        }
+    } else {
+        format!("{}{}", facts::REPOS_FOUND_HEADER, lines.join("\n"))
+    };
+
+    [head, walk_limit_note(limit).to_string(), facts::HOME_REPOS_CANDIDATE_NOTE.to_string()]
+        .into_iter()
+        .filter(|p| !p.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 // ── `Xsy` — sibling repo docs (via gh) ───────────────────────────────────────
 
 /// How many org repos `gh repo list` is asked for.
@@ -3285,6 +3713,180 @@ mod tests {
         );
         assert_eq!(GH_TIMEOUT_MS, 4_000);
         assert_eq!(KNOWN_VCS_HOSTS.len(), 3);
+    }
+
+    // ── `j1d` ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn the_walk_refuses_cloud_sync_roots_and_tool_caches() {
+        // Descending into a synced folder can wake a sync client or pull
+        // content down from the network.
+        for name in ["OneDrive", "Dropbox", "Google Drive", "OneDrive - Acme Corp"] {
+            assert!(is_skipped_walk_dir(name, false, true), "{name}");
+        }
+        // ...but a merely similar name is not skipped.
+        assert!(!is_skipped_walk_dir("Dropboxes", false, true));
+        assert!(!is_skipped_walk_dir("onedrive-backup", false, true));
+        // Tool caches and VCS internals.
+        for name in [".git", "node_modules", ".cargo", ".claude"] {
+            assert!(is_skipped_walk_dir(name, false, false), "{name}");
+        }
+        // Platform-specific.
+        assert!(is_skipped_walk_dir("AppData", true, false));
+        assert!(!is_skipped_walk_dir("AppData", false, false));
+        assert!(is_skipped_walk_dir("Library", false, true));
+        assert!(!is_skipped_walk_dir("Library", false, false));
+    }
+
+    #[test]
+    fn git_config_remotes_are_parsed_from_named_sections_only() {
+        let config = r#"
+[core]
+	url = https://not-a-remote.example/a/b
+[remote "origin"]
+	url = https://github.com/acme/app.git
+	pushurl = git@github.com:acme/app.git
+[remote "fork"]
+	url = https://github.com/bob/app
+[branch "main"]
+	url = https://github.com/nope/nope
+"#;
+        let urls = parse_config_remote_urls(config);
+        assert_eq!(
+            urls,
+            vec![
+                "https://github.com/acme/app.git",
+                "git@github.com:acme/app.git",
+                "https://github.com/bob/app",
+            ]
+        );
+        // `[core]` and `[branch "main"]` are not remotes.
+        assert!(!urls.iter().any(|u| u.contains("not-a-remote")));
+        assert!(!urls.iter().any(|u| u.contains("nope")));
+    }
+
+    #[test]
+    fn git_config_parsing_handles_comments_quotes_and_continuations() {
+        let config = "[remote \"origin\"]\n\turl = \"https://github.com/acme/app\" # trailing\n\tpushurl = https://github.com/acme/\\\n\t\tapp2\n";
+        let urls = parse_config_remote_urls(config);
+        assert_eq!(urls[0], "https://github.com/acme/app");
+        assert!(!urls[0].contains("trailing"));
+        // The continuation joined without inventing whitespace.
+        assert!(urls[1].contains("app2"));
+    }
+
+    #[test]
+    fn repo_remotes_are_reduced_deduplicated_and_capped() {
+        let config = r#"
+[remote "origin"]
+	url = https://github.com/acme/app
+	pushurl = git@github.com:acme/app
+[remote "mirror"]
+	url = https://gitlab.com/acme/app
+[remote "junk"]
+	url = https://evil.example/acme/app
+"#;
+        let remotes = config_remotes(config, None);
+        // `origin`'s two URLs reduce to the same host/org/repo, so one entry.
+        assert_eq!(remotes, vec!["github.com/acme/app", "gitlab.com/acme/app"]);
+        // An unknown host contributes nothing.
+        assert!(!remotes.iter().any(|r| r.contains("evil")));
+    }
+
+    #[test]
+    fn a_gitdir_pointer_is_read_only_in_its_exact_form() {
+        assert_eq!(
+            parse_gitdir_pointer("gitdir: ../.git/worktrees/x\n").as_deref(),
+            Some("../.git/worktrees/x")
+        );
+        assert_eq!(parse_gitdir_pointer("gitdir: \n"), None);
+        assert_eq!(parse_gitdir_pointer("gitdir:no-space"), None);
+        assert_eq!(parse_gitdir_pointer("something else"), None);
+    }
+
+    #[test]
+    fn containment_and_home_relative_paths() {
+        assert!(is_strictly_under("/home/u/work/app", "/home/u", false));
+        assert!(!is_strictly_under("/home/u", "/home/u", false));
+        assert!(!is_strictly_under("/home/other/app", "/home/u", false));
+        assert_eq!(home_relative("/home/u/work/app", "/home/u", false), "~/work/app");
+        assert_eq!(home_relative("/home/u", "/home/u", false), "~");
+        // Outside the home directory is shown as-is rather than mislabelled.
+        assert_eq!(home_relative("/opt/app", "/home/u", false), "/opt/app");
+    }
+
+    #[test]
+    fn home_repos_render_with_their_reason_for_having_no_remote() {
+        let repos = vec![
+            HomeRepo {
+                path: "~/work/app".into(),
+                remotes: vec!["github.com/acme/app".into()],
+                note: None,
+            },
+            HomeRepo {
+                path: "~/work/wt".into(),
+                remotes: vec![],
+                note: Some(HomeRepoNote::GitdirOutsideHome),
+            },
+            HomeRepo {
+                path: "~/scratch".into(),
+                remotes: vec![],
+                note: Some(HomeRepoNote::NoRemote),
+            },
+            HomeRepo {
+                path: "~/vendor".into(),
+                remotes: vec![],
+                note: None,
+            },
+        ];
+        let body = home_repos_body(&repos, WalkLimit::None);
+        assert!(body.contains("- `~/work/app` \u{2014} github.com/acme/app"));
+        assert!(body.contains("- `~/work/wt` \u{2014} (gitdir points outside the home directory"));
+        assert!(body.contains("- `~/scratch` \u{2014} (no remote configured)"));
+        assert!(body.contains("- `~/vendor` \u{2014} (remote not on a known VCS host; not shown)"));
+        // The header states the redaction contract, and the candidate caveat
+        // always trails.
+        assert!(body.contains("userinfo and any path beyond owner/repo are stripped"));
+        assert!(body.contains("These are CANDIDATES, not vetted context"));
+    }
+
+    #[test]
+    fn a_walk_cut_short_with_nothing_found_is_unknown_not_none() {
+        // "We found none" and "we stopped before finding any" are different
+        // claims, and only the first is evidence.
+        assert!(home_repos_body(&[], WalkLimit::None).contains("No other git repos found"));
+        for limit in [WalkLimit::Timeout, WalkLimit::VisitBudget, WalkLimit::RepoCap] {
+            let body = home_repos_body(&[], limit);
+            assert!(
+                body.contains("treat this as unknown, not as none"),
+                "{limit:?} must not read as none"
+            );
+        }
+        // Each incomplete walk also says WHY it stopped.
+        assert!(home_repos_body(&[], WalkLimit::Timeout).contains("time budget"));
+        assert!(home_repos_body(&[], WalkLimit::VisitBudget).contains("directory budget"));
+        assert!(home_repos_body(&[], WalkLimit::RepoCap).contains("Result cap reached"));
+    }
+
+    #[test]
+    fn a_network_or_unreadable_home_is_reported_without_a_listing() {
+        let body = home_repos_body(&[], WalkLimit::NetworkHome);
+        assert!(body.contains("merely touching one authenticates to"));
+        assert!(!body.contains("CANDIDATES"));
+        let body = home_repos_body(&[], WalkLimit::HomeUnreadable);
+        assert!(body.contains("could not be read"));
+    }
+
+    #[test]
+    fn home_walk_caps_match_the_oracle() {
+        assert_eq!(HOME_WALK_MAX_DIRS, 4_000);
+        assert_eq!(HOME_WALK_MAX_REPOS, 20);
+        assert_eq!(HOME_WALK_MAX_DEPTH, 2);
+        assert_eq!(HOME_WALK_TIMEOUT_MS, 8_000);
+        assert_eq!(REPO_REMOTE_LIMIT, 5);
+        assert_eq!(GIT_CONFIG_READ_CAP, 128_000);
+        assert_eq!(GITDIR_FILE_READ_CAP, 4_096);
+        assert_eq!(GIT_CONFIG_MAX_LINES, 2_000);
     }
 
     // ── `Xsy` ────────────────────────────────────────────────────────────────

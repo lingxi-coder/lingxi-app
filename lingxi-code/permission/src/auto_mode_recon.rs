@@ -4,7 +4,7 @@
 //! scan for /auto-mode-setup") whose large system prompt guides the model to render
 //! the user's environment into the proposal's `environment` slots. This module is the
 //! byte-verifiable, LLM-free part: the recon VOCABULARY (scan-tool description + error
-//! codes/messages, byte-exact vs 2.1.218) and the pure settings-tier fact gatherer the
+//! codes/messages, byte-exact vs 2.1.220) and the pure settings-tier fact gatherer the
 //! recon feeds the model — which existing `autoMode` blocks are present (for the "Found
 //! N inert autoMode entries" observation) and which `permissions.allow` rules are
 //! destructive (the `remove_from_permissions_allow` removal offer). The model prompt,
@@ -18,7 +18,7 @@ use crate::dangerous_perms::{
 };
 use crate::rule::{PermissionBehavior, PermissionRule, PermissionRuleSource, PermissionRuleValue};
 
-/// The `auto_mode_scan` side-query tool description (byte-exact vs 2.1.218).
+/// The `auto_mode_scan` side-query tool description (byte-exact vs 2.1.220).
 pub const RECON_SCAN_DESCRIPTION: &str = "environment scan for /auto-mode-setup";
 
 /// Telemetry/return code when the recon gather failed (`recon_failed`).
@@ -34,7 +34,7 @@ pub const PARSE_REPAIRED_CODE: &str = "parse_repaired";
 /// `remove_from_permissions_allow` reconciliation (`unsafe_allow_dropped`).
 pub const UNSAFE_ALLOW_DROPPED_CODE: &str = "unsafe_allow_dropped";
 
-/// The byte-exact recon-gather failure message prefix (2.1.218:
+/// The byte-exact recon-gather failure message prefix (2.1.220:
 /// `auto-mode-setup gather failed: ${err}`).
 #[must_use]
 pub fn gather_failed_message(err: &str) -> String {

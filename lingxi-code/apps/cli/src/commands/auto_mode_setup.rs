@@ -45,7 +45,7 @@ pub const CODE_USAGE: &str = "usage";
 /// A flag-ordering / flag-shape rejection (`bad_flag_grammar`).
 pub const CODE_BAD_FLAG_GRAMMAR: &str = "bad_flag_grammar";
 
-// ── byte-exact grammar messages (2.1.218) ────────────────────────────────────
+// ── byte-exact grammar messages (2.1.220) ────────────────────────────────────
 
 /// `--apply-target` value was neither `user` nor `project`.
 pub const APPLY_TARGET_BAD_VALUE: &str = "--apply-target must be \"user\" or \"project\".";

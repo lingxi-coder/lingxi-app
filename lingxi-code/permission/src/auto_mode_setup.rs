@@ -9,12 +9,12 @@
 use serde_json::Value;
 
 /// `tFt` — the maximum number of entries a `removeFromPermissionsAllow` proposal
-/// array may carry (2.1.218: `tFt=200`).
+/// array may carry (2.1.220: `tFt=200`).
 pub const MAX_REMOVE_FROM_PERMISSIONS_ALLOW: usize = 200;
 
 /// Validate a proposal's `removeFromPermissionsAllow` value (the wizard's offer
 /// to remove destructive ALLOW rules the user already had). Returns
-/// `Some(error_message)` (byte-exact vs 2.1.218) on the first failure, or `None`
+/// `Some(error_message)` (byte-exact vs 2.1.220) on the first failure, or `None`
 /// when the value is absent/`null` or a valid array of well-formed rule strings.
 ///
 /// 1:1 with the oracle validator:
@@ -86,7 +86,7 @@ pub fn is_removable_rule_string(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '*'))
 }
 
-/// Result of the `--apply-file` read gate (2.1.218 `auto_mode_setup_write`
+/// Result of the `--apply-file` read gate (2.1.220 `auto_mode_setup_write`
 /// codes). The gate refuses to read a proposal file unless it is an absolute
 /// path under the system temp dir or the Claude config dir AND is not covered by
 /// a `permissions.deny` READ rule.
@@ -130,7 +130,7 @@ impl ApplyFileGate {
         }
     }
 
-    /// The byte-exact human-readable `reason` string (2.1.218). (Only the codes
+    /// The byte-exact human-readable `reason` string (2.1.220). (Only the codes
     /// with a STATIC reason live here; the interpolated ones are formatted at the
     /// command handler.)
     #[must_use]
@@ -154,7 +154,7 @@ pub fn is_valid_expect_sha256(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// Verify a proposal file's hash against the `--expect-sha256` argument (2.1.218
+/// Verify a proposal file's hash against the `--expect-sha256` argument (2.1.220
 /// `auto_mode_setup_write` hash gate). `actual_sha256` is the LOWERCASE hex
 /// sha256 of the proposal file's exact bytes, computed by the command layer.
 /// Returns `Some(gate)` on failure — `MissingHashArg` (no `--expect-sha256`),
@@ -180,7 +180,7 @@ pub fn verify_proposal_hash(actual_sha256: &str, expect: Option<&str>) -> Option
     None
 }
 
-// ── S3 `--apply-file` path predicates (2.1.218) ──────────────────────────────
+// ── S3 `--apply-file` path predicates (2.1.220) ──────────────────────────────
 
 /// `Qc` — a UNC path (`//host` or `\\host`).
 #[must_use]
@@ -313,7 +313,7 @@ pub fn apply_file_pre_read_gate(
     None
 }
 
-// ── apply/write settings mutation (2.1.218) ──────────────────────────────────
+// ── apply/write settings mutation (2.1.220) ──────────────────────────────────
 
 /// Build the `autoMode` settings object an accepted proposal writes. 1:1 with
 /// the oracle:
@@ -370,7 +370,7 @@ pub fn remove_rules_from_permissions_allow(
     (kept, removed)
 }
 
-// ── rFt: the settings-file write transform (2.1.218) ─────────────────────────
+// ── rFt: the settings-file write transform (2.1.220) ─────────────────────────
 
 /// The outcome of applying an auto-mode save to a settings-file's JSON text: the
 /// re-serialized settings body (pretty + trailing newline) plus how many
@@ -467,7 +467,7 @@ pub fn apply_auto_mode_save_to_settings_json(
     }))
 }
 
-// ── vNs: the save-payload validator (2.1.218) ────────────────────────────────
+// ── vNs: the save-payload validator (2.1.220) ────────────────────────────────
 
 /// The `$defaults` sentinel (`pV`) that an `autoMode` rule array must include so
 /// it EXTENDS the shipped built-in rules instead of REPLACING them.
@@ -699,7 +699,7 @@ pub fn settings_section_size_warning(kb: usize, mib: usize) -> String {
     )
 }
 
-// ── apply-file pre-write pipeline (2.1.218) ──────────────────────────────────
+// ── apply-file pre-write pipeline (2.1.220) ──────────────────────────────────
 
 /// The outcome of the secure proposal-file read the COMMAND layer performs
 /// (open `O_NOFOLLOW` → regular file → `nlink == 1` → read up to the 1 MB cap),
@@ -754,7 +754,7 @@ pub fn scope_mismatch_reason(proposal_scope: Option<&str>, target: &str, expecte
     }
 }
 
-/// Run the `--apply-file` PRE-WRITE pipeline (2.1.218): path gate → secure read →
+/// Run the `--apply-file` PRE-WRITE pipeline (2.1.220): path gate → secure read →
 /// hash verify → parse → scope check. Pure/testable: the caller performs the
 /// actual fs read + sha256 and passes [`ProposalRead`]; `is_read_denied` comes
 /// from the live policy's `Read`-`deny` rules.
@@ -808,7 +808,7 @@ pub fn evaluate_apply_file(
 
 // ── secure fs read + sha256 (the command-layer wrapper) ──────────────────────
 
-/// `XQ_` — the `--apply-file` read cap (2.1.218: `1e6` = 1,000,000 bytes). A file
+/// `XQ_` — the `--apply-file` read cap (2.1.220: `1e6` = 1,000,000 bytes). A file
 /// whose bytes exceed this is [`ProposalRead::TooLarge`].
 pub const PROPOSAL_READ_CAP: usize = 1_000_000;
 

@@ -1,5 +1,5 @@
 //! `lingxi-cli auto-mode-setup` — the WIZARD-06 permission-hardening wizard's
-//! CLI arg-grammar layer (byte-parity with claude-code 2.1.218
+//! CLI arg-grammar layer (byte-parity with claude-code 2.1.220
 //! `auto-mode-setup`).
 //!
 //! This module is the FLAG-GRAMMAR front door for the non-interactive apply
@@ -14,14 +14,18 @@
 //! + scope check, and the atomic settings write.
 //!
 //! Every grammar message + telemetry code below is byte-verified against the
-//! 2.1.218 binary. Ordering precedence uses a left-to-right, first-violation-
+//! 2.1.220 binary. Ordering precedence uses a left-to-right, first-violation-
 //! wins walk over the canonical flag order (`--request-id` < `--apply-target` <
 //! `--expect-sha256` < `--apply-file`); each specific message is emitted ONLY in
 //! the structural situation its text describes, and flag arrangements the
-//! binary's strings don't unambiguously attribute fall back to a bare `usage`
-//! error (the CLI prints help) rather than a guessed message. The interactive
-//! `--propose` / `--wizard` product path and the dispatch/telemetry wiring are
-//! later waves that build on this parser.
+//! binary's strings don't unambiguously attribute fall back to a `usage` error
+//! carrying the oracle's generic [`PARSE_FALLBACK`] message rather than a
+//! guessed one.
+//!
+//! The non-interactive propose entry (`--wizard posture=… scope=… depth=…
+//! --propose`) is a whole-string grammar of its own and is matched first; its
+//! answer values are validated against the sets the wizard actually offers,
+//! because those answers authorise how far the recon reaches.
 
 use std::path::{Path, PathBuf};
 
@@ -102,6 +106,57 @@ impl ApplyTarget {
     }
 }
 
+/// `--request-id` was given with no value (`--request-id=` or followed by
+/// another flag).
+pub const REQUEST_ID_NEEDS_VALUE: &str = "--request-id needs a value.";
+/// `--request-id` was given a value that is not a canonical UUID.
+///
+/// Note what the wording commits to: "the token is refused, not echoed". The
+/// rejected id must NOT appear in the error output. A request id lands in
+/// telemetry and logs, so echoing an arbitrary token back would turn this
+/// message into a log-injection sink — hence a fixed string with no
+/// interpolation slot.
+pub const REQUEST_ID_NOT_UUID: &str = "--request-id must be a UUID in canonical 8-4-4-4-12 hex-and-dash form (either case) \u{2014} the token is refused, not echoed.";
+
+/// Printed when no specific message attributes the flag arrangement.
+pub const PARSE_FALLBACK: &str = "Couldn\u{2019}t parse arguments.";
+
+/// The non-interactive propose entry point's grammar, as the oracle spells it.
+/// The whole argument string must match this exactly.
+pub const PROPOSE_GRAMMAR: &str = r"^--wizard posture=(\S+) scope=(\S+) depth=(\S+)\s+--propose$";
+
+/// Accepted `posture=` values.
+pub const POSTURE_VALUES: [&str; 4] = ["personal", "open-source", "enterprise", "mixed"];
+/// Accepted `scope=` values.
+pub const SCOPE_VALUES: [&str; 2] = ["all", "project"];
+/// Accepted `depth=` values.
+pub const DEPTH_VALUES: [&str; 4] = ["both", "shell", "repos", "here"];
+
+/// A validated `--wizard … --propose` invocation: the three setup answers that
+/// would otherwise come from the interactive questions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProposeInvocation {
+    /// `posture=` — one of [`POSTURE_VALUES`].
+    pub posture: String,
+    /// `scope=` — one of [`SCOPE_VALUES`].
+    pub scope: String,
+    /// `depth=` — one of [`DEPTH_VALUES`].
+    pub depth: String,
+}
+
+/// Is `s` a UUID in canonical 8-4-4-4-12 hex-and-dash form (either case)?
+#[must_use]
+pub fn is_canonical_uuid(s: &str) -> bool {
+    let b = s.as_bytes();
+    if b.len() != 36 {
+        return false;
+    }
+    b.iter().enumerate().all(|(i, c)| match i {
+        8 | 13 | 18 | 23 => *c == b'-',
+        _ => c.is_ascii_hexdigit(),
+    })
+}
+
 /// A fully order-validated `--apply-file` invocation. `expect_sha256` is left
 /// optional here: a MISSING hash is rejected downstream by the permission
 /// pipeline's `missing_hash_arg` gate, keeping the hash-bind enforcement in one
@@ -125,6 +180,8 @@ pub enum AutoModeSetupInvocation {
     Help,
     /// A valid `--apply-file` invocation ready for the permission pipeline.
     ApplyFile(ApplyFileInvocation),
+    /// A valid `--wizard … --propose` invocation.
+    Propose(ProposeInvocation),
 }
 
 /// A grammar rejection: the byte-exact `auto_mode_setup_write` `code` +
@@ -150,8 +207,45 @@ fn grammar(message: &'static str) -> GrammarError {
 fn usage_fallback() -> GrammarError {
     GrammarError {
         code: CODE_USAGE,
-        message: "",
+        message: PARSE_FALLBACK,
     }
+}
+
+/// Match the `--wizard posture=… scope=… depth=… --propose` form.
+///
+/// [`PROPOSE_GRAMMAR`] anchors the WHOLE argument string, with single spaces
+/// between the four leading tokens, so on a token vector that is exactly five
+/// tokens in that order. Returns `None` when the shape does not match at all
+/// (the caller then continues into the apply-path parser); returns
+/// `Some(Err(..))` when the shape matches but an answer value is not one the
+/// wizard offers.
+fn match_propose_form(args: &[String]) -> Option<Result<ProposeInvocation, GrammarError>> {
+    if args.len() != 5 || args[0] != "--wizard" || args[4] != "--propose" {
+        return None;
+    }
+    let posture = args[1].strip_prefix("posture=")?;
+    let scope = args[2].strip_prefix("scope=")?;
+    let depth = args[3].strip_prefix("depth=")?;
+    // `(\S+)` — a value may not be empty or contain whitespace.
+    if [posture, scope, depth]
+        .iter()
+        .any(|v| v.is_empty() || v.split_whitespace().count() != 1)
+    {
+        return Some(Err(usage_fallback()));
+    }
+    // Fail closed on an unoffered answer rather than passing it through: these
+    // values authorise how far the recon reaches.
+    if !POSTURE_VALUES.contains(&posture)
+        || !SCOPE_VALUES.contains(&scope)
+        || !DEPTH_VALUES.contains(&depth)
+    {
+        return Some(Err(usage_fallback()));
+    }
+    Some(Ok(ProposeInvocation {
+        posture: posture.to_string(),
+        scope: scope.to_string(),
+        depth: depth.to_string(),
+    }))
 }
 
 /// Split `--flag=value` into (`--flag`, `Some(value)`); a bare flag is
@@ -173,6 +267,12 @@ fn split_eq(token: &str) -> (&str, Option<&str>) {
 /// # Errors
 /// Returns [`GrammarError`] for any flag-shape or ordering violation.
 pub fn parse_apply_file_args(args: &[String]) -> Result<AutoModeSetupInvocation, GrammarError> {
+    // The propose form is a whole-string grammar of its own, checked before the
+    // flag walk so its tokens are never mistaken for apply-path flags.
+    if let Some(result) = match_propose_form(args) {
+        return result.map(AutoModeSetupInvocation::Propose);
+    }
+
     let mut request_id: Option<String> = None;
     let mut apply_target: Option<ApplyTarget> = None;
     let mut expect_sha256: Option<String> = None;
@@ -207,19 +307,28 @@ pub fn parse_apply_file_args(args: &[String]) -> Result<AutoModeSetupInvocation,
                 if apply_target.is_some() || expect_sha256.is_some() {
                     return Err(grammar(REQUEST_ID_MUST_COME_FIRST));
                 }
-                // request-id value is telemetry metadata; take the inline (`=`)
-                // value or the next token. No binary message covers a missing
-                // value, so an empty id is accepted rather than guessing one.
-                if let Some(v) = inline {
-                    request_id = Some(v.to_string());
+                // `^--request-id(?:=|\s+(?!--))(\S+)\s*` — the value is taken
+                // inline after `=` or as the next token, but NOT when that token
+                // is itself a flag.
+                let value = if let Some(v) = inline {
                     i += 1;
+                    v.to_string()
                 } else if i + 1 < args.len() && !args[i + 1].starts_with("--") {
-                    request_id = Some(args[i + 1].clone());
                     i += 2;
+                    args[i - 1].clone()
                 } else {
-                    request_id = Some(String::new());
                     i += 1;
+                    String::new()
+                };
+                if value.is_empty() {
+                    return Err(grammar(REQUEST_ID_NEEDS_VALUE));
                 }
+                // The id reaches telemetry and logs, so it is constrained to a
+                // canonical UUID and a bad token is refused WITHOUT being echoed.
+                if !is_canonical_uuid(&value) {
+                    return Err(grammar(REQUEST_ID_NOT_UUID));
+                }
+                request_id = Some(value);
             }
             "--apply-target" => {
                 if apply_file.is_some() {
@@ -519,6 +628,13 @@ pub async fn run(cli: &Cli) -> i32 {
             SUCCESS
         }
         Ok(AutoModeSetupInvocation::ApplyFile(inv)) => run_apply_file(&inv).await,
+        // The propose grammar and its whole vocabulary are ported (see
+        // `permission::auto_mode_propose` / `auto_mode_pregather`), but the
+        // orchestration behind it — the recon gather plus the `json_schema`
+        // model call — is not wired here yet. Fail without inventing an outcome:
+        // emitting a `recon_failed` or printing a scan message would report a
+        // scan that never ran.
+        Ok(AutoModeSetupInvocation::Propose(_)) => RUNTIME_ERROR,
         Err(e) => apply_disposition(dispose_grammar(&e)),
     }
 }
@@ -556,6 +672,7 @@ mod tests {
         parts.iter().map(|s| (*s).to_string()).collect()
     }
     const HEX: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const UUID: &str = "3f2504e0-4f89-11d3-9a0c-0305e82c3301";
 
     #[test]
     fn messages_are_byte_exact() {
@@ -586,7 +703,7 @@ mod tests {
     fn happy_path_full_canonical_order() {
         let got = parse_apply_file_args(&v(&[
             "--request-id",
-            "req-42",
+            UUID,
             "--apply-target",
             "user",
             "--expect-sha256",
@@ -598,7 +715,7 @@ mod tests {
         let AutoModeSetupInvocation::ApplyFile(inv) = got else {
             panic!("expected ApplyFile");
         };
-        assert_eq!(inv.request_id.as_deref(), Some("req-42"));
+        assert_eq!(inv.request_id.as_deref(), Some(UUID));
         assert_eq!(inv.apply_target, Some(ApplyTarget::User));
         assert_eq!(inv.expect_sha256.as_deref(), Some(HEX));
     }
@@ -676,15 +793,15 @@ mod tests {
     #[test]
     fn request_id_ordering() {
         assert_eq!(
-            err(&["--request-id", "a", "--request-id", "b", "--apply-file", "/p"]).message,
+            err(&["--request-id", UUID, "--request-id", UUID, "--apply-file", "/p"]).message,
             REQUEST_ID_TWICE
         );
         assert_eq!(
-            err(&["--apply-target", "user", "--request-id", "a", "--apply-file", "/p"]).message,
+            err(&["--apply-target", "user", "--request-id", UUID, "--apply-file", "/p"]).message,
             REQUEST_ID_MUST_COME_FIRST
         );
         assert_eq!(
-            err(&["--apply-file", "/p", "--request-id", "a"]).message,
+            err(&["--apply-file", "/p", "--request-id", UUID]).message,
             REQUEST_ID_AFTER_APPLY_FILE
         );
     }
@@ -711,10 +828,128 @@ mod tests {
     }
 
     #[test]
+    fn request_id_requires_a_value() {
+        assert_eq!(err(&["--request-id"]).message, REQUEST_ID_NEEDS_VALUE);
+        assert_eq!(err(&["--request-id="]).message, REQUEST_ID_NEEDS_VALUE);
+        // A following flag is not swallowed as the value.
+        assert_eq!(
+            err(&["--request-id", "--apply-file", "/p"]).message,
+            REQUEST_ID_NEEDS_VALUE
+        );
+    }
+
+    #[test]
+    fn request_id_must_be_a_canonical_uuid() {
+        assert!(is_canonical_uuid(UUID));
+        assert!(is_canonical_uuid(&UUID.to_uppercase()));
+        for bad in [
+            "req-42",
+            "3f2504e04f8911d39a0c0305e82c3301",          // no dashes
+            "3f2504e0-4f89-11d3-9a0c-0305e82c330",       // too short
+            "3f2504e0-4f89-11d3-9a0c-0305e82c33011",     // too long
+            "3f2504e0_4f89_11d3_9a0c_0305e82c3301",      // wrong separators
+            "3f2504e0-4f89-11d3-9a0c-0305e82c330g",      // non-hex
+        ] {
+            assert!(!is_canonical_uuid(bad), "should be rejected: {bad}");
+            assert_eq!(
+                err(&["--request-id", bad, "--apply-file", "/p"]).message,
+                REQUEST_ID_NOT_UUID
+            );
+        }
+    }
+
+    #[test]
+    fn a_rejected_request_id_is_never_echoed_back() {
+        // The message promises "the token is refused, not echoed" -- the id
+        // reaches telemetry and logs, so echoing it would make this a
+        // log-injection sink.
+        let hostile = "\u{1b}[2K\rINFO: granted --apply-target=user";
+        let e = err(&["--request-id", hostile, "--apply-file", "/p"]);
+        assert_eq!(e.message, REQUEST_ID_NOT_UUID);
+        assert!(!e.message.contains(hostile));
+        assert!(!e.message.contains("granted"));
+        assert!(!e.message.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn propose_form_parses_the_three_answers() {
+        let got = parse_apply_file_args(&v(&[
+            "--wizard",
+            "posture=enterprise",
+            "scope=all",
+            "depth=both",
+            "--propose",
+        ]))
+        .unwrap();
+        assert_eq!(
+            got,
+            AutoModeSetupInvocation::Propose(ProposeInvocation {
+                posture: "enterprise".into(),
+                scope: "all".into(),
+                depth: "both".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn propose_form_rejects_answers_the_wizard_never_offers() {
+        // These answers authorise how far the recon reaches, so an unoffered
+        // value must fail rather than pass through.
+        for args in [
+            ["--wizard", "posture=root", "scope=all", "depth=both", "--propose"],
+            ["--wizard", "posture=mixed", "scope=everything", "depth=both", "--propose"],
+            ["--wizard", "posture=mixed", "scope=all", "depth=everywhere", "--propose"],
+            ["--wizard", "posture=", "scope=all", "depth=both", "--propose"],
+        ] {
+            let e = err(&args);
+            assert_eq!(e.code, CODE_USAGE);
+            assert_eq!(e.message, PARSE_FALLBACK);
+        }
+    }
+
+    #[test]
+    fn propose_form_requires_the_exact_shape() {
+        // Wrong order, missing --propose, or extra tokens: not the propose form,
+        // so it falls through to the apply-path walk and is refused there.
+        for args in [
+            &["--wizard", "scope=all", "posture=mixed", "depth=both", "--propose"][..],
+            &["--wizard", "posture=mixed", "scope=all", "depth=both"][..],
+            &["--wizard", "posture=mixed", "scope=all", "depth=both", "--propose", "x"][..],
+            &["--propose"][..],
+        ] {
+            assert!(parse_apply_file_args(&v(args)).is_err());
+        }
+    }
+
+    #[test]
+    fn propose_grammar_string_is_byte_exact() {
+        assert_eq!(
+            PROPOSE_GRAMMAR,
+            r"^--wizard posture=(\S+) scope=(\S+) depth=(\S+)\s+--propose$"
+        );
+        assert_eq!(
+            POSTURE_VALUES,
+            ["personal", "open-source", "enterprise", "mixed"]
+        );
+        assert_eq!(SCOPE_VALUES, ["all", "project"]);
+        assert_eq!(DEPTH_VALUES, ["both", "shell", "repos", "here"]);
+    }
+
+    #[test]
+    fn new_grammar_messages_are_byte_exact() {
+        assert_eq!(REQUEST_ID_NEEDS_VALUE, "--request-id needs a value.");
+        assert_eq!(
+            REQUEST_ID_NOT_UUID,
+            "--request-id must be a UUID in canonical 8-4-4-4-12 hex-and-dash form (either case) \u{2014} the token is refused, not echoed."
+        );
+        assert_eq!(PARSE_FALLBACK, "Couldn\u{2019}t parse arguments.");
+    }
+
+    #[test]
     fn unknown_flag_falls_back_to_usage() {
         let e = err(&["--frobnicate"]);
         assert_eq!(e.code, CODE_USAGE);
-        assert_eq!(e.message, "");
+        assert_eq!(e.message, PARSE_FALLBACK);
     }
 
     // ── orchestration core (real tempfiles + real settings write) ────────────
@@ -878,10 +1113,10 @@ mod tests {
         assert_eq!(d.exit_code, RUNTIME_ERROR);
         assert_eq!(d.telemetry_code.as_deref(), Some("bad_flag_grammar"));
         assert_eq!(d.stderr.as_deref(), Some(APPLY_FILE_NEEDS_PATH));
-        // A bare usage fallback (empty message) prints nothing but still exits nonzero.
+        // The usage fallback prints the oracle's generic parse message.
         let d = dispose_grammar(&usage_fallback());
         assert_eq!(d.telemetry_code.as_deref(), Some("usage"));
-        assert_eq!(d.stderr, None);
+        assert_eq!(d.stderr.as_deref(), Some(PARSE_FALLBACK));
         assert_eq!(d.exit_code, RUNTIME_ERROR);
     }
 

@@ -102,11 +102,16 @@ pub enum ApplyFileGate {
     ReadFailed,
     /// The proposal file was truncated at the read cap. Code `too_large`.
     TooLarge,
+    /// The `--expect-sha256` argument is missing. Code `missing_hash_arg`.
+    MissingHashArg,
     /// The `--expect-sha256` argument is not a 64-char hex sha256. Code
-    /// `bad_hash_arg`. (The `missing_hash_arg`/`hash_mismatch`/`scope_mismatch`
-    /// codes carry RUNTIME-interpolated reasons and are produced by the command
-    /// handler — built in the command wave; see the blueprint.)
+    /// `bad_hash_arg`.
     BadHashArg,
+    /// The proposal file's bytes do not hash to the reviewed digest. Code
+    /// `hash_mismatch`. (The result frame also carries the `expectedSha256`; the
+    /// `scope_mismatch` code's reason is RUNTIME-interpolated with `--apply-target`
+    /// and is produced by the command handler — see the blueprint.)
+    HashMismatch,
 }
 
 impl ApplyFileGate {
@@ -119,7 +124,9 @@ impl ApplyFileGate {
             ApplyFileGate::ReadDenied => "read_denied",
             ApplyFileGate::ReadFailed => "read_failed",
             ApplyFileGate::TooLarge => "too_large",
+            ApplyFileGate::MissingHashArg => "missing_hash_arg",
             ApplyFileGate::BadHashArg => "bad_hash_arg",
+            ApplyFileGate::HashMismatch => "hash_mismatch",
         }
     }
 
@@ -133,7 +140,9 @@ impl ApplyFileGate {
             ApplyFileGate::ReadDenied => "That path is covered by a permissions.deny read rule. Write the proposal somewhere the session can read.",
             ApplyFileGate::ReadFailed => "Couldn\u{2019}t read the proposal file. Check the path and that it is a regular file.",
             ApplyFileGate::TooLarge => "The proposal file is over the 1 MB cap \u{2014} a real proposal is a few KB. Regenerate it with --propose.",
+            ApplyFileGate::MissingHashArg => "--expect-sha256 is required: pass the 64-character hex sha256 of the proposal file\u{2019}s exact bytes, before --apply-file. Every non-interactive apply is hash-bound.",
             ApplyFileGate::BadHashArg => "--expect-sha256 must be the 64-character hex sha256 digest of the proposal file\u{2019}s exact bytes.",
+            ApplyFileGate::HashMismatch => "The proposal file\u{2019}s bytes do not match the reviewed digest \u{2014} the file changed after it was approved. Nothing was written; regenerate the proposal, re-review, and retry.",
         }
     }
 }
@@ -143,6 +152,32 @@ impl ApplyFileGate {
 #[must_use]
 pub fn is_valid_expect_sha256(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Verify a proposal file's hash against the `--expect-sha256` argument (2.1.218
+/// `auto_mode_setup_write` hash gate). `actual_sha256` is the LOWERCASE hex
+/// sha256 of the proposal file's exact bytes, computed by the command layer.
+/// Returns `Some(gate)` on failure — `MissingHashArg` (no `--expect-sha256`),
+/// `BadHashArg` (not 64-hex), or `HashMismatch` (`actual !== expected`) — or
+/// `None` when the hash matches.
+///
+/// The comparison is EXACT (`i !== e.expectedSha256`): `actual_sha256` is
+/// lowercase hex, so an uppercase-but-correct `--expect-sha256` is a
+/// `HashMismatch` (byte-faithful to the oracle, which does not case-fold).
+#[must_use]
+pub fn verify_proposal_hash(actual_sha256: &str, expect: Option<&str>) -> Option<ApplyFileGate> {
+    let expect = match expect {
+        None => return Some(ApplyFileGate::MissingHashArg),
+        Some(e) if e.is_empty() => return Some(ApplyFileGate::MissingHashArg),
+        Some(e) => e,
+    };
+    if !is_valid_expect_sha256(expect) {
+        return Some(ApplyFileGate::BadHashArg);
+    }
+    if actual_sha256 != expect {
+        return Some(ApplyFileGate::HashMismatch);
+    }
+    None
 }
 
 // ── S3 `--apply-file` path predicates (2.1.218) ──────────────────────────────
@@ -429,6 +464,47 @@ mod tests {
         assert!(!is_valid_expect_sha256(&"a".repeat(65))); // too long
         assert!(!is_valid_expect_sha256(&"g".repeat(64))); // non-hex
         assert!(!is_valid_expect_sha256(""));
+    }
+
+    #[test]
+    fn hash_gate_codes_reasons_and_verification() {
+        assert_eq!(ApplyFileGate::MissingHashArg.code(), "missing_hash_arg");
+        assert_eq!(
+            ApplyFileGate::MissingHashArg.reason(),
+            "--expect-sha256 is required: pass the 64-character hex sha256 of the proposal file\u{2019}s exact bytes, before --apply-file. Every non-interactive apply is hash-bound."
+        );
+        assert_eq!(ApplyFileGate::HashMismatch.code(), "hash_mismatch");
+        assert!(ApplyFileGate::HashMismatch
+            .reason()
+            .starts_with("The proposal file\u{2019}s bytes do not match the reviewed digest"));
+
+        let digest = "a".repeat(64);
+        // Missing / empty → MissingHashArg.
+        assert_eq!(
+            verify_proposal_hash(&digest, None),
+            Some(ApplyFileGate::MissingHashArg)
+        );
+        assert_eq!(
+            verify_proposal_hash(&digest, Some("")),
+            Some(ApplyFileGate::MissingHashArg)
+        );
+        // Not 64-hex → BadHashArg.
+        assert_eq!(
+            verify_proposal_hash(&digest, Some("zzzz")),
+            Some(ApplyFileGate::BadHashArg)
+        );
+        // Correct → None.
+        assert_eq!(verify_proposal_hash(&digest, Some(&digest)), None);
+        // Mismatch → HashMismatch.
+        assert_eq!(
+            verify_proposal_hash(&digest, Some(&"b".repeat(64))),
+            Some(ApplyFileGate::HashMismatch)
+        );
+        // Uppercase-but-equal is a MISMATCH (byte-faithful: lowercase actual vs exact compare).
+        assert_eq!(
+            verify_proposal_hash(&digest, Some(&"A".repeat(64))),
+            Some(ApplyFileGate::HashMismatch)
+        );
     }
 
     #[test]

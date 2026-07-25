@@ -287,6 +287,73 @@ fn build_overrides(root: &Path, patterns: &[&str]) -> Option<ignore::overrides::
     builder.build().ok()
 }
 
+// ── read-deny across path aliases ────────────────────────────────────────────
+
+/// `esy` — re-express `path` as if it sat under `to` instead of `from`.
+///
+/// `None` when `path` is not under `from` at all. Comparison is
+/// case-insensitive on Windows, matching the platform's own path semantics.
+#[must_use]
+pub fn rebase_path(path: &str, from: &str, to: &str, windows: bool) -> Option<String> {
+    let norm = |s: &str| {
+        if windows {
+            s.to_lowercase()
+        } else {
+            s.to_string()
+        }
+    };
+    let (p, f) = (norm(path), norm(from));
+    if p == f {
+        return Some(to.to_string());
+    }
+    let sep = if windows { '\\' } else { '/' };
+    let prefix = if f.ends_with(sep) {
+        f
+    } else {
+        format!("{f}{sep}")
+    };
+    if !p.starts_with(&prefix) {
+        return None;
+    }
+    Some(format!("{to}{}", &path[from.len()..]))
+}
+
+/// `Smt` — is `path` read-denied under EITHER spelling of a directory that has
+/// two names?
+///
+/// A home directory routinely has two: the one the environment reports and the
+/// one `realpath` resolves it to (`/home/u` vs `/mnt/data/u`, `/var/...` vs
+/// `/private/var/...`). A `permissions.deny` rule is written against one of
+/// them. Checking only the path as given would let the other spelling walk
+/// straight past a rule the user wrote — so the path is rebased between the two
+/// and the deny predicate is asked about each.
+///
+/// `is_denied` is injected because the deny set lives with the session policy,
+/// not with the gatherer.
+#[must_use]
+pub fn denied_under_either_alias(
+    path: &str,
+    dir_a: &str,
+    dir_b: &str,
+    is_denied: &dyn Fn(&str) -> bool,
+    windows: bool,
+) -> bool {
+    if is_denied(path) {
+        return true;
+    }
+    if dir_a == dir_b {
+        return false;
+    }
+    for (from, to) in [(dir_a, dir_b), (dir_b, dir_a)] {
+        if let Some(alias) = rebase_path(path, from, to, windows) {
+            if is_denied(&alias) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 // ── concrete sources ─────────────────────────────────────────────────────────
 
 /// Real-filesystem [`DocSource`] rooted at a project directory.
@@ -982,6 +1049,77 @@ mod tests {
         for title in crate::auto_mode_pregather::SECTION_TITLES {
             assert!(block.text.contains(title), "missing section: {title}");
         }
+    }
+
+    #[test]
+    fn rebasing_moves_a_path_between_two_spellings_of_a_directory() {
+        assert_eq!(
+            rebase_path("/home/u/.ssh/id_rsa", "/home/u", "/mnt/data/u", false).as_deref(),
+            Some("/mnt/data/u/.ssh/id_rsa")
+        );
+        // The directory itself rebases to the other directory.
+        assert_eq!(
+            rebase_path("/home/u", "/home/u", "/mnt/data/u", false).as_deref(),
+            Some("/mnt/data/u")
+        );
+        // Not under `from` at all.
+        assert_eq!(rebase_path("/etc/passwd", "/home/u", "/mnt/data/u", false), None);
+        // A sibling whose name merely starts the same is NOT under it.
+        assert_eq!(rebase_path("/home/user2/x", "/home/u", "/mnt/u", false), None);
+        // Windows compares case-insensitively.
+        assert_eq!(
+            rebase_path(r"C:\Users\U\x", r"c:\users\u", r"D:\alt", true).as_deref(),
+            Some(r"D:\alt\x")
+        );
+    }
+
+    #[test]
+    fn a_deny_rule_blocks_both_spellings_of_a_home_directory() {
+        // The rule is written against the realpath'd spelling; the walk hands
+        // over the environment's spelling. Checking only what it was handed
+        // would walk straight past the user's own rule.
+        let denied = |p: &str| p.starts_with("/mnt/data/u/.ssh");
+        assert!(denied_under_either_alias(
+            "/home/u/.ssh/id_rsa",
+            "/home/u",
+            "/mnt/data/u",
+            &denied,
+            false
+        ));
+        // ...and symmetrically, a rule against the environment spelling blocks
+        // the realpath'd one.
+        let denied = |p: &str| p.starts_with("/home/u/.ssh");
+        assert!(denied_under_either_alias(
+            "/mnt/data/u/.ssh/id_rsa",
+            "/home/u",
+            "/mnt/data/u",
+            &denied,
+            false
+        ));
+        // An unrelated path is not denied by either.
+        assert!(!denied_under_either_alias(
+            "/home/u/work/README.md",
+            "/home/u",
+            "/mnt/data/u",
+            &denied,
+            false
+        ));
+        // When the two spellings coincide, only the direct check applies.
+        let denied = |p: &str| p == "/home/u/secret";
+        assert!(denied_under_either_alias(
+            "/home/u/secret",
+            "/home/u",
+            "/home/u",
+            &denied,
+            false
+        ));
+        assert!(!denied_under_either_alias(
+            "/home/u/ok",
+            "/home/u",
+            "/home/u",
+            &denied,
+            false
+        ));
     }
 
     #[test]

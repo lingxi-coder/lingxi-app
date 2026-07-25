@@ -1,7 +1,7 @@
 use crate::{
     normalize_anthropic_usage, ContentBlock, ContentDelta, LlmError, LlmEvent, LlmRequest,
     LlmResponse, MessageDeltaPayload, ProviderRequest, ProviderResponse, RawStreamFrame,
-    StreamDecoder, ToolDeclaration, WireCodec,
+    ResponseFormat, StreamDecoder, ToolDeclaration, WireCodec,
 };
 
 use std::time::Duration;
@@ -131,12 +131,21 @@ impl WireCodec for AnthropicMessagesCodec {
         provider_request
             .headers
             .insert("content-type".to_string(), "application/json".to_string());
-        // Hosted computer-use tool ⇒ attach the `computer-use-2025-01-24` beta
-        // header (codex `liter-llm` `dynamic_headers` parity).
+        // Beta headers ACCUMULATE, comma-joined, matching the SDK's
+        // `[...betas, "…"].toString()`. Overwriting instead would silently drop
+        // one beta when a request needs two (a computer-use tool AND structured
+        // output).
+        let mut betas: Vec<String> = Vec::new();
         if let Some(beta) = computer_use_beta_header(request) {
+            betas.push(beta);
+        }
+        if request.response_format.is_some() {
+            betas.push(BETA_STRUCTURED_OUTPUTS.to_string());
+        }
+        if !betas.is_empty() {
             provider_request
                 .headers
-                .insert("anthropic-beta".to_string(), beta);
+                .insert("anthropic-beta".to_string(), betas.join(","));
         }
 
         Ok(provider_request)
@@ -177,34 +186,19 @@ impl StreamDecoder for AnthropicStreamDecoder {
 
 /// Prompt-shaped body fields shared by messages and `count_tokens`.
 ///
-/// # Anthropic `response_format` / `output_config` evidence
+/// # Anthropic `response_format` / `output_config`
 ///
-/// The claude-code TypeScript reference encodes structured output via a **beta**
-/// SDK field `output_config: { format: output_format }` sent to
-/// `client.beta.messages.create(...)` together with the `STRUCTURED_OUTPUTS_BETA_HEADER`
-/// header (see `sideQuery.ts:190`).  This is a **beta-only** wire key that requires
-/// the beta SDK path and is NOT part of the stable `POST /v1/messages` API.
+/// Anthropic's structured output is a BETA wire key: the body carries
+/// `output_config: { format }` and the request carries
+/// `anthropic-beta: structured-outputs-2025-12-15`. claude-code sends it via
+/// `client.beta.messages.create` (`sideQuery.ts:190`); the equivalent here is
+/// the same body key plus the beta header, since this codec talks to the REST
+/// endpoint directly.
 ///
-/// `LlmRequest::response_format` is encoded for `OpenAI` (stable `response_format` key).
-/// For Anthropic we **reject** it explicitly — the beta wire key (`output_config`) is
-/// intentionally out of scope here to avoid sending unapproved beta fields.  Callers
-/// that need Anthropic structured output should use the beta SDK path directly.
+/// `JsonObject` is deliberately still rejected: the oracle only ever sends
+/// `{type:"json_schema", schema}`, and there is no evidence the beta accepts a
+/// bare JSON-object mode. Inventing one would be guessing at a wire contract.
 fn base_body(request: &LlmRequest) -> Result<serde_json::Map<String, Value>, LlmError> {
-    if request.response_format.is_some() {
-        return Err(LlmError::InvalidRequest {
-            // Anthropic's structured output uses a beta-only `output_config` key
-            // (sideQuery.ts:190) — not the stable /v1/messages API.  We reject
-            // rather than silently drop or invent the beta wire key.
-            // Evidence: claude-code/src/utils/sideQuery.ts:190
-            //   `...(output_format && { output_config: { format: output_format } })`
-            // sent via `client.beta.messages.create` + STRUCTURED_OUTPUTS_BETA_HEADER.
-            message: "AnthropicMessagesCodec: response_format is not encoded (Anthropic's \
-                      structured output uses a beta-only output_config key, not the stable \
-                      /v1/messages API — see sideQuery.ts:190)"
-                .to_string(),
-        });
-    }
-
     let messages = request
         .messages
         .iter()
@@ -213,6 +207,12 @@ fn base_body(request: &LlmRequest) -> Result<serde_json::Map<String, Value>, Llm
 
     let mut body = serde_json::Map::new();
     body.insert("model".to_string(), Value::String(request.model.clone()));
+    if let Some(format) = &request.response_format {
+        body.insert(
+            "output_config".to_string(),
+            serde_json::json!({ "format": encode_output_format(format)? }),
+        );
+    }
     body.insert("messages".to_string(), Value::Array(messages));
     // Omitted when empty: an empty tools array changes prompt-cache keys.
     if !request.tools.is_empty() {
@@ -488,6 +488,28 @@ fn encode_tool(tool: &ToolDeclaration) -> Value {
 }
 
 /// Anthropic beta header for the hosted computer-use tool. Ported 1:1 from
+/// `structured-outputs-2025-12-15` — the beta that enables `output_config`.
+const BETA_STRUCTURED_OUTPUTS: &str = "structured-outputs-2025-12-15";
+
+/// Encode a [`ResponseFormat`] as Anthropic's `output_config.format`.
+///
+/// # Errors
+/// [`LlmError::InvalidRequest`] for `JsonObject`, which this beta has no
+/// documented encoding for.
+fn encode_output_format(format: &ResponseFormat) -> Result<Value, LlmError> {
+    match format {
+        ResponseFormat::JsonSchema { schema } => Ok(serde_json::json!({
+            "type": "json_schema",
+            "schema": schema,
+        })),
+        ResponseFormat::JsonObject => Err(LlmError::InvalidRequest {
+            message: "AnthropicMessagesCodec: response_format=json_object has no Anthropic \
+                      encoding (the structured-outputs beta defines only json_schema)"
+                .to_string(),
+        }),
+    }
+}
+
 /// codex `liter-llm` `provider/anthropic.rs` (`BETA_COMPUTER_USE`).
 const BETA_COMPUTER_USE: &str = "computer-use-2025-01-24";
 
@@ -844,8 +866,8 @@ fn u32_field(value: &Value, field: &str) -> Result<u32, LlmError> {
 
 #[cfg(test)]
 mod effort_codec_tests {
-    use super::base_body;
-    use crate::LlmRequest;
+    use super::{base_body, AnthropicMessagesCodec};
+    use crate::{LlmError, LlmRequest, ResponseFormat, WireCodec};
     use serde_json::json;
 
     fn req_with_effort(effort: Option<serde_json::Value>) -> LlmRequest {
@@ -886,5 +908,61 @@ mod effort_codec_tests {
             ..Default::default()
         };
         assert!(base_body(&req).unwrap().get("speed").is_none());
+    }
+
+    #[test]
+    fn structured_output_encodes_output_config_and_lights_the_beta() {
+        // Anthropic's structured output is a BETA wire key: `output_config`
+        // in the body plus `anthropic-beta: structured-outputs-2025-12-15`.
+        let schema = json!({"type":"object","properties":{"a":{"type":"string"}}});
+        let req = LlmRequest {
+            model: "claude-opus-4-8".into(),
+            response_format: Some(ResponseFormat::JsonSchema {
+                schema: schema.clone(),
+            }),
+            ..Default::default()
+        };
+        let body = base_body(&req).unwrap();
+        assert_eq!(
+            body["output_config"],
+            json!({"format": {"type": "json_schema", "schema": schema}})
+        );
+
+        let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
+        let encoded = codec.encode_request(&req).unwrap();
+        assert_eq!(
+            encoded.headers.get("anthropic-beta").map(String::as_str),
+            Some("structured-outputs-2025-12-15")
+        );
+
+        // Unset ⇒ neither the key nor the header, so ordinary requests stay
+        // byte-identical.
+        let plain = LlmRequest {
+            model: "claude-opus-4-8".into(),
+            ..Default::default()
+        };
+        assert!(base_body(&plain).unwrap().get("output_config").is_none());
+        assert!(codec
+            .encode_request(&plain)
+            .unwrap()
+            .headers
+            .get("anthropic-beta")
+            .is_none());
+    }
+
+    #[test]
+    fn json_object_mode_is_still_refused_for_anthropic() {
+        // The beta defines only json_schema; inventing a bare JSON-object mode
+        // would be guessing at a wire contract.
+        let req = LlmRequest {
+            model: "claude-opus-4-8".into(),
+            response_format: Some(ResponseFormat::JsonObject),
+            ..Default::default()
+        };
+        let err = base_body(&req).unwrap_err();
+        assert!(
+            matches!(&err, LlmError::InvalidRequest { message } if message.contains("json_object")),
+            "unexpected error: {err:?}"
+        );
     }
 }

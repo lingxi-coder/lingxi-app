@@ -518,6 +518,54 @@ impl crate::auto_mode_producers::ConfigScanSource for FsConfigScanSource {
     }
 }
 
+/// Real-filesystem [`crate::auto_mode_producers::ProjectUsageSource`].
+pub struct FsProjectUsageSource {
+    transcript_dir: PathBuf,
+}
+
+impl FsProjectUsageSource {
+    /// Build a source for this project's transcript directory.
+    #[must_use]
+    pub fn new(transcript_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            transcript_dir: transcript_dir.into(),
+        }
+    }
+}
+
+impl crate::auto_mode_producers::ProjectUsageSource for FsProjectUsageSource {
+    fn transcripts(&self) -> Option<Vec<crate::auto_mode_producers::TranscriptFile>> {
+        use crate::auto_mode_producers::{TranscriptFile, TRANSCRIPT_FILE_LIMIT};
+        // An unreadable directory is "no history", matching the oracle's catch.
+        let entries = std::fs::read_dir(&self.transcript_dir).ok()?;
+        let mut found: Vec<(std::time::SystemTime, TranscriptFile)> = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let Ok(meta) = entry.metadata() else { continue };
+            let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+            found.push((
+                mtime,
+                TranscriptFile {
+                    path,
+                    size: meta.len(),
+                },
+            ));
+        }
+        // Newest first, then capped -- so a busy project's OLD transcripts are
+        // what falls off, not its recent ones.
+        found.sort_by(|a, b| b.0.cmp(&a.0));
+        found.truncate(TRANSCRIPT_FILE_LIMIT);
+        Some(found.into_iter().map(|(_, f)| f).collect())
+    }
+
+    fn read_transcript(&self, path: &Path) -> Option<String> {
+        std::fs::read_to_string(path).ok()
+    }
+}
+
 /// Real-filesystem [`LocalSettingsSource`] for `.claude/settings.local.json`.
 pub struct FsLocalSettingsSource {
     root: PathBuf,
@@ -807,6 +855,11 @@ mod tests {
                 false,
             ))
         }
+        fn project_usage(&self) -> Result<String, ()> {
+            Ok(crate::auto_mode_producers::project_usage_section(
+                &FsProjectUsageSource::new(self.root.join(".transcripts")),
+            ))
+        }
         fn config_scans(&self) -> Result<String, ()> {
             Ok(crate::auto_mode_producers::config_scans_section(
                 &FsConfigScanSource::new(&self.root),
@@ -838,6 +891,20 @@ mod tests {
             "deploy.yaml",
             "logs: s3://acme-logs/x\ndata: gs://acme-data/y\nagain: s3://acme-logs/z\n",
         );
+        // A real transcript for the project-usage producer to mine.
+        write(
+            &root,
+            ".transcripts/session.jsonl",
+            &[
+                serde_json::json!({"message":{"content":[
+                    {"type":"tool_use","name":"Bash","input":{"command":"terraform apply -token=SECRETVALUE"}}
+                ]}}).to_string(),
+                serde_json::json!({"message":{"content":[
+                    {"type":"tool_use","name":"Bash","input":{"command":"curl https://api.acme.io/v1"}}
+                ]}}).to_string(),
+            ]
+            .join("\n"),
+        );
         write(&config, "CLAUDE.md", "user rules");
         write(
             &config,
@@ -862,11 +929,11 @@ mod tests {
             &producers,
         );
 
-        // Only the one ungated producer that is not ported yet degrades; the
-        // five that ARE ported all produced real content.
-        assert_eq!(
-            block.failed_sections,
-            vec!["Recent usage in this project (names only)"]
+        // Every ungated producer is ported now, so nothing degrades.
+        assert!(
+            block.failed_sections.is_empty(),
+            "unexpected failures: {:?}",
+            block.failed_sections
         );
         // ...docs read off the real disk,
         assert!(block.text.contains("#### ~/.lingxi/CLAUDE.md"));
@@ -896,6 +963,14 @@ mod tests {
         assert!(block.text.contains("#### Bucket names in config"));
         assert!(block.text.contains("- acme-logs"));
         assert!(block.text.contains("- acme-data"));
+        // ...and the transcript miner reported NAMES ONLY.
+        assert!(block.text.contains("Transcripts scanned: 1; Bash commands seen: 2"));
+        assert!(block.text.contains("- terraform (1\u{d7})"));
+        assert!(block.text.contains("- api.acme.io (1\u{d7})"));
+        assert!(
+            !block.text.contains("SECRETVALUE"),
+            "a secret in a command line must never reach the block"
+        );
         // ...and the shipped default labels are listed.
         assert!(block.text.contains("#### Default allow labels"));
         assert!(block.text.contains("- Read-Only Operations"));

@@ -12,6 +12,7 @@ use crate::auto_mode_defaults::{
     default_rule_label, DEFAULT_ALLOW_LABELS, DEFAULT_SOFT_DENY_LABELS,
 };
 use crate::auto_mode_facts::DEFAULT_LABELS_GUIDANCE;
+use serde_json::Value;
 use crate::auto_mode_sections::{HEADING_DEFAULT_ALLOW_LABELS, HEADING_DEFAULT_SOFT_DENY_LABELS};
 
 // ── producer read caps ───────────────────────────────────────────────────────
@@ -594,6 +595,294 @@ pub fn repo_facts_section(source: &dyn RepoFactsSource) -> RepoFacts {
         body: parts.join("\n"),
         this_repo_host,
     }
+}
+
+// ── `iay` — recent usage in this project (names only) ────────────────────────
+
+/// `K1d` — how many transcripts are mined, newest first.
+pub const TRANSCRIPT_FILE_LIMIT: usize = 50;
+/// `$sy` — a transcript above this size is skipped, not read.
+pub const TRANSCRIPT_OVERSIZE_BYTES: u64 = 26_214_400;
+/// How many denial reasons are reported.
+pub const DENIAL_REASON_LIMIT: usize = 10;
+
+/// `tay` — the line marker that identifies an auto-mode denial.
+pub const DENIAL_MARKER: &str = "denied by the Claude Code auto mode classifier";
+/// `Y1d` — the line marker that identifies a Bash tool use.
+pub const BASH_TOOL_MARKER: &str = "\"Bash\"";
+
+/// `nay` — commands so common that naming them says nothing about the user.
+pub const STANDARD_CLIS: [&str; 94] = [
+    "ls", "cd", "cat", "rg", "grep", "find", "git", "gh", "node", "bun", "npm", "yarn", "pnpm",
+    "cargo", "go", "make", "just", "docker", "curl", "wget", "echo", "printf", "sed", "awk", "tr",
+    "cut", "sort", "uniq", "xargs", "jq", "tee", "head", "tail", "wc", "which", "date", "diff",
+    "touch", "ln", "chmod", "mkdir", "cp", "mv", "rm", "ps", "kill", "pgrep", "pkill", "sleep",
+    "stat", "env", "set", "export", "unset", "read", "source", "command", "ssh", "scp", "tar",
+    "zip", "unzip", "vim", "nano", "less", "more", "man", "tmux", "sudo", "bash", "sh", "zsh",
+    "if", "then", "else", "elif", "fi", "for", "while", "until", "do", "done", "case", "esac",
+    "function", "return", "exit", "true", "false", "python", "pip", "python3", "pip3", "kubectl",
+];
+
+/// `ray` — the denial reason inside a tool result.
+#[must_use]
+pub fn denial_reason_regex() -> regex::Regex {
+    re(r"denied by the Claude Code auto mode classifier\. Reason: ([\w][\w ,'-]{0,59})")
+}
+/// URLs inside a command line.
+#[must_use]
+pub fn command_url_regex() -> regex::Regex {
+    re(r#"(https?://[^\s"'`]+)"#)
+}
+/// `-n <namespace>` flags.
+#[must_use]
+pub fn k8s_namespace_regex() -> regex::Regex {
+    re(r"-n\s+([a-z][a-z0-9-]{2,})")
+}
+/// The command word at the head of a line.
+#[must_use]
+pub fn command_word_regex() -> regex::Regex {
+    re(r"^([a-z][a-z0-9_-]{1,20})\b")
+}
+/// `sudo` / `timeout N` prefixes stripped before the command word is read.
+#[must_use]
+pub fn command_prefix_regex() -> regex::Regex {
+    re(r"^(sudo |timeout [0-9]+[smh]? )+")
+}
+/// `eay` — hosts too generic to be worth reporting.
+#[must_use]
+pub fn boring_host_regex() -> regex::Regex {
+    re(r"^(127\.0\.0\.1|localhost|.*jsdelivr.*|.*unpkg.*|example\.com)$")
+}
+
+/// `Wi(s, "\n")` — everything before the first newline.
+#[must_use]
+pub fn first_line(s: &str) -> &str {
+    s.split_once('\n').map_or(s, |(head, _)| head)
+}
+
+/// `qf` — is this host github.com, ignoring any number of `www.` prefixes?
+#[must_use]
+pub fn is_github_host(host: &str) -> bool {
+    let mut h = host.to_lowercase();
+    while let Some(rest) = h.strip_prefix("www.") {
+        h = rest.to_string();
+    }
+    h == "github.com"
+}
+
+/// `oay` — is this a command so standard it carries no signal?
+#[must_use]
+pub fn is_standard_cli(word: &str) -> bool {
+    if STANDARD_CLIS.contains(&word) {
+        return true;
+    }
+    // `^(python[0-9.]*|pip[0-9]*)$`
+    if let Some(rest) = word.strip_prefix("python") {
+        return rest.chars().all(|c| c.is_ascii_digit() || c == '.');
+    }
+    if let Some(rest) = word.strip_prefix("pip") {
+        return rest.chars().all(|c| c.is_ascii_digit());
+    }
+    false
+}
+
+/// `gFt` — count occurrences, most frequent first, ties broken by name.
+#[must_use]
+pub fn frequency(items: &[String], limit: usize) -> Vec<(String, usize)> {
+    let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for item in items {
+        if item.len() <= 256 {
+            *counts.entry(item.as_str()).or_insert(0) += 1;
+        }
+    }
+    let mut out: Vec<(String, usize)> = counts
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+    out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    out.truncate(limit);
+    out
+}
+
+/// One transcript file for this project.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranscriptFile {
+    /// Absolute path.
+    pub path: std::path::PathBuf,
+    /// Size in bytes, used for the oversize skip.
+    pub size: u64,
+}
+
+/// Supplies this project's transcripts.
+pub trait ProjectUsageSource {
+    /// The project's `.jsonl` transcripts, NEWEST FIRST and already capped at
+    /// [`TRANSCRIPT_FILE_LIMIT`]. `None` when the project has no transcript
+    /// directory at all.
+    fn transcripts(&self) -> Option<Vec<TranscriptFile>>;
+    /// Read one transcript whole.
+    fn read_transcript(&self, path: &std::path::Path) -> Option<String>;
+}
+
+/// What one pass over the transcripts collected.
+struct MinedUsage {
+    commands: Vec<String>,
+    denials: Vec<String>,
+    skipped: usize,
+    scanned: usize,
+}
+
+fn mine_transcripts(source: &dyn ProjectUsageSource, files: &[TranscriptFile]) -> MinedUsage {
+    let denial_re = denial_reason_regex();
+    let mut commands = Vec::new();
+    let mut denials = Vec::new();
+    let mut skipped = 0usize;
+
+    for file in files {
+        if file.size > TRANSCRIPT_OVERSIZE_BYTES {
+            skipped += 1;
+            continue;
+        }
+        let Some(text) = source.read_transcript(&file.path) else {
+            continue;
+        };
+        for line in text.split('\n') {
+            // Cheap prefilter before paying for a JSON parse.
+            let has_bash = line.contains(BASH_TOOL_MARKER);
+            let has_denial = line.contains(DENIAL_MARKER);
+            if !has_bash && !has_denial {
+                continue;
+            }
+            let Ok(parsed) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            let Some(blocks) = parsed
+                .get("message")
+                .and_then(|m| m.get("content"))
+                .and_then(Value::as_array)
+            else {
+                continue;
+            };
+            for block in blocks {
+                let kind = block.get("type").and_then(Value::as_str).unwrap_or("");
+                if kind == "tool_use"
+                    && block.get("name").and_then(Value::as_str) == Some("Bash")
+                {
+                    if let Some(cmd) = block
+                        .get("input")
+                        .and_then(|i| i.get("command"))
+                        .and_then(Value::as_str)
+                    {
+                        // Only the FIRST LINE of the command is kept.
+                        commands.push(first_line(cmd).to_string());
+                    }
+                }
+                if has_denial && kind == "tool_result" {
+                    let body = match block.get("content") {
+                        Some(Value::String(s)) => s.clone(),
+                        None => String::new(),
+                        Some(other) => other.to_string(),
+                    };
+                    denials.extend(collect_captures(&body, &denial_re));
+                }
+            }
+        }
+    }
+    MinedUsage {
+        scanned: files.len() - skipped,
+        commands,
+        denials,
+        skipped,
+    }
+}
+
+/// `iay` — the "Recent usage in this project (names only)" section body.
+///
+/// NAMES ONLY is the whole contract: raw command lines never leave this
+/// function. What escapes is host names, bucket names, namespaces, the leading
+/// command word, and denial reasons — each counted, none quoted.
+#[must_use]
+pub fn project_usage_section(source: &dyn ProjectUsageSource) -> String {
+    use crate::auto_mode_facts as facts;
+    use crate::auto_mode_sections as sections;
+
+    let Some(files) = source.transcripts() else {
+        return facts::NO_TRANSCRIPT_HISTORY.to_string();
+    };
+    let mined = mine_transcripts(source, &files);
+
+    let joined = mined.commands.join("\n");
+    let boring = boring_host_regex();
+    let hosts: Vec<String> = collect_captures(&joined, &command_url_regex())
+        .iter()
+        .filter_map(|u| registry_host(u))
+        .filter(|h| !boring.is_match(h) && !is_github_host(h))
+        .collect();
+    let buckets = extract_bucket_names(&joined);
+    let namespaces = collect_captures(&joined, &k8s_namespace_regex());
+
+    let prefix_re = command_prefix_regex();
+    let word_re = command_word_regex();
+    let clis: Vec<String> = mined
+        .commands
+        .iter()
+        .map(|c| prefix_re.replace(c, "").to_string())
+        .filter_map(|c| {
+            word_re
+                .captures(&c)
+                .and_then(|m| m.get(1).map(|g| g.as_str().to_string()))
+        })
+        .filter(|w| !is_standard_cli(w))
+        .collect();
+
+    let counted = |items: &[String], limit: usize| {
+        frequency(items, limit)
+            .into_iter()
+            .map(|(name, n)| format!("- {name} ({n}\u{d7})"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let section = |heading: &str, items: &[String], limit: usize| {
+        if items.is_empty() {
+            String::new()
+        } else {
+            format!("{heading}{}", counted(items, limit))
+        }
+    };
+
+    let skipped_note = if mined.skipped > 0 {
+        format!(" ({}{}", mined.skipped, facts::SKIPPED_AS_OVERSIZED_SUFFIX)
+    } else {
+        String::new()
+    };
+
+    vec![
+        format!(
+            "{}{}{skipped_note}{}{}",
+            facts::TRANSCRIPTS_SCANNED_PREFIX,
+            mined.scanned,
+            facts::BASH_COMMANDS_SEEN_INFIX,
+            mined.commands.len()
+        ),
+        section(sections::HEADING_HOSTS_CONTACTED, &hosts, FLAGGED_LIST_CAP),
+        section(
+            sections::HEADING_CLOUD_BUCKETS_TOUCHED,
+            &buckets,
+            FLAGGED_LIST_CAP,
+        ),
+        section(
+            sections::HEADING_K8S_NAMESPACES,
+            &namespaces,
+            FLAGGED_LIST_CAP,
+        ),
+        section(sections::HEADING_NONSTANDARD_CLIS, &clis, FLAGGED_LIST_CAP),
+        section(
+            sections::HEADING_DENIAL_REASONS,
+            &mined.denials,
+            DENIAL_REASON_LIMIT,
+        ),
+        facts::PROJECT_USAGE_SCOPE_NOTE.to_string(),
+    ]
+    .join("\n")
 }
 
 // ── `gay` — config scans (names only) ────────────────────────────────────────
@@ -1777,6 +2066,182 @@ mod tests {
         assert_eq!(SUBPROCESS_TIMEOUT_MS, 4_000);
         assert_eq!(REMOTE_LINE_CAP, 40);
         assert_eq!(CONTRIBUTING_READ_CAP, 2_000);
+    }
+
+    // ── `iay` ────────────────────────────────────────────────────────────────
+
+    struct FakeTranscripts {
+        files: Option<Vec<TranscriptFile>>,
+        bodies: std::collections::HashMap<String, String>,
+    }
+    impl ProjectUsageSource for FakeTranscripts {
+        fn transcripts(&self) -> Option<Vec<TranscriptFile>> {
+            self.files.clone()
+        }
+        fn read_transcript(&self, path: &std::path::Path) -> Option<String> {
+            self.bodies.get(&path.display().to_string()).cloned()
+        }
+    }
+
+    fn bash_line(cmd: &str) -> String {
+        serde_json::json!({
+            "message": { "content": [
+                { "type": "tool_use", "name": "Bash", "input": { "command": cmd } }
+            ]}
+        })
+        .to_string()
+    }
+    fn denial_line(reason: &str) -> String {
+        serde_json::json!({
+            "message": { "content": [
+                { "type": "tool_result",
+                  "content": format!("denied by the Claude Code auto mode classifier. Reason: {reason}") }
+            ]}
+        })
+        .to_string()
+    }
+    fn transcripts(lines: &[String]) -> FakeTranscripts {
+        let mut bodies = std::collections::HashMap::new();
+        bodies.insert("/t/a.jsonl".to_string(), lines.join("\n"));
+        FakeTranscripts {
+            files: Some(vec![TranscriptFile {
+                path: "/t/a.jsonl".into(),
+                size: 10,
+            }]),
+            bodies,
+        }
+    }
+
+    #[test]
+    fn a_project_with_no_transcripts_says_so() {
+        let src = FakeTranscripts {
+            files: None,
+            bodies: std::collections::HashMap::new(),
+        };
+        assert_eq!(project_usage_section(&src), "_no transcript history for this project_");
+    }
+
+    #[test]
+    fn usage_reports_names_and_counts_never_the_command_lines() {
+        // NAMES ONLY is the contract: what escapes is hosts, buckets,
+        // namespaces, the leading command word and denial reasons -- counted,
+        // never quoted.
+        let src = transcripts(&[
+            bash_line("terraform apply -auto-approve --token=SECRETVALUE"),
+            bash_line("terraform plan"),
+            bash_line("curl https://api.acme.io/v1/things"),
+            bash_line("aws s3 cp x s3://acme-logs/y"),
+            bash_line("kubectl get pods -n prod-web"),
+            bash_line("ls -la"),
+        ]);
+        let body = project_usage_section(&src);
+
+        assert!(body.contains("Transcripts scanned: 1; Bash commands seen: 6"));
+        assert!(body.contains("#### Hosts contacted\n- api.acme.io (1\u{d7})"));
+        assert!(body.contains("#### Cloud buckets touched\n- acme-logs (1\u{d7})"));
+        assert!(body.contains("#### k8s namespaces (-n flags)\n- prod-web (1\u{d7})"));
+        // terraform is non-standard and appeared twice; ls/curl/aws/kubectl are
+        // standard and are not reported.
+        assert!(body.contains("- terraform (2\u{d7})"));
+        assert!(!body.contains("- ls ("));
+        assert!(!body.contains("- curl ("));
+        // The secret that rode along in a command line never reaches the block.
+        assert!(!body.contains("SECRETVALUE"));
+        assert!(!body.contains("-auto-approve"));
+    }
+
+    #[test]
+    fn only_the_first_line_of_a_command_is_mined() {
+        // A heredoc or multi-line script must not drag its body into the block.
+        let src = transcripts(&[bash_line(
+            "terraform apply <<EOF\nSECRET_IN_BODY=1\ncurl https://leak.example\nEOF",
+        )]);
+        let body = project_usage_section(&src);
+        assert!(body.contains("- terraform (1\u{d7})"));
+        assert!(!body.contains("SECRET_IN_BODY"));
+        assert!(!body.contains("leak.example"));
+    }
+
+    #[test]
+    fn denial_reasons_are_collected_and_capped() {
+        let mut lines: Vec<String> = (0..3).map(|_| denial_line("Production Deploy")).collect();
+        lines.push(denial_line("Credential Leakage"));
+        let src = transcripts(&lines);
+        let body = project_usage_section(&src);
+        assert!(body.contains("#### Recent auto-mode denial reasons"));
+        assert!(body.contains("- Production Deploy (3\u{d7})"));
+        assert!(body.contains("- Credential Leakage (1\u{d7})"));
+    }
+
+    #[test]
+    fn oversized_transcripts_are_skipped_and_counted() {
+        let mut bodies = std::collections::HashMap::new();
+        bodies.insert("/t/small.jsonl".to_string(), bash_line("terraform apply"));
+        let src = FakeTranscripts {
+            files: Some(vec![
+                TranscriptFile { path: "/t/small.jsonl".into(), size: 10 },
+                TranscriptFile {
+                    path: "/t/huge.jsonl".into(),
+                    size: TRANSCRIPT_OVERSIZE_BYTES + 1,
+                },
+            ]),
+            bodies,
+        };
+        let body = project_usage_section(&src);
+        // The skip is REPORTED, so a partial scan cannot pass for a full one.
+        assert!(body.contains("Transcripts scanned: 1 (1 skipped as oversized); Bash commands seen: 1"));
+    }
+
+    #[test]
+    fn boring_and_github_hosts_are_not_reported() {
+        let src = transcripts(&[
+            bash_line("curl https://localhost:3000/x"),
+            bash_line("curl https://github.com/acme/app"),
+            bash_line("curl https://www.github.com/acme/app"),
+            bash_line("curl https://cdn.jsdelivr.net/npm/x"),
+            bash_line("curl https://api.acme.io/v1"),
+        ]);
+        let body = project_usage_section(&src);
+        assert!(body.contains("- api.acme.io"));
+        for hidden in ["localhost", "github.com", "jsdelivr"] {
+            assert!(!body.contains(hidden), "{hidden} must not be reported");
+        }
+    }
+
+    #[test]
+    fn standard_clis_are_filtered_including_versioned_python() {
+        assert!(is_standard_cli("git"));
+        assert!(is_standard_cli("python"));
+        assert!(is_standard_cli("python3"));
+        assert!(is_standard_cli("python3.12"));
+        assert!(is_standard_cli("pip3"));
+        assert!(!is_standard_cli("terraform"));
+        assert!(!is_standard_cli("pythonic"));
+        assert_eq!(STANDARD_CLIS.len(), 94);
+    }
+
+    #[test]
+    fn frequency_sorts_by_count_then_name() {
+        let items: Vec<String> = ["b", "a", "b", "c", "a", "b"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        assert_eq!(
+            frequency(&items, 10),
+            vec![("b".into(), 3), ("a".into(), 2), ("c".into(), 1)]
+        );
+        assert_eq!(frequency(&items, 2).len(), 2);
+    }
+
+    #[test]
+    fn usage_caps_match_the_oracle() {
+        assert_eq!(TRANSCRIPT_FILE_LIMIT, 50);
+        assert_eq!(TRANSCRIPT_OVERSIZE_BYTES, 26_214_400);
+        assert_eq!(DENIAL_REASON_LIMIT, 10);
+        assert_eq!(first_line("a\nb"), "a");
+        assert_eq!(first_line("a"), "a");
+        assert!(is_github_host("www.www.github.com"));
+        assert!(!is_github_host("notgithub.com"));
     }
 
     // ── `gay` ────────────────────────────────────────────────────────────────

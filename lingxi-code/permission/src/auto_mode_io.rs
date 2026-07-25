@@ -31,8 +31,8 @@ use std::time::{Duration, Instant};
 
 use crate::auto_mode_producers::{
     DocSource, LocalSettingsSource, RepoFactsSource, SettingsReconSource, DOC_GLOB_LIMIT,
-    DOC_GLOB_MAX_DEPTH, DOC_READ_CAP_CLAUDE_MD, GIT_HARDENING_FLAGS,
-    SUBPROCESS_TIMEOUT_MS,
+    DOC_GLOB_MAX_DEPTH, DOC_READ_CAP_CLAUDE_MD, GIT_HARDENING_FLAGS, SUBPROCESS_TIMEOUT_MS,
+    WalkLimit,
 };
 
 /// `s$s` — the longest path `eNd` will keep.
@@ -553,6 +553,10 @@ pub struct FsReconProducers {
     user_config_dir: PathBuf,
     transcript_dir: PathBuf,
     classify_all_shell: bool,
+    /// Q2 = `all` — whether the org repo split may be fetched.
+    org_split: bool,
+    /// Whether outbound `gh` traffic is permitted at all.
+    nonessential_traffic_allowed: bool,
 }
 
 impl FsReconProducers {
@@ -570,7 +574,24 @@ impl FsReconProducers {
             user_config_dir: user_config_dir.into(),
             transcript_dir: transcript_dir.into(),
             classify_all_shell,
+            org_split: false,
+            nonessential_traffic_allowed: true,
         }
+    }
+
+    /// Set the Q2 = `all` org-split gate. Defaults to closed, so a caller that
+    /// forgets to thread the answer through fetches LESS, not more.
+    #[must_use]
+    pub fn with_org_split(mut self, allowed: bool) -> Self {
+        self.org_split = allowed;
+        self
+    }
+
+    /// Set whether outbound `gh` traffic is allowed at all.
+    #[must_use]
+    pub fn with_nonessential_traffic(mut self, allowed: bool) -> Self {
+        self.nonessential_traffic_allowed = allowed;
+        self
     }
 }
 
@@ -609,6 +630,65 @@ impl crate::auto_mode_pregather::ReconProducers for FsReconProducers {
     fn default_labels(&self) -> Result<String, ()> {
         Ok(crate::auto_mode_producers::default_labels_section())
     }
+    fn shell_history(&self) -> Result<String, ()> {
+        Ok(crate::auto_mode_producers::shell_history_section(
+            &FsShellHistorySource::from_process_env(),
+        ))
+    }
+    fn home_repos(&self) -> Result<String, ()> {
+        let home = home_dir().ok_or(())?;
+        let (repos, limit) = walk_home_repos(&home);
+        Ok(crate::auto_mode_producers::home_repos_body(&repos, limit))
+    }
+    fn all_projects_usage(&self) -> Result<String, ()> {
+        // The transcript dir is `<projects_root>/<this project>`; the sweep
+        // covers its siblings and excludes this one.
+        let projects_root = self.transcript_dir.parent().ok_or(())?;
+        Ok(crate::auto_mode_producers::all_projects_usage_section(
+            &FsAllProjectsSource::new(projects_root, Some(self.transcript_dir.clone())),
+        ))
+    }
+    fn repo_visibility(&self) -> Result<String, ()> {
+        let outcome = crate::auto_mode_producers::repo_visibility_section(
+            &GhCli::new(&self.root),
+            self.org_split,
+            self.nonessential_traffic_allowed,
+        );
+        if outcome.failures.any() {
+            telemetry::emit_auto_mode_pregather("visibility_gh_failed");
+        }
+        if outcome.org_list_parse_failed {
+            telemetry::emit_auto_mode_pregather("org_list_gh_parse_failed");
+        }
+        Ok(outcome.body)
+    }
+    fn sibling_docs(&self) -> Result<String, ()> {
+        use crate::auto_mode_producers::GhSource;
+        let gh = GhCli::new(&self.root);
+        // The org and this repo's name come from the SAME origin remote the
+        // visibility section parses, so an unrecognised remote yields no
+        // sibling lookups rather than a guessed org.
+        let reduced = gh
+            .origin_remote()
+            .and_then(|url| crate::auto_mode_producers::remote_to_host_org_repo(url.trim(), None))
+            .ok_or(())?;
+        let parts: Vec<&str> = reduced.split('/').collect();
+        let [_, org, repo] = parts.as_slice() else {
+            return Err(());
+        };
+        Ok(crate::auto_mode_producers::sibling_docs_body(
+            org, repo, &gh,
+        ))
+    }
+}
+
+/// The user's home directory, from the process environment.
+fn home_dir() -> Option<PathBuf> {
+    std::env::var("HOME")
+        .ok()
+        .or_else(|| std::env::var("USERPROFILE").ok())
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from)
 }
 
 // ── concrete sources ─────────────────────────────────────────────────────────
@@ -985,6 +1065,545 @@ impl SettingsReconSource for FsSettingsReconSource {
     }
     fn classify_all_shell(&self) -> bool {
         self.classify_all_shell
+    }
+}
+
+/// Real-subprocess [`GhSource`] — the `gh` calls `x1d` and `Xsy` make.
+///
+/// Every invocation runs with [`gh_env_overrides`] applied. That is the
+/// security-relevant part: it pins `GH_HOST` to github.com, always clears the
+/// ENTERPRISE tokens, and — when the user's own `GH_HOST` named a DIFFERENT
+/// server — clears `GH_TOKEN`/`GITHUB_TOKEN` too, because those credentials
+/// belong to that server and this call is about to go to github.com.
+pub struct GhCli {
+    root: PathBuf,
+    overrides: Vec<(&'static str, Option<String>)>,
+}
+
+impl GhCli {
+    /// Build a runner for the repository at `root`, resolving the token
+    /// overrides against the caller's `GH_HOST`.
+    #[must_use]
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        let current_host = std::env::var("GH_HOST").ok();
+        Self {
+            root: root.into(),
+            overrides: crate::auto_mode_producers::gh_env_overrides(current_host.as_deref()),
+        }
+    }
+
+    fn command(&self, program: &str) -> Command {
+        let mut cmd = Command::new(program);
+        for (key, value) in &self.overrides {
+            match value {
+                Some(v) => cmd.env(key, v),
+                None => cmd.env_remove(key),
+            };
+        }
+        cmd
+    }
+}
+
+impl crate::auto_mode_producers::GhSource for GhCli {
+    fn origin_remote(&self) -> Option<String> {
+        let mut cmd = Command::new("git");
+        cmd.arg("-C").arg(&self.root);
+        cmd.args(GIT_HARDENING_FLAGS);
+        cmd.args(["remote", "get-url", "origin"]);
+        let (code, stdout, _) = run_capped(
+            cmd,
+            Duration::from_millis(crate::auto_mode_producers::GH_TIMEOUT_MS),
+        )?;
+        (code == 0).then_some(stdout)
+    }
+
+    fn gh(&self, args: &[&str], max_buffer: usize) -> crate::auto_mode_producers::GhResult {
+        use crate::auto_mode_producers::{GhResult, GH_TIMEOUT_MS};
+        let mut cmd = self.command("gh");
+        cmd.args(args);
+        match run_capped_full(cmd, Duration::from_millis(GH_TIMEOUT_MS)) {
+            Some((code, mut stdout, stderr, _timed_out)) => {
+                stdout.truncate(
+                    stdout
+                        .char_indices()
+                        .map(|(i, _)| i)
+                        .take_while(|i| *i < max_buffer)
+                        .last()
+                        .map_or(0, |i| i + 1),
+                );
+                GhResult {
+                    code,
+                    stdout,
+                    stderr,
+                }
+            }
+            // `gh` not on PATH spawns nothing. 127 is the shell's own
+            // "command not found", which `gh_is_unavailable` reads as an
+            // ordinary environment fact rather than a breakage worth recording.
+            None => GhResult {
+                code: 127,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        }
+    }
+}
+
+impl crate::auto_mode_producers::SiblingDocsSource for GhCli {
+    fn list_org_repos(&self, org: &str) -> Option<String> {
+        use crate::auto_mode_producers::GhSource;
+        let res = self.gh(
+            &[
+                "repo",
+                "list",
+                org,
+                "--limit",
+                "100",
+                "--json",
+                "name,visibility,pushedAt",
+            ],
+            256_000,
+        );
+        (res.code == 0).then_some(res.stdout)
+    }
+
+    fn fetch_doc(&self, org: &str, repo: &str, doc: &str) -> Option<String> {
+        use crate::auto_mode_producers::{is_valid_repo_name, GhSource};
+        // `org` and `repo` are interpolated into an API path, so both must
+        // survive the name shape before the call is made — `..` here would be
+        // path traversal against the GitHub API.
+        if !is_valid_repo_name(org) || !is_valid_repo_name(repo) {
+            return None;
+        }
+        let res = self.gh(
+            &[
+                "api",
+                &format!("repos/{org}/{repo}/contents/{doc}"),
+                "--jq",
+                ".content",
+            ],
+            262_144,
+        );
+        if res.code != 0 {
+            return None;
+        }
+        // `contents` returns base64 with embedded newlines.
+        let packed: String = res.stdout.split_whitespace().collect();
+        if packed.is_empty() {
+            return None;
+        }
+        base64_decode(&packed).and_then(|b| String::from_utf8(b).ok())
+    }
+}
+
+/// Decode standard base64, ignoring padding. `None` on any invalid input.
+fn base64_decode(input: &str) -> Option<Vec<u8>> {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut acc: u32 = 0;
+    let mut bits = 0u32;
+    let mut out = Vec::with_capacity(input.len() * 3 / 4);
+    for byte in input.bytes() {
+        if byte == b'=' {
+            break;
+        }
+        let value = u32::try_from(TABLE.iter().position(|c| *c == byte)?).ok()?;
+        acc = (acc << 6) | value;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((acc >> bits) & 0xFF) as u8);
+        }
+    }
+    Some(out)
+}
+
+/// `j1d`'s walk — find git checkouts under the home directory.
+///
+/// Returns the repos found and HOW the walk ended. The [`WalkLimit`] is not a
+/// diagnostic: a walk that stopped at a budget saw a prefix of the home
+/// directory, and reporting it as a finished walk would let a proposal conclude
+/// "the user has 20 repos" from a truncated sweep.
+///
+/// What is read is deliberately tiny — only each repo's `config` for its remote
+/// URLs, never any tracked content. A repo whose gitdir points OUTSIDE the home
+/// directory is recorded and skipped rather than followed, so a planted `.git`
+/// file cannot redirect the walk into an arbitrary path.
+#[must_use]
+pub fn walk_home_repos(home: &Path) -> (Vec<crate::auto_mode_producers::HomeRepo>, WalkLimit) {
+    use crate::auto_mode_producers::{
+        home_relative, is_skipped_walk_dir, HomeRepo, HOME_WALK_MAX_DEPTH, HOME_WALK_MAX_DIRS,
+        HOME_WALK_MAX_REPOS, HOME_WALK_TIMEOUT_MS,
+    };
+
+    let windows = cfg!(windows);
+    let macos = cfg!(target_os = "macos");
+    let home_str = home.to_string_lossy().into_owned();
+
+    if is_network_path(&home_str) {
+        return (Vec::new(), WalkLimit::NetworkHome);
+    }
+    if std::fs::read_dir(home).is_err() {
+        return (Vec::new(), WalkLimit::HomeUnreadable);
+    }
+
+    let started = Instant::now();
+    let deadline = Duration::from_millis(HOME_WALK_TIMEOUT_MS);
+    let mut repos: Vec<HomeRepo> = Vec::new();
+    let mut limit = WalkLimit::None;
+    let mut visited = 0usize;
+    // Breadth-first, so the shallow (and far likelier) checkouts are found
+    // before a budget runs out deep in one subtree.
+    let mut queue: std::collections::VecDeque<(PathBuf, usize)> =
+        std::collections::VecDeque::from([(home.to_path_buf(), 0usize)]);
+
+    while let Some((dir, depth)) = queue.pop_front() {
+        if started.elapsed() >= deadline {
+            limit = WalkLimit::Timeout;
+            break;
+        }
+        if visited >= HOME_WALK_MAX_DIRS {
+            limit = WalkLimit::VisitBudget;
+            break;
+        }
+        visited += 1;
+
+        let git_marker = dir.join(".git");
+        if let Ok(meta) = std::fs::symlink_metadata(&git_marker) {
+            if repos.len() >= HOME_WALK_MAX_REPOS {
+                limit = WalkLimit::RepoCap;
+                break;
+            }
+            let path = home_relative(&dir.to_string_lossy(), &home_str, windows);
+            let (remotes, note) = read_repo_remotes(&git_marker, &meta, &home_str, windows);
+            repos.push(HomeRepo {
+                path,
+                remotes,
+                note,
+            });
+            // A repository is a leaf: its own subdirectories are its working
+            // tree, not more checkouts worth enumerating.
+            continue;
+        }
+
+        if depth >= HOME_WALK_MAX_DEPTH {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            // Never traverse a symlink: it can point anywhere, including back
+            // into the tree, and following one would make the budget meaningless.
+            let Ok(meta) = entry.metadata() else { continue };
+            if !meta.is_dir() {
+                continue;
+            }
+            let Ok(link) = entry.file_type() else { continue };
+            if link.is_symlink() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if is_skipped_walk_dir(&name, windows, macos) {
+                continue;
+            }
+            queue.push_back((entry.path(), depth + 1));
+        }
+    }
+
+    // Hitting the cap on the LAST repo is not a truncated walk unless there was
+    // more to see; the queue still holding work is what makes it one.
+    if limit == WalkLimit::None && repos.len() >= HOME_WALK_MAX_REPOS && !queue.is_empty() {
+        limit = WalkLimit::RepoCap;
+    }
+    (repos, limit)
+}
+
+/// Read one repo's reduced remotes from its `config`.
+///
+/// `.git` is a directory in a normal checkout and a FILE holding a
+/// `gitdir: <path>` pointer in a worktree or submodule. The pointer is followed
+/// only when it stays under the home directory — the same containment the walk
+/// itself respects.
+fn read_repo_remotes(
+    git_marker: &Path,
+    meta: &std::fs::Metadata,
+    home: &str,
+    windows: bool,
+) -> (
+    Vec<String>,
+    Option<crate::auto_mode_producers::HomeRepoNote>,
+) {
+    use crate::auto_mode_producers::{
+        config_remotes, is_strictly_under, parse_gitdir_pointer, HomeRepoNote,
+    };
+
+    let git_dir = if meta.is_dir() {
+        git_marker.to_path_buf()
+    } else {
+        let Some(text) = secure_read_capped(git_marker, GITDIR_POINTER_CAP, false) else {
+            return (Vec::new(), Some(HomeRepoNote::NoRemote));
+        };
+        let Some(pointer) = parse_gitdir_pointer(text.trim()) else {
+            return (Vec::new(), Some(HomeRepoNote::NoRemote));
+        };
+        let resolved = if Path::new(&pointer).is_absolute() {
+            PathBuf::from(&pointer)
+        } else {
+            git_marker
+                .parent()
+                .unwrap_or(Path::new("."))
+                .join(&pointer)
+        };
+        let canonical = std::fs::canonicalize(&resolved).unwrap_or(resolved);
+        if !is_strictly_under(&canonical.to_string_lossy(), home, windows) {
+            return (Vec::new(), Some(HomeRepoNote::GitdirOutsideHome));
+        }
+        canonical
+    };
+
+    // A linked worktree's `config` lives in the COMMON dir; `commondir` points
+    // at it. Without this a worktree reports no remotes even though it has them.
+    let config_dir = match secure_read_capped(&git_dir.join("commondir"), GITDIR_POINTER_CAP, false)
+    {
+        Some(text) => {
+            let rel = text.trim();
+            let joined = if Path::new(rel).is_absolute() {
+                PathBuf::from(rel)
+            } else {
+                git_dir.join(rel)
+            };
+            let canonical = std::fs::canonicalize(&joined).unwrap_or(joined);
+            if is_strictly_under(&canonical.to_string_lossy(), home, windows) {
+                canonical
+            } else {
+                return (Vec::new(), Some(HomeRepoNote::GitdirOutsideHome));
+            }
+        }
+        None => git_dir,
+    };
+
+    match secure_read_capped(&config_dir.join("config"), GIT_CONFIG_READ_CAP, false) {
+        Some(config) => {
+            let remotes = config_remotes(&config, None);
+            if remotes.is_empty() {
+                (Vec::new(), Some(HomeRepoNote::NoRemote))
+            } else {
+                (remotes, None)
+            }
+        }
+        None => (Vec::new(), Some(HomeRepoNote::NoRemote)),
+    }
+}
+
+/// A `.git` pointer file / `commondir` is one short line.
+const GITDIR_POINTER_CAP: usize = 4_096;
+/// A repo `config` worth parsing for remote URLs.
+const GIT_CONFIG_READ_CAP: usize = 262_144;
+
+/// Real-filesystem [`AllProjectsSource`] — the `W1d` sweep over every project's
+/// transcripts under `<config>/projects/`.
+///
+/// Every budget this walk can hit (stat cap, file limit, per-file cap,
+/// aggregate cap, deadline) is RECORDED on the scan rather than silently
+/// applied. A sweep that saw half the projects must not read as "these are all
+/// the projects", so each shortfall renders its own line.
+pub struct FsAllProjectsSource {
+    projects_root: PathBuf,
+    /// This project's own transcript directory, excluded from the sweep — it is
+    /// already reported by the `iay` section, and counting it twice would
+    /// inflate the cross-project signal with local noise.
+    exclude: Option<PathBuf>,
+}
+
+impl FsAllProjectsSource {
+    /// Build a sweep over `projects_root`, skipping `exclude`.
+    #[must_use]
+    pub fn new(projects_root: impl Into<PathBuf>, exclude: Option<PathBuf>) -> Self {
+        Self {
+            projects_root: projects_root.into(),
+            exclude,
+        }
+    }
+}
+
+impl crate::auto_mode_producers::AllProjectsSource for FsAllProjectsSource {
+    fn scan(&self) -> Option<crate::auto_mode_producers::AllProjectsScan> {
+        use crate::auto_mode_producers::{
+            AllProjectsScan, ALL_PROJECTS_AGGREGATE_CAP, ALL_PROJECTS_DEADLINE_MS,
+            ALL_PROJECTS_FILE_LIMIT, ALL_PROJECTS_PER_FILE_CAP, ALL_PROJECTS_STAT_CAP,
+        };
+
+        let started = std::time::Instant::now();
+        let deadline = std::time::Duration::from_millis(ALL_PROJECTS_DEADLINE_MS);
+        // An absent or unreadable projects root is "not queryable", not "no
+        // usage" — the producer renders the unavailable marker for `None`.
+        let project_dirs = std::fs::read_dir(&self.projects_root).ok()?;
+
+        let mut scan = AllProjectsScan::default();
+        let mut candidates: Vec<(std::time::SystemTime, PathBuf, u64)> = Vec::new();
+        let mut stat_count = 0usize;
+
+        for dir in project_dirs.flatten() {
+            let dir_path = dir.path();
+            if !dir_path.is_dir() || self.exclude.as_ref() == Some(&dir_path) {
+                continue;
+            }
+            let Ok(entries) = std::fs::read_dir(&dir_path) else {
+                // A directory we could not list is a hole in coverage, and is
+                // counted as one.
+                scan.unreadable_dirs += 1;
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                    continue;
+                }
+                if stat_count >= ALL_PROJECTS_STAT_CAP {
+                    scan.enumeration_capped = true;
+                    break;
+                }
+                stat_count += 1;
+                scan.enumerated += 1;
+                match entry.metadata() {
+                    Ok(meta) => candidates.push((
+                        meta.modified().unwrap_or(std::time::UNIX_EPOCH),
+                        path,
+                        meta.len(),
+                    )),
+                    Err(_) => scan.stat_failed += 1,
+                }
+            }
+            if scan.enumeration_capped {
+                break;
+            }
+        }
+
+        // Newest first, so a cap drops the OLDEST transcripts rather than an
+        // arbitrary slice.
+        candidates.sort_by(|a, b| b.0.cmp(&a.0));
+        candidates.truncate(ALL_PROJECTS_FILE_LIMIT);
+        scan.selected = candidates.len();
+
+        let mut read_bytes = 0u64;
+        let mut commands: Vec<String> = Vec::new();
+        // The cross-project section reports command WORDS only; denials belong
+        // to the per-project section, so they are mined and dropped here.
+        let mut denials: Vec<String> = Vec::new();
+        let denial_re = crate::auto_mode_producers::denial_reason_regex();
+        for (index, (_, path, size)) in candidates.iter().enumerate() {
+            let remaining = || scan.selected - index;
+            if started.elapsed() >= deadline {
+                scan.deadline_remaining = Some(remaining());
+                break;
+            }
+            if read_bytes + size.min(&ALL_PROJECTS_PER_FILE_CAP) > ALL_PROJECTS_AGGREGATE_CAP {
+                scan.aggregate_capped_remaining = Some(remaining());
+                break;
+            }
+            if *size > ALL_PROJECTS_PER_FILE_CAP {
+                scan.per_file_capped += 1;
+                continue;
+            }
+            // No `scan.denied` accounting here: a standalone gather has no
+            // loaded session policy, so there is no `permissions.deny` read
+            // overlay to consult. Counting zero refusals is accurate — the gate
+            // is absent, not passing everything.
+            let Ok(text) = std::fs::read_to_string(path) else {
+                scan.unreadable += 1;
+                continue;
+            };
+            read_bytes += *size;
+            scan.scanned += 1;
+            crate::auto_mode_producers::mine_transcript_text(
+                &text,
+                &denial_re,
+                &mut commands,
+                &mut denials,
+            );
+        }
+
+        scan.commands_seen = commands.len();
+        drop(denials);
+        scan.words = crate::auto_mode_producers::command_words_of(&commands);
+        // Any shortfall means the word list is a sample, not a census.
+        scan.words_incomplete = scan.enumeration_capped
+            || scan.deadline_remaining.is_some()
+            || scan.aggregate_capped_remaining.is_some()
+            || scan.per_file_capped > 0
+            || scan.unreadable > 0
+            || scan.denied > 0
+            || scan.stat_failed > 0
+            || scan.unreadable_dirs > 0;
+        Some(scan)
+    }
+}
+
+/// Real-filesystem [`ShellHistorySource`].
+///
+/// Reads only the TAIL of each history file and only the command word off each
+/// line — the arguments, which are where secrets live (`curl -H "Authorization:
+/// …"`, `mysql -p…`), never leave this module.
+pub struct FsShellHistorySource {
+    env: crate::auto_mode_producers::ShellHistoryEnv,
+}
+
+impl FsShellHistorySource {
+    /// Resolve the history environment from the real process environment.
+    #[must_use]
+    pub fn from_process_env() -> Self {
+        let windows = cfg!(windows);
+        let home_dir = std::env::var("HOME")
+            .ok()
+            .or_else(|| std::env::var("USERPROFILE").ok())
+            .unwrap_or_default();
+        Self {
+            env: crate::auto_mode_producers::ShellHistoryEnv {
+                windows,
+                home_dir,
+                app_data: std::env::var("APPDATA").ok(),
+                xdg_data_home: std::env::var("XDG_DATA_HOME").ok(),
+                hist_file: std::env::var("HISTFILE").ok(),
+            },
+        }
+    }
+
+    /// Build a source over an explicit environment (tests, and hosts that
+    /// resolve the home directory differently).
+    #[must_use]
+    pub fn new(env: crate::auto_mode_producers::ShellHistoryEnv) -> Self {
+        Self { env }
+    }
+}
+
+impl crate::auto_mode_producers::ShellHistorySource for FsShellHistorySource {
+    fn env(&self) -> crate::auto_mode_producers::ShellHistoryEnv {
+        self.env.clone()
+    }
+
+    fn home_is_network(&self) -> bool {
+        // A network home means every history read is a remote round-trip that
+        // can hang; the producer reports the gate rather than blocking the
+        // wizard on a mount that may never answer.
+        is_network_path(&self.env.home_dir)
+    }
+
+    fn read_tail(
+        &self,
+        source: &crate::auto_mode_producers::HistorySource,
+    ) -> Result<Option<(String, bool)>, ()> {
+        match secure_read_tail(
+            &source.path,
+            crate::auto_mode_producers::HISTORY_TAIL_BYTES,
+            false,
+        ) {
+            TailRead::Absent => Ok(None),
+            // Present but unreadable is NOT the same as absent: the caller marks
+            // the gather partial so the proposal is not drawn from a history it
+            // could not see.
+            TailRead::Unreadable => Err(()),
+            TailRead::Read { content, truncated } => Ok(Some((content, truncated))),
+        }
     }
 }
 
@@ -1447,5 +2066,215 @@ mod tests {
             let src2 = FsLocalSettingsSource::new(dir2.path());
             assert_eq!(src2.claude_dir(), Some(false));
         }
+    }
+
+    // ── `j1d` walk ───────────────────────────────────────────────────────────
+
+    fn make_repo(at: &std::path::Path, remote: Option<&str>) {
+        std::fs::create_dir_all(at.join(".git")).unwrap();
+        let config = remote.map_or_else(
+            || "[core]\n\trepositoryformatversion = 0\n".to_string(),
+            |url| format!("[remote \"origin\"]\n\turl = {url}\n"),
+        );
+        std::fs::write(at.join(".git").join("config"), config).unwrap();
+    }
+
+    #[test]
+    fn the_walk_finds_repos_and_reduces_their_remotes() {
+        let home = tempfile::tempdir().unwrap();
+        make_repo(&home.path().join("code/app"), Some("https://github.com/acme/app"));
+        make_repo(&home.path().join("code/lib"), None);
+
+        let (repos, limit) = walk_home_repos(home.path());
+        assert_eq!(limit, WalkLimit::None);
+        let app = repos.iter().find(|r| r.path.ends_with("app")).unwrap();
+        assert_eq!(app.remotes, vec!["github.com/acme/app".to_string()]);
+        let lib = repos.iter().find(|r| r.path.ends_with("lib")).unwrap();
+        // No remote is a REASON, not an empty list.
+        assert_eq!(
+            lib.note,
+            Some(crate::auto_mode_producers::HomeRepoNote::NoRemote)
+        );
+    }
+
+    #[test]
+    fn the_walk_does_not_descend_into_a_repo() {
+        let home = tempfile::tempdir().unwrap();
+        make_repo(&home.path().join("outer"), Some("https://github.com/acme/outer"));
+        // A vendored checkout inside the working tree is not a separate repo
+        // worth reporting, and descending would burn the budget on node_modules.
+        make_repo(
+            &home.path().join("outer/vendor/inner"),
+            Some("https://github.com/acme/inner"),
+        );
+
+        let (repos, _) = walk_home_repos(home.path());
+        assert_eq!(repos.len(), 1);
+        assert!(repos[0].path.ends_with("outer"));
+    }
+
+    #[test]
+    fn a_gitdir_pointing_outside_home_is_recorded_not_followed() {
+        let home = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(elsewhere.path().join("planted")).unwrap();
+        std::fs::write(
+            elsewhere.path().join("planted").join("config"),
+            "[remote \"origin\"]\n\turl = https://github.com/attacker/exfil\n",
+        )
+        .unwrap();
+        let repo = home.path().join("trap");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(
+            repo.join(".git"),
+            format!("gitdir: {}\n", elsewhere.path().join("planted").display()),
+        )
+        .unwrap();
+
+        let (repos, _) = walk_home_repos(home.path());
+        assert_eq!(repos.len(), 1);
+        // The planted config must NOT have been read.
+        assert!(repos[0].remotes.is_empty());
+        assert_eq!(
+            repos[0].note,
+            Some(crate::auto_mode_producers::HomeRepoNote::GitdirOutsideHome)
+        );
+    }
+
+    #[test]
+    fn a_skipped_directory_name_is_never_entered() {
+        let home = tempfile::tempdir().unwrap();
+        make_repo(
+            &home.path().join("node_modules/pkg"),
+            Some("https://github.com/acme/pkg"),
+        );
+        let (repos, _) = walk_home_repos(home.path());
+        assert!(repos.is_empty());
+    }
+
+    #[test]
+    fn an_unreadable_home_is_reported_as_such_not_as_empty() {
+        let missing = std::path::Path::new("/nonexistent-home-for-wizard-06-test");
+        let (repos, limit) = walk_home_repos(missing);
+        assert!(repos.is_empty());
+        // "could not look" must never render as "found nothing".
+        assert_eq!(limit, WalkLimit::HomeUnreadable);
+    }
+
+    // ── `W1d` sweep ──────────────────────────────────────────────────────────
+
+    fn write_transcript(dir: &std::path::Path, name: &str, commands: &[&str]) {
+        std::fs::create_dir_all(dir).unwrap();
+        let lines: Vec<String> = commands
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "message": {"content": [
+                        {"type": "tool_use", "name": "Bash", "input": {"command": c}}
+                    ]}
+                })
+                .to_string()
+            })
+            .collect();
+        std::fs::write(dir.join(name), lines.join("\n")).unwrap();
+    }
+
+    #[test]
+    fn the_sweep_mines_words_across_projects_and_skips_this_one() {
+        let root = tempfile::tempdir().unwrap();
+        let mine = root.path().join("-this-project");
+        write_transcript(&mine, "a.jsonl", &["terraform apply"]);
+        write_transcript(&root.path().join("-other"), "b.jsonl", &["helm upgrade api", "ls -la"]);
+
+        let source = FsAllProjectsSource::new(root.path(), Some(mine.clone()));
+        let scan = crate::auto_mode_producers::AllProjectsSource::scan(&source).unwrap();
+
+        assert!(scan.words.contains(&"helm".to_string()));
+        // This project's own transcripts belong to the per-project section.
+        assert!(!scan.words.contains(&"terraform".to_string()));
+        // `ls` and `kubectl` are standard CLIs: the list is about what is
+        // UNUSUAL here, so they carry no signal and are filtered.
+        assert!(!scan.words.contains(&"ls".to_string()));
+        assert_eq!(scan.scanned, 1);
+        assert!(!scan.words_incomplete);
+    }
+
+    #[test]
+    fn an_absent_projects_root_is_unavailable_not_empty() {
+        let source = FsAllProjectsSource::new("/nonexistent-projects-root-w49", None);
+        assert!(crate::auto_mode_producers::AllProjectsSource::scan(&source).is_none());
+    }
+
+    #[test]
+    fn an_unreadable_project_directory_marks_coverage_partial() {
+        let root = tempfile::tempdir().unwrap();
+        write_transcript(&root.path().join("-ok"), "a.jsonl", &["helm upgrade"]);
+        let blocked = root.path().join("-blocked");
+        std::fs::create_dir_all(&blocked).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        }
+
+        let source = FsAllProjectsSource::new(root.path(), None);
+        let scan = crate::auto_mode_producers::AllProjectsSource::scan(&source).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(scan.unreadable_dirs, 1);
+            // A partial sweep must say so, or it reads as a census.
+            assert!(scan.words_incomplete);
+            std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert!(scan.words.contains(&"helm".to_string()));
+    }
+
+    // ── shell history ────────────────────────────────────────────────────────
+
+    #[test]
+    fn history_reads_the_tail_and_keeps_only_command_words() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join(".zsh_history"),
+            "curl -H \"Authorization: Bearer sekrit\" https://api.example\nterraform apply\n",
+        )
+        .unwrap();
+        let env = crate::auto_mode_producers::ShellHistoryEnv {
+            windows: false,
+            home_dir: home.path().to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let body = crate::auto_mode_producers::shell_history_section(&FsShellHistorySource::new(
+            env,
+        ));
+        assert!(body.contains("curl"));
+        assert!(body.contains("terraform"));
+        // The arguments are where the secrets are; they never leave the module.
+        assert!(!body.contains("sekrit"));
+        assert!(!body.contains("Authorization"));
+    }
+
+    #[test]
+    fn an_absent_history_file_is_not_a_partial_read() {
+        let home = tempfile::tempdir().unwrap();
+        let env = crate::auto_mode_producers::ShellHistoryEnv {
+            windows: false,
+            home_dir: home.path().to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let body = crate::auto_mode_producers::shell_history_section(&FsShellHistorySource::new(
+            env,
+        ));
+        assert!(body.contains("complete"), "got: {body}");
+    }
+
+    // ── base64 (gh `contents` payloads) ──────────────────────────────────────
+
+    #[test]
+    fn base64_round_trips_and_refuses_garbage() {
+        assert_eq!(base64_decode("aGVsbG8=").unwrap(), b"hello");
+        assert_eq!(base64_decode("").unwrap(), b"");
+        assert!(base64_decode("not base64!").is_none());
     }
 }

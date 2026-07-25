@@ -173,6 +173,9 @@ pub const AUTO_MODE_SETUP_WRITE: &str = "auto_mode_setup_write";
 /// `auto_mode_setup_propose` — the WIZARD-06 propose run's outcome. Like
 /// [`AUTO_MODE_SETUP_WRITE`], the name carries NO `tengu_` prefix.
 pub const AUTO_MODE_SETUP_PROPOSE: &str = "auto_mode_setup_propose";
+/// `auto_mode_pregather` — a WIZARD-06 recon producer degraded. No `tengu_`
+/// prefix, like its two siblings.
+pub const AUTO_MODE_PREGATHER: &str = "auto_mode_pregather";
 
 /// The 3 `/auto-mode-setup` wizard events, for the string-lock test. Kept
 /// separate from [`NAMES`] (the count-locked registry) — see the note above.
@@ -663,6 +666,7 @@ mod agent_tool_event_name_tests {
         // The apply-file write event has NO tengu_ prefix (byte-exact vs 2.1.218).
         assert_eq!(AUTO_MODE_SETUP_WRITE, "auto_mode_setup_write");
         assert_eq!(AUTO_MODE_SETUP_PROPOSE, "auto_mode_setup_propose");
+        assert_eq!(AUTO_MODE_PREGATHER, "auto_mode_pregather");
     }
 
     #[test]

@@ -907,6 +907,292 @@ pub fn render_rulesets(res: &GhResult) -> String {
     format!("{}{more_note}{redacted_note}{capped}", head.join(", "))
 }
 
+/// `xsy` — the org's repos grouped by visibility, newest push first.
+///
+/// Returns the body and whether the output failed to parse (the caller emits
+/// `org_list_gh_parse_failed`).
+///
+/// Every repo that does not survive the name charset, the visibility enum, or
+/// the expected JSON shape is COUNTED into the redaction note rather than
+/// dropped silently — otherwise a filtered list would read as the org's
+/// complete inventory.
+#[must_use]
+pub fn render_org_repo_list(res: &GhResult) -> (String, bool) {
+    use crate::auto_mode_sections as sections;
+
+    if res.code != 0 {
+        return (
+            format!("_{NOT_QUERYABLE_HERE}{}", sections::GH_ORG_SCOPE_SUFFIX),
+            false,
+        );
+    }
+    let unparseable = || {
+        (
+            format!("_{NOT_QUERYABLE_HERE}{}", sections::GH_UNPARSEABLE_SUFFIX),
+            true,
+        )
+    };
+    let Ok(Value::Array(items)) = serde_json::from_str::<Value>(if res.stdout.is_empty() {
+        "[]"
+    } else {
+        &res.stdout
+    }) else {
+        return unparseable();
+    };
+
+    // Shape filter: `name` and `visibility` must be strings, `pushedAt` a
+    // string or null (a never-pushed repo sorts last, it is not an error).
+    let total = items.len();
+    let shaped: Vec<(String, String, String)> = items
+        .iter()
+        .filter_map(|item| {
+            let name = item.get("name")?.as_str()?.to_string();
+            let visibility = item.get("visibility")?.as_str()?.to_string();
+            let pushed = match item.get("pushedAt") {
+                Some(Value::String(s)) => s.clone(),
+                Some(Value::Null) => String::new(),
+                _ => return None,
+            };
+            Some((name, visibility, pushed))
+        })
+        .collect();
+    let shape_dropped = total - shaped.len();
+
+    let named: Vec<&(String, String, String)> = shaped
+        .iter()
+        .filter(|(name, _, _)| is_valid_repo_name(name) && name.len() <= 100)
+        .collect();
+    let name_dropped = shaped.len() - named.len();
+
+    let mut visible: Vec<(&str, &str, &str)> = Vec::new();
+    let mut visibility_dropped = 0usize;
+    for (name, visibility, pushed) in named {
+        match parse_visibility(visibility) {
+            Some(_) => visible.push((name.as_str(), visibility.as_str(), pushed.as_str())),
+            None => visibility_dropped += 1,
+        }
+    }
+    // Newest push first, then the top 50.
+    visible.sort_by(|a, b| b.2.cmp(a.2));
+    visible.truncate(ORG_REPO_SPLIT_LIMIT);
+
+    let mut groups: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for (name, visibility, _) in &visible {
+        groups
+            .entry(
+                parse_visibility(visibility).unwrap_or_else(|| (*visibility).to_lowercase()),
+            )
+            .or_default()
+            .push((*name).to_string());
+    }
+
+    let redacted = shape_dropped + name_dropped + visibility_dropped;
+    let note = if redacted > 0 {
+        format!(
+            "(+{redacted}{}",
+            sections::REDACTED_OUTSIDE_CHARSET_OR_VISIBILITY
+        )
+    } else {
+        String::new()
+    };
+
+    if groups.is_empty() {
+        return (
+            if redacted > 0 {
+                format!("_none listed {note}_")
+            } else {
+                "_none listed_".to_string()
+            },
+            false,
+        );
+    }
+    let lines: Vec<String> = groups
+        .into_iter()
+        .map(|(visibility, names)| format!("- {visibility}: {}", join_gh_names(&names, GH_LIST_SHOWN)))
+        .collect();
+    let body = if redacted > 0 {
+        format!("{}\n_{note}_", lines.join("\n"))
+    } else {
+        lines.join("\n")
+    };
+    (body, false)
+}
+
+/// `xsy`'s cap — how many repos the org split shows.
+pub const ORG_REPO_SPLIT_LIMIT: usize = 50;
+
+/// Supplies the `gh` calls `x1d` makes.
+pub trait GhSource {
+    /// `git -C <cwd> remote get-url origin`, or `None` when it failed.
+    fn origin_remote(&self) -> Option<String>;
+    /// Run `gh` with `args`, capping the captured output at `max_buffer`.
+    fn gh(&self, args: &[&str], max_buffer: usize) -> GhResult;
+}
+
+/// Which of `x1d`'s `gh` calls failed for a reason worth recording.
+///
+/// An absent or unauthenticated `gh` is an ordinary environment fact and is
+/// deliberately NOT counted here — only a call that broke for some other reason
+/// is, so the telemetry measures real breakage instead of how many users lack
+/// the tool.
+// Four booleans mirroring the oracle's `visibility_gh_failed` payload exactly.
+// Collapsing them into a set or bitflags would change the telemetry shape.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GhFailures {
+    /// `gh repo view` failed.
+    pub view_failed: bool,
+    /// The rulesets API call failed.
+    pub rulesets_failed: bool,
+    /// The protected-branches API call failed.
+    pub branches_failed: bool,
+    /// The org list failed (only when it was attempted).
+    pub org_list_failed: bool,
+}
+
+impl GhFailures {
+    /// Did anything fail for a recordable reason?
+    #[must_use]
+    pub fn any(self) -> bool {
+        self.view_failed || self.rulesets_failed || self.branches_failed || self.org_list_failed
+    }
+}
+
+/// What one `x1d` run produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoVisibilityOutcome {
+    /// The section body.
+    pub body: String,
+    /// Calls that broke, for `visibility_gh_failed`.
+    pub failures: GhFailures,
+    /// The org list did not parse, for `org_list_gh_parse_failed`.
+    pub org_list_parse_failed: bool,
+}
+
+impl RepoVisibilityOutcome {
+    fn refused(reason: &str) -> Self {
+        Self {
+            body: format!("_Not queryable here ({reason}). {INFER_VISIBILITY_HINT}_"),
+            failures: GhFailures::default(),
+            org_list_parse_failed: false,
+        }
+    }
+}
+
+/// `x1d` — the "Repo visibility & branch protection (via gh)" section body.
+///
+/// `org_split` is the Q2 = `all` gate. Only github.com origins are queried:
+/// deriving an org from an unrecognised remote shape and asking GitHub about
+/// it would send somebody else's repository name to the API, so every
+/// ambiguous case refuses instead of guessing.
+#[must_use]
+pub fn repo_visibility_section(
+    source: &dyn GhSource,
+    org_split: bool,
+    nonessential_traffic_allowed: bool,
+) -> RepoVisibilityOutcome {
+    if !nonessential_traffic_allowed {
+        return RepoVisibilityOutcome::refused(
+            "nonessential traffic disabled or policy-restricted",
+        );
+    }
+    let Some(reduced) = source
+        .origin_remote()
+        .and_then(|url| remote_to_host_org_repo(url.trim(), None))
+    else {
+        return RepoVisibilityOutcome::refused(
+            "org/repo not derivable from origin remote \u{2014} missing, an unsupported or GHE host, or not a plain owner/repo URL shape",
+        );
+    };
+    let parts: Vec<&str> = reduced.split('/').collect();
+    let [host, org, repo] = parts.as_slice() else {
+        return RepoVisibilityOutcome::refused(
+            "org/repo not derivable from origin remote \u{2014} missing, an unsupported or GHE host, or not a plain owner/repo URL shape",
+        );
+    };
+    if *host != "github.com" {
+        return RepoVisibilityOutcome::refused(
+            "origin remote is not github.com \u{2014} GHE/other hosts not yet supported",
+        );
+    }
+    let slug = format!("{org}/{repo}");
+
+    let view = source.gh(&["repo", "view", &slug, "--json", "visibility"], 8_192);
+    let rulesets = source.gh(
+        &[
+            "api",
+            &format!("repos/{slug}/rulesets?per_page=100"),
+            "--jq",
+            crate::auto_mode_facts::GH_RULESETS_JQ,
+        ],
+        32_768,
+    );
+    let branches = source.gh(
+        &[
+            "api",
+            &format!("repos/{slug}/branches?protected=true&per_page=100"),
+            "--jq",
+            ".[].name",
+        ],
+        32_768,
+    );
+
+    let (org_body, org_parse_failed, org_result) = if org_split {
+        let res = source.gh(
+            &[
+                "repo",
+                "list",
+                org,
+                "--limit",
+                "100",
+                "--json",
+                "name,visibility,pushedAt",
+            ],
+            256_000,
+        );
+        let (body, parse_failed) = render_org_repo_list(&res);
+        (body, parse_failed, Some(res))
+    } else {
+        (
+            crate::auto_mode_gates::ORG_REPO_SPLIT_NOT_GATHERED.to_string(),
+            false,
+            None,
+        )
+    };
+
+    let broke = |res: &GhResult| res.code != 0 && !gh_is_unavailable(res);
+    let failures = GhFailures {
+        view_failed: broke(&view),
+        rulesets_failed: broke(&rulesets),
+        branches_failed: broke(&branches),
+        org_list_failed: org_result.as_ref().is_some_and(broke),
+    };
+
+    let body = [
+        format!("Repo: {slug}"),
+        format!("Visibility: {}", render_visibility(&view)),
+        format!("Rulesets: {}", render_rulesets(&rulesets)),
+        format!(
+            "Protected branches: {}",
+            render_protected_branches(&branches)
+        ),
+        String::new(),
+        format!(
+            "#### {}",
+            crate::auto_mode_propose::ORG_REPO_SPLIT_HEADING
+        ),
+        org_body,
+    ]
+    .join("\n");
+
+    RepoVisibilityOutcome {
+        body,
+        failures,
+        org_list_parse_failed: org_parse_failed,
+    }
+}
+
 // ── `j1d` — other git repos under the home directory ─────────────────────────
 
 /// `rsy` — how many directories the walk will visit.
@@ -2215,20 +2501,22 @@ struct MinedUsage {
     scanned: usize,
 }
 
-fn mine_transcripts(source: &dyn ProjectUsageSource, files: &[TranscriptFile]) -> MinedUsage {
-    let denial_re = denial_reason_regex();
-    let mut commands = Vec::new();
-    let mut denials = Vec::new();
-    let mut skipped = 0usize;
-
-    for file in files {
-        if file.size > TRANSCRIPT_OVERSIZE_BYTES {
-            skipped += 1;
-            continue;
-        }
-        let Some(text) = source.read_transcript(&file.path) else {
-            continue;
-        };
+/// Mine one transcript's lines for Bash tool-use commands and denial reasons,
+/// appending to `commands` / `denials`.
+///
+/// The JSON parse sits behind a cheap substring prefilter because a transcript
+/// is overwhelmingly lines this pass has no interest in. Only the FIRST LINE of
+/// a Bash command is kept: a heredoc or a multi-line script would otherwise
+/// carry its whole body — and anything embedded in it — into the recon.
+///
+/// `denial_re` is passed in so a sweep over many files compiles it once.
+pub fn mine_transcript_text(
+    text: &str,
+    denial_re: &regex::Regex,
+    commands: &mut Vec<String>,
+    denials: &mut Vec<String>,
+) {
+    {
         for line in text.split('\n') {
             // Cheap prefilter before paying for a JSON parse.
             let has_bash = line.contains(BASH_TOOL_MARKER);
@@ -2266,10 +2554,28 @@ fn mine_transcripts(source: &dyn ProjectUsageSource, files: &[TranscriptFile]) -
                         None => String::new(),
                         Some(other) => other.to_string(),
                     };
-                    denials.extend(collect_captures(&body, &denial_re));
+                    denials.extend(collect_captures(&body, denial_re));
                 }
             }
         }
+    }
+}
+
+fn mine_transcripts(source: &dyn ProjectUsageSource, files: &[TranscriptFile]) -> MinedUsage {
+    let denial_re = denial_reason_regex();
+    let mut commands = Vec::new();
+    let mut denials = Vec::new();
+    let mut skipped = 0usize;
+
+    for file in files {
+        if file.size > TRANSCRIPT_OVERSIZE_BYTES {
+            skipped += 1;
+            continue;
+        }
+        let Some(text) = source.read_transcript(&file.path) else {
+            continue;
+        };
+        mine_transcript_text(&text, &denial_re, &mut commands, &mut denials);
     }
     MinedUsage {
         scanned: files.len() - skipped,
@@ -2277,6 +2583,28 @@ fn mine_transcripts(source: &dyn ProjectUsageSource, files: &[TranscriptFile]) -
         denials,
         skipped,
     }
+}
+
+/// The leading command word of each command line: `sudo` / `timeout N`
+/// prefixes stripped, then the first word, keeping only non-standard CLIs.
+///
+/// Standard tools are filtered because the point of the list is what is
+/// UNUSUAL about this environment; reporting that the user runs `ls` tells a
+/// proposal nothing it could act on.
+#[must_use]
+pub fn command_words_of(commands: &[String]) -> Vec<String> {
+    let prefix_re = command_prefix_regex();
+    let word_re = command_word_regex();
+    commands
+        .iter()
+        .map(|c| prefix_re.replace(c, "").to_string())
+        .filter_map(|c| {
+            word_re
+                .captures(&c)
+                .and_then(|m| m.get(1).map(|g| g.as_str().to_string()))
+        })
+        .filter(|w| !is_standard_cli(w))
+        .collect()
 }
 
 /// `iay` — the "Recent usage in this project (names only)" section body.
@@ -2304,19 +2632,7 @@ pub fn project_usage_section(source: &dyn ProjectUsageSource) -> String {
     let buckets = extract_bucket_names(&joined);
     let namespaces = collect_captures(&joined, &k8s_namespace_regex());
 
-    let prefix_re = command_prefix_regex();
-    let word_re = command_word_regex();
-    let clis: Vec<String> = mined
-        .commands
-        .iter()
-        .map(|c| prefix_re.replace(c, "").to_string())
-        .filter_map(|c| {
-            word_re
-                .captures(&c)
-                .and_then(|m| m.get(1).map(|g| g.as_str().to_string()))
-        })
-        .filter(|w| !is_standard_cli(w))
-        .collect();
+    let clis: Vec<String> = command_words_of(&mined.commands);
 
     let counted = |items: &[String], limit: usize| {
         frequency(items, limit)
@@ -3679,6 +3995,152 @@ mod tests {
         let out = render_rulesets(&gh_ok(r#"[{"name":"x","enforcement":"maybe"}]"#));
         assert!(out.contains("all names outside the display charset, redacted"));
         assert_eq!(render_rulesets(&gh_ok("[]")), "none listed");
+    }
+
+    // ── `xsy` — the org repo split ───────────────────────────────────────────
+
+    #[test]
+    fn the_org_split_groups_by_visibility_newest_push_first() {
+        let json = r#"[{"name":"web","visibility":"PUBLIC","pushedAt":"2026-01-01"},
+                       {"name":"api","visibility":"private","pushedAt":"2026-07-01"},
+                       {"name":"ops","visibility":"private","pushedAt":"2026-03-01"}]"#;
+        let (body, failed) = render_org_repo_list(&gh_ok(json));
+        assert!(!failed);
+        // Visibilities are sorted; within one, newest push comes first.
+        assert_eq!(body, "- private: `api`, `ops`\n- public: `web`");
+    }
+
+    #[test]
+    fn org_entries_that_cannot_be_shown_are_counted_not_dropped() {
+        let json = r#"[{"name":"good","visibility":"public","pushedAt":"2026-01-01"},
+                       {"name":"bad name!","visibility":"public","pushedAt":"2026-01-01"},
+                       {"name":"weird","visibility":"classified","pushedAt":"2026-01-01"},
+                       {"name":"shapeless"}]"#;
+        let (body, failed) = render_org_repo_list(&gh_ok(json));
+        assert!(!failed);
+        assert!(body.contains("`good`"));
+        assert!(!body.contains("bad name"));
+        // A filtered list must not read as the org's full inventory.
+        assert!(body.contains("(+3"), "got: {body}");
+        assert!(body.contains("outside the display charset or visibility enum, redacted"));
+    }
+
+    #[test]
+    fn a_traversal_repo_name_never_reaches_the_output() {
+        // `..` is interpolated into a `gh api repos/…` path elsewhere; it is
+        // refused as a name here for the same reason.
+        let json = r#"[{"name":"..","visibility":"public","pushedAt":"2026-01-01"}]"#;
+        let (body, _) = render_org_repo_list(&gh_ok(json));
+        assert!(!body.contains(".."), "got: {body}");
+        assert!(body.contains("none listed"));
+    }
+
+    #[test]
+    fn an_org_list_failure_is_distinguished_from_an_empty_org() {
+        let (body, failed) = render_org_repo_list(&gh_fail());
+        assert!(!failed);
+        assert_eq!(
+            body,
+            "_not queryable here (gh unavailable, unauthenticated, or token lacks org scope)._"
+        );
+        let (body, failed) = render_org_repo_list(&gh_ok("{not json"));
+        assert!(failed, "a parse failure is worth recording");
+        assert_eq!(body, "_not queryable here (gh output unparseable)._");
+        // An org that really has no repos says so plainly.
+        assert_eq!(render_org_repo_list(&gh_ok("[]")).0, "_none listed_");
+    }
+
+    // ── `x1d` — the assembled section ────────────────────────────────────────
+
+    struct FakeGh {
+        origin: Option<String>,
+        calls: std::cell::RefCell<Vec<Vec<String>>>,
+    }
+
+    impl GhSource for FakeGh {
+        fn origin_remote(&self) -> Option<String> {
+            self.origin.clone()
+        }
+        fn gh(&self, args: &[&str], _max_buffer: usize) -> GhResult {
+            self.calls
+                .borrow_mut()
+                .push(args.iter().map(|a| (*a).to_string()).collect());
+            match (args.first().copied(), args.get(1).copied()) {
+                (Some("repo"), Some("view")) => gh_ok(r#"{"visibility":"private"}"#),
+                // `--jq .[].name` emits newline-separated names, so no
+                // protected branches is EMPTY output, not `[]`.
+                (Some("api"), Some(path)) if path.contains("branches") => gh_ok(""),
+                _ => gh_ok("[]"),
+            }
+        }
+    }
+
+    fn fake_gh(origin: Option<&str>) -> FakeGh {
+        FakeGh {
+            origin: origin.map(str::to_string),
+            calls: std::cell::RefCell::new(Vec::new()),
+        }
+    }
+
+    #[test]
+    fn the_section_reports_the_repo_and_its_protections() {
+        let gh = fake_gh(Some("https://github.com/acme/app\n"));
+        let out = repo_visibility_section(&gh, false, true);
+        assert!(out.body.starts_with("Repo: acme/app\n"));
+        assert!(out.body.contains("Visibility: private"));
+        assert!(out.body.contains("Rulesets: none listed"));
+        assert!(out.body.contains("Protected branches: none listed"));
+        assert!(!out.failures.any());
+    }
+
+    #[test]
+    fn a_closed_q2_means_the_org_is_never_queried() {
+        let gh = fake_gh(Some("https://github.com/acme/app"));
+        let out = repo_visibility_section(&gh, false, true);
+        // Withheld, and textually distinct from an org that has no repos.
+        assert!(out.body.contains("_NOT GATHERED"));
+        let calls = gh.calls.borrow();
+        assert!(
+            !calls.iter().any(|c| c.first().map(String::as_str) == Some("repo")
+                && c.get(1).map(String::as_str) == Some("list")),
+            "the org list must not be fetched when Q2 is closed"
+        );
+    }
+
+    #[test]
+    fn an_open_q2_does_query_the_org() {
+        let gh = fake_gh(Some("https://github.com/acme/app"));
+        let _ = repo_visibility_section(&gh, true, true);
+        let calls = gh.calls.borrow();
+        assert!(calls.iter().any(|c| c.first().map(String::as_str) == Some("repo")
+            && c.get(1).map(String::as_str) == Some("list")
+            && c.get(2).map(String::as_str) == Some("acme")));
+    }
+
+    #[test]
+    fn a_non_github_or_unparseable_origin_refuses_before_any_call() {
+        for origin in [
+            None,
+            Some("https://ghe.acme.internal/acme/app"),
+            Some("https://github.com/acme"),
+            Some("not a url"),
+        ] {
+            let gh = fake_gh(origin);
+            let out = repo_visibility_section(&gh, true, true);
+            assert!(out.body.starts_with("_Not queryable here ("), "origin={origin:?}");
+            assert!(out.body.contains(INFER_VISIBILITY_HINT));
+            // Refusing means asking GitHub NOTHING — a guessed org would send
+            // somebody else's repository name to the API.
+            assert!(gh.calls.borrow().is_empty(), "origin={origin:?}");
+        }
+    }
+
+    #[test]
+    fn disabled_nonessential_traffic_makes_no_calls_at_all() {
+        let gh = fake_gh(Some("https://github.com/acme/app"));
+        let out = repo_visibility_section(&gh, true, false);
+        assert!(out.body.contains("nonessential traffic disabled or policy-restricted"));
+        assert!(gh.calls.borrow().is_empty());
     }
 
     #[test]

@@ -86,7 +86,11 @@ impl ProposeGather for FsProposeGather {
             &self.user_config_dir,
             &self.transcript_dir,
             self.classify_all_shell,
-        );
+        )
+        // The org split is outbound traffic about repositories the user did
+        // not name, so it rides the SAME Q2 answer that authorises the rest of
+        // the all-projects reach.
+        .with_org_split(options.all_projects);
         Ok(build_recon_block(options, &producers).text)
     }
 }

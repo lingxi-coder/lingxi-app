@@ -168,6 +168,17 @@ pub const REDACTED_ALL_NAMES_OUTSIDE_CHARSET: &str = r" listed, all names outsid
 /// Suffix for org repo entries dropped on charset or visibility-enum grounds.
 pub const REDACTED_OUTSIDE_CHARSET_OR_VISIBILITY: &str = r" outside the display charset or visibility enum, redacted)";
 
+/// `xsy` — the org list could not be fetched at all.
+///
+/// The three causes are kept in one message because they are indistinguishable
+/// from `gh`'s exit code, and guessing between them would be a fabricated
+/// diagnosis.
+pub const GH_ORG_SCOPE_SUFFIX: &str =
+    r" (gh unavailable, unauthenticated, or token lacks org scope)._";
+
+/// `xsy` — `gh` answered, but not with JSON we can read.
+pub const GH_UNPARSEABLE_SUFFIX: &str = r" (gh output unparseable)._";
+
 /// `.claude` itself is not a real directory, so nothing behind it was probed.
 pub const CLAUDE_DIR_INDIRECTION_GATE_FAILED: &str = r"
 `.claude` itself failed the indirection gate (it is not a real directory — e.g. committed as a symlink), so whether a settings.local.json exists behind it was deliberately not probed. Tell the user; do not read, resolve, or rewrite anything under this path.";

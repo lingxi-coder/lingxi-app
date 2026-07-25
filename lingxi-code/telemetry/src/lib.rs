@@ -220,6 +220,21 @@ pub fn emit_auto_mode_setup_propose(code: &str) {
     );
 }
 
+/// Emit `auto_mode_pregather` — a WIZARD-06 recon producer degraded (oracle
+/// `Ne("auto_mode_pregather", {code})`). `code` names what fell short
+/// (`visibility_gh_failed` / `org_list_gh_parse_failed` / …).
+///
+/// A MISSING or unauthenticated `gh` is deliberately not reported through
+/// here: the caller filters those out first, so this measures real breakage
+/// rather than how many users lack the tool.
+/// NOTE the event name has NO `tengu_` prefix (byte-exact).
+pub fn emit_auto_mode_pregather(code: &str) {
+    tracing::info!(
+        event = crate::tengu::agent::AUTO_MODE_PREGATHER,
+        code = %code,
+    );
+}
+
 /// Emit `tengu_auto_mode_setup_wizard_resolved` — the `/auto-mode-setup` wizard
 /// finished. `choice` records how it ended (`applied` / `cancelled` / …).
 pub fn emit_auto_mode_setup_wizard_resolved(choice: &str) {

@@ -97,9 +97,10 @@ pub use mode::{next_permission_mode, PermissionMode};
 pub use mode_policy::is_plan_safe_tool;
 pub use path_constraints::{check_path_constraints, PathConstraintAsk};
 pub use persist::{
-    persist_permission_mode, persist_permission_rule_set, persist_permission_update,
-    persist_workspace_directories, persist_workspace_directory, remove_permission_update,
-    replace_permission_rules, PermissionPaths, PersistError,
+    persist_auto_mode_save, persist_permission_mode, persist_permission_rule_set,
+    persist_permission_update, persist_workspace_directories, persist_workspace_directory,
+    remove_permission_update, replace_permission_rules, AutoModeSaveOutcome, PermissionPaths,
+    PersistError,
 };
 pub use policy::{tool_wide_name_matches, PermissionPolicy};
 pub use policy_gate::{LiveModelProvider, PolicyPermissionGate};

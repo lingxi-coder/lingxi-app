@@ -157,6 +157,15 @@ pub const AUTO_MODE_SETUP_WIZARD_ANSWERS: &str = "tengu_auto_mode_setup_wizard_a
 /// records how it ended (applied / cancelled / …).
 pub const AUTO_MODE_SETUP_WIZARD_RESOLVED: &str = "tengu_auto_mode_setup_wizard_resolved";
 
+/// `auto_mode_setup_write` — the non-interactive `auto-mode-setup --apply-file`
+/// write attempt. NOTE the name has NO `tengu_` prefix (byte-exact vs 2.1.218,
+/// which is inconsistent with the `wizard_*` events above). A `code` field
+/// records the outcome: `unknown` (default) / `usage` / `bad_flag_grammar` /
+/// `bad_path` / `read_denied` / `read_failed` / `too_large` / `missing_hash_arg`
+/// / `bad_hash_arg` / `hash_mismatch` / `parse_failed` / `scope_mismatch` /
+/// `write_failed`.
+pub const AUTO_MODE_SETUP_WRITE: &str = "auto_mode_setup_write";
+
 /// The 3 `/auto-mode-setup` wizard events, for the string-lock test. Kept
 /// separate from [`NAMES`] (the count-locked registry) — see the note above.
 pub const AUTO_MODE_SETUP_WIZARD_NAMES: &[&str] = &[
@@ -643,6 +652,8 @@ mod agent_tool_event_name_tests {
             "tengu_auto_mode_setup_wizard_resolved"
         );
         assert_eq!(AUTO_MODE_SETUP_WIZARD_NAMES.len(), 3);
+        // The apply-file write event has NO tengu_ prefix (byte-exact vs 2.1.218).
+        assert_eq!(AUTO_MODE_SETUP_WRITE, "auto_mode_setup_write");
     }
 
     #[test]

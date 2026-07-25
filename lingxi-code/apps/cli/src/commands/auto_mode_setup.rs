@@ -23,7 +23,13 @@
 //! `--propose` / `--wizard` product path and the dispatch/telemetry wiring are
 //! later waves that build on this parser.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+use permission::auto_mode_setup as pipeline;
+use permission::{
+    persist_auto_mode_save, PermissionPaths, PermissionUpdateDestination, PersistError,
+};
+use serde_json::Value;
 
 // ── telemetry codes (auto_mode_setup_write) ──────────────────────────────────
 
@@ -301,6 +307,132 @@ pub fn parse_apply_file_args(args: &[String]) -> Result<AutoModeSetupInvocation,
     }))
 }
 
+// ── apply-file orchestration core ────────────────────────────────────────────
+
+/// The result of running the `--apply-file` flow end-to-end. Gate rejections
+/// carry the permission pipeline's OWN byte-exact `code` + `reason`; a
+/// save-payload validation failure carries the byte-exact `vNs` reason (its
+/// telemetry code is confirmed in the dispatch wave, so it is kept distinct
+/// here rather than guessed).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApplyResult {
+    /// A pre-write gate rejected the request (`bad_path` / `read_denied` /
+    /// `read_failed` / `too_large` / `missing_hash_arg` / `bad_hash_arg` /
+    /// `hash_mismatch` / `parse_failed` / `scope_mismatch`).
+    Rejected {
+        /// The byte-exact `auto_mode_setup_write` code.
+        code: String,
+        /// The byte-exact user-facing reason.
+        reason: String,
+    },
+    /// [`pipeline::validate_auto_mode_save`] rejected the payload; `reason` is
+    /// byte-exact (e.g. "Nothing to save.").
+    InvalidSave {
+        /// The byte-exact `vNs` validation message.
+        reason: String,
+    },
+    /// The settings file already matched — nothing was written.
+    NoChange,
+    /// The settings were written; `removed_count` `permissions.allow` entries
+    /// were filtered out.
+    Wrote {
+        /// How many `permissions.allow` rules the removal set filtered out.
+        removed_count: usize,
+    },
+}
+
+/// Map `--apply-target` to the destination settings tier (default: user).
+fn destination_for(target: Option<ApplyTarget>) -> PermissionUpdateDestination {
+    match target {
+        Some(ApplyTarget::Project) => PermissionUpdateDestination::ProjectSettings,
+        _ => PermissionUpdateDestination::UserSettings,
+    }
+}
+
+/// Read one proposal category (`environment` / `allow` / `soft_deny` /
+/// `hard_deny`) as an array of values (empty when absent or non-array).
+fn category(proposal: &Value, key: &str) -> Vec<Value> {
+    proposal
+        .get(key)
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Run the `--apply-file` flow: secure read → pre-write gates
+/// ([`pipeline::evaluate_apply_file`]) → build the `autoMode` block from the
+/// proposal → validate the save payload → persist. The security-relevant gates
+/// (path/read, hash-verify, parse, scope) all run inside `evaluate_apply_file`;
+/// this function only sequences them and maps the proposal to the write.
+///
+/// `roots` are the temp/config containment roots, `is_read_denied` the live
+/// policy's `Read`-deny predicate, `paths` the settings destination roots.
+///
+/// # Errors
+/// Propagates [`PersistError`] from the settings write (broken-JSON destination
+/// or a hardened-filesystem failure).
+pub async fn execute_apply_file(
+    inv: &ApplyFileInvocation,
+    roots: &[PathBuf],
+    is_read_denied: impl Fn(&Path) -> bool,
+    paths: &PermissionPaths,
+) -> Result<ApplyResult, PersistError> {
+    let read = pipeline::read_proposal_file(&inv.apply_file);
+    let scope = inv.apply_target.map(ApplyTarget::as_str);
+    let args = pipeline::ApplyFileArgs {
+        path: &inv.apply_file,
+        roots,
+        expect_sha256: inv.expect_sha256.as_deref(),
+        apply_target: scope,
+        expected_scope: scope,
+    };
+    let proposal = match pipeline::evaluate_apply_file(&args, is_read_denied, read) {
+        pipeline::ApplyFilePipeline::Rejected { code, reason } => {
+            return Ok(ApplyResult::Rejected { code, reason });
+        }
+        pipeline::ApplyFilePipeline::Proceed { proposal } => proposal,
+    };
+
+    let block = pipeline::build_auto_mode_settings(
+        &category(&proposal, "environment"),
+        &category(&proposal, "allow"),
+        &category(&proposal, "soft_deny"),
+        &category(&proposal, "hard_deny"),
+    );
+    let remove_value = proposal.get("remove_from_permissions_allow").cloned();
+
+    if let Some(reason) = pipeline::validate_auto_mode_save(Some(&block), remove_value.as_ref()) {
+        return Ok(ApplyResult::InvalidSave { reason });
+    }
+
+    let remove_strings: Vec<String> = remove_value
+        .as_ref()
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let outcome = persist_auto_mode_save(
+        Some(&block),
+        &remove_strings,
+        destination_for(inv.apply_target),
+        paths,
+    )
+    .await?;
+
+    Ok(if outcome.wrote {
+        ApplyResult::Wrote {
+            removed_count: outcome.removed_count,
+        }
+    } else {
+        ApplyResult::NoChange
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -468,5 +600,158 @@ mod tests {
         let e = err(&["--frobnicate"]);
         assert_eq!(e.code, CODE_USAGE);
         assert_eq!(e.message, "");
+    }
+
+    // ── orchestration core (real tempfiles + real settings write) ────────────
+
+    use serde_json::json;
+
+    /// Write `proposal` as a real file under a fresh temp dir; return the temp
+    /// dir, the file path, its containment root, and the bytes' sha256.
+    fn stage_proposal(proposal: &Value) -> (tempfile::TempDir, PathBuf, PathBuf, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let path = root.join("proposal.json");
+        let bytes = serde_json::to_vec(proposal).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        let sha = pipeline::sha256_hex(&bytes);
+        (dir, path, root, sha)
+    }
+
+    fn paths_under(dir: &Path) -> PermissionPaths {
+        PermissionPaths {
+            lingxi_home: dir.join("home/.lingxi"),
+            cwd: dir.join("proj"),
+        }
+    }
+
+    fn inv(path: &Path, sha: Option<&str>) -> ApplyFileInvocation {
+        ApplyFileInvocation {
+            request_id: None,
+            apply_target: None,
+            expect_sha256: sha.map(String::from),
+            apply_file: path.to_path_buf(),
+        }
+    }
+
+    #[tokio::test]
+    async fn applies_valid_proposal_and_writes_settings() {
+        let proposal = json!({
+            "environment": ["Solo dev on a laptop"],
+            "allow": ["Bash(ls:*)", "$defaults"],
+        });
+        let (dir, path, root, sha) = stage_proposal(&proposal);
+        let paths = paths_under(dir.path());
+        let got = execute_apply_file(&inv(&path, Some(&sha)), &[root], |_| false, &paths)
+            .await
+            .unwrap();
+        assert_eq!(got, ApplyResult::Wrote { removed_count: 0 });
+        let settings = std::fs::read_to_string(dir.path().join("home/.lingxi/settings.json")).unwrap();
+        let v: Value = serde_json::from_str(&settings).unwrap();
+        assert_eq!(v["autoMode"]["environment"], json!(["Solo dev on a laptop"]));
+        assert_eq!(v["autoMode"]["allow"], json!(["Bash(ls:*)", "$defaults"]));
+    }
+
+    #[tokio::test]
+    async fn hash_mismatch_is_rejected_and_nothing_written() {
+        let (dir, path, root, _sha) = stage_proposal(&json!({"environment": ["x"]}));
+        let paths = paths_under(dir.path());
+        let wrong = "f".repeat(64);
+        let got = execute_apply_file(&inv(&path, Some(&wrong)), &[root], |_| false, &paths)
+            .await
+            .unwrap();
+        let ApplyResult::Rejected { code, .. } = got else {
+            panic!("expected Rejected, got {got:?}");
+        };
+        assert_eq!(code, "hash_mismatch");
+        assert!(!dir.path().join("home/.lingxi/settings.json").exists());
+    }
+
+    #[tokio::test]
+    async fn missing_file_is_read_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nope.json");
+        let paths = paths_under(dir.path());
+        let got = execute_apply_file(
+            &inv(&path, Some(&"0".repeat(64))),
+            &[dir.path().to_path_buf()],
+            |_| false,
+            &paths,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(got, ApplyResult::Rejected { code, .. } if code == "read_failed"));
+    }
+
+    #[tokio::test]
+    async fn non_proposal_json_is_parse_failed() {
+        // Valid bytes + correct hash, but not a JSON object → parse_failed.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("p.json");
+        let bytes = b"[1, 2, 3]";
+        std::fs::write(&path, bytes).unwrap();
+        let sha = pipeline::sha256_hex(bytes);
+        let paths = paths_under(dir.path());
+        let got = execute_apply_file(
+            &inv(&path, Some(&sha)),
+            &[dir.path().to_path_buf()],
+            |_| false,
+            &paths,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(got, ApplyResult::Rejected { code, .. } if code == "parse_failed"));
+    }
+
+    #[tokio::test]
+    async fn empty_environment_is_invalid_save() {
+        let (dir, path, root, sha) = stage_proposal(&json!({"environment": []}));
+        let paths = paths_under(dir.path());
+        let got = execute_apply_file(&inv(&path, Some(&sha)), &[root], |_| false, &paths)
+            .await
+            .unwrap();
+        assert_eq!(
+            got,
+            ApplyResult::InvalidSave {
+                reason: "autoMode.environment is empty \u{2014} nothing to save.".to_string()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn removes_seeded_allow_rule() {
+        use permission::{
+            replace_permission_rules, PermissionBehavior, PermissionRule, PermissionRuleSource,
+            PermissionRuleValue,
+        };
+        let proposal = json!({
+            "environment": ["laptop"],
+            "remove_from_permissions_allow": ["Bash(rm:*)"],
+        });
+        let (dir, path, root, sha) = stage_proposal(&proposal);
+        let paths = paths_under(dir.path());
+        // Seed the user settings allow list with the destructive rule.
+        let allow_rule = |spec: &str| PermissionRule {
+            value: PermissionRuleValue::from_rule_string(spec),
+            behavior: PermissionBehavior::Allow,
+            source: PermissionRuleSource::UserSettings,
+        };
+        let seed = [allow_rule("Bash(rm:*)"), allow_rule("Read")];
+        replace_permission_rules(
+            PermissionBehavior::Allow,
+            &seed,
+            PermissionUpdateDestination::UserSettings,
+            &paths,
+        )
+        .await
+        .unwrap();
+        let got = execute_apply_file(&inv(&path, Some(&sha)), &[root], |_| false, &paths)
+            .await
+            .unwrap();
+        assert_eq!(got, ApplyResult::Wrote { removed_count: 1 });
+        let v: Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join("home/.lingxi/settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(v["permissions"]["allow"], json!(["Read"]));
     }
 }

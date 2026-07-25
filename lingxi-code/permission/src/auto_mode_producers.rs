@@ -1744,8 +1744,6 @@ pub trait SiblingDocsSource {
 /// `Xsy`'s body once the org and repo are known and the gates are open.
 #[must_use]
 pub fn sibling_docs_body(org: &str, this_repo: &str, source: &dyn SiblingDocsSource) -> String {
-    use crate::auto_mode_facts as facts;
-
     let Some(list) = source.list_org_repos(org) else {
         return crate::auto_mode_gates::NOT_QUERYABLE_GH_UNAVAILABLE.to_string();
     };

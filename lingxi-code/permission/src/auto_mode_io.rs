@@ -575,7 +575,11 @@ impl FsReconProducers {
             transcript_dir: transcript_dir.into(),
             classify_all_shell,
             org_split: false,
-            nonessential_traffic_allowed: true,
+            // `gh` reaches github.com, which is exactly the outbound traffic
+            // `LINGXI_DISABLE_NONESSENTIAL_TRAFFIC` exists to stop. Resolve it
+            // from the live setting rather than assuming allowed: a host that
+            // opted out must not have the wizard contact GitHub on its behalf.
+            nonessential_traffic_allowed: !traits::traffic_mode::is_essential_traffic_only(),
         }
     }
 
@@ -587,7 +591,10 @@ impl FsReconProducers {
         self
     }
 
-    /// Set whether outbound `gh` traffic is allowed at all.
+    /// Override whether outbound `gh` traffic is allowed at all.
+    ///
+    /// Defaults to the live `LINGXI_DISABLE_NONESSENTIAL_TRAFFIC` setting; this
+    /// exists for tests and for hosts that gate it differently.
     #[must_use]
     pub fn with_nonessential_traffic(mut self, allowed: bool) -> Self {
         self.nonessential_traffic_allowed = allowed;
@@ -1123,14 +1130,7 @@ impl crate::auto_mode_producers::GhSource for GhCli {
         cmd.args(args);
         match run_capped_full(cmd, Duration::from_millis(GH_TIMEOUT_MS)) {
             Some((code, mut stdout, stderr, _timed_out)) => {
-                stdout.truncate(
-                    stdout
-                        .char_indices()
-                        .map(|(i, _)| i)
-                        .take_while(|i| *i < max_buffer)
-                        .last()
-                        .map_or(0, |i| i + 1),
-                );
+                cap_at_char_boundary(&mut stdout, max_buffer);
                 GhResult {
                     code,
                     stdout,
@@ -1194,6 +1194,25 @@ impl crate::auto_mode_producers::SiblingDocsSource for GhCli {
         }
         base64_decode(&packed).and_then(|b| String::from_utf8(b).ok())
     }
+}
+
+/// Truncate `s` to at most `max_bytes`, cutting only at a character boundary.
+///
+/// The cut lands at the END of the last character that fits ENTIRELY within the
+/// cap. Cutting at "the last character's start offset + 1" would land INSIDE a
+/// multi-byte character, and `String::truncate` panics on a non-boundary — so
+/// any non-ASCII byte in a subprocess's output would abort the whole wizard.
+fn cap_at_char_boundary(s: &mut String, max_bytes: usize) {
+    if s.len() <= max_bytes {
+        return;
+    }
+    let cut = s
+        .char_indices()
+        .map(|(i, c)| i + c.len_utf8())
+        .take_while(|end| *end <= max_bytes)
+        .last()
+        .unwrap_or(0);
+    s.truncate(cut);
 }
 
 /// Decode standard base64, ignoring padding. `None` on any invalid input.
@@ -2270,6 +2289,51 @@ mod tests {
     }
 
     // ── base64 (gh `contents` payloads) ──────────────────────────────────────
+
+    #[test]
+    fn essential_traffic_only_closes_the_gh_producers() {
+        // The producer must not reach github.com when the host opted out of
+        // nonessential traffic; the section reports the refusal instead.
+        let producers = FsReconProducers::new("/tmp", "/tmp", "/tmp/projects/x", false)
+            .with_nonessential_traffic(false)
+            .with_org_split(true);
+        let body =
+            crate::auto_mode_pregather::ReconProducers::repo_visibility(&producers).unwrap();
+        assert!(body.contains("nonessential traffic disabled or policy-restricted"));
+        assert!(body.contains(crate::auto_mode_producers::INFER_VISIBILITY_HINT));
+    }
+
+    #[test]
+    fn capping_output_never_splits_a_character() {
+        // A cap landing mid-character is the case that used to panic.
+        let mut s = "aé".to_string(); // 'é' is two bytes: cap 2 must drop it
+        cap_at_char_boundary(&mut s, 2);
+        assert_eq!(s, "a");
+
+        let mut s = "aé".to_string();
+        cap_at_char_boundary(&mut s, 3);
+        assert_eq!(s, "aé");
+
+        // A cap smaller than the first character yields empty, not a panic.
+        let mut s = "\u{1F600}ok".to_string();
+        cap_at_char_boundary(&mut s, 2);
+        assert_eq!(s, "");
+
+        // Under the cap is untouched.
+        let mut s = "short".to_string();
+        cap_at_char_boundary(&mut s, 999);
+        assert_eq!(s, "short");
+
+        // Exercise every cap across a multi-byte string: none may panic, and
+        // the result is always a prefix.
+        let full = "é\u{1F600}z\u{4E2D}";
+        for cap in 0..=full.len() + 2 {
+            let mut s = full.to_string();
+            cap_at_char_boundary(&mut s, cap);
+            assert!(full.starts_with(&s), "cap={cap} gave {s:?}");
+            assert!(s.len() <= cap.min(full.len()));
+        }
+    }
 
     #[test]
     fn base64_round_trips_and_refuses_garbage() {

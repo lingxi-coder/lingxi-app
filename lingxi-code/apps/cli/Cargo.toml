@@ -131,6 +131,8 @@ predicates = "3"
 tempfile = "3"
 # Deterministic mtime staggering for the resume-loader fixture test.
 filetime = "0.2"
+# WIZARD-06 auto-mode-setup e2e: compute the proposal's --expect-sha256.
+sha2 = "0.10"
 
 [target.'cfg(unix)'.dependencies]
 # Real `BypassEnv::effective_uid` returns the REAL uid (parity with TS

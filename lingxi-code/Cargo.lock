@@ -1098,6 +1098,7 @@ dependencies = [
  "serde",
  "serde_json",
  "session",
+ "sha2",
  "skill-api",
  "tasks",
  "telemetry",

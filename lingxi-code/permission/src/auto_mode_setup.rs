@@ -100,6 +100,13 @@ pub enum ApplyFileGate {
     /// The proposal file could not be read (missing / not a regular file / …).
     /// Code `read_failed`.
     ReadFailed,
+    /// The proposal file was truncated at the read cap. Code `too_large`.
+    TooLarge,
+    /// The `--expect-sha256` argument is not a 64-char hex sha256. Code
+    /// `bad_hash_arg`. (The `missing_hash_arg`/`hash_mismatch`/`scope_mismatch`
+    /// codes carry RUNTIME-interpolated reasons and are produced by the command
+    /// handler — built in the command wave; see the blueprint.)
+    BadHashArg,
 }
 
 impl ApplyFileGate {
@@ -111,18 +118,31 @@ impl ApplyFileGate {
             ApplyFileGate::BadPath => "bad_path",
             ApplyFileGate::ReadDenied => "read_denied",
             ApplyFileGate::ReadFailed => "read_failed",
+            ApplyFileGate::TooLarge => "too_large",
+            ApplyFileGate::BadHashArg => "bad_hash_arg",
         }
     }
 
-    /// The byte-exact human-readable `reason` string (2.1.218).
+    /// The byte-exact human-readable `reason` string (2.1.218). (Only the codes
+    /// with a STATIC reason live here; the interpolated ones are formatted at the
+    /// command handler.)
     #[must_use]
     pub fn reason(&self) -> &'static str {
         match self {
             ApplyFileGate::BadPath => "Pass an absolute path under the system temp directory or the Claude config directory \u{2014} --apply-file only reads proposal files the reviewing host wrote there.",
             ApplyFileGate::ReadDenied => "That path is covered by a permissions.deny read rule. Write the proposal somewhere the session can read.",
             ApplyFileGate::ReadFailed => "Couldn\u{2019}t read the proposal file. Check the path and that it is a regular file.",
+            ApplyFileGate::TooLarge => "The proposal file is over the 1 MB cap \u{2014} a real proposal is a few KB. Regenerate it with --propose.",
+            ApplyFileGate::BadHashArg => "--expect-sha256 must be the 64-character hex sha256 digest of the proposal file\u{2019}s exact bytes.",
         }
     }
+}
+
+/// Is `s` a valid `--expect-sha256` argument — exactly 64 lowercase-or-uppercase
+/// hex characters (the sha256 of the proposal file's exact bytes)?
+#[must_use]
+pub fn is_valid_expect_sha256(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 // ── S3 `--apply-file` path predicates (2.1.218) ──────────────────────────────
@@ -387,6 +407,28 @@ mod tests {
         assert!(ApplyFileGate::ReadFailed
             .reason()
             .starts_with("Couldn\u{2019}t read the proposal file."));
+        assert_eq!(ApplyFileGate::TooLarge.code(), "too_large");
+        assert_eq!(
+            ApplyFileGate::TooLarge.reason(),
+            "The proposal file is over the 1 MB cap \u{2014} a real proposal is a few KB. Regenerate it with --propose."
+        );
+        assert_eq!(ApplyFileGate::BadHashArg.code(), "bad_hash_arg");
+        assert_eq!(
+            ApplyFileGate::BadHashArg.reason(),
+            "--expect-sha256 must be the 64-character hex sha256 digest of the proposal file\u{2019}s exact bytes."
+        );
+    }
+
+    #[test]
+    fn expect_sha256_validation() {
+        assert!(is_valid_expect_sha256(&"a".repeat(64)));
+        assert!(is_valid_expect_sha256(
+            "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+        ));
+        assert!(!is_valid_expect_sha256(&"a".repeat(63))); // too short
+        assert!(!is_valid_expect_sha256(&"a".repeat(65))); // too long
+        assert!(!is_valid_expect_sha256(&"g".repeat(64))); // non-hex
+        assert!(!is_valid_expect_sha256(""));
     }
 
     #[test]

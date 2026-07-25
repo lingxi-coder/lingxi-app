@@ -8,9 +8,11 @@
 pub mod allow_suggestion;
 pub mod auto_edit_safety;
 pub mod auto_gate;
+pub mod auto_mode_defaults;
 pub mod auto_mode_facts;
 pub mod auto_mode_gates;
 pub mod auto_mode_pregather;
+pub mod auto_mode_producers;
 pub mod auto_mode_propose;
 pub mod auto_mode_recon;
 pub mod auto_mode_sections;

@@ -8,6 +8,7 @@
 pub mod allow_suggestion;
 pub mod auto_edit_safety;
 pub mod auto_gate;
+pub mod auto_mode_propose;
 pub mod auto_mode_recon;
 pub mod auto_mode_setup;
 #[cfg(feature = "bash-ast")]

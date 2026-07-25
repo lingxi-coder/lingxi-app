@@ -166,6 +166,9 @@ pub const REPO_POSTURE_SIGNALS_PREFIX: &str = r"Posture signals present: ";
 /// Repo-facts label.
 pub const REPO_TRACKED_FILE_COUNT_PREFIX: &str = r"Tracked file count: ";
 
+/// The repo has no remotes configured.
+pub const NO_REMOTES: &str = r"(no remotes)";
+
 /// `origin/HEAD` is unset.
 pub const UNKNOWN_DEFAULT_BRANCH: &str = r"(unknown — origin/HEAD unset)";
 

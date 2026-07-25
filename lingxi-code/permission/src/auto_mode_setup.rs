@@ -565,9 +565,10 @@ pub fn merge_environment(existing: &[String], incoming: &[String]) -> Vec<String
             if let Some(idx) = appended_heading {
                 if !added_under_heading {
                     out.remove(idx);
-                    if insert_at > idx {
-                        insert_at -= 1;
-                    }
+                    // The oracle also decrements its insertion point here, but
+                    // both call sites overwrite it immediately after (this one
+                    // from the heading match below, the final flush by
+                    // returning), so the adjustment is dead either way.
                 }
             }
             appended_heading = None;

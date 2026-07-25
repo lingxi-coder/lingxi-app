@@ -225,6 +225,377 @@ pub fn project_docs_section(source: &dyn DocSource) -> String {
     docs.join("\n\n")
 }
 
+// ── `Ysy` — repo facts ───────────────────────────────────────────────────────
+
+/// `gcn` — the flags every `git` invocation in the recon carries.
+///
+/// These are hardening, not tidiness: reading facts out of a repository must
+/// not run that repository's hooks, must not start a filesystem monitor, and
+/// must never pop a credential prompt. A hostile checkout would otherwise get
+/// code execution out of `git remote`.
+pub const GIT_HARDENING_FLAGS: [&str; 6] = [
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "core.fsmonitor=",
+    "-c",
+    "core.askPass=",
+];
+
+/// `qhr` — timeout for a recon subprocess, in milliseconds.
+pub const SUBPROCESS_TIMEOUT_MS: u64 = 4_000;
+/// Read cap for the `CONTRIBUTING.md` excerpt.
+pub const CONTRIBUTING_READ_CAP: usize = 2_000;
+/// Cap on rendered remote lines (`uae * 2`).
+pub const REMOTE_LINE_CAP: usize = FLAGGED_LIST_CAP * 2;
+
+/// Paths whose presence signals an engineering-posture convention.
+pub const POSTURE_SIGNAL_PATHS: [&str; 10] = [
+    ".github/CODEOWNERS",
+    ".github/workflows",
+    ".buildkite",
+    ".circleci",
+    "CLAUDE.md",
+    "CONTRIBUTING.md",
+    "LICENSE",
+    "LICENSE.md",
+    "LICENSE.txt",
+    "LICENCE",
+];
+
+/// `VBs` — does the string contain anything outside printable ASCII, or a
+/// backslash or percent? Such a URL is refused rather than parsed.
+fn has_unsafe_url_charset(s: &str) -> bool {
+    s.chars()
+        .any(|c| c <= ' ' || c > '~' || c == '\\' || c == '%')
+}
+
+/// `SPo` — a plausible host.
+fn is_plausible_host(h: &str) -> bool {
+    !h.is_empty()
+        && h.len() <= 100
+        && matches_word_dot_dash(h)
+        && h.chars().any(|c| c.is_alphanumeric() || c == '_')
+}
+
+/// `^[\w.][\w.-]*$`
+fn matches_word_dot_dash(s: &str) -> bool {
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    (word(first) || first == '.') && chars.all(|c| word(c) || c == '.' || c == '-')
+}
+
+/// `^[\w.][\w./-]*$` — as above, plus `/`.
+fn matches_branch_shape(s: &str) -> bool {
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    (word(first) || first == '.') && chars.all(|c| word(c) || c == '.' || c == '/' || c == '-')
+}
+
+/// `Hhr` — reduce a git remote URL to `scheme://host/owner/repo`.
+///
+/// Userinfo is dropped (the parse keeps only the host) and the path is cut to
+/// its last two segments, which is the contract
+/// [`crate::auto_mode_facts::REPOS_FOUND_HEADER`] advertises. Anything that
+/// does not parse cleanly is replaced wholesale rather than partially shown.
+#[must_use]
+pub fn redact_remote_url(url: &str) -> String {
+    const REDACTED: &str = "(unparseable remote URL redacted)";
+    if url.len() > 2048 || has_unsafe_url_charset(url) {
+        return REDACTED.to_string();
+    }
+    // A protocol-relative URL carrying userinfo: re-parse with a dummy scheme.
+    if url.starts_with("//") && url.contains('@') {
+        let out = redact_remote_url(&format!("redacted:{url}"));
+        return out.strip_prefix("redacted:").unwrap_or(&out).to_string();
+    }
+    let Some(scheme_end) = url.find("://") else {
+        // scp-style `user@host:path`.
+        let mut rest = url;
+        if let Some(at) = rest.find('@') {
+            let after = &rest[at + 1..];
+            if after.contains('@') {
+                return REDACTED.to_string();
+            }
+            rest = after;
+        }
+        let shape_ok = {
+            let mut chars = rest.chars();
+            match chars.next() {
+                Some(f)
+                    if f.is_alphanumeric()
+                        || f == '_'
+                        || f == '.'
+                        || f == '~'
+                        || f == '/' =>
+                {
+                    chars.all(|c| {
+                        c.is_alphanumeric()
+                            || matches!(c, '_' | '.' | ':' | '/' | '~' | '-')
+                    })
+                }
+                _ => false,
+            }
+        };
+        // `!/[:/@]-/` — no `-` directly after `:`, `/` or `@`.
+        let dash_after_sep = rest
+            .as_bytes()
+            .windows(2)
+            .any(|w| matches!(w[0], b':' | b'/' | b'@') && w[1] == b'-');
+        return if shape_ok && !dash_after_sep {
+            rest.to_string()
+        } else {
+            REDACTED.to_string()
+        };
+    };
+
+    let scheme = &url[..scheme_end];
+    let scheme_ok = {
+        let mut chars = scheme.chars();
+        chars.next().is_some_and(char::is_alphabetic)
+            && chars.all(|c| c.is_alphanumeric() || matches!(c, '+' | '.' | '-'))
+    };
+    if !scheme_ok {
+        return REDACTED.to_string();
+    }
+    let rest = &url[scheme_end + 3..];
+    let split = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..split];
+    let path = &rest[split..];
+    // `URL.host` excludes userinfo.
+    let host = authority.rsplit('@').next().unwrap_or(authority).to_lowercase();
+    if !{
+        let mut chars = host.chars();
+        match chars.next() {
+            Some(f) if f.is_alphanumeric() || f == '_' || f == '.' || f == '[' => chars
+                .all(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | ':' | '[' | ']' | '-')),
+            _ => false,
+        }
+    } {
+        return REDACTED.to_string();
+    }
+    let segments: Vec<&str> = path
+        .split('/')
+        .filter(|s| !s.is_empty() && matches_word_dot_dash(s))
+        .collect();
+    let tail = segments[segments.len().saturating_sub(2)..].join("/");
+    if tail.is_empty() {
+        format!("{scheme}://{host}")
+    } else {
+        format!("{scheme}://{host}/{tail}")
+    }
+}
+
+/// `rNd` — the host of a remote URL, when it is a plausible one.
+#[must_use]
+pub fn remote_host(url: &str) -> Option<String> {
+    let host = if let Some(i) = url.find("://") {
+        let rest = &url[i + 3..];
+        match rest.find('/') {
+            Some(j) if j > 0 => Some(rest[..j].to_string()),
+            _ => None,
+        }
+    } else {
+        match url.find(':') {
+            Some(j) if j > 0 => {
+                let h = url[..j].to_string();
+                if h.len() == 1 {
+                    None
+                } else {
+                    Some(h)
+                }
+            }
+            _ => None,
+        }
+    }?;
+    is_plausible_host(&host).then_some(host)
+}
+
+/// Supplies the repository facts.
+pub trait RepoFactsSource {
+    /// `hFt` — run `git -C <repo> <hardening flags> <args>`; stdout with one
+    /// trailing newline removed, or `""` on a non-zero exit.
+    fn git(&self, args: &[&str]) -> String;
+    /// `Vsy` — the number of output lines, or `0` on failure.
+    fn git_line_count(&self, args: &[&str]) -> usize;
+    /// `None` when the path (or a component) does not exist; `Some(true)` when
+    /// any component is a symlink.
+    fn path_has_symlink_component(&self, relative: &str) -> Option<bool>;
+    /// Contained, no-follow read of a project file.
+    fn read_file(&self, relative: &str, cap: usize) -> Option<String>;
+    /// The repository path as given.
+    fn repo_path(&self) -> String;
+}
+
+/// The repo-facts section plus the host it derived for downstream gathers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoFacts {
+    /// The section body.
+    pub body: String,
+    /// `thisRepoHost` — the origin host, when derivable.
+    pub this_repo_host: Option<String>,
+}
+
+/// `Ysy` — the "Repo facts" section.
+#[must_use]
+pub fn repo_facts_section(source: &dyn RepoFactsSource) -> RepoFacts {
+    use crate::auto_mode_facts as facts;
+    use crate::auto_mode_sections as sections;
+
+    let remotes_raw = source.git(&["remote"]);
+    let origin_head = source.git(&["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
+    let tracked = source.git_line_count(&["ls-files"]);
+    let origin_url = source.git(&["remote", "get-url", "origin"]);
+
+    let redacted_origin = if origin_url.is_empty() {
+        String::new()
+    } else {
+        redact_remote_url(&origin_url)
+    };
+    let this_repo_host = remote_host(&redacted_origin);
+
+    let branch = origin_head
+        .strip_prefix("origin/")
+        .unwrap_or(&origin_head)
+        .to_string();
+    let default_branch = if branch.is_empty() {
+        facts::UNKNOWN_DEFAULT_BRANCH.to_string()
+    } else if branch.len() <= 256 && matches_branch_shape(&branch) {
+        branch
+    } else {
+        sections::REDACTED_UNUSUAL_BRANCH_NAME.to_string()
+    };
+
+    let safe_remote_name = |n: &str| {
+        if n.len() <= 256 && matches_word_dot_dash(n) {
+            n.to_string()
+        } else {
+            sections::REDACTED_UNUSUAL_REMOTE_NAME.to_string()
+        }
+    };
+
+    let mut remote_lines: Vec<String> = Vec::new();
+    for name in remotes_raw.lines().filter(|l| !l.is_empty()).take(10) {
+        let urls: Vec<String> = source
+            .git(&["config", "-z", "--get-all", &format!("remote.{name}.url")])
+            .split('\0')
+            .filter(|s| !s.is_empty())
+            .map(redact_remote_url)
+            .collect();
+        let pushurls: Vec<String> = source
+            .git(&["config", "-z", "--get-all", &format!("remote.{name}.pushurl")])
+            .split('\0')
+            .filter(|s| !s.is_empty())
+            .map(redact_remote_url)
+            .collect();
+        let label = safe_remote_name(name);
+        for u in &urls {
+            remote_lines.push(format!("{label}\t{u} (fetch)"));
+        }
+        let push_from = if pushurls.is_empty() { &urls } else { &pushurls };
+        for u in push_from {
+            remote_lines.push(format!("{label}\t{u} (push)"));
+        }
+    }
+    let omitted = remote_lines.len().saturating_sub(REMOTE_LINE_CAP);
+    let mut remotes_block = remote_lines
+        .iter()
+        .take(REMOTE_LINE_CAP)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
+    if omitted > 0 {
+        remotes_block.push_str(&format!(
+            "\n\u{2026}[{omitted}{}",
+            facts::REMOTE_LINES_OMITTED_SUFFIX
+        ));
+    }
+
+    // A posture signal counts only when it exists AND no path component is a
+    // symlink — a committed symlink must not be followed just to tick a box.
+    let signals: Vec<&str> = POSTURE_SIGNAL_PATHS
+        .into_iter()
+        .filter(|p| source.path_has_symlink_component(p) == Some(false))
+        .collect();
+
+    let contributing = source.read_file("CONTRIBUTING.md", CONTRIBUTING_READ_CAP);
+    let gitignore = source.read_file(".gitignore", DOC_READ_CAP).unwrap_or_default();
+    let sensitive: Vec<&str> = gitignore
+        .split('\n')
+        .map(|l| l.strip_suffix('\r').unwrap_or(l))
+        .filter(|l| {
+            let low = l.to_lowercase();
+            ["secret", "credential", ".env", "key", "token", "pii", "private"]
+                .iter()
+                .any(|n| low.contains(n))
+        })
+        .take(FLAGGED_LIST_CAP)
+        .collect();
+
+    let repo_path = source.repo_path();
+    let shown_path = if repo_path.chars().any(|c| {
+        matches!(c, '\r' | '\n' | '\u{b}' | '\u{c}' | '\u{85}' | '\u{2028}' | '\u{2029}' | '`')
+    }) {
+        sections::REDACTED_UNUSUAL_REPO_PATH.to_string()
+    } else {
+        repo_path
+    };
+
+    let parts = vec![
+        format!("Repo path: {shown_path}"),
+        format!("{}{tracked}", facts::REPO_TRACKED_FILE_COUNT_PREFIX),
+        format!("{}{default_branch}", facts::REPO_DEFAULT_BRANCH_PREFIX),
+        format!(
+            "{}{}",
+            facts::REPO_POSTURE_SIGNALS_PREFIX,
+            if signals.is_empty() {
+                "none".to_string()
+            } else {
+                signals.join(", ")
+            }
+        ),
+        format!(
+            "{}{}",
+            sections::HEADING_GIT_REMOTES,
+            if remotes_block.is_empty() {
+                facts::NO_REMOTES.to_string()
+            } else {
+                remotes_block
+            }
+        ),
+        contributing.map_or(String::new(), |c| {
+            format!("\n{}", render_doc(facts::DOC_CONTRIBUTING_HEAD_LABEL, &c))
+        }),
+        if sensitive.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "{}{}",
+                sections::HEADING_SENSITIVE_GITIGNORE,
+                sensitive
+                    .iter()
+                    .map(|p| format!("- `{}`", display_name(p)))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            )
+        },
+        crate::auto_mode_gates::REPO_FACTS_GH_EXPLAINER.to_string(),
+    ];
+
+    RepoFacts {
+        // NOTE: joined WITHOUT filtering empties -- the oracle keeps the blank
+        // lines an absent CONTRIBUTING.md or gitignore section leaves behind.
+        body: parts.join("\n"),
+        this_repo_host,
+    }
+}
+
 // ── `Zsy` — existing auto-mode settings (selective read) ─────────────────────
 
 /// `Usy` — cap on the rendered project-local `autoMode` block.
@@ -681,6 +1052,232 @@ mod tests {
             &project_docs_section(&source)
         )
         .contains("_nothing found_"));
+    }
+
+    // ── `Ysy` ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn remote_urls_lose_userinfo_and_everything_past_owner_repo() {
+        // The contract REPOS_FOUND_HEADER advertises.
+        assert_eq!(
+            redact_remote_url("https://bot:ghp_SECRET@github.com/acme/app.git"),
+            "https://github.com/acme/app.git"
+        );
+        assert_eq!(
+            redact_remote_url("https://github.com/acme/app/tree/main/deep/path"),
+            "https://github.com/deep/path"
+        );
+        // scp-style: the `user@` is stripped.
+        assert_eq!(redact_remote_url("git@github.com:acme/app.git"), "github.com:acme/app.git");
+        // Anything that will not parse is replaced WHOLESALE, never partially.
+        for bad in [
+            "https://git hub.com/a/b",       // space
+            "https://gith%75b.com/a/b",      // percent
+            "https://git\\hub.com/a/b",      // backslash
+            "a@b@c:x",                       // two `@`
+            "not a url at all!",
+        ] {
+            assert_eq!(
+                redact_remote_url(bad),
+                "(unparseable remote URL redacted)",
+                "should redact {bad:?}"
+            );
+        }
+        assert_eq!(
+            redact_remote_url(&"h".repeat(2049)),
+            "(unparseable remote URL redacted)"
+        );
+    }
+
+    #[test]
+    fn remote_host_is_only_taken_when_plausible() {
+        assert_eq!(
+            remote_host("https://github.com/acme/app"),
+            Some("github.com".to_string())
+        );
+        assert_eq!(
+            remote_host("github.com:acme/app"),
+            Some("github.com".to_string())
+        );
+        // No path after the authority, a bare drive letter, or a junk host.
+        assert_eq!(remote_host("https://github.com"), None);
+        assert_eq!(remote_host("c:/repo"), None);
+        assert_eq!(remote_host("https://-bad-/a/b"), None);
+    }
+
+    struct FakeRepo {
+        git: std::collections::HashMap<String, String>,
+        counts: usize,
+        present: Vec<&'static str>,
+        symlinked: Vec<&'static str>,
+        files: std::collections::HashMap<String, String>,
+        path: String,
+    }
+    impl Default for FakeRepo {
+        fn default() -> Self {
+            Self {
+                git: std::collections::HashMap::new(),
+                counts: 0,
+                present: Vec::new(),
+                symlinked: Vec::new(),
+                files: std::collections::HashMap::new(),
+                path: "/w/app".to_string(),
+            }
+        }
+    }
+    impl RepoFactsSource for FakeRepo {
+        fn git(&self, args: &[&str]) -> String {
+            self.git.get(&args.join(" ")).cloned().unwrap_or_default()
+        }
+        fn git_line_count(&self, _: &[&str]) -> usize {
+            self.counts
+        }
+        fn path_has_symlink_component(&self, relative: &str) -> Option<bool> {
+            if self.symlinked.contains(&relative) {
+                return Some(true);
+            }
+            self.present.contains(&relative).then_some(false)
+        }
+        fn read_file(&self, relative: &str, _cap: usize) -> Option<String> {
+            self.files.get(relative).cloned()
+        }
+        fn repo_path(&self) -> String {
+            self.path.clone()
+        }
+    }
+
+    fn repo_with(pairs: &[(&str, &str)]) -> FakeRepo {
+        let mut r = FakeRepo::default();
+        for (k, v) in pairs {
+            r.git.insert((*k).to_string(), (*v).to_string());
+        }
+        r
+    }
+
+    #[test]
+    fn repo_facts_renders_the_core_lines() {
+        let mut repo = repo_with(&[
+            ("remote", "origin"),
+            ("symbolic-ref --short refs/remotes/origin/HEAD", "origin/main"),
+            ("remote get-url origin", "https://github.com/acme/app.git"),
+            ("config -z --get-all remote.origin.url", "https://github.com/acme/app.git"),
+        ]);
+        repo.counts = 1234;
+        repo.present = vec![".github/workflows", "CLAUDE.md"];
+
+        let facts = repo_facts_section(&repo);
+        assert!(facts.body.contains("Repo path: /w/app"));
+        assert!(facts.body.contains("Tracked file count: 1234"));
+        assert!(facts.body.contains("Default branch: main"));
+        assert!(facts
+            .body
+            .contains("Posture signals present: .github/workflows, CLAUDE.md"));
+        // Both a fetch and a push line, the push falling back to the fetch URL.
+        assert!(facts.body.contains("origin\thttps://github.com/acme/app.git (fetch)"));
+        assert!(facts.body.contains("origin\thttps://github.com/acme/app.git (push)"));
+        assert_eq!(facts.this_repo_host, Some("github.com".to_string()));
+        // The gh explainer always trails the section.
+        assert!(facts.body.contains("do not fetch those yourself"));
+    }
+
+    #[test]
+    fn a_symlinked_posture_signal_is_not_counted() {
+        // A committed symlink must not be followed just to tick a box.
+        let mut repo = FakeRepo::default();
+        repo.present = vec!["CLAUDE.md"];
+        repo.symlinked = vec![".github/workflows"];
+        let facts = repo_facts_section(&repo);
+        assert!(facts.body.contains("Posture signals present: CLAUDE.md"));
+        assert!(!facts.body.contains(".github/workflows"));
+    }
+
+    #[test]
+    fn missing_origin_head_and_no_remotes_have_their_own_wording() {
+        let facts = repo_facts_section(&FakeRepo::default());
+        assert!(facts.body.contains("Default branch: (unknown \u{2014} origin/HEAD unset)"));
+        assert!(facts.body.contains("(no remotes)"));
+        assert!(facts.body.contains("Posture signals present: none"));
+        assert_eq!(facts.this_repo_host, None);
+    }
+
+    #[test]
+    fn unusual_names_are_redacted_rather_than_rendered() {
+        let mut repo = repo_with(&[
+            ("remote", "we`ird"),
+            ("symbolic-ref --short refs/remotes/origin/HEAD", "origin/we`ird"),
+            ("config -z --get-all remote.we`ird.url", "https://github.com/a/b"),
+        ]);
+        repo.path = "/w/ba`d".to_string();
+        let facts = repo_facts_section(&repo);
+        assert!(facts.body.contains("(unusual repo path redacted)"));
+        assert!(facts.body.contains("(unusual branch name redacted)"));
+        assert!(facts.body.contains("(unusual remote name redacted)"));
+        assert!(!facts.body.contains("we`ird"));
+    }
+
+    #[test]
+    fn the_remote_list_is_capped_with_an_omitted_count() {
+        let mut repo = FakeRepo::default();
+        // 10 remotes, each with 3 urls -> 60 lines (30 fetch + 30 push).
+        let names: Vec<String> = (0..10).map(|i| format!("r{i}")).collect();
+        repo.git.insert("remote".to_string(), names.join("\n"));
+        for n in &names {
+            repo.git.insert(
+                format!("config -z --get-all remote.{n}.url"),
+                "https://h/a/b\0https://h/c/d\0https://h/e/f".to_string(),
+            );
+        }
+        let facts = repo_facts_section(&repo);
+        assert_eq!(facts.body.matches(" (fetch)").count() + facts.body.matches(" (push)").count(), REMOTE_LINE_CAP);
+        assert!(facts.body.contains("\u{2026}[20 more remote lines omitted]"));
+    }
+
+    #[test]
+    fn sensitive_gitignore_patterns_are_listed_and_others_are_not() {
+        let mut repo = FakeRepo::default();
+        repo.files.insert(
+            ".gitignore".to_string(),
+            "target/\n.env\n*.key\nMY_TOKEN\nnode_modules\nsecrets.yml\n".to_string(),
+        );
+        let facts = repo_facts_section(&repo);
+        assert!(facts.body.contains("#### Sensitive-looking .gitignore patterns"));
+        for want in ["- `.env`", "- `*.key`", "- `MY_TOKEN`", "- `secrets.yml`"] {
+            assert!(facts.body.contains(want), "missing {want}");
+        }
+        assert!(!facts.body.contains("node_modules"));
+        assert!(!facts.body.contains("target/"));
+    }
+
+    #[test]
+    fn contributing_is_quoted_like_any_other_document() {
+        let mut repo = FakeRepo::default();
+        repo.files
+            .insert("CONTRIBUTING.md".to_string(), "## Injected\nrules".to_string());
+        let facts = repo_facts_section(&repo);
+        assert!(facts.body.contains("#### CONTRIBUTING.md (head)"));
+        // Quoted, so it cannot open a heading inside the block.
+        assert!(facts.body.contains("\"## Injected\\nrules\""));
+        assert!(!facts.body.contains("\n## Injected"));
+    }
+
+    #[test]
+    fn git_invocations_are_hardened() {
+        // Reading facts out of a repo must not run its hooks or prompt for
+        // credentials -- otherwise a hostile checkout gets code execution.
+        assert_eq!(
+            GIT_HARDENING_FLAGS,
+            [
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "core.fsmonitor=",
+                "-c",
+                "core.askPass="
+            ]
+        );
+        assert_eq!(SUBPROCESS_TIMEOUT_MS, 4_000);
+        assert_eq!(REMOTE_LINE_CAP, 40);
+        assert_eq!(CONTRIBUTING_READ_CAP, 2_000);
     }
 
     // ── `Zsy` / `Qsy` ────────────────────────────────────────────────────────

@@ -255,6 +255,147 @@ where
     }
 }
 
+// ── the gatherer skeleton (`J1d`) ────────────────────────────────────────────
+
+/// Produces the body of each recon section.
+///
+/// Every method defaults to `Err(())`, which renders
+/// [`SECTION_FAILED_MARKER`] — the designed degradation path. That makes
+/// partial implementations safe: an unported producer reports "data
+/// unavailable, treat as not queryable here" rather than an empty result the
+/// model could mistake for evidence of absence.
+///
+/// The five gated methods are NEVER CALLED when their gate is closed
+/// ([`build_recon_block`] substitutes the `NOT GATHERED` marker instead), so a
+/// declined answer is enforced by not running the code at all rather than by
+/// trusting the producer to check.
+pub trait ReconProducers {
+    /// `CLAUDE.md` and project documentation.
+    fn project_docs(&self) -> Result<String, ()> {
+        Err(())
+    }
+    /// Repository facts.
+    fn repo_facts(&self) -> Result<String, ()> {
+        Err(())
+    }
+    /// Repo visibility / branch protection via `gh`. Gated on Q2 = `all`.
+    fn repo_visibility(&self) -> Result<String, ()> {
+        Err(())
+    }
+    /// Sibling org repo docs via `gh`. Gated on Q2 = `all`.
+    fn sibling_docs(&self) -> Result<String, ()> {
+        Err(())
+    }
+    /// The user's existing `autoMode` settings and flagged `permissions.allow`.
+    fn existing_settings(&self) -> Result<String, ()> {
+        Err(())
+    }
+    /// Transcript-mined usage for this project.
+    fn project_usage(&self) -> Result<String, ()> {
+        Err(())
+    }
+    /// Command words from shell history. Gated on Q3 including `shell`.
+    fn shell_history(&self) -> Result<String, ()> {
+        Err(())
+    }
+    /// Other git checkouts under the home directory. Gated on Q3 including
+    /// `repos`.
+    fn home_repos(&self) -> Result<String, ()> {
+        Err(())
+    }
+    /// Transcript-mined usage across other projects. Gated on Q2 = `all`.
+    fn all_projects_usage(&self) -> Result<String, ()> {
+        Err(())
+    }
+    /// Repo-wide config scans.
+    fn config_scans(&self) -> Result<String, ()> {
+        Err(())
+    }
+    /// The shipped default rule labels.
+    fn default_labels(&self) -> Result<String, ()> {
+        Err(())
+    }
+}
+
+/// Whether a section runs, and what stands in for it when it does not.
+fn gate_for(section: ReconSection, options: GatherOptions) -> Option<&'static str> {
+    use crate::auto_mode_gates as gates;
+    match section {
+        ReconSection::RepoVisibility if !options.all_projects => {
+            Some(gates::ORG_REPO_SPLIT_NOT_GATHERED)
+        }
+        ReconSection::SiblingDocs if !options.all_projects => {
+            Some(gates::SIBLING_DOCS_NOT_GATHERED)
+        }
+        ReconSection::ShellHistory if !options.shell_history => {
+            Some(gates::SHELL_HISTORY_NOT_GATHERED)
+        }
+        ReconSection::HomeRepos if !options.home_repos => Some(gates::HOME_REPOS_NOT_GATHERED),
+        ReconSection::AllProjectsUsage if !options.all_projects => {
+            Some(gates::OTHER_PROJECT_TRANSCRIPTS_NOT_GATHERED)
+        }
+        _ => None,
+    }
+}
+
+/// The result of a gather run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconBlock {
+    /// The rendered block — the USER message for the propose call.
+    pub text: String,
+    /// Sections whose producer failed, for `section_failed` telemetry.
+    pub failed_sections: Vec<&'static str>,
+    /// Sections withheld because their gate was closed.
+    pub gated_sections: Vec<&'static str>,
+}
+
+/// Assemble the whole pre-gathered recon block.
+///
+/// Sections render in [`ReconSection::ALL`] order, always all eleven of them:
+/// a gated-off section is REPLACED by its `NOT GATHERED` marker rather than
+/// omitted, so the model is told what was withheld and why, and is told not to
+/// go fetch it itself.
+#[must_use]
+pub fn build_recon_block(options: GatherOptions, producers: &dyn ReconProducers) -> ReconBlock {
+    let mut sections: Vec<String> = Vec::with_capacity(ReconSection::ALL.len());
+    let mut failed_sections: Vec<&'static str> = Vec::new();
+    let mut gated_sections: Vec<&'static str> = Vec::new();
+
+    for section in ReconSection::ALL {
+        let title = section.title();
+        if let Some(marker) = gate_for(section, options) {
+            // The producer is deliberately NOT invoked.
+            gated_sections.push(title);
+            sections.push(render_section(title, marker));
+            continue;
+        }
+        let produce = || match section {
+            ReconSection::ProjectDocs => producers.project_docs(),
+            ReconSection::RepoFacts => producers.repo_facts(),
+            ReconSection::RepoVisibility => producers.repo_visibility(),
+            ReconSection::SiblingDocs => producers.sibling_docs(),
+            ReconSection::ExistingSettings => producers.existing_settings(),
+            ReconSection::ProjectUsage => producers.project_usage(),
+            ReconSection::ShellHistory => producers.shell_history(),
+            ReconSection::HomeRepos => producers.home_repos(),
+            ReconSection::AllProjectsUsage => producers.all_projects_usage(),
+            ReconSection::ConfigScans => producers.config_scans(),
+            ReconSection::DefaultLabels => producers.default_labels(),
+        };
+        let (rendered, failed) = render_section_or_failed(title, produce);
+        if failed {
+            failed_sections.push(title);
+        }
+        sections.push(rendered);
+    }
+
+    ReconBlock {
+        text: render_pregather_block(&sections),
+        failed_sections,
+        gated_sections,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -395,6 +536,169 @@ mod tests {
              ### Repo facts\nRepo path: /w/app\n\
              ### Config scans (names only)\n_nothing found_"
         );
+    }
+
+    // ── the gatherer skeleton ────────────────────────────────────────────────
+
+    /// Records which producers were invoked; every one succeeds.
+    #[derive(Default)]
+    struct RecordingProducers {
+        called: std::cell::RefCell<Vec<&'static str>>,
+    }
+    impl RecordingProducers {
+        fn note(&self, what: &'static str) -> Result<String, ()> {
+            self.called.borrow_mut().push(what);
+            Ok(format!("body:{what}"))
+        }
+        fn called(&self) -> Vec<&'static str> {
+            self.called.borrow().clone()
+        }
+    }
+    impl ReconProducers for RecordingProducers {
+        fn project_docs(&self) -> Result<String, ()> {
+            self.note("project_docs")
+        }
+        fn repo_facts(&self) -> Result<String, ()> {
+            self.note("repo_facts")
+        }
+        fn repo_visibility(&self) -> Result<String, ()> {
+            self.note("repo_visibility")
+        }
+        fn sibling_docs(&self) -> Result<String, ()> {
+            self.note("sibling_docs")
+        }
+        fn existing_settings(&self) -> Result<String, ()> {
+            self.note("existing_settings")
+        }
+        fn project_usage(&self) -> Result<String, ()> {
+            self.note("project_usage")
+        }
+        fn shell_history(&self) -> Result<String, ()> {
+            self.note("shell_history")
+        }
+        fn home_repos(&self) -> Result<String, ()> {
+            self.note("home_repos")
+        }
+        fn all_projects_usage(&self) -> Result<String, ()> {
+            self.note("all_projects_usage")
+        }
+        fn config_scans(&self) -> Result<String, ()> {
+            self.note("config_scans")
+        }
+        fn default_labels(&self) -> Result<String, ()> {
+            self.note("default_labels")
+        }
+    }
+
+    #[test]
+    fn a_closed_gate_never_invokes_its_producer() {
+        // THE consent property: a declined answer is enforced by not running
+        // the code, not by trusting the producer to check a flag. If this ever
+        // regresses, a "just this project / no" answer would still reach the
+        // GitHub org, the user's shell history, and their home directory.
+        let producers = RecordingProducers::default();
+        let block = build_recon_block(GatherOptions::default(), &producers);
+
+        let called = producers.called();
+        for forbidden in [
+            "repo_visibility",
+            "sibling_docs",
+            "shell_history",
+            "home_repos",
+            "all_projects_usage",
+        ] {
+            assert!(
+                !called.contains(&forbidden),
+                "{forbidden} ran despite a closed gate; called={called:?}"
+            );
+        }
+        // The ungated ones still run.
+        assert_eq!(
+            called,
+            vec![
+                "project_docs",
+                "repo_facts",
+                "existing_settings",
+                "project_usage",
+                "config_scans",
+                "default_labels",
+            ]
+        );
+        assert_eq!(block.gated_sections.len(), 5);
+    }
+
+    #[test]
+    fn open_gates_invoke_every_producer_in_order() {
+        let producers = RecordingProducers::default();
+        let block = build_recon_block(
+            GatherOptions {
+                all_projects: true,
+                shell_history: true,
+                home_repos: true,
+            },
+            &producers,
+        );
+        assert_eq!(producers.called().len(), 11);
+        assert!(block.gated_sections.is_empty());
+        assert!(block.failed_sections.is_empty());
+        // Rendered in declaration order.
+        for title in SECTION_TITLES {
+            assert!(block.text.contains(&format!("### {title}\n")), "{title}");
+        }
+    }
+
+    #[test]
+    fn a_withheld_section_still_renders_with_its_marker() {
+        // Withheld must never look like absent: the section is present, and it
+        // says who withheld it and forbids the model fetching it itself.
+        let producers = RecordingProducers::default();
+        let block = build_recon_block(GatherOptions::default(), &producers);
+        assert!(block.text.contains(&render_section(
+            "Shell history (command words only)",
+            crate::auto_mode_gates::SHELL_HISTORY_NOT_GATHERED,
+        )));
+        assert!(block
+            .text
+            .contains("Do not read history files yourself"));
+        // Every one of the eleven sections is present.
+        for title in SECTION_TITLES {
+            assert!(block.text.contains(title), "missing section: {title}");
+        }
+    }
+
+    #[test]
+    fn partial_gating_withholds_only_what_was_declined() {
+        // depth = "shell": history is allowed, the home walk is not.
+        let producers = RecordingProducers::default();
+        build_recon_block(
+            gather_options_from_answers(Some("project"), Some("shell")),
+            &producers,
+        );
+        let called = producers.called();
+        assert!(called.contains(&"shell_history"));
+        assert!(!called.contains(&"home_repos"));
+        assert!(!called.contains(&"repo_visibility"));
+    }
+
+    /// Every producer left at its default (`Err`).
+    struct UnportedProducers;
+    impl ReconProducers for UnportedProducers {}
+
+    #[test]
+    fn an_unported_producer_degrades_to_the_failure_marker() {
+        let block = build_recon_block(
+            GatherOptions {
+                all_projects: true,
+                shell_history: true,
+                home_repos: true,
+            },
+            &UnportedProducers,
+        );
+        assert_eq!(block.failed_sections.len(), 11);
+        // It reports "unavailable", never an empty result the model could read
+        // as evidence of absence.
+        assert!(block.text.contains(SECTION_FAILED_MARKER));
+        assert!(!block.text.contains(NOTHING_FOUND_MARKER));
     }
 
     #[test]

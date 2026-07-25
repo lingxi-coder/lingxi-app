@@ -191,6 +191,28 @@ pub fn emit_auto_mode_denial_limit_exceeded(
     );
 }
 
+/// Emit `auto_mode_setup_write` — the WIZARD-06 non-interactive
+/// `auto-mode-setup --apply-file` write attempt (oracle `pe("auto_mode_setup_write",
+/// {code})`). `code` is the outcome (`usage` / `bad_flag_grammar` / `bad_path` /
+/// `read_denied` / `read_failed` / `too_large` / `missing_hash_arg` /
+/// `bad_hash_arg` / `hash_mismatch` / `parse_failed` / `scope_mismatch` /
+/// `write_failed`). NOTE the event name has NO `tengu_` prefix (byte-exact).
+pub fn emit_auto_mode_setup_write(code: &str) {
+    tracing::info!(
+        event = crate::tengu::agent::AUTO_MODE_SETUP_WRITE,
+        code = %code,
+    );
+}
+
+/// Emit `tengu_auto_mode_setup_wizard_resolved` — the `/auto-mode-setup` wizard
+/// finished. `choice` records how it ended (`applied` / `cancelled` / …).
+pub fn emit_auto_mode_setup_wizard_resolved(choice: &str) {
+    tracing::info!(
+        event = crate::tengu::agent::AUTO_MODE_SETUP_WIZARD_RESOLVED,
+        choice = %choice,
+    );
+}
+
 /// Emit `tengu_agent_hooks_origin_untrusted` (cc 2.1.218 `hvo`) — an agent
 /// definition's frontmatter `hooks:` were skipped because the folder the
 /// definition came from has not been trusted. `source` is the claude

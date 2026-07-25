@@ -57,6 +57,10 @@ pub enum Commands {
     /// Inspect or reset auto mode classifier configuration
     #[command(name = "auto-mode")]
     AutoMode(auto_mode::Cli),
+    /// Apply a reviewed auto-mode proposal to your settings (non-interactive;
+    /// hash-bound via --expect-sha256)
+    #[command(name = "auto-mode-setup")]
+    AutoModeSetup(auto_mode_setup::Cli),
     /// Check the health of your LingXi auto-updater. Note: The workspace
     /// trust dialog is skipped and stdio servers from .mcp.json are spawned for
     /// health checks. Only use this command in directories you trust.
@@ -113,6 +117,7 @@ impl Commands {
             Commands::Mcp(_) => "mcp",
             Commands::Auth(_) => "auth",
             Commands::AutoMode(_) => "auto-mode",
+            Commands::AutoModeSetup(_) => "auto-mode-setup",
             Commands::Doctor(_) => "doctor",
             Commands::Gateway(_) => "gateway",
             Commands::Install(_) => "install",
@@ -137,6 +142,7 @@ impl Commands {
             Commands::Mcp(c) => mcp::run(c).await,
             Commands::Auth(c) => auth::run(c).await,
             Commands::AutoMode(c) => auto_mode::run(c).await,
+            Commands::AutoModeSetup(c) => auto_mode_setup::run(c).await,
             Commands::Doctor(c) => doctor::run(c).await,
             Commands::Gateway(c) => gateway::run(c).await,
             Commands::Install(c) => install::run(c).await,

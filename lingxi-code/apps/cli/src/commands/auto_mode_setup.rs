@@ -25,11 +25,14 @@
 
 use std::path::{Path, PathBuf};
 
+use clap::Args;
 use permission::auto_mode_setup as pipeline;
 use permission::{
     persist_auto_mode_save, PermissionPaths, PermissionUpdateDestination, PersistError,
 };
 use serde_json::Value;
+
+use crate::exit_codes::{RUNTIME_ERROR, SUCCESS};
 
 // ── telemetry codes (auto_mode_setup_write) ──────────────────────────────────
 
@@ -433,6 +436,118 @@ pub async fn execute_apply_file(
     })
 }
 
+// ── CLI dispatch (`lingxi-cli auto-mode-setup`) ──────────────────────────────
+
+/// `auto-mode-setup` payload. The flags are parsed by the hand-rolled grammar
+/// ([`parse_apply_file_args`]), so clap only captures the raw token stream
+/// (`trailing_var_arg` + `allow_hyphen_values`) — matching the oracle, which
+/// order-validates the flags itself.
+#[derive(Debug, Clone, Args)]
+pub struct Cli {
+    /// Raw `auto-mode-setup` flags (e.g. `--expect-sha256 <hex> --apply-file <path>`).
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    pub args: Vec<String>,
+}
+
+/// How a parsed outcome maps to process behavior: an exit code, an optional
+/// `auto_mode_setup_write` telemetry code, and optional stderr text. Pure +
+/// testable; [`run`] performs the actual emit/print/exit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Disposition {
+    /// The process exit code.
+    pub exit_code: i32,
+    /// The `auto_mode_setup_write` telemetry code to emit, if any.
+    pub telemetry_code: Option<String>,
+    /// The stderr message to print, if any.
+    pub stderr: Option<String>,
+}
+
+/// Map a grammar rejection to its process disposition (verified codes/messages).
+fn dispose_grammar(e: &GrammarError) -> Disposition {
+    Disposition {
+        exit_code: RUNTIME_ERROR,
+        telemetry_code: Some(e.code.to_string()),
+        stderr: (!e.message.is_empty()).then(|| e.message.to_string()),
+    }
+}
+
+/// Map an [`ApplyResult`] to its process disposition. Gate rejections carry the
+/// pipeline's byte-exact code; a validation failure folds into `usage` (the
+/// write region has no distinct validation code); success emits nothing (no
+/// success code exists) and exits 0.
+fn dispose_apply(result: &ApplyResult) -> Disposition {
+    match result {
+        ApplyResult::Wrote { .. } | ApplyResult::NoChange => Disposition {
+            exit_code: SUCCESS,
+            telemetry_code: None,
+            stderr: None,
+        },
+        ApplyResult::Rejected { code, reason } => Disposition {
+            exit_code: RUNTIME_ERROR,
+            telemetry_code: Some(code.clone()),
+            stderr: Some(reason.clone()),
+        },
+        ApplyResult::InvalidSave { reason } => Disposition {
+            exit_code: RUNTIME_ERROR,
+            telemetry_code: Some(CODE_USAGE.to_string()),
+            stderr: Some(reason.clone()),
+        },
+    }
+}
+
+/// Apply a [`Disposition`]: emit telemetry, print stderr, return the exit code.
+fn apply_disposition(d: Disposition) -> i32 {
+    if let Some(code) = &d.telemetry_code {
+        telemetry::emit_auto_mode_setup_write(code);
+    }
+    if let Some(msg) = &d.stderr {
+        eprintln!("{msg}");
+    }
+    d.exit_code
+}
+
+/// Run `lingxi-cli auto-mode-setup`. Parses the raw flags, then either prints
+/// usage (`--help`) or runs the `--apply-file` flow against the live settings.
+///
+/// A standalone apply has no loaded session policy, so the `Read`-deny overlay
+/// is inactive (`is_read_denied` = `false`); the temp/config containment root
+/// gate + the `O_NOFOLLOW`/`nlink==1` secure read still constrain what is read.
+pub async fn run(cli: &Cli) -> i32 {
+    match parse_apply_file_args(&cli.args) {
+        Ok(AutoModeSetupInvocation::Help) => {
+            print_usage();
+            SUCCESS
+        }
+        Ok(AutoModeSetupInvocation::ApplyFile(inv)) => run_apply_file(&inv).await,
+        Err(e) => apply_disposition(dispose_grammar(&e)),
+    }
+}
+
+async fn run_apply_file(inv: &ApplyFileInvocation) -> i32 {
+    let lingxi_home = crate::run::lingxi_home_dir();
+    let roots = vec![std::env::temp_dir(), lingxi_home.clone()];
+    let paths = PermissionPaths {
+        lingxi_home,
+        cwd: std::env::current_dir().unwrap_or_default(),
+    };
+    match execute_apply_file(inv, &roots, |_| false, &paths).await {
+        Ok(result) => apply_disposition(dispose_apply(&result)),
+        Err(err) => {
+            telemetry::emit_auto_mode_setup_write("write_failed");
+            eprintln!("Could not write the auto-mode settings: {err}");
+            RUNTIME_ERROR
+        }
+    }
+}
+
+/// Print a short synopsis for `auto-mode-setup --help`.
+fn print_usage() {
+    eprintln!("Apply a reviewed auto-mode proposal to your settings.");
+    eprintln!();
+    eprintln!("Usage: lingxi-cli auto-mode-setup [--request-id <id>] [--apply-target user|project] \\");
+    eprintln!("           --expect-sha256 <64-hex> --apply-file <path>");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -753,5 +868,57 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(dir.path().join("home/.lingxi/settings.json")).unwrap())
                 .unwrap();
         assert_eq!(v["permissions"]["allow"], json!(["Read"]));
+    }
+
+    // ── dispatch outcome mapping ─────────────────────────────────────────────
+
+    #[test]
+    fn grammar_error_disposition_carries_code_and_message() {
+        let d = dispose_grammar(&grammar(APPLY_FILE_NEEDS_PATH));
+        assert_eq!(d.exit_code, RUNTIME_ERROR);
+        assert_eq!(d.telemetry_code.as_deref(), Some("bad_flag_grammar"));
+        assert_eq!(d.stderr.as_deref(), Some(APPLY_FILE_NEEDS_PATH));
+        // A bare usage fallback (empty message) prints nothing but still exits nonzero.
+        let d = dispose_grammar(&usage_fallback());
+        assert_eq!(d.telemetry_code.as_deref(), Some("usage"));
+        assert_eq!(d.stderr, None);
+        assert_eq!(d.exit_code, RUNTIME_ERROR);
+    }
+
+    #[test]
+    fn apply_result_dispositions() {
+        // Success outcomes: exit 0, no telemetry code, no stderr.
+        for ok in [
+            ApplyResult::Wrote { removed_count: 3 },
+            ApplyResult::NoChange,
+        ] {
+            let d = dispose_apply(&ok);
+            assert_eq!(d.exit_code, SUCCESS);
+            assert_eq!(d.telemetry_code, None);
+            assert_eq!(d.stderr, None);
+        }
+        // Gate rejection: pipeline's own code + reason.
+        let d = dispose_apply(&ApplyResult::Rejected {
+            code: "hash_mismatch".into(),
+            reason: "boom".into(),
+        });
+        assert_eq!(d.exit_code, RUNTIME_ERROR);
+        assert_eq!(d.telemetry_code.as_deref(), Some("hash_mismatch"));
+        assert_eq!(d.stderr.as_deref(), Some("boom"));
+        // Validation failure folds into `usage`.
+        let d = dispose_apply(&ApplyResult::InvalidSave {
+            reason: "Nothing to save.".into(),
+        });
+        assert_eq!(d.telemetry_code.as_deref(), Some("usage"));
+        assert_eq!(d.stderr.as_deref(), Some("Nothing to save."));
+    }
+
+    #[tokio::test]
+    async fn run_help_prints_usage_and_succeeds() {
+        let code = run(&Cli {
+            args: vec!["--help".to_string()],
+        })
+        .await;
+        assert_eq!(code, SUCCESS);
     }
 }

@@ -612,6 +612,89 @@ pub fn evaluate_apply_file(
     ApplyFilePipeline::Proceed { proposal }
 }
 
+// ── secure fs read + sha256 (the command-layer wrapper) ──────────────────────
+
+/// `XQ_` — the `--apply-file` read cap (2.1.218: `1e6` = 1,000,000 bytes). A file
+/// whose bytes exceed this is [`ProposalRead::TooLarge`].
+pub const PROPOSAL_READ_CAP: usize = 1_000_000;
+
+/// Lowercase-hex sha256 of `bytes` (the digest `--expect-sha256` is checked
+/// against — [`verify_proposal_hash`]).
+#[must_use]
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(64);
+    for b in digest {
+        use std::fmt::Write;
+        let _ = write!(out, "{b:02x}");
+    }
+    out
+}
+
+/// Securely read a proposal file for `--apply-file` (oracle `fIe(path, XQ_,
+/// {noFollow, requireNlink1})`): open with `O_NOFOLLOW` (the final component must
+/// not be a symlink), require a REGULAR file with `nlink == 1` (no hard-link
+/// aliasing), and read up to [`PROPOSAL_READ_CAP`]. Returns [`ProposalRead::Read`]
+/// with the exact bytes + their sha256, [`ProposalRead::TooLarge`] when the file
+/// exceeds the cap, or [`ProposalRead::Failed`] on any open/stat/read failure.
+#[must_use]
+pub fn read_proposal_file(path: &std::path::Path) -> ProposalRead {
+    read_proposal_file_capped(path, PROPOSAL_READ_CAP)
+}
+
+/// [`read_proposal_file`] with an explicit cap (for tests).
+#[must_use]
+pub fn read_proposal_file_capped(path: &std::path::Path, cap: usize) -> ProposalRead {
+    use std::io::Read;
+
+    #[cfg(unix)]
+    let opened = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
+    };
+    #[cfg(not(unix))]
+    let opened = match std::fs::symlink_metadata(path) {
+        // No `O_NOFOLLOW` off-unix: reject a symlinked final component up front.
+        Ok(m) if m.file_type().is_symlink() => return ProposalRead::Failed,
+        Ok(_) => std::fs::File::open(path),
+        Err(_) => return ProposalRead::Failed,
+    };
+    let Ok(mut file) = opened else {
+        return ProposalRead::Failed; // ELOOP (symlink) / ENOENT / EACCES / …
+    };
+    let Ok(meta) = file.metadata() else {
+        return ProposalRead::Failed;
+    };
+    if !meta.is_file() {
+        return ProposalRead::Failed; // not a regular file
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if meta.nlink() != 1 {
+            return ProposalRead::Failed; // hard-link aliased
+        }
+    }
+    // Read one byte past the cap to detect truncation.
+    let mut bytes = Vec::new();
+    if file
+        .take(cap as u64 + 1)
+        .read_to_end(&mut bytes)
+        .is_err()
+    {
+        return ProposalRead::Failed;
+    }
+    if bytes.len() > cap {
+        return ProposalRead::TooLarge;
+    }
+    let sha256_hex = sha256_hex(&bytes);
+    ProposalRead::Read { bytes, sha256_hex }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -840,6 +923,112 @@ mod tests {
         // Empty everything → just an (empty) environment array.
         let e = build_auto_mode_settings(&[], &[], &[], &[]);
         assert_eq!(e, json!({ "environment": [] }));
+    }
+
+    #[test]
+    fn sha256_known_vectors() {
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn secure_read_regular_file_and_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("proposal.json");
+        std::fs::write(&p, br#"{"autoMode":{"environment":["x"]}}"#).unwrap();
+        match read_proposal_file(&p) {
+            ProposalRead::Read { bytes, sha256_hex } => {
+                assert_eq!(&bytes, br#"{"autoMode":{"environment":["x"]}}"#);
+                assert_eq!(sha256_hex, super::sha256_hex(&bytes));
+            }
+            other => panic!("expected Read, got {other:?}"),
+        }
+        // A missing file → Failed.
+        assert!(matches!(
+            read_proposal_file(&dir.path().join("nope.json")),
+            ProposalRead::Failed
+        ));
+        // A directory (not a regular file) → Failed.
+        assert!(matches!(read_proposal_file(dir.path()), ProposalRead::Failed));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn secure_read_rejects_symlink_and_hardlink_and_oversize() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("real.json");
+        std::fs::write(&target, b"{}").unwrap();
+
+        // O_NOFOLLOW: a symlinked FINAL component is rejected.
+        let link = dir.path().join("link.json");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(
+            matches!(read_proposal_file(&link), ProposalRead::Failed),
+            "a symlinked apply-file path must be rejected (O_NOFOLLOW)"
+        );
+
+        // nlink != 1: a hard-linked file is rejected (aliasing).
+        let hard = dir.path().join("hard.json");
+        std::fs::hard_link(&target, &hard).unwrap();
+        assert!(
+            matches!(read_proposal_file(&target), ProposalRead::Failed),
+            "a hard-linked file (nlink != 1) must be rejected"
+        );
+
+        // Over the cap → TooLarge (use a small cap to avoid writing 1 MB).
+        let big = dir.path().join("big.json");
+        std::fs::write(&big, vec![b'x'; 100]).unwrap();
+        assert!(matches!(
+            read_proposal_file_capped(&big, 10),
+            ProposalRead::TooLarge
+        ));
+        // Exactly at the cap is fine.
+        assert!(matches!(
+            read_proposal_file_capped(&big, 100),
+            ProposalRead::Read { .. }
+        ));
+    }
+
+    #[test]
+    fn end_to_end_apply_file_read_then_pipeline() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("p.json");
+        let body = br#"{"autoMode":{"environment":["uses git"]}}"#;
+        std::fs::write(&p, body).unwrap();
+        let read = read_proposal_file(&p);
+        let ProposalRead::Read { ref sha256_hex, .. } = read else {
+            panic!("expected Read");
+        };
+        let digest = sha256_hex.clone();
+        let roots = vec![dir.path().to_path_buf()];
+        let args = ApplyFileArgs {
+            path: &p,
+            roots: &roots,
+            expect_sha256: Some(&digest),
+            apply_target: None,
+            expected_scope: None,
+        };
+        // Correct hash → Proceed with the parsed proposal.
+        assert!(matches!(
+            evaluate_apply_file(&args, |_| false, read),
+            ApplyFilePipeline::Proceed { .. }
+        ));
+        // A tampered digest → hash_mismatch (read again since ProposalRead moved).
+        let zero = "0".repeat(64);
+        let bad = ApplyFileArgs {
+            expect_sha256: Some(&zero),
+            ..args
+        };
+        assert!(matches!(
+            evaluate_apply_file(&bad, |_| false, read_proposal_file(&p)),
+            ApplyFilePipeline::Rejected { code, .. } if code == "hash_mismatch"
+        ));
     }
 
     #[test]

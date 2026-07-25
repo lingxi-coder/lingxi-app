@@ -26,6 +26,10 @@ url = "2"
 # Faithful gitignore-glob matcher for file-path permission rules (3a) — the
 # Rust analogue of claude-code's `ignore` npm lib; already in Cargo.lock.
 ignore = "0.4"
+# WIZARD-06 `/auto-mode-setup --apply-file`: sha256 of the proposal file's exact
+# bytes (`--expect-sha256` hash gate) + the secure `O_NOFOLLOW`/`nlink==1` read.
+sha2 = "0.10"
+libc = "0.2"
 # tree-sitter bash AST (claude-code's `treeSitterAnalysis`). Optional + gated
 # behind `bash-ast` so the default/minimal build never compiles the grammar.
 tree-sitter = { version = "=0.25.10", optional = true }
@@ -46,6 +50,8 @@ tool-web = { path = "../tools/web" }
 tool-agent = { path = "../tools/agent" }
 tool-mcp = { path = "../tools/mcp" }
 tokio = { workspace = true, features = ["io-util", "rt-multi-thread", "macros"] }
+# WIZARD-06 apply-file secure-read integration tests (symlink / nlink / cap).
+tempfile = "3"
 
 [lints]
 workspace = true

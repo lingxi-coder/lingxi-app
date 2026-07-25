@@ -2971,6 +2971,34 @@ impl ApiService {
         }
         self.drive_stream(req).await
     }
+
+    /// Structured-output streaming call constrained by a JSON SCHEMA rather
+    /// than by a forced tool.
+    ///
+    /// This is claude-code's `sideQuery` shape: the model is told to emit a
+    /// document matching `schema`, which on Anthropic rides the
+    /// `structured-outputs` beta (`output_config`) and on OpenAI the stable
+    /// `response_format` key. Both encodings live in their provider codecs.
+    ///
+    /// # Errors
+    /// Propagates request-building and transport errors, including a provider
+    /// whose codec has no encoding for structured output.
+    pub async fn stream_json_schema(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&str>,
+        messages: Vec<ConversationMessage>,
+        schema: serde_json::Value,
+        max_tokens: Option<u32>,
+        effort: Option<serde_json::Value>,
+    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+        let mut req =
+            self.build_request(model, profile, system, messages, Vec::new(), true, max_tokens)?;
+        req.effort = effort;
+        req.response_format = Some(crate::ResponseFormat::JsonSchema { schema });
+        self.drive_stream(req).await
+    }
 }
 
 // ── Media capping (stripExcessMediaItems) ─────────────────────────────────────

@@ -907,6 +907,159 @@ pub fn render_rulesets(res: &GhResult) -> String {
     format!("{}{more_note}{redacted_note}{capped}", head.join(", "))
 }
 
+// ── `Xsy` — sibling repo docs (via gh) ───────────────────────────────────────
+
+/// How many org repos `gh repo list` is asked for.
+pub const SIBLING_REPO_LIST_LIMIT: usize = 5;
+/// How many sibling repos are actually fetched, after filtering.
+pub const SIBLING_DOC_LIMIT: usize = 3;
+/// The docs tried, in order; the first one found per repo wins.
+pub const SIBLING_DOC_NAMES: [&str; 2] = ["CLAUDE.md", "README.md"];
+
+/// `_cn` — `^(?!\.{1,2}$)[A-Za-z0-9_.][A-Za-z0-9_.-]*$`
+///
+/// Rejects `.` and `..` outright: those are path traversal, not repo names,
+/// and the value is interpolated into a `gh api repos/…` path.
+#[must_use]
+pub fn is_valid_repo_name(name: &str) -> bool {
+    if name == "." || name == ".." {
+        return false;
+    }
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    let ok_first = first.is_ascii_alphanumeric() || first == '_' || first == '.';
+    ok_first
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+}
+
+/// The sibling repos worth fetching: most recently pushed first, excluding this
+/// repository itself, name-validated, capped.
+#[must_use]
+pub fn select_sibling_repos(list_json: &str, this_repo: &str) -> Option<Vec<String>> {
+    let parsed = serde_json::from_str::<Value>(if list_json.is_empty() {
+        "[]"
+    } else {
+        list_json
+    })
+    .ok()?;
+    let items = parsed.as_array()?;
+    let mut typed: Vec<(&str, &str)> = items
+        .iter()
+        .filter_map(|i| {
+            let name = i.get("name")?.as_str()?;
+            let pushed = match i.get("pushedAt") {
+                Some(Value::String(s)) => s.as_str(),
+                Some(Value::Null) | None => "",
+                Some(_) => return None,
+            };
+            Some((name, pushed))
+        })
+        .collect();
+    // Most recently pushed first.
+    typed.sort_by(|a, b| b.1.cmp(a.1));
+    Some(
+        typed
+            .into_iter()
+            .map(|(name, _)| name)
+            .filter(|n| !n.eq_ignore_ascii_case(this_repo) && is_valid_repo_name(n))
+            .take(SIBLING_DOC_LIMIT)
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
+/// `…[truncated at N chars]` — the sibling-doc truncation suffix. Shorter than
+/// `jIe`'s, which also reports the file's byte size.
+#[must_use]
+pub fn chars_truncated_marker(cap: usize) -> String {
+    format!("\n\u{2026}[truncated at {cap} chars]")
+}
+
+/// Trim a fetched sibling doc to its reportable form.
+///
+/// `README.md` is cut to its first 40 lines and a 10 KB cap; `CLAUDE.md` gets
+/// the larger 200 KB cap. A cut always announces itself.
+#[must_use]
+pub fn trim_sibling_doc(doc_name: &str, content: &str) -> String {
+    let (body, cap) = if doc_name == "README.md" {
+        (
+            content
+                .split('\n')
+                .take(README_HEAD_LINES)
+                .collect::<Vec<_>>()
+                .join("\n"),
+            DOC_READ_CAP,
+        )
+    } else {
+        (content.to_string(), DOC_READ_CAP_CLAUDE_MD)
+    };
+    if body.chars().count() > cap {
+        let head: String = body.chars().take(cap).collect();
+        format!("{head}{}", chars_truncated_marker(cap))
+    } else {
+        body
+    }
+}
+
+/// The label a sibling doc is rendered under.
+#[must_use]
+pub fn sibling_doc_label(org: &str, repo: &str, doc_name: &str) -> String {
+    let shown = if doc_name == "README.md" {
+        format!("{doc_name} (head)")
+    } else {
+        doc_name.to_string()
+    };
+    format!("sibling {org}/{repo}/{shown}")
+}
+
+/// Supplies the sibling-docs gh calls.
+pub trait SiblingDocsSource {
+    /// `gh repo list <org> --limit 5 --json name,pushedAt`; `None` when gh
+    /// could not be used at all.
+    fn list_org_repos(&self, org: &str) -> Option<String>;
+    /// `gh api repos/<org>/<repo>/contents/<doc> --jq .content`, already
+    /// base64-decoded. `None` when absent or unreadable.
+    fn fetch_doc(&self, org: &str, repo: &str, doc: &str) -> Option<String>;
+}
+
+/// `Xsy`'s body once the org and repo are known and the gates are open.
+#[must_use]
+pub fn sibling_docs_body(org: &str, this_repo: &str, source: &dyn SiblingDocsSource) -> String {
+    use crate::auto_mode_facts as facts;
+
+    let Some(list) = source.list_org_repos(org) else {
+        return crate::auto_mode_gates::NOT_QUERYABLE_GH_UNAVAILABLE.to_string();
+    };
+    let Some(repos) = select_sibling_repos(&list, this_repo) else {
+        return crate::auto_mode_gates::NOT_QUERYABLE_GH_UNAVAILABLE.to_string();
+    };
+
+    let mut docs: Vec<String> = Vec::new();
+    for repo in repos {
+        // First doc found wins; a repo with neither contributes nothing.
+        for doc in SIBLING_DOC_NAMES {
+            if let Some(content) = source.fetch_doc(org, &repo, doc) {
+                if content.trim().is_empty() {
+                    continue;
+                }
+                docs.push(render_doc(
+                    &sibling_doc_label(org, &repo, doc),
+                    &trim_sibling_doc(doc, &content),
+                ));
+                break;
+            }
+        }
+    }
+
+    if docs.is_empty() {
+        crate::auto_mode_gates::NO_SIBLING_DOCS_FOUND.to_string()
+    } else {
+        docs.join("\n\n")
+    }
+}
+
 // ── `W1d` — recent usage across all projects (names only) ────────────────────
 
 /// `qsy` — per-transcript read cap (4 MiB).
@@ -3132,6 +3285,133 @@ mod tests {
         );
         assert_eq!(GH_TIMEOUT_MS, 4_000);
         assert_eq!(KNOWN_VCS_HOSTS.len(), 3);
+    }
+
+    // ── `Xsy` ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn a_repo_name_that_is_path_traversal_is_refused() {
+        // The name goes straight into a `gh api repos/<org>/<name>/...` path.
+        assert!(!is_valid_repo_name("."));
+        assert!(!is_valid_repo_name(".."));
+        assert!(!is_valid_repo_name("../../etc"));
+        assert!(!is_valid_repo_name("a/b"));
+        assert!(!is_valid_repo_name(""));
+        // Ordinary names, including dot-leading ones that are not `.`/`..`.
+        assert!(is_valid_repo_name("app"));
+        assert!(is_valid_repo_name(".github"));
+        assert!(is_valid_repo_name("my-repo_2.0"));
+    }
+
+    #[test]
+    fn siblings_are_the_most_recently_pushed_excluding_this_repo() {
+        let json = r#"[
+            {"name":"old","pushedAt":"2020-01-01T00:00:00Z"},
+            {"name":"app","pushedAt":"2026-01-01T00:00:00Z"},
+            {"name":"newest","pushedAt":"2026-07-01T00:00:00Z"},
+            {"name":"mid","pushedAt":"2026-03-01T00:00:00Z"},
+            {"name":"never","pushedAt":null}
+        ]"#;
+        // `app` is this repo and is excluded; the rest come newest-first, capped
+        // at three.
+        assert_eq!(
+            select_sibling_repos(json, "app").unwrap(),
+            vec!["newest", "mid", "old"]
+        );
+        // Case-insensitive self-exclusion.
+        assert!(!select_sibling_repos(json, "APP").unwrap().contains(&"app".to_string()));
+        // A traversal name never survives selection.
+        let json = r#"[{"name":"..","pushedAt":"2026-01-01T00:00:00Z"}]"#;
+        assert!(select_sibling_repos(json, "app").unwrap().is_empty());
+        // Non-array or unparseable output is not an empty result.
+        assert_eq!(select_sibling_repos("{}", "app"), None);
+        assert_eq!(select_sibling_repos("not json", "app"), None);
+    }
+
+    #[test]
+    fn sibling_docs_are_trimmed_and_announce_the_cut() {
+        // README is cut to 40 lines...
+        let readme = (1..=60).map(|i| format!("l{i}")).collect::<Vec<_>>().join("\n");
+        let out = trim_sibling_doc("README.md", &readme);
+        assert!(out.contains("l40"));
+        assert!(!out.contains("l41"));
+        // ...and to the 10 KB cap, with the cut announced.
+        let long = "x".repeat(20_000);
+        let out = trim_sibling_doc("README.md", &long);
+        assert!(out.ends_with("\u{2026}[truncated at 10000 chars]"));
+        // CLAUDE.md gets the larger cap and no line cut.
+        let out = trim_sibling_doc("CLAUDE.md", &readme);
+        assert!(out.contains("l60"));
+        assert!(!out.contains("truncated"));
+    }
+
+    struct FakeSiblings {
+        list: Option<String>,
+        docs: std::collections::HashMap<String, String>,
+    }
+    impl SiblingDocsSource for FakeSiblings {
+        fn list_org_repos(&self, _org: &str) -> Option<String> {
+            self.list.clone()
+        }
+        fn fetch_doc(&self, _org: &str, repo: &str, doc: &str) -> Option<String> {
+            self.docs.get(&format!("{repo}/{doc}")).cloned()
+        }
+    }
+
+    #[test]
+    fn the_first_doc_found_per_repo_wins_and_content_is_quoted() {
+        let mut docs = std::collections::HashMap::new();
+        docs.insert("alpha/CLAUDE.md".to_string(), "alpha rules".to_string());
+        docs.insert("alpha/README.md".to_string(), "alpha readme".to_string());
+        docs.insert("beta/README.md".to_string(), "## beta\nreadme".to_string());
+        let src = FakeSiblings {
+            list: Some(
+                r#"[{"name":"alpha","pushedAt":"2026-02-01"},{"name":"beta","pushedAt":"2026-01-01"}]"#
+                    .to_string(),
+            ),
+            docs,
+        };
+        let body = sibling_docs_body("acme", "app", &src);
+        // CLAUDE.md wins for alpha; README is not also emitted.
+        assert!(body.contains("#### sibling acme/alpha/CLAUDE.md"));
+        assert!(!body.contains("alpha/README.md"));
+        // beta falls back to its README, labelled as a head excerpt.
+        assert!(body.contains("#### sibling acme/beta/README.md (head)"));
+        // Untrusted sibling content is quoted, so it cannot open a heading.
+        assert!(body.contains("\"## beta\\nreadme\""));
+        assert!(!body.contains("\n## beta"));
+    }
+
+    #[test]
+    fn no_docs_and_no_listing_are_reported_differently() {
+        // Repos exist but carry no docs -> "found nothing".
+        let src = FakeSiblings {
+            list: Some(r#"[{"name":"alpha","pushedAt":"2026-01-01"}]"#.to_string()),
+            docs: std::collections::HashMap::new(),
+        };
+        assert!(sibling_docs_body("acme", "app", &src).contains("No sibling docs found"));
+
+        // gh could not be used at all -> "not queryable", NOT "found nothing".
+        let src = FakeSiblings {
+            list: None,
+            docs: std::collections::HashMap::new(),
+        };
+        assert!(sibling_docs_body("acme", "app", &src).contains("gh unavailable or unauthenticated"));
+    }
+
+    #[test]
+    fn sibling_caps_match_the_oracle() {
+        assert_eq!(SIBLING_REPO_LIST_LIMIT, 5);
+        assert_eq!(SIBLING_DOC_LIMIT, 3);
+        assert_eq!(SIBLING_DOC_NAMES, ["CLAUDE.md", "README.md"]);
+        assert_eq!(
+            sibling_doc_label("acme", "app", "README.md"),
+            "sibling acme/app/README.md (head)"
+        );
+        assert_eq!(
+            sibling_doc_label("acme", "app", "CLAUDE.md"),
+            "sibling acme/app/CLAUDE.md"
+        );
     }
 
     // ── `W1d` ────────────────────────────────────────────────────────────────

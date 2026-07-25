@@ -145,22 +145,38 @@ pub fn path_symlink_check(root: &Path, relative: &str) -> Option<bool> {
 ///
 /// stdout is drained on its own thread: an 8 MB pipe would otherwise fill and
 /// deadlock the child while we sat polling for its exit.
-fn run_capped(mut cmd: Command, timeout: Duration) -> Option<(i32, String, bool)> {
+fn run_capped(cmd: Command, timeout: Duration) -> Option<(i32, String, bool)> {
+    run_capped_full(cmd, timeout).map(|(c, out, _err, t)| (c, out, t))
+}
+
+/// As [`run_capped`], but also returns stderr — `gh`'s availability check reads it.
+fn run_capped_full(
+    mut cmd: Command,
+    timeout: Duration,
+) -> Option<(i32, String, String, bool)> {
     let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .ok()?;
 
-    let stdout = child.stdout.take()?;
-    let reader = std::thread::spawn(move || {
-        use std::io::Read;
-        let mut buf = Vec::new();
-        let mut stdout = stdout;
-        let _ = stdout.read_to_end(&mut buf);
-        buf
-    });
+    use std::io::Read;
+    let drain = |mut pipe: Option<Box<dyn std::io::Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(p) = pipe.as_mut() {
+                let _ = p.read_to_end(&mut buf);
+            }
+            buf
+        })
+    };
+    let stdout: Option<Box<dyn std::io::Read + Send>> =
+        child.stdout.take().map(|s| Box::new(s) as Box<dyn std::io::Read + Send>);
+    let stderr: Option<Box<dyn std::io::Read + Send>> =
+        child.stderr.take().map(|s| Box::new(s) as Box<dyn std::io::Read + Send>);
+    let reader = drain(stdout);
+    let err_reader = drain(stderr);
 
     let started = Instant::now();
     let status = loop {
@@ -171,21 +187,30 @@ fn run_capped(mut cmd: Command, timeout: Duration) -> Option<(i32, String, bool)
                     let _ = child.kill();
                     let _ = child.wait();
                     let partial = reader.join().unwrap_or_default();
-                    return Some((-1, String::from_utf8_lossy(&partial).into_owned(), true));
+                    let errs = err_reader.join().unwrap_or_default();
+                    return Some((
+                        -1,
+                        String::from_utf8_lossy(&partial).into_owned(),
+                        String::from_utf8_lossy(&errs).into_owned(),
+                        true,
+                    ));
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
             Err(_) => {
                 let _ = reader.join();
+                let _ = err_reader.join();
                 return None;
             }
         }
     };
 
     let bytes = reader.join().ok()?;
+    let errs = err_reader.join().unwrap_or_default();
     Some((
         status.code().unwrap_or(-1),
         String::from_utf8_lossy(&bytes).into_owned(),
+        String::from_utf8_lossy(&errs).into_owned(),
         false,
     ))
 }

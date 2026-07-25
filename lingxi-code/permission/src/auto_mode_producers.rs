@@ -597,6 +597,316 @@ pub fn repo_facts_section(source: &dyn RepoFactsSource) -> RepoFacts {
     }
 }
 
+// ── `x1d` — repo visibility & branch protection (via gh) ─────────────────────
+
+/// `R1d` — timeout for a `gh` call, in milliseconds.
+pub const GH_TIMEOUT_MS: u64 = 4_000;
+/// `V$e` — what a failed capability renders as.
+pub const NOT_QUERYABLE_HERE: &str = "not queryable here";
+/// `e$s` — appended when visibility could not be determined.
+pub const INFER_VISIBILITY_HINT: &str =
+    "Infer visibility from the remote hostname in Repo facts, or ask.";
+/// `_1d` — hosts a remote may name for the org/repo parse to be trusted.
+pub const KNOWN_VCS_HOSTS: [&str; 3] = ["github.com", "gitlab.com", "bitbucket.org"];
+/// How many names a list shows before `(+N more)`.
+pub const GH_LIST_SHOWN: usize = 20;
+
+/// `k1d` — `^[\w.][\w ./-]{0,119}$`, the charset a name must fit to be shown.
+#[must_use]
+pub fn is_displayable_gh_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(word(first) || first == '.') {
+        return false;
+    }
+    let rest: Vec<char> = chars.collect();
+    rest.len() <= 119
+        && rest
+            .iter()
+            .all(|c| word(*c) || matches!(c, '.' | ' ' | '/' | '-'))
+}
+
+/// `I1d` — a GitHub visibility value, or `None`.
+#[must_use]
+pub fn parse_visibility(v: &str) -> Option<String> {
+    let l = v.to_lowercase();
+    matches!(l.as_str(), "public" | "private" | "internal").then_some(l)
+}
+
+/// `D1d` — backtick and join a name list, noting how many were cut.
+#[must_use]
+pub fn join_gh_names(names: &[String], limit: usize) -> String {
+    let shown: Vec<String> = names.iter().take(limit).map(|n| format!("`{n}`")).collect();
+    let more = names.len().saturating_sub(shown.len());
+    let suffix = if more > 0 {
+        format!(" (+{more} more)")
+    } else {
+        String::new()
+    };
+    format!("{}{suffix}", shown.join(", "))
+}
+
+/// The outcome of one `gh` invocation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GhResult {
+    /// Process exit code.
+    pub code: i32,
+    /// Captured stdout.
+    pub stdout: String,
+    /// Captured stderr — read by [`gh_is_unavailable`].
+    pub stderr: String,
+}
+
+/// `Lhr` — did `gh` fail because it is missing or unauthenticated, rather than
+/// because the call itself went wrong?
+///
+/// The distinction decides whether the failure is worth a telemetry event: an
+/// absent `gh` is an ordinary environment fact, a broken call is not.
+#[must_use]
+pub fn gh_is_unavailable(res: &GhResult) -> bool {
+    res.code == 127 || res.code == 4 || (res.code == 1 && res.stderr.is_empty())
+}
+
+/// `t$s` — the environment a `gh` call runs with.
+///
+/// Two things happen here, and the second is the important one. `GH_HOST` is
+/// forced to github.com, and the ENTERPRISE tokens are always cleared. On top
+/// of that, if the user's own `GH_HOST` pointed at a DIFFERENT host, their
+/// `GH_TOKEN`/`GITHUB_TOKEN` are cleared too — those credentials belong to that
+/// other host, and this call is about to go to github.com. Forwarding them
+/// would hand a GHE token to a server it was never issued for.
+///
+/// Returns the variables to OVERRIDE, with `None` meaning "remove".
+#[must_use]
+pub fn gh_env_overrides(current_gh_host: Option<&str>) -> Vec<(&'static str, Option<String>)> {
+    let points_elsewhere = current_gh_host
+        .map(|h| !is_github_host(h))
+        .unwrap_or(false);
+    let mut out: Vec<(&'static str, Option<String>)> = vec![
+        ("GH_HOST", Some("github.com".to_string())),
+        ("GH_ENTERPRISE_TOKEN", None),
+        ("GITHUB_ENTERPRISE_TOKEN", None),
+    ];
+    if points_elsewhere {
+        out.push(("GH_TOKEN", None));
+        out.push(("GITHUB_TOKEN", None));
+    }
+    out
+}
+
+/// `hcn` — reduce a git remote to `host/org/repo`, or `None`.
+///
+/// Refuses anything it cannot read unambiguously: a password in the URL, a
+/// non-`git` username, an explicit port, an unknown host, or a path that is not
+/// exactly two safe segments. The result feeds `gh` calls, so a wrong parse
+/// would send a query about somebody else's repository.
+#[must_use]
+pub fn remote_to_host_org_repo(url: &str, this_repo_host: Option<&str>) -> Option<String> {
+    if url.chars().any(|c| c <= ' ' || c > '~' || c == '\\' || c == '%') {
+        return None;
+    }
+    let mut hosts: Vec<String> = KNOWN_VCS_HOSTS.iter().map(|h| (*h).to_string()).collect();
+    if let Some(extra) = this_repo_host.filter(|h| is_plausible_host(h)) {
+        hosts.push(extra.to_lowercase());
+    }
+
+    let (host, path) = if url.contains("://") {
+        let parsed = url::Url::parse(url).ok()?;
+        if parsed.password().is_some_and(|p| !p.is_empty()) {
+            return None;
+        }
+        match parsed.scheme() {
+            "https" => {
+                if !parsed.username().is_empty() {
+                    return None;
+                }
+            }
+            "ssh" | "git" => {
+                if !parsed.username().is_empty() && parsed.username() != "git" {
+                    return None;
+                }
+            }
+            _ => return None,
+        }
+        if parsed.port().is_some() {
+            return None;
+        }
+        (parsed.host_str()?.to_string(), parsed.path().to_string())
+    } else {
+        let colon = url.find(':')?;
+        if colon == 0 {
+            return None;
+        }
+        let head = &url[..colon];
+        let host = head.strip_prefix("git@")?.to_string();
+        let rest = &url[colon + 1..];
+        let path = if rest.starts_with('/') {
+            rest.to_string()
+        } else {
+            format!("/{rest}")
+        };
+        (host, path)
+    };
+
+    if !hosts.contains(&host.to_lowercase()) {
+        return None;
+    }
+    let segments: Vec<&str> = path.split('/').collect();
+    if segments.len() != 3 || !segments[0].is_empty() {
+        return None;
+    }
+    if !segments[1..].iter().all(|s| is_plausible_host(s)) {
+        return None;
+    }
+    Some(format!(
+        "{}/{}/{}",
+        host.to_lowercase(),
+        segments[1],
+        segments[2]
+    ))
+}
+
+/// `Asy` — the visibility line.
+#[must_use]
+pub fn render_visibility(res: &GhResult) -> String {
+    if res.code != 0 {
+        return NOT_QUERYABLE_HERE.to_string();
+    }
+    let parsed = serde_json::from_str::<Value>(if res.stdout.is_empty() {
+        "{}"
+    } else {
+        &res.stdout
+    });
+    parsed
+        .ok()
+        .and_then(|v| {
+            v.get("visibility")
+                .and_then(Value::as_str)
+                .and_then(parse_visibility)
+        })
+        .unwrap_or_else(|| NOT_QUERYABLE_HERE.to_string())
+}
+
+/// `ksy` — the protected-branches line.
+#[must_use]
+pub fn render_protected_branches(res: &GhResult) -> String {
+    if res.code != 0 {
+        return NOT_QUERYABLE_HERE.to_string();
+    }
+    let names: Vec<String> = res
+        .stdout
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect();
+    if names.is_empty() {
+        return "none listed".to_string();
+    }
+    let shown: Vec<String> = names
+        .iter()
+        .filter(|n| is_displayable_gh_name(n))
+        .cloned()
+        .collect();
+    let redacted = names.len() - shown.len();
+    let redacted_note = if redacted > 0 {
+        format!("{redacted}{}", crate::auto_mode_sections::REDACTED_NAMES_OUTSIDE_CHARSET_SUFFIX)
+    } else {
+        String::new()
+    };
+    let capped = if names.len() == 100 {
+        crate::auto_mode_facts::FIRST_100_ONLY_SUFFIX.to_string()
+    } else {
+        String::new()
+    };
+    if shown.is_empty() {
+        format!(
+            "{}{}{capped}",
+            names.len(),
+            crate::auto_mode_sections::REDACTED_ALL_NAMES_OUTSIDE_CHARSET
+        )
+    } else {
+        format!(
+            "{}{}{capped}",
+            join_gh_names(&shown, GH_LIST_SHOWN),
+            if redacted > 0 {
+                format!(" (+{redacted_note}")
+            } else {
+                String::new()
+            }
+        )
+    }
+}
+
+/// `Rsy` — the rulesets line.
+#[must_use]
+pub fn render_rulesets(res: &GhResult) -> String {
+    if res.code != 0 {
+        return NOT_QUERYABLE_HERE.to_string();
+    }
+    let Ok(Value::Array(items)) = serde_json::from_str::<Value>(if res.stdout.is_empty() {
+        "[]"
+    } else {
+        &res.stdout
+    }) else {
+        return NOT_QUERYABLE_HERE.to_string();
+    };
+    let typed: Vec<(&str, &str)> = items
+        .iter()
+        .filter_map(|i| {
+            Some((
+                i.get("name")?.as_str()?,
+                i.get("enforcement")?.as_str()?,
+            ))
+        })
+        .collect();
+    let mut redacted = items.len() - typed.len();
+    let total = typed.len() + redacted;
+    if total == 0 {
+        return "none listed".to_string();
+    }
+    let mut shown: Vec<String> = Vec::new();
+    for (name, enforcement) in typed {
+        let e = enforcement.to_lowercase();
+        if matches!(e.as_str(), "active" | "evaluate" | "disabled") && is_displayable_gh_name(name)
+        {
+            shown.push(format!("`{name}` - {e}"));
+        } else {
+            redacted += 1;
+        }
+    }
+    let capped = if total == 100 {
+        crate::auto_mode_facts::FIRST_100_ONLY_SUFFIX.to_string()
+    } else {
+        String::new()
+    };
+    let redacted_note = if redacted > 0 {
+        format!(
+            " (+{redacted}{}",
+            crate::auto_mode_sections::REDACTED_NAMES_OUTSIDE_CHARSET_SUFFIX
+        )
+    } else {
+        String::new()
+    };
+    if shown.is_empty() {
+        return format!(
+            "{total}{}{capped}",
+            crate::auto_mode_sections::REDACTED_ALL_NAMES_OUTSIDE_CHARSET
+        );
+    }
+    let head: Vec<String> = shown.iter().take(GH_LIST_SHOWN).cloned().collect();
+    let more = shown.len() - head.len();
+    let more_note = if more > 0 {
+        format!(" (+{more} more)")
+    } else {
+        String::new()
+    };
+    format!("{}{more_note}{redacted_note}{capped}", head.join(", "))
+}
+
 // ── `W1d` — recent usage across all projects (names only) ────────────────────
 
 /// `qsy` — per-transcript read cap (4 MiB).
@@ -2659,6 +2969,169 @@ mod tests {
         assert_eq!(SUBPROCESS_TIMEOUT_MS, 4_000);
         assert_eq!(REMOTE_LINE_CAP, 40);
         assert_eq!(CONTRIBUTING_READ_CAP, 2_000);
+    }
+
+    // ── `x1d` ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn a_token_for_another_host_is_never_forwarded_to_github() {
+        // The point of this function. GH_HOST pointing at an enterprise server
+        // means GH_TOKEN belongs to THAT server; this call goes to github.com.
+        let overrides = gh_env_overrides(Some("ghe.acme.internal"));
+        let cleared: Vec<&str> = overrides
+            .iter()
+            .filter(|(_, v)| v.is_none())
+            .map(|(k, _)| *k)
+            .collect();
+        assert!(cleared.contains(&"GH_TOKEN"));
+        assert!(cleared.contains(&"GITHUB_TOKEN"));
+        assert!(cleared.contains(&"GH_ENTERPRISE_TOKEN"));
+        assert!(cleared.contains(&"GITHUB_ENTERPRISE_TOKEN"));
+        assert!(overrides.contains(&("GH_HOST", Some("github.com".to_string()))));
+
+        // Already github.com (or unset): the user's own token is kept, but the
+        // ENTERPRISE ones are cleared regardless.
+        for host in [Some("github.com"), Some("www.github.com"), None] {
+            let overrides = gh_env_overrides(host);
+            let cleared: Vec<&str> = overrides
+                .iter()
+                .filter(|(_, v)| v.is_none())
+                .map(|(k, _)| *k)
+                .collect();
+            assert!(!cleared.contains(&"GH_TOKEN"), "host={host:?}");
+            assert!(cleared.contains(&"GH_ENTERPRISE_TOKEN"), "host={host:?}");
+        }
+    }
+
+    #[test]
+    fn a_remote_is_only_parsed_when_it_is_unambiguous() {
+        assert_eq!(
+            remote_to_host_org_repo("https://github.com/acme/app", None).as_deref(),
+            Some("github.com/acme/app")
+        );
+        assert_eq!(
+            remote_to_host_org_repo("git@github.com:acme/app.git", None).as_deref(),
+            Some("github.com/acme/app.git")
+        );
+        assert_eq!(
+            remote_to_host_org_repo("ssh://git@gitlab.com/acme/app", None).as_deref(),
+            Some("gitlab.com/acme/app")
+        );
+        // A wrong parse would send a query about somebody ELSE's repository,
+        // so every ambiguous shape is refused outright.
+        for bad in [
+            "https://u:pw@github.com/acme/app", // password
+            "https://user@github.com/acme/app", // username on https
+            "ssh://bob@github.com/acme/app",    // non-`git` user
+            "https://github.com:8443/acme/app", // explicit port
+            "https://evil.example/acme/app",    // unknown host
+            "https://github.com/acme",          // not two segments
+            "https://github.com/a/b/c",         // too many segments
+            "https://github.com/acme/app x",    // unsafe charset
+        ] {
+            assert_eq!(remote_to_host_org_repo(bad, None), None, "should refuse {bad}");
+        }
+        // The repo's own host is trusted in addition to the known set.
+        assert_eq!(
+            remote_to_host_org_repo("https://ghe.acme.io/acme/app", Some("ghe.acme.io")).as_deref(),
+            Some("ghe.acme.io/acme/app")
+        );
+        assert_eq!(remote_to_host_org_repo("https://ghe.acme.io/acme/app", None), None);
+    }
+
+    fn gh_ok(stdout: &str) -> GhResult {
+        GhResult {
+            code: 0,
+            stdout: stdout.to_string(),
+            stderr: String::new(),
+        }
+    }
+    fn gh_fail() -> GhResult {
+        GhResult {
+            code: 1,
+            stdout: String::new(),
+            stderr: "boom".to_string(),
+        }
+    }
+
+    #[test]
+    fn a_failed_capability_degrades_to_not_queryable() {
+        assert_eq!(render_visibility(&gh_fail()), "not queryable here");
+        assert_eq!(render_rulesets(&gh_fail()), "not queryable here");
+        assert_eq!(render_protected_branches(&gh_fail()), "not queryable here");
+    }
+
+    #[test]
+    fn visibility_is_only_taken_from_the_known_enum() {
+        assert_eq!(render_visibility(&gh_ok(r#"{"visibility":"PRIVATE"}"#)), "private");
+        assert_eq!(render_visibility(&gh_ok(r#"{"visibility":"internal"}"#)), "internal");
+        // Anything unrecognised is not guessed at.
+        assert_eq!(
+            render_visibility(&gh_ok(r#"{"visibility":"weird"}"#)),
+            "not queryable here"
+        );
+        assert_eq!(render_visibility(&gh_ok("not json")), "not queryable here");
+    }
+
+    #[test]
+    fn protected_branches_render_and_redact() {
+        assert_eq!(render_protected_branches(&gh_ok("")), "none listed");
+        assert_eq!(
+            render_protected_branches(&gh_ok("main\nrelease/v1\n")),
+            "`main`, `release/v1`"
+        );
+        // A name outside the display charset is counted, not shown.
+        let out = render_protected_branches(&gh_ok("main\nweird`name\n"));
+        assert!(out.contains("`main`"));
+        assert!(!out.contains("weird"));
+        assert!(out.contains("outside the display charset, redacted"));
+    }
+
+    #[test]
+    fn rulesets_report_name_and_enforcement() {
+        let json = r#"[{"name":"protect main","enforcement":"active"},
+                       {"name":"draft","enforcement":"evaluate"}]"#;
+        let out = render_rulesets(&gh_ok(json));
+        assert!(out.contains("`protect main` - active"));
+        assert!(out.contains("`draft` - evaluate"));
+        // An unknown enforcement value is redacted rather than shown.
+        let out = render_rulesets(&gh_ok(r#"[{"name":"x","enforcement":"maybe"}]"#));
+        assert!(out.contains("all names outside the display charset, redacted"));
+        assert_eq!(render_rulesets(&gh_ok("[]")), "none listed");
+    }
+
+    #[test]
+    fn gh_unavailability_is_distinguished_from_a_broken_call() {
+        // 127 = not found, 4 = not authenticated, 1 with no stderr = no result.
+        for code in [127, 4] {
+            assert!(gh_is_unavailable(&GhResult {
+                code,
+                stdout: String::new(),
+                stderr: String::new()
+            }));
+        }
+        assert!(gh_is_unavailable(&GhResult {
+            code: 1,
+            stdout: String::new(),
+            stderr: String::new()
+        }));
+        // A real failure has something on stderr and IS worth recording.
+        assert!(!gh_is_unavailable(&gh_fail()));
+    }
+
+    #[test]
+    fn gh_display_helpers_match_the_oracle() {
+        assert!(is_displayable_gh_name("release/v1.0-rc"));
+        assert!(is_displayable_gh_name("protect main"));
+        assert!(!is_displayable_gh_name("has`tick"));
+        assert!(!is_displayable_gh_name(""));
+        assert!(!is_displayable_gh_name(&"a".repeat(121)));
+        assert_eq!(
+            join_gh_names(&["a".into(), "b".into(), "c".into()], 2),
+            "`a`, `b` (+1 more)"
+        );
+        assert_eq!(GH_TIMEOUT_MS, 4_000);
+        assert_eq!(KNOWN_VCS_HOSTS.len(), 3);
     }
 
     // ── `W1d` ────────────────────────────────────────────────────────────────

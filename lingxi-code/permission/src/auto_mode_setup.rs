@@ -370,6 +370,141 @@ pub fn remove_rules_from_permissions_allow(
     (kept, removed)
 }
 
+// ── vNs: the save-payload validator (2.1.218) ────────────────────────────────
+
+/// The `$defaults` sentinel (`pV`) that an `autoMode` rule array must include so
+/// it EXTENDS the shipped built-in rules instead of REPLACING them.
+pub const AUTO_MODE_DEFAULTS_SENTINEL: &str = "$defaults";
+
+/// `oDo` — the maximum characters (JS UTF-16 length) of a single rule entry.
+const MAX_ENTRY_LEN_UTF16: usize = 10_000;
+
+/// The rule-array categories checked after `environment` (`man`).
+const AUTO_MODE_RULE_KEYS: [&str; 3] = ["allow", "soft_deny", "hard_deny"];
+
+/// `LQ_` — does `s` contain a control character (`<32` except tab, `127..=159`,
+/// U+2028, U+2029)? Such entries are not single-line text.
+fn has_control_char(s: &str) -> bool {
+    s.chars().any(|c| {
+        let r = c as u32;
+        (r < 32 && r != 9) || (127..=159).contains(&r) || r == 8232 || r == 8233
+    })
+}
+
+/// `NQ_` (approx) — does `s` contain an invisible or bidirectional character
+/// (zero-width, bidi controls, BOM, soft hyphen)? The exact `MQ_` regex is not
+/// extracted; this covers the standard invisible/bidi set. Over-inclusion only
+/// tightens a config-write validation (never accepts a malformed entry).
+fn has_invisible_or_bidi(s: &str) -> bool {
+    s.chars().any(|c| {
+        matches!(c as u32,
+            0x00AD | 0x061C | 0x115F | 0x1160 | 0x17B4 | 0x17B5 | 0x180E
+            | 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x2064 | 0x206A..=0x206F
+            | 0xFEFF | 0xFFF9..=0xFFFB)
+    })
+}
+
+/// JS `String.length` (UTF-16 code units).
+fn utf16_len(s: &str) -> usize {
+    s.chars().map(char::len_utf16).sum()
+}
+
+/// `iDo(name, entries)` — validate one rule array; returns the byte-exact error
+/// message on the first bad entry, or `None` when valid. `rte` (entry normalize)
+/// is approximated by the identity (its `FQ_` strip only removes invisible
+/// characters that `has_invisible_or_bidi` already rejects).
+fn validate_save_array(name: &str, entries: &[&str]) -> Option<String> {
+    if entries.len() > MAX_REMOVE_FROM_PERMISSIONS_ALLOW {
+        return Some(format!(
+            "{name} has {} entries; the maximum is {}.",
+            entries.len(),
+            MAX_REMOVE_FROM_PERMISSIONS_ALLOW
+        ));
+    }
+    for entry in entries {
+        if entry.trim().is_empty() {
+            return Some(format!("{name} contains an empty entry."));
+        }
+        let len = utf16_len(entry);
+        if len > MAX_ENTRY_LEN_UTF16 {
+            return Some(format!(
+                "{name} contains an entry of {len} characters; the maximum is {MAX_ENTRY_LEN_UTF16}."
+            ));
+        }
+        if has_control_char(entry) {
+            return Some(format!(
+                "{name} contains an entry with a control character; entries must be single-line text."
+            ));
+        }
+        if has_invisible_or_bidi(entry) {
+            return Some(format!(
+                "{name} contains an entry with an invisible or bidirectional character; entries must be plainly renderable text."
+            ));
+        }
+    }
+    None
+}
+
+/// Read a JSON string array as `Vec<&str>`, or `None` when the value is not an
+/// array of strings.
+fn string_array<'a>(v: Option<&'a Value>) -> Option<Vec<&'a str>> {
+    v?.as_array()?.iter().map(Value::as_str).collect()
+}
+
+/// `vNs(payload)` — validate the `{autoMode, removeFromPermissionsAllow}` save
+/// payload the wizard writes. Returns the byte-exact error message on the first
+/// failure, or `None` when the payload is valid and non-empty.
+///
+/// `auto_mode` is the parsed `autoMode` block (`{environment, allow?, soft_deny?,
+/// hard_deny?}`) or `None`; `remove` is the `removeFromPermissionsAllow` value.
+/// The `RRt().safeParse` zod pass is subsumed by the structural checks here (the
+/// port has no standalone autoMode-block schema); a non-array `environment`/rule
+/// key is treated as absent, matching the "empty/omit" guidance.
+#[must_use]
+pub fn validate_auto_mode_save(auto_mode: Option<&Value>, remove: Option<&Value>) -> Option<String> {
+    let remove_empty = match remove {
+        None | Some(Value::Null) => true,
+        Some(v) => v.as_array().is_some_and(|a| a.is_empty()),
+    };
+    if auto_mode.is_none() && remove_empty {
+        return Some("Nothing to save.".to_string());
+    }
+    if let Some(am) = auto_mode {
+        let environment = string_array(am.get("environment")).unwrap_or_default();
+        if environment.is_empty() {
+            return Some("autoMode.environment is empty \u{2014} nothing to save.".to_string());
+        }
+        if let Some(e) = validate_save_array("environment", &environment) {
+            return Some(e);
+        }
+        if environment.contains(&AUTO_MODE_DEFAULTS_SENTINEL) {
+            return Some(format!(
+                "autoMode.environment must not contain \"{AUTO_MODE_DEFAULTS_SENTINEL}\" \u{2014} skipped slots get their shipped default text written verbatim instead."
+            ));
+        }
+        for key in AUTO_MODE_RULE_KEYS {
+            let Some(s) = am.get(key) else {
+                continue; // `s === void 0` → skip
+            };
+            let arr = string_array(Some(s)).unwrap_or_default();
+            if arr.is_empty() {
+                return Some(format!(
+                    "autoMode.{key} is empty \u{2014} omit the key when nothing was accepted for it."
+                ));
+            }
+            if let Some(e) = validate_save_array(key, &arr) {
+                return Some(e);
+            }
+            if !arr.contains(&AUTO_MODE_DEFAULTS_SENTINEL) {
+                return Some(format!(
+                    "autoMode.{key} is missing the literal entry \"{AUTO_MODE_DEFAULTS_SENTINEL}\" \u{2014} without it the array replaces the shipped rules instead of extending them."
+                ));
+            }
+        }
+    }
+    validate_remove_from_permissions_allow(remove)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -598,6 +733,67 @@ mod tests {
         // Empty everything → just an (empty) environment array.
         let e = build_auto_mode_settings(&[], &[], &[], &[]);
         assert_eq!(e, json!({ "environment": [] }));
+    }
+
+    #[test]
+    fn vns_save_validation_messages() {
+        // Nothing to save.
+        assert_eq!(
+            validate_auto_mode_save(None, None),
+            Some("Nothing to save.".to_string())
+        );
+        // environment empty.
+        assert_eq!(
+            validate_auto_mode_save(Some(&json!({"environment": []})), None),
+            Some("autoMode.environment is empty \u{2014} nothing to save.".to_string())
+        );
+        // environment must not contain $defaults.
+        assert_eq!(
+            validate_auto_mode_save(Some(&json!({"environment": ["ok", "$defaults"]})), None),
+            Some("autoMode.environment must not contain \"$defaults\" \u{2014} skipped slots get their shipped default text written verbatim instead.".to_string())
+        );
+        // a rule category present but empty.
+        assert_eq!(
+            validate_auto_mode_save(
+                Some(&json!({"environment": ["ctx"], "allow": []})),
+                None
+            ),
+            Some("autoMode.allow is empty \u{2014} omit the key when nothing was accepted for it.".to_string())
+        );
+        // a rule category missing the $defaults sentinel.
+        assert_eq!(
+            validate_auto_mode_save(
+                Some(&json!({"environment": ["ctx"], "allow": ["read files"]})),
+                None
+            ),
+            Some("autoMode.allow is missing the literal entry \"$defaults\" \u{2014} without it the array replaces the shipped rules instead of extending them.".to_string())
+        );
+        // iDo: empty entry / control char.
+        assert_eq!(
+            validate_auto_mode_save(Some(&json!({"environment": ["  "]})), None),
+            Some("environment contains an empty entry.".to_string())
+        );
+        assert_eq!(
+            validate_auto_mode_save(Some(&json!({"environment": ["a\u{0007}b"]})), None),
+            Some("environment contains an entry with a control character; entries must be single-line text.".to_string())
+        );
+        assert_eq!(
+            validate_auto_mode_save(Some(&json!({"environment": ["a\u{200B}b"]})), None),
+            Some("environment contains an entry with an invisible or bidirectional character; entries must be plainly renderable text.".to_string())
+        );
+        // A fully valid payload → None.
+        assert_eq!(
+            validate_auto_mode_save(
+                Some(&json!({"environment": ["uses git"], "allow": ["read files", "$defaults"]})),
+                Some(&json!(["Bash(*)"]))
+            ),
+            None
+        );
+        // No autoMode but a non-empty removal is valid (not "Nothing to save").
+        assert_eq!(
+            validate_auto_mode_save(None, Some(&json!(["Bash(*)"]))),
+            None
+        );
     }
 
     #[test]

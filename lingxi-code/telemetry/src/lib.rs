@@ -204,6 +204,22 @@ pub fn emit_auto_mode_setup_write(code: &str) {
     );
 }
 
+/// Emit `auto_mode_setup_propose` — the WIZARD-06 propose run's outcome
+/// (oracle `pe("auto_mode_setup_propose", {code})`). `code` is the failure code
+/// (`recon_failed` / `api_failed` / `truncated` / `refused` / `unexpected_stop` /
+/// `parse_failed` / `invalid_proposal` / `unknown_removal`) or the qualified
+/// success code (`parse_repaired` / `unsafe_allow_dropped`).
+///
+/// `aborted` is deliberately NOT recorded: the oracle skips the emit when the
+/// user cancelled, so a cancellation never shows up as a failure rate.
+/// NOTE the event name has NO `tengu_` prefix (byte-exact).
+pub fn emit_auto_mode_setup_propose(code: &str) {
+    tracing::info!(
+        event = crate::tengu::agent::AUTO_MODE_SETUP_PROPOSE,
+        code = %code,
+    );
+}
+
 /// Emit `tengu_auto_mode_setup_wizard_resolved` — the `/auto-mode-setup` wizard
 /// finished. `choice` records how it ended (`applied` / `cancelled` / …).
 pub fn emit_auto_mode_setup_wizard_resolved(choice: &str) {

@@ -4044,65 +4044,75 @@ async fn apply_worktree_launch(
     Ok(())
 }
 
-pub async fn build(
-    cfg: DesktopConfig,
-    output: Arc<dyn OutputStream>,
-    permission_sink: Arc<dyn PermissionRequestSink>,
-) -> Result<DesktopRuntime, BuildError> {
-    let cwd = cfg.cwd.clone();
+/// The resolved LLM stack: credentials, the assembled multi-provider config,
+/// and the routed [`DefaultLlmClient`] every model-facing surface needs.
+///
+/// Extracted verbatim out of [`build`] so that headless one-shot commands
+/// (which must NOT boot a session, fire `SessionStart` hooks, or start MCP
+/// servers) reach the SAME credential-precedence and provider-assembly logic
+/// the interactive runtime uses. Duplicating that resolution is the failure
+/// mode this type exists to prevent: the API-key-beats-OAuth exclusion and the
+/// ChatGPT `PAT > external-tokens > OAuth login` precedence are security
+/// boundaries, and a second copy of them would drift silently.
+pub struct LlmStack {
+    /// See [`build`] for the resolution rules behind `http`.
+    pub http: Arc<PosixHttp>,
+    /// See [`build`] for the resolution rules behind `clock`.
+    pub clock: Arc<PosixClock>,
+    /// See [`build`] for the resolution rules behind `mcp_oauth_storage`.
+    pub mcp_oauth_storage: Arc<dyn traits::SecureStorage>,
+    /// See [`build`] for the resolution rules behind `credentials`.
+    pub credentials: Arc<CredentialManager>,
+    /// See [`build`] for the resolution rules behind `auth`.
+    pub auth: Arc<dyn AuthHandle>,
+    /// See [`build`] for the resolution rules behind `subscription`.
+    pub subscription: traits::subscription::SharedSubscription,
+    /// See [`build`] for the resolution rules behind `resolved_anthropic_api_key`.
+    pub resolved_anthropic_api_key: Option<String>,
+    /// See [`build`] for the resolution rules behind `is_subscriber`.
+    pub is_subscriber: bool,
+    /// See [`build`] for the resolution rules behind `openai_oauth_client`.
+    pub openai_oauth_client: Arc<openai_oauth::OpenAiOAuthClient>,
+    /// See [`build`] for the resolution rules behind `pricing`.
+    pub pricing: cost::PricingCatalog,
+    /// See [`build`] for the resolution rules behind `chains`.
+    pub chains: provider_config::ChainConfig,
+    /// See [`build`] for the resolution rules behind `model_providers`.
+    pub model_providers: std::collections::BTreeMap<String, (String, String)>,
+    /// See [`build`] for the resolution rules behind `default_listings`.
+    pub default_listings: Vec<traits::ModelListing>,
+    /// See [`build`] for the resolution rules behind `default_model_id`.
+    pub default_model_id: String,
+    /// See [`build`] for the resolution rules behind `default_model_profile`.
+    pub default_model_profile: Option<String>,
+    /// See [`build`] for the resolution rules behind `profile_first_party`.
+    pub profile_first_party: std::collections::BTreeMap<String, bool>,
+    /// See [`build`] for the resolution rules behind `provider_availability`.
+    pub provider_availability: std::collections::BTreeMap<String, bool>,
+    /// See [`build`] for the resolution rules behind `default_model_fallback`.
+    pub default_model_fallback: Option<DefaultModelFallbackNotice>,
+    /// See [`build`] for the resolution rules behind `session_model_restriction`.
+    pub session_model_restriction: Option<(llm_client::model::allowlist::ModelEnforcement, Vec<String>)>,
+    /// See [`build`] for the resolution rules behind `model_setting_for_spawns`.
+    pub model_setting_for_spawns: String,
+    /// See [`build`] for the resolution rules behind `session_provider_first_party`.
+    pub session_provider_first_party: bool,
+    /// See [`build`] for the resolution rules behind `llm_client`.
+    pub llm_client: Arc<DefaultLlmClient>,
+    /// See [`build`] for the resolution rules behind `llm_transport`.
+    pub llm_transport: Arc<dyn Transport>,
+    /// See [`build`] for the resolution rules behind `cost_estimator`.
+    pub cost_estimator: Arc<llm_client::CostEstimator>,
+    /// See [`build`] for the resolution rules behind `subscriber_state`.
+    pub subscriber_state: SubscriberState,
+}
 
-    // On-disk data-retention sweep (claude-code `fWu`). DELETES stale
-    // session-file entries (todos/statsig/logs older than the retention period),
-    // so it is flag-gated and default-OFF: a no-op unless `LINGXI_RETENTION_SWEEP`
-    // is truthy. Runs once at boot on a blocking pool so it never delays startup.
-    tokio::task::spawn_blocking(memory::retention::run_startup_retention_sweep);
-
-    // FIX A/B/C: mint the boot-canonical MAIN session id ONCE and derive the
-    // session's transcript path + subagents dir from `(lingxi_home, cwd, id)`.
-    // claude-code's `createBaseHookInput` (utils/hooks.ts:322) ALWAYS stamps
-    // `transcript_path: getTranscriptPathForSession(sessionId)` on EVERY hook
-    // payload, and `getAgentTranscriptPath` anchors spawned-subagent transcripts
-    // under `<projectDir>/<sessionId>/subagents`. The orchestrator generates its
-    // own `SessionId` INSIDE `ConversationOrchestrator::new`, so historically no
-    // single id was knowable at boot — the leaf firers / subagent spawner (built
-    // BEFORE the orchestrator) fired with an EMPTY `transcript_path` / a `/tmp`
-    // subdir. We close that by minting the id here and:
-    //   - handing it to the orchestrator via `.with_session_id` (so its live
-    //     session matches), and to the firers as the precomputed `transcript_path`;
-    //   - handing the subagents dir to the spawner via `with_hook_context`.
-    // The path helpers live in `orchestrator::transcript_paths` (a facade over
-    // `session::jsonl::path`) so this app needs no direct `session` dep.
-    // claude-code `--session-id <uuid>`: honor a host-provided session id when
-    // present (already UUID-validated by the host), else mint a fresh one. The
-    // override carries through to the transcript path, the firers' precomputed
-    // `transcript_path`, and the orchestrator's live `.with_session_id`, so a
-    // resumed/SDK-pinned id is consistent everywhere.
-    let main_session_id = cfg
-        .session_id_override
-        .as_deref()
-        .and_then(protocol::SessionId::parse_prefixed)
-        .unwrap_or_else(protocol::SessionId::new);
-    let main_session_uuid = main_session_id.as_uuid().to_string();
-    // (/rewind) One shared file-history checkpoint store: cloned into the
-    // orchestrator (per-turn snapshots + pre-edit tool backups) AND the
-    // DesktopRuntime (so the CLI can restore + build the picker rows). Backups
-    // live under `<lingxi_home>/file-history/<session>/`.
-    let file_history = std::sync::Arc::new(session::FileHistory::new(
-        cfg.lingxi_home.clone(),
-        cwd.clone(),
-        main_session_uuid.clone(),
-    ));
-    let main_transcript_path = orchestrator::transcript_paths::main_transcript_path(
-        &cfg.lingxi_home,
-        &cwd.to_string_lossy(),
-        &main_session_uuid,
-    );
-    let main_subagents_dir = orchestrator::transcript_paths::subagents_dir(
-        &cfg.lingxi_home,
-        &cwd.to_string_lossy(),
-        &main_session_uuid,
-    );
-
+/// Resolve the LLM stack from a [`DesktopConfig`] alone.
+///
+/// Pure with respect to the session: it touches the keychain, the process
+/// environment and the network (the availability probe), but creates no
+/// session, no transcript and no hooks.
+pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildError> {
     // (1) Platform-minimal façade (http + clock + storage).
     let http = Arc::new(PosixHttp::new());
     let clock = Arc::new(PosixClock::new());
@@ -4697,15 +4707,79 @@ pub async fn build(
         is_enterprise: false,
     };
 
-    // Phase 2a CHAINS BRIDGE: translate the assembled `ChainConfig` into main's
-    // richer adapter's `fallback_overrides` shape. `assemble` keys each chain by
-    // the request/display model id and carries an ordered list of `ChainEntry`;
-    // main's adapter routes by model-id through the multi-provider registry, so the
-    // `ChainEntry.provider_id` is informational and is dropped here — the per-entry
-    // `model` ids are the fallback chain. Cross-provider routing still works
-    // because every provider's models are registered in the assembled
-    // `ClientConfig`, so a fallback target on another provider resolves by id.
-    let fallback_overrides: std::collections::BTreeMap<String, Vec<String>> = assembled
+    Ok(LlmStack {
+        http,
+        clock,
+        mcp_oauth_storage,
+        credentials,
+        auth,
+        subscription,
+        resolved_anthropic_api_key,
+        is_subscriber,
+        openai_oauth_client,
+        pricing: assembled.pricing,
+        chains: assembled.chains,
+        model_providers,
+        default_listings,
+        default_model_id,
+        default_model_profile,
+        profile_first_party,
+        provider_availability,
+        default_model_fallback,
+        session_model_restriction,
+        model_setting_for_spawns,
+        session_provider_first_party,
+        llm_client,
+        llm_transport,
+        cost_estimator,
+        subscriber_state,
+    })
+}
+
+/// Build a model-facing [`llm_client::ApiService`] with NO session attached.
+///
+/// This is the entry point for one-shot commands that need to ask a model a
+/// question without becoming a session: nothing here writes a transcript,
+/// fires a `SessionStart` hook, starts an MCP server, or registers a tool. The
+/// credential resolution and provider assembly come from
+/// [`resolve_llm_stack`], so a headless call routes and authenticates exactly
+/// as the interactive runtime does.
+///
+/// Differences from the service [`build`] constructs, all of them the absence
+/// of a session rather than a change in behaviour:
+///
+/// - no retry reporter — there is no output stream to narrate backoff to, so
+///   retries stay silent instead of being announced to nobody;
+/// - no `request_metadata` — `user_id` carries a session id, and there is no
+///   session;
+/// - no forced `StructuredOutput` tool choice — a headless caller that wants
+///   structured output asks for it per-request via `stream_json_schema`.
+///
+/// The routing config, fallback chains, retry overrides, cost estimator,
+/// subscriber state, custom betas and AWS auth refresher are all identical to
+/// the interactive path: those are properties of the install, not the session.
+pub async fn build_api_service(
+    cfg: &DesktopConfig,
+    cwd: &std::path::Path,
+) -> Result<Arc<llm_client::ApiService>, BuildError> {
+    let stack = resolve_llm_stack(cfg).await?;
+    Ok(Arc::new(api_service_from_stack(cfg, cwd, stack)))
+}
+
+/// Assemble the drive service (retry / rate-limit / betas loop) over an
+/// already-resolved [`LlmStack`].
+///
+/// Split out from [`build_api_service`] so a caller that already holds a stack
+/// — and wants the other halves of it too — does not resolve credentials twice.
+#[must_use]
+pub fn api_service_from_stack(
+    cfg: &DesktopConfig,
+    cwd: &std::path::Path,
+    stack: LlmStack,
+) -> llm_client::ApiService {
+    // Same CHAINS BRIDGE as `build`: the assembled per-model chain becomes the
+    // adapter's `fallback_overrides`, keyed by model id.
+    let fallback_overrides: std::collections::BTreeMap<String, Vec<String>> = stack
         .chains
         .chains
         .iter()
@@ -4716,9 +4790,197 @@ pub async fn build(
             )
         })
         .collect();
+    let settings_max_retries = stack.chains.retry.as_ref().map(|r| r.max_attempts);
+    let settings_backoff_ms = stack.chains.retry.as_ref().map(|r| r.backoff_ms);
+    let analytics_bus = Arc::new(telemetry::AnalyticsBus::new());
+
+    let service = llm_client::ApiService::new_with_routing(
+        stack.llm_client,
+        stack.llm_transport,
+        stack.subscriber_state,
+        UserAgentEnv::from_process_env(),
+        env!("CARGO_PKG_VERSION"),
+        Some(analytics_bus.clone()),
+        cfg.fallback_model.clone(),
+        Some(stack.cost_estimator),
+        fallback_overrides,
+        settings_max_retries,
+        settings_backoff_ms,
+    )
+    .with_subscription(stack.subscription)
+    .with_custom_cli_betas(cfg.custom_betas.clone())
+    .with_thinking(cfg.session_thinking);
+
+    match aws_auth_refresher(cwd, analytics_bus) {
+        Some(refresher) => service.with_aws_auth(refresher),
+        None => service,
+    }
+}
+
+/// Resolve the `awsAuthRefresh` / `awsCredentialExport` settings and build the
+/// refresher when either is configured.
+///
+/// Returns `None` when neither is set — the common case — so a Bedrock 401 stays
+/// terminal exactly as it does today. Shared by [`build`] and the headless path
+/// so the workspace-trust gate (a project-sourced refresh command is refused
+/// before trust is accepted) is enforced identically in both.
+fn aws_auth_refresher(
+    cwd: &std::path::Path,
+    analytics_bus: Arc<telemetry::AnalyticsBus>,
+) -> Option<Arc<llm_client::AwsAuthRefresher>> {
+    let env_vars: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+    let aws_settings = engine::settings::Settings::load(engine::settings::LoadInputs {
+        env: &env_vars,
+        project_dir: cwd,
+        defaults: engine::settings::schema::SettingsJson::default(),
+    })
+    .ok()
+    .map(|eff| {
+        let from_project = |field: &str| {
+            eff.effective_for(field).is_some_and(|p| {
+                p.contributors.last() == Some(&engine::settings::tracer::Source::Project)
+            })
+        };
+        llm_client::AwsAuthSettings {
+            aws_auth_refresh: eff.settings.aws_auth_refresh.clone(),
+            aws_auth_refresh_from_project: from_project("awsAuthRefresh"),
+            aws_credential_export: eff.settings.aws_credential_export.clone(),
+            aws_credential_export_from_project: from_project("awsCredentialExport"),
+            // No global config path ⇒ the CLI trust gate proceeds (mode.rs
+            // `trust_gate_should_prompt` — nothing to check against), so treat
+            // as trusted like the gate does.
+            workspace_trusted: match migrations::global_config::global_config_path() {
+                Some(p) => migrations::global_config::check_has_trust_dialog_accepted(&p, cwd),
+                None => true,
+            },
+        }
+    })
+    .unwrap_or_default();
+    if aws_settings.aws_auth_refresh.is_none() && aws_settings.aws_credential_export.is_none() {
+        return None;
+    }
+    Some(Arc::new(llm_client::AwsAuthRefresher::new(
+        aws_settings,
+        Arc::new(llm_client::ShellAwsAuthProcess),
+        Some(analytics_bus),
+    )))
+}
+
+pub async fn build(
+    cfg: DesktopConfig,
+    output: Arc<dyn OutputStream>,
+    permission_sink: Arc<dyn PermissionRequestSink>,
+) -> Result<DesktopRuntime, BuildError> {
+    let cwd = cfg.cwd.clone();
+
+    // On-disk data-retention sweep (claude-code `fWu`). DELETES stale
+    // session-file entries (todos/statsig/logs older than the retention period),
+    // so it is flag-gated and default-OFF: a no-op unless `LINGXI_RETENTION_SWEEP`
+    // is truthy. Runs once at boot on a blocking pool so it never delays startup.
+    tokio::task::spawn_blocking(memory::retention::run_startup_retention_sweep);
+
+    // FIX A/B/C: mint the boot-canonical MAIN session id ONCE and derive the
+    // session's transcript path + subagents dir from `(lingxi_home, cwd, id)`.
+    // claude-code's `createBaseHookInput` (utils/hooks.ts:322) ALWAYS stamps
+    // `transcript_path: getTranscriptPathForSession(sessionId)` on EVERY hook
+    // payload, and `getAgentTranscriptPath` anchors spawned-subagent transcripts
+    // under `<projectDir>/<sessionId>/subagents`. The orchestrator generates its
+    // own `SessionId` INSIDE `ConversationOrchestrator::new`, so historically no
+    // single id was knowable at boot — the leaf firers / subagent spawner (built
+    // BEFORE the orchestrator) fired with an EMPTY `transcript_path` / a `/tmp`
+    // subdir. We close that by minting the id here and:
+    //   - handing it to the orchestrator via `.with_session_id` (so its live
+    //     session matches), and to the firers as the precomputed `transcript_path`;
+    //   - handing the subagents dir to the spawner via `with_hook_context`.
+    // The path helpers live in `orchestrator::transcript_paths` (a facade over
+    // `session::jsonl::path`) so this app needs no direct `session` dep.
+    // claude-code `--session-id <uuid>`: honor a host-provided session id when
+    // present (already UUID-validated by the host), else mint a fresh one. The
+    // override carries through to the transcript path, the firers' precomputed
+    // `transcript_path`, and the orchestrator's live `.with_session_id`, so a
+    // resumed/SDK-pinned id is consistent everywhere.
+    let main_session_id = cfg
+        .session_id_override
+        .as_deref()
+        .and_then(protocol::SessionId::parse_prefixed)
+        .unwrap_or_else(protocol::SessionId::new);
+    let main_session_uuid = main_session_id.as_uuid().to_string();
+    // (/rewind) One shared file-history checkpoint store: cloned into the
+    // orchestrator (per-turn snapshots + pre-edit tool backups) AND the
+    // DesktopRuntime (so the CLI can restore + build the picker rows). Backups
+    // live under `<lingxi_home>/file-history/<session>/`.
+    let file_history = std::sync::Arc::new(session::FileHistory::new(
+        cfg.lingxi_home.clone(),
+        cwd.clone(),
+        main_session_uuid.clone(),
+    ));
+    let main_transcript_path = orchestrator::transcript_paths::main_transcript_path(
+        &cfg.lingxi_home,
+        &cwd.to_string_lossy(),
+        &main_session_uuid,
+    );
+    let main_subagents_dir = orchestrator::transcript_paths::subagents_dir(
+        &cfg.lingxi_home,
+        &cwd.to_string_lossy(),
+        &main_session_uuid,
+    );
+
+    // The credential/provider half of boot lives in `resolve_llm_stack` so the
+    // headless one-shot commands share it byte-for-byte. Everything below this
+    // point is session-shaped and stays here.
+    let LlmStack {
+        http,
+        clock,
+        mcp_oauth_storage,
+        credentials,
+        auth,
+        subscription,
+        resolved_anthropic_api_key,
+        is_subscriber,
+        openai_oauth_client,
+        pricing,
+        chains,
+        model_providers,
+        default_model_id,
+        default_model_profile,
+        provider_availability,
+        default_model_fallback,
+        session_model_restriction,
+        model_setting_for_spawns,
+        session_provider_first_party,
+        llm_client,
+        llm_transport,
+        cost_estimator,
+        subscriber_state,
+        // `default_listings` / `profile_first_party` are inputs to the
+        // resolution itself (the connected-provider fallback and the Explore
+        // firstParty gate consume them inside `resolve_llm_stack`); the session
+        // half below reads the resolved outputs instead. Headless callers still
+        // get them off `LlmStack`.
+        ..
+    } = resolve_llm_stack(&cfg).await?;
+
+    // Phase 2a CHAINS BRIDGE: translate the assembled `ChainConfig` into main's
+    // richer adapter's `fallback_overrides` shape. `assemble` keys each chain by
+    // the request/display model id and carries an ordered list of `ChainEntry`;
+    // main's adapter routes by model-id through the multi-provider registry, so the
+    // `ChainEntry.provider_id` is informational and is dropped here — the per-entry
+    // `model` ids are the fallback chain. Cross-provider routing still works
+    // because every provider's models are registered in the assembled
+    // `ClientConfig`, so a fallback target on another provider resolves by id.
+    let fallback_overrides: std::collections::BTreeMap<String, Vec<String>> = chains
+        .chains
+        .iter()
+        .map(|(key, entries)| {
+            (
+                key.clone(),
+                entries.iter().map(|e| e.model.clone()).collect(),
+            )
+        })
+        .collect();
     // Retry override → main's scalar settings_max_retries / settings_backoff_ms.
-    let settings_max_retries = assembled.chains.retry.as_ref().map(|r| r.max_attempts);
-    let settings_backoff_ms = assembled.chains.retry.as_ref().map(|r| r.backoff_ms);
+    let settings_max_retries = chains.retry.as_ref().map(|r| r.max_attempts);
+    let settings_backoff_ms = chains.retry.as_ref().map(|r| r.backoff_ms);
 
     // Build the CONCRETE adapter so it can be coerced to BOTH the orchestrator
     // seam (`OrchestratorApiClient`) and the agent seam (`agent::SubagentApiClient`).
@@ -4789,44 +5051,9 @@ pub async fn build(
     // the global config). With the driver attached, a Bedrock 401/403
     // (expired STS) runs the refresh script and retries instead of
     // dead-ending — bounded at Ygf=2 inside the drive loops.
-    let service_built = {
-        let env_vars: std::collections::BTreeMap<String, String> = std::env::vars().collect();
-        let aws_settings = engine::settings::Settings::load(engine::settings::LoadInputs {
-            env: &env_vars,
-            project_dir: &cwd,
-            defaults: engine::settings::schema::SettingsJson::default(),
-        })
-        .ok()
-        .map(|eff| {
-            let from_project = |field: &str| {
-                eff.effective_for(field).is_some_and(|p| {
-                    p.contributors.last() == Some(&engine::settings::tracer::Source::Project)
-                })
-            };
-            llm_client::AwsAuthSettings {
-                aws_auth_refresh: eff.settings.aws_auth_refresh.clone(),
-                aws_auth_refresh_from_project: from_project("awsAuthRefresh"),
-                aws_credential_export: eff.settings.aws_credential_export.clone(),
-                aws_credential_export_from_project: from_project("awsCredentialExport"),
-                // No global config path ⇒ the CLI trust gate proceeds
-                // (mode.rs `trust_gate_should_prompt` — nothing to check
-                // against), so treat as trusted like the gate does.
-                workspace_trusted: match migrations::global_config::global_config_path() {
-                    Some(p) => migrations::global_config::check_has_trust_dialog_accepted(&p, &cwd),
-                    None => true,
-                },
-            }
-        })
-        .unwrap_or_default();
-        if aws_settings.aws_auth_refresh.is_some() || aws_settings.aws_credential_export.is_some() {
-            service_built.with_aws_auth(Arc::new(llm_client::AwsAuthRefresher::new(
-                aws_settings,
-                Arc::new(llm_client::ShellAwsAuthProcess),
-                Some(analytics_bus.clone()),
-            )))
-        } else {
-            service_built
-        }
+    let service_built = match aws_auth_refresher(&cwd, analytics_bus.clone()) {
+        Some(refresher) => service_built.with_aws_auth(refresher),
+        None => service_built,
     };
     // `--json-schema` structured output: FORCE the `StructuredOutput` tool so the
     // model returns its final result through it (1:1 with claude-code). Untouched
@@ -4983,7 +5210,7 @@ pub async fn build(
     // cost accounting matches per-response cost estimation.
     let cost_tracker = Arc::new(cost::CostTracker::new(
         protocol::SessionId::new(),
-        Arc::new(assembled.pricing),
+        Arc::new(pricing),
         cost_persist_tx,
     ));
 

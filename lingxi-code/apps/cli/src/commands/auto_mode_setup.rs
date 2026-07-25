@@ -142,6 +142,9 @@ pub struct ProposeInvocation {
     pub scope: String,
     /// `depth=` — one of [`DEPTH_VALUES`].
     pub depth: String,
+    /// The `--request-id` echoed verbatim on the JSON result, when one was
+    /// given. Validated as a canonical UUID before it gets here.
+    pub request_id: Option<String>,
 }
 
 /// Is `s` a UUID in canonical 8-4-4-4-12 hex-and-dash form (either case)?
@@ -219,6 +222,63 @@ fn usage_fallback() -> GrammarError {
 /// (the caller then continues into the apply-path parser); returns
 /// `Some(Err(..))` when the shape matches but an answer value is not one the
 /// wizard offers.
+/// A leading `--request-id` split off the front of the token stream.
+struct PeeledRequestId<'a> {
+    /// The validated id, or the grammar rejection it earned. `Ok(None)` when
+    /// there was no leading `--request-id` at all.
+    id: Result<Option<String>, GrammarError>,
+    /// The tokens after the flag (all of `args` when there was no flag).
+    rest: &'a [String],
+}
+
+/// Split a leading `--request-id <uuid>` (or `--request-id=<uuid>`) off the
+/// front — the oracle's `dNd`, which runs before either form is matched.
+///
+/// Validation is deferred rather than raised: the caller decides whether a bad
+/// id is attributable here (propose) or belongs to the flag walk (apply-file),
+/// which has its own ordering diagnostics for the same token.
+fn peel_leading_request_id(args: &[String]) -> PeeledRequestId<'_> {
+    let no_flag = PeeledRequestId {
+        id: Ok(None),
+        rest: args,
+    };
+    let Some(first) = args.first() else {
+        return no_flag;
+    };
+    let (name, inline) = split_eq(first);
+    if name != "--request-id" {
+        return no_flag;
+    }
+    // The value is inline after `=`, or the next token — but NOT when that token
+    // is itself a flag (`\s+(?!--)`).
+    let (value, consumed) = match inline {
+        Some(v) => (v.to_string(), 1),
+        None => match args.get(1) {
+            Some(v) if !v.starts_with("--") => (v.clone(), 2),
+            _ => (String::new(), 1),
+        },
+    };
+    let rest = &args[consumed..];
+    if value.is_empty() {
+        return PeeledRequestId {
+            id: Err(grammar(REQUEST_ID_NEEDS_VALUE)),
+            rest,
+        };
+    }
+    // The id reaches telemetry and logs, so it is constrained to a canonical
+    // UUID and a bad token is refused WITHOUT being echoed.
+    if !is_canonical_uuid(&value) {
+        return PeeledRequestId {
+            id: Err(grammar(REQUEST_ID_NOT_UUID)),
+            rest,
+        };
+    }
+    PeeledRequestId {
+        id: Ok(Some(value)),
+        rest,
+    }
+}
+
 fn match_propose_form(args: &[String]) -> Option<Result<ProposeInvocation, GrammarError>> {
     if args.len() != 5 || args[0] != "--wizard" || args[4] != "--propose" {
         return None;
@@ -245,6 +305,8 @@ fn match_propose_form(args: &[String]) -> Option<Result<ProposeInvocation, Gramm
         posture: posture.to_string(),
         scope: scope.to_string(),
         depth: depth.to_string(),
+        // Filled in by the caller, which owns the peeled prefix.
+        request_id: None,
     }))
 }
 
@@ -269,8 +331,21 @@ fn split_eq(token: &str) -> (&str, Option<&str>) {
 pub fn parse_apply_file_args(args: &[String]) -> Result<AutoModeSetupInvocation, GrammarError> {
     // The propose form is a whole-string grammar of its own, checked before the
     // flag walk so its tokens are never mistaken for apply-path flags.
-    if let Some(result) = match_propose_form(args) {
-        return result.map(AutoModeSetupInvocation::Propose);
+    //
+    // The oracle strips a leading `--request-id` (`dNd`) BEFORE matching either
+    // form (`Gay`), so `--request-id <uuid> --wizard … --propose` is valid and
+    // echoes the id. Peel the same prefix here; when what follows is not the
+    // propose form, fall through to the walk with the ORIGINAL args so the
+    // apply-path grammar and its error messages are untouched.
+    let peeled = peel_leading_request_id(args);
+    if let Some(result) = match_propose_form(peeled.rest) {
+        // Only now is a malformed leading id attributable to the propose form;
+        // on the apply path the walk below produces the more specific message.
+        let request_id = peeled.id?;
+        return result.map(|mut inv| {
+            inv.request_id = request_id;
+            AutoModeSetupInvocation::Propose(inv)
+        });
     }
 
     let mut request_id: Option<String> = None;
@@ -641,15 +716,168 @@ pub async fn run(cli: &Cli) -> i32 {
             SUCCESS
         }
         Ok(AutoModeSetupInvocation::ApplyFile(inv)) => run_apply_file(&inv).await,
-        // The propose grammar and its whole vocabulary are ported (see
-        // `permission::auto_mode_propose` / `auto_mode_pregather`), but the
-        // orchestration behind it — the recon gather plus the `json_schema`
-        // model call — is not wired here yet. Fail without inventing an outcome:
-        // emitting a `recon_failed` or printing a scan message would report a
-        // scan that never ran.
-        Ok(AutoModeSetupInvocation::Propose(_)) => RUNTIME_ERROR,
+        Ok(AutoModeSetupInvocation::Propose(inv)) => run_propose(&inv).await,
         Err(e) => apply_disposition(dispose_grammar(&e)),
     }
+}
+
+/// The command's JSON result, as the oracle serialises it (`zay`).
+///
+/// `JSON.stringify(result, null, 2)`, with `requestId` merged in LAST when the
+/// caller supplied one — a host with several commands in flight matches replies
+/// to requests by that field, so it must survive verbatim.
+#[must_use]
+pub fn propose_result_json(body: Value, request_id: Option<&str>) -> String {
+    let mut out = body;
+    if let (Some(id), Some(map)) = (request_id, out.as_object_mut()) {
+        map.insert("requestId".to_string(), Value::String(id.to_string()));
+    }
+    serde_json::to_string_pretty(&out).unwrap_or_else(|_| "{}".to_string())
+}
+
+/// The result body for a completed propose run (oracle `Way`'s propose arm:
+/// `{ok:true, proposal}` on success, `{ok:false, code, reason}` otherwise).
+#[must_use]
+pub fn propose_result_body(outcome: &permission::auto_mode_propose::ProposeOutcome) -> Value {
+    use permission::auto_mode_propose::ProposeOutcome;
+    match outcome {
+        ProposeOutcome::Ok(success) => serde_json::json!({
+            "ok": true,
+            "proposal": success.proposal.to_json(),
+        }),
+        ProposeOutcome::Failed { code, reason, .. } => serde_json::json!({
+            "ok": false,
+            "code": code,
+            "reason": reason,
+        }),
+    }
+}
+
+/// Run `--wizard … --propose`: gather the recon, ask the model, print the
+/// result JSON.
+///
+/// The proposal is PRINTED, never applied. That separation is the whole design
+/// of this command: `--apply-file` exists so a human sees the proposal before
+/// any of it reaches a settings file, and the oracle refuses a one-shot
+/// `--apply` for exactly that reason.
+async fn run_propose(inv: &ProposeInvocation) -> i32 {
+    use permission::auto_mode_propose::{ProposeAnswers, ProposeOutcome};
+
+    let answers = ProposeAnswers {
+        posture: inv.posture.clone(),
+        scope: inv.scope.clone(),
+        depth: inv.depth.clone(),
+    };
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+    let outcome = match propose_outcome(&answers, &cwd).await {
+        Ok(outcome) => outcome,
+        // A stack that will not resolve is an environment failure, not a failed
+        // scan: report it as `api_failed` rather than inventing a recon result.
+        Err(reason) => ProposeOutcome::Failed {
+            code: permission::auto_mode_propose::PROPOSE_CODE_API_FAILED,
+            reason,
+            emit_telemetry: true,
+        },
+    };
+
+    // The oracle records the run's code on both the failure and the qualified
+    // success paths, and stays silent on `aborted`.
+    match &outcome {
+        ProposeOutcome::Ok(success) => {
+            if let Some(code) = success.telemetry_code {
+                telemetry::emit_auto_mode_setup_propose(code);
+            }
+        }
+        ProposeOutcome::Failed {
+            code,
+            emit_telemetry,
+            ..
+        } => {
+            if *emit_telemetry {
+                telemetry::emit_auto_mode_setup_propose(code);
+            }
+        }
+    }
+
+    println!(
+        "{}",
+        propose_result_json(propose_result_body(&outcome), inv.request_id.as_deref())
+    );
+    match outcome {
+        ProposeOutcome::Ok(_) => SUCCESS,
+        ProposeOutcome::Failed { .. } => RUNTIME_ERROR,
+    }
+}
+
+/// Resolve the LLM stack, then drive the propose orchestration over it.
+///
+/// `Err` means the stack itself could not be resolved (no credentials, an
+/// unroutable default model); the run never reached the model.
+async fn propose_outcome(
+    answers: &permission::auto_mode_propose::ProposeAnswers,
+    cwd: &Path,
+) -> Result<permission::auto_mode_propose::ProposeOutcome, String> {
+    use crate::commands::auto_mode_propose::{ApiProposeQuery, FsProposeGather};
+
+    // No argv overrides: `auto-mode-setup` takes no `--model`, so the model and
+    // the provider set come from settings + env exactly as a session's would.
+    let cfg = crate::init::resolve_desktop_config(
+        &crate::argv::Argv::default(),
+        permission::PermissionMode::Default,
+    );
+    let stack = engine_desktop::resolve_llm_stack(&cfg)
+        .await
+        .map_err(|e| format!("The model call didn\u{2019}t start: {e}"))?;
+
+    let model = stack.default_model_id.clone();
+    let profile = stack.default_model_profile.clone();
+    // The oracle derives the thinking flag from the MODEL (`IQt(r)`), not from
+    // session config, and grants the no-thinking budget top-up when the model
+    // has no thinking config. Mirror that off the resolved listing.
+    let thinking = stack
+        .default_listings
+        .iter()
+        .find(|l| l.request_model == model || l.display_model == model)
+        .is_some_and(|l| l.supports_reasoning);
+    // `subscription_signal` reads the plan from the live snapshot; an
+    // unauthenticated or still-fetching session yields `None`, which renders as
+    // the "unknown" signal rather than a guessed plan.
+    let plan = stack
+        .subscription
+        .read()
+        .ok()
+        .and_then(|g| g.as_ref().and_then(|s| s.subscription_type.clone()));
+
+    let gather = FsProposeGather {
+        root: cwd.to_path_buf(),
+        user_config_dir: crate::run::lingxi_home_dir(),
+        // `getProjectDir(cwd)` — where this project's session transcripts live.
+        transcript_dir: crate::run::lingxi_home_dir()
+            .join("projects")
+            .join(session::jsonl::path::project_dir_name(
+                &cwd.to_string_lossy(),
+            )),
+        // `autoMode.classifyAllShell` has no settings key in this build, so the
+        // recon reports the conservative (off) state rather than claiming a
+        // setting it never read.
+        classify_all_shell: false,
+    };
+
+    let service = std::sync::Arc::new(engine_desktop::api_service_from_stack(&cfg, cwd, stack));
+    let query = ApiProposeQuery::new(service, model, profile, thinking);
+
+    Ok(crate::commands::auto_mode_propose::run_propose_blocking(
+        answers.clone(),
+        plan,
+        permission::auto_mode_defaults::DEFAULT_ENVIRONMENT
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect(),
+        gather,
+        query,
+    )
+    .await)
 }
 
 async fn run_apply_file(inv: &ApplyFileInvocation) -> i32 {
@@ -953,6 +1181,7 @@ mod tests {
                 posture: "enterprise".into(),
                 scope: "all".into(),
                 depth: "both".into(),
+                request_id: None,
             })
         );
     }
@@ -1016,6 +1245,154 @@ mod tests {
         let e = err(&["--frobnicate"]);
         assert_eq!(e.code, CODE_USAGE);
         assert_eq!(e.message, PARSE_FALLBACK);
+    }
+
+    // ── `--request-id` in front of the propose form (oracle `dNd` → `Gay`) ────
+
+    /// The propose tokens, without any leading `--request-id`.
+    const PROPOSE_TAIL: [&str; 5] = [
+        "--wizard",
+        "posture=personal",
+        "scope=project",
+        "depth=here",
+        "--propose",
+    ];
+
+    fn propose_with(prefix: &[&str]) -> Result<AutoModeSetupInvocation, GrammarError> {
+        let mut args: Vec<String> = prefix.iter().map(|s| (*s).to_string()).collect();
+        args.extend(PROPOSE_TAIL.iter().map(|s| (*s).to_string()));
+        parse_apply_file_args(&args)
+    }
+
+    #[test]
+    fn request_id_may_precede_the_propose_form() {
+        // The oracle strips `--request-id` before matching either form, so this
+        // is a valid propose invocation — not an unknown-flag rejection.
+        let got = propose_with(&["--request-id", UUID]).unwrap();
+        match got {
+            AutoModeSetupInvocation::Propose(inv) => {
+                assert_eq!(inv.request_id.as_deref(), Some(UUID));
+                assert_eq!(inv.posture, "personal");
+                assert_eq!(inv.depth, "here");
+            }
+            other => panic!("expected propose, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn request_id_inline_form_also_precedes_propose() {
+        let got = propose_with(&[&format!("--request-id={UUID}")]).unwrap();
+        match got {
+            AutoModeSetupInvocation::Propose(inv) => {
+                assert_eq!(inv.request_id.as_deref(), Some(UUID));
+            }
+            other => panic!("expected propose, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn propose_without_request_id_carries_none() {
+        let got = propose_with(&[]).unwrap();
+        match got {
+            AutoModeSetupInvocation::Propose(inv) => assert!(inv.request_id.is_none()),
+            other => panic!("expected propose, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_non_uuid_request_id_is_refused_without_being_echoed() {
+        let e = propose_with(&["--request-id", "not-a-uuid"]).unwrap_err();
+        assert_eq!(e.code, CODE_BAD_FLAG_GRAMMAR);
+        assert_eq!(e.message, REQUEST_ID_NOT_UUID);
+        // The whole point of the fixed string: the rejected token must not
+        // reach the output, where it would land in logs.
+        assert!(!e.message.contains("not-a-uuid"));
+    }
+
+    #[test]
+    fn request_id_with_no_value_before_propose_is_refused() {
+        let e = propose_with(&["--request-id"]).unwrap_err();
+        assert_eq!(e.message, REQUEST_ID_NEEDS_VALUE);
+    }
+
+    // ── the propose result envelope (oracle `zay` over `Way`'s propose arm) ──
+
+    fn draft() -> permission::auto_mode_propose::ProposalDraft {
+        permission::auto_mode_propose::ProposalDraft {
+            environment: vec!["Rust monorepo".to_string()],
+            allow: vec!["Bash(cargo test:*)".to_string()],
+            soft_deny: vec![],
+            hard_deny: vec![],
+            remove_from_permissions_allow: vec![],
+            notes: vec![],
+            mode: "append".to_string(),
+            scope: "project".to_string(),
+        }
+    }
+
+    #[test]
+    fn a_successful_run_reports_ok_and_the_proposal() {
+        let outcome = permission::auto_mode_propose::ProposeOutcome::Ok(Box::new(
+            permission::auto_mode_propose::ProposeSuccess {
+                proposal: draft(),
+                gathered: "## Pre-gathered recon".to_string(),
+                telemetry_code: None,
+            },
+        ));
+        let body = propose_result_body(&outcome);
+        assert_eq!(body["ok"], Value::Bool(true));
+        assert_eq!(body["proposal"]["allow"][0], "Bash(cargo test:*)");
+        // The failure keys must be absent, not present-and-null.
+        assert!(body.get("code").is_none());
+        assert!(body.get("reason").is_none());
+    }
+
+    #[test]
+    fn a_failed_run_reports_the_code_and_reason_in_oracle_key_order() {
+        let outcome = permission::auto_mode_propose::ProposeOutcome::Failed {
+            code: permission::auto_mode_propose::PROPOSE_CODE_TRUNCATED,
+            reason: "cut off".to_string(),
+            emit_telemetry: true,
+        };
+        let json = propose_result_json(propose_result_body(&outcome), None);
+        // `preserve_order` keeps insertion order, so the bytes match `zay`'s
+        // `{ok, code, reason}` rather than an alphabetised map.
+        assert_eq!(
+            json,
+            "{\n  \"ok\": false,\n  \"code\": \"truncated\",\n  \"reason\": \"cut off\"\n}"
+        );
+    }
+
+    #[test]
+    fn the_request_id_is_echoed_last() {
+        let outcome = permission::auto_mode_propose::ProposeOutcome::Failed {
+            code: permission::auto_mode_propose::PROPOSE_CODE_ABORTED,
+            reason: "Cancelled.".to_string(),
+            emit_telemetry: false,
+        };
+        let json = propose_result_json(propose_result_body(&outcome), Some(UUID));
+        assert!(json.ends_with(&format!("\"requestId\": \"{UUID}\"\n}}")));
+    }
+
+    #[test]
+    fn no_request_id_means_no_request_id_key() {
+        let outcome = permission::auto_mode_propose::ProposeOutcome::Ok(Box::new(
+            permission::auto_mode_propose::ProposeSuccess {
+                proposal: draft(),
+                gathered: String::new(),
+                telemetry_code: None,
+            },
+        ));
+        let json = propose_result_json(propose_result_body(&outcome), None);
+        assert!(!json.contains("requestId"));
+    }
+
+    #[test]
+    fn peeling_leaves_the_apply_path_grammar_untouched() {
+        // A leading `--request-id` whose remainder is NOT the propose form must
+        // still flow through the walk, which owns the apply-path diagnostics.
+        let e = err(&["--request-id", UUID, "--apply-target", "user"]);
+        assert_eq!(e.message, APPLY_TARGET_ONLY_APPLY_FILE);
     }
 
     // ── orchestration core (real tempfiles + real settings write) ────────────

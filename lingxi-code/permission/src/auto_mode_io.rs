@@ -287,6 +287,162 @@ fn build_overrides(root: &Path, patterns: &[&str]) -> Option<ignore::overrides::
     builder.build().ok()
 }
 
+// ── network paths ────────────────────────────────────────────────────────────
+
+/// `tu` — a UNC path (`\\server\share` or `//server/share`).
+fn is_unc(path: &str) -> bool {
+    let mut chars = path.chars();
+    matches!(chars.next(), Some('/' | '\\')) && matches!(chars.next(), Some('/' | '\\'))
+}
+
+/// `em` — a WSL path (`\\wsl$\…`, `\\wsl.localhost\…`).
+///
+/// UNC-SHAPED but local, which is why it is carved out of [`is_network_path`].
+fn is_wsl_path(path: &str) -> bool {
+    if !is_unc(path) {
+        return false;
+    }
+    let rest = &path[2..];
+    let lower = rest.to_lowercase();
+    let after = if let Some(a) = lower.strip_prefix("wsl$") {
+        a
+    } else if let Some(a) = lower.strip_prefix("wsl.localhost") {
+        a
+    } else {
+        return false;
+    };
+    after.starts_with('/') || after.starts_with('\\')
+}
+
+/// `vEi`/`d_e` — an autofs `/net/<host>/…` path.
+fn is_autofs_net(path: &str) -> bool {
+    if !path.starts_with('/') {
+        return false;
+    }
+    let mut parts: Vec<&str> = Vec::new();
+    for part in path.split('/') {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            parts.pop();
+            continue;
+        }
+        parts.push(part);
+        if parts.len() == 2 && parts[0].to_lowercase() == "net" {
+            return true;
+        }
+    }
+    false
+}
+
+/// `K7e` — would touching this path reach a NETWORK host?
+///
+/// A UNC share or an autofs `/net/<host>` mount is not merely slow: merely
+/// stat-ing one authenticates to, or at minimum resolves, the named host. The
+/// recon refuses to walk such a path at all rather than attempting it and
+/// reporting the result — see
+/// [`crate::auto_mode_gates::HOME_REPOS_NETWORK_HOME`].
+///
+/// WSL paths are UNC-shaped but local, so they are explicitly not network.
+#[must_use]
+pub fn is_network_path(path: &str) -> bool {
+    (is_unc(path) && !is_wsl_path(path)) || is_autofs_net(path)
+}
+
+// ── tail reads ───────────────────────────────────────────────────────────────
+
+/// The outcome of a tail read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TailRead {
+    /// The file is not there — skip it silently.
+    Absent,
+    /// It exists but could not be read; the caller marks the gather PARTIAL
+    /// rather than pretending the file held nothing.
+    Unreadable,
+    /// The last `cap` bytes, and whether the head was cut off.
+    Read {
+        /// The decoded content.
+        content: String,
+        /// The file was longer than `cap`.
+        truncated: bool,
+    },
+}
+
+/// `jIe`'s `fromTail` branch — read the LAST `cap` bytes of a file.
+///
+/// Shell history grows at the end, so the recent commands are the tail. When
+/// the read starts mid-file the first partial line is dropped, so a command is
+/// never reported with its head sliced off.
+#[must_use]
+pub fn secure_read_tail(path: &Path, cap: u64, require_nlink1: bool) -> TailRead {
+    use std::io::{Read, Seek, SeekFrom};
+
+    #[cfg(unix)]
+    let opened = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
+    };
+    #[cfg(not(unix))]
+    let opened = match std::fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => return TailRead::Unreadable,
+        Ok(_) => std::fs::File::open(path),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return TailRead::Absent,
+        Err(_) => return TailRead::Unreadable,
+    };
+
+    let mut file = match opened {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return TailRead::Absent,
+        Err(_) => return TailRead::Unreadable,
+    };
+    let Ok(meta) = file.metadata() else {
+        return TailRead::Unreadable;
+    };
+    if !meta.is_file() {
+        return TailRead::Unreadable;
+    }
+    #[cfg(unix)]
+    if require_nlink1 {
+        use std::os::unix::fs::MetadataExt;
+        if meta.nlink() != 1 {
+            return TailRead::Unreadable;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = require_nlink1;
+
+    let size = meta.len();
+    let from = size.saturating_sub(cap);
+    if file.seek(SeekFrom::Start(from)).is_err() {
+        return TailRead::Unreadable;
+    }
+    let mut bytes = Vec::new();
+    if file.take(size - from).read_to_end(&mut bytes).is_err() {
+        return TailRead::Unreadable;
+    }
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+
+    if from == 0 {
+        return TailRead::Read {
+            content: text,
+            truncated: false,
+        };
+    }
+    // Started mid-file: drop the partial first line.
+    let content = match text.find('\n') {
+        Some(i) => text[i + 1..].to_string(),
+        None => String::new(),
+    };
+    TailRead::Read {
+        content,
+        truncated: true,
+    }
+}
+
 // ── read-deny across path aliases ────────────────────────────────────────────
 
 /// `esy` — re-express `path` as if it sat under `to` instead of `from`.
@@ -1048,6 +1204,73 @@ mod tests {
         // Every one of the eleven sections is present either way.
         for title in crate::auto_mode_pregather::SECTION_TITLES {
             assert!(block.text.contains(title), "missing section: {title}");
+        }
+    }
+
+    #[test]
+    fn network_paths_are_recognised_so_they_are_never_touched() {
+        // Merely stat-ing one authenticates to, or resolves, the named host.
+        for p in [
+            r"\\server\share\x",
+            "//server/share/x",
+            "/net/fileserver/home/u",
+            "/net/host",
+        ] {
+            assert!(is_network_path(p), "{p} must be treated as network");
+        }
+        // WSL is UNC-SHAPED but local.
+        for p in [r"\\wsl$\Ubuntu\home\u", r"\\wsl.localhost\Ubuntu\home\u"] {
+            assert!(!is_network_path(p), "{p} is local");
+        }
+        // Ordinary local paths.
+        for p in ["/home/u", "/Users/u", r"C:\Users\u", "/netlify/x", "/net"] {
+            assert!(!is_network_path(p), "{p} is local");
+        }
+        // `..` cannot be used to sneak into `/net/<host>`.
+        assert!(is_network_path("/a/../net/host/x"));
+    }
+
+    #[test]
+    fn a_tail_read_returns_the_end_and_drops_the_partial_first_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(dir.path(), "hist", "one\ntwo\nthree\nfour\n");
+
+        // Whole file fits: nothing dropped, not truncated.
+        assert_eq!(
+            secure_read_tail(&p, 1000, false),
+            TailRead::Read {
+                content: "one\ntwo\nthree\nfour\n".to_string(),
+                truncated: false
+            }
+        );
+
+        // Only the tail fits: the sliced-open first line is dropped, so no
+        // command is ever reported with its head cut off.
+        let TailRead::Read { content, truncated } = secure_read_tail(&p, 12, false) else {
+            panic!("expected a read");
+        };
+        assert!(truncated);
+        assert_eq!(content, "three\nfour\n");
+        assert!(!content.contains("wo\n"));
+    }
+
+    #[test]
+    fn a_tail_read_distinguishes_absent_from_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            secure_read_tail(&dir.path().join("nope"), 100, false),
+            TailRead::Absent
+        );
+        // A directory is not a readable history file.
+        assert_eq!(secure_read_tail(dir.path(), 100, false), TailRead::Unreadable);
+        // A symlink is refused, and that is UNREADABLE rather than absent --
+        // the caller must mark the gather partial, not assume nothing was there.
+        #[cfg(unix)]
+        {
+            write(dir.path(), "real", "x");
+            let link = dir.path().join("link");
+            std::os::unix::fs::symlink(dir.path().join("real"), &link).unwrap();
+            assert_eq!(secure_read_tail(&link, 100, false), TailRead::Unreadable);
         }
     }
 

@@ -158,12 +158,17 @@ pub const AUTO_MODE_SETUP_WIZARD_ANSWERS: &str = "tengu_auto_mode_setup_wizard_a
 pub const AUTO_MODE_SETUP_WIZARD_RESOLVED: &str = "tengu_auto_mode_setup_wizard_resolved";
 
 /// `auto_mode_setup_write` — the non-interactive `auto-mode-setup --apply-file`
-/// write attempt. NOTE the name has NO `tengu_` prefix (byte-exact vs 2.1.218,
+/// write attempt. NOTE the name has NO `tengu_` prefix (byte-exact vs 2.1.220,
 /// which is inconsistent with the `wizard_*` events above). A `code` field
 /// records the outcome: `unknown` (default) / `usage` / `bad_flag_grammar` /
 /// `bad_path` / `read_denied` / `read_failed` / `too_large` / `missing_hash_arg`
 /// / `bad_hash_arg` / `hash_mismatch` / `parse_failed` / `scope_mismatch` /
-/// `write_failed`.
+/// `write_failed`, plus the save-step codes added in 2.1.220: `invalid_input` /
+/// `no_user_settings_path` / `invalid_merged` / `settings_file_invalid` /
+/// `permissions_allow_skipped`. Count fields: `autoModeKeysWritten`,
+/// `environmentEntriesPreserved`, `permissionsAllowRemoved`,
+/// `permissionsAllowNotFound`, `permissionsAllowSkipped`. The code and field
+/// spellings are owned (and byte-locked) by `permission::auto_mode_setup`.
 pub const AUTO_MODE_SETUP_WRITE: &str = "auto_mode_setup_write";
 
 /// The 3 `/auto-mode-setup` wizard events, for the string-lock test. Kept

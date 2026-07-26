@@ -357,6 +357,11 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         // assigned by `main` immediately before assembly. Never inherit them
         // from environment or argv.
         api_key: String::new(),
+        // Production: consult the real keychain. The comment above governs the
+        // PARENT-supplied secret; the shared login keychain is still a
+        // legitimate source here (see `needs_credential_driver`, which treats a
+        // stored provider key as "connected").
+        isolated_credential_storage: false,
         api_key_helper,
         cwd,
         lingxi_home,
@@ -1011,6 +1016,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let cwd = tmp.path().to_path_buf();
         let cfg = DesktopConfig {
+            isolated_credential_storage: false,
             api_base: DEFAULT_API_BASE.to_string(),
             api_key: String::new(),
             api_key_helper: None,

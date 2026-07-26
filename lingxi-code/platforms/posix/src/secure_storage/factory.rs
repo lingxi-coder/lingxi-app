@@ -34,6 +34,25 @@ use traits::{SecureStorage, SecureStorageError};
 /// # Errors
 /// Returns [`SecureStorageError::Io`] when the plaintext fallback cannot
 /// create its base directory (typically a permission issue on `config_dir`).
+/// Build the file-backed store directly, skipping every native keychain.
+///
+/// Exists so a host can be ISOLATED from the machine's real credentials. The
+/// native backends are keyed by OS user, not by `config_dir`, so a process that
+/// merely points `config_dir` at a temp directory still reads whatever the
+/// developer's login keychain holds — which makes "does this install have a
+/// credential?" answer differently on a logged-in machine than on a clean one.
+/// Callers that need a deterministic answer (tests, sandboxed boots) use this.
+///
+/// # Errors
+/// Propagates [`SecureStorageError`] when the plaintext store cannot be opened.
+pub async fn plaintext_secure_storage(
+    plaintext_path: PathBuf,
+) -> Result<Arc<dyn SecureStorage>, SecureStorageError> {
+    Ok(Arc::new(
+        super::plaintext::PlainTextSecureStorage::new(plaintext_path).await?,
+    ))
+}
+
 pub async fn secure_storage_for_platform(
     user: String,
     config_dir: PathBuf,

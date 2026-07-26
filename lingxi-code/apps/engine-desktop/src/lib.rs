@@ -1737,6 +1737,22 @@ pub struct DesktopConfig {
     /// successfully and only fails at `run_turn` with a 401, so slash-command
     /// dispatch still works with no key configured.
     pub api_key: String,
+    /// Inherit NO ambient credentials from the machine.
+    ///
+    /// The native backends are keyed by OS USER, not by [`Self::lingxi_home`],
+    /// so a boot that points `lingxi_home` at a temp directory still reads the
+    /// machine's real login keychain. That makes credential-dependent behaviour
+    /// answer differently on a developer's logged-in machine than on a clean
+    /// one — which is a test-isolation hazard, not a preference. Hosts that
+    /// need a deterministic credential picture (sandboxed boots, e2e tests) set
+    /// this; production leaves it `false`.
+    ///
+    /// Covers BOTH ambient sources: the OS keychain (used instead of the
+    /// file-backed store) and the process environment (a bare
+    /// `DEEPSEEK_API_KEY` in the developer's shell otherwise marks a provider
+    /// connected, which is what made `bridge-server`'s credential-required e2e
+    /// assertions machine-dependent).
+    pub isolated_credential_storage: bool,
     /// Settings `apiKeyHelper`: shell command/path that prints the Anthropic
     /// auth value. Used only when no higher-priority API key/OAuth source wins.
     pub api_key_helper: Option<String>,
@@ -2268,6 +2284,8 @@ impl Default for DesktopConfig {
         Self {
             api_base: "https://api.anthropic.com".to_string(),
             api_key: String::new(),
+            // Production reads the real keychain; only isolated hosts opt out.
+            isolated_credential_storage: false,
             api_key_helper: None,
             cwd: std::path::PathBuf::from("."),
             lingxi_home: std::path::PathBuf::new(),
@@ -4116,12 +4134,17 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
     // (1) Platform-minimal façade (http + clock + storage).
     let http = Arc::new(PosixHttp::new());
     let clock = Arc::new(PosixClock::new());
-    let storage = secure_storage_for_platform(
-        std::env::var("USER").unwrap_or_else(|_| "default".to_string()),
-        cfg.lingxi_home.clone(),
-        cfg.lingxi_home.join(".credentials.json"),
-    )
-    .await
+    let credentials_path = cfg.lingxi_home.join(".credentials.json");
+    let storage = if cfg.isolated_credential_storage {
+        platform_posix::plaintext_secure_storage(credentials_path).await
+    } else {
+        secure_storage_for_platform(
+            std::env::var("USER").unwrap_or_else(|_| "default".to_string()),
+            cfg.lingxi_home.clone(),
+            credentials_path,
+        )
+        .await
+    }
     .map_err(|e| BuildError::SecureStorage(e.to_string()))?;
 
     // (2a) Task 10: LlmTransportBridge wraps the PosixHttp transport for
@@ -4487,12 +4510,17 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
     // same map later drives the `/model` picker's Connect badge via
     // `DesktopRuntime.provider_availability`. Nothing between here and the
     // runtime literal mutates credentials, so early == late computation.
-    let availability_probe = provider_config::compute_availability(
+    let availability_probe = provider_config::compute_availability_with_isolation(
         &credentials,
         &assembled.credential_sources,
         has_api_key,
         has_oauth,
         has_openai_chatgpt,
+    
+        // Isolated boots ignore ambient provider env vars too — see the
+        // `isolated_credential_storage` doc: the flag means "this boot inherits
+        // no machine credentials", and env is the other half of that.
+        cfg.isolated_credential_storage,
     );
     let availability_rows =
         match tokio::time::timeout(std::time::Duration::from_secs(5), availability_probe).await {
@@ -8952,6 +8980,7 @@ mod tests {
         let cwd = tmp.path().to_path_buf();
         let lingxi_home = cwd.join(".lingxi");
         let cfg = DesktopConfig {
+            isolated_credential_storage: false,
             api_base: "https://api.anthropic.com".to_string(),
             api_key: String::new(),
             api_key_helper: None,

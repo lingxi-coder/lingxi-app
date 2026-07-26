@@ -32,12 +32,22 @@ pub struct ProviderAvailability {
 /// combined result here (OpenAI OAuth tokens are stored under `openai-oauth-*`
 /// keychain accounts, not under a `get_provider_key("openai-chatgpt")` slot, so
 /// the generic arm cannot detect any of the three sources).
-pub async fn compute_availability(
+/// `isolated` suppresses AMBIENT credential sources — the process environment
+/// — leaving only what this boot was explicitly given.
+///
+/// A preset counts as available when its env var merely EXISTS, so any
+/// `DEEPSEEK_API_KEY`/`OPENAI_API_KEY`/… in the developer's shell silently makes
+/// a provider "connected". That is correct for a real session and wrong for a
+/// sandboxed one: it makes credential-dependent behaviour answer differently on
+/// a machine that happens to export a key, which is a test-isolation hazard
+/// rather than a preference.
+pub async fn compute_availability_with_isolation(
     credentials: &Arc<secret::CredentialManager>,
     sources: &[CredentialSource],
     anthropic_has_api_key: bool,
     anthropic_has_oauth: bool,
     openai_chatgpt_available: bool,
+    isolated: bool,
 ) -> Vec<ProviderAvailability> {
     let mut out = Vec::with_capacity(sources.len());
     for source in sources {
@@ -47,10 +57,11 @@ pub async fn compute_availability(
             "openai-chatgpt" => openai_chatgpt_available,
             id => {
                 let keychain_has = matches!(credentials.get_provider_key(id).await, Ok(Some(_)));
-                let env_set = source
-                    .env_var
-                    .as_deref()
-                    .is_some_and(|var| std::env::var(var).is_ok());
+                let env_set = !isolated
+                    && source
+                        .env_var
+                        .as_deref()
+                        .is_some_and(|var| std::env::var(var).is_ok());
                 keychain_has || env_set
             }
         };
@@ -62,6 +73,26 @@ pub async fn compute_availability(
         });
     }
     out
+}
+
+/// [`compute_availability_with_isolation`] with ambient sources ENABLED — the
+/// production behaviour.
+pub async fn compute_availability(
+    credentials: &Arc<secret::CredentialManager>,
+    sources: &[CredentialSource],
+    anthropic_has_api_key: bool,
+    anthropic_has_oauth: bool,
+    openai_chatgpt_available: bool,
+) -> Vec<ProviderAvailability> {
+    compute_availability_with_isolation(
+        credentials,
+        sources,
+        anthropic_has_api_key,
+        anthropic_has_oauth,
+        openai_chatgpt_available,
+        false,
+    )
+    .await
 }
 
 #[cfg(test)]

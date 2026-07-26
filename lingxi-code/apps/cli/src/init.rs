@@ -700,6 +700,9 @@ pub(crate) fn resolve_desktop_config(
     let _ = argv.no_stream;
 
     DesktopConfig {
+        // Real CLI session: the machine's keychain and env ARE legitimate
+        // credential sources here.
+        isolated_credential_storage: false,
         api_base: resolve_api_base(),
         api_key: std::env::var("ANTHROPIC_API_KEY").unwrap_or_default(),
         api_key_helper: load_settings_api_key_helper(incl_user, incl_project),

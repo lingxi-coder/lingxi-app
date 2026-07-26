@@ -73,6 +73,9 @@ fn config_with_settings(settings_json: &str) -> (tempfile::TempDir, DesktopConfi
     std::fs::write(lingxi_home.join("settings.json"), settings_json).expect("write settings.json");
 
     let cfg = DesktopConfig {
+        // Sandboxed boot: inherit no machine credentials, so the
+        // assertions do not depend on the developer's env/keychain.
+        isolated_credential_storage: true,
         api_base: "https://api.anthropic.com".to_string(),
         api_key: String::new(),
         api_key_helper: None,

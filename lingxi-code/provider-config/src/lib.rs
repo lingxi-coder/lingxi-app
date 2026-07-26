@@ -16,7 +16,9 @@ pub mod parse_routing;
 pub mod types;
 
 pub use assemble::assemble;
-pub use availability::{compute_availability, ProviderAvailability};
+pub use availability::{
+    compute_availability, compute_availability_with_isolation, ProviderAvailability,
+};
 pub use credentials::MultiCredentialProvider;
 pub use parse_providers::{parse_user_providers, ParsedUserProvider};
 pub use parse_routing::parse_routing;

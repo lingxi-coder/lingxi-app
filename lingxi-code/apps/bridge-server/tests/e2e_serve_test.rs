@@ -50,6 +50,15 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
         // Deterministic across host machines: a dev keychain with real provider
         // keys must not trigger the connected-provider fallback mid-test.
         default_model_explicit: true,
+        // Same hazard, one layer deeper. The native keychain is keyed by OS
+        // USER, not by `lingxi_home`, so pointing that at a tempdir does NOT
+        // isolate this boot: any provider key in the developer's login keychain
+        // lands in `provider_availability`, `needs_credential_driver` then
+        // returns false, the REAL turn driver runs, and the provider's auth
+        // failure arrives as a text delta instead of the bridge's terminal
+        // credential-required Error. Without this the credential assertions
+        // below pass only on a machine that has never logged in.
+        isolated_credential_storage: true,
         recent_models: Vec::new(),
         fallback_model: None,
         custom_betas: Vec::new(),

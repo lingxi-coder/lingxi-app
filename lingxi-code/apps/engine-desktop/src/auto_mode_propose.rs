@@ -1,5 +1,10 @@
 //! WIZARD-06 — the `--propose` adapters.
 //!
+//! These live in the composition root because the query side needs a live
+//! [`llm_client::ApiService`], which only this crate assembles
+//! (`resolve_llm_stack`). `apps/cli` re-exports them so its own dispatch and
+//! tests are unchanged.
+//!
 //! Two seams sit between [`permission::auto_mode_propose::run_propose`] and the
 //! outside world: the recon GATHER (filesystem) and the model QUERY (network).
 //! This module supplies both.
@@ -445,5 +450,221 @@ mod tests {
             }
             other => panic!("expected a user message, got {other:?}"),
         }
+    }
+}
+
+// ── the two `/auto-mode-setup` runners ───────────────────────────────────────
+
+/// Drives `--propose` for the slash surface.
+///
+/// Holds the live [`llm_client::ApiService`] plus the resolved model, so the
+/// slash command asks the SAME route, with the same credential, that the
+/// session's turns use. Everything else (gather reach, prompt, repair
+/// round-trip, unsafe-allow reconciliation) is
+/// [`permission::auto_mode_propose::run_propose`].
+pub struct DesktopProposeRunner {
+    service: std::sync::Arc<llm_client::ApiService>,
+    model: String,
+    profile: Option<String>,
+    thinking: bool,
+    plan: Option<String>,
+    gather_root: std::path::PathBuf,
+    user_config_dir: std::path::PathBuf,
+    transcript_dir: std::path::PathBuf,
+}
+
+impl DesktopProposeRunner {
+    /// Wire the runner from the pieces `build` already has in hand.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        service: std::sync::Arc<llm_client::ApiService>,
+        model: String,
+        profile: Option<String>,
+        thinking: bool,
+        plan: Option<String>,
+        gather_root: std::path::PathBuf,
+        user_config_dir: std::path::PathBuf,
+        transcript_dir: std::path::PathBuf,
+    ) -> Self {
+        Self {
+            service,
+            model,
+            profile,
+            thinking,
+            plan,
+            gather_root,
+            user_config_dir,
+            transcript_dir,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl command_core::ProposeRunner for DesktopProposeRunner {
+    async fn run(
+        &self,
+        inv: &permission::auto_mode_argv::ProposeInvocation,
+    ) -> serde_json::Value {
+        let answers = ProposeAnswers {
+            posture: inv.posture.clone(),
+            scope: inv.scope.clone(),
+            depth: inv.depth.clone(),
+        };
+        let gather = FsProposeGather {
+            root: self.gather_root.clone(),
+            user_config_dir: self.user_config_dir.clone(),
+            transcript_dir: self.transcript_dir.clone(),
+            // No settings key for `autoMode.classifyAllShell` in this build, so
+            // the recon reports the conservative state rather than claiming a
+            // setting it never read.
+            classify_all_shell: false,
+        };
+        let query = ApiProposeQuery::new(
+            self.service.clone(),
+            self.model.clone(),
+            self.profile.clone(),
+            self.thinking,
+        );
+        let outcome = run_propose_blocking(
+            answers,
+            self.plan.clone(),
+            permission::auto_mode_defaults::DEFAULT_ENVIRONMENT
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
+            gather,
+            query,
+        )
+        .await;
+
+        // The oracle records the run's code on both the failure and the
+        // qualified-success paths, and stays silent on `aborted`.
+        match &outcome {
+            permission::auto_mode_propose::ProposeOutcome::Ok(success) => {
+                if let Some(code) = success.telemetry_code {
+                    telemetry::emit_auto_mode_setup_propose(code);
+                }
+            }
+            permission::auto_mode_propose::ProposeOutcome::Failed {
+                code,
+                emit_telemetry,
+                ..
+            } => {
+                if *emit_telemetry {
+                    telemetry::emit_auto_mode_setup_propose(code);
+                }
+            }
+        }
+        permission::auto_mode_argv::propose_result_body(&outcome)
+    }
+}
+
+/// Drives `--apply-file` for the slash surface.
+///
+/// Routes through the SAME `permission::auto_mode_argv::execute_apply_file` the
+/// CLI subcommand uses — the hash-bind, containment-root and scope checks are
+/// the security-relevant half of this command, and a second implementation of
+/// them is exactly what must not exist.
+pub struct DesktopApplyRunner {
+    roots: Vec<std::path::PathBuf>,
+    paths: permission::PermissionPaths,
+}
+
+impl DesktopApplyRunner {
+    /// Build the runner for `config_dir`'s settings tiers.
+    #[must_use]
+    pub fn new(roots: Vec<std::path::PathBuf>, paths: permission::PermissionPaths) -> Self {
+        Self { roots, paths }
+    }
+}
+
+#[async_trait::async_trait]
+impl command_core::ApplyRunner for DesktopApplyRunner {
+    async fn run(
+        &self,
+        inv: &permission::auto_mode_argv::ApplyFileInvocation,
+    ) -> permission::auto_mode_argv::ApplyResult {
+        // A slash-dispatched apply has no loaded session policy, so the
+        // `Read`-deny overlay is inactive — same stance the CLI subcommand
+        // documents. The containment-root gate and the `O_NOFOLLOW`/`nlink==1`
+        // secure read still constrain what is read.
+        match permission::auto_mode_argv::execute_apply_file(
+            inv,
+            &self.roots,
+            |_| false,
+            &self.paths,
+        )
+        .await
+        {
+            Ok(result) => result,
+            // A write failure is reported with the pipeline's own vocabulary
+            // rather than swallowed: the caller must never read a failed
+            // settings write as a successful one.
+            Err(e) => permission::auto_mode_argv::ApplyResult::Rejected {
+                code: "write_failed".to_string(),
+                reason: e.to_string(),
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+mod runner_tests {
+    use super::*;
+    use command_core::ApplyRunner as _;
+    use permission::auto_mode_argv::{ApplyFileInvocation, ApplyResult};
+
+    fn runner(dir: &std::path::Path) -> DesktopApplyRunner {
+        DesktopApplyRunner::new(
+            vec![dir.to_path_buf()],
+            permission::PermissionPaths {
+                lingxi_home: dir.to_path_buf(),
+                cwd: dir.to_path_buf(),
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn the_apply_runner_routes_through_the_real_pipeline() {
+        // Proves the runner is wired to `execute_apply_file` rather than
+        // stubbed: a path outside the containment roots comes back with the
+        // PIPELINE's own byte-exact code, which only the real gate produces.
+        let dir = tempfile::tempdir().unwrap();
+        let inv = ApplyFileInvocation {
+            request_id: None,
+            apply_target: None,
+            expect_sha256: Some("a".repeat(64)),
+            apply_file: std::path::PathBuf::from("/etc/passwd"),
+        };
+        match runner(dir.path()).run(&inv).await {
+            ApplyResult::Rejected { code, .. } => {
+                assert_eq!(code, "bad_path", "must be the pipeline's own gate verdict");
+            }
+            other => panic!("an out-of-root path must be rejected, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_apply_runner_never_reports_a_write_it_did_not_make() {
+        // A hash that cannot match the file's bytes must NOT come back as
+        // Wrote/NoChange — a caller reading either as success would believe
+        // settings changed when they did not.
+        let dir = tempfile::tempdir().unwrap();
+        let proposal = dir.path().join("p.json");
+        std::fs::write(&proposal, r#"{"environment":["x"]}"#).unwrap();
+        let inv = ApplyFileInvocation {
+            request_id: None,
+            apply_target: None,
+            expect_sha256: Some("b".repeat(64)),
+            apply_file: proposal.clone(),
+        };
+        assert!(
+            matches!(
+                runner(dir.path()).run(&inv).await,
+                ApplyResult::Rejected { .. }
+            ),
+            "a hash mismatch must be a rejection, never a claimed write"
+        );
     }
 }

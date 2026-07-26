@@ -103,6 +103,9 @@ tokio-util = { workspace = true }
 dirs = "5"
 # ConfigChange settings watcher: drive the `FileSystem::watch` event stream.
 futures-core = { workspace = true }
+# WIZARD-06 `--propose`: the query adapter drains the response stream
+# (`StreamExt::collect`) before folding it into a QueryOutcome.
+futures = { workspace = true }
 tokio-stream = { workspace = true }
 
 # F2-00: `DesktopConfig` carries the settings-declared `providers` block as

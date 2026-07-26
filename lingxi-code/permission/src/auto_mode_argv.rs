@@ -667,3 +667,21 @@ pub fn propose_result_json(body: Value, request_id: Option<&str>) -> String {
     }
     serde_json::to_string_pretty(&out).unwrap_or_else(|_| "{}".to_string())
 }
+
+/// The result body for a completed propose run (oracle `Way`'s propose arm:
+/// `{ok:true, proposal}` on success, `{ok:false, code, reason}` otherwise).
+#[must_use]
+pub fn propose_result_body(outcome: &crate::auto_mode_propose::ProposeOutcome) -> Value {
+    
+    match outcome {
+        crate::auto_mode_propose::ProposeOutcome::Ok(success) => serde_json::json!({
+            "ok": true,
+            "proposal": success.proposal.to_json(),
+        }),
+        crate::auto_mode_propose::ProposeOutcome::Failed { code, reason, .. } => serde_json::json!({
+            "ok": false,
+            "code": code,
+            "reason": reason,
+        }),
+    }
+}

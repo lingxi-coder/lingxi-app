@@ -1786,6 +1786,7 @@ dependencies = [
  "cron",
  "dirs",
  "engine",
+ "futures",
  "futures-core",
  "hooks",
  "insta",

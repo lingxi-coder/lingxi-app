@@ -23,7 +23,9 @@ pub mod agents;
 pub mod attach;
 pub mod auth;
 pub mod auto_mode;
-pub mod auto_mode_propose;
+/// WIZARD-06 `--propose` adapters, hosted in the composition root (they need a
+/// live `ApiService`). Re-exported so this module's path is unchanged.
+pub use engine_desktop::auto_mode_propose;
 pub mod auto_mode_setup;
 pub mod bg_worker;
 pub mod daemon;

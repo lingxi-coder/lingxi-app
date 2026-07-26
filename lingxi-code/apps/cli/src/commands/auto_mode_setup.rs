@@ -135,23 +135,6 @@ pub async fn run(cli: &Cli) -> i32 {
 }
 
 
-/// The result body for a completed propose run (oracle `Way`'s propose arm:
-/// `{ok:true, proposal}` on success, `{ok:false, code, reason}` otherwise).
-#[must_use]
-pub fn propose_result_body(outcome: &permission::auto_mode_propose::ProposeOutcome) -> Value {
-    use permission::auto_mode_propose::ProposeOutcome;
-    match outcome {
-        ProposeOutcome::Ok(success) => serde_json::json!({
-            "ok": true,
-            "proposal": success.proposal.to_json(),
-        }),
-        ProposeOutcome::Failed { code, reason, .. } => serde_json::json!({
-            "ok": false,
-            "code": code,
-            "reason": reason,
-        }),
-    }
-}
 
 /// Run `--wizard … --propose`: gather the recon, ask the model, print the
 /// result JSON.

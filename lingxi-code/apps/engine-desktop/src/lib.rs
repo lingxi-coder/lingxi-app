@@ -29,6 +29,7 @@
 mod agent_skill_loader;
 mod background_agent;
 mod connect;
+pub mod auto_mode_propose;
 pub mod file_changed_watch;
 pub mod settings_watch;
 mod skill_loader;
@@ -4979,6 +4980,7 @@ pub async fn build(
         pricing,
         chains,
         model_providers,
+        default_listings,
         default_model_id,
         default_model_profile,
         provider_availability,
@@ -4990,11 +4992,10 @@ pub async fn build(
         llm_transport,
         cost_estimator,
         subscriber_state,
-        // `default_listings` / `profile_first_party` are inputs to the
-        // resolution itself (the connected-provider fallback and the Explore
-        // firstParty gate consume them inside `resolve_llm_stack`); the session
-        // half below reads the resolved outputs instead. Headless callers still
-        // get them off `LlmStack`.
+        // `profile_first_party` is an input to the resolution itself (the
+        // Explore firstParty gate consumes it inside `resolve_llm_stack`); the
+        // session half below reads the resolved outputs instead. Headless
+        // callers still get it off `LlmStack`.
         ..
     } = resolve_llm_stack(&cfg).await?;
 
@@ -7743,6 +7744,57 @@ pub async fn build(
     )
     .await;
     reg.register_builtin_handler(worktree_command_handler);
+
+    // WIZARD-06: re-register `/auto-mode-setup` WITH its runners attached.
+    // `register_all_builtin_commands` wires the handle-free shape (grammar,
+    // `--help`, every rejection path); only the composition root can supply the
+    // two branches that need real capabilities — a live `ApiService` for
+    // `--propose` and the settings writer for `--apply-file`. Until this point
+    // both branches report `unavailable_here` rather than pretending to work.
+    {
+        let listing = default_listings
+            .iter()
+            .find(|l| l.request_model == default_model_id || l.display_model == default_model_id);
+        // The oracle derives the thinking flag from the MODEL (`IQt(r)`), not
+        // from session config, and grants the no-thinking budget top-up when the
+        // model carries no thinking config.
+        let thinking = listing.is_some_and(|l| l.supports_reasoning);
+        // `subscription_signal` reads the plan from the live snapshot; an
+        // unauthenticated or still-fetching session yields `None`, which renders
+        // as the "unknown" signal rather than a guessed plan.
+        let plan = subscription
+            .read()
+            .ok()
+            .and_then(|g| g.as_ref().and_then(|s| s.subscription_type.clone()));
+        let transcript_dir = cfg
+            .lingxi_home
+            .join("projects")
+            .join(session::jsonl::path::project_dir_name(
+                &cfg.cwd.to_string_lossy(),
+            ));
+        let propose = std::sync::Arc::new(auto_mode_propose::DesktopProposeRunner::new(
+            api_service.clone(),
+            default_model_id.clone(),
+            default_model_profile.clone(),
+            thinking,
+            plan,
+            cfg.cwd.clone(),
+            cfg.lingxi_home.clone(),
+            transcript_dir,
+        ));
+        let apply = std::sync::Arc::new(auto_mode_propose::DesktopApplyRunner::new(
+            command_core::auto_mode_setup::apply_file_roots(&cfg.lingxi_home),
+            permission::PermissionPaths {
+                lingxi_home: cfg.lingxi_home.clone(),
+                cwd: cfg.cwd.clone(),
+            },
+        ));
+        reg.register_builtin_handler(std::sync::Arc::new(
+            command_core::AutoModeSetupHandler::new()
+                .with_propose(propose)
+                .with_apply(apply),
+        ));
+    }
     // SKILLEXEC.2: fill the shared command-registry slot the `Skill` tool's
     // loader holds, then hand the SAME `Arc` to the slash dispatcher so the tool
     // and the dispatcher observe one command set (plugin lifecycle mutations via

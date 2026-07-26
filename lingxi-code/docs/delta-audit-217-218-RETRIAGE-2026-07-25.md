@@ -50,19 +50,36 @@ audit flagged this as "subordinate to a pre-217 gap" and that holds: the field
 cannot be added to a response the port never sends. Do the `set_cwd` trust flow
 first.
 
-### Independently actionable (2)
+### Blocked on a missing prerequisite (2) — CORRECTED 2026-07-25
 
-- `tengu_left_arrow_editing_guard` (LOW, M) — `tui/src/bottom_pane/mod.rs:1311`
-  handles `KeyCode::Left` as an unconditional `composer.move_left()`. The
-  oracle's gesture state machine (`idp()`/`sdp()` over
-  `{editedEmptyAtMs, armedAtMs, lastLeftPressMs, …}`, with
-  reject/absorb/arm decisions) is absent. The flag defaults TRUE with no
-  firstParty check, so this path IS reachable in an external build.
-- `tengu_refusal_fallback_notice_collapsed` (LOW, L) —
-  `orchestrator/src/conversation.rs:3943` `maybe_swap_to_refusal_fallback` has
-  the once-per-session latch but no banner-collapsing queue: zero hits for
-  `retractedMessageUuids` / `suppressedCount` / `emittedVia` repo-wide. Only
-  reachable when a refusal→fallback episode actually occurs.
+I first listed these as "independently actionable". That was wrong, and the
+error is worth naming: I judged reachability in the ORACLE (the flag defaults
+true, that code path runs) instead of asking whether the PORT has the thing
+being guarded. Re-verified at the behaviour site — both guard something that
+does not exist here, so implementing either yields code that can never execute.
+
+- `tengu_left_arrow_editing_guard` (LOW, M) — a debounce for the **←-on-empty
+  gesture** (open the agents panel / detach). **The port has no such gesture.**
+  Every `KeyCode::Left` handler in `tui/` moves the cursor:
+  `bottom_pane/mod.rs:1311` (`composer.move_left()`), `vim.rs:125` and `:243`,
+  `rewind_picker_view.rs:246`. There is no left-arrow → agents-panel or →
+  detach binding anywhere. The audit's own sketch says so: *"Only worth doing
+  together with the missing ←-on-empty gesture."*
+
+- `tengu_refusal_fallback_notice_collapsed` (LOW, L) — a queue that collapses
+  **provisional** `model_refusal_fallback` banners when a later banner retracts
+  their uuid. **The port emits no provisional banners and has no retraction
+  subsystem.** `refusal_fallback_latched` (`conversation.rs:978`) fires the
+  banner at most ONCE per session, and repo-wide there are zero hits for
+  `retractedMessageUuids` / `retracted_message_uuids` / `suppressedCount` (the
+  two `provisional` matches are unrelated plugin-marketplace clone-dir
+  naming). With one un-retractable banner there is nothing to collapse. The
+  sketch agrees: *"the port emits no provisional banners today, so there is
+  nothing to collapse."*
+
+Schedule each WITH its prerequisite, never before it. A guard shipped ahead of
+the thing it guards is not partial coverage — it is dead code that reads as
+coverage.
 
 ## Methodology warning for the next pass
 

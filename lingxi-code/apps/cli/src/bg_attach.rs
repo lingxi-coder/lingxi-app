@@ -1061,9 +1061,27 @@ mod unix {
 
         let mut reader = reader;
         let mut stdout = io::stdout().lock();
+        // P1-12 first-frame stall watchdog. Armed for the whole attach: a
+        // worker that never paints leaves this terminal blank forever, so if no
+        // FRAME_OUTPUT arrives inside the threshold we ask the daemon to
+        // restart it (twice) and then give up with a diagnostic.
+        let jobs_dir = crate::agents_registry::jobs_dir(&crate::run::daemon_runtime_dir());
+        let mut stall = crate::bg_attach_stall::StallDriver::new(
+            crate::bg_attach_stall::stall_threshold_ms(
+                crate::bg_attach_stall::STALL_DEFAULT_MS,
+                // The attach target was dispatched with argv, so it gets the
+                // slower floor (a prompt to load or a session to resume).
+                true,
+            ),
+        );
+        let mut last_poll = std::time::Instant::now();
+        let mut stall_respawns: i64 = 0;
+
         let result = loop {
             match read_frame(&mut reader) {
                 Ok(Some((FRAME_OUTPUT, payload))) => {
+                    // The session is alive and painting — disarm permanently.
+                    stall.saw_frame();
                     stdout.write_all(&payload)?;
                     stdout.flush()?;
                 }
@@ -1098,6 +1116,69 @@ mod unix {
                         .map_or(LocalInputEnd::Failed, |state| *state);
                     if state == LocalInputEnd::Failed {
                         break closed_connection_result(state);
+                    }
+                    // A read timeout is the watchdog's tick. Feed REAL elapsed
+                    // time, not the nominal poll period, so a machine sleep is
+                    // seen as one long gap and resets rather than firing.
+                    let now = std::time::Instant::now();
+                    let elapsed = now.duration_since(last_poll).as_millis();
+                    last_poll = now;
+                    let elapsed = u64::try_from(elapsed).unwrap_or(u64::MAX);
+                    match stall.advance(
+                        elapsed,
+                        crate::bg_attach_stall::StallGates::default(),
+                        stall_respawns,
+                    ) {
+                        crate::bg_attach_stall::StallDecision::Wait => {}
+                        crate::bg_attach_stall::StallDecision::Respawn => {
+                            crate::bg_attach_stall::emit_stall_respawn(
+                                "starting",
+                                "attach",
+                                stall_respawns,
+                            );
+                            crate::bg_attach_stall::emit_job_attach_stalled(
+                                session_label,
+                                stall_respawns,
+                            );
+                            let _ = writeln!(
+                                stdout,
+                                "\r\n{}",
+                                crate::bg_attach_stall::NOT_RESPONDING_BANNER
+                            );
+                            let _ = stdout.flush();
+                            crate::bg_attach_stall::request_stall_respawn(
+                                &jobs_dir,
+                                session_label,
+                            );
+                            stall_respawns += 1;
+                            // Re-arm for the restarted worker's own first frame.
+                            stall = crate::bg_attach_stall::StallDriver::new(
+                                crate::bg_attach_stall::stall_threshold_ms(
+                                    crate::bg_attach_stall::STALL_DEFAULT_MS,
+                                    true,
+                                ),
+                            );
+                        }
+                        crate::bg_attach_stall::StallDecision::GiveUp => {
+                            crate::bg_attach_stall::emit_stall_gave_up(
+                                "starting",
+                                "attach",
+                                stall_respawns,
+                            );
+                            let _ = writeln!(
+                                stdout,
+                                "\r\n{}\r\n{}",
+                                crate::bg_attach_stall::KEEPS_STALLING_BANNER,
+                                crate::bg_attach_stall::estalled_notice(
+                                    session_label,
+                                    &jobs_dir.join(session_label).display().to_string(),
+                                )
+                            );
+                            let _ = stdout.flush();
+                            break Err(io::Error::other(
+                                crate::bg_attach_stall::KEEPS_STALLING_KILL_REASON,
+                            ));
+                        }
                     }
                 }
                 Err(error) => break Err(error),

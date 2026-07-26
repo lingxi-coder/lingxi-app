@@ -492,6 +492,101 @@ fn run_supervisor<LP: LockProbe, PP: ProcProbe, WS: WorkerSpawner>(
 /// One roster sweep: re-read, drop dead/recycled workers, spawn a detached
 /// worker for each pending `--bg` job, stamp our `supervisorPid` + a fresh
 /// `updatedAt`, and re-persist.
+
+/// Durable respawn-attempt counter writer (sibling of [`read_respawn_count`]).
+fn write_respawn_count(runtime_dir: &Path, short: &str, count: i64) {
+    let dir = agents_registry::jobs_dir(runtime_dir).join(short);
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(dir.join("respawns"), format!("{count}\n"));
+}
+
+/// P1-12 — service stall-respawn requests left by attach clients.
+///
+/// The attach client sees the stall (it owns the stream) but has no authority
+/// to restart a supervised worker; the daemon has authority but never sees
+/// frames. The client leaves a request file, and this consumes it.
+///
+/// The restart is a RESUME, never a re-prompt. That distinction is the whole
+/// reason the daemon otherwise fails a vanished worker closed: re-running the
+/// original prompt would duplicate whatever side effects the first run already
+/// committed. Flipping the launch spec to `Resume` keeps the session's own
+/// transcript as the continuation point.
+fn service_stall_requests<PP: ProcProbe>(
+    runtime_dir: &Path,
+    roster: &mut Roster,
+    proc_probe: &PP,
+    claimed: &mut HashSet<String>,
+) {
+    let jobs = agents_registry::jobs_dir(runtime_dir);
+    let shorts: Vec<String> = roster.workers.keys().cloned().collect();
+    for short in shorts {
+        if !crate::bg_attach_stall::take_stall_request(&jobs, &short) {
+            continue;
+        }
+        let attempt = read_respawn_count(runtime_dir, &short);
+        let Some(record) = roster.workers.get(&short) else {
+            continue;
+        };
+        let worker_pid = record.pid;
+
+        if attempt >= crate::bg_attach_stall::STALL_RESPAWN_BUDGET {
+            // Budget spent. SIGKILL and fail closed with the oracle's reason —
+            // a session that will not paint after two restarts is not going to.
+            crate::bg_attach_stall::emit_stall_gave_up("starting", "daemon", attempt);
+            kill_worker(worker_pid, true);
+            let _ = agents_registry::update_job_state_with_detail(
+                runtime_dir,
+                &short,
+                "failed",
+                None,
+                crate::bg_attach_stall::KEEPS_STALLING_KILL_REASON,
+            );
+            roster.workers.remove(&short);
+            claimed.remove(&short);
+            continue;
+        }
+
+        crate::bg_attach_stall::emit_stall_respawn("starting", "daemon", attempt);
+        // Flip the launch spec to a resume BEFORE killing, so a crash between
+        // the two never leaves a spec that would re-run the prompt.
+        if let Ok(mut spec) = crate::background_launch::read_launch_spec(runtime_dir, &short) {
+            if spec.launch == crate::background_launch::BackgroundLaunchKind::Fresh {
+                spec.launch = crate::background_launch::BackgroundLaunchKind::Resume;
+                let _ = crate::background_launch::write_launch_spec(runtime_dir, &short, &spec);
+            }
+        }
+        write_respawn_count(runtime_dir, &short, attempt + 1);
+        kill_worker(worker_pid, false);
+        // Drop the record and the claim so the SAME heartbeat's
+        // `spawn_pending_workers` treats the job as pending and spawns it
+        // afresh — as a resume, per the spec flip above.
+        let _ = proc_probe;
+        roster.workers.remove(&short);
+        claimed.remove(&short);
+        let _ = agents_registry::update_job_state(runtime_dir, &short, "working", None);
+    }
+}
+
+/// Signal a worker. `hard` selects SIGKILL over SIGTERM.
+///
+/// Uses the same `nix` path as [`stop_all_workers`] — the crate forbids
+/// `unsafe`, so a raw `libc::kill` is not available here.
+fn kill_worker(pid: i32, hard: bool) {
+    #[cfg(unix)]
+    {
+        let sig = if hard {
+            nix::sys::signal::Signal::SIGKILL
+        } else {
+            nix::sys::signal::Signal::SIGTERM
+        };
+        let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), Some(sig));
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (pid, hard);
+    }
+}
+
 fn heartbeat<PP: ProcProbe, WS: WorkerSpawner>(
     runtime_dir: &Path,
     pid: i32,
@@ -502,6 +597,10 @@ fn heartbeat<PP: ProcProbe, WS: WorkerSpawner>(
 ) {
     let mut roster = daemon_roster::read_roster(runtime_dir, pid, true).into_roster();
     let _dropped = daemon_roster::retain_adoptable(&mut roster, proc_probe);
+    // P1-12: service attach-stall respawn requests BEFORE spawning, so a
+    // request handled this heartbeat is re-spawned in the same pass rather
+    // than leaving the user staring at a dead session for another cycle.
+    service_stall_requests(runtime_dir, &mut roster, proc_probe, claimed);
     // Spawn detached workers for pending jobs (mutates the roster with each new
     // live worker record so the NEXT `retain_adoptable` keeps it while alive).
     spawn_pending_workers(
@@ -848,6 +947,10 @@ fn worker_record_for_job(
                 .unwrap_or((None, None))
         });
     let now = now_millis();
+    // P1-12: the roster's `attachStallRespawns` is sourced from the DURABLE
+    // counter, so it survives the respawn that increments it. Previously the
+    // field was written `None` everywhere and read nowhere — dead.
+    let stall_respawns = read_respawn_count(runtime_dir, short);
     let mut dispatch = previous_dispatch.unwrap_or_else(|| Dispatch {
         proto: PROTO,
         short: short.to_string(),
@@ -867,13 +970,16 @@ fn worker_record_for_job(
             Isolation::None
         },
         respawn_flags: Vec::new(),
-        attach_stall_respawns: None,
+        attach_stall_respawns: (stall_respawns > 0).then_some(stall_respawns),
         agent: None,
         routine: None,
         seed: job.intent.clone().map(|intent| Seed { intent, name: None }),
         cols,
         rows,
     });
+    // An ADOPTED dispatch predates this respawn, so its counter is stale;
+    // the durable file is the source of truth either way.
+    dispatch.attach_stall_respawns = (stall_respawns > 0).then_some(stall_respawns);
     // Canonicalize the fresh/resume/fork launch and worktree from the owner-only
     // launch spec. The foreground handoff record normally disappears when its
     // short-lived PID exits before daemon adoption, so relying on that record
@@ -1893,5 +1999,74 @@ mod tests {
         let job = agents_registry::read_job(&dir, "cafe0003").unwrap();
         assert_eq!(job.worker_pid, Some(7778));
         assert_eq!(job.state, "working");
+    }
+
+    // ── P1-12: attach-stall respawn requests ─────────────────────────────────
+
+    fn stall_probe() -> FakeProc {
+        FakeProc {
+            alive: HashMap::new(),
+            start: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn a_stall_request_respawns_the_worker_and_bumps_the_durable_counter() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut roster = empty_roster(1);
+        roster.workers.insert("cafe0001".to_string(), worker(4242));
+        let jobs = agents_registry::jobs_dir(root);
+        crate::bg_attach_stall::request_stall_respawn(&jobs, "cafe0001");
+
+        let mut claimed: HashSet<String> = ["cafe0001".to_string()].into_iter().collect();
+        service_stall_requests(root, &mut roster, &stall_probe(), &mut claimed);
+
+        // The request is consumed, so the next heartbeat does not restart again.
+        assert!(!crate::bg_attach_stall::take_stall_request(&jobs, "cafe0001"));
+        // The record and claim are dropped so `spawn_pending_workers` treats the
+        // job as pending IN THE SAME heartbeat.
+        assert!(!roster.workers.contains_key("cafe0001"));
+        assert!(!claimed.contains("cafe0001"));
+        // The durable counter advanced — this is what the budget is applied to.
+        assert_eq!(read_respawn_count(root, "cafe0001"), 1);
+    }
+
+    #[test]
+    fn the_budget_gives_up_instead_of_respawning_forever() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_respawn_count(root, "cafe0002", crate::bg_attach_stall::STALL_RESPAWN_BUDGET);
+        let mut roster = empty_roster(1);
+        roster.workers.insert("cafe0002".to_string(), worker(4243));
+        let jobs = agents_registry::jobs_dir(root);
+        crate::bg_attach_stall::request_stall_respawn(&jobs, "cafe0002");
+
+        let mut claimed = HashSet::new();
+        service_stall_requests(root, &mut roster, &stall_probe(), &mut claimed);
+
+        // Budget spent: the counter must NOT keep climbing, and the job is
+        // failed closed rather than restarted a third time.
+        assert_eq!(
+            read_respawn_count(root, "cafe0002"),
+            crate::bg_attach_stall::STALL_RESPAWN_BUDGET
+        );
+        assert!(!roster.workers.contains_key("cafe0002"));
+    }
+
+    #[test]
+    fn a_worker_with_no_request_is_left_completely_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut roster = empty_roster(1);
+        roster.workers.insert("cafe0003".to_string(), worker(4244));
+        let mut claimed: HashSet<String> = ["cafe0003".to_string()].into_iter().collect();
+
+        service_stall_requests(root, &mut roster, &stall_probe(), &mut claimed);
+
+        // The whole point: a healthy session must never be touched by this.
+        assert!(roster.workers.contains_key("cafe0003"));
+        assert!(claimed.contains("cafe0003"));
+        assert_eq!(read_respawn_count(root, "cafe0003"), 0);
     }
 }

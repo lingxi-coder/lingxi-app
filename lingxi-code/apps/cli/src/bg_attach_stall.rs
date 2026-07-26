@@ -282,6 +282,71 @@ impl StallDriver {
     }
 }
 
+// ── the request file the client leaves for the daemon ────────────────────────
+
+/// Path of the stall-respawn request for `short`.
+///
+/// A FILE rather than a control frame, deliberately. The party that can see the
+/// stall (the attach client, which owns the stream) is not the party with
+/// respawn authority (the daemon, which owns spawn/kill). The daemon already
+/// polls the jobs directory every heartbeat, so a request file crosses that
+/// split without adding a protocol — and it survives the client detaching
+/// mid-restart, which an in-band frame would not.
+#[must_use]
+pub fn stall_request_path(jobs_dir: &std::path::Path, short: &str) -> std::path::PathBuf {
+    jobs_dir.join(short).join("stall-respawn")
+}
+
+/// Ask the daemon to restart `short` because it never painted a first frame.
+///
+/// Best-effort: a request that cannot be written leaves the session stalled but
+/// otherwise untouched, which is strictly better than the client trying to kill
+/// a supervised worker behind the daemon's back.
+pub fn request_stall_respawn(jobs_dir: &std::path::Path, short: &str) {
+    let path = stall_request_path(jobs_dir, short);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&path, b"stall\n");
+}
+
+/// Consume a pending stall-respawn request. `true` when one was present.
+#[must_use]
+pub fn take_stall_request(jobs_dir: &std::path::Path, short: &str) -> bool {
+    let path = stall_request_path(jobs_dir, short);
+    if !path.exists() {
+        return false;
+    }
+    // Remove BEFORE acting: a request that survived its own handling would
+    // restart the worker again on the next heartbeat, forever.
+    std::fs::remove_file(&path).is_ok()
+}
+
+/// `tengu_bg_attach_stall_respawn` — a stalled worker is being restarted.
+pub fn emit_stall_respawn(state: &str, via: &str, attempt: i64) {
+    tracing::info!(
+        event = "tengu_bg_attach_stall_respawn",
+        state,
+        via,
+        attempt,
+    );
+}
+
+/// `tengu_bg_attach_stall_gave_up` — the respawn budget is spent.
+pub fn emit_stall_gave_up(state: &str, via: &str, attempt: i64) {
+    tracing::info!(
+        event = "tengu_bg_attach_stall_gave_up",
+        state,
+        via,
+        attempt,
+    );
+}
+
+/// `job_attach_stalled` — the job-level record of a stall.
+pub fn emit_job_attach_stalled(short: &str, attempt: i64) {
+    tracing::info!(event = "job_attach_stalled", short, attempt);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -505,5 +570,26 @@ mod tests {
         for _ in 0..1_000 {
             assert_eq!(d.advance(1_000, open(), 0), StallDecision::Wait);
         }
+    }
+
+    #[test]
+    fn a_stall_request_round_trips_and_is_consumed_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let jobs = dir.path();
+        assert!(!take_stall_request(jobs, "cafe0001"));
+        request_stall_respawn(jobs, "cafe0001");
+        assert!(stall_request_path(jobs, "cafe0001").exists());
+        // Consumed exactly once — a surviving request would restart the worker
+        // again on every heartbeat, forever.
+        assert!(take_stall_request(jobs, "cafe0001"));
+        assert!(!take_stall_request(jobs, "cafe0001"));
+    }
+
+    #[test]
+    fn requests_are_per_worker() {
+        let dir = tempfile::tempdir().unwrap();
+        request_stall_respawn(dir.path(), "cafe0001");
+        assert!(!take_stall_request(dir.path(), "cafe0002"));
+        assert!(take_stall_request(dir.path(), "cafe0001"));
     }
 }

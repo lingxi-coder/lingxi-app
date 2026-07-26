@@ -47,6 +47,10 @@ const IDP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// (xaaIdpLogin.ts `ID_TOKEN_EXPIRY_BUFFER_S = 60`).
 const ID_TOKEN_EXPIRY_BUFFER: Duration = Duration::from_secs(60);
 
+/// Expiry given to a pre-obtained id_token whose JWT carries no usable `exp`
+/// claim (`Date.now() + 3600000`, xaaIdpLogin.ts:137).
+const ID_TOKEN_NO_EXP_FALLBACK: Duration = Duration::from_secs(3600);
+
 /// Secure-storage service for the per-issuer id_token cache. The TS keychain
 /// blob nests these under `mcpXaaIdp[issuerKey]`; in the `(service, account)`
 /// store we use this service with `account = issuer_key(issuer)`.
@@ -316,6 +320,32 @@ async fn set_cached_id_token(
     Ok(())
 }
 
+/// Cache a PRE-OBTAINED id_token JWT for `issuer`, returning its absolute
+/// expiry (`saveIdpIdTokenFromJwt`, xaaIdpLogin.ts:125-141).
+///
+/// The expiry comes from the JWT's own `exp` claim. A token whose `exp` is
+/// absent, non-numeric, or unparseable gets a one-hour expiry from now rather
+/// than being rejected: this path exists for conformance/e2e runs against mock
+/// IdPs, which routinely mint minimal tokens. The JWT is NOT otherwise
+/// validated here — it is cached, not trusted, and the resource server is what
+/// verifies it.
+///
+/// # Errors
+/// [`McpError::OAuth`] on a storage backend error.
+pub async fn save_id_token_from_jwt(
+    storage: &Arc<dyn SecureStorage>,
+    clock: &Arc<dyn Clock>,
+    issuer: &str,
+    jwt: &str,
+) -> Result<SystemTime, McpError> {
+    let expires_at = match jwt_exp(jwt) {
+        Some(exp) => UNIX_EPOCH + Duration::from_secs(exp),
+        None => clock.now() + ID_TOKEN_NO_EXP_FALLBACK,
+    };
+    set_cached_id_token(storage, clock, issuer, jwt, expires_at).await?;
+    Ok(expires_at)
+}
+
 /// Remove a cached id_token for `issuer` (`clearIdpIdToken`,
 /// xaaIdpLogin.ts:143-150). Best-effort; a missing entry is not an error.
 ///
@@ -345,11 +375,58 @@ struct StoredClientSecret {
 /// Read the IdP client secret for `issuer`, if any (`getIdpClientSecret`).
 /// `None` → public IdP client (PKCE only). Read from the `xaa-idp-config`
 /// service keyed by normalized issuer.
-async fn get_idp_client_secret(
+///
+/// # Errors
+/// [`McpError::OAuth`] on a storage backend error.
+pub async fn get_idp_client_secret(
     storage: &Arc<dyn SecureStorage>,
     issuer: &str,
 ) -> Result<Option<String>, McpError> {
     read_client_secret(storage, XAA_IDP_CONFIG_SERVICE, &issuer_key(issuer)).await
+}
+
+/// Persist the IdP client secret for `issuer` (`saveIdpClientSecret`,
+/// xaaIdpLogin.ts:152-175).
+///
+/// # Errors
+/// [`McpError::OAuth`] on a storage backend error. The caller surfaces this as
+/// a WARNING, not a failure: by the time it runs, the settings write has
+/// already succeeded, so the connection is configured and only the secret is
+/// missing. Reporting it as a hard failure would tell the user nothing was
+/// written when in fact most of it was.
+pub async fn save_idp_client_secret(
+    storage: &Arc<dyn SecureStorage>,
+    clock: &Arc<dyn Clock>,
+    issuer: &str,
+    client_secret: &str,
+) -> Result<(), McpError> {
+    let bytes = serde_json::to_vec(&serde_json::json!({ "clientSecret": client_secret }))
+        .map_err(|e| McpError::OAuth(format!("XAA IdP: encode secret: {e}")))?;
+    let metadata = protocol::SecureStorageMetadata {
+        created_at: clock.now(),
+        last_accessed: None,
+        kind: protocol::SecretKindDto("xaa_idp_client_secret".into()),
+    };
+    let data = protocol::SecureStorageData::new(bytes, metadata);
+    storage
+        .store(XAA_IDP_CONFIG_SERVICE, &issuer_key(issuer), data)
+        .await
+        .map_err(|e| McpError::OAuth(format!("XAA IdP: secret store: {e}")))
+}
+
+/// Remove the IdP client secret for `issuer` (`clearIdpClientSecret`).
+/// Best-effort; a missing entry is not an error.
+///
+/// # Errors
+/// [`McpError::OAuth`] on a storage backend error.
+pub async fn clear_idp_client_secret(
+    storage: &Arc<dyn SecureStorage>,
+    issuer: &str,
+) -> Result<(), McpError> {
+    storage
+        .delete(XAA_IDP_CONFIG_SERVICE, &issuer_key(issuer))
+        .await
+        .map_err(|e| McpError::OAuth(format!("XAA IdP: secret delete: {e}")))
 }
 
 /// Read the AS confidential-client secret for a server
@@ -726,6 +803,170 @@ impl ServerOAuthLookup for MapServerOAuthLookup {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ----- writers added for the `mcp xaa` CLI surface ------------------------
+
+    /// Base64url (no padding) encode, for building test JWTs.
+    fn b64url(bytes: &[u8]) -> String {
+        use base64::Engine as _;
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+    }
+
+    fn jwt_with_claims(claims: &str) -> String {
+        format!(
+            "{}.{}.sig",
+            b64url(br#"{"alg":"RS256"}"#),
+            b64url(claims.as_bytes())
+        )
+    }
+
+    fn mem() -> (Arc<dyn SecureStorage>, Arc<dyn Clock>) {
+        let storage: Arc<dyn SecureStorage> = Arc::new(MemStorage::default());
+        // 2026-01-01T00:00:00Z, so "now" is well before the 2030 test expiry.
+        let clock: Arc<dyn Clock> = Arc::new(TestClock(UNIX_EPOCH + Duration::from_secs(1_767_225_600)));
+        (storage, clock)
+    }
+
+    #[tokio::test]
+    async fn saved_jwt_round_trips_and_uses_its_own_exp() {
+        let (storage, clock) = mem();
+        // exp = 2030-01-01T00:00:00Z
+        let jwt = jwt_with_claims(r#"{"exp":1893456000,"sub":"u1"}"#);
+        let expires_at = save_id_token_from_jwt(&storage, &clock, "https://idp.example", &jwt)
+            .await
+            .expect("save");
+        assert_eq!(
+            expires_at,
+            UNIX_EPOCH + Duration::from_secs(1_893_456_000),
+            "expiry must come from the JWT's own exp claim"
+        );
+        let got = get_cached_id_token(&storage, &clock, "https://idp.example")
+            .await
+            .expect("read");
+        assert_eq!(got.as_deref(), Some(jwt.as_str()));
+    }
+
+    #[tokio::test]
+    async fn a_jwt_without_exp_falls_back_to_one_hour() {
+        let (storage, clock) = mem();
+        let jwt = jwt_with_claims(r#"{"sub":"u1"}"#);
+        let expires_at = save_id_token_from_jwt(&storage, &clock, "https://idp.example", &jwt)
+            .await
+            .expect("save");
+        assert_eq!(expires_at, clock.now() + Duration::from_secs(3600));
+        // Still readable: an hour is comfortably outside the 60s buffer.
+        assert!(get_cached_id_token(&storage, &clock, "https://idp.example")
+            .await
+            .expect("read")
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn a_malformed_jwt_is_cached_with_the_fallback_not_rejected() {
+        // This path exists for conformance runs against mock IdPs, which mint
+        // minimal tokens. The token is cached, not trusted; the resource server
+        // is what verifies it.
+        let (storage, clock) = mem();
+        let expires_at = save_id_token_from_jwt(&storage, &clock, "https://idp.example", "not-a-jwt")
+            .await
+            .expect("save");
+        assert_eq!(expires_at, clock.now() + Duration::from_secs(3600));
+    }
+
+    #[tokio::test]
+    async fn an_already_expired_jwt_saves_but_reads_back_as_a_miss() {
+        // The write must not silently succeed-and-hide: `show` has to report
+        // "not logged in" rather than showing a token nothing will accept.
+        let (storage, clock) = mem();
+        let jwt = jwt_with_claims(r#"{"exp":1000000000}"#); // 2001
+        save_id_token_from_jwt(&storage, &clock, "https://idp.example", &jwt)
+            .await
+            .expect("save");
+        assert_eq!(
+            get_cached_id_token(&storage, &clock, "https://idp.example")
+                .await
+                .expect("read"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn a_token_inside_the_expiry_buffer_reads_as_a_miss() {
+        let (storage, clock) = mem();
+        // Expires 30s from now — inside the 60s buffer.
+        let exp = (clock.now() + Duration::from_secs(30))
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let jwt = jwt_with_claims(&format!(r#"{{"exp":{exp}}}"#));
+        save_id_token_from_jwt(&storage, &clock, "https://idp.example", &jwt)
+            .await
+            .expect("save");
+        assert_eq!(
+            get_cached_id_token(&storage, &clock, "https://idp.example")
+                .await
+                .expect("read"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn client_secret_round_trips_and_clears() {
+        let (storage, clock) = mem();
+        assert_eq!(
+            get_idp_client_secret(&storage, "https://idp.example").await.expect("read"),
+            None
+        );
+        save_idp_client_secret(&storage, &clock, "https://idp.example", "s3cret")
+            .await
+            .expect("save");
+        assert_eq!(
+            get_idp_client_secret(&storage, "https://idp.example").await.expect("read"),
+            Some("s3cret".to_string())
+        );
+        clear_idp_client_secret(&storage, "https://idp.example").await.expect("clear");
+        assert_eq!(
+            get_idp_client_secret(&storage, "https://idp.example").await.expect("read"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn writes_and_reads_agree_on_the_normalized_issuer_key() {
+        // A cosmetic issuer difference must not create a second cache slot: a
+        // user who runs `setup` with a trailing slash and `login` without one
+        // would otherwise appear logged out immediately after logging in.
+        let (storage, clock) = mem();
+        let jwt = jwt_with_claims(r#"{"exp":1893456000}"#);
+        save_id_token_from_jwt(&storage, &clock, "https://IdP.Example/", &jwt)
+            .await
+            .expect("save");
+        assert!(
+            get_cached_id_token(&storage, &clock, "https://idp.example")
+                .await
+                .expect("read")
+                .is_some(),
+            "trailing slash + host case must hit the same slot"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_id_token_and_client_secret_live_in_separate_slots() {
+        // Same account key, different service: clearing one must not clear the
+        // other, or `setup --client-secret` would silently log the user out.
+        let (storage, clock) = mem();
+        let jwt = jwt_with_claims(r#"{"exp":1893456000}"#);
+        save_id_token_from_jwt(&storage, &clock, "https://idp.example", &jwt).await.expect("save");
+        save_idp_client_secret(&storage, &clock, "https://idp.example", "s3cret").await.expect("save");
+
+        clear_cached_id_token(&storage, "https://idp.example").await.expect("clear");
+        assert_eq!(
+            get_idp_client_secret(&storage, "https://idp.example").await.expect("read"),
+            Some("s3cret".to_string()),
+            "clearing the id_token must not clear the client secret"
+        );
+    }
+
     use std::collections::HashMap;
     use tokio::sync::Mutex;
 

@@ -54,6 +54,29 @@ pub struct CallbackListener {
     port: u16,
 }
 
+/// Bind a loopback listener with `SO_REUSEADDR`.
+///
+/// The callback server closes the connection first, so its accepted socket
+/// lingers in `TIME_WAIT` holding `127.0.0.1:1455`. Without `SO_REUSEADDR` a
+/// rebind of that port fails with `AddrInUse` for the duration of the wait
+/// (60s on macOS), and since the fallback port is used the same way, both
+/// candidates can be blocked at once — surfacing as
+/// "both fixed ports 1455 and 1457 are already in use".
+///
+/// This is not only a test concern: a user who cancels an OAuth login and
+/// immediately retries hits precisely the same window.
+///
+/// `SO_REUSEADDR` permits reusing an address held by a `TIME_WAIT` socket; it
+/// does NOT permit two live listeners on one port (that would need
+/// `SO_REUSEPORT`). So a genuine "another process is already serving this
+/// port" is still reported rather than masked.
+fn bind_reusable(addr: SocketAddr) -> std::io::Result<TcpListener> {
+    let socket = tokio::net::TcpSocket::new_v4()?;
+    socket.set_reuseaddr(true)?;
+    socket.bind(addr)?;
+    socket.listen(1024)
+}
+
 impl CallbackListener {
     /// Bind `127.0.0.1:1455`, falling back to `127.0.0.1:1457` on `AddrInUse`.
     /// Returns the listener at whichever port bound successfully.
@@ -63,7 +86,7 @@ impl CallbackListener {
     pub async fn bind() -> Result<Self, CallbackError> {
         for &port in &[PRIMARY_PORT, FALLBACK_PORT] {
             let addr: SocketAddr = ([127, 0, 0, 1], port).into();
-            match TcpListener::bind(addr).await {
+            match bind_reusable(addr) {
                 Ok(listener) => {
                     let bound_port = listener
                         .local_addr()

@@ -143,6 +143,11 @@ pub enum Sub {
     ResetProjectChoices,
     /// Start the LingXi MCP server
     Serve(ServeArgs),
+    /// Manage the XAA (SEP-990) IdP connection
+    Xaa {
+        #[command(subcommand)]
+        sub: crate::commands::mcp_xaa::Sub,
+    },
 }
 
 /// `mcp add <name> <commandOrUrl> [args...]` options.
@@ -322,6 +327,7 @@ pub async fn run(cli: &Cli) -> i32 {
         Sub::Login(a) => run_login(a).await,
         Sub::Logout(a) => run_logout(a).await,
         Sub::AddFromClaudeDesktop(a) => run_add_from_claude_desktop(a),
+        Sub::Xaa { sub } => crate::commands::mcp_xaa::run(sub).await,
     }
 }
 

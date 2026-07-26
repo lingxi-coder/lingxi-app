@@ -33,6 +33,7 @@ pub mod doctor;
 pub mod gateway;
 pub mod install;
 pub mod mcp;
+pub mod mcp_xaa;
 pub mod plugin;
 pub mod plugin_init;
 pub mod plugin_install;

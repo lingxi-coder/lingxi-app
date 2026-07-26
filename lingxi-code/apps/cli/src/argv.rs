@@ -46,14 +46,33 @@ fn parse_fallback_model_list(value: &str) -> Result<String, String> {
     Ok(models.join(","))
 }
 
+/// Help layout matching the oracle's section order (`Usage:` first, then the
+/// description, then Arguments / Options / Commands).
+pub const HELP_TEMPLATE: &str = "\
+Usage: {usage}
+
+{about-with-newline}
+{all-args}{after-help}";
+
 /// AI coding assistant — runs a single turn or REPL
 #[derive(Debug, Parser, Clone, Default)]
+// Section ORDER follows the oracle: `Usage:` first, then the description, then
+// Arguments / Options / Commands. clap's default leads with the description and
+// puts Commands before Options, which was the "--help layout" divergence
+// recorded in the 2.1.216 audit.
+//
+// The remaining differences are structural to clap vs commander (its two-column
+// wrap and its `[OPTIONS]` usage placeholder) or are deliberate branding, so
+// this aligns the layout without pretending the text can be byte-identical to a
+// differently-named product with a different command set.
 #[command(
     name = "lingxi-cli",
     version,
     disable_version_flag = true,
     about,
-    long_about = None
+    long_about = None,
+    help_template = crate::argv::HELP_TEMPLATE,
+    term_width = 80
 )]
 #[allow(clippy::struct_excessive_bools, clippy::doc_markdown)]
 pub struct Argv {

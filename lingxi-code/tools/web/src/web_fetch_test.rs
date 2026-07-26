@@ -1034,7 +1034,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let _env = SKIP_ENV_LOCK.lock().await;
         crate::cache::clear_web_fetch_cache();
         crate::blocklist::clear_domain_check_cache();
-        std::env::set_var("LINGXI_SKIP_WEBFETCH_PREFLIGHT", "1");
+        let _skip_guard = crate::testsupport::PreflightSkipGuard::set("1");
         // Sanity-check the env fallback sees the truthy value.
         assert!(skip_web_fetch_preflight_env());
 
@@ -1050,7 +1050,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
                 fresh_tx(),
             )
             .await;
-        std::env::remove_var("LINGXI_SKIP_WEBFETCH_PREFLIGHT");
+        let _skip_guard = crate::testsupport::PreflightSkipGuard::unset();
 
         let res = res.expect("fetch must proceed when preflight skipped");
         assert_eq!(res.data["result"], "no preflight here");
@@ -1071,7 +1071,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let _env = SKIP_ENV_LOCK.lock().await;
         crate::cache::clear_web_fetch_cache();
         crate::blocklist::clear_domain_check_cache();
-        std::env::remove_var("LINGXI_SKIP_WEBFETCH_PREFLIGHT");
+        let _skip_guard = crate::testsupport::PreflightSkipGuard::unset();
         assert!(!skip_web_fetch_preflight_env(), "env fallback must be off");
 
         let (mut ctx, http, _sink) = make_web_ctx();
@@ -1106,7 +1106,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let _env = SKIP_ENV_LOCK.lock().await;
         crate::cache::clear_web_fetch_cache();
         crate::blocklist::clear_domain_check_cache();
-        std::env::remove_var("LINGXI_SKIP_WEBFETCH_PREFLIGHT");
+        let _skip_guard = crate::testsupport::PreflightSkipGuard::unset();
 
         let (ctx, http, _sink) = make_web_ctx();
         assert!(!ctx.skip_web_fetch_preflight, "ctx field defaults to false");
@@ -1229,7 +1229,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let _env = SKIP_ENV_LOCK.lock().await;
         crate::cache::clear_web_fetch_cache();
         crate::blocklist::clear_domain_check_cache();
-        std::env::set_var("LINGXI_SKIP_WEBFETCH_PREFLIGHT", "1");
+        let _skip_guard = crate::testsupport::PreflightSkipGuard::set("1");
 
         let http = NoFollowMock::new(vec![redirect_resp(301, "https://other.example/landing")]);
         let ctx = ctx_with_transport(http.clone() as Arc<dyn HttpTransport>);
@@ -1241,7 +1241,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
                 fresh_tx(),
             )
             .await;
-        std::env::remove_var("LINGXI_SKIP_WEBFETCH_PREFLIGHT");
+        let _skip_guard = crate::testsupport::PreflightSkipGuard::unset();
         let res = res.expect("cross-host redirect must return Ok with the notice");
 
         assert_eq!(res.data["code"], 301);
@@ -1277,7 +1277,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let _env = SKIP_ENV_LOCK.lock().await;
         crate::cache::clear_web_fetch_cache();
         crate::blocklist::clear_domain_check_cache();
-        std::env::set_var("LINGXI_SKIP_WEBFETCH_PREFLIGHT", "1");
+        let _skip_guard = crate::testsupport::PreflightSkipGuard::set("1");
 
         // First hop: same-host redirect (only the path changes). Second hop: 200.
         let http = NoFollowMock::new(vec![
@@ -1298,7 +1298,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
                 fresh_tx(),
             )
             .await;
-        std::env::remove_var("LINGXI_SKIP_WEBFETCH_PREFLIGHT");
+        let _skip_guard = crate::testsupport::PreflightSkipGuard::unset();
         let res = res.expect("permitted redirect must be followed to the final body");
 
         assert_eq!(res.data["code"], 200);
@@ -1326,7 +1326,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let _env = SKIP_ENV_LOCK.lock().await;
         crate::cache::clear_web_fetch_cache();
         crate::blocklist::clear_domain_check_cache();
-        std::env::set_var("LINGXI_SKIP_WEBFETCH_PREFLIGHT", "1");
+        let _skip_guard = crate::testsupport::PreflightSkipGuard::set("1");
 
         let http = NoFollowMock::new(vec![redirect_resp(303, "https://other.example/landing")]);
         let ctx = ctx_with_transport(http.clone() as Arc<dyn HttpTransport>);
@@ -1338,7 +1338,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
                 fresh_tx(),
             )
             .await;
-        std::env::remove_var("LINGXI_SKIP_WEBFETCH_PREFLIGHT");
+        let _skip_guard = crate::testsupport::PreflightSkipGuard::unset();
         let res = res.expect("303 must be detected as a redirect and return Ok with the notice");
 
         assert_eq!(res.data["code"], 303);
@@ -1361,7 +1361,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let _env = SKIP_ENV_LOCK.lock().await;
         crate::cache::clear_web_fetch_cache();
         crate::blocklist::clear_domain_check_cache();
-        std::env::set_var("LINGXI_SKIP_WEBFETCH_PREFLIGHT", "1");
+        let _skip_guard = crate::testsupport::PreflightSkipGuard::set("1");
 
         // 301 with NO Location header.
         let http = NoFollowMock::new(vec![protocol::HttpResponse {
@@ -1776,14 +1776,14 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         // claimed in a comment that it therefore could not race them.
         let _env = crate::testsupport::block_on_web_globals_lock();
         for truthy in ["1", "true", "TRUE", "Yes", "on", " on "] {
-            std::env::set_var("LINGXI_SKIP_WEBFETCH_PREFLIGHT", truthy);
+            let _skip_guard = crate::testsupport::PreflightSkipGuard::set(truthy);
             assert!(skip_web_fetch_preflight_env(), "{truthy:?} must be truthy");
         }
         for falsy in ["0", "false", "no", "off", "", "garbage"] {
-            std::env::set_var("LINGXI_SKIP_WEBFETCH_PREFLIGHT", falsy);
+            let _skip_guard = crate::testsupport::PreflightSkipGuard::set(falsy);
             assert!(!skip_web_fetch_preflight_env(), "{falsy:?} must be falsy");
         }
-        std::env::remove_var("LINGXI_SKIP_WEBFETCH_PREFLIGHT");
+        let _skip_guard = crate::testsupport::PreflightSkipGuard::unset();
         assert!(!skip_web_fetch_preflight_env(), "unset must be falsy");
     }
 

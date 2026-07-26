@@ -49,6 +49,15 @@ pub struct CallbackListener {
     port: u16,
 }
 
+/// Bind a loopback listener with `SO_REUSEADDR` set. See the note in
+/// [`CallbackListener::bind`].
+fn bind_reusable(addr: SocketAddr) -> std::io::Result<TcpListener> {
+    let socket = tokio::net::TcpSocket::new_v4()?;
+    socket.set_reuseaddr(true)?;
+    socket.bind(addr)?;
+    socket.listen(1024)
+}
+
 impl CallbackListener {
     /// Bind `127.0.0.1:{port}`. `port == 0` selects an OS-assigned ephemeral
     /// port readable via [`Self::port`].
@@ -57,9 +66,13 @@ impl CallbackListener {
     /// [`CallbackError::Bind`] if the socket cannot be bound.
     pub async fn bind(port: u16) -> Result<Self, CallbackError> {
         let addr: SocketAddr = ([127, 0, 0, 1], port).into();
-        let listener = TcpListener::bind(addr)
-            .await
-            .map_err(|e| CallbackError::Bind(e.to_string()))?;
+        // SO_REUSEADDR: this server closes the connection first, so its accepted
+        // socket lingers in TIME_WAIT holding the fixed callback port. Without
+        // it, a user who cancels an OAuth login and retries inside that window
+        // (60s on macOS) gets AddrInUse. Reusing a TIME_WAIT address is all this
+        // permits — two live listeners on one port would need SO_REUSEPORT, so a
+        // real conflict is still reported. Harmless when `port == 0`.
+        let listener = bind_reusable(addr).map_err(|e| CallbackError::Bind(e.to_string()))?;
         let port = listener
             .local_addr()
             .map_err(|e| CallbackError::Bind(e.to_string()))?

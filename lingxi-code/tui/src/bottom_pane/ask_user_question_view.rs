@@ -290,10 +290,10 @@ impl AskUserQuestionView {
         ViewOutcome::Accepted(ViewAction::Selected(self.current))
     }
 
-    /// Auto-continue with the answers selected so far (the idle-timeout afk
-    /// path). Every not-yet-confirmed question is answered with its current
-    /// selection (highlight/checkmarks) so the map is complete, then the whole
-    /// map is resolved. Called by the app loop when [`Self::is_expired_at`].
+    /// Auto-continue with the answers the user actually CONFIRMED (the
+    /// idle-timeout afk path). Unanswered questions are left out rather than
+    /// back-filled from their current highlight — see the body. Called by the
+    /// app loop when [`Self::is_expired_at`].
     pub fn auto_submit(&mut self) -> ViewOutcome {
         // afk idle-timeout: resolve with ONLY the questions the user already
         // CONFIRMED (present in `self.answers`). Do NOT fabricate answers for

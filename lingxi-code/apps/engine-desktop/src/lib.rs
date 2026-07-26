@@ -2520,13 +2520,22 @@ impl tui_core::bash_runner::BashRunner for DesktopBashRunner {
                 tui_core::bash_runner::BashRunOutput {
                     stdout: field("stdout"),
                     stderr: field("stderr"),
+                    exit_code: result
+                        .data
+                        .get("exit_code")
+                        .and_then(serde_json::Value::as_i64)
+                        .and_then(|c| i32::try_from(c).ok())
+                        .unwrap_or_default(),
                 }
             }
             // A spawn/IO/validation error surfaces as stderr text so the TUI
             // still renders a `UserBashOutput` row (no LLM turn, no raw spawn).
+            // A spawn/validation failure never ran a command, so there is no
+            // status to report; 1 is the conventional "did not succeed".
             Err(e) => tui_core::bash_runner::BashRunOutput {
                 stdout: String::new(),
                 stderr: e.to_string(),
+                exit_code: 1,
             },
         }
     }

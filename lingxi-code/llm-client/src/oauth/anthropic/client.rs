@@ -4,6 +4,8 @@
 //! authorize URL builder; browser-open + token exchange land with the
 //! cli-demo in Plan 16.
 
+use ::url::form_urlencoded;
+
 use crate::oauth::anthropic::config::ClaudeAiOAuthConfig;
 use crate::oauth::anthropic::pkce::{generate_pkce, generate_state_token};
 use crate::oauth::anthropic::refresh::{AuthState, RefreshDriver};
@@ -154,6 +156,18 @@ pub struct ClaudeAiOAuthClient {
     clock: Arc<dyn Clock>,
 }
 
+/// Percent-encode one query value the way `URLSearchParams` does.
+///
+/// The oracle assembles its authorize URL through `URLSearchParams` /
+/// `URL.searchParams.set`, which serialises as
+/// `application/x-www-form-urlencoded` — SPACE becomes `+`, not `%20`. The
+/// scope parameter is a space-joined list, so this is the one place the two
+/// encodings visibly disagree, and an authorization server that compares the
+/// scope string byte-for-byte would see a different value.
+fn form_encode(value: &str) -> String {
+    form_urlencoded::byte_serialize(value.as_bytes()).collect()
+}
+
 impl ClaudeAiOAuthClient {
     /// Construct a client with a static config, HTTP transport, and credential store.
     ///
@@ -243,19 +257,19 @@ impl ClaudeAiOAuthClient {
         let mut url = format!(
             "{}?code=true&client_id={}&response_type=code&redirect_uri={}&scope={}&code_challenge={}&code_challenge_method=S256&state={}",
             self.config.authorization_endpoint,
-            urlencoding::encode(&self.config.client_id),
-            urlencoding::encode(redirect_uri),
-            urlencoding::encode(&scopes),
-            urlencoding::encode(&challenge),
-            urlencoding::encode(&state),
+            form_encode(&self.config.client_id),
+            form_encode(redirect_uri),
+            form_encode(&scopes),
+            form_encode(&challenge),
+            form_encode(&state),
         );
         if let Some(org_uuid) = options.org_uuid.as_deref() {
             url.push_str("&orgUUID=");
-            url.push_str(&urlencoding::encode(org_uuid));
+            url.push_str(&form_encode(org_uuid));
         }
         if let Some(login_hint) = options.login_hint.as_deref() {
             url.push_str("&login_hint=");
-            url.push_str(&urlencoding::encode(login_hint));
+            url.push_str(&form_encode(login_hint));
         }
         if let Some(login_method) = options.login_method.as_deref() {
             url.push_str("&login_method=");
@@ -447,6 +461,12 @@ mod exchange_tests {
         assert!(url.contains("client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e"));
         assert!(url.contains("response_type=code"));
         assert!(url.contains("scope=user%3Ainference"));
+        // `URLSearchParams` serialises as application/x-www-form-urlencoded, so
+        // the space between scopes is `+`, NOT `%20`. An authorization server
+        // that compares the scope string byte-for-byte sees a different value
+        // between the two encodings, and the existing assertion above passes
+        // under either — so pin the separator explicitly.
+        assert!(!url.contains("%20"), "spaces must encode as `+`: {url}");
         assert!(url.contains("orgUUID=org%2Fone"));
         assert!(url.contains("login_hint=a%2Bb%40example.com"));
         assert!(url.contains("login_method=sso"));

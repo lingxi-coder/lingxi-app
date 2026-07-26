@@ -1266,9 +1266,12 @@ pub async fn run_stream_json_input_loop(
                 Some(StreamInput::Bash(command)) => {
                     let input = format!("<bash-input>{}</bash-input>", command.command);
                     let output = runtime.bash_runner.run(&command.command).await;
+                    // Oracle frame:
+                    // `<bash-stdout>..</bash-stdout><bash-stderr>..</bash-stderr>
+                    //  <bash-exit-code>N</bash-exit-code>`
                     let result = format!(
-                        "<bash-stdout>{}</bash-stdout><bash-stderr>{}</bash-stderr>",
-                        output.stdout, output.stderr
+                        "<bash-stdout>{}</bash-stdout><bash-stderr>{}</bash-stderr><bash-exit-code>{}</bash-exit-code>",
+                        output.stdout, output.stderr, output.exit_code
                     );
                     for content in [input, result] {
                         runtime

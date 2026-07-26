@@ -23,6 +23,13 @@ pub struct BashRunOutput {
     pub stdout: String,
     /// Standard error captured from the command.
     pub stderr: String,
+    /// The command's exit status.
+    ///
+    /// The stream-json `bash_command` frame reports it as
+    /// `<bash-exit-code>N</bash-exit-code>`, which is how an SDK peer learns a
+    /// between-turns command FAILED — stdout/stderr alone cannot distinguish a
+    /// command that printed a diagnostic and succeeded from one that died.
+    pub exit_code: i32,
 }
 
 /// Runs a single `!` bash-mode command through the host's sandboxed Bash tool.

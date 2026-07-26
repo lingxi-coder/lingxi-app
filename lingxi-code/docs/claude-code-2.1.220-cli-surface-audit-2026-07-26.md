@@ -22,11 +22,21 @@ Corrected below with a recursive walk (51 command paths, depth 3).
 
 ## Method
 
+Reproducible: `scripts/parity_surface.py <oracle-binary>`.
+
 ```
 oracle: every `.option("--x"` in the binary                     → 83 long flags
 port:   lingxi-cli --help, recursively through every "Commands:"
         block to depth 3                                        → 51 paths, 106 long flags
 ```
+
+The script SELF-CHECKS before reporting: it refuses to print a gap list unless
+it resolved nested command paths and can see a set of known-nested canary flags.
+Run against the historical one-level walk it exits non-zero with
+`no NESTED command path resolved` — i.e. it rejects the exact bug that produced
+this document's first revision (17 paths, 77 flags, 39 phantom gaps). It also
+discards any path whose help is identical to the ROOT help, which is how an
+unrecognised subcommand silently masquerades as a real one.
 
 ## Result: 16 oracle flags absent, and 14 of them are one internal command
 

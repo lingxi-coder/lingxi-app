@@ -43,9 +43,20 @@ the evidence chain; read this block first.
   `apps/cli/src/run.rs`), with the full needs_trust → echo handshake, and
   `trust_root` is the enclosing project root offered alongside it.
 
-Still open (2), both still blocked on the same prerequisites — see below:
-`tengu_left_arrow_editing_guard` and
-`tengu_refusal_fallback_notice_collapsed`.
+- `tengu_left_arrow_editing_guard` — **CLOSED** (`91903a009`). Its prerequisite
+  was the point: the ←-on-empty gesture did not exist, so the guard would have
+  been a debounce for nothing. Both landed together —
+  `tui_core::left_arrow_gesture` (claude `W_p`/`G_p`, read verbatim) plus the
+  composer wiring.
+
+Still open (1): `tengu_refusal_fallback_notice_collapsed`. Re-verified
+2026-07-26 and the block is STRUCTURAL, not a missing field: every path to a
+non-zero `suppressedCount` runs through a PROVISIONAL banner, and this port
+decides refusal at response terminal (`conversation.rs:8275`, alongside
+`max_tokens`/`stop_sequence`), so a refusal can never still be withdrawn. It
+needs refusal detection moved into the stream plus the
+`tengu_refusal_retraction_*` signals first. Full decomposition in
+`docs/refusal-retraction-DECOMPOSITION-2026-07-26.md`.
 
 ## Genuinely open (6) — ORIGINAL, superseded by the block above
 

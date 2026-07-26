@@ -60,6 +60,7 @@ pub mod argv;
 pub mod ax_screen_reader;
 pub mod background_dispatch;
 pub mod background_launch;
+pub mod bg_attach_stall;
 pub mod bg_attach;
 pub mod bg_reply_queue;
 pub mod bg_session_forker;

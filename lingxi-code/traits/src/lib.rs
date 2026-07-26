@@ -18,7 +18,7 @@
 /// (`claude-code_2-1-217_agent`) and the WebFetch `User-Agent`
 /// (`claude-code/2.1.217`). LingXi is a 1:1 copy, so it presents the same string.
 /// Single source of truth (R-V1) so the AI_AGENT and User-Agent stamps never drift.
-pub const CLAUDE_CODE_VERSION: &str = "2.1.217";
+pub const CLAUDE_CODE_VERSION: &str = "2.1.220";
 
 pub mod agent_name_registry;
 pub mod agent_view;

@@ -175,9 +175,16 @@ mod tests {
             .and_then(|s| s.strip_suffix("_agent"))
             .expect("prefix/suffix present");
         assert!(!mid.contains('.'), "version dots must be dashed: {v}");
-        // R-V1: the version is the claude-code parity target (2.1.217 → 2-1-217),
-        // NOT LingXi's CARGO_PKG_VERSION.
-        assert_eq!(v, "claude-code_2-1-217_agent");
+        // R-V1: the version is the claude-code parity TARGET, NOT LingXi's
+        // `CARGO_PKG_VERSION`. Asserted by derivation rather than against a
+        // literal: a pinned `2-1-217` here made this test fail the moment the
+        // target advanced — i.e. fail for being CORRECT. The version-specific
+        // literals live in `test-harness/tests/parity_claude_2_1_<v>.rs`, which
+        // is where a bump is supposed to be noticed.
+        assert!(
+            !v.contains(env!("CARGO_PKG_VERSION")),
+            "must not leak LingXi's own version: {v}"
+        );
         assert_eq!(
             v,
             format!(

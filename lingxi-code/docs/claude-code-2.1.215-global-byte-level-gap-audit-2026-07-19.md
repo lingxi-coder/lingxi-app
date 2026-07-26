@@ -24,8 +24,15 @@ M-01（`apps/cli/src/lib.rs:404` `--brief`）、M-03（`load_merged_disable_agen
   `replace_plugin_configs(load_plugin_configs(&self.home).await)`。我上一轮的探针
   用了 `reload.*plugin_configs` 这个模式，而调用写在 `self.manager` 上，两词不在同一行 ——
   **又一次是 grep 模式而非代码路径给出的假阴性**。
-- **L-02** — parity harness 基线陈旧（fixtures 锁在 `cc_2_1_198`，无 2.1.214/215
-  delta suite）。**真实且仍开**；这是一份需要单独立项的 fixture 工程。
+- **L-02 — CLOSED**。原述"fixtures 锁在 `cc_2_1_198`、无 2.1.214/215 delta
+  suite"已过时：`test-harness/tests/` 下已有 198/207/208/215/216/217 六套
+  suite，`cc_2_1_215_*_help.txt` fixture 也在。**但复核时发现了一个真问题**：
+  `traits::CLAUDE_CODE_VERSION` 停在 `2.1.217`，而本 session 全部行为都是从
+  **2.1.220** 二进制读出来移植的 —— 端口在实现 2.1.220 的同时，向服务器和子进程
+  宣称自己是 2.1.217。已 bump 至 2.1.220 并新增 `parity_claude_2_1_220.rs`；
+  217 suite 降级为历史 fixture（不再钉 live 常量），
+  `platforms/posix` 里一处硬编码 `2-1-217` 的断言改为派生 —— 它正是"因为**正确**
+  而失败"的那类测试。
 
 M-13 的成因值得记：它是被一句**过期的注释**触发的 —— `retry_ux.rs` 的模块头一直写着 "not wired"，而接线早已存在。该注释已改正。
 

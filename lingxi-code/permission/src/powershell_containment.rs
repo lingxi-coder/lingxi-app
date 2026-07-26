@@ -3019,7 +3019,18 @@ pub fn powershell_git_battery(
         return ask(BATTERY_CD_GIT);
     }
 
-    // (bare-repo indicators — `if(E)` — OUT OF SCOPE, deferred.)
+    // PS-CALLER-06-2 (bare-repo indicators) — MISSING, and the gap is wider
+    // than this placeholder implies.
+    //
+    // The oracle runs the same probe (`R3r`) on the BASH path too, among the
+    // `&`/bare-assignment/UNC guards — and the port has it on NEITHER. Git
+    // treats a directory carrying planted `HEAD`/`objects`/`refs` (or a `.git`
+    // file/symlink redirecting somewhere uncanonicalisable) as a git dir and
+    // runs config/hooks FROM IT, so this is a live under-ask on the primary
+    // platform, not a PowerShell corner.
+    //
+    // Re-filed as a bash + PowerShell item; see
+    // docs/ps-caller-06-deferrals-REEVALUATED-2026-07-25.md for the probe spec.
 
     if has_git {
         // 2. git-internal-write — inside `if(S)`, `if(V||U)`.
@@ -3075,7 +3086,13 @@ pub fn powershell_git_battery(
         }
     }
 
-    // (PS5.1 cwd-first shadowing — Windows-only — OUT OF SCOPE, deferred.)
+    // PS-CALLER-06-5 (PS5.1 cwd-first shadowing) — deliberately absent.
+    //
+    // The ORACLE gates this on runtime OS: `if (Dt() === "windows" && …)`. On
+    // macOS/Linux it never evaluates the check either, so omitting it is
+    // behaviourally identical on every platform LingXi ships. Genuinely
+    // Windows-only, not a silently-skipped guard.
+    // See docs/ps-caller-06-deferrals-REEVALUATED-2026-07-25.md.
 
     // 4. archive-extract — `if(pxg && u.length>1)`.
     let archive_present = names

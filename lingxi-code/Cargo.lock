@@ -35,6 +35,7 @@ dependencies = [
  "memory",
  "migrations",
  "permission",
+ "platform-posix",
  "protocol",
  "serde",
  "serde_json",

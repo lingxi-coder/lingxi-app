@@ -178,6 +178,12 @@ pub struct PoolSubagentSpawner {
     /// `…/subagents/agent-<id>.jsonl` instead of the prior `/tmp` placeholder.
     /// `None` ⇒ the `/tmp` placeholder stands (byte-identical legacy).
     hook_subagents_dir: Option<std::path::PathBuf>,
+    /// Filesystem the child uses to APPEND its conversation to
+    /// `<hook_subagents_dir>/agent-<id>.jsonl`. Set with the subagents dir at
+    /// boot: naming the path without wiring a writer is what left the
+    /// `SubagentStop` hook reporting a transcript that did not exist. `None`
+    /// ⇒ nothing is persisted (byte-identical legacy).
+    transcript_fs: Option<std::sync::Arc<dyn traits::FileSystem>>,
     /// G14: name → child agent-id registry for `SendMessage` routing of spawned
     /// ASYNC subagents (claude `AppState.agentNameRegistry`, AgentTool.tsx:704-711).
     /// `AgentTool` calls [`SubagentSpawner::register_name`] after a successful
@@ -253,6 +259,7 @@ impl PoolSubagentSpawner {
             hook_session_id: protocol::SessionId::nil(),
             hook_cwd: std::path::PathBuf::new(),
             hook_subagents_dir: None,
+            transcript_fs: None,
             name_registry: Arc::new(RwLock::new(HashMap::new())),
             tool_wide_deny_names: Arc::new(std::sync::OnceLock::new()),
             subagent_env_renderer: Arc::new(std::sync::OnceLock::new()),
@@ -502,6 +509,15 @@ impl PoolSubagentSpawner {
         self.hook_session_id = session_id;
         self.hook_cwd = cwd;
         self.hook_subagents_dir = subagents_dir;
+        self
+    }
+
+    /// Builder: the filesystem each child appends its transcript through.
+    /// Pairs with [`Self::with_hook_context`]'s `subagents_dir` — a dir without
+    /// a writer names a file nothing creates.
+    #[must_use]
+    pub fn with_transcript_fs(mut self, fs: std::sync::Arc<dyn traits::FileSystem>) -> Self {
+        self.transcript_fs = Some(fs);
         self
     }
 
@@ -823,6 +839,7 @@ impl PoolSubagentSpawner {
             can_show_permission_prompts: false,
             mcp_clients: vec![],
             transcript_subdir: "/tmp".into(),
+            transcript_fs: None,
             rendered_system_prompt,
             content_replacement_state: None,
             agent_memory: None,
@@ -1026,6 +1043,10 @@ impl PoolSubagentSpawner {
         // Seed the child's REAL transcript_subdir when the host wired one.
         if let Some(subagents_dir) = &self.hook_subagents_dir {
             ctx.transcript_subdir = subagents_dir.clone();
+            // Only wire the writer alongside a REAL subagents dir — writing a
+            // transcript into the `/tmp` placeholder would scatter files a
+            // resume could never find.
+            ctx.transcript_fs = self.transcript_fs.clone();
         }
         // Resolve THIS spawn's advertised tools + dispatch allow-list.
         // This child's recursion depth (claude `spawnDepth`): the Agent tool

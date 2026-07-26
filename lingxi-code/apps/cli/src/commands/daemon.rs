@@ -1680,6 +1680,15 @@ mod tests {
         use tracing_subscriber::layer::SubscriberExt;
         let capture = EventCapture::default();
         let subscriber = tracing_subscriber::registry().with(capture.clone());
+        // `tracing` caches per-callsite INTEREST process-globally. Every other
+        // `run_supervisor` test in this binary reaches `emit_worker_vanished`
+        // with no subscriber installed, which caches that callsite as
+        // "never" — and `with_default` (unlike `set_global_default`) does not
+        // rebuild the cache. Whether this test saw its own event then depended
+        // on test ORDER: it captured nothing roughly one run in three, always
+        // as an empty event list. Rebuilding the cache re-evaluates the
+        // callsite against the subscriber we are about to install.
+        tracing::callsite::rebuild_interest_cache();
 
         let dir = tmpdir();
         seed_working_job(&dir, "dead0009");

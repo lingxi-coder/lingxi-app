@@ -2,9 +2,7 @@
 //!
 //! [`AgentTranscriptWriter`] appends one JSON line per
 //! [`ConversationMessage`] to a transcript file under the agent's transcript
-//! subdir. The full append-only [`traits::FileSystem::append_file`]
-//! lands in Plan 10; today we read-then-rewrite to keep the public surface
-//! stable.
+//! subdir.
 
 use protocol::{AgentId, ConversationMessage};
 use serde::{Deserialize, Serialize};
@@ -25,9 +23,6 @@ pub struct TranscriptEntry {
 }
 
 /// Appends [`TranscriptEntry`] lines to a per-agent transcript file.
-///
-/// Today this is a thin wrapper over [`FileSystem`]; Plan 10 replaces the
-/// read-then-write hack with a real append API.
 pub struct AgentTranscriptWriter {
     /// Absolute path the transcript is written to.
     pub transcript_path: PathBuf,
@@ -59,17 +54,15 @@ impl AgentTranscriptWriter {
             "{}\n",
             serde_json::to_string(&entry).expect("transcript serialization")
         );
-        // FileSystem.append_file added in Plan 10. For now use write+read concat.
         let path_str = self
             .transcript_path
             .to_str()
             .expect("utf-8 transcript path");
-        let existing = self
-            .fs
-            .read_file(path_str, None, None)
-            .await
-            .map(|fc| fc.content)
-            .unwrap_or_default();
-        self.fs.write_file(path_str, &(existing + &line)).await
+        // A real APPEND, not read-then-rewrite. The old hack round-tripped the
+        // whole file through `read_file`, whose returned view is not
+        // guaranteed byte-identical to the file — concatenating onto it
+        // corrupted the JSONL — and rewrote every prior line on each message,
+        // making a long conversation quadratic.
+        self.fs.append_file(path_str, &line).await
     }
 }

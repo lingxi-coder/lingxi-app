@@ -260,6 +260,7 @@ mod tests {
             can_show_permission_prompts: true,
             mcp_clients: vec![],
             transcript_subdir: "/tmp".into(),
+            transcript_fs: None,
             rendered_system_prompt: None,
             content_replacement_state: None,
             agent_memory: None,

@@ -37,6 +37,7 @@ tracing.workspace = true
 [dev-dependencies]
 test-harness = { path = "../test-harness" }
 tempfile = "3"
+platform-posix = { path = "../platforms/posix" }
 tokio = { version = "1", features = ["sync", "fs", "rt-multi-thread", "macros"] }
 
 [lints]

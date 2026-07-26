@@ -386,6 +386,7 @@ fn fresh_subagent_ctx() -> SubagentContext {
         can_show_permission_prompts: true,
         mcp_clients: vec![],
         transcript_subdir: "/tmp".into(),
+        transcript_fs: None,
         rendered_system_prompt: Some(Arc::from("")),
         content_replacement_state: None,
         agent_memory: None,
@@ -2816,4 +2817,66 @@ async fn nonqualifying_error_after_content_still_fails() {
             .any(|e| matches!(e, SubagentEvent::Completed { .. })),
         "non-qualifying error must not recover a partial: {evs:?}"
     );
+}
+
+/// The per-agent transcript is actually WRITTEN. Before this, the
+/// `SubagentStop` hook reported an `agent_transcript_path` while nothing
+/// created the file — the payload named something that did not exist, and a
+/// background agent's conversation lived only in memory.
+#[tokio::test]
+async fn run_subagent_persists_its_conversation_to_the_agent_transcript() {
+    let dir = tempfile::tempdir().unwrap();
+    let api = MockSubagentApiClient::new(vec![Ok(text_response("the answer", Some("end_turn")))]);
+    let mut ctx = loop_ctx(api, None, 4);
+    ctx.transcript_subdir = dir.path().to_path_buf();
+    ctx.transcript_fs = Some(
+        Arc::new(platform_posix::PosixFileSystem::new(dir.path().to_path_buf()))
+            as Arc<dyn traits::FileSystem>,
+    );
+    ctx.prompt_messages = vec![protocol::ConversationMessage::user(
+        MessageId::new(),
+        "do the thing".to_string(),
+    )];
+    let agent_id = ctx.agent_id;
+
+    let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    run_subagent(ctx, event_rx, out_tx).await;
+    let _ = drain(out_rx).await;
+
+    let path = dir.path().join(format!("agent-{agent_id}.jsonl"));
+    let body = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("transcript at {} should exist: {e}", path.display()));
+    let lines: Vec<&str> = body.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert!(!lines.is_empty(), "transcript has content");
+    for line in &lines {
+        let entry: serde_json::Value = serde_json::from_str(line).expect("a JSON line");
+        assert!(entry.get("agent_id").is_some(), "stamped with its agent");
+        assert!(entry.get("message").is_some(), "carries the message");
+    }
+    // The SEEDED prompt is on disk, not only the assistant turns — a resume
+    // needs the conversation from its start.
+    assert!(
+        body.contains("do the thing"),
+        "the seeded prompt is persisted: {body}"
+    );
+    assert!(body.contains("the answer"), "the reply is persisted: {body}");
+}
+
+/// A host that wires no transcript filesystem persists nothing and behaves
+/// exactly as before — the seam is additive.
+#[tokio::test]
+async fn run_subagent_without_a_transcript_fs_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let api = MockSubagentApiClient::new(vec![Ok(text_response("x", Some("end_turn")))]);
+    let mut ctx = loop_ctx(api, None, 4);
+    ctx.transcript_subdir = dir.path().to_path_buf();
+    let agent_id = ctx.agent_id;
+
+    let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    run_subagent(ctx, event_rx, out_tx).await;
+    let _ = drain(out_rx).await;
+
+    assert!(!dir.path().join(format!("agent-{agent_id}.jsonl")).exists());
 }

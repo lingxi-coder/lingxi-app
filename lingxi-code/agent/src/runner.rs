@@ -861,6 +861,25 @@ async fn run_subagent_loop(
     // done at the `run_subagent` dispatcher for guaranteed cleanup.)
     history.extend(build_preload_messages(&ctx).await);
 
+    // Per-agent transcript. Appended by WATERMARK — everything in
+    // `history[written..]` is flushed at each turn-set boundary — rather than
+    // at each `history.push` site. There are five of those and a future sixth
+    // would silently skip persistence; a watermark cannot miss one.
+    //
+    // The flush points are the turn-set boundaries because those are exactly
+    // the RESUME boundaries: a persistent agent parks between turn-sets, so an
+    // on-disk transcript that is complete at every park is complete at every
+    // point anything could resume from.
+    let transcript = ctx.transcript_fs.clone().map(|fs| {
+        crate::transcript::AgentTranscriptWriter::new(
+            ctx.transcript_subdir
+                .join(format!("agent-{agent_id}.jsonl")),
+            agent_id,
+            fs,
+        )
+    });
+    let mut transcript_written: usize = 0;
+
     let max_turns = ctx.agent_definition.max_turns;
 
     // Once the cancellation channel closes, no UserExit / UserInterrupt can
@@ -1449,6 +1468,20 @@ async fn run_subagent_loop(
                     last_request_id: last_request_id.clone(),
                 })
                 .await;
+        }
+
+        // Flush the turn-set's messages to the per-agent transcript. Runs for
+        // BOTH dispositions below — a one-shot subagent's transcript is just as
+        // much a record as a persistent one's, and the `SubagentStop` hook
+        // reports its path either way. Best-effort: a transcript write failure
+        // must never mask the agent's result.
+        if let Some(writer) = &transcript {
+            for message in &history[transcript_written..] {
+                if writer.record(message).await.is_err() {
+                    break;
+                }
+                transcript_written += 1;
+            }
         }
 
         // ----- Persist decision ------------------------------------------------

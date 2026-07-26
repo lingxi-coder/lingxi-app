@@ -92,6 +92,19 @@ pub struct SubagentContext {
     pub mcp_clients: Vec<McpConnectionId>,
     /// Directory under which this agent writes its transcript.
     pub transcript_subdir: PathBuf,
+    /// Filesystem used to APPEND this agent's conversation to
+    /// `<transcript_subdir>/agent-<id>.jsonl`.
+    ///
+    /// `transcript_subdir` alone only ever named a path: the `SubagentStop`
+    /// hook reported `agent_transcript_path` while nothing wrote the file, so
+    /// the payload pointed at something that did not exist. Wiring this makes
+    /// the transcript real, and is the prerequisite for reconstructing a
+    /// background agent's conversation outside the process that ran it.
+    ///
+    /// `None` ⇒ nothing is persisted (tests / minimal builds), byte-identical
+    /// to the previous behaviour.
+    #[allow(clippy::struct_field_names)]
+    pub transcript_fs: Option<Arc<dyn traits::FileSystem>>,
     /// Pre-rendered system prompt (post template + frontmatter expansion).
     pub rendered_system_prompt: Option<Arc<str>>,
     /// Shared content-replacement state (e.g. file mention expansion). Wrapped

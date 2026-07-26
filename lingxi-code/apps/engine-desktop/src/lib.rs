@@ -5340,6 +5340,12 @@ pub async fn build(
             cwd.clone(),
             Some(main_subagents_dir.clone()),
         )
+        // …and the writer that actually creates the file the line above names.
+        // Without it `agent_transcript_path` pointed at nothing, and a
+        // background agent's conversation existed only in memory.
+        .with_transcript_fs(
+            Arc::new(PosixFileSystem::new(cwd.clone())) as Arc<dyn traits::FileSystem>,
+        )
         // 2.1.186: append the subagent `<env>` block (`tIm`) after the `Notes:`
         // trailer on every NON-fork spawn. The renderer probes the boot-stable
         // environment once (cwd/git/platform/shell/OS) via the orchestrator's own

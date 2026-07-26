@@ -74,8 +74,24 @@ mod tests {
         let raw = i32::try_from(child.id().expect("pid")).expect("pid fits i32");
         let pid = Pid::from_raw(raw);
 
-        let sid = getsid(Some(pid)).expect("getsid");
-        let pgid = getpgid(Some(pid)).expect("getpgid");
+        // `spawn` returns once the FORK succeeds; `setsid` runs in the child
+        // between fork and execve, so the parent can observe the pre-setsid
+        // session for a moment. Reading once made this test fail under a loaded
+        // full-workspace run (the child had not been scheduled yet) while
+        // passing every time in isolation. Poll until the child has become its
+        // own session leader — the child lives ~1s, so this is bounded well
+        // inside its lifetime and still fails fast if `attach_setsid` is a
+        // no-op.
+        let mut sid = getsid(Some(pid)).expect("getsid");
+        let mut pgid = getpgid(Some(pid)).expect("getpgid");
+        for _ in 0..200 {
+            if sid == pid && pgid == pid {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            sid = getsid(Some(pid)).expect("getsid");
+            pgid = getpgid(Some(pid)).expect("getpgid");
+        }
         assert_eq!(sid, pid, "session leader: sid {sid} should equal pid {pid}");
         assert_eq!(
             pgid, pid,

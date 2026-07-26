@@ -39,6 +39,26 @@ scripts/check-deps.sh
 
 **Rust toolchain**: pinned to 1.82.0 (`rust-toolchain.toml`). Workspace edition 2021.
 
+### Verifying a change
+
+`cargo test -p <crate>` is not proof. Three gaps have each let a real defect
+through:
+
+- **`--tests` does not run doctests.** A `DesktopConfig` doc example stopped
+  compiling and sat broken across two waves while every targeted run came back
+  green. Only a bare `cargo test` (or `--doc`) compiles rustdoc examples.
+- **A green crate is not a green workspace.** Two `settings_watch` tests shared
+  a path in the process-global `permission::mark_internal_write` map. They
+  passed standalone and under `-p engine-desktop`, and failed only under the
+  different scheduling of `cargo test --workspace`.
+- **`--workspace` aborts at the first failing binary.** Always add
+  `--no-fail-fast`, or you see one failure and assume it is the only one.
+
+Before claiming a change is clean, run `cargo test --workspace --no-fail-fast`
+at least once. It takes a while; it is the only invocation that covers lib +
+bins + integration + doctests together.
+
+
 ## Architecture Overview
 
 LingXi is a multi-provider AI coding assistant with a Ratatui TUI, CLI, and desktop bridge server. It is a Rust port of claude-code with byte-parity fidelity.
@@ -126,3 +146,68 @@ The orchestrator's turn loop (`orchestrator/src/conversation.rs`) drives every c
 - Tests live in `#[cfg(test)] mod tests` at the bottom of source files OR as `tests/*.rs` integration test files. Integration tests use crate-internal APIs re-exported through `test_support` modules.
 - `test_support.rs` modules export mocks (`MockApiClient`, `MockOutputStream`, `NoOpPermissionGate`, `StaticMemoryProvider`) used across crate boundaries.
 - Provider-specific code lives in `llm-client/src/providers/` (Anthropic, OpenAI, Gemini, OpenAI Responses, Azure, Vertex, Bedrock).
+
+## Parity Work
+
+This is a byte-parity port, so most work is: read the oracle binary, find what
+the port does instead, decide whether the difference is real. The recurring
+mistakes are all variations of one thing — **a negative search result is not
+evidence.**
+
+### Before claiming something is absent
+
+Grep tells you a string is missing. It does not tell you a behaviour is
+missing. Every one of these produced a wrong "absent" verdict:
+
+- **The port renamed it.** `tengu_repair_double_escaped_unicode` ships as the
+  module `unicode_repair`; `canonicalModel` sits inside
+  `build_model_usage_block`; the LLM service type is re-exported as
+  `ApiService`, so searching `LlmService::new` finds only tests and suggests —
+  wrongly — that nothing constructs one.
+- **You checked the wrong layer.** `SendMessage` accepts `to: "*"` in
+  `parse_recipient`; the oracle rejects it in `validateInput`, and so does the
+  port — one function further out. Check the layer the oracle gates at.
+- **The data is not stored as literals.** Grepping the binary for emoji
+  shortcodes as `"name"` returned 23 misses; `tada` appears 2709 times *bare*
+  and 0 times quoted.
+- **Your regex was wrong.** `grep -E 'a\|b'` matches a literal pipe — in ERE
+  alternation is `|`. This silently reported 0 hits for three items that were
+  all present.
+
+So: confirm "absent" by reading the behaviour site, never by a failed grep.
+
+### Triaging an audit backlog
+
+The audit JSONs in `docs/` age fast. Across two of them, **22 of 32 items
+listed `open` were already closed.** Two specifics:
+
+- Their `verify` fields are usually **binary-side** — they establish that the
+  ORACLE has a feature, and say nothing about whether the port lacks it.
+- **Grepping the item ID is not a triage method.** Five of eight items with
+  zero references to their own ID were implemented; an ID that *is* present may
+  be a `TODO`. Read each reference.
+
+### Deciding not to do something
+
+Two failure modes, in opposite directions:
+
+- **Deferring a check without asking where else the oracle applies it.**
+  `PS-CALLER-06-2` was correctly scoped out of a PowerShell wave — but the
+  oracle runs the same probe on the *bash* path, no bash-side item was ever
+  filed, and a real under-ask inherited a narrow item's justification.
+- **Shipping a guard ahead of the thing it guards.** The ←-on-empty debounce
+  and the refusal-banner collapser both guard features the port does not have.
+  Building them yields dead code that reads as coverage, and the next audit
+  reports them done.
+
+### Branding is a correctness rule, not a naming one
+
+Config paths are `.lingxi/` and `LINGXI.md`; product names in user-facing prose
+stay as they are. Grepping for oracle config literals (`.claude`, `CLAUDE.md`,
+`.claude.json`) in non-test code found a real behavioural bug **every time**: a
+recon reading files this product never writes, `/agents` pointing at the wrong
+directory, and a subagent escalation guard blind to the settings paths that
+actually grant permissions here.
+
+Shared security primitives belong in `permission` — `tools/*` depend on it for
+real, while `permission`'s dependencies back on them are dev-only.

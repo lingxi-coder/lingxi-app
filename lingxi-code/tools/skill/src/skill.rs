@@ -30,12 +30,15 @@
 //! is claude's own behaviour: a skill that cannot fork still runs, just here.
 //! The one exception is the depth-chain cap, which is a hard error.
 //!
+//! Both fork shapes are implemented: the BACKGROUND fork detaches and returns
+//! a handle, the SYNCHRONOUS fork runs the subagent to completion and returns
+//! its answer. Both apply the skill's scoping and inject nothing into the
+//! caller's conversation; only the background one is resumable, so only it
+//! writes the scoping sidecars.
+//!
 //! ## Remaining non-faithful surface
-//! The SYNCHRONOUS fork (claude's `background: false` branch, which drives a
-//! whole subagent turn loop inside the tool call) has no substrate here, so
-//! that case runs inline. MCP-skill discovery (`getAllCommands` merging
-//! `mcp.commands`) and remote canonical skills (`EXPERIMENTAL_SKILL_SEARCH`)
-//! are also unported.
+//! MCP-skill discovery (`getAllCommands` merging `mcp.commands`) and remote
+//! canonical skills (`EXPERIMENTAL_SKILL_SEARCH`) are unported.
 //!
 //! Hermetic by default: the `EmptySkillLoader` always returns "skill not
 //! found" (→ `Unknown skill:`). Production hosts inject a loader backed by the
@@ -102,6 +105,12 @@ pub struct SkillDescriptor {
     pub model: Option<String>,
     /// Tools this skill allows, surfaced in the result (TS `allowedTools`).
     pub allowed_tools: Vec<String>,
+    /// Tools this skill REMOVES (frontmatter `disallowed-tools`). For a
+    /// `context: fork` skill these ride onto the spawned agent as
+    /// `SubagentSpawnRequest::additional_disallowed_tools` — without them the
+    /// fork would run with the parent's tools, which is the scoping the fork
+    /// exists to narrow.
+    pub disallowed_tools: Vec<String>,
     /// Declared positional argument names (markdown frontmatter `arguments`).
     /// Threaded into [`command_api::substitute_arguments_faithful`] so a named
     /// placeholder like `$ticket` in the skill body resolves to the matching
@@ -161,6 +170,7 @@ impl Default for SkillDescriptor {
             command_type: SkillCommandType::Prompt,
             model: None,
             allowed_tools: Vec::new(),
+            disallowed_tools: Vec::new(),
             argument_names: Vec::new(),
             shell: None,
             skip_shell_expansion: false,
@@ -247,13 +257,13 @@ impl SkillTool {
     /// depth-chain cap degrades that way, and so does a host with no spawner or
     /// task registry wired. `Ok(Some(result))` is a launched fork.
     ///
-    /// Only the BACKGROUND fork is implemented as a fork: the synchronous
-    /// variant would have to drive a whole subagent turn loop inside this tool
-    /// call, which this tool has no substrate for. Rather than pretend, a
-    /// skill that opts out of background (or a session with background tasks
-    /// disabled) runs INLINE — the same content, in this context, which is the
-    /// honest degradation. Claude's own predicate already routes several cases
-    /// that way.
+    /// Both fork shapes are handled. The BACKGROUND fork detaches through
+    /// `spawn_async` and returns a handle; the SYNCHRONOUS fork (a skill that
+    /// opts out, a session with background tasks off, or a caller that is
+    /// already a subagent) runs the subagent to completion through `spawn` and
+    /// returns its answer. Only the background one is addressable and
+    /// resumable, so only it claims a `SendMessage` name, a fork identity on
+    /// the task index, and the scoping sidecars.
     async fn try_fork(
         &self,
         bus: &Arc<AnalyticsBus>,
@@ -273,19 +283,18 @@ impl SkillTool {
                 .ok()
                 .as_deref(),
         );
-        if !crate::fork::should_background_fork(
+        let background = crate::fork::should_background_fork(
             desc.background,
             false,
             background_tasks_disabled,
             ctx.depth > 0,
-        ) {
-            return Ok(None);
-        }
+        );
 
         let tasks = registry
             .list(traits::task_registry::TaskListFilter::default())
             .await
             .unwrap_or_default();
+        let frozen_command_denies = frozen_command_denies(&self.ctx.permission_policy);
         let spawn_cap = max_subagents_per_session();
         let inputs = crate::fork::ForkLaunchInputs {
             skill_name: command_name,
@@ -294,9 +303,11 @@ impl SkillTool {
             // `effort` key stays absent, which is claude's shape for a skill
             // that declares none.
             effort: None,
-            // The freeze itself is the caller's to supply; an empty list writes
-            // no key, which is claude's shape for "nothing frozen".
-            frozen_command_denies: Vec::new(),
+            // Snapshot the command deny rules in force RIGHT NOW (claude's
+            // `freezeCommandDenies`, which it sets only on the background
+            // path). Persisted with the scoping so a resume can replay them
+            // ahead of whatever is live then.
+            frozen_command_denies: frozen_command_denies.clone(),
             depth: ctx.depth as usize + 1,
             depth_limit: traits::subagent_spawn::max_subagent_spawn_depth() as usize,
             total_spawns: registry.get_total_agent_spawns(),
@@ -351,7 +362,10 @@ impl SkillTool {
             tool_use_id: ctx.tool_use_id.as_ref().map(ToString::to_string),
             system_prompt_override: None,
             system_prompt_addendum: None,
-            additional_disallowed_tools: Vec::new(),
+            // The skill's own `disallowed-tools` — half of the scoping a fork
+            // exists to narrow. Without this the forked agent would run with
+            // the PARENT's tools, which is strictly wider than the skill's.
+            additional_disallowed_tools: desc.disallowed_tools.clone(),
             parent_model_override: None,
         };
         let inherit = traits::subagent_spawn::SubagentInheritance {
@@ -379,6 +393,73 @@ impl SkillTool {
         ) {
             emit_failed(bus, reason.reason(), 0).await;
             return Ok(None);
+        }
+
+        // SYNCHRONOUS fork (claude's `background: false` branch, and the branch
+        // its predicate routes to when background tasks are off or the caller
+        // is already a subagent): run the subagent to completion HERE and
+        // return its answer. Still a fork — the skill's scoping applies and
+        // nothing is injected into this conversation — just not detached.
+        //
+        // It is NOT resumable, so it writes no scoping sidecars: there is
+        // nothing to resume, and a record with no agent behind it would only
+        // give a later resume something spurious to corroborate.
+        if !background {
+            let mut sync_request = request;
+            sync_request.run_in_background = false;
+            // A synchronous fork is not addressable, so it claims no
+            // `SendMessage` name and no fork identity on the task index — both
+            // exist to route to, and later resume, a LIVE background agent.
+            sync_request.name = None;
+            sync_request.forked_skill_name = None;
+            let (agent_id, result) = match spawner.spawn(sync_request, inherit).await {
+                Ok(traits::subagent_spawn::SubagentResult::Completed {
+                    agent_id, content, ..
+                }) => {
+                    let text = crate::fork::final_text(&content);
+                    (
+                        agent_id,
+                        if text.is_empty() {
+                            crate::fork::SYNC_FORK_EMPTY_RESULT.to_string()
+                        } else {
+                            text
+                        },
+                    )
+                }
+                // A failed or killed fork surfaces as a tool error rather than
+                // silently reporting success with an empty result.
+                Ok(traits::subagent_spawn::SubagentResult::Failed { reason, .. }) => {
+                    return Err(ToolError::Internal(format!(
+                        "Skill {command_name} (forked execution) failed: {reason}"
+                    )));
+                }
+                Ok(traits::subagent_spawn::SubagentResult::Killed { .. }) => {
+                    return Err(ToolError::Internal(format!(
+                        "Skill {command_name} (forked execution) was stopped"
+                    )));
+                }
+                // An unwired spawner falls back to inline — the skill still
+                // runs, just in this context.
+                Err(_) => return Ok(None),
+            };
+            registry.increment_total_agent_spawns();
+            return Ok(Some(ToolCallResult {
+                data: crate::fork::fork_result(
+                    command_name,
+                    &agent_id.to_string(),
+                    false,
+                    &result,
+                ),
+                model_content: Some(crate::fork::fork_tool_result_text(
+                    command_name,
+                    false,
+                    &result,
+                )),
+                new_messages: Vec::new(),
+                context_modifier: None,
+                is_error: false,
+                mcp_meta: None,
+            }));
         }
 
         let launch = match spawner.spawn_async(request, inherit).await {
@@ -438,6 +519,34 @@ static SCHEMA: Lazy<Value> = Lazy::new(|| {
         "required": ["skill"]
     })
 });
+
+/// Snapshot the COMMAND deny rules currently in force, as canonical rule
+/// strings (claude `freezeCommandDenies` — `getAppState().toolPermissionContext
+/// .alwaysDenyRules.command ?? []`, captured only on the background fork path).
+///
+/// Claude freezes these because its resume rebuilds the permission context from
+/// LIVE app state, so without a snapshot a settings edit made while the fork was
+/// parked could REMOVE a deny that was in force when it launched. The port's
+/// `PolicyPermissionGate` holds a boot-snapshot `Arc<PermissionPolicy>` (only
+/// the MODE is live), so within one process the two cannot drift — but the
+/// record outlives the process, and a cross-session resume reads it against a
+/// freshly-loaded policy. Persisting it is what makes that resume checkable.
+fn frozen_command_denies(policy: &permission::PermissionPolicy) -> Vec<String> {
+    let mut out: Vec<String> = policy
+        .deny_rules
+        .values()
+        .flatten()
+        // `Bash` is the command tool — claude's `alwaysDenyRules.command`
+        // bucket. Deny rules for other tools are not command rules.
+        .filter(|r| r.value.tool_name == "Bash")
+        .map(|r| r.value.to_rule_string())
+        .collect();
+    // `deny_rules` is keyed by source, and a HashMap has no stable iteration
+    // order — sort so the persisted record is deterministic across runs.
+    out.sort();
+    out.dedup();
+    out
+}
 
 /// The per-session subagent spawn cap (claude 2.1.212 `xtu()` =
 /// `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION ?? 200`). Duplicated from the Agent

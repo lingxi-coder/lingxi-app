@@ -91,6 +91,11 @@ struct RawFrontmatter {
     description: Option<String>,
     #[serde(default, rename = "allowed-tools")]
     allowed_tools: Option<ToolsField>,
+    /// Tools REMOVED from the command's agent. For a `context: fork` skill this
+    /// is half of the scoping the fork runs under, so it must survive to the
+    /// spawn — a fork that drops it runs with the parent's tools.
+    #[serde(default, rename = "disallowed-tools", alias = "disallowedTools")]
+    disallowed_tools: Option<ToolsField>,
     #[serde(default)]
     model: Option<String>,
     #[serde(default, rename = "argument-hint")]
@@ -700,6 +705,11 @@ fn build_frontmatter(raw: RawFrontmatter) -> CommandFrontmatter {
         Some(ToolsField::One(s)) => Some(parse_slash_command_tools_from_frontmatter(&[s])),
         Some(ToolsField::Many(v)) => Some(parse_slash_command_tools_from_frontmatter(&v)),
     };
+    let disallowed_tools = match raw.disallowed_tools {
+        None => None,
+        Some(ToolsField::One(s)) => Some(parse_slash_command_tools_from_frontmatter(&[s])),
+        Some(ToolsField::Many(v)) => Some(parse_slash_command_tools_from_frontmatter(&v)),
+    };
     let argument_hints = raw.argument_hint.map(|h| vec![h]).unwrap_or_default();
     let argument_names = match raw.arguments {
         None => Vec::new(),
@@ -732,6 +742,7 @@ fn build_frontmatter(raw: RawFrontmatter) -> CommandFrontmatter {
         Some(Boolish::Str(_)) | None => None,
     };
     CommandFrontmatter {
+        disallowed_tools,
         context: raw.context,
         background,
         agent: raw.agent,

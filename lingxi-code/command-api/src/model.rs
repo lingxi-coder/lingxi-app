@@ -186,6 +186,10 @@ pub struct CommandFrontmatter {
     /// Optional allow-list of tool names.
     #[serde(alias = "tools_allowed")]
     pub allowed_tools: Option<Vec<String>>,
+    /// Tools REMOVED from this command's agent (frontmatter `disallowed-tools`).
+    /// For a `context: fork` skill this is half the scoping the fork runs
+    /// under. `None` ⇒ nothing extra denied.
+    pub disallowed_tools: Option<Vec<String>>,
     /// Optional pinned model name.
     pub model: Option<String>,
     /// Free-form hints describing positional argument shape.

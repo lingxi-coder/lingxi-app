@@ -440,14 +440,18 @@ pub fn check_fork_capable(
 /// Build the command deny list a resumed fork runs under (claude `Ofo`'s
 /// `frozenCommandDenies !== undefined` branch).
 ///
-/// NOT YET APPLIED to a resumed fork's permission context. The frozen list is
-/// captured at launch, persisted in the scoping record, and read back by the
-/// resume gate — but the port routes a parked subagent's tool dispatch through
-/// the `SubagentInheritance` captured at spawn, and I have not verified whether
-/// that path re-reads live deny rules or a snapshot. Wiring this without
-/// knowing which would be a guess about a security boundary. The application
-/// point is the resumed agent's permission context; this function is the
-/// byte-faithful transform it needs.
+/// WHY THIS HAS NO CALLER IN-PROCESS, verified rather than assumed:
+/// `PolicyPermissionGate` holds a BOOT-snapshot `Arc<PermissionPolicy>` — only
+/// the mode and a few overrides are live, the allow/deny RULES are fixed for
+/// the process. Claude needs the union because its resume rebuilds the
+/// permission context from live app state, so a settings edit made while a fork
+/// was parked could REMOVE a deny that was in force at launch. In this port the
+/// two cannot drift within a process: frozen, live, and boot are the same set.
+///
+/// The record still has to be written, because it outlives the process. When a
+/// cross-session fork resume lands (today's resume is `send_message` to a
+/// parked IN-PROCESS agent), it will read this record against a freshly-loaded
+/// policy that genuinely can differ — and this is the transform it needs.
 ///
 /// Order is `frozen`, then `live`, then the skill's own `disallowed` —
 /// deduplicated, first occurrence winning. Putting the FROZEN rules first is

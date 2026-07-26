@@ -254,6 +254,21 @@ pub fn fork_result(
     serde_json::Value::Object(obj)
 }
 
+/// The subagent's final TEXT (claude `Jc(content, "\n")` — text blocks joined
+/// with `\n`; non-text blocks dropped). A non-array content has no text blocks.
+#[must_use]
+pub fn final_text(content: &serde_json::Value) -> String {
+    let Some(blocks) = content.as_array() else {
+        return String::new();
+    };
+    blocks
+        .iter()
+        .filter(|b| b.get("type").and_then(serde_json::Value::as_str) == Some("text"))
+        .filter_map(|b| b.get("text").and_then(serde_json::Value::as_str))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// The background launch's `result` line (claude
 /// `` `Running in the background as @${G.name}` ``).
 #[must_use]
@@ -276,6 +291,10 @@ pub fn fork_tool_result_text(command_name: &str, background: bool, result: &str)
         format!("Skill \"{command_name}\" completed (forked execution).\n\nResult:\n{result}")
     }
 }
+
+/// The synchronous fork's `result` when the subagent produced no final text
+/// (claude `bpr(U, "Skill execution completed")`'s default).
+pub const SYNC_FORK_EMPTY_RESULT: &str = "Skill execution completed";
 
 /// Whether a skill's frontmatter asks for forked execution (`context: fork`).
 #[must_use]
@@ -506,6 +525,11 @@ Do the skill's work directly in this context instead of invoking further skills.
             fork_tool_result_text("review", false, "the findings"),
             "Skill \"review\" completed (forked execution).\n\nResult:\nthe findings"
         );
+    }
+
+    #[test]
+    fn the_sync_fork_default_result_is_locked() {
+        assert_eq!(SYNC_FORK_EMPTY_RESULT, "Skill execution completed");
     }
 
     #[test]

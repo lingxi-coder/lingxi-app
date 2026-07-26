@@ -1291,15 +1291,28 @@ mod fork_dispatch_tests {
     #[derive(Default)]
     struct RecordingSpawner {
         seen: std::sync::Mutex<Option<SubagentSpawnRequest>>,
+        /// Canned final content for the SYNCHRONOUS fork path.
+        sync_content: Option<serde_json::Value>,
     }
     #[async_trait]
     impl SubagentSpawner for RecordingSpawner {
         async fn spawn(
             &self,
-            _r: SubagentSpawnRequest,
+            request: SubagentSpawnRequest,
             _i: SubagentInheritance,
         ) -> Result<SubagentResult, SubagentSpawnError> {
-            unreachable!("a background fork never takes the sync spawn path")
+            *self.seen.lock().unwrap() = Some(request);
+            Ok(SubagentResult::Completed {
+                agent_id: protocol::AgentId::nil(),
+                content: self.sync_content.clone().unwrap_or(json!([])),
+                usage: Default::default(),
+                total_tool_use_count: 0,
+                total_duration_ms: 0,
+                total_tokens: 0,
+                assistant_message_count: 0,
+                response_char_count: 0,
+                last_request_id: None,
+            })
         }
         async fn agent_listing(&self) -> Vec<SubagentListingEntry> {
             vec![]
@@ -1487,21 +1500,6 @@ mod fork_dispatch_tests {
         assert!(spawner.seen.lock().unwrap().is_none(), "no second spawn");
     }
 
-    /// `background: false` opts out of forking here: the synchronous fork has
-    /// no substrate in this tool, so the skill runs INLINE — the same content,
-    /// in this context — rather than reporting a launch that did not happen.
-    #[tokio::test]
-    async fn a_non_background_forking_skill_runs_inline() {
-        let spawner: Arc<RecordingSpawner> = Arc::default();
-        let tool = tool_with(spawner.clone(), fork_desc("review", Some(false)), vec![]);
-        let res = tool
-            .call(json!({"skill": "review"}), ctx_with_registry(), fresh_tx())
-            .await
-            .expect("inline");
-        assert_eq!(res.data["status"], json!("inline"));
-        assert!(spawner.seen.lock().unwrap().is_none(), "no spawn attempted");
-    }
-
     /// An ordinary (non-forking) skill is untouched by any of this.
     #[tokio::test]
     async fn an_inline_skill_is_unaffected() {
@@ -1529,4 +1527,132 @@ mod fork_dispatch_tests {
             .expect("inline");
         assert_eq!(res.data["status"], json!("inline"));
     }
+
+    /// The skill's own `disallowed-tools` ride onto the spawned agent. Without
+    /// this the fork runs with the PARENT's tools — strictly wider than the
+    /// scoping the fork exists to narrow, and the launch is the only place it
+    /// can be applied.
+    #[tokio::test]
+    async fn a_forking_skill_scopes_the_agent_to_its_disallowed_tools() {
+        let spawner: Arc<RecordingSpawner> = Arc::default();
+        let mut desc = fork_desc("review", None);
+        desc.disallowed_tools = vec!["Write".into(), "Bash".into()];
+        let tool = tool_with(spawner.clone(), desc, vec![]);
+        tool.call(json!({"skill": "review"}), ctx_with_registry(), fresh_tx())
+            .await
+            .expect("fork dispatch succeeds");
+
+        let req = spawner.seen.lock().unwrap().clone().expect("spawned");
+        assert_eq!(
+            req.additional_disallowed_tools,
+            vec!["Write".to_string(), "Bash".to_string()],
+            "the skill's disallowed-tools scope the forked agent"
+        );
+    }
+
+    /// The command denies in force at LAUNCH are snapshotted onto the spawn, so
+    /// the scoping record persists them. Deterministic order — `deny_rules` is
+    /// keyed by source and a HashMap has no stable iteration order.
+    #[tokio::test]
+    async fn a_fork_freezes_the_command_denies_in_force_at_launch() {
+        use permission::rule::{
+            PermissionBehavior, PermissionRule, PermissionRuleSource, PermissionRuleValue,
+        };
+        let spawner: Arc<RecordingSpawner> = Arc::default();
+        let mut ctx = shell_test_ctx(out());
+        let mut policy = permission::PermissionPolicy::new(permission::PermissionMode::Default);
+        policy.deny_rules.insert(
+            PermissionRuleSource::ProjectSettings,
+            vec![
+                PermissionRule {
+                    value: PermissionRuleValue::from_rule_string("Bash(rm:*)"),
+                    behavior: PermissionBehavior::Deny,
+                    source: PermissionRuleSource::ProjectSettings,
+                },
+                // A non-command deny must NOT be frozen as a command rule.
+                PermissionRule {
+                    value: PermissionRuleValue::from_rule_string("Write"),
+                    behavior: PermissionBehavior::Deny,
+                    source: PermissionRuleSource::ProjectSettings,
+                },
+            ],
+        );
+        ctx.permission_policy = Arc::new(policy);
+        ctx.subagent_spawner = Some(spawner.clone() as Arc<dyn SubagentSpawner>);
+        ctx.task_registry = Some(Arc::new(StubRegistry::new(vec![])));
+        ctx.budget_enforcer = Some(Arc::new(NoBudget));
+        let tool =
+            SkillTool::with_loader(ctx, Arc::new(Loader(Some(fork_desc("review", None)))));
+
+        tool.call(json!({"skill": "review"}), ctx_with_registry(), fresh_tx())
+            .await
+            .expect("fork dispatch succeeds");
+
+        let req = spawner.seen.lock().unwrap().clone().expect("spawned");
+        assert_eq!(
+            req.frozen_command_denies,
+            vec!["Bash(rm:*)".to_string()],
+            "only command (Bash) denies are frozen"
+        );
+    }
+
+
+    /// `background: false` still FORKS — it runs the subagent to completion
+    /// here and returns its answer, under the skill's scoping, with nothing
+    /// injected into this conversation. It is not the inline path.
+    #[tokio::test]
+    async fn a_non_background_fork_runs_the_subagent_synchronously() {
+        let spawner = Arc::new(RecordingSpawner {
+            seen: std::sync::Mutex::new(None),
+            sync_content: Some(json!([
+                { "type": "text", "text": "first" },
+                { "type": "tool_use", "name": "Bash", "input": {} },
+                { "type": "text", "text": "second" }
+            ])),
+        });
+        let mut desc = fork_desc("review", Some(false));
+        desc.disallowed_tools = vec!["Write".into()];
+        let tool = tool_with(spawner.clone(), desc, vec![]);
+        let res = tool
+            .call(json!({"skill": "review"}), ctx_with_registry(), fresh_tx())
+            .await
+            .expect("sync fork succeeds");
+
+        assert_eq!(res.data["status"], json!("forked"));
+        assert!(
+            res.data.get("background").is_none(),
+            "the synchronous fork omits the background key"
+        );
+        assert_eq!(res.data["result"], json!("first\nsecond"));
+        assert_eq!(
+            res.model_content.as_deref(),
+            Some("Skill \"review\" completed (forked execution).\n\nResult:\nfirst\nsecond")
+        );
+        assert!(res.new_messages.is_empty(), "still a fork: nothing injected");
+
+        let req = spawner.seen.lock().unwrap().clone().expect("spawned");
+        assert!(!req.run_in_background);
+        assert_eq!(req.additional_disallowed_tools, vec!["Write".to_string()]);
+        // Not addressable and not resumable: no SendMessage name, no fork
+        // identity on the task index.
+        assert!(req.name.is_none());
+        assert!(req.forked_skill_name.is_none());
+    }
+
+    /// A subagent that produced no text still reports something — claude's
+    /// `"Skill execution completed"` default, not an empty result.
+    #[tokio::test]
+    async fn a_sync_fork_with_no_text_reports_the_default_result() {
+        let spawner = Arc::new(RecordingSpawner {
+            seen: std::sync::Mutex::new(None),
+            sync_content: Some(json!([])),
+        });
+        let tool = tool_with(spawner, fork_desc("review", Some(false)), vec![]);
+        let res = tool
+            .call(json!({"skill": "review"}), ctx_with_registry(), fresh_tx())
+            .await
+            .unwrap();
+        assert_eq!(res.data["result"], json!("Skill execution completed"));
+    }
+
 }

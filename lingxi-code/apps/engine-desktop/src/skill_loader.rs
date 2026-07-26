@@ -49,6 +49,7 @@ fn to_descriptor(cmd: &SlashCommand, session_id: Option<&str>) -> SkillDescripto
             command_type: SkillCommandType::Prompt,
             model: frontmatter.model.clone(),
             allowed_tools: frontmatter.allowed_tools.clone().unwrap_or_default(),
+            disallowed_tools: frontmatter.disallowed_tools.clone().unwrap_or_default(),
             argument_names: frontmatter.argument_names.clone(),
             // SKILLEXEC.6: forward the frontmatter `shell` selector so embedded
             // `!command` expansion routes through the author's chosen shell.
@@ -90,6 +91,7 @@ fn to_descriptor(cmd: &SlashCommand, session_id: Option<&str>) -> SkillDescripto
             command_type: SkillCommandType::Prompt,
             model: frontmatter.model.clone(),
             allowed_tools: frontmatter.allowed_tools.clone().unwrap_or_default(),
+            disallowed_tools: frontmatter.disallowed_tools.clone().unwrap_or_default(),
             argument_names: Vec::new(),
             shell: frontmatter.shell,
             skip_shell_expansion: false,

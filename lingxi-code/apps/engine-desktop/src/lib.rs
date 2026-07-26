@@ -7544,7 +7544,7 @@ pub async fn build(
         .with_workspace_trusted(goal_workspace_trusted)
         .with_hooks_restricted(goal_hooks_restricted)
         .with_analytics_bus(analytics_bus)
-        .with_mcp_registry(mcp_registry)
+        .with_mcp_registry(mcp_registry.clone())
         .with_hook_registry(hook_registry)
         .with_agent_catalog(agent_catalog)
         .with_output_style_registry(plugin_output_style_registry.clone())
@@ -7828,6 +7828,19 @@ pub async fn build(
     // loader holds, then hand the SAME `Arc` to the slash dispatcher so the tool
     // and the dispatcher observe one command set (plugin lifecycle mutations via
     // the dispatcher's write lock are visible to the loader too).
+    // claude-code `getAllCommands` folds `mcp.commands` into the command list:
+    // an MCP server's PROMPTS become `/<server>:<prompt>` slash commands. The
+    // registry has always fetched them at connect; this is the read side, and
+    // without it they existed on the wire and nowhere the user or model could
+    // reach. Merged LAST so a same-named local command wins — a remote server
+    // must not shadow one of the user's own.
+    for cmd in command_api::mcp_prompts::mcp_prompt_commands(
+        &mcp_registry.connected_prompts().await,
+    ) {
+        if reg.resolve(&cmd.name).is_none() {
+            reg.register_command(cmd);
+        }
+    }
     *shared_command_registry.write().await = reg;
 
     // (6.5) Plugin bootstrap — discover installed plugins on disk and

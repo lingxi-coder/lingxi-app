@@ -36,9 +36,14 @@
 //! caller's conversation; only the background one is resumable, so only it
 //! writes the scoping sidecars.
 //!
-//! ## Remaining non-faithful surface
-//! MCP-skill discovery (`getAllCommands` merging `mcp.commands`) and remote
-//! canonical skills (`EXPERIMENTAL_SKILL_SEARCH`) are unported.
+//! MCP prompts reach this tool as ordinary `<server>:<prompt>` commands —
+//! the `getAllCommands` merge lives in `command_api::mcp_prompts` and runs at
+//! the composition root. They resolve as [`SkillCommandType::Other`], so the
+//! locked "is a built-in CLI command, not a skill" rejection applies: an MCP
+//! prompt's body comes from a remote server and is never shell-expanded here.
+//!
+//! (`EXPERIMENTAL_SKILL_SEARCH` is ported in `skill_api::prefetch`, gated off
+//! by default — an earlier revision of this comment claimed otherwise.)
 //!
 //! Hermetic by default: the `EmptySkillLoader` always returns "skill not
 //! found" (→ `Unknown skill:`). Production hosts inject a loader backed by the
@@ -379,19 +384,35 @@ impl SkillTool {
             })?,
         };
 
-        // Re-check across the spawn await window: a concurrent tool call can
-        // launch the same skill or exhaust the spawn budget while this one is
-        // in flight (claude re-runs both tests after its scoping write).
-        if let Some(reason) = crate::fork::recheck_after_persist(
+        // Re-check across the await window: a concurrent tool call can launch
+        // the same skill or exhaust the spawn budget while this one is in
+        // flight (claude re-runs both tests after its scoping write).
+        //
+        // The budget half RESERVES atomically rather than re-reading the
+        // counter. Read-then-increment lets two concurrent forks both observe
+        // `spawns < cap` and both spawn, overshooting the session cap; the
+        // reservation is compare-and-increment in one step. Released on every
+        // path that then declines to spawn, so a duplicate-loss does not burn
+        // budget.
+        let reserved = registry.try_reserve_total_agent_spawn(spawn_cap).is_ok();
+        if !reserved {
+            emit_failed(bus, crate::fork::InlineFallback::SpawnCap.reason(), 0).await;
+            return Ok(None);
+        }
+        if crate::fork::has_live_fork(
             &registry
                 .list(traits::task_registry::TaskListFilter::default())
                 .await
                 .unwrap_or_default(),
             command_name,
-            registry.get_total_agent_spawns(),
-            spawn_cap,
         ) {
-            emit_failed(bus, reason.reason(), 0).await;
+            registry.release_total_agent_spawn_reservation();
+            emit_failed(
+                bus,
+                crate::fork::InlineFallback::LiveDuplicate.reason(),
+                0,
+            )
+            .await;
             return Ok(None);
         }
 
@@ -429,6 +450,8 @@ impl SkillTool {
                 // A failed or killed fork surfaces as a tool error rather than
                 // silently reporting success with an empty result.
                 Ok(traits::subagent_spawn::SubagentResult::Failed { reason, .. }) => {
+                    // The spawn HAPPENED, so the reservation is correctly
+                    // consumed — only a fork that never launched releases it.
                     return Err(ToolError::Internal(format!(
                         "Skill {command_name} (forked execution) failed: {reason}"
                     )));
@@ -440,9 +463,11 @@ impl SkillTool {
                 }
                 // An unwired spawner falls back to inline — the skill still
                 // runs, just in this context.
-                Err(_) => return Ok(None),
+                Err(_) => {
+                    registry.release_total_agent_spawn_reservation();
+                    return Ok(None);
+                }
             };
-            registry.increment_total_agent_spawns();
             return Ok(Some(ToolCallResult {
                 data: crate::fork::fork_result(
                     command_name,
@@ -468,6 +493,7 @@ impl SkillTool {
             // write failed) falls back to inline rather than failing the call —
             // the skill still runs, just here.
             Err(_) => {
+                registry.release_total_agent_spawn_reservation();
                 emit_failed(
                     bus,
                     crate::fork::InlineFallback::ScopingWriteFailed.reason(),
@@ -477,7 +503,6 @@ impl SkillTool {
                 return Ok(None);
             }
         };
-        registry.increment_total_agent_spawns();
 
         let result_line = crate::fork::running_in_background_line(command_name);
         Ok(Some(ToolCallResult {

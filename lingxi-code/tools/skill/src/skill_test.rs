@@ -1386,6 +1386,10 @@ mod fork_dispatch_tests {
             self.spawns
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
+        fn release_total_agent_spawn_reservation(&self) {
+            self.spawns
+                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 
     struct NoBudget;
@@ -1653,6 +1657,62 @@ mod fork_dispatch_tests {
             .await
             .unwrap();
         assert_eq!(res.data["result"], json!("Skill execution completed"));
+    }
+
+
+    /// A fork that declines to launch must RELEASE its spawn reservation —
+    /// otherwise every duplicate invocation of a live fork would silently burn
+    /// a slot of the session's agent budget.
+    #[tokio::test]
+    async fn a_declined_fork_releases_its_spawn_reservation() {
+        let live = TaskRecord {
+            task_id: "a00000001".into(),
+            task_type: "local_agent".into(),
+            status: "running".into(),
+            forked_skill_name: Some("review".into()),
+            ..Default::default()
+        };
+        let registry = Arc::new(StubRegistry::new(vec![live]));
+        let spawner: Arc<RecordingSpawner> = Arc::default();
+        let mut ctx = shell_test_ctx(out());
+        ctx.subagent_spawner = Some(spawner.clone() as Arc<dyn SubagentSpawner>);
+        ctx.task_registry = Some(registry.clone());
+        ctx.budget_enforcer = Some(Arc::new(NoBudget));
+        let tool = SkillTool::with_loader(
+            ctx,
+            Arc::new(Loader(Some(fork_desc("review", None)))),
+        );
+
+        let res = tool
+            .call(json!({"skill": "review"}), ctx_with_registry(), fresh_tx())
+            .await
+            .expect("inline");
+        assert_eq!(res.data["status"], json!("inline"));
+        assert_eq!(
+            registry.get_total_agent_spawns(),
+            0,
+            "the duplicate-loser gave its reservation back"
+        );
+    }
+
+    /// A launched fork KEEPS its reservation — the slot really was consumed.
+    #[tokio::test]
+    async fn a_launched_fork_consumes_one_spawn() {
+        let registry = Arc::new(StubRegistry::new(vec![]));
+        let spawner: Arc<RecordingSpawner> = Arc::default();
+        let mut ctx = shell_test_ctx(out());
+        ctx.subagent_spawner = Some(spawner.clone() as Arc<dyn SubagentSpawner>);
+        ctx.task_registry = Some(registry.clone());
+        ctx.budget_enforcer = Some(Arc::new(NoBudget));
+        let tool = SkillTool::with_loader(
+            ctx,
+            Arc::new(Loader(Some(fork_desc("review", None)))),
+        );
+
+        tool.call(json!({"skill": "review"}), ctx_with_registry(), fresh_tx())
+            .await
+            .expect("fork");
+        assert_eq!(registry.get_total_agent_spawns(), 1);
     }
 
 }

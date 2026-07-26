@@ -917,7 +917,13 @@ impl TaskRegistry {
     pub async fn kill_with_reason(&self, task_id: &str, killed_by: &str) -> Result<(), TaskError> {
         let canonical = self.canonical_or_raw(task_id).await;
         if let Some(TaskState::LocalAgent(agent)) = self.tasks.write().await.get_mut(&canonical) {
-            agent.outcome.killed_by = Some(killed_by.to_string());
+            // Same reverse-race guard `kill` applies to the status: a task that
+            // already finished on its own is not "stopped by" anyone, and
+            // stamping one would leave a completed task carrying a stop
+            // initiator.
+            if !agent.base.status.is_terminal() {
+                agent.outcome.killed_by = Some(killed_by.to_string());
+            }
         }
         self.kill(task_id).await
     }

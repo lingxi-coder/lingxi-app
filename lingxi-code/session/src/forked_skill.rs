@@ -157,7 +157,11 @@ pub struct ForkedSkillMarker {
 /// forge a second line of a rendered message.
 #[must_use]
 pub fn is_valid_skill_name(name: &str) -> bool {
-    let len = name.chars().count();
+    // zod's `.min(1).max(256)` measures a JS string's `.length`, which counts
+    // UTF-16 CODE UNITS — an astral character (emoji, rare CJK) counts as two.
+    // `chars().count()` would count it as one and accept a name the oracle
+    // rejects, letting an over-long name reach the sidecar.
+    let len = name.encode_utf16().count();
     len >= 1 && len <= SKILL_NAME_MAX_LEN && !name.contains(['\r', '\n'])
 }
 
@@ -652,6 +656,13 @@ mod tests {
         assert!(is_valid_skill_name("ok"));
         assert!(is_valid_skill_name(&"x".repeat(SKILL_NAME_MAX_LEN)));
         assert!(!is_valid_skill_name(&"x".repeat(SKILL_NAME_MAX_LEN + 1)));
+        // The bound is UTF-16 code units (zod measures a JS string's
+        // `.length`), so an astral character counts as TWO. Counting chars
+        // would accept a name the oracle rejects.
+        assert!(is_valid_skill_name(&"\u{1F600}".repeat(SKILL_NAME_MAX_LEN / 2)));
+        assert!(!is_valid_skill_name(
+            &"\u{1F600}".repeat(SKILL_NAME_MAX_LEN / 2 + 1)
+        ));
         assert!(!is_valid_skill_name(""));
         // A newline in the name could forge a line of a rendered refusal.
         assert!(!is_valid_skill_name("a\nb"));

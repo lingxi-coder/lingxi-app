@@ -1756,6 +1756,40 @@ impl McpRegistry {
         out
     }
 
+    /// Every prompt advertised by a CONNECTED server, as
+    /// `(server_name, connection_id, prompt)`.
+    ///
+    /// Claude-code merges these into the slash-command list (`getAllCommands`
+    /// folding in `mcp.commands`), which is what makes an MCP prompt reachable
+    /// as `/<server>:<prompt>` and findable by the `Skill` tool. The registry
+    /// has always FETCHED them (`prompts/list` during `connect`, refreshed on
+    /// `notifications/prompts/list_changed`); nothing read them back.
+    ///
+    /// Only `Connected` servers contribute: a reconnecting or failed server's
+    /// last-known prompts would advertise commands that cannot be fetched.
+    /// Ordered by server name so the merged command list is deterministic.
+    pub async fn connected_prompts(
+        &self,
+    ) -> Vec<(String, protocol::McpConnectionId, traits::McpPromptDto)> {
+        let conns = self.connections.read().await;
+        let mut servers: Vec<&String> = conns.keys().collect();
+        servers.sort();
+        let mut out = Vec::new();
+        for name in servers {
+            if let Some(crate::connection::McpConnectionState::Connected {
+                connection_id,
+                prompts,
+                ..
+            }) = conns.get(name)
+            {
+                for prompt in prompts {
+                    out.push((name.clone(), *connection_id, prompt.clone()));
+                }
+            }
+        }
+        out
+    }
+
     /// Recover the RAW wire tool name for a model-facing MCP tool `full_name`.
     ///
     /// The model-facing `full_name` (`mcp__<normalize(server)>__<normalize(tool)>`,

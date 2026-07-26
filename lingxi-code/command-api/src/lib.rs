@@ -23,6 +23,7 @@ pub mod cd;
 pub mod describe;
 pub mod dispatcher;
 pub mod expand;
+pub mod mcp_prompts;
 pub mod markdown_loader;
 pub mod model;
 pub mod parser;

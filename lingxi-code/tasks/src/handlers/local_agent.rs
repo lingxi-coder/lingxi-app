@@ -475,10 +475,16 @@ impl Task for LocalAgentHandler {
                                 status_sink
                                     .set_status(&worker_task_id, TaskStatus::Running)
                                     .await;
+                                // Retain the LAST non-empty answer and its
+                                // usage. Guarding both on `is_some` keeps a
+                                // later result-less rest from blanking what an
+                                // earlier turn-set produced.
                                 if rest_result.is_some() {
                                     outcome.result = rest_result.clone();
                                 }
-                                outcome.usage = rest_usage.clone();
+                                if rest_usage.is_some() {
+                                    outcome.usage = rest_usage.clone();
+                                }
                                 status_sink
                                     .notify_rest(&worker_task_id, rest_result, rest_usage)
                                     .await;

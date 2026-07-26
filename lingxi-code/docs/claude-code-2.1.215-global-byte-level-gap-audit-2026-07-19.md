@@ -13,10 +13,19 @@
 **CLOSED（27）** — H-01…H-12 全部（H-01/02 见 2.1.216 §0 的 PTY/冷恢复关闭；H-03/04 settings 层级与 2 MiB；H-05 长命令强制 prompt；H-06/H-07 见上；H-08 `/goal` Stop hook；H-09 OTel exporter；H-10/11/12 marketplace policy 与 `name@marketplace` 身份），以及
 M-01（`apps/cli/src/lib.rs:404` `--brief`）、M-03（`load_merged_disable_agent_view`）、M-04（`startup_resources.rs` `--plugin-url`）、M-06（`events.rs:77` tool heartbeat）、M-07（single-writer 归 `run_stream_json_input_loop`）、M-08/M-09（`resume.rs:52` effort + compaction 冷恢复连续性）、M-10（`definition.rs:79` "Parsed, stored, and EXECUTED"）、M-11、M-12、M-13（`emit_api_retry` → `TurnEvent::ApiRetry`，`lib.rs:3912`）、M-14（`events.rs:340` `CommandsChanged`）、M-15（`load_merged_ask_user_question_timeout`，注释直接标注 M-15）、L-01、L-03。
 
-**仍开（3）**：
-- **M-02** — `SendMessage::is_enabled` 恒 `true`。代码里有明确理由（"swarm surface 在 Rust host 始终存在，mailbox seam 在场时接入"），属**有记录的分歧**而非疏漏；但无 mailbox router 时模型仍会看到一个调用即报 internal error 的工具。要么按 teammate context 收窄，要么把该理由升格为 accepted divergence。
-- **M-05** — `/reload-plugins` 不重新读取 `pluginConfigs`（options/secrets scope）。`manager.rs` 的 refresh 只 diff enabled set。
-- **L-02** — parity harness 基线陈旧（fixtures 锁在 `cc_2_1_198`，无 2.1.214/215 delta suite）。
+**仍开（1）** —— 下面两条在 2026-07-26 的后续核实中也已关闭：
+
+- **M-02 — CLOSED（本轮修复）**。`SendMessage::is_enabled` 现在返回
+  `self.ctx.mailbox_router.is_some()`。旧理由（"swarm surface 在 Rust host 始终存在"）
+  描述的是**类型存在**，不是 **seam 已接线** —— 两个不同的问题。没有 router 时
+  `call` 对每次调用都返回 `router_not_wired`，所以可用性现在与广告一致。
+- **M-05 — CLOSED（早已实现）**。`PluginRuntime::refresh`
+  （`engine-desktop/src/lib.rs:3664`）第一件事就是
+  `replace_plugin_configs(load_plugin_configs(&self.home).await)`。我上一轮的探针
+  用了 `reload.*plugin_configs` 这个模式，而调用写在 `self.manager` 上，两词不在同一行 ——
+  **又一次是 grep 模式而非代码路径给出的假阴性**。
+- **L-02** — parity harness 基线陈旧（fixtures 锁在 `cc_2_1_198`，无 2.1.214/215
+  delta suite）。**真实且仍开**；这是一份需要单独立项的 fixture 工程。
 
 M-13 的成因值得记：它是被一句**过期的注释**触发的 —— `retry_ux.rs` 的模块头一直写着 "not wired"，而接线早已存在。该注释已改正。
 

@@ -608,10 +608,20 @@ impl Tool for SendMessageTool {
         &SEND_MESSAGE_SCHEMA
     }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
-        // TS `isEnabled()` = `isAgentSwarmsEnabled()`. The swarm surface is
-        // always live in the Rust host (the mailbox seam is wired when present),
-        // so this is `true`.
-        true
+        // TS `isEnabled()` = `isAgentSwarmsEnabled()`, which binds the tool to a
+        // live team/teammate context.
+        //
+        // The port's equivalent of "there is a swarm to talk to" is a wired
+        // `MailboxRouterHandle`: without one, `call` cannot route at ALL and
+        // returns `router_not_wired` for every invocation. Advertising a tool
+        // that always errors costs the model a tool slot, some system-prompt
+        // budget, and at least one wasted call to discover it does not work —
+        // so the availability now matches the usability.
+        //
+        // (2.1.215 audit M-02. The previous rationale — "the swarm surface is
+        // always live in the Rust host" — described the TYPE being present, not
+        // the seam being wired, which are different questions.)
+        self.ctx.mailbox_router.is_some()
     }
     fn should_defer(&self) -> bool {
         // TS `shouldDefer: true`.
@@ -1616,4 +1626,19 @@ mod tests {
             other => panic!("expected Internal, got {other:?}"),
         }
     }
+
+    /// M-02: a session with NO mailbox router must not advertise `SendMessage`.
+    /// Without a router every call returns `router_not_wired`, so offering it
+    /// costs a tool slot, prompt budget and one wasted call to find that out.
+    #[tokio::test]
+    async fn send_message_is_disabled_without_a_mailbox_router() {
+        let ctx = shell_test_ctx(dummy_out());
+        assert!(
+            ctx.mailbox_router.is_none(),
+            "fixture precondition: no router wired"
+        );
+        let tool = SendMessageTool::new(ctx);
+        assert!(!tool.is_enabled(&ToolStaticContext::default()));
+    }
+
 }

@@ -311,6 +311,166 @@ pub async fn read_marker_skill_name(session_jsonl: &Path) -> Option<String> {
     }
 }
 
+/// A refusal to resume a forked-skill agent: the telemetry reason and the
+/// model-facing message, both byte-exact with claude-code.
+///
+/// Every one of these is a REFUSAL, not a warning. Resuming a forked skill
+/// without re-establishing its scoping would run it under the parent's
+/// permissions, which is strictly wider than what the fork was granted — so
+/// every ambiguous state fails closed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumeRefusal {
+    /// The `pe("subagent_launch", …)` reason string.
+    pub reason: &'static str,
+    /// The thrown message, with the agent label interpolated.
+    pub message: String,
+}
+
+/// Checks 1–5 of the resume gate: is there a scoping record, and does its
+/// identity corroborate?
+///
+/// The order is the binary's and it is behavioural — `Malformed` is checked
+/// before absence so an unreadable record can never be mistaken for "this
+/// agent never forked", and the task-record branch is checked before the
+/// cold branch so a hot resume reports the specific `_missing` reason rather
+/// than the colder `_missing_cold` one.
+///
+/// - `agent_label` is interpolated into the message (claude interpolates the
+///   agent id).
+/// - `task_forked_skill_name` is `Some` when a LIVE task record says this agent
+///   ran as that forked skill — the "hot" path. `None` covers both "no task
+///   record" (a cold resume from disk) and "a record that names no skill".
+/// - `marker_witness` is [`read_marker_skill_name`]'s answer, consulted only on
+///   the cold path.
+///
+/// `Ok(None)` means this is not a forked-skill agent at all and the resume may
+/// proceed unscoped. `Ok(Some(scoping))` means it is, and this is the scoping
+/// to re-establish — the caller must still run [`check_fork_capable`].
+pub fn check_scoping_provenance(
+    agent_label: &str,
+    status: &ScopingStatus,
+    task_forked_skill_name: Option<&str>,
+    marker_witness: Option<&str>,
+) -> Result<Option<ForkedSkillScoping>, ResumeRefusal> {
+    match status {
+        ScopingStatus::Malformed => Err(ResumeRefusal {
+            reason: "forked_skill_resume_scoping_invalid",
+            message: format!(
+                "Agent {agent_label} has a malformed forked-skill scoping record; refusing to resume it without the skill's permission scoping."
+            ),
+        }),
+        ScopingStatus::Absent | ScopingStatus::AbsentButMarked
+            if task_forked_skill_name.is_some() =>
+        {
+            // The task record says this agent IS a forked skill, and the record
+            // that says what it was scoped to is gone.
+            Err(ResumeRefusal {
+                reason: "forked_skill_resume_scoping_missing",
+                message: format!(
+                    "Agent {agent_label} ran as a forked skill but its scoping record is missing; refusing to resume it without the skill's permission scoping."
+                ),
+            })
+        }
+        ScopingStatus::AbsentButMarked => Err(ResumeRefusal {
+            reason: "forked_skill_resume_scoping_missing_cold",
+            message: format!(
+                "Agent {agent_label} carries a forked-skill provenance marker but its scoping record is missing; refusing to resume it without the skill's permission scoping."
+            ),
+        }),
+        // No record, no marker, no task claim — an ordinary agent.
+        ScopingStatus::Absent => Ok(None),
+        ScopingStatus::Valid(scoping) => {
+            match task_forked_skill_name {
+                // HOT: a live task record must name the SAME skill. A mismatch
+                // means the record on disk belongs to a different fork.
+                Some(name) => {
+                    if name != scoping.skill_name {
+                        return Err(ResumeRefusal {
+                            reason: "forked_skill_resume_scoping_mismatch",
+                            message: format!(
+                                "Agent {agent_label} has a forked-skill scoping record that does not match its task record; refusing to resume it."
+                            ),
+                        });
+                    }
+                }
+                // COLD: no live record to corroborate against, so the
+                // provenance marker is the only witness. A scoping record
+                // without a matching witness could have been planted.
+                None => {
+                    if marker_witness != Some(scoping.skill_name.as_str()) {
+                        return Err(ResumeRefusal {
+                            reason: "forked_skill_resume_cold_witness_mismatch",
+                            message: format!(
+                                "Agent {agent_label} has a forked-skill scoping record with no matching provenance-marker witness; refusing to resume it on a cold path without a corroborated fork identity."
+                            ),
+                        });
+                    }
+                }
+            }
+            Ok(Some((**scoping).clone()))
+        }
+    }
+}
+
+/// Check 6: the named skill must still resolve to a FORK-CAPABLE skill.
+///
+/// A skill that has been deleted, or edited to drop `context: fork`, no longer
+/// supplies the allow/deny lists the fork ran under — so there is nothing to
+/// re-establish and the resume refuses rather than falling back to the
+/// parent's permissions.
+///
+/// # Errors
+/// Returns the refusal when `fork_capable` is false.
+pub fn check_fork_capable(
+    agent_label: &str,
+    skill_name: &str,
+    fork_capable: bool,
+) -> Result<(), ResumeRefusal> {
+    if fork_capable {
+        return Ok(());
+    }
+    Err(ResumeRefusal {
+        reason: "forked_skill_resume_skill_unresolved",
+        message: format!(
+            "Agent {agent_label} ran as forked skill {skill_name}, which no longer resolves to a fork-capable skill; refusing to resume it without its permission scoping."
+        ),
+    })
+}
+
+/// Build the command deny list a resumed fork runs under (claude `Ofo`'s
+/// `frozenCommandDenies !== undefined` branch).
+///
+/// NOT YET APPLIED to a resumed fork's permission context. The frozen list is
+/// captured at launch, persisted in the scoping record, and read back by the
+/// resume gate — but the port routes a parked subagent's tool dispatch through
+/// the `SubagentInheritance` captured at spawn, and I have not verified whether
+/// that path re-reads live deny rules or a snapshot. Wiring this without
+/// knowing which would be a guess about a security boundary. The application
+/// point is the resumed agent's permission context; this function is the
+/// byte-faithful transform it needs.
+///
+/// Order is `frozen`, then `live`, then the skill's own `disallowed` —
+/// deduplicated, first occurrence winning. Putting the FROZEN rules first is
+/// the point: they were snapshotted when the fork launched, so a settings edit
+/// made while the fork was parked cannot remove a rule that was in force when
+/// it started. The live rules are unioned in rather than replaced, so denies
+/// added since the fork launched still apply — the set only ever grows.
+#[must_use]
+pub fn union_frozen_command_denies(
+    frozen: &[String],
+    live: &[String],
+    disallowed: &[String],
+) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(frozen.len() + live.len() + disallowed.len());
+    for rule in frozen.iter().chain(live).chain(disallowed) {
+        if seen.insert(rule.as_str()) {
+            out.push(rule.clone());
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -509,5 +669,146 @@ mod tests {
         assert!(rec.is_valid());
         rec.effort = Some(Effort::Steps(EFFORT_MAX + 1));
         assert!(!rec.is_valid());
+    }
+
+    // ── resume gate ─────────────────────────────────────────────────────────
+
+    fn valid(skill: &str) -> ScopingStatus {
+        ScopingStatus::Valid(Box::new(scoping(skill)))
+    }
+
+    /// An UNREADABLE scoping record is never mistaken for "this agent never
+    /// forked" — it is checked before absence, and it refuses.
+    #[test]
+    fn a_malformed_record_refuses_before_any_absence_check() {
+        let err = check_scoping_provenance("a1", &ScopingStatus::Malformed, None, None)
+            .expect_err("malformed refuses");
+        assert_eq!(err.reason, "forked_skill_resume_scoping_invalid");
+        assert_eq!(
+            err.message,
+            "Agent a1 has a malformed forked-skill scoping record; refusing to resume it without the skill's permission scoping."
+        );
+        // Even with a task record naming a skill, `Malformed` wins.
+        assert_eq!(
+            check_scoping_provenance("a1", &ScopingStatus::Malformed, Some("s"), None)
+                .unwrap_err()
+                .reason,
+            "forked_skill_resume_scoping_invalid"
+        );
+    }
+
+    /// A live task record says this agent IS a forked skill, and the scoping is
+    /// gone — the hot-path refusal, reported ahead of the colder one.
+    #[test]
+    fn a_task_record_naming_a_skill_with_no_scoping_refuses_as_missing() {
+        for status in [ScopingStatus::Absent, ScopingStatus::AbsentButMarked] {
+            let err = check_scoping_provenance("a1", &status, Some("review"), None).unwrap_err();
+            assert_eq!(err.reason, "forked_skill_resume_scoping_missing", "{status:?}");
+            assert_eq!(
+                err.message,
+                "Agent a1 ran as a forked skill but its scoping record is missing; refusing to resume it without the skill's permission scoping."
+            );
+        }
+    }
+
+    /// The marker outlives the scoping record precisely so that DELETING the
+    /// scoping is a refusal instead of an unscoped resume.
+    #[test]
+    fn a_marker_without_scoping_refuses_on_the_cold_path() {
+        let err =
+            check_scoping_provenance("a1", &ScopingStatus::AbsentButMarked, None, None).unwrap_err();
+        assert_eq!(err.reason, "forked_skill_resume_scoping_missing_cold");
+        assert_eq!(
+            err.message,
+            "Agent a1 carries a forked-skill provenance marker but its scoping record is missing; refusing to resume it without the skill's permission scoping."
+        );
+    }
+
+    /// An ordinary agent — no record, no marker, no task claim — resumes
+    /// normally. The gate must not become a tax on every resume.
+    #[test]
+    fn an_ordinary_agent_passes_the_gate() {
+        assert_eq!(
+            check_scoping_provenance("a1", &ScopingStatus::Absent, None, None).unwrap(),
+            None
+        );
+    }
+
+    /// HOT path: the task record and the scoping record must name the SAME
+    /// skill, or the record on disk belongs to a different fork.
+    #[test]
+    fn a_task_record_naming_a_different_skill_refuses_as_mismatch() {
+        let err = check_scoping_provenance("a1", &valid("review"), Some("deploy"), None)
+            .unwrap_err();
+        assert_eq!(err.reason, "forked_skill_resume_scoping_mismatch");
+        assert_eq!(
+            err.message,
+            "Agent a1 has a forked-skill scoping record that does not match its task record; refusing to resume it."
+        );
+    }
+
+    #[test]
+    fn a_matching_task_record_yields_the_scoping() {
+        let got = check_scoping_provenance("a1", &valid("review"), Some("review"), None).unwrap();
+        assert_eq!(got.map(|s| s.skill_name), Some("review".to_string()));
+    }
+
+    /// COLD path: with no live task record, the provenance marker is the only
+    /// witness. A scoping record whose witness disagrees — or is missing —
+    /// could have been planted, so it refuses.
+    #[test]
+    fn a_cold_resume_requires_a_matching_marker_witness() {
+        for witness in [None, Some("deploy")] {
+            let err = check_scoping_provenance("a1", &valid("review"), None, witness).unwrap_err();
+            assert_eq!(
+                err.reason, "forked_skill_resume_cold_witness_mismatch",
+                "{witness:?}"
+            );
+            assert_eq!(
+                err.message,
+                "Agent a1 has a forked-skill scoping record with no matching provenance-marker witness; refusing to resume it on a cold path without a corroborated fork identity."
+            );
+        }
+        // A witness that agrees corroborates the identity.
+        let got = check_scoping_provenance("a1", &valid("review"), None, Some("review")).unwrap();
+        assert_eq!(got.map(|s| s.skill_name), Some("review".to_string()));
+    }
+
+    /// A skill deleted, or edited to drop `context: fork`, no longer supplies
+    /// the lists the fork ran under, so there is nothing to re-establish.
+    #[test]
+    fn a_skill_that_is_no_longer_fork_capable_refuses() {
+        assert!(check_fork_capable("a1", "review", true).is_ok());
+        let err = check_fork_capable("a1", "review", false).unwrap_err();
+        assert_eq!(err.reason, "forked_skill_resume_skill_unresolved");
+        assert_eq!(
+            err.message,
+            "Agent a1 ran as forked skill review, which no longer resolves to a fork-capable skill; refusing to resume it without its permission scoping."
+        );
+    }
+
+    /// Frozen denies come FIRST and the live list is unioned in, not replaced:
+    /// a settings edit made while the fork was parked can ADD a deny but never
+    /// remove one that was in force at launch.
+    #[test]
+    fn the_deny_union_keeps_frozen_rules_and_only_grows() {
+        let frozen = vec!["Bash(rm:*)".to_string(), "Bash(curl:*)".to_string()];
+        let live = vec!["Bash(curl:*)".to_string(), "Bash(dd:*)".to_string()];
+        let disallowed = vec!["Write".to_string()];
+        assert_eq!(
+            union_frozen_command_denies(&frozen, &live, &disallowed),
+            vec!["Bash(rm:*)", "Bash(curl:*)", "Bash(dd:*)", "Write"]
+        );
+        // The rule the live settings dropped is still enforced.
+        assert!(union_frozen_command_denies(&frozen, &[], &[]).contains(&"Bash(rm:*)".to_string()));
+    }
+
+    #[test]
+    fn the_deny_union_dedupes_keeping_the_first_occurrence() {
+        let dup = vec!["A".to_string(), "A".to_string()];
+        assert_eq!(
+            union_frozen_command_denies(&dup, &dup, &dup),
+            vec!["A".to_string()]
+        );
     }
 }

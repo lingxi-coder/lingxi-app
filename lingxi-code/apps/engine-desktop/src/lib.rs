@@ -28,6 +28,7 @@
 
 mod agent_skill_loader;
 mod background_agent;
+pub mod fork_resume;
 mod connect;
 pub mod auto_mode_propose;
 pub mod file_changed_watch;
@@ -6373,6 +6374,17 @@ pub async fn build(
     // `getWorktreeResult` closure handed to the detached lifecycle).
     let worktree_manager: Arc<dyn traits::worktree::WorktreeManager> =
         Arc::new(PosixWorktreeManager::new(cwd.clone()));
+    // The forked-skill resume gate. Its skill resolver is bound LATER (the
+    // command registry does not exist yet — the same registration cycle the
+    // status sink solves); until then it reports "not fork-capable", which
+    // REFUSES rather than waving a forked skill through.
+    let fork_capable_skills = Arc::new(fork_resume::RegistryForkCapableSkills::new());
+    let fork_resume_gate = Arc::new(fork_resume::DesktopForkResumeGate {
+        session_dir: cfg.lingxi_home.join("projects").join(
+            session::jsonl::path::project_dir_name(&cfg.cwd.to_string_lossy()),
+        ),
+        skills: fork_capable_skills.clone() as Arc<dyn fork_resume::ForkCapableSkills>,
+    });
     task_registry_inner.register_handler(
         tasks::TaskType::LocalAgent,
         Arc::new(
@@ -6391,7 +6403,12 @@ pub async fn build(
                 local_agent_status_sink.clone() as Arc<dyn tasks::handlers::TaskStatusSink>
             )
             // Terminal keep/cleanup of a background agent's isolation worktree.
-            .with_worktree_manager(worktree_manager.clone()),
+            .with_worktree_manager(worktree_manager.clone())
+            // Refuse to resume a forked skill whose permission scoping cannot
+            // be re-established — resuming one unscoped would run it under the
+            // parent's (strictly wider) permissions.
+            .with_fork_resume_gate(fork_resume_gate.clone()
+                as Arc<dyn traits::fork_resume_gate::ForkResumeGate>),
         ),
     );
 
@@ -7013,6 +7030,11 @@ pub async fn build(
     // `build()` returns, so the loader never reads the empty registry.
     let shared_command_registry: Arc<RwLock<CommandRegistry>> =
         Arc::new(RwLock::new(CommandRegistry::new()));
+    // Bind the forked-skill resume gate's skill resolver to the SAME `Arc` that
+    // is filled with the real registry at (6). Binding the slot (not its
+    // contents) is what makes the deferral safe: the gate reads through it at
+    // resume time, long after it is populated.
+    fork_capable_skills.bind(shared_command_registry.clone());
     let plugin_output_style_registry =
         Arc::new(RwLock::new(outputstyles::OutputStyleRegistry::new()));
     // SKILLEXEC: the per-session id stamped onto every resolved skill descriptor

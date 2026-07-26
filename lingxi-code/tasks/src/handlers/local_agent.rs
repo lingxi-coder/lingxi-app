@@ -101,6 +101,16 @@ pub struct LocalAgentHandler {
     /// `task_id` → the resting agent's id, for `send_message` resume routing.
     /// Populated for a live persistent agent; removed when it terminates.
     agent_ids: Arc<Mutex<HashMap<String, AgentId>>>,
+    /// `task_id` → the SKILL this agent is, when a `context: fork` skill
+    /// launched it. The fork identity the resume gate corroborates against the
+    /// on-disk scoping record. Kept beside [`Self::agent_ids`] and torn down
+    /// with it.
+    fork_names: Arc<Mutex<HashMap<String, String>>>,
+    /// Consulted before a parked agent is resumed: a forked skill whose
+    /// permission scoping cannot be re-established must NOT resume under the
+    /// parent's (wider) permissions. `None` ⇒ no gate, which is correct for a
+    /// host that also cannot launch a forked skill.
+    fork_resume_gate: Option<Arc<dyn traits::fork_resume_gate::ForkResumeGate>>,
     /// Parent's tool invoker — passed through *unchanged* in
     /// [`SubagentInheritance`] (the recursion lock relies on `Arc::ptr_eq`).
     tool_invoker: Arc<dyn traits::ToolInvoker>,
@@ -151,6 +161,8 @@ impl LocalAgentHandler {
             spawner,
             streaming_spawner: None,
             agent_ids: Arc::new(Mutex::new(HashMap::new())),
+            fork_names: Arc::new(Mutex::new(HashMap::new())),
+            fork_resume_gate: None,
             tool_invoker,
             budget,
             output_manager,
@@ -190,6 +202,18 @@ impl LocalAgentHandler {
     #[must_use]
     pub fn with_status_sink(mut self, sink: Arc<dyn TaskStatusSink>) -> Self {
         self.status_sink = sink;
+        self
+    }
+
+    /// Wire the forked-skill resume gate. Without it, resuming a forked skill
+    /// would silently run it under the parent's (wider) permissions rather than
+    /// the scoping it was launched with.
+    #[must_use]
+    pub fn with_fork_resume_gate(
+        mut self,
+        gate: Arc<dyn traits::fork_resume_gate::ForkResumeGate>,
+    ) -> Self {
+        self.fork_resume_gate = Some(gate);
         self
     }
 
@@ -280,6 +304,13 @@ impl Task for LocalAgentHandler {
         // 3. Preserve the complete background Agent request (model/cwd/context/
         //    isolation/schema/depth and more). Direct TaskCreate-style callers
         //    lack that payload, so only they use the compact legacy fallback.
+        // The fork identity travels on the full spawn request, not the compact
+        // task-index fields — a forked skill is dispatched through the same
+        // `SubagentSpawnRequest` as any background agent. Read BEFORE the
+        // request is consumed below.
+        let fork_name = spawn_request
+            .as_ref()
+            .and_then(|r| r.forked_skill_name.clone());
         let request = spawn_request.unwrap_or_else(|| SubagentSpawnRequest {
             subagent_type,
             prompt,
@@ -341,6 +372,7 @@ impl Task for LocalAgentHandler {
         let worker_task_id = task_id.clone();
         let streaming = self.streaming_spawner.clone();
         let agent_ids = self.agent_ids.clone();
+        let fork_names = self.fork_names.clone();
         let worker: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
             if is_backgrounded && streaming.is_some() {
                 // ── PERSISTENT / resumable path (local_agent "comes to rest"). ──
@@ -383,6 +415,9 @@ impl Task for LocalAgentHandler {
                         .lock()
                         .await
                         .insert(worker_task_id.clone(), agent_id);
+                    if let Some(name) = fork_name.clone() {
+                        fork_names.lock().await.insert(worker_task_id.clone(), name);
+                    }
                     // The MOST RECENT turn-set's answer + usage. A persistent
                     // agent reports once per rest and then parks; when it finally
                     // terminates, the last rest IS its final response, so the
@@ -494,6 +529,7 @@ impl Task for LocalAgentHandler {
                         .set_status(&worker_task_id, terminal_status)
                         .await;
                     agent_ids.lock().await.remove(&worker_task_id);
+                    fork_names.lock().await.remove(&worker_task_id);
                     workers.lock().await.remove(&worker_task_id);
                 })
             } else {
@@ -728,6 +764,17 @@ impl Task for LocalAgentHandler {
             .get(task_id)
             .copied()
             .ok_or(TaskError::TerminatedTask)?;
+        // Resuming a parked agent re-enters it with the permissions of whatever
+        // is wired NOW. For a forked skill that is the parent's scoping, which
+        // is strictly wider than the skill's — so the gate re-establishes (or
+        // refuses) before the message can reach the runner. Every ambiguous
+        // on-disk state refuses.
+        if let Some(gate) = &self.fork_resume_gate {
+            let fork_name = self.fork_names.lock().await.get(task_id).cloned();
+            gate.check_resume(agent_id, fork_name.as_deref())
+                .await
+                .map_err(TaskError::Internal)?;
+        }
         streaming
             .resume(&agent_id, message)
             .await
@@ -2337,4 +2384,183 @@ mod tests {
         assert_eq!(handler.task_type(), TaskType::LocalAgent);
         assert!(!handler.supports_messages());
     }
+
+    // ── forked-skill resume gate ─────────────────────────────────────────────
+
+    /// A gate that refuses everything, recording what it was asked about.
+    struct RefusingGate {
+        seen: StdMutex<Vec<Option<String>>>,
+    }
+    #[async_trait]
+    impl traits::fork_resume_gate::ForkResumeGate for RefusingGate {
+        async fn check_resume(
+            &self,
+            _agent_id: protocol::AgentId,
+            task_forked_skill_name: Option<&str>,
+        ) -> Result<(), String> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(task_forked_skill_name.map(str::to_string));
+            Err("refusing to resume it without the skill's permission scoping.".into())
+        }
+    }
+
+    struct AllowingGate {
+        seen: StdMutex<Vec<Option<String>>>,
+    }
+    #[async_trait]
+    impl traits::fork_resume_gate::ForkResumeGate for AllowingGate {
+        async fn check_resume(
+            &self,
+            _agent_id: protocol::AgentId,
+            task_forked_skill_name: Option<&str>,
+        ) -> Result<(), String> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(task_forked_skill_name.map(str::to_string));
+            Ok(())
+        }
+    }
+
+    /// Drive a persistent agent to rest, then attempt a resume.
+    async fn parked_fork_agent(
+        fs: Arc<dyn FileSystem>,
+        mgr: Arc<TaskOutputManager>,
+        sink: Arc<RecordingSink>,
+        gate: Arc<dyn traits::fork_resume_gate::ForkResumeGate>,
+        fork_name: Option<&str>,
+    ) -> (LocalAgentHandler, String, Arc<std::sync::atomic::AtomicUsize>) {
+        let tx_slot: Arc<StdMutex<Option<tokio::sync::mpsc::Sender<SubagentEvent>>>> =
+            Arc::new(StdMutex::new(None));
+        let resume_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let streaming = MockStreamingSpawner::new(tx_slot.clone(), resume_count.clone());
+        let handler = make_handler(MockSpawner::new(CannedResult::Pending), mgr, sink)
+            .with_streaming_spawner(streaming)
+            .with_fork_resume_gate(gate);
+
+        let mut input = local_agent_input("start");
+        if let TaskSpawnInput::LocalAgent { spawn_request, .. } = &mut input {
+            let mut req = request_with_worktree("start");
+            req.worktree = None;
+            req.forked_skill_name = fork_name.map(str::to_string);
+            *spawn_request = Some(req);
+        }
+        let handle = handler
+            .spawn(input, make_ctx(fs))
+            .await
+            .expect("spawn should succeed");
+
+        // Wait for the persistent worker to register its agent id.
+        for _ in 0..400 {
+            if tx_slot.lock().unwrap().is_some() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        (handler, handle.task_id, resume_count)
+    }
+
+    /// A refused resume never reaches the runner. This is the security
+    /// property: a forked skill whose scoping cannot be re-established must not
+    /// re-enter under the parent's (strictly wider) permissions.
+    #[tokio::test]
+    async fn a_refused_fork_resume_never_reaches_the_runner() {
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let (_dir, mgr) = make_output_manager(fs.clone());
+        let sink = Arc::new(RecordingSink::default());
+        let gate = Arc::new(RefusingGate {
+            seen: StdMutex::new(Vec::new()),
+        });
+        let (handler, task_id, resume_count) = parked_fork_agent(
+            fs.clone(),
+            mgr,
+            sink,
+            gate.clone() as Arc<dyn traits::fork_resume_gate::ForkResumeGate>,
+            Some("review"),
+        )
+        .await;
+
+        let err = handler
+            .send_message(&task_id, "keep going".into(), make_ctx(fs))
+            .await
+            .expect_err("the gate refuses");
+        assert!(
+            format!("{err:?}").contains("permission scoping"),
+            "the refusal message surfaces: {err:?}"
+        );
+        assert_eq!(
+            resume_count.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the message never reached the runner"
+        );
+        // The gate was told WHICH skill, so it can corroborate against the
+        // on-disk record.
+        assert_eq!(
+            gate.seen.lock().unwrap().as_slice(),
+            &[Some("review".to_string())]
+        );
+    }
+
+    /// An allowed resume proceeds, and an agent that never forked is reported
+    /// to the gate as `None` — the gate must not be a tax on ordinary agents.
+    #[tokio::test]
+    async fn an_allowed_resume_proceeds_and_a_non_fork_reports_no_identity() {
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let (_dir, mgr) = make_output_manager(fs.clone());
+        let sink = Arc::new(RecordingSink::default());
+        let gate = Arc::new(AllowingGate {
+            seen: StdMutex::new(Vec::new()),
+        });
+        let (handler, task_id, resume_count) = parked_fork_agent(
+            fs.clone(),
+            mgr,
+            sink,
+            gate.clone() as Arc<dyn traits::fork_resume_gate::ForkResumeGate>,
+            None,
+        )
+        .await;
+
+        handler
+            .send_message(&task_id, "keep going".into(), make_ctx(fs))
+            .await
+            .expect("the gate allows");
+        assert_eq!(
+            resume_count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the message reached the runner"
+        );
+        assert_eq!(gate.seen.lock().unwrap().as_slice(), &[None]);
+    }
+
+    /// A host with NO gate wired resumes as before — the seam is additive.
+    #[tokio::test]
+    async fn an_unwired_gate_leaves_resume_untouched() {
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let (_dir, mgr) = make_output_manager(fs.clone());
+        let sink = Arc::new(RecordingSink::default());
+        let tx_slot: Arc<StdMutex<Option<tokio::sync::mpsc::Sender<SubagentEvent>>>> =
+            Arc::new(StdMutex::new(None));
+        let resume_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let streaming = MockStreamingSpawner::new(tx_slot.clone(), resume_count.clone());
+        let handler = make_handler(MockSpawner::new(CannedResult::Pending), mgr, sink)
+            .with_streaming_spawner(streaming);
+        let handle = handler
+            .spawn(local_agent_input("start"), make_ctx(fs.clone()))
+            .await
+            .unwrap();
+        for _ in 0..400 {
+            if tx_slot.lock().unwrap().is_some() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        handler
+            .send_message(&handle.task_id, "go".into(), make_ctx(fs))
+            .await
+            .expect("no gate ⇒ resume proceeds");
+        assert_eq!(resume_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
 }

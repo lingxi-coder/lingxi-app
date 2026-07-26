@@ -1,0 +1,67 @@
+# What is actually left, 2026-07-26
+
+`main` @ `406f35cec`. Every audit backlog in `docs/` has been swept at the
+behaviour sites; this is the residue, with the blocker named for each so the
+next session starts from execution rather than re-derivation.
+
+Ordered by what I would do first.
+
+## 1. 2.1.220 BEHAVIOUR audit — the real remaining work
+
+Everything done so far compares SURFACE (does the flag/command exist). Nobody
+has compared what a flag DOES. Two sides can advertise `--scope` and write to
+different tiers.
+
+Start with `scripts/parity_surface.py` — it self-verifies its traversal and
+refuses to report a broken walk — then, per command, construct inputs and
+compare outputs against the oracle.
+
+**Method warning, earned three times this session:** a generated absence looks
+identical whether the probe worked or not. Confirm every candidate at the call
+site (`<cli> <sub> --help`, or the code path) before recording it. A one-level
+walk produced 39 phantom flag gaps; a grep for two identifiers that never share
+a line reported a wired feature as missing; a `--help` comparison read the ROOT
+help as 20 subcommands' descriptions because an unrecognised path silently
+falls back to it.
+
+## 2. `login --id-token <jwt>` — blocked on a missing seam
+
+2.1.220 writes a pre-obtained id_token straight to cache, skipping the OIDC
+browser round-trip (headless/CI enterprise auth). This port has **no id_token
+cache**: repo-wide, `id_token` appears only as a JWT the OAuth handles DECODE
+and as a redaction key, never as stored state.
+
+Build the storage seam first. The flag is deliberately NOT added — the reason
+is recorded at the `LoginArgs` definition, because a flag that parses and does
+nothing advertises a path that does not exist.
+
+## 3. `xaa` — the XAA (SEP-990) IdP connection subsystem
+
+Absent as a concept. `xaa setup` / `login` / `show` / `clear` manage an IdP
+connection so XAA-enabled MCP servers authenticate silently. Not investigated
+beyond its command surface; scope unknown.
+
+## 4. `--help` TEXT layout
+
+A known accepted divergence from the 2.1.216 audit, not a new finding. Listed
+so it is not re-discovered as one.
+
+## Two decisions, not fixes
+
+- **`doctor` description** diverges beyond branding: the port additionally
+  warns that stdio servers from `.mcp.json` are spawned. That is more
+  informative than the oracle's text. Keep or align — a product call.
+- **Remote-session client** (`useRemoteSession`, the
+  `tengu_refusal_retraction_*` family) is an accepted divergence: no Anthropic
+  private relay / auth contract. If that ever changes, note that `fzf` applies
+  a retraction signal ONLY when `event.source === "worker"` — a trust boundary,
+  since an unauthenticated retraction can erase history.
+
+## The rule this session kept re-learning
+
+A comment or backlog heading that asserts a fact about OTHER code becomes a lie
+the moment that code moves. Four false findings this session traced to exactly
+that — including 2.1.215's M-13, where an auditor read a stale module doc
+saying a surface was "not wired" and filed a gap against working code.
+
+When deferring, point at the code; do not restate what it does.

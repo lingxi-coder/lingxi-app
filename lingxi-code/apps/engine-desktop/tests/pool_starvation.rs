@@ -232,6 +232,10 @@ fn agent_tool_request() -> SubagentSpawnRequest {
         additional_disallowed_tools: Vec::new(),
         depth: 0,
         parent_model_override: None,
+        forked_skill_name: None,
+            forked_skill_attribution: None,
+            forked_skill_effort: None,
+            frozen_command_denies: Vec::new(),
     }
 }
 

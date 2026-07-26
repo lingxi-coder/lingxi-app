@@ -6668,6 +6668,13 @@ pub async fn build(
             registry: task_registry.clone(),
             mailbox_router: coordinator.mailbox_router.clone(),
             runtime: Arc::new(PosixRuntime::new()) as Arc<dyn traits::RuntimeSpawner>,
+            // Where a forked skill's scoping sidecars land — beside the
+            // background agent's own transcript, in this project's session
+            // directory (the same `projects/<sanitized-cwd>/` dir
+            // `session_path` writes transcripts to).
+            session_dir: Some(cfg.lingxi_home.join("projects").join(
+                session::jsonl::path::project_dir_name(&cfg.cwd.to_string_lossy()),
+            )),
         });
 
     // (/sandbox) One shared fast-toggle cell, seeded from the config's

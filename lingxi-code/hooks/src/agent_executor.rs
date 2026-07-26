@@ -105,6 +105,10 @@ impl AgentExecutor {
             depth: 0,
             // Top-level spawn ⇒ the spawner's own default model anchors resolution.
             parent_model_override: None,
+            forked_skill_name: None,
+            forked_skill_attribution: None,
+            forked_skill_effort: None,
+            frozen_command_denies: Vec::new(),
             subagent_type: agent_type.to_string(),
             prompt: format!("{prompt_template}\n\n{payload_json}"),
             context_paths: Vec::new(),

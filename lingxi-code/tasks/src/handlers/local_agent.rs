@@ -306,6 +306,10 @@ impl Task for LocalAgentHandler {
             additional_disallowed_tools: Vec::new(),
             depth: 0,
             parent_model_override: None,
+            forked_skill_name: None,
+            forked_skill_attribution: None,
+            forked_skill_effort: None,
+            frozen_command_denies: Vec::new(),
         });
 
         // 4. Preserve the immediate parent's registry/budget handles. Root
@@ -1044,6 +1048,10 @@ mod tests {
             additional_disallowed_tools: Vec::new(),
             depth: 1,
             parent_model_override: None,
+            forked_skill_name: None,
+            forked_skill_attribution: None,
+            forked_skill_effort: None,
+            frozen_command_denies: Vec::new(),
         }
     }
 
@@ -2241,6 +2249,10 @@ mod tests {
             additional_disallowed_tools: vec!["Bash".into()],
             depth: 3,
             parent_model_override: Some("claude-opus-4-6".into()),
+            forked_skill_name: None,
+            forked_skill_attribution: None,
+            forked_skill_effort: None,
+            frozen_command_denies: Vec::new(),
         };
         let input = TaskSpawnInput::LocalAgent {
             agent_id: protocol::AgentId::new(),

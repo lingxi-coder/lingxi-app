@@ -18,16 +18,24 @@
 //! - Output (inline path) mirrors the TS inline output union (TS `:301-326`):
 //!   `{success:true, commandName, allowedTools?, model?, status:"inline"}`.
 //!
-//! ## Biggest non-faithful surface
-//! The entire **forked-agent execution** path (TS `executeForkedSkill` →
-//! `runAgent`, `prepareForkedCommandContext`, progress streaming,
-//! `createAgentId`), MCP-skill discovery (`getAllCommands` merging
-//! `mcp.commands`), remote canonical skills (`EXPERIMENTAL_SKILL_SEARCH`), and
-//! frontmatter parsing have **no Rust substrate**. This tool performs *inline
-//! resolution + metadata surfacing only*: it loads a descriptor, enforces the
-//! locked rejections, and echoes the skill's `model`/`allowedTools`. `args` is
-//! accepted but never expanded into a prompt. The descriptor `body` rides along
-//! as an extra field (Rust's pragmatic substitute for actually forking).
+//! ## `context: fork`
+//! A skill declaring `context: fork` does NOT expand inline. It launches a
+//! background subagent under the skill's own permission scoping (persisted to
+//! the scoping sidecars so a later resume can re-establish it — see
+//! `session::forked_skill`) and returns a handle instead of the body. The
+//! decision logic — the background predicate, the caps, the one-live-fork-per-
+//! skill guard, and the result shapes — lives in [`crate::fork`].
+//!
+//! Every guard degrades to the INLINE path rather than failing the call, which
+//! is claude's own behaviour: a skill that cannot fork still runs, just here.
+//! The one exception is the depth-chain cap, which is a hard error.
+//!
+//! ## Remaining non-faithful surface
+//! The SYNCHRONOUS fork (claude's `background: false` branch, which drives a
+//! whole subagent turn loop inside the tool call) has no substrate here, so
+//! that case runs inline. MCP-skill discovery (`getAllCommands` merging
+//! `mcp.commands`) and remote canonical skills (`EXPERIMENTAL_SKILL_SEARCH`)
+//! are also unported.
 //!
 //! Hermetic by default: the `EmptySkillLoader` always returns "skill not
 //! found" (→ `Unknown skill:`). Production hosts inject a loader backed by the
@@ -117,6 +125,16 @@ pub struct SkillDescriptor {
     /// `!command` blocks can reference bundled scripts
     /// (`loadSkillsDir.ts:359-363`).
     pub skill_root: Option<std::path::PathBuf>,
+    /// Execution context from the frontmatter: `Some("fork")` runs the skill as
+    /// a subagent under its own permission scoping instead of expanding it
+    /// inline. Anything else (including `None`) is inline.
+    pub context: Option<String>,
+    /// Whether a forking skill runs in the BACKGROUND. `None` ⇒ background (the
+    /// claude default); see `crate::fork::should_background_fork`.
+    pub background: Option<bool>,
+    /// The agent type a forking skill spawns (frontmatter `agent`). `None` ⇒
+    /// the `general-purpose` fallback.
+    pub agent: Option<String>,
     /// The current session id, surfaced to substitute `${LINGXI_SESSION_ID}` in
     /// the body (TS `getSessionId()`, `loadSkillsDir.ts:366-369`). `None` for
     /// hermetic/loaderless construction (the token is then left as-is); the
@@ -147,6 +165,9 @@ impl Default for SkillDescriptor {
             shell: None,
             skip_shell_expansion: false,
             skill_root: None,
+            context: None,
+            background: None,
+            agent: None,
             session_id: None,
             dynamic_body: None,
         }
@@ -219,6 +240,186 @@ impl SkillTool {
             prompt_shell,
         }
     }
+
+    /// Attempt the `context: fork` path.
+    ///
+    /// `Ok(None)` means "run inline instead" — every guard except the
+    /// depth-chain cap degrades that way, and so does a host with no spawner or
+    /// task registry wired. `Ok(Some(result))` is a launched fork.
+    ///
+    /// Only the BACKGROUND fork is implemented as a fork: the synchronous
+    /// variant would have to drive a whole subagent turn loop inside this tool
+    /// call, which this tool has no substrate for. Rather than pretend, a
+    /// skill that opts out of background (or a session with background tasks
+    /// disabled) runs INLINE — the same content, in this context, which is the
+    /// honest degradation. Claude's own predicate already routes several cases
+    /// that way.
+    async fn try_fork(
+        &self,
+        bus: &Arc<AnalyticsBus>,
+        ctx: &ToolUseContext,
+        desc: &SkillDescriptor,
+        command_name: &str,
+        prompt: &str,
+    ) -> Result<Option<ToolCallResult>, ToolError> {
+        let (Some(spawner), Some(registry)) = (
+            self.ctx.subagent_spawner.as_ref(),
+            self.ctx.task_registry.as_ref(),
+        ) else {
+            return Ok(None);
+        };
+        let background_tasks_disabled = traits::env::is_env_truthy(
+            std::env::var("LINGXI_DISABLE_BACKGROUND_TASKS")
+                .ok()
+                .as_deref(),
+        );
+        if !crate::fork::should_background_fork(
+            desc.background,
+            false,
+            background_tasks_disabled,
+            ctx.depth > 0,
+        ) {
+            return Ok(None);
+        }
+
+        let tasks = registry
+            .list(traits::task_registry::TaskListFilter::default())
+            .await
+            .unwrap_or_default();
+        let spawn_cap = max_subagents_per_session();
+        let inputs = crate::fork::ForkLaunchInputs {
+            skill_name: command_name,
+            attribution_name: command_name,
+            // `SkillDescriptor` carries no effort today; the sidecar's
+            // `effort` key stays absent, which is claude's shape for a skill
+            // that declares none.
+            effort: None,
+            // The freeze itself is the caller's to supply; an empty list writes
+            // no key, which is claude's shape for "nothing frozen".
+            frozen_command_denies: Vec::new(),
+            depth: ctx.depth as usize + 1,
+            depth_limit: traits::subagent_spawn::max_subagent_spawn_depth() as usize,
+            total_spawns: registry.get_total_agent_spawns(),
+            spawn_cap,
+            tasks: &tasks,
+        };
+        let scoping = match crate::fork::decide_fork_launch(&inputs) {
+            crate::fork::ForkDecision::Launch(s) => s,
+            crate::fork::ForkDecision::Inline(reason) => {
+                emit_failed(bus, reason.reason(), 0).await;
+                return Ok(None);
+            }
+            crate::fork::ForkDecision::DepthChainCap { spawned, cap } => {
+                emit_failed(bus, "forked_skill_depth_chain_cap", 0).await;
+                return Err(ToolError::InvalidInput(
+                    crate::fork::depth_chain_cap_message(spawned, cap),
+                ));
+            }
+        };
+
+        let request = traits::subagent_spawn::SubagentSpawnRequest {
+            subagent_type: desc
+                .agent
+                .clone()
+                .unwrap_or_else(|| "general-purpose".to_string()),
+            prompt: prompt.to_string(),
+            description: Some(format!("/{command_name}")),
+            model: desc.model.clone(),
+            run_in_background: true,
+            // The `SendMessage` handle AND the fork identity: the launch is
+            // announced as `@<skill>`, and the identity is what the resume gate
+            // corroborates against the scoping record on disk.
+            name: Some(command_name.to_string()),
+            forked_skill_name: Some(scoping.skill_name.clone()),
+            forked_skill_attribution: Some(scoping.attribution_name.clone()),
+            forked_skill_effort: None,
+            frozen_command_denies: scoping.frozen_command_denies.clone().unwrap_or_default(),
+            depth: ctx.depth + 1,
+            context_paths: Vec::new(),
+            model_profile: None,
+            team_name: None,
+            creator_teammate_name: None,
+            creator_team_name: None,
+            mode: None,
+            isolation: None,
+            cwd: None,
+            worktree: None,
+            fork_context_messages: None,
+            fork_parent_system_prompt: None,
+            schema: None,
+            effort: None,
+            tool_use_id: ctx.tool_use_id.as_ref().map(ToString::to_string),
+            system_prompt_override: None,
+            system_prompt_addendum: None,
+            additional_disallowed_tools: Vec::new(),
+            parent_model_override: None,
+        };
+        let inherit = traits::subagent_spawn::SubagentInheritance {
+            tool_invoker: Arc::new(tool_api::tool_invoker_impl::RegistryToolInvoker::new(
+                ctx.subagent_registry.clone().ok_or_else(|| {
+                    ToolError::Internal("Skill: subagent tool registry is not configured".into())
+                })?,
+            )),
+            budget: self.ctx.budget_enforcer.clone().ok_or_else(|| {
+                ToolError::Internal("Skill: budget enforcer is not configured".into())
+            })?,
+        };
+
+        // Re-check across the spawn await window: a concurrent tool call can
+        // launch the same skill or exhaust the spawn budget while this one is
+        // in flight (claude re-runs both tests after its scoping write).
+        if let Some(reason) = crate::fork::recheck_after_persist(
+            &registry
+                .list(traits::task_registry::TaskListFilter::default())
+                .await
+                .unwrap_or_default(),
+            command_name,
+            registry.get_total_agent_spawns(),
+            spawn_cap,
+        ) {
+            emit_failed(bus, reason.reason(), 0).await;
+            return Ok(None);
+        }
+
+        let launch = match spawner.spawn_async(request, inherit).await {
+            Ok(l) => l,
+            // A spawner that cannot background (unwired seam, or the scoping
+            // write failed) falls back to inline rather than failing the call —
+            // the skill still runs, just here.
+            Err(_) => {
+                emit_failed(
+                    bus,
+                    crate::fork::InlineFallback::ScopingWriteFailed.reason(),
+                    0,
+                )
+                .await;
+                return Ok(None);
+            }
+        };
+        registry.increment_total_agent_spawns();
+
+        let result_line = crate::fork::running_in_background_line(command_name);
+        Ok(Some(ToolCallResult {
+            data: crate::fork::fork_result(
+                command_name,
+                &launch.agent_id.to_string(),
+                true,
+                &result_line,
+            ),
+            model_content: Some(crate::fork::fork_tool_result_text(
+                command_name,
+                true,
+                &result_line,
+            )),
+            // A forked skill injects NOTHING into this conversation — that is
+            // the whole point of forking. The inline path's `new_messages` is
+            // what this replaces.
+            new_messages: Vec::new(),
+            context_modifier: None,
+            is_error: false,
+            mcp_meta: None,
+        }))
+    }
 }
 
 static SCHEMA: Lazy<Value> = Lazy::new(|| {
@@ -237,6 +438,18 @@ static SCHEMA: Lazy<Value> = Lazy::new(|| {
         "required": ["skill"]
     })
 });
+
+/// The per-session subagent spawn cap (claude 2.1.212 `xtu()` =
+/// `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION ?? 200`). Duplicated from the Agent
+/// tool rather than shared: both read the same env var, and `tool-skill` does
+/// not depend on `tool-agent`. An unset or unparseable value falls back to the
+/// default, so a garbage env string cannot silently disable the cap.
+fn max_subagents_per_session() -> u64 {
+    std::env::var("CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(200)
+}
 
 fn pii_str(s: &str) -> AnalyticsValue {
     AnalyticsValue::String(PiiTagged::assert_pii_tagged_column(s.to_string()).into_inner())
@@ -428,7 +641,7 @@ ALREADY been loaded - follow the instructions directly instead of calling this t
     async fn call(
         &self,
         input: Value,
-        _ctx: ToolUseContext,
+        ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let started = Instant::now();
@@ -674,6 +887,27 @@ ALREADY been loaded - follow the instructions directly instead of calling this t
             };
             expanded_prompt =
                 format!("Base directory for this skill: {skill_dir}\n\n{expanded_prompt}");
+        }
+
+        // ── `context: fork` ─────────────────────────────────────────────────
+        // A forking skill does not expand into this conversation. It runs as a
+        // subagent under its OWN permission scoping, normally in the
+        // background, and this call returns a handle instead of the body.
+        //
+        // Every guard below degrades to the inline path rather than failing the
+        // call (claude returns `null` from its launch helper and falls through),
+        // with one exception: past the nesting cap AND out of spawn budget is a
+        // hard error, because running inline there would hide an exhausted
+        // chain from the model.
+        if crate::fork::declares_fork(desc.context.as_deref())
+            && crate::fork::is_forkable_skill_name(&command_name)
+        {
+            if let Some(res) = self
+                .try_fork(&bus, &ctx, &desc, &command_name, &expanded_prompt)
+                .await?
+            {
+                return Ok(res);
+            }
         }
 
         // P2-12 / `zSr(e.name,u,d,r.agentId??null)`: record this invocation in

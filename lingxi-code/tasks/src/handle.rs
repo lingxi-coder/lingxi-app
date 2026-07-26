@@ -98,16 +98,17 @@ fn state_to_record(s: &TaskState) -> TaskRecord {
     // carries `name` (← `workflow_id`); `monitor_mcp` carries only `server`
     // (`MonitorMcpTaskState` watches resources, not one tool), while `mcp_task`
     // (`McpTaskState`) carries BOTH `server` and `tool`.
-    let (agent_type, server, tool, name, is_backgrounded) = match s {
+    let (agent_type, server, tool, name, is_backgrounded, forked_skill_name) = match s {
         TaskState::LocalAgent(a) => (
             Some(a.subagent_type.clone()),
             None,
             None,
             None,
             Some(a.is_backgrounded),
+            a.forked_skill_name.clone(),
         ),
-        TaskState::MonitorMcp(m) => (None, Some(m.server_name.clone()), None, None, None),
-        TaskState::Monitor(_) => (None, None, None, None, None),
+        TaskState::MonitorMcp(m) => (None, Some(m.server_name.clone()), None, None, None, None),
+        TaskState::Monitor(_) => (None, None, None, None, None, None),
         // `mcp_task` surfaces BOTH the server and the single tool it detached
         // (claude-code `Lic` `switch(n.type)`), unlike `monitor_mcp`.
         TaskState::McpTask(m) => (
@@ -116,9 +117,10 @@ fn state_to_record(s: &TaskState) -> TaskRecord {
             Some(m.tool_name.clone()),
             None,
             None,
+            None,
         ),
-        TaskState::LocalWorkflow(w) => (None, None, None, Some(w.workflow_id.clone()), None),
-        _ => (None, None, None, None, None),
+        TaskState::LocalWorkflow(w) => (None, None, None, Some(w.workflow_id.clone()), None, None),
+        _ => (None, None, None, None, None, None),
     };
     TaskRecord {
         task_id: b.id.clone(),
@@ -130,6 +132,7 @@ fn state_to_record(s: &TaskState) -> TaskRecord {
         server,
         tool,
         name,
+        forked_skill_name,
         is_backgrounded,
     }
 }
@@ -861,6 +864,7 @@ mod tests {
                 pending_messages: vec![],
                 is_backgrounded: true,
                 outcome: Default::default(),
+                forked_skill_name: None,
             });
             registry.insert_state_for_test(state).await;
 
@@ -1041,6 +1045,7 @@ mod tests {
             pending_messages: vec![],
             is_backgrounded: true,
             outcome: Default::default(),
+            forked_skill_name: None,
         });
         registry.insert_state_for_test(state).await;
 

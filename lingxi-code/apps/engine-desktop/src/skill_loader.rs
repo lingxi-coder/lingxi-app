@@ -57,6 +57,11 @@ fn to_descriptor(cmd: &SlashCommand, session_id: Option<&str>) -> SkillDescripto
             // 'mcp'`), so shell expansion runs for these commands.
             skip_shell_expansion: false,
             skill_root: cmd.skill_root.clone(),
+            // Forked-skill declarations from the markdown frontmatter — these
+            // are what make `context: fork` reach the Skill tool at all.
+            context: frontmatter.context.clone(),
+            background: frontmatter.background,
+            agent: frontmatter.agent.clone(),
             session_id,
             dynamic_body: None,
         },
@@ -89,6 +94,9 @@ fn to_descriptor(cmd: &SlashCommand, session_id: Option<&str>) -> SkillDescripto
             shell: frontmatter.shell,
             skip_shell_expansion: false,
             skill_root: None,
+            context: frontmatter.context.clone(),
+            background: frontmatter.background,
+            agent: frontmatter.agent.clone(),
             session_id,
             dynamic_body: prompt_fn.clone(),
         },

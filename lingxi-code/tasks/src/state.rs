@@ -162,6 +162,15 @@ pub struct LocalAgentTaskState {
     pub pending_messages: Vec<String>,
     /// Whether the agent is currently backgrounded.
     pub is_backgrounded: bool,
+    /// The SKILL this agent IS, when a `context: fork` skill launched it
+    /// (claude `forkedSkillName`). Threaded from
+    /// `SubagentSpawnRequest::forked_skill_name` at spawn. Keys the
+    /// live-duplicate guard (one live fork per skill) and is the task-record
+    /// half of the identity a resume corroborates against the on-disk scoping
+    /// record (`session::forked_skill`). `#[serde(default)]` so pre-field rows
+    /// still parse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_skill_name: Option<String>,
     /// What the run reported when it terminated — final text, usage, and the
     /// kept-worktree coordinates — plus `killed_by` once a stop names its
     /// initiator. Populated by

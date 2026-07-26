@@ -1108,6 +1108,10 @@ Reach for this when the task matches an available agent type, when you have inde
             // (claude `getAgentModel(…, toolUseContext.options.mainLoopModel, …)`,
             // AgentTool.tsx:418) — see the sync spawn path for the full note.
             parent_model_override: main_loop_model_parent(ctx),
+            forked_skill_name: None,
+            forked_skill_attribution: None,
+            forked_skill_effort: None,
+            frozen_command_denies: Vec::new(),
         };
 
         match spawner.spawn_async(request, inherit).await {
@@ -2027,6 +2031,10 @@ Use /mcp to configure and authenticate the required MCP servers.",
             // dispatching runner's own model, mirroring runAgent.ts:678). When set
             // it takes precedence over the spawner's boot/live `default_model`.
             parent_model_override: main_loop_model_parent(&ctx),
+            forked_skill_name: None,
+            forked_skill_attribution: None,
+            forked_skill_effort: None,
+            frozen_command_denies: Vec::new(),
         };
 
         // Nested-progress bridge: `spawn_with_progress` feeds one String line per

@@ -105,6 +105,17 @@ struct RawFrontmatter {
     /// SLASH.4: TS `when_to_use` (`snake_case` key, free-form string).
     #[serde(default)]
     when_to_use: Option<String>,
+    /// `context: fork` runs the skill as a subagent under its own permission
+    /// scoping instead of expanding it inline.
+    #[serde(default)]
+    context: Option<String>,
+    /// Whether a forking skill runs in the background. Absent ⇒ background
+    /// (claude's `background ?? true`).
+    #[serde(default)]
+    background: Option<Boolish>,
+    /// The agent type a forking skill spawns.
+    #[serde(default)]
+    agent: Option<String>,
 }
 
 /// A frontmatter value that TS `parseBooleanFrontmatter` accepts as a boolean:
@@ -708,7 +719,22 @@ fn build_frontmatter(raw: RawFrontmatter) -> CommandFrontmatter {
         Some(Boolish::Str(s)) => s == "true",
         None => false,
     };
+    // `background` follows the same boolean-frontmatter rule as
+    // `disable-model-invocation` (claude `parseBooleanFrontmatter`): a real
+    // boolean, or the exact strings `"true"` / `"false"`. Anything else is not
+    // a declaration at all and leaves the default (background) in force —
+    // NOT `false`, which would silently un-background a forking skill over a
+    // typo.
+    let background = match raw.background {
+        Some(Boolish::Bool(b)) => Some(b),
+        Some(Boolish::Str(s)) if s == "true" => Some(true),
+        Some(Boolish::Str(s)) if s == "false" => Some(false),
+        Some(Boolish::Str(_)) | None => None,
+    };
     CommandFrontmatter {
+        context: raw.context,
+        background,
+        agent: raw.agent,
         description: raw.description.unwrap_or_default(),
         allowed_tools,
         model: raw.model,

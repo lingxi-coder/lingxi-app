@@ -8,6 +8,7 @@
 pub mod agent_color;
 pub mod branch;
 pub mod file_history;
+pub mod forked_skill;
 pub mod filestate;
 pub mod jsonl;
 pub mod metadata;

@@ -2471,6 +2471,10 @@ mod tests {
             additional_disallowed_tools: Vec::new(),
             depth: 1,
             parent_model_override: Some("claude-sonnet-5".to_string()),
+            forked_skill_name: None,
+            forked_skill_attribution: None,
+            forked_skill_effort: None,
+            frozen_command_denies: Vec::new(),
         };
         let inherit = SubagentInheritance {
             tool_invoker: Arc::new(DummyInvoker),
@@ -2520,6 +2524,10 @@ mod tests {
             additional_disallowed_tools: Vec::new(),
             depth: 0,
             parent_model_override: Some("override-model".to_string()),
+            forked_skill_name: None,
+            forked_skill_attribution: None,
+            forked_skill_effort: None,
+            frozen_command_denies: Vec::new(),
         };
         // Override present → override wins.
         assert_eq!(
@@ -2860,6 +2868,10 @@ mod tests {
             additional_disallowed_tools: Vec::new(),
             depth: 0,
             parent_model_override: None,
+            forked_skill_name: None,
+            forked_skill_attribution: None,
+            forked_skill_effort: None,
+            frozen_command_denies: Vec::new(),
         };
         // Drive resolve_definition + the override branch directly by replicating
         // the spawn-path logic (spawn() would require a live runner).
@@ -2973,6 +2985,10 @@ mod tests {
             additional_disallowed_tools: Vec::new(),
             depth: 0,
             parent_model_override: None,
+            forked_skill_name: None,
+            forked_skill_attribution: None,
+            forked_skill_effort: None,
+            frozen_command_denies: Vec::new(),
         };
 
         // An explicit mode:"plan" call param is IGNORED — a Bubble-default agent
@@ -3074,6 +3090,10 @@ mod tests {
             additional_disallowed_tools: Vec::new(),
             depth: 0,
             parent_model_override: None,
+            forked_skill_name: None,
+            forked_skill_attribution: None,
+            forked_skill_effort: None,
+            frozen_command_denies: Vec::new(),
         };
         let ctx = spawner
             .build_subagent_context(&req, inherit, false)
@@ -3136,6 +3156,10 @@ mod tests {
             additional_disallowed_tools: Vec::new(),
             depth: 0,
             parent_model_override: None,
+            forked_skill_name: None,
+            forked_skill_attribution: None,
+            forked_skill_effort: None,
+            frozen_command_denies: Vec::new(),
         };
 
         let ctx = spawner
@@ -3188,6 +3212,10 @@ mod tests {
             additional_disallowed_tools: Vec::new(),
             depth: 0,
             parent_model_override: None,
+            forked_skill_name: None,
+            forked_skill_attribution: None,
+            forked_skill_effort: None,
+            frozen_command_denies: Vec::new(),
         };
         let mk_inherit = || SubagentInheritance {
             tool_invoker: Arc::new(DummyInvoker),
@@ -3255,6 +3283,10 @@ mod tests {
             additional_disallowed_tools: Vec::new(),
             depth: 0,
             parent_model_override: None,
+            forked_skill_name: None,
+            forked_skill_attribution: None,
+            forked_skill_effort: None,
+            frozen_command_denies: Vec::new(),
         };
         let inherit = SubagentInheritance {
             tool_invoker: Arc::new(DummyInvoker),
@@ -3351,6 +3383,10 @@ mod tests {
             additional_disallowed_tools: Vec::new(),
             depth: 0,
             parent_model_override: None,
+            forked_skill_name: None,
+            forked_skill_attribution: None,
+            forked_skill_effort: None,
+            frozen_command_denies: Vec::new(),
         };
 
         // Non-fork: env block appended after the body, joined by a blank line,
@@ -3430,6 +3466,10 @@ mod tests {
             additional_disallowed_tools: Vec::new(),
             depth: 1,
             parent_model_override: None,
+            forked_skill_name: None,
+            forked_skill_attribution: None,
+            forked_skill_effort: None,
+            frozen_command_denies: Vec::new(),
         };
         let inherit = SubagentInheritance {
             tool_invoker: Arc::new(DummyInvoker),
@@ -3641,6 +3681,10 @@ mod tests {
             additional_disallowed_tools: Vec::new(),
             depth: 0,
             parent_model_override: None,
+            forked_skill_name: None,
+            forked_skill_attribution: None,
+            forked_skill_effort: None,
+            frozen_command_denies: Vec::new(),
         };
         let err = spawner
             .spawn_async(

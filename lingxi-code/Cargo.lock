@@ -7207,6 +7207,7 @@ dependencies = [
  "sandbox",
  "serde",
  "serde_json",
+ "session",
  "telemetry",
  "tempfile",
  "thiserror 2.0.18",

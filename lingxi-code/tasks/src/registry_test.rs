@@ -382,6 +382,7 @@ async fn budget_stop_matches_claude_background_agent_filter() {
             pending_messages: vec![],
             is_backgrounded: false,
             outcome: Default::default(),
+            forked_skill_name: None,
         }))
         .await;
 
@@ -1549,6 +1550,7 @@ async fn take_pending_carries_agent_error() {
             pending_messages: vec![],
             is_backgrounded: true,
             outcome: Default::default(),
+            forked_skill_name: None,
         }))
         .await;
 
@@ -1589,6 +1591,7 @@ fn agent_state(id: &str, status: TaskStatus) -> crate::state::TaskState {
         pending_messages: vec![],
         is_backgrounded: true,
         outcome: Default::default(),
+        forked_skill_name: None,
     })
 }
 
@@ -1821,6 +1824,7 @@ async fn rested_agent_surfaces_once_per_rest_without_eviction() {
             pending_messages: vec![],
             is_backgrounded: true,
             outcome: Default::default(),
+            forked_skill_name: None,
         }))
         .await;
 

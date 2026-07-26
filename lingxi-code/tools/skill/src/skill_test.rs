@@ -1251,3 +1251,282 @@ mod tests {
         compaction::invoked_skills::reset_for_test();
     }
 }
+
+/// `context: fork` end-to-end through `SkillTool::call`.
+#[cfg(test)]
+mod fork_dispatch_tests {
+    use super::*;
+    use std::sync::Arc;
+    use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
+    use traits::budget::{BudgetEnforcerHandle, BudgetError};
+    use traits::process::ProcessOutput;
+    use traits::subagent_spawn::{
+        AsyncLaunch, SubagentInheritance, SubagentListingEntry, SubagentResult, SubagentSpawnError,
+        SubagentSpawnRequest, SubagentSpawner,
+    };
+    use traits::task_registry::{
+        TaskCreateInput, TaskListFilter, TaskRecord, TaskRegistryError, TaskRegistryHandle,
+        TaskUpdatePatch,
+    };
+
+    fn out() -> ProcessOutput {
+        ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        }
+    }
+
+    struct Loader(Option<SkillDescriptor>);
+    #[async_trait]
+    impl SkillLoader for Loader {
+        async fn load(&self, _name: &str) -> Result<Option<SkillDescriptor>, ToolError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// Records the request `spawn_async` received; the sync `spawn` is
+    /// unreachable on this path and says so.
+    #[derive(Default)]
+    struct RecordingSpawner {
+        seen: std::sync::Mutex<Option<SubagentSpawnRequest>>,
+    }
+    #[async_trait]
+    impl SubagentSpawner for RecordingSpawner {
+        async fn spawn(
+            &self,
+            _r: SubagentSpawnRequest,
+            _i: SubagentInheritance,
+        ) -> Result<SubagentResult, SubagentSpawnError> {
+            unreachable!("a background fork never takes the sync spawn path")
+        }
+        async fn agent_listing(&self) -> Vec<SubagentListingEntry> {
+            vec![]
+        }
+        async fn spawn_async(
+            &self,
+            request: SubagentSpawnRequest,
+            _i: SubagentInheritance,
+        ) -> Result<AsyncLaunch, SubagentSpawnError> {
+            *self.seen.lock().unwrap() = Some(request);
+            Ok(AsyncLaunch {
+                agent_id: protocol::AgentId::nil(),
+                output_file: "/tmp/a.output".into(),
+            })
+        }
+    }
+
+    /// The fork path reads the live task list (duplicate guard) and the spawn
+    /// counter (cap); nothing else.
+    struct StubRegistry {
+        tasks: Vec<TaskRecord>,
+        spawns: std::sync::atomic::AtomicU64,
+    }
+    impl StubRegistry {
+        fn new(tasks: Vec<TaskRecord>) -> Self {
+            Self {
+                tasks,
+                spawns: std::sync::atomic::AtomicU64::new(0),
+            }
+        }
+    }
+    #[async_trait]
+    impl TaskRegistryHandle for StubRegistry {
+        async fn create(&self, _i: TaskCreateInput) -> Result<TaskRecord, TaskRegistryError> {
+            Err(TaskRegistryError::Internal("unused".into()))
+        }
+        async fn get(&self, _id: &str) -> Result<Option<TaskRecord>, TaskRegistryError> {
+            Ok(None)
+        }
+        async fn list(&self, _f: TaskListFilter) -> Result<Vec<TaskRecord>, TaskRegistryError> {
+            Ok(self.tasks.clone())
+        }
+        async fn update(
+            &self,
+            _id: &str,
+            _p: TaskUpdatePatch,
+        ) -> Result<TaskRecord, TaskRegistryError> {
+            Err(TaskRegistryError::Internal("unused".into()))
+        }
+        async fn set_status(
+            &self,
+            _id: &str,
+            _s: &str,
+        ) -> Result<TaskRecord, TaskRegistryError> {
+            Err(TaskRegistryError::Internal("unused".into()))
+        }
+        async fn kill(&self, _id: &str) -> Result<TaskRecord, TaskRegistryError> {
+            Err(TaskRegistryError::Internal("unused".into()))
+        }
+        async fn output(
+            &self,
+            _id: &str,
+            _offset: Option<u64>,
+        ) -> Result<traits::task_registry::TaskOutputChunk, TaskRegistryError> {
+            Err(TaskRegistryError::Internal("unused".into()))
+        }
+        fn get_total_agent_spawns(&self) -> u64 {
+            self.spawns.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        fn increment_total_agent_spawns(&self) {
+            self.spawns
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    struct NoBudget;
+    #[async_trait]
+    impl BudgetEnforcerHandle for NoBudget {
+        async fn check_and_charge(&self, _n: u64) -> Result<(), BudgetError> {
+            Ok(())
+        }
+        async fn snapshot_total_nano_usd(&self) -> u64 {
+            0
+        }
+    }
+
+    fn fork_desc(name: &str, background: Option<bool>) -> SkillDescriptor {
+        SkillDescriptor {
+            name: name.into(),
+            description: "a forking skill".into(),
+            body: "do the review".into(),
+            context: Some("fork".into()),
+            background,
+            agent: Some("code-reviewer".into()),
+            ..SkillDescriptor::default()
+        }
+    }
+
+    fn inline_desc(name: &str) -> SkillDescriptor {
+        SkillDescriptor {
+            name: name.into(),
+            description: "a skill".into(),
+            body: "body here".into(),
+            ..SkillDescriptor::default()
+        }
+    }
+
+    fn tool_with(
+        spawner: Arc<RecordingSpawner>,
+        desc: SkillDescriptor,
+        tasks: Vec<TaskRecord>,
+    ) -> SkillTool {
+        let mut ctx = shell_test_ctx(out());
+        ctx.subagent_spawner = Some(spawner as Arc<dyn SubagentSpawner>);
+        ctx.task_registry = Some(Arc::new(StubRegistry::new(tasks)));
+        ctx.budget_enforcer = Some(Arc::new(NoBudget));
+        SkillTool::with_loader(ctx, Arc::new(Loader(Some(desc))))
+    }
+
+    fn ctx_with_registry() -> ToolUseContext {
+        let mut ctx = fresh_ctx();
+        ctx.subagent_registry = Some(Arc::new(tool_api::ToolRegistry::new()));
+        ctx
+    }
+
+    /// A `context: fork` skill launches a BACKGROUND subagent instead of
+    /// expanding into this conversation, and reports it in claude's shape.
+    #[tokio::test]
+    async fn a_forking_skill_launches_a_background_subagent() {
+        let spawner: Arc<RecordingSpawner> = Arc::default();
+        let tool = tool_with(spawner.clone(), fork_desc("review", None), vec![]);
+        let res = tool
+            .call(json!({"skill": "review"}), ctx_with_registry(), fresh_tx())
+            .await
+            .expect("fork dispatch succeeds");
+
+        assert_eq!(res.data["status"], json!("forked"));
+        assert_eq!(res.data["background"], json!(true));
+        assert_eq!(res.data["commandName"], json!("review"));
+        assert_eq!(
+            res.data["result"],
+            json!("Running in the background as @review")
+        );
+        assert_eq!(
+            res.model_content.as_deref(),
+            Some(
+                "Skill \"review\" launched (forked execution, running in the background).\n\n\
+                 Running in the background as @review"
+            )
+        );
+        // The whole point of forking: nothing lands in this conversation.
+        assert!(
+            res.new_messages.is_empty(),
+            "a forked skill injects no messages into the parent"
+        );
+
+        let req = spawner.seen.lock().unwrap().clone().expect("spawned");
+        assert_eq!(req.forked_skill_name.as_deref(), Some("review"));
+        assert_eq!(req.forked_skill_attribution.as_deref(), Some("review"));
+        assert_eq!(req.subagent_type, "code-reviewer");
+        assert!(req.run_in_background);
+        // The `SendMessage` handle is the skill name, so `@review` resolves.
+        assert_eq!(req.name.as_deref(), Some("review"));
+    }
+
+    /// One live fork per skill: a second invocation while the first is still
+    /// running falls back to inline instead of racing it over the same scoping
+    /// record and the same `SendMessage` name.
+    #[tokio::test]
+    async fn a_second_invocation_of_a_live_fork_runs_inline() {
+        let live = TaskRecord {
+            task_id: "a00000001".into(),
+            task_type: "local_agent".into(),
+            status: "running".into(),
+            forked_skill_name: Some("review".into()),
+            ..Default::default()
+        };
+        let spawner: Arc<RecordingSpawner> = Arc::default();
+        let tool = tool_with(spawner.clone(), fork_desc("review", None), vec![live]);
+        let res = tool
+            .call(json!({"skill": "review"}), ctx_with_registry(), fresh_tx())
+            .await
+            .expect("inline");
+        assert_eq!(res.data["status"], json!("inline"));
+        assert!(spawner.seen.lock().unwrap().is_none(), "no second spawn");
+    }
+
+    /// `background: false` opts out of forking here: the synchronous fork has
+    /// no substrate in this tool, so the skill runs INLINE — the same content,
+    /// in this context — rather than reporting a launch that did not happen.
+    #[tokio::test]
+    async fn a_non_background_forking_skill_runs_inline() {
+        let spawner: Arc<RecordingSpawner> = Arc::default();
+        let tool = tool_with(spawner.clone(), fork_desc("review", Some(false)), vec![]);
+        let res = tool
+            .call(json!({"skill": "review"}), ctx_with_registry(), fresh_tx())
+            .await
+            .expect("inline");
+        assert_eq!(res.data["status"], json!("inline"));
+        assert!(spawner.seen.lock().unwrap().is_none(), "no spawn attempted");
+    }
+
+    /// An ordinary (non-forking) skill is untouched by any of this.
+    #[tokio::test]
+    async fn an_inline_skill_is_unaffected() {
+        let spawner: Arc<RecordingSpawner> = Arc::default();
+        let tool = tool_with(spawner.clone(), inline_desc("commit"), vec![]);
+        let res = tool
+            .call(json!({"skill": "commit"}), ctx_with_registry(), fresh_tx())
+            .await
+            .expect("inline");
+        assert_eq!(res.data["status"], json!("inline"));
+        assert!(spawner.seen.lock().unwrap().is_none());
+    }
+
+    /// A host with no spawner wired falls back to inline rather than failing —
+    /// the skill still runs, just here.
+    #[tokio::test]
+    async fn no_spawner_falls_back_to_inline() {
+        let tool = SkillTool::with_loader(
+            shell_test_ctx(out()),
+            Arc::new(Loader(Some(fork_desc("review", None)))),
+        );
+        let res = tool
+            .call(json!({"skill": "review"}), fresh_ctx(), fresh_tx())
+            .await
+            .expect("inline");
+        assert_eq!(res.data["status"], json!("inline"));
+    }
+}

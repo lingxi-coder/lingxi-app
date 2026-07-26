@@ -1302,8 +1302,15 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
             subagent_type,
             prompt,
             is_backgrounded,
+            spawn_request,
             ..
         } => TaskState::LocalAgent(crate::state::LocalAgentTaskState {
+            // The fork identity rides the full spawn request, not the compact
+            // task-index fields — a forked skill is dispatched through the same
+            // `SubagentSpawnRequest` as any background agent.
+            forked_skill_name: spawn_request
+                .as_ref()
+                .and_then(|r| r.forked_skill_name.clone()),
             base,
             agent_id: *agent_id,
             subagent_type: subagent_type.clone(),

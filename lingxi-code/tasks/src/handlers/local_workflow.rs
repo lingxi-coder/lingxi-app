@@ -589,6 +589,10 @@ fn make_request(
         depth: 0,
         // Workflow-spawned agents are top-level ⇒ the spawner's default anchors.
         parent_model_override: None,
+        forked_skill_name: None,
+            forked_skill_attribution: None,
+            forked_skill_effort: None,
+            frozen_command_denies: Vec::new(),
     }
 }
 

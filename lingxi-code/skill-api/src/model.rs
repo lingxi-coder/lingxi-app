@@ -96,6 +96,15 @@ pub struct SkillFrontmatter {
     pub context: Option<String>,
     /// Agent type to spawn when `context: fork`. Binary bytes 155734026.
     pub agent: Option<String>,
+    /// Whether a `context: fork` skill runs in the BACKGROUND (returning
+    /// immediately) rather than synchronously inside the tool call.
+    ///
+    /// Claude's predicate is `background ?? true` — a forking skill backgrounds
+    /// unless it opts out or the session disables background tasks entirely
+    /// (see `tools/skill::fork::should_background_fork`). Only the background
+    /// path freezes command denies and writes the scoping sidecars, because
+    /// only it can be resumed later.
+    pub background: Option<bool>,
     /// Model override for this skill invocation. Binary bytes 196457593.
     pub model: Option<String>,
     /// Hide this skill from the slash-command listing shown to the model.

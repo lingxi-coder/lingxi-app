@@ -194,6 +194,30 @@ pub struct SubagentSpawnRequest {
     /// default is used (non-`AgentTool` spawn paths / legacy serialized payloads).
     #[serde(default)]
     pub parent_model_override: Option<String>,
+    /// The SKILL this background agent IS, when it was launched by a
+    /// `context: fork` skill (claude `forkedSkillName`).
+    ///
+    /// Distinct from every other identity on this request: `subagent_type` is
+    /// the agent definition, `name` the `SendMessage` handle. This is the skill
+    /// whose permission scoping the run adopted — it keys the live-duplicate
+    /// guard (one live fork per skill) and is the identity a later resume
+    /// corroborates against the on-disk scoping record
+    /// (`session::forked_skill`). `None` for every non-fork spawn.
+    #[serde(default)]
+    pub forked_skill_name: Option<String>,
+    /// The display name a forked skill's run is attributed to (claude
+    /// `attributionName`, from the launch's `spawnedBySkill`). Persisted in the
+    /// scoping sidecar so a resume reconstructs the same attribution.
+    #[serde(default)]
+    pub forked_skill_attribution: Option<String>,
+    /// The forked skill's declared effort, persisted with its scoping.
+    #[serde(default)]
+    pub forked_skill_effort: Option<String>,
+    /// Command-deny rules FROZEN at fork time and replayed ahead of the live
+    /// deny list on resume, so a later settings edit cannot widen what an
+    /// already-running fork is allowed to run. Empty ⇒ no key is persisted.
+    #[serde(default)]
+    pub frozen_command_denies: Vec<String>,
 }
 
 /// Token-usage rollup returned at the end of a successful spawn.

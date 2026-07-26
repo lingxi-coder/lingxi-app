@@ -106,6 +106,13 @@ pub struct TaskRecord {
     /// type. Additive default `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// `local_agent` only: the skill this agent IS, when a `context: fork`
+    /// skill launched it (claude `forkedSkillName`). Keys the live-duplicate
+    /// guard — a skill already running as a live fork does not fork again — and
+    /// is the task-record half of the identity a resume corroborates against
+    /// the on-disk scoping record. Additive default `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_skill_name: Option<String>,
     /// `local_agent` only: whether the agent is currently backgrounded, used by
     /// the `Stop` / `SubagentStop` `background_tasks` filter (claude-code `wA`:
     /// drop a task when `"isBackgrounded" in e && e.isBackgrounded === false`).

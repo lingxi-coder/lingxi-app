@@ -207,6 +207,14 @@ pub struct CommandFrontmatter {
     /// SLASH.4: TS `when_to_use` frontmatter — advisory text describing when the
     /// command applies (carried onto [`SlashCommand::when_to_use`]).
     pub when_to_use: Option<String>,
+    /// Execution context: `Some("fork")` runs the command as a subagent under
+    /// its own permission scoping. Anything else (including `None`) is inline.
+    pub context: Option<String>,
+    /// Whether a forking command runs in the BACKGROUND. `None` ⇒ background
+    /// (claude's `background ?? true`).
+    pub background: Option<bool>,
+    /// Agent type a forking command spawns. `None` ⇒ `general-purpose`.
+    pub agent: Option<String>,
 }
 
 /// Shell selected by a markdown command's frontmatter for embedded shell

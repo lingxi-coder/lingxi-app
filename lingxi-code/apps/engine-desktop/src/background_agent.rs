@@ -53,6 +53,67 @@ pub struct BackgroundAgentSpawner {
     pub mailbox_router: Arc<MailboxRouter>,
     /// D17-safe task spawner for the per-agent mailbox→runner pump.
     pub runtime: Arc<dyn RuntimeSpawner>,
+    /// Directory holding this project's session transcripts — where a forked
+    /// skill's scoping sidecars are written, beside `<agent-id>.jsonl`.
+    /// `None` disables fork persistence (a host with no session storage); a
+    /// forking skill then still launches, and a later resume refuses it because
+    /// its task record names a skill with no scoping record on disk.
+    pub session_dir: Option<std::path::PathBuf>,
+}
+
+impl BackgroundAgentSpawner {
+    /// Persist a forked skill's scoping sidecars for `agent_id`, BEFORE the
+    /// agent is spawned (claude `qdd(Gc(e), A)` precedes the task creation).
+    ///
+    /// Order matters: an agent that exists without its scoping on disk is one
+    /// a later resume must refuse, so the record lands first. The write is
+    /// keyed on the AGENT's own session path, not the parent's — each
+    /// background agent gets its own transcript.
+    ///
+    /// Returns `Err` when the record cannot be persisted; the caller aborts the
+    /// launch rather than producing an unresumable agent.
+    async fn persist_fork_scoping(
+        &self,
+        agent_id: AgentId,
+        request: &SubagentSpawnRequest,
+    ) -> Result<(), SubagentSpawnError> {
+        let Some(skill_name) = request.forked_skill_name.as_deref() else {
+            return Ok(());
+        };
+        let Some(dir) = self.session_dir.as_ref() else {
+            return Ok(());
+        };
+        let scoping = session::forked_skill::ForkedSkillScoping {
+            skill_name: skill_name.to_string(),
+            attribution_name: request
+                .forked_skill_attribution
+                .clone()
+                .unwrap_or_else(|| skill_name.to_string()),
+            effort: request
+                .forked_skill_effort
+                .clone()
+                .map(session::forked_skill::Effort::Level),
+            // An EMPTY list writes no key (claude gates the spread on
+            // `f.length > 0`), so it must not become `"frozenCommandDenies":[]`.
+            frozen_command_denies: (!request.frozen_command_denies.is_empty())
+                .then(|| request.frozen_command_denies.clone()),
+        };
+        // Re-validate at the write boundary. The Skill tool already checked, but
+        // this is the last point before bytes hit disk, and a record that fails
+        // the schema reads back as `Malformed` — a resume REFUSAL, not "no
+        // scoping" — so writing one would strand the agent.
+        if !scoping.is_valid() {
+            return Err(SubagentSpawnError::Runtime(
+                "forked-skill scoping record is unpersistable".to_string(),
+            ));
+        }
+        let jsonl = dir.join(format!("{agent_id}.jsonl"));
+        session::forked_skill::write_fork_records(&jsonl, &scoping)
+            .await
+            .map_err(|e| {
+                SubagentSpawnError::Runtime(format!("failed to persist forked-skill scoping: {e}"))
+            })
+    }
 }
 
 #[async_trait]
@@ -99,6 +160,12 @@ impl SubagentSpawner for BackgroundAgentSpawner {
         // routing is mailbox→task_id→handler-map, so the two need not match.
         let agent_id = AgentId::new();
         let description = request.description.clone().unwrap_or_default();
+
+        // 0. A forked skill's permission scoping lands on disk BEFORE the agent
+        //    exists. The reverse order would leave a window in which a running
+        //    fork has no scoping record, and the resume gate reads a missing
+        //    record as a refusal — so a crash there would strand the agent.
+        self.persist_fork_scoping(agent_id, &request).await?;
 
         // 1. Spawn the BACKGROUNDED LocalAgent → the persistent handler worker.
         let task_id = self
@@ -373,6 +440,10 @@ mod tests {
             additional_disallowed_tools: Vec::new(),
             depth: 0,
             parent_model_override: None,
+            forked_skill_name: None,
+            forked_skill_attribution: None,
+            forked_skill_effort: None,
+            frozen_command_denies: Vec::new(),
         }
     }
 
@@ -406,6 +477,7 @@ mod tests {
             registry,
             mailbox_router: mailbox_router.clone(),
             runtime,
+            session_dir: None,
         };
         let inherit = SubagentInheritance {
             tool_invoker: Arc::new(MockInvoker),
@@ -439,6 +511,124 @@ mod tests {
             launch.output_file.contains("a-bg-test-1"),
             "output_file is the spawned task's spool path: {}",
             launch.output_file
+        );
+    }
+
+    /// A `context: fork` skill's permission scoping is persisted beside the new
+    /// agent's own transcript, and it lands BEFORE the agent exists — an agent
+    /// running without a scoping record is one the resume gate must refuse.
+    #[tokio::test]
+    async fn spawn_async_persists_forked_skill_scoping_beside_the_agent_transcript() {
+        let runtime: Arc<dyn RuntimeSpawner> = Arc::new(MockRuntimeSpawner::default());
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = tempfile::tempdir().unwrap();
+        let fs = Arc::new(PosixFileSystem::new(PathBuf::from(dir.path())));
+        let output_manager = Arc::new(TaskOutputManager::new(
+            PathBuf::from(dir.path()),
+            fs.clone(),
+        ));
+        let mut reg = TaskRegistry::new(runtime.clone(), fs, output_manager);
+        reg.register_handler(
+            TaskType::LocalAgent,
+            Arc::new(RecordingHandler {
+                seen_backgrounded: Arc::new(StdMutex::new(None)),
+                killed_ids: Arc::new(StdMutex::new(Vec::new())),
+                terminate_on_message: false,
+            }),
+        );
+        let deco = BackgroundAgentSpawner {
+            inner: Arc::new(InertSpawner),
+            registry: Arc::new(reg),
+            mailbox_router: Arc::new(MailboxRouter::new()),
+            runtime,
+            session_dir: Some(sessions.path().to_path_buf()),
+        };
+
+        let mut req = request(None);
+        req.forked_skill_name = Some("code-review".into());
+        req.forked_skill_attribution = Some("reviewer".into());
+        req.forked_skill_effort = Some("high".into());
+        req.frozen_command_denies = vec!["Bash(rm:*)".into()];
+
+        let launch = deco
+            .spawn_async(
+                req,
+                SubagentInheritance {
+                    tool_invoker: Arc::new(MockInvoker),
+                    budget: Arc::new(MockBudget),
+                },
+            )
+            .await
+            .expect("spawn_async should succeed");
+
+        let jsonl = sessions.path().join(format!("{}.jsonl", launch.agent_id));
+        match session::forked_skill::read_scoping(&jsonl).await {
+            session::forked_skill::ScopingStatus::Valid(s) => {
+                assert_eq!(s.skill_name, "code-review");
+                assert_eq!(s.attribution_name, "reviewer");
+                assert_eq!(
+                    s.effort,
+                    Some(session::forked_skill::Effort::Level("high".into()))
+                );
+                assert_eq!(
+                    s.frozen_command_denies.as_deref(),
+                    Some(["Bash(rm:*)".to_string()].as_slice())
+                );
+            }
+            other => panic!("expected a valid scoping record, got {other:?}"),
+        }
+        // The provenance marker witnesses the fork identity, so a later DELETION
+        // of the scoping record is a refusal rather than an unscoped resume.
+        assert_eq!(
+            session::forked_skill::read_marker_skill_name(&jsonl).await,
+            Some("code-review".to_string())
+        );
+    }
+
+    /// A non-fork spawn writes nothing — the sidecars exist only for skills
+    /// whose scoping cannot be recovered from the transcript.
+    #[tokio::test]
+    async fn spawn_async_writes_no_sidecars_for_an_ordinary_agent() {
+        let runtime: Arc<dyn RuntimeSpawner> = Arc::new(MockRuntimeSpawner::default());
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = tempfile::tempdir().unwrap();
+        let fs = Arc::new(PosixFileSystem::new(PathBuf::from(dir.path())));
+        let output_manager = Arc::new(TaskOutputManager::new(
+            PathBuf::from(dir.path()),
+            fs.clone(),
+        ));
+        let mut reg = TaskRegistry::new(runtime.clone(), fs, output_manager);
+        reg.register_handler(
+            TaskType::LocalAgent,
+            Arc::new(RecordingHandler {
+                seen_backgrounded: Arc::new(StdMutex::new(None)),
+                killed_ids: Arc::new(StdMutex::new(Vec::new())),
+                terminate_on_message: false,
+            }),
+        );
+        let deco = BackgroundAgentSpawner {
+            inner: Arc::new(InertSpawner),
+            registry: Arc::new(reg),
+            mailbox_router: Arc::new(MailboxRouter::new()),
+            runtime,
+            session_dir: Some(sessions.path().to_path_buf()),
+        };
+
+        let launch = deco
+            .spawn_async(
+                request(None),
+                SubagentInheritance {
+                    tool_invoker: Arc::new(MockInvoker),
+                    budget: Arc::new(MockBudget),
+                },
+            )
+            .await
+            .unwrap();
+
+        let jsonl = sessions.path().join(format!("{}.jsonl", launch.agent_id));
+        assert_eq!(
+            session::forked_skill::read_scoping(&jsonl).await,
+            session::forked_skill::ScopingStatus::Absent
         );
     }
 
@@ -477,6 +667,7 @@ mod tests {
             registry,
             mailbox_router: mailbox_router.clone(),
             runtime,
+            session_dir: None,
         };
         let inherit = SubagentInheritance {
             tool_invoker: Arc::new(MockInvoker),
@@ -560,6 +751,7 @@ mod tests {
             registry,
             mailbox_router: mailbox_router.clone(),
             runtime,
+            session_dir: None,
         };
         let inherit = SubagentInheritance {
             tool_invoker: Arc::new(MockInvoker),

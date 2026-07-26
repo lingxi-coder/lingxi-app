@@ -233,6 +233,7 @@ mod tests {
             status: "running".into(),
             description: "explore".into(),
             agent_type: Some("general-purpose".into()),
+            forked_skill_name: None,
             is_backgrounded: Some(true),
             ..Default::default()
         };

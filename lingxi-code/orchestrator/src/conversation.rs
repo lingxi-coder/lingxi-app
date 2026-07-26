@@ -981,6 +981,14 @@ pub struct ConversationOrchestrator {
     /// already refused — the bound that lets a multi-hop chain terminate
     /// without relying on the once-per-session latch.
     pub(crate) refusal_tried_models: Mutex<Vec<String>>,
+    /// The refusal episode's accumulating notice: hops fold into one notice
+    /// describing where the session ended up, rather than each hop announcing a
+    /// model the cascade may already have left.
+    pub(crate) refusal_episode: Mutex<crate::refusal_notice::RefusalEpisode>,
+    /// The collapse queue in front of the notice stream. Holds a provisional
+    /// notice and drops it when a later one supersedes it, counting the
+    /// collapse for `tengu_refusal_fallback_notice_collapsed`.
+    pub(crate) refusal_notice_queue: Mutex<crate::refusal_notice::NoticeQueue>,
     /// Cost tracker wired by [`Self::with_cost_tracker`] (M6-06). `None`
     /// when not configured — `snapshot_cost` then falls back to the M5-10
     /// zero-shaped stub. The CLI binary (M6-06 init.rs) always populates
@@ -1563,6 +1571,8 @@ impl ConversationOrchestrator {
             fast_mode: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             refusal_fallback_latched: std::sync::atomic::AtomicBool::new(false),
             refusal_tried_models: Mutex::new(Vec::new()),
+            refusal_episode: Mutex::new(crate::refusal_notice::RefusalEpisode::default()),
+            refusal_notice_queue: Mutex::new(crate::refusal_notice::NoticeQueue::new()),
             cost_tracker: None,
             analytics_bus: None,
             session_started_at: std::sync::Mutex::new(std::time::Instant::now()),
@@ -3946,6 +3956,25 @@ impl ConversationOrchestrator {
     /// Returns `true` when the swap happened (the caller must retry/continue the
     /// turn against the fallback model), `false` when no fallback is configured or
     /// the latch is already set (the caller preserves today's terminal behavior).
+    /// The user-visible refusal-fallback line (2.1.206 `VPn(e,t,r)` for the
+    /// common `category == "other"` path: the generic `$7m` prefix, then
+    /// `Switched to {marketing name}`, then the feedback line).
+    ///
+    /// Lives here rather than inline so the emit site and the tests read the
+    /// same bytes. The cyber/bio "intentionally broad" variant still needs the
+    /// refusal category routed through — see the typed notice's
+    /// `api_refusal_category`, which now carries it.
+    pub(crate) fn refusal_warning_text(fallback: &str) -> String {
+        let display = crate::prompt::env_meta::marketing_name_for_model(fallback)
+            .map(String::from)
+            .unwrap_or_else(|| fallback.to_string());
+        format!(
+            "This model's safeguards flagged this message. \
+This sometimes happens with safe, normal conversations. Switched to {display}. \
+Send feedback with /feedback or learn more: https://support.claude.com/en/articles/15363606"
+        )
+    }
+
     pub(crate) async fn maybe_swap_to_refusal_fallback(&self) -> bool {
         // The CASCADE: an ordered chain of models, each tried as the previous
         // one refuses. An empty chain falls back to the historical single
@@ -3991,6 +4020,9 @@ impl ConversationOrchestrator {
         let crate::refusal_cascade::RefusalRoute::Category { stage, .. } = route else {
             return false;
         };
+        // What the cascade still has left. A hop with stages remaining may be
+        // superseded, so its notice is provisional.
+        let stage_remaining = stage.remaining_chain;
         let fallback = stage.model;
         // Once-per-session latch (refusalFallbackModelLatch analog) — applies
         // only to a SINGLE-hop chain, which is the historical shape. A real
@@ -4025,15 +4057,49 @@ impl ConversationOrchestrator {
         // model. (The cyber/bio `mmi(e)` "intentionally broad" variant needs the
         // refusal category routed through here — deferred with the typed
         // model_refusal_fallback system frame.)
-        let fallback_display = crate::prompt::env_meta::marketing_name_for_model(&fallback)
-            .map(String::from)
-            .unwrap_or_else(|| fallback.clone());
-        let warning = format!(
-            "This model's safeguards flagged this message. \
-This sometimes happens with safe, normal conversations. Switched to {fallback_display}. \
-Send feedback with /feedback or learn more: https://support.claude.com/en/articles/15363606"
-        );
-        self.output.emit_text(&warning).await;
+        // Route the notice through the episode accumulator and the collapse
+        // queue rather than emitting it directly. A hop that a LATER hop
+        // supersedes must not reach the user: "switched to X" stops being true
+        // the moment the cascade moves on from X. So an intermediate hop is
+        // held PROVISIONALLY and folded into the notice that finally settles,
+        // which reports how many hops it collapsed.
+        let more_hops_possible = !stage_remaining.is_empty();
+        let notice_uuid = uuid::Uuid::new_v4().to_string();
+        let emitted = {
+            let mut episode = self.refusal_episode.lock().await;
+            episode.merge(crate::refusal_notice::RefusalNotice {
+                uuid: notice_uuid.clone(),
+                origin_model: original_model.clone(),
+                serving_model: fallback.clone(),
+                ..crate::refusal_notice::RefusalNotice::default()
+            });
+            let taken = if more_hops_possible {
+                episode.take_provisional(&notice_uuid)
+            } else {
+                episode.settle()
+            };
+            drop(episode);
+            match taken {
+                Some(notice) => self
+                    .refusal_notice_queue
+                    .lock()
+                    .await
+                    .accept(notice, more_hops_possible),
+                None => Vec::new(),
+            }
+        };
+        for e in emitted {
+            if e.suppressed_count > 0 {
+                tracing::info!(
+                    event = "tengu_refusal_fallback_notice_collapsed",
+                    suppressed_count = e.suppressed_count,
+                    emitted_via = e.emitted_via.as_str(),
+                );
+            }
+            self.output
+                .emit_text(&Self::refusal_warning_text(&e.banner.serving_model))
+                .await;
+        }
         // Success-path analytics — inline event name (NOT a locked telemetry
         // const), so the 347-entry `ALL_EVENT_NAMES` fixture lock is unperturbed.
         tracing::info!(
@@ -15145,6 +15211,53 @@ mod refusal_fallback_tests {
             "an exhausted chain declines"
         );
         assert_eq!(orch.session.lock().await.model, "hop-two");
+    }
+
+    /// END TO END, and the whole point of steps 2-4: a multi-hop cascade emits
+    /// ONE notice, naming where the session ended up — not one notice per hop
+    /// announcing a model the cascade has already left.
+    #[tokio::test]
+    async fn a_cascade_emits_one_collapsed_notice_not_one_per_hop() {
+        let (orch, out) = orch_with_refusal_chain(&["hop-one", "hop-two", "hop-three"]);
+
+        assert!(orch.maybe_swap_to_refusal_fallback().await);
+        assert!(
+            out.text_events().await.is_empty(),
+            "an intermediate hop is HELD, not announced"
+        );
+
+        assert!(orch.maybe_swap_to_refusal_fallback().await);
+        assert!(
+            out.text_events().await.is_empty(),
+            "the second hop is still intermediate"
+        );
+
+        // The last hop has nothing remaining, so the episode settles and the
+        // accumulated notice goes out — once.
+        assert!(orch.maybe_swap_to_refusal_fallback().await);
+        let texts = out.text_events().await;
+        assert_eq!(texts.len(), 1, "exactly one notice for the whole cascade");
+        assert!(
+            texts[0].contains("hop-three"),
+            "it names where the session ENDED UP: {}",
+            texts[0]
+        );
+        assert!(
+            !texts[0].contains("hop-one") && !texts[0].contains("hop-two"),
+            "and not the hops it passed through: {}",
+            texts[0]
+        );
+    }
+
+    /// A single-hop fallback announces immediately — there is no later hop that
+    /// could withdraw it, so holding it would just delay the user's notice.
+    #[tokio::test]
+    async fn a_single_hop_announces_immediately() {
+        let (orch, out) = orch_with_refusal_chain(&["only"]);
+        assert!(orch.maybe_swap_to_refusal_fallback().await);
+        let texts = out.text_events().await;
+        assert_eq!(texts.len(), 1);
+        assert!(texts[0].contains("only"), "{}", texts[0]);
     }
 
     /// A ONE-element chain behaves exactly like the historical single

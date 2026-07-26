@@ -71,6 +71,22 @@ are NOT prerequisites for the audit item — they belong to a subsystem the
 project has deliberately not built. The first revision of this document implied
 otherwise.
 
+## STATUS: COMPLETE 2026-07-26
+
+All four steps landed (`adbc367c8` for step 1, this wave for 2-4). The
+`tengu_refusal_fallback_notice_collapsed` telemetry now fires for real: a
+three-hop cascade emits ONE notice naming where the session ended up, with
+`suppressed_count: 2` for the hops folded into it. `orchestrator::refusal_cascade`
+is the routing; `orchestrator::refusal_notice` is the episode accumulator plus
+the `j0m` collapse queue.
+
+One decision worth carrying: `origin_model` and `refused_user_message_uuid` are
+FIRST-writer-wins across a merge, everything else latest-wins. The user is told
+where the episode began and where it ended — not which intermediate hop the
+merge happened to see last.
+
+The section below is the plan as written before the work.
+
 ## The actual decomposition
 
 1. **Refusal-fallback cascade.** Replace the single `refusal_fallback_model` +

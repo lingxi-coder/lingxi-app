@@ -1033,6 +1033,31 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+
+    /// Serializes every test that drives `run_supervisor`.
+    ///
+    /// `tracing` caches per-callsite INTEREST process-globally, and
+    /// `with_default` (unlike `set_global_default`) does not rebuild it. So a
+    /// test running `run_supervisor` with NO subscriber caches
+    /// `emit_worker_vanished` as "never", and the one test that DOES install a
+    /// subscriber then captures nothing.
+    ///
+    /// A `rebuild_interest_cache()` inside the capturing test alone was not
+    /// enough — the flake came straight back, because a concurrent
+    /// `run_supervisor` on another thread re-poisons the cache after the
+    /// rebuild. The guard must cover EVERY user of the shared callsite, not
+    /// just the reader; the same invariant the shared web caches needed.
+    ///
+    /// Poison-tolerant: the payload is `()`, so a panicking test leaves nothing
+    /// to corrupt and must not wedge the other fifteen.
+    static SUPERVISOR_TRACING_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn supervisor_lock() -> std::sync::MutexGuard<'static, ()> {
+        SUPERVISOR_TRACING_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     fn tmpdir() -> PathBuf {
         static COUNTER: AtomicUsize = AtomicUsize::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -1227,6 +1252,7 @@ mod tests {
 
     #[test]
     fn fresh_acquire_adopts_seeds_roster_and_bumps_updated_at() {
+        let _supervisor_guard = supervisor_lock();
         let dir = tmpdir();
         // Seed a roster with one LIVE worker (kept) + one DEAD worker (dropped).
         let mut roster = empty_roster(999);
@@ -1270,6 +1296,7 @@ mod tests {
 
     #[test]
     fn heartbeat_loop_runs_once_then_stops() {
+        let _supervisor_guard = supervisor_lock();
         let dir = tmpdir();
         let proc = FakeProc {
             alive: HashMap::new(),
@@ -1300,6 +1327,7 @@ mod tests {
 
     #[test]
     fn yields_to_a_live_peer_without_writing_roster() {
+        let _supervisor_guard = supervisor_lock();
         let dir = tmpdir();
         // A live peer already holds the lock.
         let mut peer = DaemonLock::new(5555, "0.0.0");
@@ -1333,6 +1361,7 @@ mod tests {
 
     #[test]
     fn takes_over_a_stale_dead_lock() {
+        let _supervisor_guard = supervisor_lock();
         let dir = tmpdir();
         // A DEAD holder's lock.
         let mut stale = DaemonLock::new(5555, "0.0.0");
@@ -1369,6 +1398,7 @@ mod tests {
 
     #[test]
     fn one_pending_job_spawns_one_worker_and_records_pid() {
+        let _supervisor_guard = supervisor_lock();
         let dir = tmpdir();
         seed_working_job(&dir, "bc7c6b33");
 
@@ -1409,6 +1439,7 @@ mod tests {
 
     #[test]
     fn spawned_worker_restores_resume_worktree_and_terminal_from_launch_spec() {
+        let _supervisor_guard = supervisor_lock();
         use crate::background_launch::{
             self, BackgroundLaunchKind, BackgroundLaunchOptions, BackgroundLaunchSpec,
             TerminalSize, LAUNCH_SPEC_VERSION,
@@ -1524,6 +1555,7 @@ mod tests {
 
     #[test]
     fn terminal_job_is_not_spawned() {
+        let _supervisor_guard = supervisor_lock();
         let dir = tmpdir();
         seed_working_job(&dir, "dddd4444");
         // Mark it done (terminal) before the supervisor runs.
@@ -1553,6 +1585,7 @@ mod tests {
 
     #[test]
     fn job_with_live_worker_pid_is_not_respawned() {
+        let _supervisor_guard = supervisor_lock();
         let dir = tmpdir();
         seed_working_job(&dir, "eeee5555");
         // Record a still-live worker pid on the job.
@@ -1584,6 +1617,7 @@ mod tests {
 
     #[test]
     fn claimed_job_is_not_double_spawned_across_heartbeats() {
+        let _supervisor_guard = supervisor_lock();
         let dir = tmpdir();
         seed_working_job(&dir, "ffff6666");
 
@@ -1625,6 +1659,7 @@ mod tests {
 
     #[test]
     fn crashed_worker_is_marked_failed_without_respawn() {
+        let _supervisor_guard = supervisor_lock();
         let dir = tmpdir();
         seed_working_job(&dir, "cafe0001");
         // Record a worker pid on the job, then let the worker "die": the proc
@@ -1669,6 +1704,7 @@ mod tests {
 
     #[test]
     fn vanished_worker_does_not_emit_respawn_exhausted() {
+        let _supervisor_guard = supervisor_lock();
         // Regression (RV9): the daemon fails a vanished worker CLOSED and never
         // respawns it, so there is no respawn budget to exhaust. CC 2.1.208
         // emits `tengu_bg_respawn_exhausted` ONLY from scheduleRespawn once the
@@ -1732,6 +1768,7 @@ mod tests {
 
     #[test]
     fn vanished_worker_drains_and_surfaces_stranded_replies() {
+        let _supervisor_guard = supervisor_lock();
         // Regression (RV2): the durable offline reply queue was write-only. A
         // follow-up reply the attach fallback persisted while the worker was
         // dying was only ever drained by `bg_worker::execute_job` at (re)spawn —
@@ -1790,6 +1827,7 @@ mod tests {
 
     #[test]
     fn pending_job_with_missing_cwd_is_failed_closed_not_spawned() {
+        let _supervisor_guard = supervisor_lock();
         let dir = tmpdir();
         // A pending job whose recorded cwd no longer exists (never created).
         let gone = dir.join("was-here-now-gone").display().to_string();
@@ -1839,6 +1877,7 @@ mod tests {
 
     #[test]
     fn spawned_worker_receives_the_bg_session_env() {
+        let _supervisor_guard = supervisor_lock();
         // The daemon must launch `__bg-run` with the LINGXI_ background-session
         // env (rebrand of CC's CLAUDE_CODE_SESSION_KIND/CLAUDE_BG_*/CLAUDE_JOB_DIR
         // worker-spawn keys) so the worker's turn gets the `# Background Session`
@@ -1933,6 +1972,7 @@ mod tests {
 
     #[test]
     fn job_with_alive_worker_is_left_untouched_not_failed() {
+        let _supervisor_guard = supervisor_lock();
         let dir = tmpdir();
         seed_working_job(&dir, "cafe0002");
         agents_registry::update_job_state(&dir, "cafe0002", "working", Some(7777)).unwrap();
@@ -1969,6 +2009,7 @@ mod tests {
 
     #[test]
     fn restart_adopts_live_roster_worker_when_job_pid_write_was_lost() {
+        let _supervisor_guard = supervisor_lock();
         let dir = tmpdir();
         seed_working_job(&dir, "cafe0003");
 

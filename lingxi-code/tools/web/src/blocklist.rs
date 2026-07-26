@@ -405,7 +405,7 @@ mod tests {
 
     #[tokio::test]
     async fn allowed_on_200_can_fetch_true() {
-        let _cache_guard = crate::testsupport::web_cache_lock().await;
+        let _cache_guard = crate::testsupport::web_globals_lock().await;
         clear_domain_check_cache();
         let http = Arc::new(MockHttpTransport::new());
         http.enqueue(sync_resp(200, r#"{"can_fetch":true}"#));
@@ -456,7 +456,7 @@ mod tests {
 
     #[tokio::test]
     async fn allowed_result_is_cached_no_second_request() {
-        let _cache_guard = crate::testsupport::web_cache_lock().await;
+        let _cache_guard = crate::testsupport::web_globals_lock().await;
         clear_domain_check_cache();
         let http = Arc::new(MockHttpTransport::new());
         // Only ONE response enqueued: a cache hit must not consume a second.
@@ -482,7 +482,7 @@ mod tests {
 
     #[tokio::test]
     async fn blocked_is_not_cached() {
-        let _cache_guard = crate::testsupport::web_cache_lock().await;
+        let _cache_guard = crate::testsupport::web_globals_lock().await;
         clear_domain_check_cache();
         let http = Arc::new(MockHttpTransport::new());
         // Two blocked responses: if blocked were cached, the second call would

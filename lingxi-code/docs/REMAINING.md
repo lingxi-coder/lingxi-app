@@ -45,24 +45,38 @@ a line reported a wired feature as missing; a `--help` comparison read the ROOT
 help as 20 subcommands' descriptions because an unrecognised path silently
 falls back to it.
 
-## 2. `login --id-token <jwt>` — blocked on a missing seam
+## 2. `mcp xaa` — the XAA (SEP-990) IdP connection subsystem
 
-2.1.220 writes a pre-obtained id_token straight to cache, skipping the OIDC
-browser round-trip (headless/CI enterprise auth). This port has **no id_token
-cache**: repo-wide, `id_token` appears only as a JWT the OAuth handles DECODE
-and as a redaction key, never as stored state.
+Absent as a concept. `mcp xaa setup` / `login` / `show` / `clear` manage an IdP
+connection so XAA-enabled MCP servers authenticate silently:
 
-Build the storage seam first. The flag is deliberately NOT added — the reason
-is recorded at the `LoginArgs` definition, because a flag that parses and does
-nothing advertises a path that does not exist.
+```
+xaa login  "Cache an IdP id_token so XAA-enabled MCP servers authenticate
+            silently. Default: run the OIDC browser login. With --id-token:
+            write a pre-obtained JWT directly (used by conformance/e2e tests
+            where the mock IdP does not serve /authorize)."
+           --force      ignore any cached id_token and re-login
+           --id-token   write a pre-obtained JWT directly
+setup      configure the IdP connection (one-time, all XAA servers)
+           --client-id --client-secret --callback-port --scope
+show       show the current IdP connection config
+clear      clear the connection config and cached id_token
+```
 
-## 3. `xaa` — the XAA (SEP-990) IdP connection subsystem
+Storage side: `saveIdpClientSecret(issuer, secret)` and
+`saveIdpIdTokenFromJwt(issuer, jwt)`. The port has neither — repo-wide,
+`id_token` appears only as a JWT the OAuth handles DECODE and as a redaction
+key, never as stored state. `secret::SecretKind` would gain the IdP variants.
 
-Absent as a concept. `xaa setup` / `login` / `show` / `clear` manage an IdP
-connection so XAA-enabled MCP servers authenticate silently. Not investigated
-beyond its command surface; scope unknown.
+**CORRECTION.** An earlier revision of this file listed `login --id-token` as a
+separate item under `auth login`, and a comment in `LoginArgs` explained why it
+was "deliberately not added". Both were wrong: `--id-token` belongs to
+`mcp xaa login`, `auth login` never had it, and the oracle's own text says the
+flag exists for conformance/e2e tests against a mock IdP — not the
+headless-enterprise-auth affordance I described. The comment has been removed
+rather than corrected, since `auth.rs` was never the right place for it.
 
-## 4. `--help` TEXT layout
+## 3. `--help` TEXT layout
 
 A known accepted divergence from the 2.1.216 audit, not a new finding. Listed
 so it is not re-discovered as one.

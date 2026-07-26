@@ -263,7 +263,7 @@ mod tests {
     fn clear_empties_cache() {
         // Sync test: block on the shared async guard rather than skipping it —
         // this test clears the same process-global cache the async ones use.
-        let _cache_guard = crate::testsupport::block_on_web_cache_lock();
+        let _cache_guard = crate::testsupport::block_on_web_globals_lock();
         let now = Instant::now();
         cache_set_at(
             "https://global.example/clear-1".into(),

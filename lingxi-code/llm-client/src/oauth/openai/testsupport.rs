@@ -236,7 +236,15 @@ pub async fn port_guard() -> PortGuard {
     static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let in_process = LOCK.lock().await;
     let path = std::env::temp_dir().join("lingxi-oauth-fixed-port.lock");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    // Takeover is keyed ONLY on staleness — a lock file whose holder has been
+    // gone for STALE_AFTER. There is deliberately no wall-clock deadline that
+    // steals a LIVE lock: the first version of this had one (60s), and under a
+    // saturated full-workspace run a legitimate holder exceeded it, so a waiter
+    // stole the lock, both ran, both bound 1455, and the loser failed with
+    // "both fixed ports are already in use" — the exact symptom the lock
+    // exists to prevent. A safety valve that breaks the invariant it guards is
+    // worse than a hang, because a hang is diagnosable.
+    const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(300);
     loop {
         match std::fs::OpenOptions::new()
             .write(true)
@@ -245,20 +253,21 @@ pub async fn port_guard() -> PortGuard {
         {
             Ok(_) => break,
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                // Take over a lock whose holder died (or is wedged) rather than
-                // hanging the whole suite behind it.
                 let stale = std::fs::metadata(&path)
                     .and_then(|m| m.modified())
-                    .map(|t| t.elapsed().unwrap_or_default() > std::time::Duration::from_secs(120))
+                    .map(|t| t.elapsed().unwrap_or_default() > STALE_AFTER)
+                    // Un-stat-able: treat as stale, else an unreadable lock file
+                    // wedges the suite forever.
                     .unwrap_or(true);
-                if stale || std::time::Instant::now() > deadline {
+                if stale {
                     let _ = std::fs::remove_file(&path);
                     continue;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(25)).await;
             }
-            // An unusable temp dir must not fail the test that only wanted a
-            // lock — fall back to the in-process guard alone.
+            // An unusable temp dir leaves only the in-process mutex. That still
+            // covers same-binary contention, which is where these tests
+            // actually collide.
             Err(_) => break,
         }
     }

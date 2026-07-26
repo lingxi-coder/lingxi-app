@@ -23,20 +23,32 @@
 /// a test that wipes it. The invariant is "any user of the shared cache", not
 /// "any mutator of it".
 ///
+/// It governs the process-global URL/domain caches AND the process-global
+/// `LINGXI_SKIP_WEBFETCH_PREFLIGHT` env var, because those are one resource
+/// from a test's point of view: a test that sets the env var makes a
+/// concurrent test skip its preflight, which desynchronises that test's queued
+/// mock responses and fails it on a body it never asked for. It was originally
+/// named `web_cache_lock`, and that name caused the very bug it was meant to
+/// prevent — a test guarding the env var reached for a DIFFERENT lock
+/// (`SKIP_ENV_LOCK`, which covers `LINGXI_SIMPLE_SYSTEM_PROMPT`) and its
+/// comment claimed it therefore could not race a parallel `call()` test. Two
+/// locks are not mutual exclusion. Name a lock after the invariant, not after
+/// one of the things it happens to protect.
+///
 /// A `tokio::sync::Mutex` so the guard can be held across the `.await`s these
 /// tests contain without tripping `await_holding_lock`.
-pub(crate) async fn web_cache_lock() -> tokio::sync::MutexGuard<'static, ()> {
+pub(crate) async fn web_globals_lock() -> tokio::sync::MutexGuard<'static, ()> {
     static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     LOCK.lock().await
 }
 
-/// [`web_cache_lock`] for a SYNC test. Blocks on the same lock, so a
+/// [`web_globals_lock`] for a SYNC test. Blocks on the same lock, so a
 /// non-`async` test that clears the caches still serializes against the async
 /// ones — skipping it there would leave the exact hole the lock exists to
 /// close.
-pub(crate) fn block_on_web_cache_lock() -> tokio::sync::MutexGuard<'static, ()> {
+pub(crate) fn block_on_web_globals_lock() -> tokio::sync::MutexGuard<'static, ()> {
     tokio::runtime::Builder::new_current_thread()
         .build()
         .expect("test runtime")
-        .block_on(web_cache_lock())
+        .block_on(web_globals_lock())
 }

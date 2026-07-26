@@ -27,7 +27,7 @@ it round-tripped the whole file through `read_file`, whose returned view is not
 guaranteed byte-identical, which corrupted the JSONL — caught by the first test
 that actually read the file back — and rewrote every prior line per message.
 
-## Layer 1 — persist task state (NOT DONE)
+## Layer 1 — persist task state ✅ DONE (`d76739609`)
 
 `TaskRegistry` holds `tasks: RwLock<HashMap<String, TaskState>>` and nothing
 else. A `LocalAgentTaskState` carries the fields a restore needs (`agent_id`,
@@ -46,7 +46,7 @@ Open design questions that need answering BEFORE writing it:
 - Eviction: `evict_terminal_tasks` currently drops rows from memory. Terminal
   rows must not be restored as live.
 
-## Layer 2 — rebuild a runner (NOT DONE)
+## Layer 2 — rebuild a runner ✅ DONE (`d76739609`)
 
 `StreamingSubagentSpawner::spawn_persistent(request, inherit)` starts a runner
 from a `SubagentSpawnRequest`. A restore needs a variant that also seeds
@@ -73,6 +73,17 @@ live task record.
 because `PolicyPermissionGate` holds a boot-snapshot policy that cannot drift
 within a process. A cross-session resume reads a freshly-loaded policy that
 genuinely can differ, and that is the transform it needs.
+
+## STATUS: COMPLETE
+
+All three layers landed. `session::agent_rows` holds the parked row
+(`agent-<id>.task.json`, absence-means-terminal),
+`traits::parked_agent_store::ParkedAgentStore` is the seam,
+`engine_desktop::agent_restore::restore_parked_agents` rebuilds through the same
+`spawn_async` a fresh launch uses, and `SubagentContext::resumed_history`
+REPLACES the seed (prompt + fork context + preload) rather than prefixing it.
+
+The sections below are the plan as written before the work.
 
 ## Ordering
 

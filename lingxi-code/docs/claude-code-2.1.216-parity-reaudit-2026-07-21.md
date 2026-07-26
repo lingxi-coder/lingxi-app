@@ -235,7 +235,7 @@ forker 使用调用者当前 cwd 创建 background spec；worker 恢复时忽略
 
 影响：从其他 worktree 或目录 resume 时可能加载失败，或命中错误的同名 session 上下文。
 
-### M2. Background cold seed 没有完整恢复 compact/deferred-tool metadata
+### M2. Background cold seed 没有完整恢复 compact/deferred-tool metadata — **CLOSED**（见 §0 表；本节保留为修复前证据）
 
 **结论：TRUE / Medium**
 

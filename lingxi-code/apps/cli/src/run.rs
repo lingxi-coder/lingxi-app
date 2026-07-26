@@ -686,6 +686,13 @@ async fn dispatch_control_request(
                         }
                     }
                     let dir = std::path::PathBuf::from(&directory);
+                    // The new cwd becomes the SOLE trusted directory, matching
+                    // what `EnterWorktree` and the worktree restore already do.
+                    // Any `--add-dir` extras are dropped rather than carried
+                    // across: narrowing a trust boundary on a move is the safe
+                    // direction, and inheriting the old session's extras into a
+                    // directory the user has just been asked to trust would
+                    // grant more than the prompt described.
                     let trusted = vec![dir.clone()];
                     session_cwd.swap(dir, trusted);
                     writer.reply_success(

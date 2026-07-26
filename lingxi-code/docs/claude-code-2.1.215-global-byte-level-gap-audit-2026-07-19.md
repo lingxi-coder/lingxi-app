@@ -1,5 +1,18 @@
 # Claude Code 2.1.215 全局 byte-level parity 复审
 
+## 复审状态更新 2026-07-26
+
+本文档写于 2026-07-19，其后多轮 wave 已关闭其中大量条目；**下文各节保留为修复前证据，不应再当作当前工作树状态**。已在行为点逐条核实并关闭的：
+
+- **H-06**（PowerShell 5.1 fail-open）— **CLOSED**。`policy.rs:217-218` 现在对无法静态验证的命令返回 `ask_powershell_invalid_parse`（"PowerShell command could not be statically validated: …"），不再 passthrough。
+- **H-07**（Docker/Podman daemon redirect flags）— **CLOSED**。`read_only_command.rs` 的测试断言 `docker images --context=prod` / `--url` / `--connection` / `docker ps --identity` 均**不**是只读。
+- **H-08**（`/goal` 只有文案）— **CLOSED**，见 2.1.216 复审 §0（session-scoped Stop hook 强制续转）。
+
+其余条目**尚未逐条复审**。经验数据：上两次同类 re-triage 中，标记为 open 的条目分别有 22/32 与 5/6 其实早已关闭 —— 所以这份清单的剩余部分应当先做一次 behaviour-site 复核，而不是直接当作待办开工。
+
+---
+
+
 日期：2026-07-19  
 LingXi 基线：`50b7b88c0b01ccc1b56d53559561d634a2c4bfc9`  
 Claude Code 基线：`2.1.215`（npm `latest` / `next`；native binary SHA-256 `90608b5c5ab504e96e77365cea6203d046e291d59b2bb42cf28dcb2ccdf9dd58`）

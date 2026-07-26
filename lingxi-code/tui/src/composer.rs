@@ -174,6 +174,17 @@ impl Composer {
         self.chars.iter().collect()
     }
 
+    /// Whether the buffer holds no characters at all.
+    ///
+    /// O(1) and allocation-free, unlike [`Self::text`], which collects the
+    /// `Vec<char>` into a fresh `String`. The key path asks this on EVERY
+    /// keystroke (the ←-on-empty gesture needs to know emptiness before and
+    /// after each key), so it must not allocate.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.chars.is_empty()
+    }
+
     /// Whether the buffer is empty ignoring surrounding whitespace.
     #[must_use]
     pub fn is_blank(&self) -> bool {

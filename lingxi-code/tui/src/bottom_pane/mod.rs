@@ -1285,9 +1285,9 @@ impl BottomPane {
         // Whether the composer had text BEFORE this key, so an edit that
         // empties it can be stamped below. That stamp is what makes the very
         // next ← ambiguous — without it the guard never arms.
-        let had_text = !self.composer.text().is_empty();
+        let had_text = !self.composer.is_empty();
         let out = self.on_composer_key_inner(key, ctrl);
-        if had_text && self.composer.text().is_empty() {
+        if had_text && self.composer.is_empty() {
             let now_ms = self.left_arrow_epoch.elapsed().as_millis() as u64 + 1;
             self.left_arrow.note_edited_to_empty(now_ms);
         }
@@ -1416,7 +1416,7 @@ impl BottomPane {
                 // step away from a character you just deleted — see
                 // `tui_core::left_arrow_gesture`.
                 let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-                if self.composer.text().is_empty() && !shift {
+                if self.composer.is_empty() && !shift {
                     // A ← inside a paste burst is pasted content, not a
                     // deliberate keystroke.
                     let solo = !self.paste_burst_pending();

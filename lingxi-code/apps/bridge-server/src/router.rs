@@ -970,22 +970,28 @@ impl CommandRouter for EngineCommandRouter {
                     }
                 }
             }
-            ClientCommand::TaskStop { task_id } => match self.tasks.kill(&task_id).await {
-                Ok(rec) => {
-                    sink.emit(ClientEvent::TaskStatusChanged {
-                        task_id: rec.task_id,
-                        status: client_adapter::lowering::lower_task_status(&rec.status),
-                    })
-                    .await;
+            // A stop from the desktop client is the USER's — claude-code's
+            // UI/control-channel `stopTask` passes `source:"user"` and inherits
+            // the stop helper's `killedBy = "user"` default, so the killed
+            // notification reads "was stopped by user".
+            ClientCommand::TaskStop { task_id } => {
+                match self.tasks.kill_with_reason(&task_id, "user").await {
+                    Ok(rec) => {
+                        sink.emit(ClientEvent::TaskStatusChanged {
+                            task_id: rec.task_id,
+                            status: client_adapter::lowering::lower_task_status(&rec.status),
+                        })
+                        .await;
+                    }
+                    Err(e) => {
+                        sink.emit(ClientEvent::Error {
+                            kind: ErrorKindDto::Internal,
+                            message: format!("task stop failed: {e}"),
+                        })
+                        .await;
+                    }
                 }
-                Err(e) => {
-                    sink.emit(ClientEvent::Error {
-                        kind: ErrorKindDto::Internal,
-                        message: format!("task stop failed: {e}"),
-                    })
-                    .await;
-                }
-            },
+            }
 
             // ── Handled elsewhere / not routed by this seam ──────────────────
             //

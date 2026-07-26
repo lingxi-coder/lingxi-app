@@ -2061,7 +2061,11 @@ impl Tool for TaskStopTool {
             None => record.description.clone(),
         };
 
-        if let Err(e) = registry.kill(&task_id).await {
+        // claude-code's `TaskStop` tool calls the shared stop entry point with
+        // `killedBy:"parent"` (2.1.220, byte-visible) — a PARENT AGENT stopping
+        // one of its background children, so a killed `local_agent` notification
+        // reads "was stopped by Claude" rather than the bare "was stopped".
+        if let Err(e) = registry.kill_with_reason(&task_id, "parent").await {
             emit_failed(
                 &bus,
                 TASK_STOP_FAILED,

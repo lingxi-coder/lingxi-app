@@ -148,6 +148,45 @@ pub struct WorkflowRecord {
     pub ended_at_ms: Option<u64>,
 }
 
+/// Everything a terminating `local_agent` run reports beyond its status — the
+/// payload claude-code passes to `enqueueAgentNotification` (`yNt`) in the SAME
+/// call that carries the terminal status.
+///
+/// The binary builds this at the moment of termination: `finalMessage` (the
+/// agent's final text), the `{totalTokens,toolUses,durationMs}` usage object,
+/// the `error` string on the failed path, and the worktree result spread
+/// (`...await getWorktreeResult()`) whose two keys gate and fill the optional
+/// `<worktree>` section. Modeling it as one struct keeps the port's write
+/// ATOMIC with respect to the notification drain: a terminal status published
+/// before its payload would let a drain fire the byte-shape of a result-less
+/// completion.
+///
+/// Every field is optional and a `None` never clears an already-stored value
+/// (see [`TaskRegistryHandle::set_agent_outcome`]), so a partial report — e.g.
+/// a killed run with a worktree but no result — is safe.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTerminalOutcome {
+    /// The agent's final text response → the `<result>` section (claude
+    /// `finalMessage`, `wc(content,"\n")` — text blocks joined with `\n`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
+    /// Run usage → the `<usage>` section.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<AgentRunUsage>,
+    /// Failure reason → folded into the `failed` summary (claude `error ||
+    /// 'Unknown error'`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// The KEPT isolation worktree's path → gates and fills `<worktree>`. A
+    /// worktree the terminal judgment auto-removed reports `None` (claude's
+    /// `getWorktreeResult` resolves to `{}`), so the section is omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_path: Option<String>,
+    /// The kept worktree's branch → `<worktreeBranch>` inside that section.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_branch: Option<String>,
+}
+
 /// Agent-run usage for a `local_agent` task-notification's optional `<usage>`
 /// section — mirrors claude-code's `enqueueAgentNotification` usage object
 /// (`{ totalTokens, toolUses, durationMs }`, rendered as
@@ -334,6 +373,44 @@ pub trait TaskRegistryHandle: Send + Sync {
 
     /// Kill the task (cancels any background handle, marks status `killed`).
     async fn kill(&self, id: &str) -> Result<TaskRecord, TaskRegistryError>;
+
+    /// Kill the task, recording WHO stopped it so a `local_agent`'s killed
+    /// notification renders the right verb.
+    ///
+    /// Claude-code's stop entry point (`H$e`) takes `killedBy` from its caller
+    /// and stores it on the task; the renderer then picks
+    /// `"parent"` → `was stopped by Claude`, `"user"` → `was stopped by user`,
+    /// anything else → the bare `was stopped`. The two production callers are
+    /// byte-visible in 2.1.220: the `TaskStop` TOOL passes `killedBy:"parent"`
+    /// (a parent agent stopping a child), and the UI/control-channel `stopTask`
+    /// passes `source:"user"` and inherits `H$e`'s `killedBy = "user"`
+    /// destructuring default.
+    ///
+    /// Defaulted to plain [`kill`](Self::kill) — a host that does not
+    /// distinguish the two stores no reason, which is exactly the binary's
+    /// `undefined killedBy` case.
+    async fn kill_with_reason(
+        &self,
+        id: &str,
+        _killed_by: &str,
+    ) -> Result<TaskRecord, TaskRegistryError> {
+        self.kill(id).await
+    }
+
+    /// Record a terminating `local_agent`'s notification payload
+    /// ([`AgentTerminalOutcome`]).
+    ///
+    /// MUST be called BEFORE the terminal `set_status`: the drain
+    /// ([`take_pending_task_notifications`](Self::take_pending_task_notifications))
+    /// is gated on terminal-and-not-notified, so publishing the status first
+    /// opens a window where the notification renders without its `<result>` /
+    /// `<usage>` / `<worktree>` sections. Claude-code has no such window — it
+    /// passes status and payload to `enqueueAgentNotification` in one call.
+    ///
+    /// Merge semantics: a `Some` field overwrites, a `None` field leaves the
+    /// stored value alone. Default no-op so existing mock handles compile
+    /// unchanged.
+    async fn set_agent_outcome(&self, _id: &str, _outcome: AgentTerminalOutcome) {}
 
     /// Spawn a real background monitor and return its registry task id.
     /// Hosts without a task runtime fail closed rather than minting a fake id.

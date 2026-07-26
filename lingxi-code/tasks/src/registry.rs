@@ -883,6 +883,45 @@ impl TaskRegistry {
     /// - `local_agent` carries `error` (its `failed` reason);
     /// - every type carries `tool_use_id` (when launched from a tool call) and
     ///   the spool `output_path`.
+    /// Record a terminating `local_agent`'s notification payload onto its state
+    /// ([`crate::state::AgentOutcomeState::merge`] semantics: `Some`
+    /// overwrites, `None` leaves the stored value).
+    ///
+    /// `outcome.error` lands on the state's own `error` field — the failed
+    /// summary's `{error}` (claude `error || 'Unknown error'`) reads from there,
+    /// and until this existed nothing in production ever wrote it, so EVERY
+    /// failed background agent reported `Unknown error`.
+    ///
+    /// Callers must invoke this BEFORE the terminal `set_status`; see
+    /// [`traits::task_registry::TaskRegistryHandle::set_agent_outcome`].
+    pub async fn set_agent_outcome(
+        &self,
+        task_id: &str,
+        outcome: traits::task_registry::AgentTerminalOutcome,
+    ) {
+        let task_id = self.canonical_or_raw(task_id).await;
+        let mut map = self.tasks.write().await;
+        if let Some(TaskState::LocalAgent(agent)) = map.get_mut(&task_id) {
+            if let Some(error) = outcome.error.clone() {
+                agent.error = Some(error);
+            }
+            agent.outcome.merge(outcome);
+        }
+    }
+
+    /// [`Self::kill`] with the stop initiator recorded (`"parent"` / `"user"`).
+    ///
+    /// The reason is stamped BEFORE the kill dispatch so a handler that flips
+    /// the task to `Killed` synchronously cannot let the drain observe a
+    /// terminal task whose `killed_by` has not landed yet.
+    pub async fn kill_with_reason(&self, task_id: &str, killed_by: &str) -> Result<(), TaskError> {
+        let canonical = self.canonical_or_raw(task_id).await;
+        if let Some(TaskState::LocalAgent(agent)) = self.tasks.write().await.get_mut(&canonical) {
+            agent.outcome.killed_by = Some(killed_by.to_string());
+        }
+        self.kill(task_id).await
+    }
+
     pub async fn take_pending_task_notifications(
         &self,
     ) -> Vec<traits::task_registry::TaskNotification> {
@@ -915,6 +954,15 @@ impl TaskRegistry {
                 TaskState::LocalAgent(agent) => agent.error.clone(),
                 _ => None,
             };
+            // `local_agent` optional sections — the payload the terminating run
+            // reported via `set_agent_outcome` (and the stop initiator recorded
+            // by `kill_with_reason`). Every other task type carries none of
+            // them, which is the renderer's omit-the-clause case.
+            let agent_outcome = match state {
+                TaskState::LocalAgent(agent) => Some(agent.outcome.clone()),
+                _ => None,
+            };
+            let agent_outcome = agent_outcome.unwrap_or_default();
             out.push(traits::task_registry::TaskNotification {
                 task_id: b.id.clone(),
                 task_type: task_type_to_wire(b.task_type).to_string(),
@@ -924,28 +972,21 @@ impl TaskRegistry {
                 output_path: Some(b.output_file.to_string_lossy().into_owned()),
                 exit_code,
                 error,
-                // `local_agent` `<result>` / `<usage>` (the optional sections):
-                // `LocalAgentTaskState` carries neither the final-message text nor
-                // the run usage today, so both stay `None` — the byte-faithful
-                // "no result" case. They flow only once the BACKGROUNDED local_agent
-                // path is wired (`AgentTool::call` dispatches synchronously today,
-                // and the production `LocalAgentHandler` has no result-bearing sink;
-                // the renderer already emits them when present — see
-                // `prompt::task_notification`). Part of the deferred async-agent work.
-                result: None,
-                usage: None,
-                // `killed_by` (the by-Claude/by-user split) + the isolation
-                // `<worktree>` section: `LocalAgentTaskState` tracks neither the
-                // stop reason nor the carried worktree handle today, so both stay
-                // `None` here — the byte-faithful "no reason / no worktree" case.
-                // The renderer (`prompt::task_notification`) emits the correct
-                // bytes the moment they are populated; wiring the stop reason
-                // through the kill paths and the worktree metadata onto the state
-                // is part of the same deferred backgrounded-local_agent work as
-                // `result`/`usage` above.
-                killed_by: None,
-                worktree_path: None,
-                worktree_branch: None,
+                // `local_agent` `<result>` / `<usage>`: the terminating run's
+                // final text and usage rollup, reported through
+                // `set_agent_outcome` before its terminal status. `None` stays
+                // the byte-faithful "no result" case (a run that produced no
+                // text, or a non-agent task).
+                result: agent_outcome.result,
+                usage: agent_outcome.usage,
+                // `killed_by` (the by-Claude/by-user split, from
+                // `kill_with_reason`) + the isolation `<worktree>` section (the
+                // KEPT worktree's path/branch, from the handler's terminal
+                // `agent_worktree_result` judgment). `None` ⇒ the bare
+                // `was stopped` verb / no worktree section.
+                killed_by: agent_outcome.killed_by,
+                worktree_path: agent_outcome.worktree_path,
+                worktree_branch: agent_outcome.worktree_branch,
             });
             // Mark notified so the completion surfaces exactly once. The task
             // itself stays addressable until an explicit cleanup/delete removes
@@ -1271,6 +1312,7 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
             messages: vec![],
             pending_messages: vec![],
             is_backgrounded: *is_backgrounded,
+            outcome: Default::default(),
         }),
         TaskSpawnInput::RemoteAgent { endpoint, .. } => {
             TaskState::RemoteAgent(crate::state::RemoteAgentTaskState {

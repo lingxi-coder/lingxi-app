@@ -442,8 +442,10 @@ impl SendMessageTool {
         let registry = self.ctx.task_registry.as_ref().ok_or_else(|| {
             ToolError::Internal("SendMessage: task registry is not configured".into())
         })?;
+        // The team LEAD (an agent) approved this shutdown, so the stop is
+        // attributed to Claude, not the user (claude `killedBy:"parent"`).
         registry
-            .kill(&task_address)
+            .kill_with_reason(&task_address, "parent")
             .await
             .map_err(|e| ToolError::Internal(format!("SendMessage: shutdown failed: {e}")))?;
         Ok(json!({

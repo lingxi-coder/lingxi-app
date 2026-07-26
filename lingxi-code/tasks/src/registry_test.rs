@@ -381,6 +381,7 @@ async fn budget_stop_matches_claude_background_agent_filter() {
             messages: vec![],
             pending_messages: vec![],
             is_backgrounded: false,
+            outcome: Default::default(),
         }))
         .await;
 
@@ -1547,6 +1548,7 @@ async fn take_pending_carries_agent_error() {
             messages: vec![],
             pending_messages: vec![],
             is_backgrounded: true,
+            outcome: Default::default(),
         }))
         .await;
 
@@ -1558,6 +1560,175 @@ async fn take_pending_carries_agent_error() {
     assert_eq!(n.error.as_deref(), Some("rate limited"));
     assert_eq!(n.tool_use_id.as_deref(), Some("toolu_7"));
     assert!(n.exit_code.is_none(), "agent tasks have no exit_code");
+}
+
+/// Build a `local_agent` state in `status`, ready for `insert_state_for_test`.
+fn agent_state(id: &str, status: TaskStatus) -> crate::state::TaskState {
+    use crate::state::{LocalAgentTaskState, TaskState, TaskStateBase};
+    TaskState::LocalAgent(LocalAgentTaskState {
+        base: TaskStateBase {
+            id: id.into(),
+            task_type: TaskType::LocalAgent,
+            status,
+            description: "research".into(),
+            tool_use_id: None,
+            start_time: SystemTime::now(),
+            end_time: None,
+            total_paused_ms: 0,
+            output_file: std::path::PathBuf::from(format!("/tmp/tasks/{id}.output")),
+            output_offset: 0,
+            notified: false,
+            creator_teammate_name: None,
+            creator_team_name: None,
+        },
+        agent_id: protocol::AgentId::nil(),
+        subagent_type: String::new(),
+        prompt: String::new(),
+        error: None,
+        messages: vec![],
+        pending_messages: vec![],
+        is_backgrounded: true,
+        outcome: Default::default(),
+    })
+}
+
+/// The terminating run's payload reaches the drained notification: `<result>`,
+/// `<usage>` and the `<worktree>` coordinates. All three were hardcoded `None`
+/// while nothing wrote them, so a background agent's completion reached the
+/// model as a bare status.
+#[tokio::test]
+async fn take_pending_carries_agent_result_usage_and_worktree() {
+    let (_d, registry) = make_registry();
+    registry
+        .insert_state_for_test(agent_state("adone0001", TaskStatus::Running))
+        .await;
+    registry
+        .set_agent_outcome(
+            "adone0001",
+            traits::task_registry::AgentTerminalOutcome {
+                result: Some("the answer".into()),
+                usage: Some(traits::task_registry::AgentRunUsage {
+                    subagent_tokens: 120,
+                    tool_uses: 3,
+                    duration_ms: 4_500,
+                }),
+                error: None,
+                worktree_path: Some("/repo/.lingxi/worktrees/agent-1".into()),
+                worktree_branch: Some("worktree-agent-1".into()),
+            },
+        )
+        .await;
+    registry
+        .set_status("adone0001", TaskStatus::Completed)
+        .await
+        .unwrap();
+
+    let drained = registry.take_pending_task_notifications().await;
+    assert_eq!(drained.len(), 1);
+    let n = &drained[0];
+    assert_eq!(n.result.as_deref(), Some("the answer"));
+    let usage = n.usage.clone().expect("usage section");
+    assert_eq!(usage.subagent_tokens, 120);
+    assert_eq!(usage.tool_uses, 3);
+    assert_eq!(usage.duration_ms, 4_500);
+    assert_eq!(
+        n.worktree_path.as_deref(),
+        Some("/repo/.lingxi/worktrees/agent-1")
+    );
+    assert_eq!(n.worktree_branch.as_deref(), Some("worktree-agent-1"));
+    assert!(n.killed_by.is_none(), "a completion has no stop initiator");
+}
+
+/// `outcome.error` lands on the state's `error` field — the failed summary's
+/// `{error}` reads from there, and nothing in production wrote it before, so
+/// every failed background agent reported claude's `Unknown error` fallback.
+#[tokio::test]
+async fn set_agent_outcome_error_reaches_the_failed_summary() {
+    let (_d, registry) = make_registry();
+    registry
+        .insert_state_for_test(agent_state("afail0001", TaskStatus::Running))
+        .await;
+    registry
+        .set_agent_outcome(
+            "afail0001",
+            traits::task_registry::AgentTerminalOutcome {
+                error: Some("model refused".into()),
+                ..Default::default()
+            },
+        )
+        .await;
+    registry
+        .set_status("afail0001", TaskStatus::Failed)
+        .await
+        .unwrap();
+
+    let drained = registry.take_pending_task_notifications().await;
+    assert_eq!(drained[0].error.as_deref(), Some("model refused"));
+}
+
+/// Merge semantics: a later partial report never erases an earlier one. A kill
+/// that only carries a worktree must not blank out the result the run already
+/// produced.
+#[tokio::test]
+async fn set_agent_outcome_merges_rather_than_replaces() {
+    let (_d, registry) = make_registry();
+    registry
+        .insert_state_for_test(agent_state("amerge001", TaskStatus::Running))
+        .await;
+    registry
+        .set_agent_outcome(
+            "amerge001",
+            traits::task_registry::AgentTerminalOutcome {
+                result: Some("partial answer".into()),
+                ..Default::default()
+            },
+        )
+        .await;
+    registry
+        .set_agent_outcome(
+            "amerge001",
+            traits::task_registry::AgentTerminalOutcome {
+                worktree_path: Some("/wt".into()),
+                ..Default::default()
+            },
+        )
+        .await;
+    registry
+        .set_status("amerge001", TaskStatus::Completed)
+        .await
+        .unwrap();
+
+    let drained = registry.take_pending_task_notifications().await;
+    assert_eq!(drained[0].result.as_deref(), Some("partial answer"));
+    assert_eq!(drained[0].worktree_path.as_deref(), Some("/wt"));
+}
+
+/// `kill_with_reason` records WHO stopped the task, which selects the killed
+/// summary's verb: `"parent"` → "was stopped by Claude" (the `TaskStop` TOOL),
+/// `"user"` → "was stopped by user" (the UI / control-channel stop). Plain
+/// `kill` records nothing — the binary's `undefined killedBy` → bare
+/// "was stopped".
+#[tokio::test]
+async fn kill_with_reason_records_the_stop_initiator() {
+    for (id, reason, expected) in [
+        ("akillpar1", Some("parent"), Some("parent")),
+        ("akilluse1", Some("user"), Some("user")),
+        ("akillbare", None, None),
+    ] {
+        let (_d, registry) = make_registry();
+        registry
+            .insert_state_for_test(agent_state(id, TaskStatus::Running))
+            .await;
+        match reason {
+            Some(r) => registry.kill_with_reason(id, r).await.unwrap(),
+            None => registry.kill(id).await.unwrap(),
+        }
+
+        let drained = registry.take_pending_task_notifications().await;
+        assert_eq!(drained.len(), 1, "{id}: killed task drains once");
+        assert_eq!(drained[0].status, "killed");
+        assert_eq!(drained[0].killed_by.as_deref(), expected, "{id}");
+    }
 }
 
 #[tokio::test]
@@ -1649,6 +1820,7 @@ async fn rested_agent_surfaces_once_per_rest_without_eviction() {
             messages: vec![],
             pending_messages: vec![],
             is_backgrounded: true,
+            outcome: Default::default(),
         }))
         .await;
 

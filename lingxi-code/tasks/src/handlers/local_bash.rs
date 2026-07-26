@@ -139,6 +139,29 @@ pub trait TaskStatusSink: Send + Sync {
     ) {
     }
 
+    /// Report a TERMINATING `local_agent`'s notification payload — final text,
+    /// usage, failure reason, and the kept-worktree coordinates.
+    ///
+    /// The counterpart of [`Self::notify_rest`] for the terminal case. Both the
+    /// resting and the terminal notification carry `<result>`/`<usage>` in
+    /// claude-code (`enqueueAgentNotification` receives `finalMessage`, `usage`
+    /// and the `...getWorktreeResult()` spread alongside the status), but only
+    /// the rest path had a seam here — so a terminating background agent
+    /// reported a bare status and the model never saw its answer.
+    ///
+    /// Call this BEFORE the terminal [`Self::set_status`]: the registry's drain
+    /// is terminal-gated, so the reverse order can publish a notification whose
+    /// optional sections have not landed yet.
+    ///
+    /// Defaulted to a no-op (frozen-trait idiom) — standalone sinks that only
+    /// track status keep compiling unchanged.
+    async fn set_agent_outcome(
+        &self,
+        _task_id: &str,
+        _outcome: traits::task_registry::AgentTerminalOutcome,
+    ) {
+    }
+
     /// Queue a live stdout event from a `monitor_ws` task. Default no-op keeps
     /// standalone handlers and existing test sinks source-compatible.
     async fn notify_monitor_event(&self, _task_id: &str, _event: &str) {}

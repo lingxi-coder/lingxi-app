@@ -1,77 +1,70 @@
-# forked-skill gap — what it actually depends on, 2026-07-25
+# forked-skill gap — the real dependency chain, 2026-07-25
 
 `delta-audit-217-218` files three items — `forkedSkillName` (L),
-`forkedSkill` (L, security), `frozenCommandDenies` (XL, security) — and my own
-re-triage called them "one architectural cluster". That was right but
-understated. They do not sit on a missing *feature*; they sit on a missing
-*subsystem*, and that subsystem is a separate deferred item nobody has filed.
+`forkedSkill` (L, security), `frozenCommandDenies` (XL, security) — which my
+re-triage grouped as "one architectural cluster". They are a stack, and the
+security guard is at the TOP, so it cannot be landed first.
 
-Verified against `main` @ `06f8b71e8`, at the behaviour sites.
+Verified against `main` @ `d4bf6e352`, at the behaviour sites.
 
-## The dependency chain
+## Correction to this document's first revision
+
+The first revision claimed the base of the stack was missing entirely: *"no
+tool can dispatch a background agent."* **That was wrong.** I had grepped for
+`spawn_local_agent` / `SpawnInput::LocalAgent` / `TaskKind::LocalAgent` under
+`tools/` and read the empty result as absence — but the tool layer does not
+name the tasks layer directly. It goes through a seam:
 
 ```
-backgrounded agent dispatch FROM A TOOL      ← not wired (see below)
-  └─ context:fork skill launches as a background subagent   (forkedSkillName)
-       └─ .forked-skill.json / .marker.json + resume hard-gate  (forkedSkill)
-            └─ frozenCommandDenies union across fork + resume
+AgentTool::dispatch_async  →  SubagentSpawner::spawn_async
+                              └─ BackgroundAgentSpawner (apps/engine-desktop/src/background_agent.rs)
+                                   ├─ registry.spawn(LocalAgent{is_backgrounded:true})
+                                   ├─ MailboxRouter.register(agent_id)  ← SendMessage routing
+                                   └─ run_teammate_pump  ← the injectUserMessageToTeammate bridge
 ```
 
-Each layer is meaningless without the one under it, and the security guard is
-at the TOP — which is why it cannot be landed first.
+wired at the composition root (`apps/engine-desktop/src/lib.rs:6666`).
+`run_in_background` has been live end-to-end.
 
-## The real blocker: no tool can dispatch a background agent
+Two things fed the wrong read, and both are worth naming because they will
+mislead the next reader too:
 
-- `AgentTool` carries `run_in_background` but never acts on it. Its own doc
-  says so: *"Carried; background dispatch is handled by the host runtime /
-  coordinator"* (`tools/agent/src/agent.rs:120-123`). The only use of the task
-  registry in that file is a spawn-cap **reservation**
-  (`try_reserve_total_agent_spawn`, `:1656`) — the run itself is synchronous.
-- Repo-wide, **no tool** references `spawn_local_agent` / `SpawnInput::LocalAgent`
-  / `TaskKind::LocalAgent`. Nothing under `tools/` routes into the backgrounded
-  path.
-- The backgrounded path DOES exist one layer down —
-  `tasks/src/handlers/local_agent.rs` handles `is_backgrounded`, allocates a
-  spool file and preserves a full `SubagentSpawnRequest` — but it is only
-  reachable from the tasks layer, not from a tool call.
-- `tasks/src/registry.rs:930` states the consequence plainly: `result` and
-  `usage` "flow only once the BACKGROUNDED local_agent path is wired
-  (`AgentTool::call` dispatches synchronously today, and the production
-  `LocalAgentHandler` has no result-bearing sink)", and `:944` puts
-  `killed_by` / worktree metadata in "the same deferred backgrounded-local_agent
-  work".
+1. **A negative grep for a name the architecture deliberately avoids.** The
+   point of the `SubagentSpawner` seam is that `tools/` does not mention
+   `tasks/`. Searching for the callee's vocabulary inside the caller's crate
+   was guaranteed to return nothing whether or not the wiring existed.
+2. **A stale comment that read as a live status.** `tasks/src/registry.rs:930`
+   said, in prose, *"they flow only once the BACKGROUNDED local_agent path is
+   wired (`AgentTool::call` dispatches synchronously today…)"*. That sentence
+   was true when written and false when read, and it named the exact symbol I
+   had just failed to find — so it confirmed the wrong conclusion instead of
+   correcting it. **A deferral note that asserts a fact about other code,
+   rather than pointing at it, becomes a lie the moment that code moves.**
 
-So the prerequisite is: route a tool-initiated background agent through the
-tasks layer, give `LocalAgentHandler` a result-bearing sink, and plumb stop
-reason + worktree metadata onto `LocalAgentTaskState`.
+## What was actually missing (fixed in this wave)
 
-## And the skill side starts further back than the audit says
+Only the last layer of the base: a terminating `local_agent` reported nothing
+but a status. `take_pending_task_notifications` hardcoded `result: None,
+usage: None, killed_by: None, worktree_path: None, worktree_branch: None`, and
+`LocalAgentTaskState::error` was never written in production either — so every
+completed background agent reached the model as a bare "finished" with no
+answer, every failed one as claude's `Unknown error` fallback, and every stop
+as the generic "was stopped".
 
-`SkillFrontmatter` (`skill-api/src/model.rs`) has `name`, `description`,
-`when_to_use`, `allowed_tools`, `disallowed_tools`, `model` — and **no
-`context` field at all**. A `context: fork` skill is not "executed inline
-instead of forked"; the declaration is parsed away and never seen. `background`
-is likewise absent. `tools/skill/src/skill.rs` hard-codes `"status": "inline"`.
+## What forked-skill still needs, now that the base is whole
 
-## Why I did not start it
+1. `SkillFrontmatter` (`skill-api/src/model.rs`) has `name`, `description`,
+   `when_to_use`, `allowed_tools`, `disallowed_tools`, `model` — and **no
+   `context` field**, so a `context: fork` declaration is parsed away and never
+   seen. `background` is absent too. Add both + a `should_background_fork`
+   predicate.
+2. `tools/skill/src/skill.rs` hard-codes `"status": "inline"`. Route a forking
+   skill through the same `SubagentSpawner::spawn_async` the Agent tool uses,
+   and render claude's `status:"forked"` / `background:true` result shape.
+3. `forkedSkillName` on the registry entry.
+4. The two scoping sidecars + the four resume refusal reasons
+   (`..._scoping_invalid` / `_missing` / `_missing_cold` / skill-name mismatch).
+5. `frozenCommandDenies`: capture at fork, union ahead of live denies on resume.
 
-Not because a decision was needed — because the task as stated requires first
-building a different subsystem that is itself deferred, and the honest estimate
-is several waves:
-
-1. tool → tasks background dispatch + result sink + stop-reason/worktree plumbing
-2. `context` / `background` frontmatter + `should_background_fork` predicate
-3. fork launch path, `forkedSkillName` on the registry entry, the `status:
-   "forked"` / `background: true` output shape and its tool_result wording
-4. the two sidecars + the four resume refusal reasons
-   (`..._scoping_invalid` / `_missing` / `_missing_cold` / skill-name mismatch)
-5. `frozenCommandDenies` capture at fork, union ahead of live denies on resume
-
-Landing any of 2–5 without 1 produces either dead code or, worse, a Skill tool
-that reports `status: "forked", background: true, result: "Running in the
-background as @name"` when nothing was launched — a tool result that lies to
-the model. That is strictly worse than the current honest `status: "inline"`.
-
-**Step 1 is the piece worth filing on its own.** It is not forked-skill work at
-all; it unblocks `run_in_background` for the Agent tool too, which is a
-user-visible feature that silently does nothing today.
+Steps 4–5 are the security items and must land WITH 2–3, not after: a fork path
+without the resume gate is precisely what the guard exists to stop.

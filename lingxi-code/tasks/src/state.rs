@@ -162,6 +162,70 @@ pub struct LocalAgentTaskState {
     pub pending_messages: Vec<String>,
     /// Whether the agent is currently backgrounded.
     pub is_backgrounded: bool,
+    /// What the run reported when it terminated — final text, usage, and the
+    /// kept-worktree coordinates — plus `killed_by` once a stop names its
+    /// initiator. Populated by
+    /// [`TaskRegistryHandle::set_agent_outcome`](traits::task_registry::TaskRegistryHandle::set_agent_outcome)
+    /// / `kill_with_reason` and read by the notification drain, which before
+    /// this always rendered a `local_agent` completion with no `<result>`,
+    /// `<usage>` or `<worktree>` and every stop as the bare `was stopped`.
+    ///
+    /// `#[serde(default)]` so pre-field on-disk task rows still parse.
+    #[serde(default)]
+    pub outcome: AgentOutcomeState,
+}
+
+/// [`LocalAgentTaskState::outcome`] — the terminal notification payload plus
+/// the stop initiator.
+///
+/// [`traits::task_registry::AgentTerminalOutcome`] is the WRITE shape (what a
+/// terminating run reports); this is the stored shape, which additionally holds
+/// `killed_by` because that arrives from the kill path rather than from the
+/// run.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentOutcomeState {
+    /// Final text response → the notification's `<result>` section.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
+    /// Run usage → the `<usage>` section.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<traits::task_registry::AgentRunUsage>,
+    /// Who stopped the task (`"parent"` / `"user"`) → the killed-summary verb.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub killed_by: Option<String>,
+    /// Kept isolation worktree path → gates and fills `<worktree>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_path: Option<String>,
+    /// Kept isolation worktree branch → `<worktreeBranch>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_branch: Option<String>,
+}
+
+impl AgentOutcomeState {
+    /// Merge a terminating run's report in. A `Some` field overwrites; a `None`
+    /// leaves the stored value alone, so a later partial report (e.g. a kill
+    /// that only carries a worktree) never erases an earlier result.
+    pub fn merge(&mut self, incoming: traits::task_registry::AgentTerminalOutcome) {
+        let traits::task_registry::AgentTerminalOutcome {
+            result,
+            usage,
+            error: _,
+            worktree_path,
+            worktree_branch,
+        } = incoming;
+        if result.is_some() {
+            self.result = result;
+        }
+        if usage.is_some() {
+            self.usage = usage;
+        }
+        if worktree_path.is_some() {
+            self.worktree_path = worktree_path;
+        }
+        if worktree_branch.is_some() {
+            self.worktree_branch = worktree_branch;
+        }
+    }
 }
 
 /// State specific to a remote agent task.

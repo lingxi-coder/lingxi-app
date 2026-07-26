@@ -143,7 +143,7 @@ fn state_to_record(s: &TaskState) -> TaskRecord {
 /// (e.g. a bare string the spawner returned) yields no `text` blocks → `""`,
 /// exactly mirroring the TS `.filter(...).map(...).join(...)` over a typed
 /// block array.
-fn extract_text_content(content: &serde_json::Value) -> String {
+pub(crate) fn extract_text_content(content: &serde_json::Value) -> String {
     let Some(blocks) = content.as_array() else {
         return String::new();
     };
@@ -390,6 +390,28 @@ impl TaskRegistryHandle for TaskRegistry {
             Some(state) => Ok(state_to_record(&state)),
             None => Err(TaskRegistryError::NotFound(id.into())),
         }
+    }
+
+    async fn kill_with_reason(
+        &self,
+        id: &str,
+        killed_by: &str,
+    ) -> Result<TaskRecord, TaskRegistryError> {
+        TaskRegistry::kill_with_reason(self, id, killed_by)
+            .await
+            .map_err(task_err_to_registry_err)?;
+        match self.get(id).await {
+            Some(state) => Ok(state_to_record(&state)),
+            None => Err(TaskRegistryError::NotFound(id.into())),
+        }
+    }
+
+    async fn set_agent_outcome(
+        &self,
+        id: &str,
+        outcome: traits::task_registry::AgentTerminalOutcome,
+    ) {
+        TaskRegistry::set_agent_outcome(self, id, outcome).await;
     }
 
     async fn spawn_monitor(&self, reg: MonitorRegistration) -> Result<String, TaskRegistryError> {
@@ -838,6 +860,7 @@ mod tests {
                 messages: vec![],
                 pending_messages: vec![],
                 is_backgrounded: true,
+                outcome: Default::default(),
             });
             registry.insert_state_for_test(state).await;
 
@@ -1017,6 +1040,7 @@ mod tests {
             messages: vec![],
             pending_messages: vec![],
             is_backgrounded: true,
+            outcome: Default::default(),
         });
         registry.insert_state_for_test(state).await;
 

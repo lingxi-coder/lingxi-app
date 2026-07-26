@@ -848,7 +848,9 @@ pub(crate) async fn run_ratatui_with_initial_prompt(
         let tx = task_turn_tx.clone();
         task_handle.spawn(async move {
             let tui::bottom_pane::TaskAction::Kill { task_id } = action;
-            let (body, is_error) = match registry.kill(&task_id).await {
+            // The `/tasks` picker is a USER gesture, so the killed agent's
+            // notification reads "was stopped by user" (claude `killedBy` default).
+            let (body, is_error) = match registry.kill_with_reason(&task_id, "user").await {
                 Ok(_) => (format!("Stopped task {task_id}"), false),
                 Err(e) => (format!("Could not stop task {task_id}: {e}"), true),
             };

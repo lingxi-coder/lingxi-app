@@ -79,6 +79,16 @@ impl TaskStatusSink for RegistryStatusSink {
         }
     }
 
+    async fn set_agent_outcome(
+        &self,
+        task_id: &str,
+        outcome: traits::task_registry::AgentTerminalOutcome,
+    ) {
+        if let Some(reg) = self.registry.get() {
+            reg.set_agent_outcome(task_id, outcome).await;
+        }
+    }
+
     async fn notify_monitor_event(&self, task_id: &str, event: &str) {
         if let Some(reg) = self.registry.get() {
             reg.notify_monitor_event(task_id, event).await;

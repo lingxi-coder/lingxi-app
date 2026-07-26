@@ -379,6 +379,19 @@ impl Task for LocalAgentHandler {
                         .lock()
                         .await
                         .insert(worker_task_id.clone(), agent_id);
+                    // The MOST RECENT turn-set's answer + usage. A persistent
+                    // agent reports once per rest and then parks; when it finally
+                    // terminates, the last rest IS its final response, so the
+                    // terminal notification carries it (claude-code's async
+                    // lifecycle passes `finalMessage: Vpr(y)` — the accumulated
+                    // messages' final text — on every terminal branch, not only
+                    // the clean one).
+                    let mut outcome = traits::task_registry::AgentTerminalOutcome::default();
+                    // Published once, after the outcome, below. A channel close
+                    // (the runner went away without a terminal event) IS the
+                    // completed case, so that is the initial value; the
+                    // Failed / Killed arms override it before breaking.
+                    let mut terminal_status = TaskStatus::Completed;
                     loop {
                         match rx.recv().await {
                             Some(SubagentEvent::Completed {
@@ -423,31 +436,27 @@ impl Task for LocalAgentHandler {
                                 status_sink
                                     .set_status(&worker_task_id, TaskStatus::Running)
                                     .await;
+                                if rest_result.is_some() {
+                                    outcome.result = rest_result.clone();
+                                }
+                                outcome.usage = rest_usage.clone();
                                 status_sink
                                     .notify_rest(&worker_task_id, rest_result, rest_usage)
                                     .await;
                             }
                             Some(SubagentEvent::Failed { error, .. }) => {
                                 let _ = output_manager.append(&worker_spool_path, &error).await;
-                                status_sink
-                                    .set_status(&worker_task_id, TaskStatus::Failed)
-                                    .await;
+                                outcome.error = Some(error);
+                                terminal_status = TaskStatus::Failed;
                                 break;
                             }
                             Some(SubagentEvent::Killed { .. }) => {
-                                status_sink
-                                    .set_status(&worker_task_id, TaskStatus::Killed)
-                                    .await;
+                                terminal_status = TaskStatus::Killed;
                                 break;
                             }
                             // Progress / Message: live streaming, not spooled here.
                             Some(_) => {}
-                            None => {
-                                status_sink
-                                    .set_status(&worker_task_id, TaskStatus::Completed)
-                                    .await;
-                                break;
-                            }
+                            None => break,
                         }
                     }
                     // Terminal (Failed / Killed / channel-close — NOT a rest):
@@ -461,9 +470,25 @@ impl Task for LocalAgentHandler {
                     let _ = streaming.stop(&agent_id).await;
                     // Then run the worktree keep/cleanup judgment (claude-code
                     // `getWorktreeResult`): keep when dirty/ahead, else remove.
+                    // A KEPT worktree's `(path, branch)` fills the notification's
+                    // `<worktree>` section, so this runs BEFORE the terminal
+                    // status publish.
                     if let (Some(mgr), Some(handle)) = (&worktree_manager, &agent_worktree) {
-                        let _ = traits::worktree::agent_worktree_result(mgr.as_ref(), handle).await;
+                        if let Some((path, branch)) =
+                            traits::worktree::agent_worktree_result(mgr.as_ref(), handle).await
+                        {
+                            outcome.worktree_path = Some(path);
+                            outcome.worktree_branch = Some(branch);
+                        }
                     }
+                    // Payload BEFORE status — the drain is terminal-gated (see
+                    // the sync branch below for the full note).
+                    status_sink
+                        .set_agent_outcome(&worker_task_id, outcome)
+                        .await;
+                    status_sink
+                        .set_status(&worker_task_id, terminal_status)
+                        .await;
                     agent_ids.lock().await.remove(&worker_task_id);
                     workers.lock().await.remove(&worker_task_id);
                 })
@@ -501,6 +526,42 @@ impl Task for LocalAgentHandler {
                         Err(e) => (e.to_string(), TaskStatus::Failed),
                     };
 
+                    // The notification payload claude-code hands to
+                    // `enqueueAgentNotification` alongside the status:
+                    // `finalMessage` (the final TEXT — `wc(content,"\n")`, not
+                    // the JSON-pretty spool body), the
+                    // `{totalTokens,toolUses,durationMs}` usage object, and the
+                    // failure reason. The spool has always carried the answer;
+                    // nothing carried it into the notification, so the model was
+                    // told a background agent finished without being told what
+                    // it found.
+                    let mut outcome = traits::task_registry::AgentTerminalOutcome::default();
+                    match &result {
+                        Ok(SubagentResult::Completed {
+                            content,
+                            total_tool_use_count,
+                            total_duration_ms,
+                            total_tokens,
+                            ..
+                        }) => {
+                            let text = crate::handle::extract_text_content(content);
+                            // Claude gates the section on a TRUTHY finalMessage
+                            // (`s ? "<result>…" : ""`), so an empty answer omits
+                            // `<result>` rather than rendering an empty one.
+                            outcome.result = (!text.is_empty()).then_some(text);
+                            outcome.usage = Some(traits::task_registry::AgentRunUsage {
+                                subagent_tokens: *total_tokens,
+                                tool_uses: *total_tool_use_count,
+                                duration_ms: *total_duration_ms,
+                            });
+                        }
+                        Ok(SubagentResult::Failed { reason, .. }) => {
+                            outcome.error = Some(reason.clone());
+                        }
+                        Ok(SubagentResult::Killed { .. }) => {}
+                        Err(e) => outcome.error = Some(e.to_string()),
+                    }
+
                     // Routed through the output manager's `append` so the per-file 5GB
                     // disk cap is enforced (T17). The write uses O_NOFOLLOW (claude-code
                     // `diskOutput.ts`) so a symlink planted at the spool path from inside
@@ -509,15 +570,35 @@ impl Task for LocalAgentHandler {
                         let _ = output_manager.append(&worker_spool_path, &payload).await;
                     }
 
-                    status_sink.set_status(&worker_task_id, status).await;
-
                     // Terminal: run the worktree keep/cleanup judgment on the
                     // carried isolation worktree (claude-code `getWorktreeResult`
                     // — keep when dirty/ahead, else auto-remove). Runs for ANY
                     // outcome so a worktree never leaks on a failed/killed agent.
+                    // A KEPT worktree's `(path, branch)` is the binary's
+                    // `...await getWorktreeResult()` spread — it gates and fills
+                    // the notification's `<worktree>` section, so the judgment
+                    // must run BEFORE the status publish (claude awaits the same
+                    // closure before calling `enqueueAgentNotification`), not
+                    // after it as a fire-and-forget cleanup.
                     if let (Some(mgr), Some(handle)) = (&worktree_manager, &agent_worktree) {
-                        let _ = traits::worktree::agent_worktree_result(mgr.as_ref(), handle).await;
+                        if let Some((path, branch)) =
+                            traits::worktree::agent_worktree_result(mgr.as_ref(), handle).await
+                        {
+                            outcome.worktree_path = Some(path);
+                            outcome.worktree_branch = Some(branch);
+                        }
                     }
+
+                    // Payload BEFORE status: the registry's notification drain is
+                    // gated on terminal-and-not-notified, so publishing the
+                    // terminal status first opens a window in which the drain
+                    // renders this completion with none of its optional
+                    // sections. Claude-code has no such window — status and
+                    // payload reach `enqueueAgentNotification` in one call.
+                    status_sink
+                        .set_agent_outcome(&worker_task_id, outcome)
+                        .await;
+                    status_sink.set_status(&worker_task_id, status).await;
 
                     // The subagent has terminated; drop the cancel record so a late
                     // kill is a graceful no-op (claude-code `status !== 'running'`).
@@ -987,14 +1068,30 @@ mod tests {
         statuses: StdMutex<Vec<(String, TaskStatus)>>,
         rest_count: StdMutex<usize>,
         last_rest: StdMutex<Option<(Option<String>, Option<traits::task_registry::AgentRunUsage>)>>,
+        /// The terminal notification payload, and the call ORDER relative to the
+        /// terminal `set_status` — the drain is terminal-gated, so the payload
+        /// must land first.
+        outcome: StdMutex<Option<traits::task_registry::AgentTerminalOutcome>>,
+        calls: StdMutex<Vec<&'static str>>,
     }
     #[async_trait]
     impl TaskStatusSink for RecordingSink {
         async fn set_status(&self, task_id: &str, status: TaskStatus) {
+            if status.is_terminal() {
+                self.calls.lock().unwrap().push("status");
+            }
             self.statuses
                 .lock()
                 .unwrap()
                 .push((task_id.to_string(), status));
+        }
+        async fn set_agent_outcome(
+            &self,
+            _task_id: &str,
+            outcome: traits::task_registry::AgentTerminalOutcome,
+        ) {
+            self.calls.lock().unwrap().push("outcome");
+            *self.outcome.lock().unwrap() = Some(outcome);
         }
         async fn notify_rest(
             &self,
@@ -1021,6 +1118,12 @@ mod tests {
         }
         fn rest_count(&self) -> usize {
             *self.rest_count.lock().unwrap()
+        }
+        fn outcome(&self) -> traits::task_registry::AgentTerminalOutcome {
+            self.outcome.lock().unwrap().clone().unwrap_or_default()
+        }
+        fn calls(&self) -> Vec<&'static str> {
+            self.calls.lock().unwrap().clone()
         }
     }
 
@@ -1503,6 +1606,186 @@ mod tests {
         assert_eq!(await_terminal(&sink).await, TaskStatus::Failed);
         await_workers_drained(&workers).await;
         assert_eq!(wt.removed_count(), 0, "dirty worktree KEPT at terminal");
+    }
+
+    // ── terminal notification payload (`enqueueAgentNotification`) ──────────
+
+    /// A completed background agent reports its FINAL TEXT and usage, not just
+    /// a status. Before this the spool held the answer and the notification did
+    /// not, so the model was told an agent finished without being told what it
+    /// found.
+    ///
+    /// The `<result>` is the text-block join (claude `wc(content,"\n")`), NOT
+    /// the JSON-pretty spool body.
+    #[tokio::test]
+    async fn completed_agent_reports_final_text_and_usage() {
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let content = json!([
+            { "type": "text", "text": "first" },
+            { "type": "tool_use", "name": "Bash", "input": {} },
+            { "type": "text", "text": "second" }
+        ]);
+        let spawner = MockSpawner::new(CannedResult::Completed(content, 42));
+        let (_dir, mgr) = make_output_manager(fs.clone());
+        let sink = Arc::new(RecordingSink::default());
+        let handler = make_handler(spawner, mgr, sink.clone());
+        let workers = handler.workers_map();
+
+        handler
+            .spawn(local_agent_input("p"), make_ctx(fs))
+            .await
+            .unwrap();
+
+        assert_eq!(await_terminal(&sink).await, TaskStatus::Completed);
+        await_workers_drained(&workers).await;
+
+        let outcome = sink.outcome();
+        assert_eq!(
+            outcome.result.as_deref(),
+            Some("first\nsecond"),
+            "text blocks joined with \\n; the tool_use block dropped"
+        );
+        let usage = outcome.usage.expect("<usage> section");
+        assert_eq!(usage.subagent_tokens, 42);
+        assert!(outcome.error.is_none(), "a clean run reports no error");
+    }
+
+    /// An agent whose final content has no text blocks omits `<result>` rather
+    /// than rendering an empty one — claude gates the section on a TRUTHY
+    /// `finalMessage` (`s ? "<result>…" : ""`).
+    #[tokio::test]
+    async fn completed_agent_with_no_text_omits_result() {
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let spawner = MockSpawner::new(CannedResult::Completed(json!([]), 0));
+        let (_dir, mgr) = make_output_manager(fs.clone());
+        let sink = Arc::new(RecordingSink::default());
+        let handler = make_handler(spawner, mgr, sink.clone());
+        let workers = handler.workers_map();
+
+        handler
+            .spawn(local_agent_input("p"), make_ctx(fs))
+            .await
+            .unwrap();
+        assert_eq!(await_terminal(&sink).await, TaskStatus::Completed);
+        await_workers_drained(&workers).await;
+
+        assert!(sink.outcome().result.is_none());
+    }
+
+    /// The failure reason reaches the notification, so the summary reads
+    /// `failed: model refused` instead of claude's `Unknown error` fallback —
+    /// which is what every failed background agent reported while nothing in
+    /// production wrote `LocalAgentTaskState::error`.
+    #[tokio::test]
+    async fn failed_agent_reports_its_reason() {
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let spawner = MockSpawner::new(CannedResult::Failed("model refused".into()));
+        let (_dir, mgr) = make_output_manager(fs.clone());
+        let sink = Arc::new(RecordingSink::default());
+        let handler = make_handler(spawner, mgr, sink.clone());
+        let workers = handler.workers_map();
+
+        handler
+            .spawn(local_agent_input("p"), make_ctx(fs))
+            .await
+            .unwrap();
+        assert_eq!(await_terminal(&sink).await, TaskStatus::Failed);
+        await_workers_drained(&workers).await;
+
+        let outcome = sink.outcome();
+        assert_eq!(outcome.error.as_deref(), Some("model refused"));
+        assert!(outcome.result.is_none(), "a failed run has no final text");
+        assert!(outcome.usage.is_none(), "no usage rollup on the failed path");
+    }
+
+    /// The payload must land BEFORE the terminal status: the registry's drain
+    /// is gated on terminal-and-not-notified, so the reverse order lets a drain
+    /// that runs in between render the completion with none of its optional
+    /// sections. Claude passes status and payload to
+    /// `enqueueAgentNotification` in ONE call, so it has no such window.
+    #[tokio::test]
+    async fn outcome_is_published_before_the_terminal_status() {
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let spawner = MockSpawner::new(CannedResult::Completed(
+            json!([{ "type": "text", "text": "done" }]),
+            7,
+        ));
+        let (_dir, mgr) = make_output_manager(fs.clone());
+        let sink = Arc::new(RecordingSink::default());
+        let handler = make_handler(spawner, mgr, sink.clone());
+        let workers = handler.workers_map();
+
+        handler
+            .spawn(local_agent_input("p"), make_ctx(fs))
+            .await
+            .unwrap();
+        assert_eq!(await_terminal(&sink).await, TaskStatus::Completed);
+        await_workers_drained(&workers).await;
+
+        assert_eq!(sink.calls(), vec!["outcome", "status"]);
+    }
+
+    /// A KEPT isolation worktree's `(path, branch)` — the binary's
+    /// `...await getWorktreeResult()` spread — fills the notification's
+    /// `<worktree>` section. The handler already ran this judgment and threw
+    /// the answer away.
+    #[tokio::test]
+    async fn kept_worktree_fills_the_worktree_section() {
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let spawner = MockSpawner::new(CannedResult::Completed(json!([]), 0));
+        let (_dir, mgr) = make_output_manager(fs.clone());
+        let sink = Arc::new(RecordingSink::default());
+        let wt = RecordingWorktree::new(Some(traits::worktree::WorktreeChangeSummary {
+            changed_files: 2,
+            commits: 1,
+        }));
+        let handler = make_handler(spawner, mgr, sink.clone())
+            .with_worktree_manager(wt.clone() as Arc<dyn traits::worktree::WorktreeManager>);
+        let workers = handler.workers_map();
+
+        handler
+            .spawn(input_with_worktree("p"), make_ctx(fs))
+            .await
+            .unwrap();
+        assert_eq!(await_terminal(&sink).await, TaskStatus::Completed);
+        await_workers_drained(&workers).await;
+
+        let outcome = sink.outcome();
+        assert_eq!(
+            outcome.worktree_path.as_deref(),
+            Some("/repo/.lingxi/worktrees/agent-1")
+        );
+        assert_eq!(outcome.worktree_branch.as_deref(), Some("worktree-agent-1"));
+    }
+
+    /// A worktree the terminal judgment AUTO-REMOVED reports nothing — claude's
+    /// `getWorktreeResult` resolves to `{}` there, so the whole `<worktree>`
+    /// section is omitted rather than pointing at a deleted directory.
+    #[tokio::test]
+    async fn removed_worktree_omits_the_worktree_section() {
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let spawner = MockSpawner::new(CannedResult::Completed(json!([]), 0));
+        let (_dir, mgr) = make_output_manager(fs.clone());
+        let sink = Arc::new(RecordingSink::default());
+        let wt = RecordingWorktree::new(Some(traits::worktree::WorktreeChangeSummary {
+            changed_files: 0,
+            commits: 0,
+        }));
+        let handler = make_handler(spawner, mgr, sink.clone())
+            .with_worktree_manager(wt.clone() as Arc<dyn traits::worktree::WorktreeManager>);
+        let workers = handler.workers_map();
+
+        handler
+            .spawn(input_with_worktree("p"), make_ctx(fs))
+            .await
+            .unwrap();
+        assert_eq!(await_terminal(&sink).await, TaskStatus::Completed);
+        await_workers_drained(&workers).await;
+
+        assert_eq!(wt.removed_count(), 1, "clean worktree removed");
+        let outcome = sink.outcome();
+        assert!(outcome.worktree_path.is_none());
+        assert!(outcome.worktree_branch.is_none());
     }
 
     /// P1-01: on the PERSISTENT path the judgment runs ONLY at a terminal

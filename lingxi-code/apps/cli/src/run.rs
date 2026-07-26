@@ -570,7 +570,9 @@ async fn dispatch_control_request(
         "stop_task" => {
             // §2.2 #38: best-effort kill; not_found/not_running ⇒ success `{}`.
             if let Some(task_id) = field("task_id").and_then(|v| v.as_str()) {
-                let _ = task_registry.kill(task_id).await;
+                // The control-channel `stopTask` — claude-code's `source:"user"`
+                // caller, which inherits `killedBy = "user"`.
+                let _ = task_registry.kill_with_reason(task_id, "user").await;
             }
             writer.reply_success(request_id, Some(json!({})));
         }

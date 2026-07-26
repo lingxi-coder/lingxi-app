@@ -374,6 +374,17 @@ mod tests {
         SettingsPaths::resolve(Path::new("/home/u/.lingxi"), Path::new("/work/proj"))
     }
 
+    /// [`paths`] rooted at a test-specific project dir.
+    ///
+    /// `permission::mark_internal_write` keeps its marks in a PROCESS-GLOBAL
+    /// map keyed by path, so two tests that touch the same settings path race:
+    /// one test's mark suppresses the other's event, or the other consumes the
+    /// mark this one was about to rely on. Any test that marks (or expects to
+    /// fire for) `settings.json` must therefore own a unique root.
+    fn paths_rooted(project: &str) -> SettingsPaths {
+        SettingsPaths::resolve(Path::new("/home/u/.lingxi"), Path::new(project))
+    }
+
     fn ev(path: &str) -> FileEvent {
         FileEvent {
             path: PathBuf::from(path),
@@ -466,9 +477,13 @@ mod tests {
 
     #[tokio::test]
     async fn handle_event_suppresses_one_recent_internal_write() {
-        let p = paths();
+        // Own project root — see `paths_rooted`: sharing `/work/proj` with
+        // `handle_event_fires_with_correct_source_per_path` made the two race
+        // through the global internal-write map (each failed the other's
+        // assertion, intermittently, under a full-workspace run).
+        let p = paths_rooted("/work/suppress-one");
         let firer = RecordingFirer::default();
-        let path = PathBuf::from("/work/proj/.lingxi/settings.json");
+        let path = PathBuf::from("/work/suppress-one/.lingxi/settings.json");
         permission::mark_internal_write(&path);
 
         handle_event(&ev(&path.to_string_lossy()), &p, &firer).await;

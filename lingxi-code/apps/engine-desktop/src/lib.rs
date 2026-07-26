@@ -1668,6 +1668,7 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 /// let cfg = DesktopConfig {
 ///     api_base: "https://api.anthropic.com".to_string(),
 ///     api_key: "sk-test".to_string(),
+///     isolated_credential_storage: false,
 ///     api_key_helper: None,
 ///     cwd: PathBuf::from("/tmp/project"),
 ///     lingxi_home: PathBuf::from("/tmp/home/.lingxi"),

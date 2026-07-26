@@ -214,6 +214,21 @@ const FIND_DANGEROUS_FLAGS: &[&str] = &[
 /// command; otherwise [`ReadOnlyBehavior::Passthrough`].
 #[must_use]
 pub fn check_read_only(command: &str, compound_has_cd: bool) -> ReadOnlyResult {
+    check_read_only_in(command, compound_has_cd, None)
+}
+
+/// [`check_read_only`] with the working directory the command would run in.
+///
+/// `cwd` enables the planted-git-directory gate (`R3r`): git will read config
+/// and run hooks from a directory carrying bare-repo indicators, so a git
+/// command there must never be auto-classified read-only. Passing `None` skips
+/// only that probe — every other rule is unchanged.
+#[must_use]
+pub fn check_read_only_in(
+    command: &str,
+    compound_has_cd: bool,
+    cwd: Option<&std::path::Path>,
+) -> ReadOnlyResult {
     let command = command.trim();
     if command.is_empty() {
         return ReadOnlyResult::passthrough(
@@ -239,6 +254,20 @@ pub fn check_read_only(command: &str, compound_has_cd: bool) -> ReadOnlyResult {
         return ReadOnlyResult::passthrough(
             "Command is not read-only, requires further permission checks",
         );
+    }
+
+    // The planted-git-directory gate. Checked only when a subcommand is
+    // actually git — the probe touches the filesystem, and a command that never
+    // invokes git cannot be steered by a planted git dir.
+    if let Some(cwd) = cwd {
+        let touches_git = subcommands
+            .iter()
+            .any(|sub| base_command(sub).is_some_and(|base| base == "git"));
+        if touches_git {
+            if let Some(gate) = permission::git_bare_repo::bare_repo_gate(cwd) {
+                return ReadOnlyResult::passthrough(gate.shell_message());
+            }
+        }
     }
 
     let all_read_only = subcommands.iter().all(|sub| is_command_read_only(sub));
@@ -939,5 +968,44 @@ mod tests {
         // Quote protects the `&&` so this is a single echo subcommand; but echo
         // with a `&` outside quotes would be rejected — here it's inside quotes.
         assert!(ro("echo 'a && b'"));
+    }
+
+    // ── planted-git-directory gate (PS-CALLER-06-2) ──────────────────────────
+
+    #[test]
+    fn a_read_only_git_command_in_a_planted_directory_is_not_auto_allowed() {
+        // `git status` is read-only by every other rule, so without this gate
+        // it auto-allows — and git would read config + run hooks from the
+        // planted directory.
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("objects")).unwrap();
+        std::fs::write(d.path().join("HEAD"), "ref: refs/heads/main\n").unwrap();
+
+        assert!(check_read_only("git status", false).is_read_only());
+        let gated = check_read_only_in("git status", false, Some(d.path()));
+        assert!(!gated.is_read_only(), "must not auto-allow in a planted dir");
+        assert!(gated
+            .message
+            .as_deref()
+            .is_some_and(|m| m.contains("bare-repo indicators")));
+    }
+
+    #[test]
+    fn a_non_git_command_is_unaffected_by_a_planted_directory() {
+        // The probe touches the filesystem, and a command that never invokes
+        // git cannot be steered by a planted git dir — so it must not pay for
+        // the check or be blocked by it.
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("objects")).unwrap();
+        assert!(check_read_only_in("ls -la", false, Some(d.path())).is_read_only());
+    }
+
+    #[test]
+    fn a_git_command_in_a_real_repository_still_auto_allows() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join(".git/objects")).unwrap();
+        std::fs::create_dir_all(d.path().join(".git/refs")).unwrap();
+        std::fs::write(d.path().join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        assert!(check_read_only_in("git status", false, Some(d.path())).is_read_only());
     }
 }

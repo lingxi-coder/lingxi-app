@@ -3019,18 +3019,16 @@ pub fn powershell_git_battery(
         return ask(BATTERY_CD_GIT);
     }
 
-    // PS-CALLER-06-2 (bare-repo indicators) — MISSING, and the gap is wider
-    // than this placeholder implies.
-    //
-    // The oracle runs the same probe (`R3r`) on the BASH path too, among the
-    // `&`/bare-assignment/UNC guards — and the port has it on NEITHER. Git
-    // treats a directory carrying planted `HEAD`/`objects`/`refs` (or a `.git`
-    // file/symlink redirecting somewhere uncanonicalisable) as a git dir and
-    // runs config/hooks FROM IT, so this is a live under-ask on the primary
-    // platform, not a PowerShell corner.
-    //
-    // Re-filed as a bash + PowerShell item; see
-    // docs/ps-caller-06-deferrals-REEVALUATED-2026-07-25.md for the probe spec.
+    // 2. bare-repo indicators — `if(E && vLr())`. Git reads config and runs
+    //    hooks from a directory carrying planted HEAD/objects/refs, or from a
+    //    `.git` file/symlink redirecting somewhere unverifiable, so a git
+    //    command there needs approval. Shared with the shell battery via
+    //    `crate::git_bare_repo` so the two cannot drift.
+    if has_git {
+        if let Some(gate) = crate::git_bare_repo::bare_repo_gate(&ctx.roots.cwd) {
+            return ask(gate.powershell_message());
+        }
+    }
 
     if has_git {
         // 2. git-internal-write — inside `if(S)`, `if(V||U)`.

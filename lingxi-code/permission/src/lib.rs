@@ -20,6 +20,7 @@ pub mod auto_mode_recon;
 pub mod auto_mode_sections;
 pub mod auto_mode_wizard;
 pub mod auto_mode_argv;
+pub mod git_bare_repo;
 pub mod auto_mode_setup;
 #[cfg(feature = "bash-ast")]
 pub mod bash_ast_security;

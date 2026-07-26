@@ -14,6 +14,7 @@
 #![forbid(unsafe_code)]
 
 pub mod bg_snapshot;
+pub mod refusal_cascade;
 pub mod config;
 pub mod conversation;
 pub(crate) mod cost_lines;

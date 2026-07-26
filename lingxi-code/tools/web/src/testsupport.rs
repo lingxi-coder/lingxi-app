@@ -16,6 +16,13 @@
 /// the caches also share ONE lock; two separate locks would serialize each
 /// module against itself and leave them racing each other.
 ///
+/// EVERY test that touches the fetch path must hold this — not only the ones
+/// that CLEAR the caches. The first version of this guard covered only the
+/// clearing tests, and the flake came straight back under load: a test that
+/// merely populates `URL_CACHE` races one that expects a hit just as surely as
+/// a test that wipes it. The invariant is "any user of the shared cache", not
+/// "any mutator of it".
+///
 /// A `tokio::sync::Mutex` so the guard can be held across the `.await`s these
 /// tests contain without tripping `await_holding_lock`.
 pub(crate) async fn web_cache_lock() -> tokio::sync::MutexGuard<'static, ()> {

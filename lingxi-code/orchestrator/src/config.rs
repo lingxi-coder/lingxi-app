@@ -231,6 +231,21 @@ pub struct OrchestratorConfig {
     #[serde(default)]
     pub refusal_fallback_model: Option<String>,
 
+    /// The refusal-fallback CASCADE: an ordered chain of models to try, in
+    /// order, as each one refuses.
+    ///
+    /// Claude walks a chain rather than a single model, skipping stages that
+    /// cannot be resolved or were already tried this episode
+    /// (`crate::refusal_cascade`). This port's historical shape is the single
+    /// [`Self::refusal_fallback_model`], which is exactly a one-element chain —
+    /// so an EMPTY chain here means "use that field", and the two never
+    /// disagree.
+    ///
+    /// Empty (the default) is a strict no-op: behaviour is byte-identical to
+    /// before this field existed.
+    #[serde(default)]
+    pub refusal_fallback_chain: Vec<String>,
+
     /// R-P1d: the authenticated user's email, surfaced in the leading
     /// `additionalContext` meta message as
     /// `# userEmail\nThe user's email address is {email}.` — 1:1 with
@@ -315,6 +330,7 @@ impl Default for OrchestratorConfig {
             max_budget_nano_usd: None,
             transcript_classifier_enabled: false,
             refusal_fallback_model: None,
+            refusal_fallback_chain: Vec::new(),
             user_email: None,
             plan_mode_instructions: None,
             plans_directory: None,
@@ -368,6 +384,7 @@ mod tests {
             max_budget_nano_usd: Some(5_000_000_000),
             transcript_classifier_enabled: true,
             refusal_fallback_model: Some("claude-sonnet-4-6".into()),
+            refusal_fallback_chain: Vec::new(),
             user_email: Some("u@example.com".into()),
             plan_mode_instructions: Some("MY BODY".into()),
             plans_directory: Some("docs/plans".into()),

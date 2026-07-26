@@ -976,6 +976,11 @@ pub struct ConversationOrchestrator {
     /// most ONCE per session — matching the binary, where the latch makes the
     /// `mainLoopModel` override sticky.
     pub(crate) refusal_fallback_latched: std::sync::atomic::AtomicBool,
+    /// Models already routed to this session's refusal cascade. Consumed by
+    /// the stage resolver so a chain never loops back onto a model that has
+    /// already refused — the bound that lets a multi-hop chain terminate
+    /// without relying on the once-per-session latch.
+    pub(crate) refusal_tried_models: Mutex<Vec<String>>,
     /// Cost tracker wired by [`Self::with_cost_tracker`] (M6-06). `None`
     /// when not configured — `snapshot_cost` then falls back to the M5-10
     /// zero-shaped stub. The CLI binary (M6-06 init.rs) always populates
@@ -1557,6 +1562,7 @@ impl ConversationOrchestrator {
             should_exit: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             fast_mode: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             refusal_fallback_latched: std::sync::atomic::AtomicBool::new(false),
+            refusal_tried_models: Mutex::new(Vec::new()),
             cost_tracker: None,
             analytics_bus: None,
             session_started_at: std::sync::Mutex::new(std::time::Instant::now()),
@@ -3941,18 +3947,64 @@ impl ConversationOrchestrator {
     /// turn against the fallback model), `false` when no fallback is configured or
     /// the latch is already set (the caller preserves today's terminal behavior).
     pub(crate) async fn maybe_swap_to_refusal_fallback(&self) -> bool {
-        let Some(fallback) = self.config.refusal_fallback_model.clone() else {
+        // The CASCADE: an ordered chain of models, each tried as the previous
+        // one refuses. An empty chain falls back to the historical single
+        // `refusal_fallback_model`, which is exactly a one-element chain — so
+        // the default path is byte-identical to before the cascade existed.
+        let chain: Vec<String> = if self.config.refusal_fallback_chain.is_empty() {
+            self.config.refusal_fallback_model.clone().into_iter().collect()
+        } else {
+            self.config.refusal_fallback_chain.clone()
+        };
+        if chain.is_empty() {
+            return false;
+        }
+        // Models already tried THIS EPISODE, so a cascade cannot loop back onto
+        // one that has already refused.
+        let tried = self.refusal_tried_models.lock().await.clone();
+        let route = crate::refusal_cascade::route_refusal(
+            &crate::refusal_cascade::RouteInputs {
+                chain: Some(&chain),
+                armed_fallback_model: None,
+                armed_target_is_refusing_model: false,
+                catch_all_enabled: false,
+            },
+            |stage| {
+                // A stage is reachable when it has not already been routed to
+                // this episode. Claude's exclusion is exactly `triedModels`,
+                // which resets with the session — deliberately NOT "differs
+                // from the current model": after a hop the current model IS the
+                // previous fallback, and excluding it would make a cleared
+                // session unable to route to that model again.
+                (!tried.iter().any(|m| m == stage)).then(|| stage.to_string())
+            },
+        );
+        // Report every stage the walk passed over. A chain that silently
+        // degraded to its last entry is otherwise indistinguishable from one
+        // that worked first try.
+        for report in crate::refusal_cascade::decline_reports(&route) {
+            tracing::info!(
+                event = "tengu_refusal_fallback_route_declined",
+                reason = report.as_str(),
+            );
+        }
+        let crate::refusal_cascade::RefusalRoute::Category { stage, .. } = route else {
             return false;
         };
-        // Once-per-session latch (refusalFallbackModelLatch analog). `swap` returns
-        // the PRIOR value, so the first caller sees `false` and proceeds; any later
-        // caller sees `true` and bails → at most one swap per session.
-        if self
-            .refusal_fallback_latched
-            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        let fallback = stage.model;
+        // Once-per-session latch (refusalFallbackModelLatch analog) — applies
+        // only to a SINGLE-hop chain, which is the historical shape. A real
+        // cascade is bounded by the chain instead: each hop is consumed by
+        // `tried`, so the walk terminates on its own without needing the latch
+        // to cap it.
+        if chain.len() <= 1
+            && self
+                .refusal_fallback_latched
+                .swap(true, std::sync::atomic::Ordering::SeqCst)
         {
             return false;
         }
+        self.refusal_tried_models.lock().await.push(fallback.clone());
         // Persistently swap the session model to the fallback.
         let original_model = {
             let mut s = self.session.lock().await;
@@ -15051,6 +15103,94 @@ mod refusal_fallback_tests {
             PathBuf::from("/work/repo"),
         );
         (orch, out)
+    }
+
+    /// Build an orchestrator over a multi-hop refusal CASCADE.
+    fn orch_with_refusal_chain(chain: &[&str]) -> (ConversationOrchestrator, MockOutputStream) {
+        let out = MockOutputStream::new();
+        let cfg = OrchestratorConfig {
+            refusal_fallback_chain: chain.iter().map(|s| (*s).to_string()).collect(),
+            ..OrchestratorConfig::default()
+        };
+        let orch = ConversationOrchestrator::new(
+            cfg,
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(out.clone()),
+            Arc::new(StaticMemoryProvider::with_files(vec![])),
+            PathBuf::from("/work/repo"),
+        );
+        (orch, out)
+    }
+
+    /// The point of the cascade: successive refusals walk the chain instead of
+    /// stopping after one hop. The once-per-session latch does NOT apply to a
+    /// multi-hop chain — the chain itself is the bound.
+    #[tokio::test]
+    async fn a_cascade_walks_each_hop_in_order() {
+        let (orch, _out) = orch_with_refusal_chain(&["hop-one", "hop-two"]);
+
+        assert!(orch.maybe_swap_to_refusal_fallback().await, "first hop");
+        assert_eq!(orch.session.lock().await.model, "hop-one");
+
+        assert!(orch.maybe_swap_to_refusal_fallback().await, "second hop");
+        assert_eq!(orch.session.lock().await.model, "hop-two");
+
+        // Chain exhausted: every stage has been tried, so the walk declines
+        // rather than looping back onto a model that already refused.
+        assert!(
+            !orch.maybe_swap_to_refusal_fallback().await,
+            "an exhausted chain declines"
+        );
+        assert_eq!(orch.session.lock().await.model, "hop-two");
+    }
+
+    /// A ONE-element chain behaves exactly like the historical single
+    /// `refusal_fallback_model`, latch included — the default path must be
+    /// unchanged by the cascade's arrival.
+    #[tokio::test]
+    async fn a_single_hop_chain_still_latches_once_per_session() {
+        let (orch, _out) = orch_with_refusal_chain(&["only"]);
+        assert!(orch.maybe_swap_to_refusal_fallback().await);
+        assert!(
+            orch.refusal_fallback_latched
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "a single-hop chain still sets the latch"
+        );
+        assert!(
+            !orch.maybe_swap_to_refusal_fallback().await,
+            "and the latch stops the second attempt"
+        );
+    }
+
+    /// An empty chain defers to `refusal_fallback_model`, so a config written
+    /// before the cascade existed keeps working and the two never disagree.
+    #[tokio::test]
+    async fn an_empty_chain_defers_to_the_single_model_field() {
+        let (orch, _out) = orch_with_refusal_fallback(Some("legacy-model"));
+        assert!(orch.maybe_swap_to_refusal_fallback().await);
+        assert_eq!(orch.session.lock().await.model, "legacy-model");
+    }
+
+    /// The cascade's tried-models list resets with the latch, so a cleared
+    /// session can walk the same chain again from its first hop.
+    #[tokio::test]
+    async fn clearing_the_session_lets_the_cascade_start_over() {
+        let (orch, _out) = orch_with_refusal_chain(&["hop-one", "hop-two"]);
+        assert!(orch.maybe_swap_to_refusal_fallback().await);
+        assert!(orch.maybe_swap_to_refusal_fallback().await);
+        assert!(!orch.maybe_swap_to_refusal_fallback().await);
+
+        orch.refusal_tried_models.lock().await.clear();
+        orch.refusal_fallback_latched
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            orch.maybe_swap_to_refusal_fallback().await,
+            "a reset session walks the chain again"
+        );
+        assert_eq!(orch.session.lock().await.model, "hop-one");
     }
 
     #[tokio::test]

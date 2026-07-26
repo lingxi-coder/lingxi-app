@@ -363,6 +363,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
     /// byte-exact exception wording; with them off (the default) they do not.
     #[tokio::test]
     async fn prompt_artifact_exception_gated_on_dY() {
+        let _cache_guard = crate::testsupport::web_cache_lock().await;
         let _env = SKIP_ENV_LOCK.lock().await;
         telemetry::test_clear_flag("tengu_cobalt_plinth");
         telemetry::test_clear_flag("allow_cobalt_plinth");
@@ -396,6 +397,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
 
     #[tokio::test]
     async fn prompt_gates_short_vs_long_with_auth_prefix() {
+        let _cache_guard = crate::testsupport::web_cache_lock().await;
         // 1:1 with claude-code `CMi(model)`: a current-gen model gets the SHORT
         // variant; the default (no model) gets the LONG = `IMPORTANT: WebFetch
         // WILL FAIL…` auth-prefix + the DESCRIPTION.
@@ -642,6 +644,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
 
     #[tokio::test]
     async fn rejects_file_scheme_in_call() {
+        let _cache_guard = crate::testsupport::web_cache_lock().await;
         // PARITY (#93): `file:///etc/passwd` is rejected by the single-label-host
         // SSRF rule (it has no host), NOT by a scheme allow-list — matching
         // claude-code's `validateURL`, which has no scheme rejection.
@@ -663,6 +666,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
 
     #[tokio::test]
     async fn validate_input_rejects_unparseable_url() {
+        let _cache_guard = crate::testsupport::web_cache_lock().await;
         let (ctx, _http, _sink) = make_web_ctx();
         let tool = WebFetchTool::new(ctx);
         let err = tool
@@ -681,6 +685,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
 
     #[tokio::test]
     async fn validate_input_rejects_scheme_relative_url() {
+        let _cache_guard = crate::testsupport::web_cache_lock().await;
         // Like JS `new URL('example.com')`, `url::Url::parse` rejects a URL with
         // no scheme/base.
         let (ctx, _http, _sink) = make_web_ctx();
@@ -696,6 +701,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
 
     #[tokio::test]
     async fn validate_input_accepts_valid_https() {
+        let _cache_guard = crate::testsupport::web_cache_lock().await;
         let (ctx, _http, _sink) = make_web_ctx();
         let tool = WebFetchTool::new(ctx);
         tool.validate_input(&json!({ "url": "https://example.com/page" }), &fresh_ctx())
@@ -705,6 +711,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
 
     #[tokio::test]
     async fn validate_input_passes_parseable_non_http_scheme() {
+        let _cache_guard = crate::testsupport::web_cache_lock().await;
         // Parity: validateInput only checks parseability. `file://` parses, so it
         // passes this gate — the scheme is rejected later in `call()`.
         let (ctx, _http, _sink) = make_web_ctx();

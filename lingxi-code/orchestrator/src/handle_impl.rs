@@ -53,6 +53,13 @@ impl ConversationOrchestrator {
         self.output_token_pool.store(0, Ordering::Relaxed);
         self.turn_start_output_baseline.store(0, Ordering::Relaxed);
         self.refusal_fallback_latched.store(false, Ordering::SeqCst);
+        // The cascade's tried-models list resets WITH the latch: a cleared
+        // session must be able to route to the same fallback again, and leaving
+        // the list populated would make every stage look already-tried.
+        self.refusal_tried_models
+            .try_lock()
+            .map(|mut v| v.clear())
+            .ok();
 
         self.tools
             .deferral()
@@ -197,6 +204,8 @@ impl OrchestratorHandle for ConversationOrchestrator {
         *self.last_jsonl_uuid.lock().await = last_jsonl_uuid;
         self.refusal_fallback_latched
             .store(false, std::sync::atomic::Ordering::SeqCst);
+        // …and so does the cascade's tried-models list (see `clear_session`).
+        self.refusal_tried_models.lock().await.clear();
         self.hooks.clear_session_hooks(old_session_id).await;
         self.sync_active_goal_stop_hook_for_current_state().await;
         Ok(())

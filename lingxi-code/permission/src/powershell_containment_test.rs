@@ -1753,3 +1753,175 @@ fn zls_passthrough_on_empty_statements() {
         PsAcceptEditsResult::Passthrough(_)
     ));
 }
+
+// --- PS-CALLER-06-5: PS5.1 cwd-first shadowing -----------------------------
+//
+// The battery entry point is OS-gated (PowerShell Core resolves PATH-first off
+// Windows, so the shadowing cannot happen there). The PREDICATE is pure, so it
+// is exercised directly on every platform — otherwise the whole guard would be
+// untested on the machines it is developed on.
+
+#[test]
+fn shadow_predicate_flags_a_write_that_precedes_the_command() {
+    // `Set-Content ./git.bat …; git status` — PS 5.1 would run ./git.bat.
+    let stmts = vec![
+        bstmt(vec![cmd("Set-Content", &["./git.bat", "evil"])]),
+        bstmt(vec![cmd("git", &["status"])]),
+    ];
+    let u = battery_u_list(&stmts);
+    assert_eq!(
+        battery_shadowed_command(&stmts, &u).as_deref(),
+        Some("git")
+    );
+}
+
+/// ORDER is the whole point: a file written AFTER a command runs cannot shadow
+/// it, so the same two commands the other way round must NOT ask.
+#[test]
+fn shadow_predicate_ignores_a_write_that_follows_the_command() {
+    let stmts = vec![
+        bstmt(vec![cmd("git", &["status"])]),
+        bstmt(vec![cmd("Set-Content", &["./git.bat", "evil"])]),
+    ];
+    let u = battery_u_list(&stmts);
+    assert_eq!(battery_shadowed_command(&stmts, &u), None);
+}
+
+/// A line-level redirection is not attached to any sub-command but still lands
+/// before the next one runs, so it seeds the written set.
+#[test]
+fn shadow_predicate_seeds_from_line_level_redirections() {
+    let mut writer = bstmt(vec![cmd("Write-Output", &["evil"])]);
+    writer.redirections = vec![bredir("./git.cmd")];
+    let stmts = vec![writer, bstmt(vec![cmd("git", &["status"])])];
+    let u = battery_u_list(&stmts);
+    assert_eq!(
+        battery_shadowed_command(&stmts, &u).as_deref(),
+        Some("git")
+    );
+}
+
+/// Only a PATHEXT extension makes a file executable-by-shadowing. `git.notes`
+/// is just a file; flagging it would be a false positive on every compound
+/// command that happens to write a same-named document.
+#[test]
+fn shadow_predicate_ignores_a_non_executable_extension() {
+    let stmts = vec![
+        bstmt(vec![cmd("Set-Content", &["./git.notes", "x"])]),
+        bstmt(vec![cmd("git", &["status"])]),
+    ];
+    let u = battery_u_list(&stmts);
+    assert_eq!(battery_shadowed_command(&stmts, &u), None);
+}
+
+/// A single sub-command cannot be preceded by anything.
+#[test]
+fn shadow_predicate_needs_more_than_one_sub_command() {
+    let stmts = vec![bstmt(vec![cmd("git", &["status"])])];
+    let u = battery_u_list(&stmts);
+    assert_eq!(battery_shadowed_command(&stmts, &u), None);
+}
+
+/// The write target is matched on its BASENAME, so a path elsewhere still
+/// shadows — PS 5.1 resolves against the cwd the command runs in.
+#[test]
+fn shadow_predicate_matches_on_the_basename() {
+    let stmts = vec![
+        bstmt(vec![cmd("Copy-Item", &["src", "C:\\other\\dir\\git.exe"])]),
+        bstmt(vec![cmd("git", &["status"])]),
+    ];
+    let u = battery_u_list(&stmts);
+    assert_eq!(
+        battery_shadowed_command(&stmts, &u).as_deref(),
+        Some("git")
+    );
+}
+
+/// A `-Flag:` prefix is stripped before the argument is read as a path, so
+/// `-Path:./git.bat` is still a write target.
+#[test]
+fn shadow_predicate_strips_a_leading_parameter_flag() {
+    let stmts = vec![
+        bstmt(vec![cmd("Out-File", &["-FilePath:./git.bat"])]),
+        bstmt(vec![cmd("git", &["status"])]),
+    ];
+    let u = battery_u_list(&stmts);
+    assert_eq!(
+        battery_shadowed_command(&stmts, &u).as_deref(),
+        Some("git")
+    );
+}
+
+/// An invocation that carries its OWN extension is shadowed by a write whose
+/// stem equals that full name (`git.exe` ← `git.exe.bat`).
+#[test]
+fn shadow_predicate_matches_an_extension_bearing_invocation() {
+    let stmts = vec![
+        bstmt(vec![cmd("Set-Content", &["./git.exe.bat", "x"])]),
+        bstmt(vec![cmd("git.exe", &["status"])]),
+    ];
+    let u = battery_u_list(&stmts);
+    assert_eq!(
+        battery_shadowed_command(&stmts, &u).as_deref(),
+        Some("git.exe")
+    );
+}
+
+/// A command that only READS cannot create a shadowing file, so its arguments
+/// are not write targets.
+#[test]
+fn shadow_predicate_ignores_arguments_of_a_non_writing_command() {
+    let stmts = vec![
+        bstmt(vec![cmd("Get-Content", &["./git.bat"])]),
+        bstmt(vec![cmd("git", &["status"])]),
+    ];
+    let u = battery_u_list(&stmts);
+    assert_eq!(battery_shadowed_command(&stmts, &u), None);
+}
+
+#[test]
+fn shadow_message_is_byte_exact() {
+    assert_eq!(
+        battery_shadow_message("git"),
+        "An earlier sub-command writes a file (./git.*) that would shadow the later \
+`git` command under Windows PowerShell 5.1 cwd-first resolution."
+    );
+}
+
+/// `LDo`: the basename is lowercased and a PATHEXT suffix — and only a PATHEXT
+/// suffix — is stripped for the stem.
+#[test]
+fn ldo_splits_basename_and_pathext_stem() {
+    assert_eq!(battery_ldo("C:\\tools\\GIT.EXE"), ("git.exe".into(), "git".into()));
+    assert_eq!(battery_ldo("./git.bat"), ("git.bat".into(), "git".into()));
+    assert_eq!(battery_ldo("notes.md"), ("notes.md".into(), "notes.md".into()));
+    // Drive-relative `C:foo` drops the prefix; `..` resolves.
+    assert_eq!(battery_ldo("C:git.cmd").1, "git");
+    assert_eq!(battery_ldo("a/../git.com").1, "git");
+    // An alternate-data-stream suffix names a stream, not the file.
+    assert_eq!(battery_ldo("git.bat:hidden").1, "git");
+}
+
+/// The WIRING, not just the predicate: on a Windows host the battery returns
+/// the shadowing ask, and on a non-Windows host it returns nothing for the same
+/// input. Without the injectable gate this could only be checked on Windows.
+#[test]
+fn battery_shadow_ask_is_windows_only() {
+    let stmts = vec![
+        bstmt(vec![cmd("Set-Content", &["./git.bat", "evil"])]),
+        bstmt(vec![cmd("git", &["status"])]),
+    ];
+    let on_windows = with_windows_host(true, || battery(&stmts, false));
+    assert_eq!(
+        battery_ask_msg(&on_windows),
+        Some(battery_shadow_message("git").as_str())
+    );
+
+    // PowerShell Core off Windows resolves PATH-first, so the same command is
+    // not shadowed and asking would be a false positive.
+    let elsewhere = with_windows_host(false, || battery(&stmts, false));
+    assert!(
+        elsewhere.is_none(),
+        "no cwd-first shadowing off Windows: {elsewhere:?}"
+    );
+}

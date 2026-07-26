@@ -2290,6 +2290,113 @@ fn check_redirections(
 //   * PS5.1 cwd-first shadowing (`qt()==="windows" && …`): Windows-only.
 // ===========================================================================
 
+
+// ───────────────────────────────────────────────────────────────────────────
+// PS-CALLER-06-5 — PowerShell 5.1 cwd-first command resolution (2.1.220
+// `Lt()==="windows" && u.length>1` inside `NTU`).
+//
+// Windows PowerShell 5.1 resolves a bare command name against the CURRENT
+// DIRECTORY before PATH. So an earlier sub-command that writes `./git.bat` makes
+// a later bare `git` run that file instead of the real git — arbitrary code
+// execution from what reads like an ordinary compound command.
+//
+// The check is genuinely OS-gated in the oracle, and stays gated here: on
+// macOS/Linux PowerShell Core resolves PATH-first, so the shadowing does not
+// exist and asking would be a false positive. The PREDICATE is pure and tested
+// on every platform; only the gate is conditional.
+
+/// The PATHEXT extensions, lowercased and without the leading dot (2.1.220
+/// `kOd`: `process.env.PATHEXT`, keep entries starting with `.` and no longer
+/// than 16 chars).
+///
+/// Falls back to the Windows default set when the variable is unset or yields
+/// nothing — an absent PATHEXT must not silently disable the guard.
+fn pathext_stems() -> Vec<String> {
+    const DEFAULT: &str = ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC";
+    let raw = std::env::var("PATHEXT").unwrap_or_default();
+    let parse = |v: &str| -> Vec<String> {
+        v.split(';')
+            .map(str::trim)
+            .filter(|e| e.starts_with('.') && e.chars().count() <= 16)
+            .map(|e| e[1..].to_lowercase())
+            .filter(|e| !e.is_empty())
+            .collect()
+    };
+    let from_env = parse(&raw);
+    if from_env.is_empty() {
+        parse(DEFAULT)
+    } else {
+        from_env
+    }
+}
+
+/// 2.1.220 `BQ_` — reduce a path to its final segment, lowercased.
+///
+/// Unquotes, drops a leading drive letter (`C:` NOT followed by a separator),
+/// splits on either separator, strips each segment's alternate-data-stream
+/// suffix (`name:stream`), resolves `.` / `..`, and lowercases the last
+/// segment.
+fn battery_bq_basename(e: &str) -> String {
+    let unquoted = strip_surrounding_quotes(e.trim());
+    // `C:foo` is drive-relative; `C:\foo` is absolute. Only the former's
+    // prefix is dropped here — the latter's separator survives the split.
+    let mut rest = unquoted;
+    let bytes = rest.as_bytes();
+    if bytes.len() >= 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && !matches!(bytes.get(2), Some(b'\\' | b'/'))
+    {
+        rest = &rest[2..];
+    }
+    let mut stack: Vec<String> = Vec::new();
+    for seg in rest.split(['\\', '/']).filter(|s| !s.is_empty()) {
+        // `name:stream` — the ADS suffix names a stream, not the file.
+        let seg = seg.split(':').next().unwrap_or(seg);
+        let seg = battery_backtick_decode(seg);
+        if seg == "." || seg.is_empty() {
+            continue;
+        }
+        if seg == ".." {
+            match stack.last() {
+                Some(top) if top != ".." => {
+                    stack.pop();
+                }
+                _ => stack.push("..".to_string()),
+            }
+            continue;
+        }
+        stack.push(seg);
+    }
+    stack.last().map(|s| s.to_lowercase()).unwrap_or_default()
+}
+
+/// 2.1.220 `LDo` — `(base, stem)`: the lowercased basename, and the same with a
+/// trailing PATHEXT extension removed.
+///
+/// Only a PATHEXT extension is stripped, not any dot-suffix: `git.bat` has stem
+/// `git` (and would shadow `git`), while `my.notes` keeps its stem `my.notes`
+/// because `.notes` is not executable.
+fn battery_ldo(e: &str) -> (String, String) {
+    let base = battery_bq_basename(e);
+    let stem = pathext_stems()
+        .iter()
+        .find_map(|ext| {
+            let suffix = format!(".{ext}");
+            base.strip_suffix(&suffix).map(str::to_string)
+        })
+        .unwrap_or_else(|| base.clone());
+    (base, stem)
+}
+
+/// The cwd-first shadowing ask message (2.1.220, verbatim).
+fn battery_shadow_message(name: &str) -> String {
+    format!(
+        "An earlier sub-command writes a file (./{name}.*) that would shadow the later \
+`{name}` command under Windows PowerShell 5.1 cwd-first resolution."
+    )
+}
+
 /// cd-git ask message (2.1.211 `NTU`, `if(y&&S)`).
 const BATTERY_CD_GIT: &str =
     "Compound commands with cd/Set-Location and git require approval to prevent bare repository attacks";
@@ -2772,6 +2879,135 @@ fn battery_deo_dotgit(e: &str, ctx: &PsCtx) -> bool {
     matches!(battery_qbu(&t, ctx), Some(n) if battery_kbu(&n))
 }
 
+
+
+/// Whether the host resolves commands cwd-first (2.1.220 `Lt()==="windows"`).
+///
+/// `cfg!(windows)` rather than `#[cfg(windows)]` so the shadowing check is
+/// COMPILED and type-checked on every platform — a `#[cfg]`-gated block would
+/// only ever be built on the one OS nobody develops on here, which is how such
+/// code rots.
+///
+/// The value is overridable in tests. Without that the WIRING (as opposed to
+/// the predicate) could only be exercised on Windows, so the guard would ship
+/// with its entry point untested on the machines it is written on.
+#[cfg(not(test))]
+fn battery_host_is_windows() -> bool {
+    cfg!(windows)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test override for [`battery_host_is_windows`]; `None` ⇒ the real host.
+    static FORCE_WINDOWS_HOST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn battery_host_is_windows() -> bool {
+    FORCE_WINDOWS_HOST.with(|c| c.get()).unwrap_or(cfg!(windows))
+}
+
+/// Run `f` as though the host were (or were not) Windows. Thread-local, so
+/// parallel tests cannot see each other's override.
+#[cfg(test)]
+pub(crate) fn with_windows_host<T>(is_windows: bool, f: impl FnOnce() -> T) -> T {
+    FORCE_WINDOWS_HOST.with(|c| c.set(Some(is_windows)));
+    let out = f();
+    FORCE_WINDOWS_HOST.with(|c| c.set(None));
+    out
+}
+
+/// The first sub-command whose name is shadowed by a file an EARLIER
+/// sub-command writes (2.1.220 `NTU`'s `Lt()==="windows" && u.length>1` block).
+///
+/// Walks the sub-commands in order, carrying the set of write-target stems seen
+/// so far. Order is the whole point: a file written AFTER a command runs cannot
+/// shadow it, so each command is tested against the set BEFORE its own writes
+/// are added.
+///
+/// The set is pre-seeded with every line-level redirection target, because a
+/// redirection at the end of the line (`… > git.bat`) is not attached to any one
+/// sub-command yet still lands before the next line runs.
+///
+/// Returns the ORIGINAL command name (not the normalized one) so the message
+/// echoes what the user wrote. `None` when nothing is shadowed, or when there is
+/// only one sub-command — a single command cannot be preceded by a write.
+fn battery_shadowed_command(statements: &[PsStatement], u: &[BatteryUEntry<'_>]) -> Option<String> {
+    if u.len() <= 1 {
+        return None;
+    }
+    let mut written: std::collections::HashSet<String> = battery_r5r_targets(statements)
+        .iter()
+        .map(|t| battery_ldo(t).1)
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    for entry in u {
+        let cmd = entry.cmd;
+        let (base, stem) = battery_ldo(&cmd.name);
+        // `git` shadowed by a written `git.bat` (stem match), or `git.exe`
+        // shadowed by a written `git.exe.bat` (base match — only meaningful
+        // when the invocation carried its own extension).
+        if (!stem.is_empty() && written.contains(&stem)) || (base != stem && written.contains(&base))
+        {
+            return Some(cmd.name.clone());
+        }
+        for r in &cmd.redirections {
+            let s = battery_ldo(&r.target).1;
+            if !s.is_empty() {
+                written.insert(s);
+            }
+        }
+        // A write CMDLET's arguments are write targets too (`Copy-Item x
+        // ./git.bat`). Strip a leading `-Flag:` before reading the path, the
+        // way the oracle does.
+        let canon = normalize_cmdlet(&cmd.name);
+        if WRITE_CMDLETS.contains(&canon.as_str()) {
+            for a in cmd.args.iter().flat_map(|a| battery_peo(a.as_ref())) {
+                let stripped = battery_strip_leading_flag(&a);
+                let s = battery_ldo(&stripped).1;
+                if !s.is_empty() {
+                    written.insert(s);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Drop a leading `-Flag` / `--Flag` / en/em-dash variant, with an optional
+/// trailing colon (2.1.220 `re.replace(/^[-\u2013\u2014\u2015]+[A-Za-z]+:?/, "")`).
+fn battery_strip_leading_flag(a: &str) -> String {
+    let mut chars = a.char_indices();
+    let mut idx = 0usize;
+    let mut saw_dash = false;
+    for (i, c) in chars.by_ref() {
+        if matches!(c, '-' | '\u{2013}' | '\u{2014}' | '\u{2015}') {
+            saw_dash = true;
+            idx = i + c.len_utf8();
+        } else {
+            break;
+        }
+    }
+    if !saw_dash {
+        return a.to_string();
+    }
+    let rest = &a[idx..];
+    let letters: usize = rest
+        .chars()
+        .take_while(char::is_ascii_alphabetic)
+        .map(char::len_utf8)
+        .sum();
+    if letters == 0 {
+        return a.to_string();
+    }
+    let mut end = idx + letters;
+    if a[end..].starts_with(':') {
+        end += 1;
+    }
+    a[end..].to_string()
+}
+
 /// 2.1.211 `peo` — comma-split flattener: `[e, ...e.split(",")]` when `e` has a
 /// comma, else `[e]`.
 fn battery_peo(e: &str) -> Vec<String> {
@@ -3084,13 +3320,18 @@ pub fn powershell_git_battery(
         }
     }
 
-    // PS-CALLER-06-5 (PS5.1 cwd-first shadowing) — deliberately absent.
+    // PS-CALLER-06-5 — PowerShell 5.1 cwd-first command resolution.
     //
-    // The ORACLE gates this on runtime OS: `if (Dt() === "windows" && …)`. On
-    // macOS/Linux it never evaluates the check either, so omitting it is
-    // behaviourally identical on every platform LingXi ships. Genuinely
-    // Windows-only, not a silently-skipped guard.
-    // See docs/ps-caller-06-deferrals-REEVALUATED-2026-07-25.md.
+    // Windows PowerShell 5.1 looks in the CURRENT DIRECTORY before PATH, so an
+    // earlier sub-command that writes `./git.bat` makes a later bare `git` run
+    // that file. The oracle gates this on `Lt()==="windows"` and so does this
+    // port: PowerShell Core on macOS/Linux resolves PATH-first, where the
+    // shadowing cannot happen and the ask would be a false positive.
+    if battery_host_is_windows() {
+        if let Some(shadowed) = battery_shadowed_command(statements, &u) {
+            return ask(&battery_shadow_message(&shadowed));
+        }
+    }
 
     // 4. archive-extract — `if(pxg && u.length>1)`.
     let archive_present = names

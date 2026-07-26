@@ -9,7 +9,30 @@ They are not equally justified. One deferral holds and should be reworded; the
 other is **mis-scoped and should be re-filed**, because the gap is wider than
 the item says.
 
-## PS-CALLER-06-5 — deferral HOLDS (reword, do not schedule)
+## PS-CALLER-06-5 — IMPLEMENTED 2026-07-26 (this section is the prior verdict)
+
+The deferral is no longer in force. The reasoning below was sound about the
+oracle's OS gate but drew the wrong conclusion for a port that SHIPS Windows:
+"the oracle does not evaluate it on macOS/Linux either" makes omitting it
+harmless on macOS and Linux, and says nothing about Windows, where the check is
+a live security ask and the port had none.
+
+Implemented in `permission/src/powershell_containment.rs`, gated the same way
+the oracle gates it. Two decisions worth carrying forward:
+
+- `cfg!(windows)` (a runtime constant), NOT `#[cfg(windows)]`, so the code is
+  compiled and type-checked on every platform rather than only on the one
+  nobody develops on here.
+- The gate is injectable in tests (`with_windows_host`), so the WIRING is
+  tested on macOS too. Otherwise the predicate would be tested everywhere and
+  its entry point nowhere — the shape of gap this backlog keeps finding.
+
+Cross-compiling `permission` to `x86_64-pc-windows-msvc` is NOT possible on
+this host: a transitive C dependency (`ring`) needs an MSVC toolchain. That is
+a toolchain limit, not evidence the code is Windows-clean, and it is why the
+`cfg!` + injectable-gate choice above matters.
+
+## PS-CALLER-06-5 — deferral HOLDS (PRIOR VERDICT, superseded)
 
 PowerShell 5.1 resolves commands cwd-first, so an earlier sub-command that
 writes `./foo.*` can shadow a later `foo`. The oracle asks about it.

@@ -49,14 +49,15 @@ the evidence chain; read this block first.
   `tui_core::left_arrow_gesture` (claude `W_p`/`G_p`, read verbatim) plus the
   composer wiring.
 
-Still open (1): `tengu_refusal_fallback_notice_collapsed`. Re-verified
-2026-07-26 and the block is STRUCTURAL, not a missing field: every path to a
-non-zero `suppressedCount` runs through a PROVISIONAL banner, and this port
-decides refusal at response terminal (`conversation.rs:8275`, alongside
-`max_tokens`/`stop_sequence`), so a refusal can never still be withdrawn. It
-needs refusal detection moved into the stream plus the
-`tengu_refusal_retraction_*` signals first. Full decomposition in
-`docs/refusal-retraction-DECOMPOSITION-2026-07-26.md`.
+Still open (1): `tengu_refusal_fallback_notice_collapsed`. Its prerequisite is
+a refusal-fallback CASCADE — `suppressedCount` counts the intermediate hops of
+a multi-hop chain, and this port has a single hop behind a once-per-session
+latch, so there is never a second notice to retract the first. (An earlier note
+here named "move refusal detection into the stream" as the prerequisite; that
+was wrong — provisional-ness comes from a hop that a LATER hop may supersede,
+not from an open stream.) The `tengu_refusal_retraction_*` family is NOT a
+prerequisite: it belongs to the remote-session client, an accepted divergence.
+Full decomposition in `docs/refusal-retraction-DECOMPOSITION-2026-07-26.md`.
 
 ## Genuinely open (6) — ORIGINAL, superseded by the block above
 

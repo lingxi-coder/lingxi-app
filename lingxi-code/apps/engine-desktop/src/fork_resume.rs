@@ -81,9 +81,10 @@ impl ForkCapableSkills for RegistryForkCapableSkills {
 
 /// The production gate.
 pub struct DesktopForkResumeGate {
-    /// Directory holding this project's session transcripts — where each
-    /// agent's scoping sidecars live, beside `<agent-id>.jsonl`.
-    pub session_dir: PathBuf,
+    /// This session's `subagents/` directory — where each background agent's
+    /// transcript lives, and therefore where its scoping sidecars sit (beside
+    /// `agent-<id>.jsonl`).
+    pub subagents_dir: PathBuf,
     /// The live skill registry.
     pub skills: Arc<dyn ForkCapableSkills>,
 }
@@ -95,7 +96,10 @@ impl ForkResumeGate for DesktopForkResumeGate {
         agent_id: protocol::AgentId,
         task_forked_skill_name: Option<&str>,
     ) -> Result<(), String> {
-        let jsonl = self.session_dir.join(format!("{agent_id}.jsonl"));
+        let jsonl = session::forked_skill::agent_transcript_path(
+            &self.subagents_dir,
+            &agent_id.to_string(),
+        );
         let status = session::forked_skill::read_scoping(&jsonl).await;
 
         // The provenance marker is only consulted on the COLD path (no live
@@ -145,7 +149,7 @@ mod tests {
 
     fn gate(dir: &std::path::Path, capable: bool) -> DesktopForkResumeGate {
         DesktopForkResumeGate {
-            session_dir: dir.to_path_buf(),
+            subagents_dir: dir.to_path_buf(),
             skills: Arc::new(Skills(capable)),
         }
     }
@@ -174,7 +178,7 @@ mod tests {
     async fn a_corroborated_fork_resumes() {
         let dir = tempfile::tempdir().unwrap();
         let id = protocol::AgentId::new();
-        write_fork_records(&dir.path().join(format!("{id}.jsonl")), &scoping("review"))
+        write_fork_records(&session::forked_skill::agent_transcript_path(dir.path(), &id.to_string()), &scoping("review"))
             .await
             .unwrap();
         assert!(gate(dir.path(), true)
@@ -190,7 +194,8 @@ mod tests {
     async fn deleting_the_scoping_record_refuses_rather_than_widening() {
         let dir = tempfile::tempdir().unwrap();
         let id = protocol::AgentId::new();
-        let jsonl = dir.path().join(format!("{id}.jsonl"));
+        let jsonl =
+            session::forked_skill::agent_transcript_path(dir.path(), &id.to_string());
         write_fork_records(&jsonl, &scoping("review")).await.unwrap();
         tokio::fs::remove_file(session::forked_skill::forked_skill_paths(&jsonl).scoping)
             .await
@@ -212,7 +217,7 @@ mod tests {
     async fn a_mismatched_identity_refuses() {
         let dir = tempfile::tempdir().unwrap();
         let id = protocol::AgentId::new();
-        write_fork_records(&dir.path().join(format!("{id}.jsonl")), &scoping("review"))
+        write_fork_records(&session::forked_skill::agent_transcript_path(dir.path(), &id.to_string()), &scoping("review"))
             .await
             .unwrap();
         let err = gate(dir.path(), true)
@@ -228,7 +233,7 @@ mod tests {
     async fn a_skill_that_lost_fork_capability_refuses() {
         let dir = tempfile::tempdir().unwrap();
         let id = protocol::AgentId::new();
-        write_fork_records(&dir.path().join(format!("{id}.jsonl")), &scoping("review"))
+        write_fork_records(&session::forked_skill::agent_transcript_path(dir.path(), &id.to_string()), &scoping("review"))
             .await
             .unwrap();
         let err = gate(dir.path(), false)
@@ -246,7 +251,8 @@ mod tests {
     async fn a_corrupt_record_refuses() {
         let dir = tempfile::tempdir().unwrap();
         let id = protocol::AgentId::new();
-        let jsonl = dir.path().join(format!("{id}.jsonl"));
+        let jsonl =
+            session::forked_skill::agent_transcript_path(dir.path(), &id.to_string());
         tokio::fs::write(
             session::forked_skill::forked_skill_paths(&jsonl).scoping,
             "{ not json",
@@ -263,7 +269,8 @@ mod tests {
     async fn a_cold_resume_without_a_witness_refuses() {
         let dir = tempfile::tempdir().unwrap();
         let id = protocol::AgentId::new();
-        let jsonl = dir.path().join(format!("{id}.jsonl"));
+        let jsonl =
+            session::forked_skill::agent_transcript_path(dir.path(), &id.to_string());
         // Write ONLY the scoping record — no marker.
         tokio::fs::write(
             session::forked_skill::forked_skill_paths(&jsonl).scoping,
@@ -284,7 +291,7 @@ mod tests {
     async fn a_cold_resume_with_a_matching_witness_proceeds() {
         let dir = tempfile::tempdir().unwrap();
         let id = protocol::AgentId::new();
-        write_fork_records(&dir.path().join(format!("{id}.jsonl")), &scoping("review"))
+        write_fork_records(&session::forked_skill::agent_transcript_path(dir.path(), &id.to_string()), &scoping("review"))
             .await
             .unwrap();
         assert!(gate(dir.path(), true).check_resume(id, None).await.is_ok());

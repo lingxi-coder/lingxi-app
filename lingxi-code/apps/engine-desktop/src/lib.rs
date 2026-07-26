@@ -6380,9 +6380,10 @@ pub async fn build(
     // REFUSES rather than waving a forked skill through.
     let fork_capable_skills = Arc::new(fork_resume::RegistryForkCapableSkills::new());
     let fork_resume_gate = Arc::new(fork_resume::DesktopForkResumeGate {
-        session_dir: cfg.lingxi_home.join("projects").join(
-            session::jsonl::path::project_dir_name(&cfg.cwd.to_string_lossy()),
-        ),
+        // Beside the agents' own transcripts (`agent-<id>.jsonl`), not in the
+        // project session directory — that is where the writer puts them and
+        // where anything keying off the real transcript will look.
+        subagents_dir: main_subagents_dir.clone(),
         skills: fork_capable_skills.clone() as Arc<dyn fork_resume::ForkCapableSkills>,
     });
     task_registry_inner.register_handler(
@@ -6686,12 +6687,9 @@ pub async fn build(
             mailbox_router: coordinator.mailbox_router.clone(),
             runtime: Arc::new(PosixRuntime::new()) as Arc<dyn traits::RuntimeSpawner>,
             // Where a forked skill's scoping sidecars land — beside the
-            // background agent's own transcript, in this project's session
-            // directory (the same `projects/<sanitized-cwd>/` dir
-            // `session_path` writes transcripts to).
-            session_dir: Some(cfg.lingxi_home.join("projects").join(
-                session::jsonl::path::project_dir_name(&cfg.cwd.to_string_lossy()),
-            )),
+            // background agent's own transcript in this session's
+            // `subagents/` directory.
+            subagents_dir: Some(main_subagents_dir.clone()),
         });
 
     // (/sandbox) One shared fast-toggle cell, seeded from the config's

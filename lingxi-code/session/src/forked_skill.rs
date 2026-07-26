@@ -174,6 +174,20 @@ pub struct ForkedSkillPaths {
     pub provenance_marker: PathBuf,
 }
 
+/// The transcript path a background agent's sidecars sit beside:
+/// `<subagents_dir>/agent-<id>.jsonl` (claude `getAgentTranscriptPath`; the
+/// port's `agent::runner` writes exactly this name).
+///
+/// Both the fork writer and the resume gate go through here. They used to
+/// derive the path independently — agreeing with each other but matching
+/// NOTHING on disk, which made the sidecars invisible to anything that keys off
+/// the real transcript, and scattered them into the project session directory
+/// beside main-session transcripts.
+#[must_use]
+pub fn agent_transcript_path(subagents_dir: &Path, agent_id: &str) -> PathBuf {
+    subagents_dir.join(format!("agent-{agent_id}.jsonl"))
+}
+
 /// Derive both sidecar paths from a session JSONL path.
 ///
 /// Claude replaces a TRAILING `.jsonl` (`e.replace(/\.jsonl$/, …)`); a path
@@ -491,6 +505,19 @@ mod tests {
             effort: None,
             frozen_command_denies: None,
         }
+    }
+
+    /// The sidecars must sit beside the agent's REAL transcript — the same
+    /// `agent-<id>.jsonl` the runner writes — not beside a path only this
+    /// module believes in.
+    #[test]
+    fn sidecars_sit_beside_the_agents_real_transcript() {
+        let t = agent_transcript_path(Path::new("/h/projects/p/sess/subagents"), "abc");
+        assert_eq!(t, PathBuf::from("/h/projects/p/sess/subagents/agent-abc.jsonl"));
+        assert_eq!(
+            forked_skill_paths(&t).scoping,
+            PathBuf::from("/h/projects/p/sess/subagents/agent-abc.forked-skill.json")
+        );
     }
 
     #[test]

@@ -53,12 +53,13 @@ pub struct BackgroundAgentSpawner {
     pub mailbox_router: Arc<MailboxRouter>,
     /// D17-safe task spawner for the per-agent mailbox→runner pump.
     pub runtime: Arc<dyn RuntimeSpawner>,
-    /// Directory holding this project's session transcripts — where a forked
-    /// skill's scoping sidecars are written, beside `<agent-id>.jsonl`.
+    /// This session's `subagents/` directory — where every background agent's
+    /// transcript lives, and therefore where a forked skill's scoping sidecars
+    /// are written (beside `agent-<id>.jsonl`).
     /// `None` disables fork persistence (a host with no session storage); a
     /// forking skill then still launches, and a later resume refuses it because
     /// its task record names a skill with no scoping record on disk.
-    pub session_dir: Option<std::path::PathBuf>,
+    pub subagents_dir: Option<std::path::PathBuf>,
 }
 
 impl BackgroundAgentSpawner {
@@ -80,7 +81,7 @@ impl BackgroundAgentSpawner {
         let Some(skill_name) = request.forked_skill_name.as_deref() else {
             return Ok(());
         };
-        let Some(dir) = self.session_dir.as_ref() else {
+        let Some(dir) = self.subagents_dir.as_ref() else {
             return Ok(());
         };
         let scoping = session::forked_skill::ForkedSkillScoping {
@@ -107,7 +108,7 @@ impl BackgroundAgentSpawner {
                 "forked-skill scoping record is unpersistable".to_string(),
             ));
         }
-        let jsonl = dir.join(format!("{agent_id}.jsonl"));
+        let jsonl = session::forked_skill::agent_transcript_path(dir, &agent_id.to_string());
         session::forked_skill::write_fork_records(&jsonl, &scoping)
             .await
             .map_err(|e| {
@@ -477,7 +478,7 @@ mod tests {
             registry,
             mailbox_router: mailbox_router.clone(),
             runtime,
-            session_dir: None,
+            subagents_dir: None,
         };
         let inherit = SubagentInheritance {
             tool_invoker: Arc::new(MockInvoker),
@@ -541,7 +542,7 @@ mod tests {
             registry: Arc::new(reg),
             mailbox_router: Arc::new(MailboxRouter::new()),
             runtime,
-            session_dir: Some(sessions.path().to_path_buf()),
+            subagents_dir: Some(sessions.path().to_path_buf()),
         };
 
         let mut req = request(None);
@@ -561,7 +562,10 @@ mod tests {
             .await
             .expect("spawn_async should succeed");
 
-        let jsonl = sessions.path().join(format!("{}.jsonl", launch.agent_id));
+        let jsonl = session::forked_skill::agent_transcript_path(
+            sessions.path(),
+            &launch.agent_id.to_string(),
+        );
         match session::forked_skill::read_scoping(&jsonl).await {
             session::forked_skill::ScopingStatus::Valid(s) => {
                 assert_eq!(s.skill_name, "code-review");
@@ -611,7 +615,7 @@ mod tests {
             registry: Arc::new(reg),
             mailbox_router: Arc::new(MailboxRouter::new()),
             runtime,
-            session_dir: Some(sessions.path().to_path_buf()),
+            subagents_dir: Some(sessions.path().to_path_buf()),
         };
 
         let launch = deco
@@ -625,7 +629,10 @@ mod tests {
             .await
             .unwrap();
 
-        let jsonl = sessions.path().join(format!("{}.jsonl", launch.agent_id));
+        let jsonl = session::forked_skill::agent_transcript_path(
+            sessions.path(),
+            &launch.agent_id.to_string(),
+        );
         assert_eq!(
             session::forked_skill::read_scoping(&jsonl).await,
             session::forked_skill::ScopingStatus::Absent
@@ -667,7 +674,7 @@ mod tests {
             registry,
             mailbox_router: mailbox_router.clone(),
             runtime,
-            session_dir: None,
+            subagents_dir: None,
         };
         let inherit = SubagentInheritance {
             tool_invoker: Arc::new(MockInvoker),
@@ -751,7 +758,7 @@ mod tests {
             registry,
             mailbox_router: mailbox_router.clone(),
             runtime,
-            session_dir: None,
+            subagents_dir: None,
         };
         let inherit = SubagentInheritance {
             tool_invoker: Arc::new(MockInvoker),

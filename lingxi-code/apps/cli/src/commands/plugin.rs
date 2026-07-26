@@ -628,7 +628,9 @@ async fn run_list(args: &ListArgs) -> i32 {
         }
     } else {
         if discovered.is_empty() {
-            println!("No plugins installed.");
+            // Oracle: "No plugins installed. Use `claude plugin install` to
+            // install a plugin." The remediation hint names this binary.
+            println!("No plugins installed. Use `lingxi-cli plugin install` to install a plugin.");
             return SUCCESS;
         }
         for (_, m, _) in &discovered {

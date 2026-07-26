@@ -447,10 +447,54 @@ fn default_rules_value() -> Option<serde_json::Value> {
     Some(value)
 }
 
+/// Does this `autoMode` settings value carry any custom rules?
+///
+/// True iff at least one of the four sections is a NON-EMPTY array — the
+/// oracle's `gyi(...)` test. A present-but-empty `allow: []` is not a custom
+/// rule set, and treating it as one would critique nothing and report success.
+pub(crate) fn has_custom_rules(auto_mode: &Value) -> bool {
+    ["allow", "soft_deny", "hard_deny", "environment"]
+        .iter()
+        .any(|k| {
+            auto_mode
+                .get(*k)
+                .and_then(Value::as_array)
+                .is_some_and(|a| !a.is_empty())
+        })
+}
+
+/// Read the user's `autoMode` settings section, if any.
+fn user_auto_mode_rules() -> Option<Value> {
+    let path = crate::run::lingxi_home_dir().join("settings.json");
+    let raw = std::fs::read_to_string(path).ok()?;
+    let doc: Value = serde_json::from_str(&raw).ok()?;
+    doc.get("autoMode").cloned()
+}
+
+/// `auto-mode critique` — review the user's CUSTOM rules.
+///
+/// This used to critique the shipped DEFAULTS, which meant it never looked at
+/// the user's rules at all and reported the same thing on every machine. The
+/// oracle critiques `autoMode` from settings and, when there are none, says so
+/// rather than grading a document the user did not write.
+///
+/// Divergence, deliberate: where the oracle sends the rules to a model for a
+/// prose critique, this runs the local structural critique — consistent with
+/// this port shipping a deterministic offline classifier instead of the
+/// classifier prompt. `--model` is still accepted and echoed so the surface
+/// matches.
 fn critique_rules(args: &CritiqueArgs) -> i32 {
-    let Some(value) = default_rules_value() else {
-        return RUNTIME_ERROR;
-    };
+    let rules = user_auto_mode_rules();
+    let has_custom = rules.as_ref().is_some_and(has_custom_rules);
+    if !has_custom {
+        println!(
+            "No custom auto mode rules found.\n\n\
+             Add rules to your settings file under autoMode.{{allow, soft_deny, hard_deny, environment}}.\n\
+             Run `lingxi-cli auto-mode defaults` to see the default rules for reference."
+        );
+        return SUCCESS;
+    }
+    let value = rules.unwrap_or(Value::Null);
     let findings = permission::classifier::critique_rules(&value);
     if let Some(model) = args.model.as_deref() {
         println!("Model override: {model}");
@@ -476,6 +520,32 @@ fn print_help_hint() {
 
 #[cfg(test)]
 mod tests {
+    // ---- `critique` reads the USER's rules, not the shipped defaults --------
+
+    #[test]
+    fn a_non_empty_section_counts_as_custom_rules() {
+        for k in ["allow", "soft_deny", "hard_deny", "environment"] {
+            let v = serde_json::json!({ k: ["Some Rule: text"] });
+            assert!(super::has_custom_rules(&v), "{k} must count");
+        }
+    }
+
+    #[test]
+    fn empty_arrays_are_not_custom_rules() {
+        // A present-but-empty section would otherwise critique nothing and
+        // report success, which reads as "your rules are fine".
+        let v = serde_json::json!({ "allow": [], "soft_deny": [], "environment": [] });
+        assert!(!super::has_custom_rules(&v));
+    }
+
+    #[test]
+    fn an_absent_or_unrecognized_auto_mode_is_not_custom_rules() {
+        assert!(!super::has_custom_rules(&serde_json::json!({})));
+        assert!(!super::has_custom_rules(&serde_json::json!("nonsense")));
+        // A non-array section is not a rule list.
+        assert!(!super::has_custom_rules(&serde_json::json!({ "allow": "x" })));
+    }
+
     use super::*;
 
     #[test]

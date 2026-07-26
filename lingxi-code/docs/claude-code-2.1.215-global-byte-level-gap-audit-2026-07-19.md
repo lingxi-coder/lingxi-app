@@ -8,7 +8,17 @@
 - **H-07**（Docker/Podman daemon redirect flags）— **CLOSED**。`read_only_command.rs` 的测试断言 `docker images --context=prod` / `--url` / `--connection` / `docker ps --identity` 均**不**是只读。
 - **H-08**（`/goal` 只有文案）— **CLOSED**，见 2.1.216 复审 §0（session-scoped Stop hook 强制续转）。
 
-其余条目**尚未逐条复审**。经验数据：上两次同类 re-triage 中，标记为 open 的条目分别有 22/32 与 5/6 其实早已关闭 —— 所以这份清单的剩余部分应当先做一次 behaviour-site 复核，而不是直接当作待办开工。
+**全部 30 条已于 2026-07-26 逐条 behaviour-site 复核。** 结果如下（与前两次 re-triage 一致：绝大多数早已关闭）：
+
+**CLOSED（27）** — H-01…H-12 全部（H-01/02 见 2.1.216 §0 的 PTY/冷恢复关闭；H-03/04 settings 层级与 2 MiB；H-05 长命令强制 prompt；H-06/H-07 见上；H-08 `/goal` Stop hook；H-09 OTel exporter；H-10/11/12 marketplace policy 与 `name@marketplace` 身份），以及
+M-01（`apps/cli/src/lib.rs:404` `--brief`）、M-03（`load_merged_disable_agent_view`）、M-04（`startup_resources.rs` `--plugin-url`）、M-06（`events.rs:77` tool heartbeat）、M-07（single-writer 归 `run_stream_json_input_loop`）、M-08/M-09（`resume.rs:52` effort + compaction 冷恢复连续性）、M-10（`definition.rs:79` "Parsed, stored, and EXECUTED"）、M-11、M-12、M-13（`emit_api_retry` → `TurnEvent::ApiRetry`，`lib.rs:3912`）、M-14（`events.rs:340` `CommandsChanged`）、M-15（`load_merged_ask_user_question_timeout`，注释直接标注 M-15）、L-01、L-03。
+
+**仍开（3）**：
+- **M-02** — `SendMessage::is_enabled` 恒 `true`。代码里有明确理由（"swarm surface 在 Rust host 始终存在，mailbox seam 在场时接入"），属**有记录的分歧**而非疏漏；但无 mailbox router 时模型仍会看到一个调用即报 internal error 的工具。要么按 teammate context 收窄，要么把该理由升格为 accepted divergence。
+- **M-05** — `/reload-plugins` 不重新读取 `pluginConfigs`（options/secrets scope）。`manager.rs` 的 refresh 只 diff enabled set。
+- **L-02** — parity harness 基线陈旧（fixtures 锁在 `cc_2_1_198`，无 2.1.214/215 delta suite）。
+
+M-13 的成因值得记：它是被一句**过期的注释**触发的 —— `retry_ux.rs` 的模块头一直写着 "not wired"，而接线早已存在。该注释已改正。
 
 ---
 

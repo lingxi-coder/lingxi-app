@@ -13,12 +13,13 @@
 //!   is REPLACED by the status-page link (binary `if(fe&&me)Te=D2n().trim()`,
 //!   where `D2n` → `" If it persists, check https://status.claude.com."`).
 //!
-//! LingXi note: the LIVE per-attempt retry-status event surface from
-//! `llm-client` (the binary's `onRetryStatus` callback) is not wired — retries
-//! are internal to `llm_client::ApiService`'s drive loop and the only
-//! `RenderedMessage::SystemApiError` producer today is a demo fixture. These
-//! functions capture the faithful gating so the render (and any future live
-//! wiring) matches the binary.
+//! The live per-attempt retry surface IS wired: `llm-client`'s retry info
+//! reaches `OrchestratorBridge::emit_api_retry`
+//! (`apps/engine-desktop/src/lib.rs:3912`), which sends `TurnEvent::ApiRetry`
+//! to the TUI. These functions are the render half of that path.
+//!
+//! (An earlier revision of this note said the surface was NOT wired, and that
+//! claim outlived the wiring — the 2.1.215 audit's M-13 was raised on it.)
 
 /// The Anthropic status page URL — the binary's `zha` (@210994387).
 pub const STATUS_PAGE_URL: &str = "https://status.claude.com";

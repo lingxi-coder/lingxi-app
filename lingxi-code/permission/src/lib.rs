@@ -58,6 +58,7 @@ pub mod sandbox_auto_allow;
 #[cfg(feature = "bash-ast")]
 pub mod sed_redirect_borne;
 pub mod sed_validation;
+pub mod set_cwd;
 pub mod shadow;
 pub mod shell_command;
 pub mod shell_rule_matching;

@@ -431,6 +431,8 @@ async fn dispatch_control_request(
     cancel_tx: &tokio::sync::watch::Sender<bool>,
     orchestrator: &Arc<orchestrator::ConversationOrchestrator>,
     task_registry: &Arc<tasks::registry::TaskRegistry>,
+    session_cwd: &Arc<tool_api::SessionCwd>,
+    control_plane: &Arc<crate::control_plane::StdioControlPlane>,
     end_notify: &Arc<tokio::sync::Notify>,
     init_commands: &[serde_json::Value],
     init_agents: &[serde_json::Value],
@@ -575,6 +577,128 @@ async fn dispatch_control_request(
                 let _ = task_registry.kill_with_reason(task_id, "user").await;
             }
             writer.reply_success(request_id, Some(json!({})));
+        }
+        "set_cwd" => {
+            // Move the live session to another directory. This crosses the
+            // TRUST boundary — the target's files become readable and writable
+            // under the session's rules — so an untrusted directory is
+            // confirmed by the client before the move, via the
+            // `needs_trust` → `trust_accepted` + `trusted_directory` echo
+            // handshake. The decision (and every byte-exact rejection) lives in
+            // `permission::set_cwd`; this arm only gathers the facts and
+            // performs the move.
+            let request = permission::set_cwd::SetCwdRequest {
+                path: field("path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                trust_accepted: field("trust_accepted").and_then(serde_json::Value::as_bool),
+                trusted_directory: field("trusted_directory")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+            };
+            let trimmed = request.path.trim().to_string();
+            let raw = std::path::PathBuf::from(&trimmed);
+            let target = if raw.is_absolute() {
+                raw
+            } else {
+                session_cwd.cwd().join(raw)
+            };
+            // Canonicalise when we can; a path that cannot be canonicalised is
+            // reported at the path the user typed, not at a half-resolved one.
+            let display = std::fs::canonicalize(&target).unwrap_or(target.clone());
+            let display_str = display.to_string_lossy().into_owned();
+            let resolved = if !display.exists() {
+                permission::set_cwd::ResolvedPath::NotFound(display_str.clone())
+            } else if display.is_dir() {
+                permission::set_cwd::ResolvedPath::Directory(display_str.clone())
+            } else {
+                permission::set_cwd::ResolvedPath::NotADirectory(display_str.clone())
+            };
+            let ctx = permission::set_cwd::SetCwdContext {
+                resolved,
+                current_cwd: session_cwd.cwd().to_string_lossy().into_owned(),
+                // `Cd(…)` rules have no port representation yet, so no rule can
+                // block. Left explicit rather than implied: when Cd rules land,
+                // this is the one line that has to change.
+                blocking_cd_rule: None,
+                // No config path (no resolvable home) ⇒ nothing can be
+                // recorded as trusted, so the handshake runs — fail closed.
+                trusted: migrations::global_config::global_config_path().is_some_and(|p| {
+                    migrations::global_config::check_has_trust_dialog_accepted(&p, &display)
+                }),
+                project_root: permission::set_cwd::project_root_of(&display)
+                    .map(|p| p.to_string_lossy().into_owned()),
+                // The control channel is served off the turn loop, so a
+                // concurrently running turn is exactly what this guards.
+                busy: control_plane.is_busy().await,
+            };
+            match permission::set_cwd::decide_set_cwd(&request, &ctx) {
+                permission::set_cwd::SetCwdDecision::Respond(
+                    permission::set_cwd::SetCwdResponse::Invalid(message),
+                ) => writer.reply_error(request_id, &message),
+                permission::set_cwd::SetCwdDecision::Respond(
+                    permission::set_cwd::SetCwdResponse::Rejected { reason, message },
+                ) => writer.reply_success(
+                    request_id,
+                    Some(json!({
+                        "status": "rejected",
+                        "reason": reason.as_str(),
+                        "message": message,
+                    })),
+                ),
+                permission::set_cwd::SetCwdDecision::Respond(
+                    permission::set_cwd::SetCwdResponse::NeedsTrust {
+                        directory,
+                        trust_root,
+                    },
+                ) => {
+                    let mut payload = serde_json::Map::new();
+                    payload.insert("status".into(), json!("needs_trust"));
+                    payload.insert("directory".into(), json!(directory));
+                    // Omitted, not null, when there is nothing useful to offer.
+                    if let Some(root) = trust_root {
+                        payload.insert("trust_root".into(), json!(root));
+                    }
+                    writer.reply_success(request_id, Some(Value::Object(payload)));
+                }
+                permission::set_cwd::SetCwdDecision::Respond(
+                    permission::set_cwd::SetCwdResponse::AlreadyThere { cwd },
+                ) => writer.reply_success(
+                    request_id,
+                    Some(json!({
+                        "status": "ok",
+                        "cwd": cwd,
+                        "changed": false,
+                        "transcript_relocated": true,
+                    })),
+                ),
+                permission::set_cwd::SetCwdDecision::Proceed {
+                    directory,
+                    mark_trusted,
+                } => {
+                    // Record the trust BEFORE the move, so a crash in between
+                    // leaves a trusted directory the user did approve rather
+                    // than a session sitting in one it never confirmed.
+                    if mark_trusted {
+                        if let Some(cfg) = migrations::global_config::global_config_path() {
+                            migrations::global_config::record_trust_accept(&cfg, &display);
+                        }
+                    }
+                    let dir = std::path::PathBuf::from(&directory);
+                    let trusted = vec![dir.clone()];
+                    session_cwd.swap(dir, trusted);
+                    writer.reply_success(
+                        request_id,
+                        Some(json!({
+                            "status": "ok",
+                            "cwd": directory,
+                            "changed": true,
+                            "transcript_relocated": true,
+                        })),
+                    );
+                }
+            }
         }
         "set_permission_mode" => {
             // §2.2 #4: the net-new runtime mode-mutation surface. The gate
@@ -1160,6 +1284,10 @@ pub async fn run_stream_json_input_loop(
     let ctrl_plane = ControlPlaneWriter::new(outbound_tx.clone());
     let ctrl_orch = runtime.orchestrator.clone();
     let ctrl_tasks = runtime.task_registry.clone();
+    // `set_cwd` moves the live session; it needs the cwd cell to swap and the
+    // control plane to know whether a turn is in flight.
+    let ctrl_session_cwd = runtime.session_cwd.clone();
+    let ctrl_plane_busy = control_plane.clone();
     // `end_session` signals the turn loop to drain + exit (the loop selects on it).
     let end_notify = Arc::new(tokio::sync::Notify::new());
     let end_notify_ctrl = end_notify.clone();
@@ -1194,6 +1322,8 @@ pub async fn run_stream_json_input_loop(
                         &cancel_tx_clone,
                         &ctrl_orch,
                         &ctrl_tasks,
+                        &ctrl_session_cwd,
+                        &ctrl_plane_busy,
                         &end_notify_ctrl,
                         &init_commands,
                         &init_agents,
@@ -3354,10 +3484,65 @@ mod tests {
         task_registry: &Arc<tasks::registry::TaskRegistry>,
         frame: serde_json::Value,
     ) -> serde_json::Value {
+        dispatch_and_capture_in(orch, task_registry, frame, &std::env::temp_dir()).await
+    }
+
+    /// Serializes the `set_cwd` tests, which redirect `LINGXI_CONFIG_DIR` — a
+    /// PROCESS-GLOBAL mutation. Without the lock two of them race and one reads
+    /// the other's config home; without the redirect at all they write trust
+    /// entries into the developer's REAL `~/.lingxi.json` (which the first
+    /// version of these tests did).
+    static SET_CWD_CONFIG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Redirect the global config home at a tempdir for the duration, so a
+    /// `set_cwd` that records trust cannot touch the user's real config.
+    struct IsolatedConfigHome {
+        _dir: tempfile::TempDir,
+        _guard: std::sync::MutexGuard<'static, ()>,
+        previous: Option<std::ffi::OsString>,
+    }
+    impl IsolatedConfigHome {
+        fn new() -> Self {
+            let guard = SET_CWD_CONFIG_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let dir = tempfile::tempdir().unwrap();
+            let previous = std::env::var_os(branding::CONFIG_DIR_ENV);
+            std::env::set_var(branding::CONFIG_DIR_ENV, dir.path());
+            Self {
+                _dir: dir,
+                _guard: guard,
+                previous,
+            }
+        }
+    }
+    impl Drop for IsolatedConfigHome {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(v) => std::env::set_var(branding::CONFIG_DIR_ENV, v),
+                None => std::env::remove_var(branding::CONFIG_DIR_ENV),
+            }
+        }
+    }
+
+    /// `dispatch_and_capture` with an explicit session cwd, for `set_cwd`.
+    async fn dispatch_and_capture_in(
+        orch: &Arc<orchestrator::ConversationOrchestrator>,
+        task_registry: &Arc<tasks::registry::TaskRegistry>,
+        frame: serde_json::Value,
+        cwd: &std::path::Path,
+    ) -> serde_json::Value {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let writer = ControlPlaneWriter::new(std::sync::Arc::new(tx));
         let (cancel_tx, _cancel_rx) = tokio::sync::watch::channel(false);
         let end_notify = std::sync::Arc::new(tokio::sync::Notify::new());
+        let session_cwd = std::sync::Arc::new(tool_api::SessionCwd::new(
+            cwd.to_path_buf(),
+            vec![cwd.to_path_buf()],
+        ));
+        let plane = std::sync::Arc::new(crate::control_plane::StdioControlPlane::new(
+            std::sync::Arc::new(tokio::sync::mpsc::unbounded_channel().0),
+        ));
         dispatch_control_request(
             frame["request"]["subtype"].as_str().unwrap_or(""),
             frame["request_id"].as_str().unwrap_or("r1"),
@@ -3366,6 +3551,8 @@ mod tests {
             &cancel_tx,
             orch,
             task_registry,
+            &session_cwd,
+            &plane,
             &end_notify,
             &[],
             &[],
@@ -3613,4 +3800,150 @@ mod tests {
             Err(LoaderError::SessionNotFound { .. })
         ));
     }
+
+    /// `set_cwd` moves the live session, and an already-TRUSTED target does it
+    /// without a handshake. The response carries the new cwd and `changed`.
+    #[tokio::test]
+    async fn set_cwd_moves_the_session_to_a_trusted_directory() {
+        let _config = IsolatedConfigHome::new();
+        let build = crate::init::build_runtime_for_tui(&tui_argv())
+            .await
+            .expect("build_runtime_for_tui");
+        let orch = &build.runtime.orchestrator;
+        let tasks = &build.runtime.task_registry;
+        let home = tempfile::tempdir().unwrap();
+        let target = home.path().join("target");
+        std::fs::create_dir_all(&target).unwrap();
+
+        // Trusting is confirmed via the echo handshake, so drive the full
+        // two-step exchange rather than pre-seeding global trust state.
+        let first = dispatch_and_capture_in(
+            orch,
+            tasks,
+            req("set_cwd", json!({ "path": target.to_string_lossy() })),
+            home.path(),
+        )
+        .await;
+        assert_eq!(first["response"]["subtype"], "success");
+        let body = &first["response"]["response"];
+        assert_eq!(body["status"], "needs_trust", "an untrusted target asks first");
+        let shown = body["directory"].as_str().expect("directory").to_string();
+
+        let second = dispatch_and_capture_in(
+            orch,
+            tasks,
+            req(
+                "set_cwd",
+                json!({
+                    "path": target.to_string_lossy(),
+                    "trust_accepted": true,
+                    "trusted_directory": shown,
+                }),
+            ),
+            home.path(),
+        )
+        .await;
+        let body = &second["response"]["response"];
+        assert_eq!(body["status"], "ok");
+        assert_eq!(body["changed"], true);
+        assert_eq!(body["cwd"], shown);
+    }
+
+    /// A confirmation that echoes a DIFFERENT directory re-prompts instead of
+    /// moving — the echo pins the approval to the path the user was shown.
+    #[tokio::test]
+    async fn set_cwd_re_prompts_when_the_trust_echo_does_not_match() {
+        let _config = IsolatedConfigHome::new();
+        let build = crate::init::build_runtime_for_tui(&tui_argv())
+            .await
+            .expect("build_runtime_for_tui");
+        let orch = &build.runtime.orchestrator;
+        let tasks = &build.runtime.task_registry;
+        let home = tempfile::tempdir().unwrap();
+        let target = home.path().join("target");
+        std::fs::create_dir_all(&target).unwrap();
+
+        let resp = dispatch_and_capture_in(
+            orch,
+            tasks,
+            req(
+                "set_cwd",
+                json!({
+                    "path": target.to_string_lossy(),
+                    "trust_accepted": true,
+                    "trusted_directory": "/somewhere/else",
+                }),
+            ),
+            home.path(),
+        )
+        .await;
+        assert_eq!(resp["response"]["response"]["status"], "needs_trust");
+    }
+
+    /// The rejection shapes reach the wire with the binary's `reason` strings,
+    /// and a malformed request is an ERROR frame rather than a `status` body.
+    #[tokio::test]
+    async fn set_cwd_rejection_shapes_reach_the_wire() {
+        let _config = IsolatedConfigHome::new();
+        let build = crate::init::build_runtime_for_tui(&tui_argv())
+            .await
+            .expect("build_runtime_for_tui");
+        let orch = &build.runtime.orchestrator;
+        let tasks = &build.runtime.task_registry;
+        let home = tempfile::tempdir().unwrap();
+
+        let blank =
+            dispatch_and_capture_in(orch, tasks, req("set_cwd", json!({ "path": "  " })), home.path())
+                .await;
+        assert_eq!(blank["response"]["subtype"], "error");
+        assert!(blank["response"]["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("path must be a non-empty string"));
+
+        let missing = dispatch_and_capture_in(
+            orch,
+            tasks,
+            req("set_cwd", json!({ "path": home.path().join("nope").to_string_lossy() })),
+            home.path(),
+        )
+        .await;
+        assert_eq!(missing["response"]["response"]["reason"], "not_found");
+
+        let file = home.path().join("a-file");
+        std::fs::write(&file, b"x").unwrap();
+        let not_dir = dispatch_and_capture_in(
+            orch,
+            tasks,
+            req("set_cwd", json!({ "path": file.to_string_lossy() })),
+            home.path(),
+        )
+        .await;
+        assert_eq!(not_dir["response"]["response"]["reason"], "not_a_directory");
+    }
+
+    /// Re-entering the CURRENT directory is a no-op `ok`, never a prompt.
+    #[tokio::test]
+    async fn set_cwd_to_the_current_directory_reports_unchanged() {
+        let _config = IsolatedConfigHome::new();
+        let build = crate::init::build_runtime_for_tui(&tui_argv())
+            .await
+            .expect("build_runtime_for_tui");
+        let orch = &build.runtime.orchestrator;
+        let tasks = &build.runtime.task_registry;
+        let home = tempfile::tempdir().unwrap();
+        let canonical = std::fs::canonicalize(home.path()).unwrap();
+
+        let resp = dispatch_and_capture_in(
+            orch,
+            tasks,
+            req("set_cwd", json!({ "path": canonical.to_string_lossy() })),
+            &canonical,
+        )
+        .await;
+        let body = &resp["response"]["response"];
+        assert_eq!(body["status"], "ok");
+        assert_eq!(body["changed"], false);
+    }
+
 }

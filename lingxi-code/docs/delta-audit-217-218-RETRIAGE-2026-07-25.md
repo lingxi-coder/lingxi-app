@@ -22,7 +22,32 @@ three are one architectural cluster and one is blocked on a prerequisite.
 `SWEEP-CRITICAL-PERMISSION-SANDBOX-LITERALS` — the audit itself concluded the
 port sites are already aligned.
 
-## Genuinely open (6)
+## STATUS UPDATE 2026-07-26
+
+Four of the six are now CLOSED. This section's original text is kept below for
+the evidence chain; read this block first.
+
+- The forked-skill cluster (`frozenCommandDenies`, `forkedSkill`,
+  `forkedSkillName`) — **CLOSED** across `40e91c38f` … `d76739609`. The premise
+  below ("no Rust substrate") was true when written and wrong when acted on:
+  `AgentTool::dispatch_async` → `SubagentSpawner::spawn_async` →
+  `BackgroundAgentSpawner` had been wired at the composition root all along.
+  `context: fork` now forks (background AND synchronous), applies the skill's
+  scoping, persists it, and refuses to resume without it — six byte-exact
+  refusals. `frozenCommandDenies` is captured and persisted; its union has no
+  in-process caller BY CONSTRUCTION (verified: `PolicyPermissionGate` holds a
+  boot snapshot, so frozen/live/boot cannot drift within a process) and is what
+  a cross-session resume reads.
+- `trust_root` — **CLOSED** (this wave). Its prerequisite was the point: the
+  `set_cwd` control request now exists (`permission::set_cwd` +
+  `apps/cli/src/run.rs`), with the full needs_trust → echo handshake, and
+  `trust_root` is the enclosing project root offered alongside it.
+
+Still open (2), both still blocked on the same prerequisites — see below:
+`tengu_left_arrow_editing_guard` and
+`tengu_refusal_fallback_notice_collapsed`.
+
+## Genuinely open (6) — ORIGINAL, superseded by the block above
 
 ### The forked-skill cluster — one gap, not three
 

@@ -169,6 +169,16 @@ impl StdioControlPlane {
         *self.active_turn_cancel.lock().await = Some(token);
     }
 
+    /// Whether a turn is currently in flight.
+    ///
+    /// The turn loop registers its cancellation token before each turn and
+    /// clears it after, so the token's presence IS the busy signal. Read by
+    /// `set_cwd`, which must not move the session's working directory out from
+    /// under a turn that is already resolving paths against it.
+    pub async fn is_busy(&self) -> bool {
+        self.active_turn_cancel.lock().await.is_some()
+    }
+
     /// Clear the active-turn token between turns.
     pub async fn clear_active_turn(&self) {
         *self.active_turn_cancel.lock().await = None;

@@ -37,7 +37,21 @@ Each confirmed at the site the audit named as missing:
 
 No `TODO`/`unimplemented!` is tied to any of these IDs (checked).
 
-## Open (3)
+## STATUS UPDATE 2026-07-26
+
+Two of the three are CLOSED; the section below is the original evidence.
+
+- `PS-CALLER-06-2` (bare-repo indicators) — **CLOSED**,
+  `permission/src/git_bare_repo.rs`.
+- `P1-12` (background-attach stall detection) — **CLOSED**,
+  `apps/cli/src/bg_attach_stall.rs`, with the `tengu_bg_attach_*` telemetry the
+  audit found missing.
+
+Still open (1): `PS-CALLER-06-5`, PS5.1 cwd-first shadowing (Windows-only,
+security). Still an explicit in-code deferral at
+`permission/src/powershell_containment.rs:3087`.
+
+## Open (3) — ORIGINAL, superseded by the block above
 
 ### Deliberately deferred, still marked as such (2)
 

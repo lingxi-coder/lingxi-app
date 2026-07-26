@@ -111,6 +111,10 @@ pub struct LocalAgentHandler {
     /// parent's (wider) permissions. `None` ⇒ no gate, which is correct for a
     /// host that also cannot launch a forked skill.
     fork_resume_gate: Option<Arc<dyn traits::fork_resume_gate::ForkResumeGate>>,
+    /// Records a parked agent so a LATER process can restore it. Written each
+    /// time the agent comes to rest, erased when it terminates. `None` ⇒ no
+    /// durable record, which is correct for a host that also cannot restore.
+    parked_store: Option<Arc<dyn traits::parked_agent_store::ParkedAgentStore>>,
     /// Parent's tool invoker — passed through *unchanged* in
     /// [`SubagentInheritance`] (the recursion lock relies on `Arc::ptr_eq`).
     tool_invoker: Arc<dyn traits::ToolInvoker>,
@@ -163,6 +167,7 @@ impl LocalAgentHandler {
             agent_ids: Arc::new(Mutex::new(HashMap::new())),
             fork_names: Arc::new(Mutex::new(HashMap::new())),
             fork_resume_gate: None,
+            parked_store: None,
             tool_invoker,
             budget,
             output_manager,
@@ -202,6 +207,17 @@ impl LocalAgentHandler {
     #[must_use]
     pub fn with_status_sink(mut self, sink: Arc<dyn TaskStatusSink>) -> Self {
         self.status_sink = sink;
+        self
+    }
+
+    /// Wire the durable parked-agent store, so a backgrounded agent survives
+    /// the process that ran it.
+    #[must_use]
+    pub fn with_parked_agent_store(
+        mut self,
+        store: Arc<dyn traits::parked_agent_store::ParkedAgentStore>,
+    ) -> Self {
+        self.parked_store = Some(store);
         self
     }
 
@@ -341,7 +357,12 @@ impl Task for LocalAgentHandler {
             forked_skill_attribution: None,
             forked_skill_effort: None,
             frozen_command_denies: Vec::new(),
+            resumed_history: None,
         });
+        // What `park` needs, cloned BEFORE `request` moves into the spawn:
+        // the launch configuration is what a rebuilt runner is configured from.
+        let parked_request = request.clone();
+        let parked_description = request.description.clone().unwrap_or_default();
 
         // 4. Preserve the immediate parent's registry/budget handles. Root
         //    handles are only the correct fallback for legacy direct tasks.
@@ -373,6 +394,7 @@ impl Task for LocalAgentHandler {
         let streaming = self.streaming_spawner.clone();
         let agent_ids = self.agent_ids.clone();
         let fork_names = self.fork_names.clone();
+        let parked_store = self.parked_store.clone();
         let worker: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
             if is_backgrounded && streaming.is_some() {
                 // ── PERSISTENT / resumable path (local_agent "comes to rest"). ──
@@ -479,6 +501,20 @@ impl Task for LocalAgentHandler {
                                 // usage. Guarding both on `is_some` keeps a
                                 // later result-less rest from blanking what an
                                 // earlier turn-set produced.
+                                // The agent is now IDLE with a complete
+                                // transcript — the only state a later process
+                                // can resume from, so this is where the durable
+                                // record is written.
+                                if let Some(store) = &parked_store {
+                                    store
+                                        .park(
+                                            &worker_task_id,
+                                            agent_id,
+                                            &parked_description,
+                                            &parked_request,
+                                        )
+                                        .await;
+                                }
                                 if rest_result.is_some() {
                                     outcome.result = rest_result.clone();
                                 }
@@ -525,6 +561,12 @@ impl Task for LocalAgentHandler {
                             outcome.worktree_path = Some(path);
                             outcome.worktree_branch = Some(branch);
                         }
+                    }
+                    // Terminal: erase the durable record. A restore relies on
+                    // its ABSENCE to know an agent must not be revived, so this
+                    // runs before the terminal status is published.
+                    if let Some(store) = &parked_store {
+                        store.unpark(agent_id).await;
                     }
                     // Payload BEFORE status — the drain is terminal-gated (see
                     // the sync branch below for the full note).
@@ -1105,6 +1147,7 @@ mod tests {
             forked_skill_attribution: None,
             forked_skill_effort: None,
             frozen_command_denies: Vec::new(),
+            resumed_history: None,
         }
     }
 
@@ -2306,6 +2349,7 @@ mod tests {
             forked_skill_attribution: None,
             forked_skill_effort: None,
             frozen_command_denies: Vec::new(),
+            resumed_history: None,
         };
         let input = TaskSpawnInput::LocalAgent {
             agent_id: protocol::AgentId::new(),

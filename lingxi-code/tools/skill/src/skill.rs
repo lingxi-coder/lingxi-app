@@ -372,6 +372,7 @@ impl SkillTool {
             // the PARENT's tools, which is strictly wider than the skill's.
             additional_disallowed_tools: desc.disallowed_tools.clone(),
             parent_model_override: None,
+            resumed_history: None,
         };
         let inherit = traits::subagent_spawn::SubagentInheritance {
             tool_invoker: Arc::new(tool_api::tool_invoker_impl::RegistryToolInvoker::new(

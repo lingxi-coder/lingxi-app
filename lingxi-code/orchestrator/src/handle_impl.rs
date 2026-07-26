@@ -370,6 +370,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
             forked_skill_attribution: None,
             forked_skill_effort: None,
             frozen_command_denies: Vec::new(),
+            resumed_history: None,
         };
 
         let invoker: Arc<dyn traits::tool_invoker::ToolInvoker> = Arc::new(

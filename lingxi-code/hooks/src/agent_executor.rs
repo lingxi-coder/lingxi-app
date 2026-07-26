@@ -109,6 +109,7 @@ impl AgentExecutor {
             forked_skill_attribution: None,
             forked_skill_effort: None,
             frozen_command_denies: Vec::new(),
+            resumed_history: None,
             subagent_type: agent_type.to_string(),
             prompt: format!("{prompt_template}\n\n{payload_json}"),
             context_paths: Vec::new(),

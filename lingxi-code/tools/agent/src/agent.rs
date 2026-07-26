@@ -1112,6 +1112,7 @@ Reach for this when the task matches an available agent type, when you have inde
             forked_skill_attribution: None,
             forked_skill_effort: None,
             frozen_command_denies: Vec::new(),
+            resumed_history: None,
         };
 
         match spawner.spawn_async(request, inherit).await {
@@ -2035,6 +2036,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
             forked_skill_attribution: None,
             forked_skill_effort: None,
             frozen_command_denies: Vec::new(),
+            resumed_history: None,
         };
 
         // Nested-progress bridge: `spawn_with_progress` feeds one String line per

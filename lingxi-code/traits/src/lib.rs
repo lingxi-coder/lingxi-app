@@ -36,6 +36,7 @@ pub mod effect_handler;
 pub mod env;
 pub mod file_history_sink;
 pub mod fork_resume_gate;
+pub mod parked_agent_store;
 pub mod filesystem;
 pub mod fork_subagent;
 pub mod http;

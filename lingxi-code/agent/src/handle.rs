@@ -840,6 +840,7 @@ impl PoolSubagentSpawner {
             mcp_clients: vec![],
             transcript_subdir: "/tmp".into(),
             transcript_fs: None,
+        resumed_history: None,
             rendered_system_prompt,
             content_replacement_state: None,
             agent_memory: None,
@@ -1040,6 +1041,9 @@ impl PoolSubagentSpawner {
         ctx.skill_loader = self.skill_loader.get().cloned();
         ctx.hook_session_id = self.hook_session_id;
         ctx.hook_cwd = self.hook_cwd.clone();
+        // A RESTORE seeds the child from its recovered conversation, replacing
+        // prompt + fork-context + preload (see `SubagentContext::resumed_history`).
+        ctx.resumed_history = request.resumed_history.clone();
         // Seed the child's REAL transcript_subdir when the host wired one.
         if let Some(subagents_dir) = &self.hook_subagents_dir {
             ctx.transcript_subdir = subagents_dir.clone();
@@ -2496,6 +2500,7 @@ mod tests {
             forked_skill_attribution: None,
             forked_skill_effort: None,
             frozen_command_denies: Vec::new(),
+            resumed_history: None,
         };
         let inherit = SubagentInheritance {
             tool_invoker: Arc::new(DummyInvoker),
@@ -2549,6 +2554,7 @@ mod tests {
             forked_skill_attribution: None,
             forked_skill_effort: None,
             frozen_command_denies: Vec::new(),
+            resumed_history: None,
         };
         // Override present → override wins.
         assert_eq!(
@@ -2893,6 +2899,7 @@ mod tests {
             forked_skill_attribution: None,
             forked_skill_effort: None,
             frozen_command_denies: Vec::new(),
+            resumed_history: None,
         };
         // Drive resolve_definition + the override branch directly by replicating
         // the spawn-path logic (spawn() would require a live runner).
@@ -3010,6 +3017,7 @@ mod tests {
             forked_skill_attribution: None,
             forked_skill_effort: None,
             frozen_command_denies: Vec::new(),
+            resumed_history: None,
         };
 
         // An explicit mode:"plan" call param is IGNORED — a Bubble-default agent
@@ -3115,6 +3123,7 @@ mod tests {
             forked_skill_attribution: None,
             forked_skill_effort: None,
             frozen_command_denies: Vec::new(),
+            resumed_history: None,
         };
         let ctx = spawner
             .build_subagent_context(&req, inherit, false)
@@ -3181,6 +3190,7 @@ mod tests {
             forked_skill_attribution: None,
             forked_skill_effort: None,
             frozen_command_denies: Vec::new(),
+            resumed_history: None,
         };
 
         let ctx = spawner
@@ -3237,6 +3247,7 @@ mod tests {
             forked_skill_attribution: None,
             forked_skill_effort: None,
             frozen_command_denies: Vec::new(),
+            resumed_history: None,
         };
         let mk_inherit = || SubagentInheritance {
             tool_invoker: Arc::new(DummyInvoker),
@@ -3308,6 +3319,7 @@ mod tests {
             forked_skill_attribution: None,
             forked_skill_effort: None,
             frozen_command_denies: Vec::new(),
+            resumed_history: None,
         };
         let inherit = SubagentInheritance {
             tool_invoker: Arc::new(DummyInvoker),
@@ -3408,6 +3420,7 @@ mod tests {
             forked_skill_attribution: None,
             forked_skill_effort: None,
             frozen_command_denies: Vec::new(),
+            resumed_history: None,
         };
 
         // Non-fork: env block appended after the body, joined by a blank line,
@@ -3491,6 +3504,7 @@ mod tests {
             forked_skill_attribution: None,
             forked_skill_effort: None,
             frozen_command_denies: Vec::new(),
+            resumed_history: None,
         };
         let inherit = SubagentInheritance {
             tool_invoker: Arc::new(DummyInvoker),
@@ -3706,6 +3720,7 @@ mod tests {
             forked_skill_attribution: None,
             forked_skill_effort: None,
             frozen_command_denies: Vec::new(),
+            resumed_history: None,
         };
         let err = spawner
             .spawn_async(

@@ -28,6 +28,7 @@
 
 mod agent_skill_loader;
 mod background_agent;
+pub mod agent_restore;
 pub mod fork_resume;
 mod connect;
 pub mod auto_mode_propose;
@@ -6415,7 +6416,13 @@ pub async fn build(
             // be re-established — resuming one unscoped would run it under the
             // parent's (strictly wider) permissions.
             .with_fork_resume_gate(fork_resume_gate.clone()
-                as Arc<dyn traits::fork_resume_gate::ForkResumeGate>),
+                as Arc<dyn traits::fork_resume_gate::ForkResumeGate>)
+            // Record each parked agent so a LATER process can rebuild it; the
+            // record is erased the moment it terminates.
+            .with_parked_agent_store(Arc::new(agent_restore::DesktopParkedAgentStore {
+                subagents_dir: main_subagents_dir.clone(),
+            })
+                as Arc<dyn traits::parked_agent_store::ParkedAgentStore>),
         ),
     );
 

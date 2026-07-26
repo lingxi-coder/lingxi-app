@@ -218,6 +218,16 @@ pub struct SubagentSpawnRequest {
     /// already-running fork is allowed to run. Empty ⇒ no key is persisted.
     #[serde(default)]
     pub frozen_command_denies: Vec<String>,
+    /// A conversation recovered from this agent's persisted transcript, when
+    /// this spawn is a RESTORE of an agent that parked in an earlier process.
+    ///
+    /// Distinct from [`Self::fork_context_messages`], and deliberately so: that
+    /// field is a PREFIX the runner adds ahead of the prompt and the
+    /// `SubagentStart` / skills preload, whereas this REPLACES all three. A
+    /// restore that reused the fork field would re-inject context the agent has
+    /// already seen and re-fire start hooks for a run that began elsewhere.
+    #[serde(default)]
+    pub resumed_history: Option<Vec<protocol::ConversationMessage>>,
 }
 
 /// Token-usage rollup returned at the end of a successful spawn.

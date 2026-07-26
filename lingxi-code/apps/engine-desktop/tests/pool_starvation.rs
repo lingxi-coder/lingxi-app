@@ -167,6 +167,7 @@ fn parked_teammate_ctx() -> SubagentContext {
         mcp_clients: vec![],
         transcript_subdir: "/tmp".into(),
         transcript_fs: None,
+        resumed_history: None,
         rendered_system_prompt: None,
         content_replacement_state: None,
         agent_memory: None,
@@ -237,6 +238,7 @@ fn agent_tool_request() -> SubagentSpawnRequest {
             forked_skill_attribution: None,
             forked_skill_effort: None,
             frozen_command_denies: Vec::new(),
+            resumed_history: None,
     }
 }
 

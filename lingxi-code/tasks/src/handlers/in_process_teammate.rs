@@ -461,6 +461,7 @@ impl InProcessTeammateHandler {
             mcp_clients: vec![],
             transcript_subdir: "/tmp".into(),
             transcript_fs: None,
+        resumed_history: None,
             rendered_system_prompt: None,
             content_replacement_state: None,
             agent_memory: None,

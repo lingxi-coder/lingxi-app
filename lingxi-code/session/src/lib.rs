@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 pub mod agent_color;
+pub mod agent_rows;
 pub mod branch;
 pub mod file_history;
 pub mod forked_skill;

@@ -445,6 +445,7 @@ mod tests {
             forked_skill_attribution: None,
             forked_skill_effort: None,
             frozen_command_denies: Vec::new(),
+            resumed_history: None,
         }
     }
 

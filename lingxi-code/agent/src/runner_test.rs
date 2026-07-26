@@ -21,6 +21,9 @@ use tokio::sync::mpsc;
 struct MockSubagentApiClient {
     responses: Mutex<VecDeque<Result<llm_client::LlmResponse, llm_client::LlmError>>>,
     calls: AtomicUsize,
+    /// The messages the LAST call was given — lets a test assert what the
+    /// runner actually seeded the conversation with.
+    last_messages: Mutex<Vec<ConversationMessage>>,
 }
 
 impl MockSubagentApiClient {
@@ -28,10 +31,14 @@ impl MockSubagentApiClient {
         Arc::new(Self {
             responses: Mutex::new(responses.into_iter().collect()),
             calls: AtomicUsize::new(0),
+            last_messages: Mutex::new(Vec::new()),
         })
     }
     fn call_count(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
+    }
+    fn last_messages(&self) -> Vec<ConversationMessage> {
+        self.last_messages.lock().unwrap().clone()
     }
 }
 
@@ -44,6 +51,7 @@ impl crate::api::SubagentApiClient for MockSubagentApiClient {
         _messages: Vec<ConversationMessage>,
         _tools: Vec<serde_json::Value>,
     ) -> Result<llm_client::LlmResponse, llm_client::LlmError> {
+        *self.last_messages.lock().unwrap() = _messages.clone();
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.responses
             .lock()
@@ -387,6 +395,7 @@ fn fresh_subagent_ctx() -> SubagentContext {
         mcp_clients: vec![],
         transcript_subdir: "/tmp".into(),
         transcript_fs: None,
+        resumed_history: None,
         rendered_system_prompt: Some(Arc::from("")),
         content_replacement_state: None,
         agent_memory: None,
@@ -2879,4 +2888,77 @@ async fn run_subagent_without_a_transcript_fs_writes_nothing() {
     let _ = drain(out_rx).await;
 
     assert!(!dir.path().join(format!("agent-{agent_id}.jsonl")).exists());
+}
+
+/// A RESTORED agent is seeded from its recovered conversation, and that history
+/// REPLACES the normal seeding rather than prefixing it: the prompt, the fork
+/// context and the `SubagentStart` / skills preload are all already inside the
+/// recovered messages, so re-adding them would duplicate context the agent has
+/// seen and re-fire start hooks for a run that began in another process.
+#[tokio::test]
+async fn a_resumed_history_replaces_the_seed_rather_than_prefixing_it() {
+    let api = MockSubagentApiClient::new(vec![Ok(text_response("ok", Some("end_turn")))]);
+    let mut ctx = loop_ctx(api.clone(), None, 4);
+    ctx.prompt_messages = vec![protocol::ConversationMessage::user(
+        MessageId::new(),
+        "ORIGINAL PROMPT".to_string(),
+    )];
+    ctx.fork_context_messages = Some(vec![protocol::ConversationMessage::user(
+        MessageId::new(),
+        "FORK CONTEXT".to_string(),
+    )]);
+    ctx.resumed_history = Some(vec![protocol::ConversationMessage::user(
+        MessageId::new(),
+        "RECOVERED".to_string(),
+    )]);
+
+    let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    run_subagent(ctx, event_rx, out_tx).await;
+    let _ = drain(out_rx).await;
+
+    let sent = api.last_messages();
+    let rendered = format!("{sent:?}");
+    assert!(rendered.contains("RECOVERED"), "resumed history is sent: {rendered}");
+    assert!(
+        !rendered.contains("ORIGINAL PROMPT"),
+        "the prompt is NOT re-sent: {rendered}"
+    );
+    assert!(
+        !rendered.contains("FORK CONTEXT"),
+        "the fork-context prefix is NOT re-added: {rendered}"
+    );
+}
+
+/// A RESTORED run must not re-append its recovered conversation to the
+/// transcript — the watermark starts past it, so the file grows by what is new
+/// rather than doubling every time the agent is restored.
+#[tokio::test]
+async fn a_restored_run_appends_only_new_messages_to_its_transcript() {
+    let dir = tempfile::tempdir().unwrap();
+    let api = MockSubagentApiClient::new(vec![Ok(text_response("fresh reply", Some("end_turn")))]);
+    let mut ctx = loop_ctx(api, None, 4);
+    ctx.transcript_subdir = dir.path().to_path_buf();
+    ctx.transcript_fs = Some(
+        Arc::new(platform_posix::PosixFileSystem::new(dir.path().to_path_buf()))
+            as Arc<dyn traits::FileSystem>,
+    );
+    ctx.resumed_history = Some(vec![protocol::ConversationMessage::user(
+        MessageId::new(),
+        "ALREADY ON DISK".to_string(),
+    )]);
+    let agent_id = ctx.agent_id;
+
+    let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    run_subagent(ctx, event_rx, out_tx).await;
+    let _ = drain(out_rx).await;
+
+    let body =
+        std::fs::read_to_string(dir.path().join(format!("agent-{agent_id}.jsonl"))).unwrap();
+    assert!(
+        !body.contains("ALREADY ON DISK"),
+        "the recovered conversation is not written a second time: {body}"
+    );
+    assert!(body.contains("fresh reply"), "new turns are appended: {body}");
 }

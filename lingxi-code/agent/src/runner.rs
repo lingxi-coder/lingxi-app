@@ -846,20 +846,30 @@ async fn run_subagent_loop(
     // inherited `RegistryToolInvoker` itself does NOT check policy.
     let allowed_tools = ctx.allowed_tools.clone();
 
-    // Seed history: fork-context prefix (if any) followed by the prompt.
+    // Seed history. A RESTORED agent is seeded from its persisted transcript
+    // and nothing else: fork context, prompt and preload are all already inside
+    // that history (they were persisted on the original run), so re-adding them
+    // would duplicate context the agent has seen and re-fire `SubagentStart`
+    // for a run that began in another process.
     let mut history: Vec<ConversationMessage> = Vec::new();
-    if let Some(fork) = &ctx.fork_context_messages {
-        history.extend(fork.iter().cloned());
-    }
-    history.extend(ctx.prompt_messages.iter().cloned());
+    if let Some(resumed) = &ctx.resumed_history {
+        history.extend(resumed.iter().cloned());
+    } else {
+        // Fork-context prefix (if any) followed by the prompt.
+        if let Some(fork) = &ctx.fork_context_messages {
+            history.extend(fork.iter().cloned());
+        }
+        history.extend(ctx.prompt_messages.iter().cloned());
 
-    // G4 + G5 (claude runAgent.ts:530-646): SubagentStart-hook additionalContext
-    // injection then frontmatter skills preload, appended to the child's INITIAL
-    // messages before the first turn. Strict no-op (no extra messages) when
-    // neither `hook_executor` nor `skill_loader` is wired, so legacy / test
-    // builds keep a byte-identical history. (Frontmatter-hook registration is
-    // done at the `run_subagent` dispatcher for guaranteed cleanup.)
-    history.extend(build_preload_messages(&ctx).await);
+        // G4 + G5 (claude runAgent.ts:530-646): SubagentStart-hook
+        // additionalContext injection then frontmatter skills preload, appended
+        // to the child's INITIAL messages before the first turn. Strict no-op
+        // (no extra messages) when neither `hook_executor` nor `skill_loader` is
+        // wired, so legacy / test builds keep a byte-identical history.
+        // (Frontmatter-hook registration is done at the `run_subagent`
+        // dispatcher for guaranteed cleanup.)
+        history.extend(build_preload_messages(&ctx).await);
+    }
 
     // Per-agent transcript. Appended by WATERMARK — everything in
     // `history[written..]` is flushed at each turn-set boundary — rather than
@@ -878,7 +888,15 @@ async fn run_subagent_loop(
             fs,
         )
     });
-    let mut transcript_written: usize = 0;
+    // A RESTORED run starts with its transcript already on disk, so its
+    // watermark starts past the recovered messages — otherwise the first flush
+    // would append the whole conversation a second time. A fresh run starts at
+    // 0: its seeded prompt and preload are new and must be persisted.
+    let mut transcript_written: usize = if ctx.resumed_history.is_some() {
+        history.len()
+    } else {
+        0
+    };
 
     let max_turns = ctx.agent_definition.max_turns;
 

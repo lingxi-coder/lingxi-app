@@ -105,6 +105,18 @@ pub struct SubagentContext {
     /// to the previous behaviour.
     #[allow(clippy::struct_field_names)]
     pub transcript_fs: Option<Arc<dyn traits::FileSystem>>,
+    /// A conversation recovered from this agent's persisted transcript, used to
+    /// RESTORE it in a later process.
+    ///
+    /// When present it REPLACES the normal seeding — fork context, prompt, and
+    /// the `SubagentStart` / frontmatter-skills preload — rather than prefixing
+    /// it. All three are already inside the recovered history (they were
+    /// persisted the first time round), so re-running them would re-inject
+    /// context the agent has already seen and re-fire start hooks for a run
+    /// that started in another process.
+    ///
+    /// `None` ⇒ a fresh spawn, seeded as before.
+    pub resumed_history: Option<Vec<ConversationMessage>>,
     /// Pre-rendered system prompt (post template + frontmatter expansion).
     pub rendered_system_prompt: Option<Arc<str>>,
     /// Shared content-replacement state (e.g. file mention expansion). Wrapped

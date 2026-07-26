@@ -20,7 +20,7 @@ pub mod refresh;
 pub mod token_data;
 
 #[cfg(test)]
-mod testsupport;
+pub(crate) mod testsupport;
 
 pub use client::{init_refresh_driver, OAuthError, OpenAiOAuthClient};
 pub use config::OpenAiOAuthConfig;

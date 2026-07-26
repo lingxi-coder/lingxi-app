@@ -441,6 +441,9 @@ mod tests {
 
     #[tokio::test]
     async fn login_uses_account_org_from_token_response() {
+        // Binds the fixed loopback port 45321 — same machine-global resource
+        // contention as the OpenAI ports, and these three raced each other.
+        let _g = crate::oauth::openai::testsupport::port_guard().await;
         let body = r#"{
             "access_token":"acc","refresh_token":"ref","expires_in":3600,
             "scope":"read:user",
@@ -463,6 +466,9 @@ mod tests {
 
     #[tokio::test]
     async fn login_falls_back_to_profile_endpoint() {
+        // Binds the fixed loopback port 45321 — same machine-global resource
+        // contention as the OpenAI ports, and these three raced each other.
+        let _g = crate::oauth::openai::testsupport::port_guard().await;
         // Token body omits account/organization → profile GET is used.
         let body = r#"{"access_token":"acc","refresh_token":"ref","expires_in":3600}"#;
         let (handle, _storage, _opened) = handle_with_token_body(body);
@@ -473,6 +479,9 @@ mod tests {
 
     #[tokio::test]
     async fn logout_clears_and_current_user_is_none() {
+        // Binds the fixed loopback port 45321 — same machine-global resource
+        // contention as the OpenAI ports, and these three raced each other.
+        let _g = crate::oauth::openai::testsupport::port_guard().await;
         let body = r#"{"access_token":"acc","refresh_token":"ref","expires_in":3600,
             "account":{"uuid":"u","email_address":"e@x"},"organization":{"uuid":"o"}}"#;
         let (handle, storage, _) = handle_with_token_body(body);

@@ -16,6 +16,8 @@
     clippy::manual_let_else
 )]
 pub mod blocklist;
+#[cfg(test)]
+mod testsupport;
 pub mod cache;
 mod markdown;
 pub mod persist;

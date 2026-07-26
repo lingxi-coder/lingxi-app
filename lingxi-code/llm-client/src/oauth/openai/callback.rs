@@ -215,7 +215,7 @@ mod tests {
     /// Serialize tests that compete for the fixed ports 1455/1457.
     /// Delegates to the shared guard in `testsupport` so handle tests and
     /// callback tests can't collide with each other.
-    async fn port_guard() -> tokio::sync::MutexGuard<'static, ()> {
+    async fn port_guard() -> crate::oauth::openai::testsupport::PortGuard {
         crate::oauth::openai::testsupport::port_guard().await
     }
 

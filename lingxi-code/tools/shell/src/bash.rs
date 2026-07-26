@@ -2084,8 +2084,26 @@ mod tests {
         );
     }
 
+    /// Serializes every test that mutates `LINGXI_SHELL`.
+    ///
+    /// `std::env::set_var` is PROCESS-GLOBAL, and these four tests each set the
+    /// variable, read it back, and clear it. Run in parallel they overwrite one
+    /// another — the bash test read `/usr/local/bin/zsh` because the zsh test
+    /// had just set it. It surfaced only under a saturated full-workspace run
+    /// and passed every time in isolation, which is exactly how it survived.
+    static SHELL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Poison-tolerant: the payload is `()`, so a panicking test leaves nothing
+    /// to corrupt and must not wedge the rest of the family.
+    fn shell_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        SHELL_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     #[test]
     fn resolve_shell_path_matches_host_os() {
+        let _g = shell_env_lock();
         // Ensure LINGXI_SHELL is unset so we hit the OS-fallback branch.
         std::env::remove_var("LINGXI_SHELL");
         if cfg!(target_os = "macos") {
@@ -2098,6 +2116,7 @@ mod tests {
     /// LINGXI_SHELL override: a bash path is honoured.
     #[test]
     fn resolve_shell_path_honours_claude_code_shell_bash() {
+        let _g = shell_env_lock();
         std::env::set_var("LINGXI_SHELL", "/opt/homebrew/bin/bash");
         let result = resolve_shell_path();
         std::env::remove_var("LINGXI_SHELL");
@@ -2107,6 +2126,7 @@ mod tests {
     /// LINGXI_SHELL override: a zsh path is honoured.
     #[test]
     fn resolve_shell_path_honours_claude_code_shell_zsh() {
+        let _g = shell_env_lock();
         std::env::set_var("LINGXI_SHELL", "/usr/local/bin/zsh");
         let result = resolve_shell_path();
         std::env::remove_var("LINGXI_SHELL");
@@ -2117,6 +2137,7 @@ mod tests {
     /// falls back to the OS default — matches TS fallback path.
     #[test]
     fn resolve_shell_path_rejects_unsupported_shell() {
+        let _g = shell_env_lock();
         std::env::set_var("LINGXI_SHELL", "/bin/sh");
         std::env::remove_var("LINGXI_SHELL"); // first clear; now test with fish
         std::env::set_var("LINGXI_SHELL", "/usr/bin/fish");
@@ -2133,6 +2154,7 @@ mod tests {
     /// Empty LINGXI_SHELL falls back to OS default.
     #[test]
     fn resolve_shell_path_ignores_empty_claude_code_shell() {
+        let _g = shell_env_lock();
         std::env::set_var("LINGXI_SHELL", "");
         let result = resolve_shell_path();
         std::env::remove_var("LINGXI_SHELL");
@@ -3091,6 +3113,7 @@ mod tests {
 
     #[test]
     fn disable_extglob_command_byte_locked_per_shell() {
+        let _g = shell_env_lock();
         // The LINGXI_SHELL_PREFIX branch overrides the shell-specific form;
         // only assert the per-shell strings when that env var is unset.
         if !std::env::var("LINGXI_SHELL_PREFIX").is_ok_and(|v| !v.is_empty()) {

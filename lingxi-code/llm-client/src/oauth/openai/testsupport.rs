@@ -216,14 +216,68 @@ impl RuntimeSpawner for InstantSpawner {
     }
 }
 
-/// Serialize tests that compete for the fixed loopback ports 1455/1457.
+/// Serialize tests that compete for a FIXED loopback port (OpenAI 1455/1457,
+/// Anthropic 45321).
 ///
-/// Import this from any test module in this crate rather than defining a
-/// local `port_guard` — all callers share the same `static LOCK` so tests in
-/// different modules cannot accidentally collide.
-pub async fn port_guard() -> tokio::sync::MutexGuard<'static, ()> {
+/// The guard is deliberately two-layered, because the resource is:
+///
+/// - a `static` mutex, so tests inside one binary queue rather than spin; and
+/// - a LOCK FILE, because a TCP port is machine-global and `cargo test
+///   --workspace` runs many test binaries at once. An in-process mutex is
+///   simply the wrong scope for a machine-global resource — that mismatch is
+///   what produced the intermittent `both fixed ports 1455 and 1457 are
+///   already in use` failure, which reproduced only under a saturated
+///   full-workspace run and passed every time in isolation.
+///
+/// The file lock is an `O_EXCL` create with a stale-takeover timeout rather
+/// than `flock`, so it needs no new dependency and cannot wedge the suite if a
+/// holder is killed mid-test.
+pub async fn port_guard() -> PortGuard {
     static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-    LOCK.lock().await
+    let in_process = LOCK.lock().await;
+    let path = std::env::temp_dir().join("lingxi-oauth-fixed-port.lock");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(_) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // Take over a lock whose holder died (or is wedged) rather than
+                // hanging the whole suite behind it.
+                let stale = std::fs::metadata(&path)
+                    .and_then(|m| m.modified())
+                    .map(|t| t.elapsed().unwrap_or_default() > std::time::Duration::from_secs(120))
+                    .unwrap_or(true);
+                if stale || std::time::Instant::now() > deadline {
+                    let _ = std::fs::remove_file(&path);
+                    continue;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+            // An unusable temp dir must not fail the test that only wanted a
+            // lock — fall back to the in-process guard alone.
+            Err(_) => break,
+        }
+    }
+    PortGuard {
+        _in_process: in_process,
+        path,
+    }
+}
+
+/// Held for the duration of a fixed-port test; releases both layers on drop.
+pub struct PortGuard {
+    _in_process: tokio::sync::MutexGuard<'static, ()>,
+    path: std::path::PathBuf,
+}
+
+impl Drop for PortGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
 
 /// Build a `CredentialManager` over an in-memory store + fixed clock.

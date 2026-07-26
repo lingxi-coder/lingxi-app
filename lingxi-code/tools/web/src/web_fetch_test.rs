@@ -4,6 +4,7 @@ use super::*;
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     #[test]
@@ -441,6 +442,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
 
     #[tokio::test]
     async fn http_500_returns_success_result_not_error() {
+        let _cache_guard = crate::testsupport::web_cache_lock().await;
         // 1:1 with claude-code: HTTP >= 400 is a SUCCESS data result carrying the
         // `iIp` body (so the model can react / fall back to gh/MCP), NOT a thrown
         // transport error.
@@ -479,6 +481,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
 
     #[tokio::test]
     async fn http_429_surfaces_retry_after_header() {
+        let _cache_guard = crate::testsupport::web_cache_lock().await;
         // A 429 with a Retry-After header surfaces the header on its own line in
         // the result body, and reports codeText "Too Many Requests".
         let _env = SKIP_ENV_LOCK.lock().await;
@@ -510,6 +513,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
 
     #[tokio::test]
     async fn http_500_does_not_retry_internally() {
+        let _cache_guard = crate::testsupport::web_cache_lock().await;
         let _env = SKIP_ENV_LOCK.lock().await;
         crate::blocklist::clear_domain_check_cache();
         let (ctx, http, _sink) = make_web_ctx();
@@ -532,6 +536,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
 
     #[tokio::test]
     async fn surfaces_dns_failure() {
+        let _cache_guard = crate::testsupport::web_cache_lock().await;
         let _env = SKIP_ENV_LOCK.lock().await;
         crate::blocklist::clear_domain_check_cache();
         let (ctx, http, sink) = make_web_ctx();
@@ -563,6 +568,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
 
     #[tokio::test]
     async fn happy_path_emits_completed() {
+        let _cache_guard = crate::testsupport::web_cache_lock().await;
         let _env = SKIP_ENV_LOCK.lock().await;
         crate::blocklist::clear_domain_check_cache();
         let (ctx, http, sink) = make_web_ctx();
@@ -597,6 +603,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
 
     #[tokio::test]
     async fn sets_user_agent_header() {
+        let _cache_guard = crate::testsupport::web_cache_lock().await;
         let _env = SKIP_ENV_LOCK.lock().await;
         crate::blocklist::clear_domain_check_cache();
         let (ctx, http, _sink) = make_web_ctx();
@@ -711,6 +718,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
 
     #[tokio::test]
     async fn upgrades_http_to_https_on_the_wire() {
+        let _cache_guard = crate::testsupport::web_cache_lock().await;
         let _env = SKIP_ENV_LOCK.lock().await;
         crate::cache::clear_web_fetch_cache();
         crate::blocklist::clear_domain_check_cache();
@@ -741,6 +749,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
 
     #[tokio::test]
     async fn second_call_is_served_from_cache() {
+        let _cache_guard = crate::testsupport::web_cache_lock().await;
         let _env = SKIP_ENV_LOCK.lock().await;
         crate::cache::clear_web_fetch_cache();
         crate::blocklist::clear_domain_check_cache();
@@ -777,6 +786,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
 
     #[tokio::test]
     async fn cache_keyed_by_original_url_so_http_and_https_share() {
+        let _cache_guard = crate::testsupport::web_cache_lock().await;
         let _env = SKIP_ENV_LOCK.lock().await;
         crate::cache::clear_web_fetch_cache();
         crate::blocklist::clear_domain_check_cache();
@@ -809,6 +819,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
 
     #[tokio::test]
     async fn distinct_urls_each_fetch() {
+        let _cache_guard = crate::testsupport::web_cache_lock().await;
         let _env = SKIP_ENV_LOCK.lock().await;
         crate::cache::clear_web_fetch_cache();
         crate::blocklist::clear_domain_check_cache();
@@ -843,6 +854,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
 
     #[tokio::test]
     async fn errors_are_not_cached() {
+        let _cache_guard = crate::testsupport::web_cache_lock().await;
         let _env = SKIP_ENV_LOCK.lock().await;
         crate::cache::clear_web_fetch_cache();
         crate::blocklist::clear_domain_check_cache();
@@ -868,6 +880,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
 
     #[tokio::test]
     async fn preflight_blocked_fails_with_domain_blocked_msg() {
+        let _cache_guard = crate::testsupport::web_cache_lock().await;
         let _env = SKIP_ENV_LOCK.lock().await;
         crate::cache::clear_web_fetch_cache();
         crate::blocklist::clear_domain_check_cache();
@@ -899,6 +912,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
 
     #[tokio::test]
     async fn preflight_non_200_fails_with_check_failed_msg() {
+        let _cache_guard = crate::testsupport::web_cache_lock().await;
         let _env = SKIP_ENV_LOCK.lock().await;
         crate::cache::clear_web_fetch_cache();
         crate::blocklist::clear_domain_check_cache();
@@ -930,6 +944,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
 
     #[tokio::test]
     async fn preflight_transport_error_fails_with_check_failed_msg() {
+        let _cache_guard = crate::testsupport::web_cache_lock().await;
         let _env = SKIP_ENV_LOCK.lock().await;
         crate::cache::clear_web_fetch_cache();
         crate::blocklist::clear_domain_check_cache();
@@ -964,6 +979,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
 
     #[tokio::test]
     async fn preflight_caches_allowed_host_across_distinct_urls() {
+        let _cache_guard = crate::testsupport::web_cache_lock().await;
         let _env = SKIP_ENV_LOCK.lock().await;
         crate::cache::clear_web_fetch_cache();
         crate::blocklist::clear_domain_check_cache();
@@ -1007,6 +1023,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
 
     #[tokio::test]
     async fn skip_preflight_setting_issues_no_domain_info_request() {
+        let _cache_guard = crate::testsupport::web_cache_lock().await;
         let _env = SKIP_ENV_LOCK.lock().await;
         crate::cache::clear_web_fetch_cache();
         crate::blocklist::clear_domain_check_cache();
@@ -1039,6 +1056,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
 
     #[tokio::test]
     async fn ctx_skip_web_fetch_preflight_field_issues_no_domain_info_request() {
+        let _cache_guard = crate::testsupport::web_cache_lock().await;
         // parity 2.1.207 P2-14: the faithful gate is `settings.skipWebFetchPreflight`,
         // threaded via `BuiltinToolContext::skip_web_fetch_preflight`. With the env
         // fallback UNSET, setting the ctx field alone must skip the domain-blocklist
@@ -1074,6 +1092,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
 
     #[tokio::test]
     async fn ctx_field_false_and_no_env_runs_the_preflight() {
+        let _cache_guard = crate::testsupport::web_cache_lock().await;
         // Negative/precedence guard: ctx field default (`false`) + env fallback
         // UNSET ⇒ the domain-blocklist preflight DOES run (a domain_info request
         // precedes the fetch), matching CC's default `!skipWebFetchPreflight` path.
@@ -1199,6 +1218,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
     /// regression guard the whole change exists for.
     #[tokio::test]
     async fn cross_host_redirect_via_request_no_follow_returns_notice() {
+        let _cache_guard = crate::testsupport::web_cache_lock().await;
         let _env = SKIP_ENV_LOCK.lock().await;
         crate::cache::clear_web_fetch_cache();
         crate::blocklist::clear_domain_check_cache();
@@ -1246,6 +1266,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
     /// returns the final body — again never touching plain `request`.
     #[tokio::test]
     async fn same_host_redirect_via_request_no_follow_is_followed() {
+        let _cache_guard = crate::testsupport::web_cache_lock().await;
         let _env = SKIP_ENV_LOCK.lock().await;
         crate::cache::clear_web_fetch_cache();
         crate::blocklist::clear_domain_check_cache();
@@ -1294,6 +1315,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
     /// as a redirect (→ the notice), not treated as normal page content.
     #[tokio::test]
     async fn cross_host_303_redirect_is_detected() {
+        let _cache_guard = crate::testsupport::web_cache_lock().await;
         let _env = SKIP_ENV_LOCK.lock().await;
         crate::cache::clear_web_fetch_cache();
         crate::blocklist::clear_domain_check_cache();
@@ -1328,6 +1350,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
     /// {type:"http_error",statusCode:s}`), NOT a thrown transport error.
     #[tokio::test]
     async fn redirect_without_location_returns_http_error_result() {
+        let _cache_guard = crate::testsupport::web_cache_lock().await;
         let _env = SKIP_ENV_LOCK.lock().await;
         crate::cache::clear_web_fetch_cache();
         crate::blocklist::clear_domain_check_cache();
@@ -1667,6 +1690,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
     #[cfg(feature = "web-markdown")]
     #[tokio::test]
     async fn apply_step_runs_model_over_markdown() {
+        let _cache_guard = crate::testsupport::web_cache_lock().await;
         let _env = SKIP_ENV_LOCK.lock().await;
         crate::cache::clear_web_fetch_cache();
         crate::blocklist::clear_domain_check_cache();
@@ -1704,6 +1728,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
     #[cfg(feature = "web-markdown")]
     #[tokio::test]
     async fn no_side_query_returns_markdown_unchanged_behavior() {
+        let _cache_guard = crate::testsupport::web_cache_lock().await;
         let _env = SKIP_ENV_LOCK.lock().await;
         crate::cache::clear_web_fetch_cache();
         crate::blocklist::clear_domain_check_cache();
@@ -1781,6 +1806,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
     // `truncated` flag is still set.
     #[tokio::test]
     async fn oversized_body_is_returned_in_full_no_apply() {
+        let _cache_guard = crate::testsupport::web_cache_lock().await;
         let _env = SKIP_ENV_LOCK.lock().await;
         crate::cache::clear_web_fetch_cache();
         crate::blocklist::clear_domain_check_cache();
@@ -1814,6 +1840,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
     // side_query → raw body + footer.)
     #[tokio::test]
     async fn binary_content_persists_and_appends_footer() {
+        let _cache_guard = crate::testsupport::web_cache_lock().await;
         let _env = SKIP_ENV_LOCK.lock().await;
         crate::cache::clear_web_fetch_cache();
         crate::blocklist::clear_domain_check_cache();
@@ -1874,6 +1901,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
     // artifact. This pins that WebFetch persists the raw `body_bytes`.
     #[tokio::test]
     async fn binary_body_persists_raw_bytes_not_lossy_string() {
+        let _cache_guard = crate::testsupport::web_cache_lock().await;
         let _env = SKIP_ENV_LOCK.lock().await;
         crate::cache::clear_web_fetch_cache();
         crate::blocklist::clear_domain_check_cache();
@@ -1939,6 +1967,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
     // footer.
     #[tokio::test]
     async fn text_html_does_not_persist_or_footer() {
+        let _cache_guard = crate::testsupport::web_cache_lock().await;
         let _env = SKIP_ENV_LOCK.lock().await;
         crate::cache::clear_web_fetch_cache();
         crate::blocklist::clear_domain_check_cache();

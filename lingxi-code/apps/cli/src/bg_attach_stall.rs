@@ -202,6 +202,86 @@ impl StallWatchdog {
     }
 }
 
+/// Drives a [`StallWatchdog`] from a poll loop whose cadence is NOT the tick
+/// period.
+///
+/// The attach client polls its socket every 40ms; the oracle's watchdog is a
+/// 1s `setInterval` that only starts after a 500ms arm delay. This converts
+/// one to the other on wall-clock time, so the policy stays identical no matter
+/// how often the caller happens to poll.
+#[derive(Debug, Clone)]
+pub struct StallDriver {
+    watchdog: StallWatchdog,
+    arm_remaining_ms: u64,
+    accumulated_ms: u64,
+}
+
+impl StallDriver {
+    /// Arm a driver for `threshold_ms` (0 ⇒ never fires).
+    #[must_use]
+    pub fn new(threshold_ms: u64) -> Self {
+        Self {
+            watchdog: StallWatchdog::new(threshold_ms),
+            arm_remaining_ms: STALL_ARM_DELAY_MS,
+            accumulated_ms: 0,
+        }
+    }
+
+    /// Whether this driver can ever fire.
+    #[must_use]
+    pub fn is_armed(&self) -> bool {
+        self.watchdog.is_armed()
+    }
+
+    /// The first frame arrived — disarm permanently.
+    pub fn saw_frame(&mut self) {
+        self.watchdog.saw_frame();
+    }
+
+    /// Feed `elapsed_ms` of real time. Returns the decision for whichever tick
+    /// boundaries that crossed, or [`StallDecision::Wait`].
+    ///
+    /// A single `elapsed_ms` larger than three tick periods is a machine SLEEP,
+    /// and is handed to the watchdog as one oversized tick so its reset applies
+    /// — feeding it as many small ticks instead would fire on wake, which is
+    /// exactly the bug the reset exists to prevent.
+    pub fn advance(
+        &mut self,
+        elapsed_ms: u64,
+        gates: StallGates,
+        respawns: i64,
+    ) -> StallDecision {
+        if !self.is_armed() {
+            return StallDecision::Wait;
+        }
+        // Burn the arm delay first; ticking only starts after it.
+        let after_arm = if self.arm_remaining_ms > 0 {
+            let consumed = elapsed_ms.min(self.arm_remaining_ms);
+            self.arm_remaining_ms -= consumed;
+            elapsed_ms - consumed
+        } else {
+            elapsed_ms
+        };
+        if after_arm == 0 {
+            return StallDecision::Wait;
+        }
+        if after_arm > STALL_TICK_MS * 3 {
+            self.accumulated_ms = 0;
+            return self.watchdog.tick(after_arm, gates, respawns);
+        }
+        self.accumulated_ms += after_arm;
+        let mut decision = StallDecision::Wait;
+        while self.accumulated_ms >= STALL_TICK_MS {
+            self.accumulated_ms -= STALL_TICK_MS;
+            decision = self.watchdog.tick(STALL_TICK_MS, gates, respawns);
+            if decision != StallDecision::Wait {
+                break;
+            }
+        }
+        decision
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -374,5 +454,56 @@ mod tests {
         assert_eq!(STALL_FLOOR_WITH_ARGS_MS, 12_000); // j9b
         assert_eq!(RESPAWN_EXIT_WAIT_MS, 6_000); // W9b
         assert_eq!(STALL_RESPAWN_BUDGET, 2);
+    }
+
+    #[test]
+    fn the_driver_converts_a_fast_poll_into_oracle_ticks() {
+        // 40ms polls must not fire 25x too fast: 500ms arm + 5 ticks = 5500ms.
+        let mut d = StallDriver::new(5_000);
+        let mut elapsed = 0;
+        loop {
+            elapsed += 40;
+            if d.advance(40, open(), 0) != StallDecision::Wait {
+                break;
+            }
+            assert!(elapsed < 10_000, "driver never fired");
+        }
+        // 500ms arm delay + 5 x 1000ms ticks = 5500ms. The driver can only
+        // fire ON a poll, and 5500 is not a multiple of 40, so it lands on the
+        // first poll at or after the boundary — never before it.
+        assert!(
+            (5_500..5_500 + 40).contains(&elapsed),
+            "fired at {elapsed}ms, expected the first poll at/after 5500ms"
+        );
+    }
+
+    #[test]
+    fn the_driver_treats_one_huge_gap_as_a_sleep_not_as_many_ticks() {
+        let mut d = StallDriver::new(5_000);
+        // Past the arm delay, still short of firing.
+        for _ in 0..100 {
+            assert_eq!(d.advance(40, open(), 0), StallDecision::Wait);
+        }
+        // Laptop closed for a minute. Credited as ticks this would fire
+        // immediately; as a sleep it resets.
+        assert_eq!(d.advance(60_000, open(), 0), StallDecision::Wait);
+    }
+
+    #[test]
+    fn a_frame_during_the_arm_delay_disarms_the_driver() {
+        let mut d = StallDriver::new(5_000);
+        d.advance(100, open(), 0);
+        d.saw_frame();
+        assert!(!d.is_armed());
+        assert_eq!(d.advance(60_000, open(), 0), StallDecision::Wait);
+    }
+
+    #[test]
+    fn a_disabled_threshold_never_fires_through_the_driver() {
+        let mut d = StallDriver::new(0);
+        assert!(!d.is_armed());
+        for _ in 0..1_000 {
+            assert_eq!(d.advance(1_000, open(), 0), StallDecision::Wait);
+        }
     }
 }

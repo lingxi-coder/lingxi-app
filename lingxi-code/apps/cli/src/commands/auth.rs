@@ -66,6 +66,14 @@ pub struct LoginArgs {
     /// Force SSO login flow
     #[arg(long)]
     pub sso: bool,
+
+    // `--id-token <jwt>` (2.1.220 `login`) is NOT offered here, deliberately.
+    // The oracle writes a pre-obtained id_token straight to cache to skip the
+    // OIDC browser round-trip; this port has no id_token cache to write to —
+    // `id_token` appears only as a JWT the OAuth handles DECODE and as a
+    // redaction key, never as stored state. A flag that parsed and then did
+    // nothing would advertise a headless-auth path that does not exist, which
+    // is worse than not offering it. Add the storage seam first.
 }
 
 /// `auth status` options — byte-faithful with `claude auth status --help`.

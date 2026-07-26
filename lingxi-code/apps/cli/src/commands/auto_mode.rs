@@ -120,10 +120,18 @@ pub enum Sub {
     Critique(CritiqueArgs),
     /// Print the default auto mode environment, allow, soft_deny, and hard_deny
     /// rules as JSON
-    Defaults,
+    Defaults(DefaultsArgs),
     /// Reset auto mode configuration to the shipped defaults by removing the
     /// autoMode section from your user settings file
     Reset(ResetArgs),
+}
+
+/// Options for `auto-mode defaults`.
+#[derive(Debug, Clone, Args, Default)]
+pub struct DefaultsArgs {
+    /// Show only rules whose label starts with this prefix (case-insensitive)
+    #[arg(long, value_name = "prefix")]
+    pub label: Option<String>,
 }
 
 /// Options for `auto-mode reset`.
@@ -152,8 +160,8 @@ pub async fn run(cli: &Cli) -> i32 {
             print_help_hint();
             SUCCESS
         }
-        Some(Sub::Defaults) => print_rules(),
-        Some(Sub::Config) => print_rules(),
+        Some(Sub::Defaults(args)) => print_rules(args.label.as_deref()),
+        Some(Sub::Config) => print_rules(None),
         Some(Sub::Critique(args)) => critique_rules(args),
         Some(Sub::Reset(args)) => {
             let path = crate::run::lingxi_home_dir().join("settings.json");
@@ -303,10 +311,23 @@ fn confirm(prompt: &str) -> bool {
 /// `config` and `defaults` share this: with no user-writable auto-mode settings
 /// schema there are no overrides to merge, so the effective config equals the
 /// defaults — byte-identical to claude on a clean machine.
-fn print_rules() -> i32 {
-    let Some(value) = default_rules_value() else {
+/// Print the rules JSON, optionally keeping only rules whose `label` starts
+/// with `label_prefix` (case-insensitive).
+///
+/// The filter descends into every rule ARRAY and drops non-matching entries
+/// while leaving the surrounding object shape intact, so the output is still a
+/// valid rules document rather than a flat list — a caller piping it into a
+/// settings file gets something it can use.
+///
+/// A rule with no `label` never matches a prefix filter: it has nothing to
+/// match against, and silently keeping it would make the filter look broken.
+fn print_rules(label_prefix: Option<&str>) -> i32 {
+    let Some(mut value) = default_rules_value() else {
         return RUNTIME_ERROR;
     };
+    if let Some(prefix) = label_prefix {
+        filter_rules_by_label(&mut value, &prefix.to_lowercase());
+    }
     match serde_json::to_string_pretty(&value) {
         Ok(s) => {
             println!("{s}");
@@ -316,6 +337,28 @@ fn print_rules() -> i32 {
             eprintln!("lingxi-cli auto-mode: failed to serialise config: {e}");
             RUNTIME_ERROR
         }
+    }
+}
+
+/// Drop rules whose `label` does not start with `prefix` (already lowercased).
+fn filter_rules_by_label(value: &mut serde_json::Value, prefix: &str) {
+    match value {
+        serde_json::Value::Array(items) => {
+            items.retain(|item| {
+                item.get("label")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|l| l.to_lowercase().starts_with(prefix))
+            });
+            for item in items.iter_mut() {
+                filter_rules_by_label(item, prefix);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (_, v) in map.iter_mut() {
+                filter_rules_by_label(v, prefix);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -482,4 +525,49 @@ mod tests {
             vec!["autoMode (unrecognized value)".to_string()]
         );
     }
+
+    /// `--label` keeps only rules whose label starts with the prefix, and the
+    /// match is case-insensitive (the oracle says so explicitly).
+    #[test]
+    fn label_filter_keeps_matching_rules_case_insensitively() {
+        let mut v = serde_json::json!({
+            "allow": [
+                { "label": "Git read", "rule": "a" },
+                { "label": "git write", "rule": "b" },
+                { "label": "npm", "rule": "c" }
+            ]
+        });
+        filter_rules_by_label(&mut v, "git");
+        let allow = v["allow"].as_array().unwrap();
+        assert_eq!(allow.len(), 2, "both git labels survive: {allow:?}");
+    }
+
+    /// A rule with NO label never matches a prefix filter — it has nothing to
+    /// match against, and silently keeping it would make the filter look
+    /// broken.
+    #[test]
+    fn label_filter_drops_unlabelled_rules() {
+        let mut v = serde_json::json!({ "allow": [ { "rule": "a" } ] });
+        filter_rules_by_label(&mut v, "git");
+        assert!(v["allow"].as_array().unwrap().is_empty());
+    }
+
+    /// The surrounding OBJECT shape survives, so the output is still a valid
+    /// rules document a caller can pipe into settings — not a flat list.
+    #[test]
+    fn label_filter_preserves_the_document_shape() {
+        let mut v = serde_json::json!({
+            "environment": { "x": 1 },
+            "allow": [ { "label": "git", "rule": "a" } ],
+            "hard_deny": [ { "label": "npm", "rule": "b" } ]
+        });
+        filter_rules_by_label(&mut v, "git");
+        assert!(v.get("environment").is_some(), "non-rule sections stay");
+        assert_eq!(v["allow"].as_array().unwrap().len(), 1);
+        assert!(
+            v["hard_deny"].as_array().unwrap().is_empty(),
+            "a section with no match becomes empty, not absent"
+        );
+    }
+
 }

@@ -36,15 +36,28 @@ port:   lingxi-cli --help, recursively through every "Commands:"
 | `login` | `--id-token <jwt>` | *"Write this pre-obtained id_token directly to cache, skipping the OIDC browser login"* — an enterprise/CI affordance for a headless OIDC flow. The port models `id_token` inside the OAuth handles but exposes no way to inject one. **Real, small.** |
 | `defaults` | `--label <prefix>` | *"Show only rules whose label starts with this prefix (case-insensitive)"* — a filter on a rules listing. **Real, cosmetic.** |
 
-**So the genuine user-facing CLI surface delta against 2.1.220 is two flags**,
-one of which only matters for headless enterprise auth.
+**So the genuine user-facing CLI surface delta against 2.1.220 is two flags.**
+
+### Status after this pass
+
+- `auto-mode defaults --label <prefix>` — **DONE**. Filters the rules document
+  by label prefix, case-insensitively, descending into every rule array while
+  leaving the surrounding object shape intact so the output is still a valid
+  rules document. An unlabelled rule never matches a prefix filter.
+- `login --id-token <jwt>` — **NOT DONE, deliberately.** The port has no
+  id_token cache to write to: `id_token` appears only as a JWT the OAuth
+  handles DECODE and as a redaction key, never as stored state. A flag that
+  parsed and then did nothing would advertise a headless-auth path that does
+  not exist. The storage seam has to land first; the reason is recorded at the
+  `LoginArgs` definition so the next reader does not re-derive it.
 
 ## Command names
 
 45 oracle `.command(` names vs 17 port top-level commands is a MISLEADING
 comparison and should not be quoted as a gap count — most oracle names are
-subcommands of groups the port also has. Absent as concepts: `eval` (above),
-`critique`, `xaa`. The latter two were not investigated.
+subcommands of groups the port also has. Absent as concepts: `eval` (above) and `xaa`.
+`critique` is NOT absent — the port has `auto-mode critique`; I listed it from
+the same one-level walk that produced the bad flag diff.
 
 ## What this pass does NOT cover
 

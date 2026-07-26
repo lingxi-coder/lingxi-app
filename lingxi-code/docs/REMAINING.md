@@ -16,6 +16,27 @@ Start with `scripts/parity_surface.py` — it self-verifies its traversal and
 refuses to report a broken walk — then, per command, construct inputs and
 compare outputs against the oracle.
 
+**First slice done 2026-07-26** (pure-output commands, both binaries executed
+and diffed — evidence, not inference):
+
+- `--version` SHAPE differs: oracle `2.1.220 (Claude Code)` vs port
+  `lingxi-cli 0.12.0`. Version-then-parenthesised-product vs
+  product-then-version. The VALUE difference is correct — LingXi is its own
+  product with its own version, and the Claude-compat identifiers derive
+  separately from `traits::CLAUDE_CODE_VERSION`. The SHAPE is a branding call
+  that has not been made explicitly.
+- `--help` layout differs (clap vs commander ordering: the oracle leads with
+  `Usage:`, the port with the description). This is the known accepted
+  divergence from the 2.1.216 audit, now confirmed by execution rather than
+  inferred.
+- No behaviour DEFECT found in this slice.
+
+**Two false alarms were caught inside this slice before being recorded**: a
+"materially different `mcp --help`" and an "`--help` performs network I/O", both
+of which were interleaved stdout from concurrent processes sharing the
+terminal. Run each comparison with `< /dev/null` and in isolation; a shared
+terminal is enough to manufacture a finding.
+
 **Method warning, earned three times this session:** a generated absence looks
 identical whether the probe worked or not. Confirm every candidate at the call
 site (`<cli> <sub> --help`, or the code path) before recording it. A one-level

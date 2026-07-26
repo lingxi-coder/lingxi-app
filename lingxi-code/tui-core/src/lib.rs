@@ -14,6 +14,7 @@ pub mod bash_runner;
 pub mod collapse;
 pub mod computer_access_bridge;
 pub mod error;
+pub mod left_arrow_gesture;
 pub mod key_hint;
 pub mod message;
 pub mod message_render;

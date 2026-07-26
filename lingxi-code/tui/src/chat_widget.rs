@@ -3504,6 +3504,11 @@ impl ChatWidget {
     fn on_pane_outcome(&mut self, outcome: BottomPaneOutcome) -> ChatOutcome {
         match outcome {
             BottomPaneOutcome::Consumed => ChatOutcome::Continue,
+            // ← on an empty composer: open the background-agents view. Routed
+            // through the SAME path as `/tasks` so the two cannot drift — the
+            // row snapshot comes from the live registry, which only the owner
+            // holds.
+            BottomPaneOutcome::OpenAgentsView => self.cmd_tasks(""),
             BottomPaneOutcome::Quit => ChatOutcome::Quit,
             BottomPaneOutcome::Interrupt => {
                 if let Some(token) = self.current_compaction.as_ref() {

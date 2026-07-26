@@ -108,6 +108,18 @@ pub struct BottomPaneStatus {
 /// What the owner must do after the pane routed one key or paste. Local
 /// editing/navigation is fully consumed inside the pane; these variants carry
 /// only the app-level intents the pane is not allowed to decide itself.
+/// What a ← on an empty composer resolved to, inside the pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LeftArrowOutcome {
+    /// Run the gesture (open the agents view).
+    Fire,
+    /// Consume the press WITHOUT moving the cursor — the press was spent on
+    /// the gesture (armed or absorbed).
+    Swallow,
+    /// Not a gesture; move the cursor as usual.
+    PassThrough,
+}
+
 #[derive(Debug)]
 pub enum BottomPaneOutcome {
     /// The pane consumed the input; nothing for the owner to do.
@@ -129,6 +141,11 @@ pub enum BottomPaneOutcome {
         /// The provider profile the model routes through, when qualified.
         profile: Option<String>,
     },
+    /// ← was pressed on an EMPTY composer and the gesture fired: open the
+    /// background-agents view, the same one `/tasks` opens. Routed as an
+    /// outcome rather than handled in the pane because the row snapshot comes
+    /// from the task registry, which only the owner holds.
+    OpenAgentsView,
     /// A view asks the owner to run a command effect on its behalf.
     RunCommand(CommandAction),
     /// A view asks the owner to run a `/web` effect on its behalf. A test
@@ -225,6 +242,15 @@ pub struct BottomPane {
     /// second press within [`CTRL_C_EXIT_WINDOW`] surfaces
     /// [`BottomPaneOutcome::Quit`].
     ctrl_c_at: Option<Instant>,
+    /// ←-on-empty gesture timestamps (`tui_core::left_arrow_gesture`). Pane-
+    /// local like `ctrl_c_at`: it drives the "Press ← again" footer hint and
+    /// decides whether the next ← moves the cursor or opens the agents view.
+    left_arrow: tui_core::left_arrow_gesture::LeftArrowState,
+    /// When the gesture armed, so the hint can expire on its own after
+    /// `FEEDBACK_TIMEOUT_MS` even if the user never presses anything else.
+    left_arrow_hint_at: Option<Instant>,
+    /// Monotonic origin for the gesture's millisecond stamps.
+    left_arrow_epoch: Instant,
     /// Non-bracketed paste-burst detector (codex `paste_burst.rs`): rapid
     /// plain-char streams are buffered and flushed as ONE paste through
     /// [`Self::apply_paste_text`] (large-paste placeholder + image-path
@@ -294,6 +320,9 @@ impl BottomPane {
             vim_insert_mode_remaps: BTreeMap::new(),
             vim_insert_remap_pending: None,
             ctrl_c_at: None,
+            left_arrow: tui_core::left_arrow_gesture::LeftArrowState::default(),
+            left_arrow_hint_at: None,
+            left_arrow_epoch: Instant::now(),
             paste_burst: paste_burst::PasteBurst::default(),
             // Unit tests default the heuristic OFF: synthetic keystrokes
             // arrive at machine speed, which IS the burst signature. Burst
@@ -969,6 +998,56 @@ impl BottomPane {
         &self.view_stack
     }
 
+    /// The armed ←-gesture hint, if one is showing and has not timed out.
+    fn left_arrow_hint(&self) -> Option<&'static str> {
+        let at = self.left_arrow_hint_at?;
+        if at.elapsed().as_millis() as u64 >= tui_core::left_arrow_gesture::FEEDBACK_TIMEOUT_MS {
+            return None;
+        }
+        Some(tui_core::left_arrow_gesture::CONFIRM_HINT)
+    }
+
+    /// Route a ← pressed on an EMPTY composer through the gesture guard.
+    ///
+    /// `solo_keypress` is false when the press arrived inside a paste burst —
+    /// a ← that is part of pasted content is not a deliberate gesture.
+    fn on_left_arrow_on_empty(&mut self, solo_keypress: bool) -> LeftArrowOutcome {
+        use tui_core::left_arrow_gesture::{
+            apply_left_arrow, decide_left_arrow, LeftArrowAction, LeftArrowInputs,
+        };
+        // Monotonic, not wall-clock: a system time change must not be able to
+        // fire or suppress the gesture.
+        let now_ms = self.left_arrow_epoch.elapsed().as_millis() as u64 + 1;
+        let action = decide_left_arrow(
+            &self.left_arrow,
+            &LeftArrowInputs {
+                now_ms,
+                solo_keypress,
+                // On by default, matching the oracle's
+                // `Ke("tengu_left_arrow_editing_guard", true)`.
+                guard_enabled: true,
+                // The port surfaces no post-attach quiet window, and 2.1.220
+                // hard-codes its own probe to `false`, so both take the
+                // non-attach arms.
+                in_attach_quiet_window: false,
+                attach_stamp_ms: 0,
+            },
+        );
+        apply_left_arrow(&mut self.left_arrow, action, now_ms);
+        match action {
+            LeftArrowAction::Fire => {
+                self.left_arrow_hint_at = None;
+                LeftArrowOutcome::Fire
+            }
+            LeftArrowAction::Arm | LeftArrowAction::AttachArm => {
+                self.left_arrow_hint_at = Some(Instant::now());
+                LeftArrowOutcome::Swallow
+            }
+            LeftArrowAction::Absorb | LeftArrowAction::AttachAbsorb => LeftArrowOutcome::Swallow,
+            LeftArrowAction::Reject => LeftArrowOutcome::PassThrough,
+        }
+    }
+
     /// Whether an idle Ctrl-C is currently armed (a second press quits).
     #[must_use]
     pub fn ctrl_c_armed(&self) -> bool {
@@ -1196,6 +1275,29 @@ impl BottomPane {
         if !is_ctrl_c {
             self.ctrl_c_at = None;
         }
+        // Anything that is not another ← disarms the gesture and takes its hint
+        // down: the user moved on, so a later ← must start the confirmation
+        // over rather than fire on a stale one.
+        if !matches!(key.code, KeyCode::Left) {
+            self.left_arrow.disarm();
+            self.left_arrow_hint_at = None;
+        }
+        // Whether the composer had text BEFORE this key, so an edit that
+        // empties it can be stamped below. That stamp is what makes the very
+        // next ← ambiguous — without it the guard never arms.
+        let had_text = !self.composer.text().is_empty();
+        let out = self.on_composer_key_inner(key, ctrl);
+        if had_text && self.composer.text().is_empty() {
+            let now_ms = self.left_arrow_epoch.elapsed().as_millis() as u64 + 1;
+            self.left_arrow.note_edited_to_empty(now_ms);
+        }
+        out
+    }
+
+    /// The body of [`Self::on_composer_key`], split out so the caller can
+    /// observe the composer text on BOTH sides of the key — the edit-to-empty
+    /// transition is what arms the ← gesture's guard.
+    fn on_composer_key_inner(&mut self, key: KeyEvent, ctrl: bool) -> BottomPaneOutcome {
         // Paste-burst layer (codex `handle_input_basic` ordering): flush any
         // DUE burst first so buffered text never lags behind this key, then
         // intercept plain chars/Enter; any other key flushes + closes the
@@ -1309,6 +1411,24 @@ impl BottomPane {
                 BottomPaneOutcome::Consumed
             }
             KeyCode::Left => {
+                // ← on an EMPTY composer is a gesture (open the agents view),
+                // not a cursor move. It is guarded, because ← is also how you
+                // step away from a character you just deleted — see
+                // `tui_core::left_arrow_gesture`.
+                let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+                if self.composer.text().is_empty() && !shift {
+                    // A ← inside a paste burst is pasted content, not a
+                    // deliberate keystroke.
+                    let solo = !self.paste_burst_pending();
+                    match self.on_left_arrow_on_empty(solo) {
+                        LeftArrowOutcome::Fire => return BottomPaneOutcome::OpenAgentsView,
+                        // Armed / absorbed: the press is spent on the gesture,
+                        // so it must NOT also move the cursor.
+                        LeftArrowOutcome::Swallow => return BottomPaneOutcome::Consumed,
+                        // Not a gesture — fall through to the ordinary move.
+                        LeftArrowOutcome::PassThrough => {}
+                    }
+                }
                 self.composer.move_left();
                 BottomPaneOutcome::Consumed
             }
@@ -1423,7 +1543,9 @@ impl BottomPane {
     /// Footer props for the current pane state (mode selection that codex
     /// keeps in `ChatComposer::footer_props`).
     fn footer_props(&self) -> footer::FooterProps {
-        let mode = if self.ctrl_c_armed() {
+        let mode = if let Some(hint) = self.left_arrow_hint() {
+            footer::FooterMode::LeftArrowReminder(hint)
+        } else if self.ctrl_c_armed() {
             footer::FooterMode::CtrlCReminder
         } else if self.completion.is_some() {
             footer::FooterMode::CompletionActive
@@ -3374,4 +3496,106 @@ mod tests {
         // no leading status row now, so the composer's top padding is row 0).
         assert_eq!(pane.cursor_pos(Rect::new(0, 0, 80, 4)), Some((7, 1)));
     }
+
+    // ===== ←-on-empty gesture =====
+
+    fn k(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// The plain case: ← on a composer that has simply been empty opens the
+    /// agents view on the FIRST press.
+    #[test]
+    fn left_on_a_long_empty_composer_opens_the_agents_view() {
+        let mut p = pane();
+        assert!(matches!(
+            p.handle_key(k(KeyCode::Left)),
+            BottomPaneOutcome::OpenAgentsView
+        ));
+    }
+
+    /// ← on a NON-empty composer is an ordinary cursor move, never the
+    /// gesture — this is the case the whole feature must not break.
+    #[test]
+    fn left_on_a_non_empty_composer_moves_the_cursor() {
+        let mut p = pane();
+        p.handle_key(k(KeyCode::Char('h')));
+        assert!(matches!(
+            p.handle_key(k(KeyCode::Left)),
+            BottomPaneOutcome::Consumed
+        ));
+    }
+
+    /// The guard in action: backspacing the last character and tapping ←
+    /// must NOT open anything. The first press only arms and shows the hint;
+    /// the second fires.
+    #[test]
+    fn left_right_after_deleting_the_last_char_arms_before_firing() {
+        let mut p = pane();
+        p.handle_key(k(KeyCode::Char('h')));
+        p.handle_key(k(KeyCode::Backspace));
+
+        // Armed: consumed, no view, hint showing.
+        assert!(matches!(
+            p.handle_key(k(KeyCode::Left)),
+            BottomPaneOutcome::Consumed
+        ));
+        assert_eq!(
+            p.left_arrow_hint(),
+            Some(tui_core::left_arrow_gesture::CONFIRM_HINT)
+        );
+
+        // Synthetic keystrokes all land in the same millisecond, which the
+        // engine correctly reads as key repeat (a real user cannot press twice
+        // in under 1ms). Rewind the pane's monotonic epoch to simulate the
+        // elapsed time instead of poking the state machine.
+        p.left_arrow_epoch = Instant::now() - std::time::Duration::from_millis(1_500);
+        assert!(matches!(
+            p.handle_key(k(KeyCode::Left)),
+            BottomPaneOutcome::OpenAgentsView
+        ));
+        assert_eq!(p.left_arrow_hint(), None, "firing takes the hint down");
+    }
+
+    /// Pressing anything else disarms: the user moved on, so a later ← starts
+    /// the confirmation over instead of firing on a stale one.
+    #[test]
+    fn another_key_disarms_the_gesture() {
+        let mut p = pane();
+        p.handle_key(k(KeyCode::Char('h')));
+        p.handle_key(k(KeyCode::Backspace));
+        p.handle_key(k(KeyCode::Left));
+        assert!(p.left_arrow_hint().is_some());
+
+        p.handle_key(k(KeyCode::Right));
+        assert_eq!(p.left_arrow_hint(), None, "the hint is taken down");
+        assert_eq!(p.left_arrow.armed_at_ms, 0, "and the gesture is disarmed");
+    }
+
+    /// Shift+← is a selection gesture, not the agents gesture.
+    #[test]
+    fn shift_left_is_never_the_gesture() {
+        let mut p = pane();
+        let shift_left = KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT);
+        assert!(matches!(
+            p.handle_key(shift_left),
+            BottomPaneOutcome::Consumed
+        ));
+    }
+
+    /// The armed footer hint really renders, and it is the byte-exact copy.
+    #[test]
+    fn the_armed_hint_renders_in_the_footer() {
+        let mut p = pane();
+        p.handle_key(k(KeyCode::Char('h')));
+        p.handle_key(k(KeyCode::Backspace));
+        p.handle_key(k(KeyCode::Left));
+
+        let props = p.footer_props();
+        assert!(matches!(
+            props.mode,
+            footer::FooterMode::LeftArrowReminder(h) if h == "Press \u{2190} again"
+        ));
+    }
+
 }

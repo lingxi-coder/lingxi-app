@@ -17,6 +17,8 @@ pub(crate) enum FooterMode {
     IdleVerbose,
     CompletionActive,
     CtrlCReminder,
+    /// The ←-on-empty gesture is armed; the hint is its confirm copy.
+    LeftArrowReminder(&'static str),
 }
 
 pub(crate) struct FooterProps {
@@ -33,6 +35,10 @@ pub(crate) fn footer_height(_props: &FooterProps) -> u16 {
 /// The footer line: hint copy is byte-identical to the pre-move status row.
 pub(crate) fn footer_line(props: &FooterProps, theme: &tui_core::theme::Theme) -> Line<'static> {
     let dim = crate::style_adapter::to_ratatui(theme.dim);
+    if let FooterMode::LeftArrowReminder(hint) = props.mode {
+        let claude = crate::style_adapter::to_ratatui(theme.claude);
+        return Line::from(Span::styled(hint, Style::default().fg(claude)));
+    }
     if props.mode == FooterMode::CtrlCReminder {
         let claude = crate::style_adapter::to_ratatui(theme.claude);
         return Line::from(Span::styled(
@@ -47,9 +53,10 @@ pub(crate) fn footer_line(props: &FooterProps, theme: &tui_core::theme::Theme) -
         FooterMode::IdleVerbose => {
             "Enter: send  ·  Ctrl-O: collapse  ·  ↑/↓: history  ·  Esc: quit"
         }
-        // CtrlCReminder is unreachable here (early return above); listed only
-        // to keep the match exhaustive without a wildcard.
-        FooterMode::Idle | FooterMode::CtrlCReminder => {
+        // CtrlCReminder / LeftArrowReminder are unreachable here (early
+        // returns above); listed only to keep the match exhaustive without a
+        // wildcard.
+        FooterMode::Idle | FooterMode::CtrlCReminder | FooterMode::LeftArrowReminder(_) => {
             "Enter: send  ·  Alt+Enter: newline  ·  Ctrl-O: verbose  ·  Esc: quit"
         }
     };

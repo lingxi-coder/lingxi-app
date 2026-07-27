@@ -177,7 +177,7 @@ pub struct SubagentSpawnRequest {
     /// The CHILD's recursion depth = the spawning agent's depth + 1 (claude
     /// `spawnDepth = z6(parentContext) + 1`). The spawner stamps it onto the
     /// child's `SubagentContext.depth`, which the tool-resolver consults against
-    /// `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` (default 1). `#[serde(default)]` ⇒
+    /// `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` (default 3). `#[serde(default)]` ⇒
     /// `0` for legacy/serialized payloads, so a child that deserializes without
     /// it behaves like a top-level spawn (the conservative direction).
     #[serde(default)]
@@ -501,10 +501,31 @@ pub const FORWARD_SUBAGENT_MESSAGE_SENTINEL: &str = "__forward_subagent_message_
 /// Claude Code 2.1.217's default number of concurrently-running subagents.
 pub const DEFAULT_MAX_CONCURRENT_SUBAGENTS: usize = 20;
 
-/// Claude Code 2.1.217's default subagent nesting depth. A top-level caller has
-/// depth 0, so the default permits that caller to spawn a depth-1 child while
-/// preventing the child from spawning another agent.
-pub const DEFAULT_MAX_SUBAGENT_SPAWN_DEPTH: u32 = 1;
+/// Claude Code 2.1.219's default subagent nesting depth.
+///
+/// A top-level caller has depth 0, so 3 permits main → child → grandchild →
+/// great-grandchild. This was 1 through 2.1.217 (main could spawn one child,
+/// and that child could spawn nothing); 2.1.219 raised it to 3, and
+/// `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1` is how you get the old behaviour
+/// back.
+///
+/// Leaving it at 1 made the port's depth-2+ stream-json forwarding
+/// unreachable in a default configuration — code that existed, was tested, and
+/// could never run.
+///
+/// ORACLE (`bee()`, 2.1.220 @230685726):
+/// ```js
+/// let e = Z.CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH;
+/// if (e !== void 0) return e;                     // env wins outright
+/// let r = getFeatureValue(pt_, aHu);              // "tengu_hazel_trellis"
+/// Ous = (typeof r === "number" && Number.isInteger(r) && r >= 1) ? r : aHu;
+/// var aHu = 3
+/// ```
+/// The gate value is accepted only when it is an INTEGER >= 1; anything else
+/// falls back to 3. This build has no numeric feature-gate client, so it always
+/// takes the default — the same result the oracle produces when Statsig is
+/// unconfigured.
+pub const DEFAULT_MAX_SUBAGENT_SPAWN_DEPTH: u32 = 3;
 
 fn max_concurrent_subagents_from(raw: Option<&str>) -> usize {
     raw.and_then(|value| value.trim().parse::<usize>().ok())
@@ -685,16 +706,22 @@ mod tests {
     }
 
     #[test]
-    fn claude_2_1_217_agent_limits_resolve_defaults_and_overrides() {
+    fn claude_agent_limits_resolve_defaults_and_overrides() {
         assert_eq!(max_concurrent_subagents_from(None), 20);
         assert_eq!(max_concurrent_subagents_from(Some(" 7 ")), 7);
         assert_eq!(max_concurrent_subagents_from(Some("0")), 0);
         assert_eq!(max_concurrent_subagents_from(Some("invalid")), 20);
 
-        assert_eq!(max_subagent_spawn_depth_from(None), 1);
-        assert_eq!(max_subagent_spawn_depth_from(Some(" 3 ")), 3);
+        // 2.1.219 raised the default nesting depth from 1 to 3.
+        assert_eq!(max_subagent_spawn_depth_from(None), 3);
+        // The env override wins outright, including the documented way to get
+        // the pre-2.1.219 behaviour back.
+        assert_eq!(max_subagent_spawn_depth_from(Some("1")), 1);
+        assert_eq!(max_subagent_spawn_depth_from(Some(" 5 ")), 5);
         assert_eq!(max_subagent_spawn_depth_from(Some("0")), 0);
-        assert_eq!(max_subagent_spawn_depth_from(Some("invalid")), 1);
+        // Unparseable ⇒ the default, not a panic and not 0 (0 would silently
+        // disable subagents entirely).
+        assert_eq!(max_subagent_spawn_depth_from(Some("invalid")), 3);
     }
 
     /// The gate defaults ON in v2.1.193 (catalog always externalized). Guarded by

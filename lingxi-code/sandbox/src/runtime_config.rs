@@ -103,6 +103,23 @@ pub struct NetworkRestrictionConfig {
     /// `allowManagedDomainsOnly`.
     #[serde(default)]
     pub allow_managed_domains_only: bool,
+    /// When `true`, the sandbox runtime DENIES a host that is not in
+    /// `allowed_domains` instead of prompting (2.1.219 `strictAllowlist`).
+    ///
+    /// Oracle description, verbatim: "When true, the sandbox runtime
+    /// deterministically denies hosts not in allowedDomains instead of
+    /// prompting. Enforced for sandboxed commands only — in-process tools such
+    /// as WebFetch are not gated by this setting. Only honored from user,
+    /// managed/policy, or CLI (--settings) settings — project settings
+    /// (.claude/settings.json and .claude/settings.local.json) are ignored."
+    ///
+    /// The source restriction is the load-bearing half and is NOT enforced
+    /// here: this struct is the merged wire shape, so a project tier that set
+    /// the key would land in it. The composition root resolves the honored
+    /// value separately (`strict_allowlist_override`) exactly as it already
+    /// does for `allowAppleEvents`.
+    #[serde(default)]
+    pub strict_allowlist: bool,
     /// Unix-socket paths the sandboxed process is permitted to connect to
     /// (e.g. `/var/run/docker.sock`).
     #[serde(default)]

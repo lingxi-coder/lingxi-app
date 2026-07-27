@@ -341,6 +341,9 @@ pub(crate) async fn run_ratatui_with_initial_prompt(
     let session = build_session_info(orchestrator.as_ref()).await;
     let handle = tokio::runtime::Handle::current();
     let switch_orch = orchestrator.clone();
+    // Cloned here (before the turn closure takes ownership) for the
+    // `AddDirectory` arm's `DirectoryAdded` hook fire.
+    let permission_orch = orchestrator.clone();
     let switch_handle = handle.clone();
     let web_handle = handle.clone();
     let connect_handle = handle.clone();
@@ -623,6 +626,7 @@ pub(crate) async fn run_ratatui_with_initial_prompt(
         let snapshot = permission_snapshot_cb.clone();
         let session_cwd = permission_session_cwd.clone();
         let mcp_registry = permission_mcp_registry.clone();
+        let orch = permission_orch.clone();
         permission_handle.spawn(async move {
             run_permission_action(
                 action,
@@ -632,6 +636,7 @@ pub(crate) async fn run_ratatui_with_initial_prompt(
                 snapshot,
                 session_cwd,
                 mcp_registry,
+                orch,
             )
             .await;
         });
@@ -1553,6 +1558,11 @@ async fn run_permission_action(
     // arm to apply the add to the running session (file access + roots/list).
     session_cwd: std::sync::Arc<tool_api::SessionCwd>,
     mcp_registry: std::sync::Arc<mcp::McpRegistry>,
+    // Used only by the `AddDirectory` arm, to fire the `DirectoryAdded` hook
+    // (2.1.219) after a directory is actually added. Taken as the TRAIT handle
+    // (not the concrete orchestrator) so this stays on the same seam every
+    // other permission effect uses.
+    orch: std::sync::Arc<dyn traits::OrchestratorHandle>,
 ) {
     use permission::{
         persist_permission_update, remove_permission_update, PermissionBehavior, PermissionRule,
@@ -1723,6 +1733,11 @@ async fn run_permission_action(
                     if session_cwd.add_trusted_dir(std::path::PathBuf::from(&path)) {
                         mcp_registry.add_root(std::path::PathBuf::from(&path));
                         mcp_registry.notify_roots_list_changed_all().await;
+                        // `DirectoryAdded` (2.1.219) fires ONLY on a real
+                        // change, alongside the roots notification — an
+                        // already-trusted directory is a no-op for both. The
+                        // source doubles as the hook matcher query.
+                        orch.fire_directory_added(&path, "add_dir").await;
                     }
                     // claude-code 2.1.205 success/already echoes, byte-exact:
                     // `Added ${path} as a working directory and saved to local

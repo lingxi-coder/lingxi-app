@@ -17,8 +17,8 @@
 //!
 //! `TaskStop` is NOT in that set — it is allowed to subagents. And `Agent` is
 //! NOT flat-denied either: it is DEPTH-GATED in [`AgentToolResolver::resolve`]
-//! per claude's `if(isAgentTool(a)) return depth < maxSpawnDepth`. As of 2.1.217
-//! the default maximum depth is 1, with
+//! per claude's `if(isAgentTool(a)) return depth < maxSpawnDepth`. As of 2.1.219
+//! the default maximum depth is 3 (was 1 through 2.1.217), with
 //! `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` providing the same override as
 //! Claude Code. The fork `use_exact_tools` bypass is exempt (fork recursion is
 //! governed by `AgentTool`'s `is_in_fork_child` message guard).
@@ -635,8 +635,8 @@ mod tests {
 
     #[test]
     fn explicit_policy_keeps_agent_when_below_depth() {
-        // An agent that explicitly lists `Agent` keeps it at depth 0 (no longer
-        // flat-denied). At the default depth 1 the gate drops it.
+        // An agent that explicitly lists `Agent` keeps it below the depth cap
+        // (no longer flat-denied). At the default cap of 3 the gate drops it.
         let parent = pool(&["Read", "Agent"]);
         let def = agent_def(AgentToolPolicy::Explicit(vec![
             "Read".to_string(),
@@ -644,11 +644,11 @@ mod tests {
         ]));
         let kept = AgentToolResolver::resolve(&def, &parent, &[], 0, false);
         assert_eq!(names(&kept), vec!["Read".to_string(), "Agent".to_string()]);
-        let gated = AgentToolResolver::resolve(&def, &parent, &[], 1, false);
+        let gated = AgentToolResolver::resolve(&def, &parent, &[], 3, false);
         assert_eq!(
             names(&gated),
             vec!["Read".to_string()],
-            "Agent gated at depth 1"
+            "Agent gated at depth 3"
         );
     }
 
@@ -788,16 +788,24 @@ mod tests {
     }
 
     #[test]
-    fn agent_tool_dropped_at_default_depth_1_and_beyond() {
-        // Claude 2.1.217 defaults the maximum spawn depth to 1, so a child at
-        // depth 1 (and every deeper context) does not advertise `Agent`.
+    fn agent_tool_dropped_at_default_depth_3_and_beyond() {
+        // Claude 2.1.219 defaults the maximum spawn depth to 3, so `Agent` is
+        // advertised at depths 0-2 and dropped at 3 and deeper.
         let parent = pool(&["Read", "Agent", "Bash"]);
-        for depth in [1u32, 5, 12] {
+        for depth in [0u32, 1, 2] {
+            let resolved =
+                AgentToolResolver::resolve(&agent_def(all_policy()), &parent, &[], depth, false);
+            assert!(
+                names(&resolved).contains(&"Agent".to_string()),
+                "Agent must survive at depth {depth} (< 3 by default)"
+            );
+        }
+        for depth in [3u32, 5, 12] {
             let resolved =
                 AgentToolResolver::resolve(&agent_def(all_policy()), &parent, &[], depth, false);
             assert!(
                 !names(&resolved).contains(&"Agent".to_string()),
-                "Agent must be dropped at depth {depth} (>= 1 by default)"
+                "Agent must be dropped at depth {depth} (>= 3 by default)"
             );
             // Non-Agent tools are unaffected by the depth-gate.
             assert!(names(&resolved).contains(&"Read".to_string()));

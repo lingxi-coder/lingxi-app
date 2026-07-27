@@ -2133,12 +2133,12 @@ mod tests {
             allowed0.contains(&"Task".to_string()),
             "alias in allow-list"
         );
-        // depth 1: Agent gated → empty pool.
+        // depth 3 (the 2.1.219 default cap): Agent gated → empty pool.
         let (schemas1, allowed1) = spawner
-            .resolve_tools(&policy(), 1)
+            .resolve_tools(&policy(), 3)
             .await
-            .expect("depth 1 should resolve");
-        assert!(schemas1.is_empty(), "Agent gated at depth 1 → no schemas");
+            .expect("depth 3 should resolve");
+        assert!(schemas1.is_empty(), "Agent gated at depth 3 → no schemas");
         assert!(
             allowed1.is_empty(),
             "Agent (and alias Task) gated → empty allow-list"

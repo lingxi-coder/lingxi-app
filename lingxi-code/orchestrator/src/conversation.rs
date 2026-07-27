@@ -6545,6 +6545,30 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             .await;
     }
 
+    /// Fire the `DirectoryAdded` hook after a working directory is added
+    /// mid-session (2.1.219).
+    ///
+    /// `source` is both a payload field and the MATCHER QUERY — claude-code
+    /// `a$t` dispatches with `matchQuery: t`, so a hook `matcher` is tested
+    /// against `add_dir` / `register_repo_root`, not against the path. A
+    /// matcher written against the directory would silently never fire.
+    ///
+    /// Best-effort, like the other lifecycle fires: a failing or absent hook
+    /// must not undo a directory the user successfully added.
+    pub async fn fire_directory_added(&self, directory: &str, source: &str) {
+        let ctx = self.lifecycle_hook_ctx(false).await;
+        let _ = self
+            .hooks
+            .execute(
+                HookEvent::DirectoryAdded {
+                    directory: directory.to_string(),
+                    source: source.to_string(),
+                },
+                ctx,
+            )
+            .await;
+    }
+
     /// Append a Stop hook's blocking reason as a *meta* user message so the
     /// model sees the hook feedback on the continued turn. Mirrors claude-code
     /// `query/stopHooks.ts:257-262`: each blocking error becomes

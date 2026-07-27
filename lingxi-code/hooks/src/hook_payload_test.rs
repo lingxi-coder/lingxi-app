@@ -1307,6 +1307,32 @@ mod tests {
         );
     }
 
+    /// `DirectoryAdded` (2.1.219) wire shape — claude-code `a$t`:
+    /// `{...,hook_event_name:"DirectoryAdded",directory:e,source:t}`.
+    #[test]
+    fn directory_added_payload_matches_the_oracle_wire_shape() {
+        let p = DirectoryAddedPayload {
+            hook_event_name: HookEventNameDirectoryAdded,
+            session_id: "s1".into(),
+            transcript_path: "/t.jsonl".into(),
+            cwd: "/work".into(),
+            permission_mode: None,
+            agent_id: None,
+            agent_type: None,
+            effort: None,
+            directory: "/work/extra".into(),
+            source: "add_dir".into(),
+        };
+        let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(v["hook_event_name"], "DirectoryAdded");
+        assert_eq!(v["directory"], "/work/extra");
+        assert_eq!(v["source"], "add_dir");
+        // Absent optionals must not serialise as nulls.
+        for k in ["permission_mode", "agent_id", "agent_type", "effort"] {
+            assert!(v.get(k).is_none(), "{k} must be omitted when None");
+        }
+    }
+
     #[test]
     fn cwd_changed_payload_serializes_byte_lock() {
         let p = CwdChangedPayload {

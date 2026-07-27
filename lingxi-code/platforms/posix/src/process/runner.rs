@@ -989,8 +989,15 @@ mod async_hook_tests {
     async fn async_marker_retains_eventual_stdout_and_stderr() {
         // The post-marker stdout/stderr + exit are drained and delivered once
         // through the eventual-output channel (the fold-back payload).
+        // asyncTimeout is generous ON PURPOSE. This test asserts the FOLD-BACK
+        // PAYLOAD, not the timeout, and the marker's timeout is a hard kill
+        // deadline for the backgrounded process. At 1000ms it raced the
+        // scheduler: under a saturated run three `echo`s can exceed a second of
+        // wall clock, the hook was terminated, and the test failed with an
+        // empty stdout and `timed_out: true`. A test that asserts on output
+        // must not also be a wall-clock benchmark.
         let cmd =
-            sh("echo '{\"async\":true,\"asyncTimeout\":1000}'; echo after; echo err 1>&2; exit 0");
+            sh("echo '{\"async\":true,\"asyncTimeout\":60000}'; echo after; echo err 1>&2; exit 0");
         let outcome = PosixProcess::new()
             .run_hook_with_async_detection(&cmd, Duration::from_millis(15_000))
             .await
@@ -1003,7 +1010,7 @@ mod async_hook_tests {
             panic!("async hook must background with an eventual-output handle");
         };
 
-        let out = tokio::time::timeout(Duration::from_secs(5), output_rx)
+        let out = tokio::time::timeout(Duration::from_secs(60), output_rx)
             .await
             .expect("eventual output must arrive before the async timeout")
             .expect("sender must not drop");
@@ -1148,9 +1155,15 @@ mod streaming_tests {
     #[tokio::test]
     async fn streaming_delivers_a_line_before_process_exit() {
         let sink = Arc::new(RecordingSink::default());
+        // The child sleeps long enough that the `!task.is_finished()` assertion
+        // below cannot lose a race with the scheduler. At 0.4s it did: this test
+        // passes in isolation but failed alongside its siblings, because a
+        // descheduled test thread let the whole process finish before the
+        // assertion ran. The window is what makes the assertion meaningful, so
+        // it has to dwarf jitter rather than merely exceed it.
         let command = stream_sh(
-            "printf 'ready\\n'; sleep 0.4; printf 'done\\n'",
-            Duration::from_secs(3),
+            "printf 'ready\\n'; sleep 3; printf 'done\\n'",
+            Duration::from_secs(60),
         );
         let task_sink: Arc<dyn ProcessStreamSink> = sink.clone();
         let task =
@@ -1158,7 +1171,7 @@ mod streaming_tests {
                 async move { PosixProcess::new().run_streaming(&command, task_sink).await },
             );
 
-        tokio::time::timeout(Duration::from_secs(2), sink.line_ready.notified())
+        tokio::time::timeout(Duration::from_secs(30), sink.line_ready.notified())
             .await
             .expect("first line is delivered live");
         assert!(

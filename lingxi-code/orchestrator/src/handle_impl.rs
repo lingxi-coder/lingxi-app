@@ -752,6 +752,10 @@ impl OrchestratorHandle for ConversationOrchestrator {
         Ok(outcomes)
     }
 
+    async fn fire_directory_added(&self, directory: &str, source: &str) {
+        ConversationOrchestrator::fire_directory_added(self, directory, source).await;
+    }
+
     async fn list_hooks(&self) -> Vec<HookInfo> {
         // M6-07: read the wired HookRegistry (Task 7).
         let Some(reg) = self.hook_registry.as_ref() else {
@@ -1063,6 +1067,7 @@ fn event_str(et: &hooks::events::HookEventType) -> &'static str {
         E::PostToolBatch => "PostToolBatch",
         E::UserPromptExpansion => "UserPromptExpansion",
         E::MessageDisplay => "MessageDisplay",
+        E::DirectoryAdded => "DirectoryAdded",
     }
 }
 

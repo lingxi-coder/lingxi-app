@@ -1133,6 +1133,19 @@ pub trait OrchestratorHandle: Send + Sync {
     /// `/status`.
     async fn list_hooks(&self) -> Vec<HookInfo>;
 
+    /// Fire the `DirectoryAdded` hook (2.1.219) after a working directory is
+    /// added mid-session via `/add-dir` or the SDK `register_repo_root`.
+    ///
+    /// `source` is both a payload field and the hook MATCHER QUERY, so a
+    /// matcher is tested against `add_dir` / `register_repo_root` rather than
+    /// against the path.
+    ///
+    /// DEFAULTED to a no-op so the many existing implementations of this trait
+    /// (test doubles, the mobile engine) compile unchanged — the frozen-trait
+    /// idiom this codebase uses for additive surface. Only the desktop
+    /// orchestrator overrides it.
+    async fn fire_directory_added(&self, _directory: &str, _source: &str) {}
+
     /// Enumerate registered subagents (markdown-defined + built-in). Used
     /// by `/agents` and `/status`.
     async fn list_agents(&self) -> Vec<AgentInfo>;

@@ -86,6 +86,14 @@ pub struct SandboxConvertContext {
     /// `sandbox.allowAppleEvents` is intentionally NOT applied in
     /// [`convert_settings_to_runtime_config`] so project/local can never set it.
     pub allow_apple_events_override: Option<bool>,
+    /// SOURCE-RESTRICTED `sandbox.network.strictAllowlist` (2.1.219), resolved
+    /// per-source at the composition root exactly like
+    /// [`Self::allow_apple_events_override`].
+    ///
+    /// The oracle honors it only from user / managed-policy / CLI `--settings`;
+    /// project `.lingxi/settings.json` and `settings.local.json` are IGNORED.
+    /// `None` ⇒ leave the default `false`.
+    pub strict_allowlist_override: Option<bool>,
 }
 
 /// Parse a `Tool(content)` permission rule string into `(tool, content)`.
@@ -332,6 +340,19 @@ pub fn convert_settings_to_runtime_config(
     // merged settings blob, so project/local can never enable Apple Events.
     if let Some(v) = ctx.allow_apple_events_override {
         cfg.allow_apple_events = v;
+    }
+
+    // strictAllowlist SOURCE RESTRICTION (applied LAST, same rationale as
+    // allowAppleEvents). Honored only from user / managed-policy / CLI
+    // `--settings`; a project or local tier that sets it is ignored, so the
+    // merged-blob value is deliberately overwritten here rather than trusted.
+    if let Some(v) = ctx.strict_allowlist_override {
+        cfg.network.strict_allowlist = v;
+    } else {
+        // No honored source set it. Clear anything a non-honored tier merged
+        // in — leaving it would let project settings enable the flag through
+        // the merged blob, which is exactly what the restriction forbids.
+        cfg.network.strict_allowlist = false;
     }
 
     cfg

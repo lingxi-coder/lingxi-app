@@ -929,6 +929,42 @@ fn apple_events_override(
         .and_then(|s| s.allow_apple_events)
 }
 
+/// Resolve the SOURCE-RESTRICTED `sandbox.network.strictAllowlist` (2.1.219).
+///
+/// Same tier rule as [`apple_events_override`]: honored only from managed /
+/// policy, CLI `--settings` (no boot-time analog here), and user settings.
+/// Project `.lingxi/settings.json` and `settings.local.json` are IGNORED — the
+/// oracle's own description says so outright.
+///
+/// `None` ⇒ no honored source set it, and the converter clears the flag rather
+/// than inheriting whatever a non-honored tier merged in.
+fn strict_allowlist_override(
+    managed_raw_tiers: &[String],
+    user_settings_raw: Option<&str>,
+) -> Option<bool> {
+    use sandbox::runtime_config::SettingsJson;
+    // Managed/policy file tiers are deep-merged; resolve per-field last-defined
+    // so a partial drop-in cannot clobber an earlier tier's value.
+    let mut merged_managed: Option<bool> = None;
+    for raw in managed_raw_tiers {
+        if let Ok(parsed) = serde_json::from_str::<SettingsJson>(raw) {
+            if let Some(n) = parsed.sandbox.and_then(|s| s.network) {
+                if n.strict_allowlist {
+                    merged_managed = Some(true);
+                }
+            }
+        }
+    }
+    if let Some(v) = merged_managed {
+        return Some(v);
+    }
+    user_settings_raw
+        .and_then(|raw| serde_json::from_str::<SettingsJson>(raw).ok())
+        .and_then(|s| s.sandbox)
+        .and_then(|s| s.network)
+        .and_then(|n| n.strict_allowlist.then_some(true))
+}
+
 /// claude-code `getClaudeTempDir()` + `getClaudeTempDirName()` analog (Shell.ts:307),
 /// identical to the canonical private `lingxi_temp_dir()` in `tool-shell`'s
 /// `prompt.rs`: `baseTmpDir = LINGXI_TMPDIR || (windows ? tmpdir() : "/tmp")`,
@@ -6600,6 +6636,9 @@ pub async fn build(
         // flag(none) → user; `None` leaves the default `false`.
         let allow_apple_events_override =
             apple_events_override(&managed_tiers, user_settings_raw.as_deref());
+        // strictAllowlist: same source restriction (2.1.219).
+        let strict_allowlist_override_v =
+            strict_allowlist_override(&managed_tiers, user_settings_raw.as_deref());
         // Seed the `SandboxConvertContext` with the boot-resolvable hardening
         // paths so the settings/skills denyWrite defense actually fires
         // (sandbox-adapter.ts:225-299). Seeds with no boot analog
@@ -6626,6 +6665,7 @@ pub async fn build(
             managed_allowed_domains,
             managed_read_paths,
             allow_apple_events_override,
+            strict_allowlist_override: strict_allowlist_override_v,
             ..Default::default()
         };
         sandbox_runtime_config_from_settings_tiers(&refs, &cwd, &ctx)

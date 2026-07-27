@@ -547,3 +547,66 @@ fn seeded_non_symlink_settings_deny_write_kept_literal() {
 
     assert_eq!(resolve_deny_write_symlink(&real_str), real_str);
 }
+
+// ---------------------------------------------------------------------------
+// `sandbox.network.strictAllowlist` (2.1.219) — SOURCE-RESTRICTED.
+//
+// Oracle: "Only honored from user, managed/policy, or CLI (--settings)
+// settings — project settings (.claude/settings.json and
+// .claude/settings.local.json) are ignored."
+// ---------------------------------------------------------------------------
+
+/// A settings blob carrying only `sandbox.network.strictAllowlist`.
+fn strict_settings(on: bool) -> SettingsJson {
+    let mut net = sandbox::runtime_config::NetworkRestrictionConfig::default();
+    net.strict_allowlist = on;
+    SettingsJson {
+        permissions: None,
+        sandbox: Some(SandboxSettingsJson {
+            network: Some(net),
+            ..Default::default()
+        }),
+        settings_dir: None,
+    }
+}
+
+#[test]
+fn strict_allowlist_defaults_off() {
+    let cfg = convert_settings_to_runtime_config(&strict_settings(false), &ctx());
+    assert!(!cfg.network.strict_allowlist);
+}
+
+#[test]
+fn a_merged_tier_alone_cannot_enable_strict_allowlist() {
+    // THE security property. A project `.lingxi/settings.json` reaches the
+    // converter through the merged blob; without an honored override the flag
+    // must stay off, or project settings would silently gain a setting the
+    // oracle refuses them.
+    let cfg = convert_settings_to_runtime_config(&strict_settings(true), &ctx());
+    assert!(
+        !cfg.network.strict_allowlist,
+        "an unhonored tier must not enable strictAllowlist"
+    );
+}
+
+#[test]
+fn an_honored_source_enables_strict_allowlist() {
+    let c = SandboxConvertContext {
+        strict_allowlist_override: Some(true),
+        ..SandboxConvertContext::default()
+    };
+    let cfg = convert_settings_to_runtime_config(&strict_settings(false), &c);
+    assert!(cfg.network.strict_allowlist);
+}
+
+#[test]
+fn an_honored_false_overrides_a_merged_true() {
+    // Explicit `false` from an honored source must win over a project tier's
+    // `true` — the override is authoritative in both directions.
+    let c = SandboxConvertContext {
+        strict_allowlist_override: Some(false),
+        ..SandboxConvertContext::default()
+    };
+    let cfg = convert_settings_to_runtime_config(&strict_settings(true), &c);
+    assert!(!cfg.network.strict_allowlist);
+}

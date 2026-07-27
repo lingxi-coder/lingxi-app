@@ -14,9 +14,10 @@ use crate::async_registry::{AsyncHookRegistry, HookWork};
 use crate::definition::{HookDefinition, HookExecutor};
 use crate::events::HookEvent;
 use crate::hook_payload::{
-    parse_response, ConfigChangePayload, CwdChangedPayload, ElicitationPayload,
+    parse_response, ConfigChangePayload, CwdChangedPayload, DirectoryAddedPayload, ElicitationPayload,
     ElicitationResultPayload, FileChangedPayload, HookEventNameConfigChange,
-    HookEventNameCwdChanged, HookEventNameElicitation, HookEventNameElicitationResult,
+    HookEventNameCwdChanged, HookEventNameDirectoryAdded, HookEventNameElicitation,
+    HookEventNameElicitationResult,
     HookEventNameFileChanged, HookEventNameInstructionsLoaded, HookEventNameMessageDisplay,
     HookEventNameNotification, HookEventNamePermissionDenied, HookEventNamePermissionRequest,
     HookEventNamePost, HookEventNamePostCompact, HookEventNamePostToolBatch,
@@ -1921,6 +1922,21 @@ fn build_lifecycle_envelope_body(
                 new_cwd: new.to_string_lossy().into_owned(),
             };
             Some(("CwdChanged", serde_json::to_string(&payload).ok()?))
+        }
+        HookEvent::DirectoryAdded { directory, source } => {
+            let payload = DirectoryAddedPayload {
+                hook_event_name: HookEventNameDirectoryAdded,
+                session_id: b.session_id,
+                transcript_path: b.transcript_path,
+                cwd: b.cwd,
+                permission_mode: b.permission_mode,
+                agent_id: b.agent_id,
+                agent_type: b.agent_type,
+                effort: b.effort,
+                directory: directory.clone(),
+                source: source.clone(),
+            };
+            Some(("DirectoryAdded", serde_json::to_string(&payload).ok()?))
         }
         HookEvent::FileChanged { path, kind } => {
             let payload = FileChangedPayload {

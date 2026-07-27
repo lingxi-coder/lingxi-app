@@ -155,6 +155,7 @@ mod tests {
                 allowed_domains: vec!["github.com".into(), "*.npmjs.org".into()],
                 denied_domains: vec![],
                 allow_managed_domains_only: true,
+                strict_allowlist: false,
                 allow_unix_sockets: vec!["/tmp/sock".into()],
                 allow_all_unix_sockets: true,
                 allow_local_binding: true,

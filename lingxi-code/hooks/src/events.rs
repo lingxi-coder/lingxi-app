@@ -81,6 +81,9 @@ pub enum HookEventType {
     /// synchronously with per-invocation telemetry suppressed (#39, BIN off
     /// 205713189: `MessageDisplay:aAt`).
     MessageDisplay,
+    /// A working directory was added mid-session — `/add-dir`, or the SDK
+    /// `register_repo_root` control request (2.1.219).
+    DirectoryAdded,
 }
 
 /// Expansion source for an [`HookEvent::UserPromptExpansion`] — `slash_command`
@@ -500,6 +503,20 @@ pub enum HookEvent {
         /// The expanded prompt text (wire `prompt`, required).
         prompt: String,
     },
+    /// A working directory was added to the session mid-run (2.1.219) —
+    /// `/add-dir` or the SDK `register_repo_root` control request.
+    ///
+    /// claude-code `a$t` (BIN off 237753662):
+    /// `{...,hook_event_name:"DirectoryAdded",directory:e,source:t}`, dispatched
+    /// with `matchQuery: t` — so a hook `matcher` is tested against the SOURCE,
+    /// not the path. The dispatcher collects each result's `systemMessage`,
+    /// dropping empties.
+    DirectoryAdded {
+        /// The directory that was added (wire `directory`, required).
+        directory: String,
+        /// What added it (wire `source`, required) — also the matcher query.
+        source: String,
+    },
     /// An assistant-message delta is about to be displayed (#39). Fired per
     /// flush, synchronously, with per-invocation telemetry suppressed —
     /// claude-code `aAt` (BIN off 205705090):
@@ -592,6 +609,7 @@ impl HookEvent {
             Self::PostToolBatch { .. } => HookEventType::PostToolBatch,
             Self::UserPromptExpansion { .. } => HookEventType::UserPromptExpansion,
             Self::MessageDisplay { .. } => HookEventType::MessageDisplay,
+            Self::DirectoryAdded { .. } => HookEventType::DirectoryAdded,
         }
     }
 }
@@ -632,6 +650,14 @@ mod event_tests {
                 },
                 HookEventType::MessageDisplay,
                 "MessageDisplay",
+            ),
+            (
+                HookEvent::DirectoryAdded {
+                    directory: "/tmp/x".into(),
+                    source: "add_dir".into(),
+                },
+                HookEventType::DirectoryAdded,
+                "DirectoryAdded",
             ),
         ] {
             assert_eq!(ev.event_type(), tag);

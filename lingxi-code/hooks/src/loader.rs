@@ -510,6 +510,7 @@ fn parse_event_type(name: &str) -> Option<HookEventType> {
         "PostToolBatch" => Some(HookEventType::PostToolBatch),
         "UserPromptExpansion" => Some(HookEventType::UserPromptExpansion),
         "MessageDisplay" => Some(HookEventType::MessageDisplay),
+        "DirectoryAdded" => Some(HookEventType::DirectoryAdded),
         _ => None,
     }
 }
@@ -613,7 +614,7 @@ mod tests {
     }
 
     #[test]
-    fn all_30_event_names_parse_to_their_variant() {
+    fn all_31_event_names_parse_to_their_variant() {
         // Mirrors claude-code HOOK_EVENTS (entrypoints/sdk/coreTypes.ts:25-53).
         // Each (settings name -> expected HookEventType) must round-trip.
         let cases: &[(&str, HookEventType)] = &[
@@ -647,8 +648,9 @@ mod tests {
             ("PostToolBatch", HookEventType::PostToolBatch),
             ("UserPromptExpansion", HookEventType::UserPromptExpansion),
             ("MessageDisplay", HookEventType::MessageDisplay),
+            ("DirectoryAdded", HookEventType::DirectoryAdded),
         ];
-        assert_eq!(cases.len(), 30, "claude-code HOOK_EVENTS has 30 names");
+        assert_eq!(cases.len(), 31, "claude-code 2.1.220 HOOK_EVENTS has 31 names");
         for (name, expected) in cases {
             let raw = one_command(name);
             let hooks = parse_hooks_from_settings_json(&raw, HookSource::User).unwrap();

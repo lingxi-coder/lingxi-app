@@ -107,6 +107,7 @@ hook_event_name_marker!(HookEventNamePermissionDenied, "PermissionDenied");
 hook_event_name_marker!(HookEventNameSetup, "Setup");
 hook_event_name_marker!(HookEventNameSubagentStart, "SubagentStart");
 hook_event_name_marker!(HookEventNameCwdChanged, "CwdChanged");
+hook_event_name_marker!(HookEventNameDirectoryAdded, "DirectoryAdded");
 hook_event_name_marker!(HookEventNameFileChanged, "FileChanged");
 hook_event_name_marker!(HookEventNameWorktreeRemove, "WorktreeRemove");
 // Deferred-completion batch — the final four events whose `HookEvent` variant
@@ -748,6 +749,32 @@ pub struct CwdChangedPayload {
     pub effort: Option<EffortLevel>,
     pub old_cwd: String,
     pub new_cwd: String,
+}
+
+/// Wire-format `DirectoryAdded` payload (2.1.219).
+///
+/// claude-code `a$t` (BIN off 237753662):
+/// `{...Kf(void 0),hook_event_name:"DirectoryAdded",directory:e,source:t}`,
+/// dispatched with `matchQuery: t` — a hook `matcher` is therefore tested
+/// against the SOURCE (`add_dir`, `register_repo_root`), not the path.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DirectoryAddedPayload {
+    pub hook_event_name: HookEventNameDirectoryAdded,
+    pub session_id: String,
+    pub transcript_path: String,
+    pub cwd: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub permission_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub effort: Option<EffortLevel>,
+    /// The directory that was added.
+    pub directory: String,
+    /// What added it — also the matcher query.
+    pub source: String,
 }
 
 /// Wire-format `FileChanged` payload (1:1 with `coreSchemas.ts:737-745`

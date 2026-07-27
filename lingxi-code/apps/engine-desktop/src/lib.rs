@@ -1799,13 +1799,17 @@ pub struct DesktopConfig {
     /// Settings `apiKeyHelper`: shell command/path that prints the Anthropic
     /// auth value. Used only when no higher-priority API key/OAuth source wins.
     pub api_key_helper: Option<String>,
-    /// (M13) Managed context forces Claude.ai OAuth as the effective auth
-    /// source (managed settings `forceLoginMethod: "claudeai"`): with a stored
-    /// OAuth session it outranks even an env `ANTHROPIC_API_KEY` in the auth
-    /// resolver (`llm_client::oauth::anthropic::resolver`). Host-resolved
-    /// (F2-01: `build()` performs no managed-settings reads for this); the CLI
-    /// fills it from the managed tiers, bridge-server keeps the default
-    /// `false`.
+    /// (M13) The HOST launcher forces Claude.ai OAuth as the effective auth
+    /// source: with a stored OAuth session it then outranks even an env
+    /// `ANTHROPIC_API_KEY` in the auth resolver
+    /// (`llm_client::oauth::anthropic::resolver`). claude-code derives this
+    /// from `KWr()` (@228931361), a pure env predicate that
+    /// `resolve_llm_stack` reads itself via
+    /// [`llm_client::oauth::anthropic::resolver::host_managed_oauth_only`], so
+    /// every host gets it for free; this field only lets an embedding host
+    /// declare the same forcing without the launcher env. A managed
+    /// `forceLoginMethod` policy must NEVER be fed here — it has no place in
+    /// credential precedence (`zb()` @228933355).
     pub managed_oauth_only: bool,
     /// (M13) `true` when the launcher advertised an FD-inherited Anthropic API
     /// key (`CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR` in claude-code's managed /
@@ -3086,6 +3090,38 @@ fn oauth_subscriber_flag(
         source,
         llm_client::oauth::anthropic::resolver::AuthSource::OAuthClaudeAi
     ) && llm_client::oauth::anthropic::subscription_from_scopes(scopes)
+}
+
+/// Seed of the shared subscription slot for a session that holds a stored
+/// Claude.ai credential.
+///
+/// The tier persisted inside the credential is readable through
+/// `getSubscriptionType()` (`Aa()` @228959617) and `getRateLimitTier()` (`jW()`,
+/// same region), and BOTH short-circuit to `null` unless
+/// `isAnthropicAuthEnabled()` (`zb()` @228933355) holds — i.e. a leftover stored
+/// blob under an env key / bearer / FD key reports NO tier at all. So the tier
+/// is gated on the RESOLVER's pick alone: `Aa()` does NOT additionally require
+/// the `user:inference` scope that `isClaudeAISubscriber` folds into
+/// [`oauth_subscriber_flag`], so an inference-less OAuth session still reports
+/// its tier while `is_subscriber` is false.
+fn subscription_seed(
+    source: &llm_client::oauth::anthropic::resolver::AuthSource,
+    scopes: &[String],
+    subscription_type: Option<&String>,
+    rate_limit_tier: Option<&String>,
+) -> traits::subscription::SubscriptionSnapshot {
+    let oauth_effective = matches!(
+        source,
+        llm_client::oauth::anthropic::resolver::AuthSource::OAuthClaudeAi
+    );
+    traits::subscription::SubscriptionSnapshot {
+        is_subscriber: oauth_subscriber_flag(source, scopes),
+        subscription_type: oauth_effective
+            .then(|| subscription_type.cloned())
+            .flatten(),
+        rate_limit_tier: oauth_effective.then(|| rate_limit_tier.cloned()).flatten(),
+        ..Default::default()
+    }
 }
 
 /// Fold the profile + roles responses into the shared snapshot. Pure —
@@ -4377,17 +4413,25 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
     match credentials.get_oauth_tokens().await {
         Ok(Some(tokens)) => {
             // (M13) Drive the documented auth-source resolver with the full
-            // context instead of a hand-rolled two-flag exclusion: managed
-            // OAuth forcing (`forceLoginMethod: "claudeai"`) makes the stored
-            // session the effective auth EVEN with an env key present, an
-            // FD-inherited key outranks the stored session, and a
-            // keychain-stored key ranks BELOW it. The below-OAuth sources
-            // (settings key / helper / Bedrock) cannot change the outcome once
-            // `has_stored_oauth` is true, so their slots stay conservative.
+            // context instead of a hand-rolled two-flag exclusion: HOST-forced
+            // OAuth makes the stored session the effective auth EVEN with an
+            // env key present, an FD-inherited key outranks the stored
+            // session, and a keychain-stored key ranks BELOW it. The
+            // below-OAuth sources (settings key / helper / Bedrock) cannot
+            // change the outcome once `has_stored_oauth` is true, so their
+            // slots stay conservative.
             let auth_source =
                 llm_client::oauth::anthropic::resolver::resolve(
                     &llm_client::oauth::anthropic::resolver::ResolverContext {
-                        managed_oauth_only: cfg.managed_oauth_only,
+                        // The ONLY thing that demotes an env key below the
+                        // stored session is `KWr()` (@228931361), read HERE —
+                        // the credential-resolution point, exactly where
+                        // `zb()` (@228933355) evaluates it — so EVERY
+                        // entrypoint agrees, including the ones that never
+                        // pass through the CLI's `build_runtime_from_config`
+                        // (`mcp serve`, `auto-mode-setup`, bridge-server).
+                        managed_oauth_only: cfg.managed_oauth_only
+                            || llm_client::oauth::anthropic::resolver::host_managed_oauth_only(),
                         env_auth_token: std::env::var("ANTHROPIC_AUTH_TOKEN")
                             .ok()
                             .filter(|v| !v.is_empty()),
@@ -4405,12 +4449,20 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
                         aws_present: false,
                     },
                 );
-            is_subscriber = oauth_subscriber_flag(&auth_source, &tokens.scopes);
             // (M13) The stored credential carries the tier persisted at login
             // (claude-code keeps `subscriptionType`/`rateLimitTier` inside
             // `claudeAiOauth`), so enterprise/tier-gated behaviour is correct
-            // from request #1 — no async profile-fetch window.
-            persisted_subscription_type.clone_from(&tokens.subscription_type);
+            // from request #1 — no async profile-fetch window — but only while
+            // the stored session is the effective auth source (see
+            // [`subscription_seed`]).
+            let seed = subscription_seed(
+                &auth_source,
+                &tokens.scopes,
+                tokens.subscription_type.as_ref(),
+                tokens.rate_limit_tier.as_ref(),
+            );
+            is_subscriber = seed.is_subscriber;
+            persisted_subscription_type.clone_from(&seed.subscription_type);
             // Re-seed the shared slot with the resolved subscriber flag + the
             // PERSISTED tier so readers see them even before (or without) the
             // background profile+roles fetch landing. SECRECY: deliberately
@@ -4419,12 +4471,7 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
             // pattern — BEFORE the original moves into `init_refresh_driver`;
             // it is exposed again only inside the spawned fetch task.
             if let Ok(mut guard) = subscription.write() {
-                *guard = Some(traits::subscription::SubscriptionSnapshot {
-                    is_subscriber,
-                    subscription_type: tokens.subscription_type.clone(),
-                    rate_limit_tier: tokens.rate_limit_tier.clone(),
-                    ..Default::default()
-                });
+                *guard = Some(seed);
             }
             let profile_token = protocol::Secret::new(tokens.access_token.expose_secret().clone());
             match llm_client::oauth::anthropic::client::init_refresh_driver(
@@ -4622,8 +4669,8 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
     // OAuth bridges into the client exactly when the auth RESOLVER made the
     // stored session the effective source (M13): `oauth_auth_state` is only
     // captured for an OAuth-effective subscriber session, which outranks a
-    // keychain-stored key and — under managed `forceLoginMethod: "claudeai"` —
-    // even an env key. `has_oauth` selects `AuthStrategy::OAuthBearer`, which
+    // keychain-stored key and — under HOST forcing (`KWr()` @228931361) — even
+    // an env key. `has_oauth` selects `AuthStrategy::OAuthBearer`, which
     // is what injects the required `oauth-2025-04-20` beta on Anthropic routes;
     // the assemble input below drops the key claim when OAuth is effective so
     // the ApiKey strategy can't shadow it.
@@ -4960,7 +5007,11 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
     // (M13) Enterprise state now comes from the PERSISTED credential tier
     // (claude-code reads `subscriptionType` synchronously from the stored
     // tokens), so the static build-time state is correct from request #1;
-    // the shared subscription slot freshens it per request.
+    // the shared subscription slot freshens it per request. `Ger()`
+    // (@228959874) is `Aa() === "enterprise"`, so it inherits `Aa()`'s
+    // `isAnthropicAuthEnabled` gate — `persisted_subscription_type` is `None`
+    // whenever a non-OAuth source outranks the stored blob
+    // ([`subscription_seed`]).
     let subscriber_state = SubscriberState {
         is_subscriber,
         is_enterprise: persisted_subscription_type.as_deref() == Some("enterprise"),
@@ -9642,8 +9693,13 @@ mod tests {
             &ctx(false, false, false, false, true),
             &inference
         ));
-        // (M13) Managed `forceLoginMethod: "claudeai"` forces the stored session
-        // even when an env ANTHROPIC_API_KEY is present.
+        // (M13) HOST forcing — and ONLY host forcing (`KWr()` @228931361,
+        // `zb()`'s `(n||i) && !KWr()` term) — makes the stored session outrank
+        // an env ANTHROPIC_API_KEY. A managed `forceLoginMethod: "claudeai"`
+        // policy is NOT `KWr()` and must never reach this flag: `zb()` has no
+        // `forceLoginMethod` term, and `Gde()` (@228967690) REFUSES that
+        // combination ("A non-OAuth Anthropic credential cannot satisfy the org
+        // pin") rather than silently promoting OAuth.
         assert!(super::oauth_subscriber_flag(
             &ctx(true, true, false, false, false),
             &inference
@@ -9658,6 +9714,56 @@ mod tests {
             &ctx(false, false, false, false, false),
             &[]
         ));
+    }
+
+    /// `Aa()` (@228959617) / `jW()` both `return null` unless `zb()` holds, so
+    /// the tier persisted inside the stored credential is visible ONLY while
+    /// the resolver keeps the stored session as the effective source.
+    #[test]
+    fn subscription_seed_gates_persisted_tier_on_effective_oauth() {
+        use llm_client::oauth::anthropic::resolver::AuthSource;
+        let inference = vec!["user:inference".to_string()];
+        let tier = "enterprise".to_string();
+        let limit = "default_claude_max_20x".to_string();
+
+        // OAuth effective ⇒ both `Aa()` and `jW()` read the persisted values.
+        let seed = super::subscription_seed(
+            &AuthSource::OAuthClaudeAi,
+            &inference,
+            Some(&tier),
+            Some(&limit),
+        );
+        assert!(seed.is_subscriber);
+        assert_eq!(seed.subscription_type.as_deref(), Some("enterprise"));
+        assert_eq!(
+            seed.rate_limit_tier.as_deref(),
+            Some("default_claude_max_20x")
+        );
+
+        // An env ANTHROPIC_API_KEY outranks the stored blob ⇒ `zb()` false ⇒
+        // NO tier at all (and `Ger()` — the static `is_enterprise` — is false).
+        for outranking in [
+            AuthSource::EnvApiKey,
+            AuthSource::EnvAuthToken,
+            AuthSource::FileDescriptor,
+        ] {
+            let seed = super::subscription_seed(&outranking, &inference, Some(&tier), Some(&limit));
+            assert!(!seed.is_subscriber);
+            assert_eq!(seed.subscription_type, None);
+            assert_eq!(seed.rate_limit_tier, None);
+        }
+
+        // `Aa()` gates on `zb()` ALONE — an OAuth-effective session without the
+        // `user:inference` scope is not a Claude.ai subscriber, yet its tier is
+        // still readable.
+        let seed = super::subscription_seed(
+            &AuthSource::OAuthClaudeAi,
+            &["user:profile".to_string()],
+            Some(&tier),
+            Some(&limit),
+        );
+        assert!(!seed.is_subscriber);
+        assert_eq!(seed.subscription_type.as_deref(), Some("enterprise"));
     }
 
     /// A [`client_adapter::PermissionRequestSink`] that records the requests the

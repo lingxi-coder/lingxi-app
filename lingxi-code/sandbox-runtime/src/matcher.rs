@@ -93,6 +93,38 @@ pub fn filter_network_request(port: u16, host: &str, config: &NetworkConfig) -> 
     false
 }
 
+/// The stderr line `yo(...)` emits for `msg`, or `None` when it stays silent.
+///
+/// 2.1.220 `yo` @229781624:
+///
+/// ```text
+/// function yo(e,t){if(!process.env.SRT_DEBUG)return;let r=t?.level||"info",
+/// n="[SandboxDebug]";switch(r){case"error":console.error(`${n} ${e}`);break;
+/// case"warn":console.warn(`${n} ${e}`);break;default:console.error(`${n} ${e}`)}}
+/// ```
+///
+/// Nothing is emitted without `SRT_DEBUG`, every level lands on stderr
+/// (`console.warn` is stderr under Node too), and the level only picks the
+/// console method: the rendered line is `[SandboxDebug] ` + the message either
+/// way, so the port carries no level at all.
+fn sandbox_debug_line(srt_debug: bool, msg: &str) -> Option<String> {
+    srt_debug.then(|| format!("[SandboxDebug] {msg}"))
+}
+
+/// `yo(...)` — the only channel `srt` logs network-filter decisions on.
+///
+/// Deliberately NOT `tracing`: these lines must be invisible unless the user
+/// asked for them with `SRT_DEBUG`, and a `tracing` event at `error`/`warn`
+/// would clear the CLI's default `warn` stderr filter in `--print` / `--no-tui`
+/// mode, printing where claude-code prints nothing.
+fn yo(msg: &str) {
+    #[cfg(test)]
+    tests::record_yo(msg);
+    if let Some(line) = sandbox_debug_line(std::env::var_os("SRT_DEBUG").is_some(), msg) {
+        eprintln!("{line}");
+    }
+}
+
 /// `filterNetworkRequest` WITH the interactive ask-callback path
 /// (`sandbox-manager.js:62-119`; 2.1.220 `wSu` @229871400). Identical
 /// deny-first/allow core as [`filter_network_request`], but the *unmatched*
@@ -109,8 +141,10 @@ pub fn filter_network_request(port: u16, host: &str, config: &NetworkConfig) -> 
 /// - unmatched + `ask = Some(cb)` → `await cb(host, port)`; `Ok(true)` → allow,
 ///   `Ok(false)` or `Err(_)` → deny (the TS `try/catch` denies on throw).
 ///
-/// Every outcome logs the oracle's `yo(...)` line byte-for-byte (original
-/// `host`, not the canonical form — the TS templates interpolate `t`).
+/// Every outcome goes through the [`yo`] port, so the emitted line matches the
+/// oracle byte-for-byte — including its `SRT_DEBUG` gate and `[SandboxDebug] `
+/// prefix — with the original `host`, not the canonical form (the TS templates
+/// interpolate `t`).
 ///
 /// `host` (not the canonicalized form) is passed to the callback, matching the
 /// TS which forwards the original `{ host, port }`.
@@ -121,21 +155,21 @@ pub async fn filter_network_request_with_ask(
     ask: Option<&AskFn>,
 ) -> bool {
     if !is_valid_host(host) {
-        // `Denying malformed host: ${JSON.stringify(t)}:${e}` — error level.
+        // `Denying malformed host: ${JSON.stringify(t)}:${e}`.
         let quoted = serde_json::to_string(host).unwrap_or_else(|_| format!("{host:?}"));
-        tracing::error!("Denying malformed host: {quoted}:{port}");
+        yo(&format!("Denying malformed host: {quoted}:{port}"));
         return false;
     }
     let canonical = canonicalize_host(host).unwrap_or_else(|| host.to_string());
     for denied in &config.denied_domains {
         if matches_domain_pattern(&canonical, denied) {
-            tracing::debug!("Denied by config rule: {host}:{port}");
+            yo(&format!("Denied by config rule: {host}:{port}"));
             return false;
         }
     }
     for allowed in &config.allowed_domains {
         if matches_domain_pattern(&canonical, allowed) {
-            tracing::debug!("Allowed by config rule: {host}:{port}");
+            yo(&format!("Allowed by config rule: {host}:{port}"));
             return true;
         }
     }
@@ -144,22 +178,22 @@ pub async fn filter_network_request_with_ask(
     // `strictAllowlist` — strict must never fire the interactive ask).
     let strict = config.strict_allowlist == Some(true);
     let Some(cb) = ask.filter(|_| !strict) else {
-        tracing::debug!("No matching config rule, denying: {host}:{port}");
+        yo(&format!("No matching config rule, denying: {host}:{port}"));
         return false;
     };
-    tracing::debug!("No matching config rule, asking user: {host}:{port}");
+    yo(&format!("No matching config rule, asking user: {host}:{port}"));
     match cb(host, port).await {
         Ok(true) => {
-            tracing::debug!("User allowed: {host}:{port}");
+            yo(&format!("User allowed: {host}:{port}"));
             true
         }
         Ok(false) => {
-            tracing::debug!("User denied: {host}:{port}");
+            yo(&format!("User denied: {host}:{port}"));
             false
         }
         // A callback error (the TS callback throwing) denies — the TS `catch`.
         Err(e) => {
-            tracing::error!("Error in permission callback: {e}");
+            yo(&format!("Error in permission callback: {e}"));
             false
         }
     }
@@ -169,6 +203,66 @@ pub async fn filter_network_request_with_ask(
 mod tests {
     use super::*;
     use crate::config::NetworkConfig;
+
+    thread_local! {
+        /// Every message handed to [`yo`] on this thread, recorded regardless
+        /// of `SRT_DEBUG` so a test can pin BOTH that a branch routes through
+        /// the gated port and the exact text it passes.
+        static YO_LOG: std::cell::RefCell<Vec<String>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    pub(super) fn record_yo(msg: &str) {
+        YO_LOG.with(|l| l.borrow_mut().push(msg.to_string()));
+    }
+
+    fn drain_yo() -> Vec<String> {
+        YO_LOG.with(|l| std::mem::take(&mut *l.borrow_mut()))
+    }
+
+    /// `yo` @229781624 returns before printing anything unless `SRT_DEBUG` is
+    /// set, and prefixes what it does print with `[SandboxDebug] `. Nothing may
+    /// reach stderr on the default (unset) path — the CLI's non-TUI `warn`
+    /// filter would otherwise surface a `tracing::error!` where claude-code is
+    /// silent.
+    #[test]
+    fn debug_lines_are_srt_debug_gated_and_prefixed() {
+        assert_eq!(
+            sandbox_debug_line(false, "Denying malformed host: \"a b\":443"),
+            None
+        );
+        assert_eq!(
+            sandbox_debug_line(true, "Denying malformed host: \"a b\":443").as_deref(),
+            Some("[SandboxDebug] Denying malformed host: \"a b\":443")
+        );
+    }
+
+    /// The malformed-host and callback-error branches are the two the oracle
+    /// tags `{level:"error"}` — the level picks a `console` method, it does NOT
+    /// lift the `SRT_DEBUG` gate. Both must therefore go through [`yo`] with the
+    /// oracle's exact message.
+    #[tokio::test]
+    async fn error_level_branches_still_route_through_the_gated_port() {
+        let _ = drain_yo();
+        assert!(
+            !filter_network_request_with_ask(443, "bad host", &allow_example(), None).await
+        );
+        assert_eq!(
+            drain_yo(),
+            vec![r#"Denying malformed host: "bad host":443"#.to_string()]
+        );
+
+        let ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ask = ask_err(std::sync::Arc::clone(&ran));
+        assert!(!filter_network_request_with_ask(443, "unknown.com", &allow_example(), Some(&ask)).await);
+        assert_eq!(
+            drain_yo(),
+            vec![
+                "No matching config rule, asking user: unknown.com:443".to_string(),
+                "Error in permission callback: boom".to_string(),
+            ]
+        );
+    }
 
     #[test]
     fn wildcard_and_exact_matching() {

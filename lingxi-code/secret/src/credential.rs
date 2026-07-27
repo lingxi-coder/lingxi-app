@@ -144,16 +144,22 @@ pub enum CredentialError {
 /// Caches the Anthropic API key in process memory and refreshes from
 /// [`SecureStorage`] on TTL expiry.
 ///
-/// The cache uses a `RwLock` for fast read-mostly access; the `refresh_lock`
-/// is reserved for future OAuth-refresh serialization. `http` and `clock` are
-/// captured at construction so the manager remains runtime-agnostic.
+/// The cache uses a `RwLock` for fast read-mostly access; `session_meta_lock`
+/// serializes every read-modify-write of the OAuth session blob. `http` and
+/// `clock` are captured at construction so the manager remains
+/// runtime-agnostic.
 pub struct CredentialManager {
     storage: Arc<dyn SecureStorage>,
     clock: Arc<dyn Clock>,
     #[allow(dead_code)]
     http: Arc<dyn HttpTransport>,
-    #[allow(dead_code)]
-    refresh_lock: Mutex<()>,
+    /// Guards read → merge → write over `anthropic-oauth-meta`, so a token
+    /// rotation and a subscription refresh running concurrently cannot lose
+    /// each other's fields. claude-code funnels every credential mutation
+    /// through `ixt()` → `Hcg()` (@228065879), which serializes on an
+    /// in-process promise chain plus a `.storage-write` lockfile; this is the
+    /// in-process half of that contract.
+    session_meta_lock: Mutex<()>,
     // caches are kept under RwLock; M1 only exposes api_key getter.
     api_key_cache: RwLock<Option<(Secret<String>, std::time::SystemTime)>>,
     /// Credentials injected by the packaged desktop bridge live only for the
@@ -178,7 +184,7 @@ impl CredentialManager {
             storage,
             clock,
             http,
-            refresh_lock: Mutex::new(()),
+            session_meta_lock: Mutex::new(()),
             api_key_cache: RwLock::new(None),
             provider_key_cache: RwLock::new(HashMap::new()),
             api_key_ttl: Duration::from_secs(300),
@@ -457,6 +463,10 @@ impl CredentialManager {
         email: &str,
         org_id: &str,
     ) -> Result<(), CredentialError> {
+        // Held across the whole read → write span: a concurrent
+        // `update_oauth_subscription` must not slip its own read in between and
+        // then overwrite the rotated `expires_at` with the pre-rotation one.
+        let _guard = self.session_meta_lock.lock().await;
         let now = self.clock.now();
 
         // Read the prior session blob (best-effort) BEFORE the meta entry is
@@ -518,11 +528,18 @@ impl CredentialManager {
     /// `subscriptionType: t.subscriptionType ?? e?.subscriptionType ?? null`
     /// (an incoming `None` PRESERVES the stored value; it never clears one).
     /// No-op when no session blob exists (not logged in).
+    ///
+    /// The merge runs under `session_meta_lock` so it composes with a
+    /// concurrent [`Self::store_oauth_tokens`] rotation instead of racing it —
+    /// whichever wins the lock, the loser re-reads and preserves the winner's
+    /// fields, matching the oracle's single serialized `mutate()` (`Wer`
+    /// @228948885 merges tokens AND tier in one callback).
     pub async fn update_oauth_subscription(
         &self,
         subscription_type: Option<&str>,
         rate_limit_tier: Option<&str>,
     ) -> Result<(), CredentialError> {
+        let _guard = self.session_meta_lock.lock().await;
         let Some(mut meta) = self.read_oauth_session_meta().await else {
             return Ok(());
         };
@@ -966,6 +983,82 @@ mod oauth_tests {
             .await
             .expect("no-op update after logout");
         assert!(cm.get_oauth_tokens().await.expect("get").is_none());
+    }
+
+    /// Storage double that inserts an await point at every operation, so
+    /// `tokio::join!` on the current-thread runtime interleaves two credential
+    /// writers exactly at the read → write boundary the lock has to close.
+    struct YieldingStorage(Arc<MemStorage>);
+
+    #[async_trait]
+    impl SecureStorage for YieldingStorage {
+        async fn store(
+            &self,
+            service: &str,
+            account: &str,
+            data: SecureStorageData,
+        ) -> Result<(), SecureStorageError> {
+            tokio::task::yield_now().await;
+            self.0.store(service, account, data).await
+        }
+        async fn retrieve(
+            &self,
+            service: &str,
+            account: &str,
+        ) -> Result<Option<SecureStorageData>, SecureStorageError> {
+            tokio::task::yield_now().await;
+            self.0.retrieve(service, account).await
+        }
+        async fn delete(&self, service: &str, account: &str) -> Result<(), SecureStorageError> {
+            tokio::task::yield_now().await;
+            self.0.delete(service, account).await
+        }
+        async fn list(&self, service: &str) -> Result<Vec<String>, SecureStorageError> {
+            self.0.list(service).await
+        }
+        fn is_encrypted(&self) -> bool {
+            false
+        }
+        fn backend(&self) -> SecureStorageBackend {
+            SecureStorageBackend::PlainText
+        }
+    }
+
+    /// The desktop freshener's tier merge and the refresh driver's rotation
+    /// both read-modify-write the session blob on one shared manager. Neither
+    /// may drop the other's fields: claude-code applies both in a single
+    /// `mutate()` callback (`Wer` @228948885) serialized by `Hcg` @228065879.
+    #[tokio::test]
+    async fn concurrent_tier_merge_and_rotation_do_not_lose_each_other() {
+        let cm = CredentialManager::new(
+            Arc::new(YieldingStorage(Arc::new(MemStorage::default()))) as Arc<dyn SecureStorage>,
+            Arc::new(FixedClock),
+            Arc::new(NoHttp),
+        );
+        let stale = SystemTime::UNIX_EPOCH + Duration::from_secs(5_000);
+        let rotated = SystemTime::UNIX_EPOCH + Duration::from_secs(9_000);
+        cm.store_oauth_tokens("a1", Some("r1"), stale, vec![], "e@x", "o")
+            .await
+            .expect("seed");
+
+        let (merged, rotate) = tokio::join!(
+            cm.update_oauth_subscription(Some("max"), Some("default_claude_max_20x")),
+            cm.store_oauth_tokens("a2", Some("r2"), rotated, vec![], "e@x", "o"),
+        );
+        merged.expect("merge");
+        rotate.expect("rotate");
+
+        let got = cm.get_oauth_tokens().await.expect("get").expect("present");
+        assert_eq!(got.access_token.expose_secret(), "a2");
+        assert_eq!(
+            got.expires_at, rotated,
+            "the merge must not write the pre-rotation expiry back"
+        );
+        assert_eq!(got.subscription_type.as_deref(), Some("max"));
+        assert_eq!(
+            got.rate_limit_tier.as_deref(),
+            Some("default_claude_max_20x")
+        );
     }
 
     /// M13 back-compat: a pre-existing meta blob WITHOUT the subscription keys

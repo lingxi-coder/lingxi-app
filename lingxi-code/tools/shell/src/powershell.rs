@@ -358,6 +358,20 @@ impl Tool for PowerShellTool {
         self.ctx.sandbox_runner.cleanup_after_command().await;
         match run_result {
             Ok(out) => {
+                // OTEL `claude_code.commit.count` / `claude_code.pull_request.count`
+                // — claude-code drives `mEo(command, code, output)` from BOTH tool
+                // completion seams, not just BashTool. The PowerShell arm alone
+                // carries a skip guard:
+                //   g = m.code===0 && !m.stdout && m.stderr && !m.backgroundTaskId
+                //   if (!g && mEo(e.command, m.code, _).prResolved && …)
+                // (the `backgroundTaskId` conjunct is vacuous here — this tool has
+                // no background path). Byte-noop when OTEL is off.
+                let quiet_success_with_stderr =
+                    out.exit_code == 0 && out.stdout.is_empty() && !out.stderr.is_empty();
+                if !quiet_success_with_stderr {
+                    telemetry::otel::record_git_operation_counters(&cmd_str, out.exit_code);
+                }
+
                 let (stdout_clean, _ansi_out) = strip_ansi_count(&out.stdout);
                 let (stderr_clean, _ansi_err) = strip_ansi_count(&out.stderr);
                 let (stdout_final, truncated) =
@@ -437,6 +451,83 @@ mod tests {
                 None => std::env::remove_var("PATH"),
             }
         }
+    }
+
+    /// The OTEL runtime and its counter registry are process-global.
+    static OTEL_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Drive one PowerShell completion through the real `call()` and return the
+    /// rendered Prometheus registry.
+    async fn powershell_completion_metrics(command: &str, out: ProcessOutput) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let tool = PowerShellTool::new(shell_test_ctx(out));
+
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("pwsh");
+        std::fs::write(&fake, "#!/bin/sh\necho stub\n").unwrap();
+        let mut p = std::fs::metadata(&fake).unwrap().permissions();
+        p.set_mode(0o755);
+        std::fs::set_permissions(&fake, p).unwrap();
+        let _path = PathOverride::set(dir.path());
+
+        tool.call(json!({"command": command}), fresh_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+        telemetry::otel::prometheus_text().expect("prometheus registry")
+    }
+
+    /// claude-code drives `mEo(command, code, output)` from BOTH tool
+    /// completion seams — Bash @235699561 and PowerShell @235540668 — so a
+    /// `gh pr create` routed through PowerShell must bump
+    /// `claude_code.pull_request.count` exactly as the Bash seam does. The
+    /// PowerShell arm is the one that carries a skip guard:
+    ///   g = m.code===0 && !m.stdout && m.stderr && !m.backgroundTaskId
+    ///   if (!g && mEo(e.command, m.code, _).prResolved && …)
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn powershell_completion_records_git_counters_with_the_oracle_skip_guard() {
+        let _otel = OTEL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = PATH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cfg = telemetry::otel::OtelConfig::from_lookup(|key| match key {
+            telemetry::otel::ENV_ENABLE_TELEMETRY => Some("1".to_string()),
+            "OTEL_METRICS_EXPORTER" => Some("prometheus".to_string()),
+            "OTEL_LOGS_EXPORTER" | "OTEL_TRACES_EXPORTER" => Some("none".to_string()),
+            _ => None,
+        });
+        let _guard = telemetry::otel::install_process_with_config("test-powershell", false, cfg);
+
+        // Silent success that only wrote to stderr ⇒ the whole `mEo` call is
+        // skipped, so the counter must not even be registered yet.
+        let quiet = powershell_completion_metrics(
+            "gh pr create --title x",
+            ProcessOutput {
+                stdout: String::new(),
+                stderr: "warning: something\n".into(),
+                exit_code: 0,
+                timed_out: false,
+            },
+        )
+        .await;
+        assert!(
+            !quiet.contains("claude_code_pull_request_count"),
+            "the !g guard must skip mEo entirely, got: {quiet}"
+        );
+
+        // Normal completion ⇒ counted, same as the Bash seam.
+        let counted = powershell_completion_metrics(
+            "gh pr create --title x",
+            ProcessOutput {
+                stdout: "https://github.com/o/r/pull/1\n".into(),
+                stderr: String::new(),
+                exit_code: 0,
+                timed_out: false,
+            },
+        )
+        .await;
+        assert!(
+            counted.contains("claude_code_pull_request_count"),
+            "PowerShell seam must record the PR counter, got: {counted}"
+        );
     }
 
     /// 2.1.196 regression lock: grep-family / git diff / git grep exit 1 is

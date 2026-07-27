@@ -162,6 +162,12 @@ pub struct SubscriberState {
 struct StreamState {
     decoder: Box<dyn crate::StreamDecoder>,
     frames: Box<dyn crate::FrameStream>,
+    /// First frame already pulled by the drive loop's dispatch body-phase
+    /// lookahead (see [`ApiService::note_dispatch_body_phase_failure`]).
+    /// Consumed in place of the first `next_frame()` so decoding, watchdog and
+    /// error handling stay identical to the un-seeded path. `None` on every
+    /// stream that did not carry `anthropic-dispatch-id`.
+    seed: Option<Result<Option<crate::RawStreamFrame>, LlmError>>,
     queue: VecDeque<LlmEvent>,
     finished: bool,
     /// Guard against double-emit: once we have fired succeed/fail we never fire again.
@@ -437,11 +443,37 @@ pub struct ApiService {
     /// `previous_response_id` when the new request is a strict compatible
     /// extension of the previous completed request.
     responses_ws_session: tokio::sync::Mutex<ResponsesWebSocketSession>,
-    /// (cc 2.1.219) `anthropic-dispatch-id: v2s` degradation latch — set when
-    /// an attempt that carried the opt-in header failed with a 5xx/connection
-    /// error; every later attempt this session omits the header (the oracle's
-    /// module-scope `Kt` flag). Never reset.
-    dispatch_v2s_fallen_back: std::sync::atomic::AtomicBool,
+}
+
+/// (cc 2.1.219) Per-QUERY `anthropic-dispatch-id` state — the oracle's `Kt`/
+/// `no` pair.
+///
+/// Both live in the `let` list of the per-query generator `erp` (2.1.220
+/// @237543834: `…,_o=0,Kt=!1,no=!1,Dn=!1,…`), NOT at module scope: the module
+/// scope in that file holds only the `var` constants `S8s`/`Vtp` (@237594040).
+/// A fallback therefore lasts for the rest of the CURRENT query and the next
+/// query re-sends the header — the deliberate contrast is the afk-beta arm a
+/// few bytes earlier, which calls the global setters `F2(!1),gnn(!0)` and says
+/// "for this session".
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct DispatchHeaderState {
+    /// `fB(i.querySource)==="auxiliary"` — utility queries (compaction, recap,
+    /// title generation, …) never carry the header. `false` also covers the
+    /// oracle's `fB(void 0) === undefined` case, which passes the gate.
+    auxiliary: bool,
+    /// `Kt` — an attempt of THIS query that carried the header failed with a
+    /// 5xx / connection error, so every later attempt of this query omits it.
+    fallen_back: bool,
+}
+
+impl DispatchHeaderState {
+    /// `fB(querySource) === "auxiliary"` — the side-query driver
+    /// ([`ApiService::messages_create_side_query`]), which serves the oracle's
+    /// compaction / recap / title-generation / memory utility queries.
+    const AUXILIARY: Self = Self {
+        auxiliary: true,
+        fallen_back: false,
+    };
 }
 
 /// 429-attempt state held until the retry loop declares the error TERMINAL —
@@ -635,7 +667,6 @@ impl ApiService {
             last_rate_limit_record_ts_ms: Mutex::new(None),
             stream_idle_timeout_override: None,
             responses_ws_session: tokio::sync::Mutex::new(ResponsesWebSocketSession::new()),
-            dispatch_v2s_fallen_back: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -1366,33 +1397,57 @@ impl ApiService {
     }
 
     /// (cc 2.1.219) Opt-in `anthropic-dispatch-id: v2s` resolver —
-    /// `Mg.CLAUDE_CODE_DISPATCH_V2S ?? Ke("tengu_cedar_lattice", !1)`. A SET
-    /// env var wins over the flag in BOTH directions (`"0"` disables even a
-    /// true flag); unset/empty falls through to the flag (default OFF). Kept
-    /// under the original `CLAUDE_CODE_` name — a wire-parity var like the
-    /// sibling `CLAUDE_CODE_EXTRA_BODY` above.
+    /// `Mg.CLAUDE_CODE_DISPATCH_V2S ?? Ke("tengu_cedar_lattice", !1)`.
+    ///
+    /// `Mg` is `oMl(cfh, null)` with `cfh = {}` (2.1.220 @226176806): the
+    /// getter loop over `Object.entries({})` never runs and the prototype is
+    /// `null`, so `Mg.<ANY>` reads `undefined` and the nullish `??` ALWAYS
+    /// falls through to the flag. `CLAUDE_CODE_DISPATCH_V2S` is therefore not
+    /// a live switch in the shipped binary — the flag is the sole gate, and
+    /// reading the env here would let the port enable (or disable) a header
+    /// the oracle cannot.
     fn dispatch_v2s_opt_in() -> bool {
-        match std::env::var("CLAUDE_CODE_DISPATCH_V2S") {
-            Ok(v) if !v.is_empty() => matches!(
-                v.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            ),
-            // `::telemetry` = the flags crate (the unqualified name is the
-            // local `crate::model::telemetry` emit module).
-            _ => ::telemetry::flag_bool("tengu_cedar_lattice", false),
-        }
+        // `::telemetry` = the flags crate (the unqualified name is the
+        // local `crate::model::telemetry` emit module).
+        ::telemetry::flag_bool("tengu_cedar_lattice", false)
     }
 
-    /// (cc 2.1.219) Add `anthropic-dispatch-id: v2s` (`pi[S8s]=Vtp`) to a
-    /// first-party Anthropic attempt when the opt-in is on and the session has
-    /// not fallen back. The oracle additionally skips `querySource ===
-    /// "auxiliary"` utility queries; the port's `llm-client` layer carries no
-    /// query-source, so the header rides every first-party request from this
-    /// service (a noted approximation — the feature is default-off).
-    fn apply_dispatch_header(&self, prepared: &mut crate::PreparedLlmCall) {
-        use std::sync::atomic::Ordering;
-        if self.dispatch_v2s_fallen_back.load(Ordering::Relaxed)
-            || prepared.route.resolved_route.provider_id != crate::ProviderId::AnthropicFirstParty
+    /// (cc 2.1.219) `Ooe()` = `xn()==="firstParty" && Yd()` (2.1.220
+    /// @227683488) — the header's provider gate has TWO halves.
+    ///
+    /// `xn()` is env-only (bedrock/foundry/…/else `"firstParty"`), which the
+    /// port models as [`crate::ProviderId::AnthropicFirstParty`]. `Yd()` is the
+    /// BASE-URL half and is independent of it: `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL`
+    /// (`Pe.bool()`, i.e. `1|true|yes|on`) short-circuits to true, else
+    /// `d6r()` requires the configured base to be unset or to parse to host
+    /// `api.anthropic.com` (`T1e`; an unparseable URL is false). A first-party
+    /// route pointed at an enterprise gateway must get NO header.
+    fn dispatch_first_party(prepared: &crate::PreparedLlmCall) -> bool {
+        if prepared.route.resolved_route.provider_id != crate::ProviderId::AnthropicFirstParty {
+            return false;
+        }
+        if cache_env_truthy("_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL") {
+            return true;
+        }
+        // The port always resolves a concrete base (default
+        // `https://api.anthropic.com`), so the oracle's "unset ⇒ true" arm is
+        // the default host itself. `URL.host` keeps a non-default port, which
+        // is what `url::Url::port()` reports.
+        url::Url::parse(&prepared.provider_request.url).is_ok_and(|u| {
+            u.host_str().is_some_and(|h| match u.port() {
+                Some(p) => format!("{h}:{p}") == FIRST_PARTY_API_HOST,
+                None => h == FIRST_PARTY_API_HOST,
+            })
+        })
+    }
+
+    /// (cc 2.1.219) Add `anthropic-dispatch-id: v2s` (`pi[S8s]=Vtp`) to an
+    /// attempt: `!Kt && fB(i.querySource)!=="auxiliary" && Ooe() && (flag)`
+    /// (2.1.220 @237553955), in that order.
+    fn apply_dispatch_header(prepared: &mut crate::PreparedLlmCall, state: DispatchHeaderState) {
+        if state.fallen_back
+            || state.auxiliary
+            || !Self::dispatch_first_party(prepared)
             || !Self::dispatch_v2s_opt_in()
         {
             return;
@@ -1407,13 +1462,13 @@ impl ApiService {
 
     /// (cc 2.1.219) Dispatch-header degradation check: when THIS attempt
     /// carried the header and the failure is an HTTP 5xx or a connection
-    /// error, latch the session-wide fallback (`Kt=!0`) and report
+    /// error, latch the per-query fallback (`Kt=!0`) and report
     /// `(reason, status)` for the `tengu_dispatch_header_fallback` telemetry —
     /// the caller then retries immediately WITHOUT consuming retry budget
     /// (the oracle's `"retry:dispatch-header-strip"` step). `None` ⇒ not a
     /// dispatch-header failure; normal retry classification applies.
     fn note_dispatch_header_failure(
-        &self,
+        state: &mut DispatchHeaderState,
         prepared: &crate::PreparedLlmCall,
         err: &LlmError,
     ) -> Option<(&'static str, Option<u16>)> {
@@ -1421,30 +1476,26 @@ impl ApiService {
             .provider_request
             .headers
             .contains_key(DISPATCH_ID_HEADER);
-        self.note_dispatch_header_failure_carried(carried, err)
+        Self::note_dispatch_header_failure_carried(state, carried, err)
     }
 
     /// [`Self::note_dispatch_header_failure`] twin for callers whose prepared
     /// call was already moved (the stream open path) — `carried` is captured
     /// before the move.
     fn note_dispatch_header_failure_carried(
-        &self,
+        state: &mut DispatchHeaderState,
         carried: bool,
         err: &LlmError,
     ) -> Option<(&'static str, Option<u16>)> {
-        use std::sync::atomic::Ordering;
-        if !carried {
+        // `no && !Kt`.
+        if !carried || state.fallen_back {
             return None;
         }
         let http_5xx = Self::status_of(err).filter(|s| *s >= 500);
-        let conn_err = matches!(err, LlmError::Transport { .. } | LlmError::TlsCert { .. });
-        if http_5xx.is_none() && !conn_err {
+        if http_5xx.is_none() && !Self::is_dispatch_conn_err(err) {
             return None;
         }
-        if self.dispatch_v2s_fallen_back.swap(true, Ordering::Relaxed) {
-            // Already latched by a concurrent attempt — nothing new to report.
-            return None;
-        }
+        state.fallen_back = true;
         // Byte template: `[dispatch] ${Nu?`HTTP ${ss}`:"connection error"}
         // with ${S8s}; retrying without it` at level warn.
         let what = http_5xx.map_or_else(
@@ -1458,7 +1509,49 @@ impl ApiService {
         ))
     }
 
-    fn inject_headers(&self, prepared: &mut crate::PreparedLlmCall, request_id: &str) {
+    /// (cc 2.1.219) The oracle's SECOND dispatch-fallback arm (2.1.220
+    /// @237577972): `if(no&&!Kt&&Bs!==null&&!oc)` — a CONNECTION error raised
+    /// while reading the stream body, before the first stream event was
+    /// yielded. It latches `Kt`, emits `tengu_dispatch_header_fallback` with
+    /// `reason:"body_phase"`/`status:"none"` and `continue e`s, so unlike the
+    /// stale-connection arm right below it (`ko<jt`) it costs no retry budget.
+    ///
+    /// `!oc` ("nothing yielded yet") is why the port can only take this arm on
+    /// a ONE-FRAME lookahead in [`Self::drive_stream`]: once the stream is
+    /// handed to the caller there is no attempt loop left to `continue`.
+    /// `x2(Qo)` classifies node connection errors, so the watchdog's
+    /// [`LlmError::StreamInterrupted`] is correctly excluded.
+    fn note_dispatch_body_phase_failure(
+        state: &mut DispatchHeaderState,
+        carried: bool,
+        err: &LlmError,
+    ) -> bool {
+        if !carried || state.fallen_back || !Self::is_dispatch_conn_err(err) {
+            return false;
+        }
+        state.fallen_back = true;
+        // Byte template: `[dispatch] Stream connection error (${Bs.code}) with
+        // anthropic-dispatch-id before first event; retrying without it`. The
+        // port has no node `errno` string, so the transport message stands in
+        // for `Bs.code`.
+        tracing::warn!(
+            "[dispatch] Stream connection error ({err}) with {DISPATCH_ID_HEADER} before first event; retrying without it"
+        );
+        true
+    }
+
+    /// `x2()` — the connection-error classification both dispatch-fallback arms
+    /// key on (a TLS failure is a connect failure, not a provider response).
+    fn is_dispatch_conn_err(err: &LlmError) -> bool {
+        matches!(err, LlmError::Transport { .. } | LlmError::TlsCert { .. })
+    }
+
+    fn inject_headers(
+        &self,
+        prepared: &mut crate::PreparedLlmCall,
+        request_id: &str,
+        dispatch: DispatchHeaderState,
+    ) {
         // Provider-specific tool-search beta: first-party/Foundry use
         // advanced-tool-use, Vertex uses tool-search-tool, and Bedrock carries
         // tool-search-tool in the request body's anthropic_beta array.
@@ -1489,14 +1582,19 @@ impl ApiService {
             .headers
             .insert("x-request-id".to_string(), request_id.to_string());
         // (cc 2.1.219) opt-in dispatch-routing header (see apply_dispatch_header).
-        self.apply_dispatch_header(prepared);
+        Self::apply_dispatch_header(prepared, dispatch);
         // CLAUDE_CODE_EXTRA_BODY merge — after the beta header is computed from the
         // pre-merge body (claude-code `B0t` spread; 2.1.207).
         Self::merge_extra_body(prepared);
     }
 
     /// Same as [`inject_headers`] but for the streaming endpoint.
-    fn inject_stream_headers(&self, prepared: &mut crate::PreparedLlmCall, request_id: &str) {
+    fn inject_stream_headers(
+        &self,
+        prepared: &mut crate::PreparedLlmCall,
+        request_id: &str,
+        dispatch: DispatchHeaderState,
+    ) {
         let beta_provider = match prepared.route.protocol {
             crate::ProtocolFamily::AnthropicMessages | crate::ProtocolFamily::FoundryClaude => {
                 Some(Provider::Anthropic)
@@ -1522,7 +1620,7 @@ impl ApiService {
             .headers
             .insert("x-request-id".to_string(), request_id.to_string());
         // (cc 2.1.219) opt-in dispatch-routing header (see apply_dispatch_header).
-        self.apply_dispatch_header(prepared);
+        Self::apply_dispatch_header(prepared, dispatch);
         // CLAUDE_CODE_EXTRA_BODY merge — after the beta header is computed from the
         // pre-merge body (claude-code `B0t` spread; 2.1.207).
         Self::merge_extra_body(prepared);
@@ -1999,13 +2097,17 @@ impl ApiService {
     /// Step 1b: before classifying a retryable 5xx, the driver checks
     /// `x-should-retry: false` — that header makes the response terminal (same
     /// behaviour as api-client `retry.rs:196`).
+    ///
+    /// `dispatch` classifies the query for the `anthropic-dispatch-id` gate
+    /// (`fB(i.querySource)`) and carries this query's `Kt` latch.
     #[allow(clippy::too_many_lines)]
     async fn drive_non_stream(
         &self,
         req: LlmRequest,
         retry_control: RetryControl,
+        dispatch: DispatchHeaderState,
     ) -> Result<LlmResponse, LlmError> {
-        self.drive_non_stream_seeded_with_chain(req, retry_control, 0, &[])
+        self.drive_non_stream_seeded_with_chain(req, retry_control, 0, &[], dispatch)
             .await
     }
 
@@ -2029,6 +2131,7 @@ impl ApiService {
         mut retry_control: RetryControl,
         initial_consecutive_overloaded: u8,
         chain: &[String],
+        mut dispatch: DispatchHeaderState,
     ) -> Result<LlmResponse, LlmError> {
         let request_id = new_request_id();
         let started = Instant::now();
@@ -2082,7 +2185,7 @@ impl ApiService {
                     return Err(e);
                 }
             };
-            self.inject_headers(&mut prepared, &request_id);
+            self.inject_headers(&mut prepared, &request_id, dispatch);
 
             let resp_result = self.transport.execute(&prepared.provider_request).await;
 
@@ -2090,10 +2193,11 @@ impl ApiService {
                 Err(transport_err) => {
                     // (cc 2.1.219) dispatch-header degradation: a connection
                     // error on an attempt that carried anthropic-dispatch-id
-                    // strips it session-wide and retries immediately WITHOUT
-                    // consuming retry budget ("retry:dispatch-header-strip").
+                    // strips it for the rest of this query and retries
+                    // immediately WITHOUT consuming retry budget
+                    // ("retry:dispatch-header-strip").
                     if let Some((reason, status)) =
-                        self.note_dispatch_header_failure(&prepared, &transport_err)
+                        Self::note_dispatch_header_failure(&mut dispatch, &prepared, &transport_err)
                     {
                         telemetry::emit_dispatch_header_fallback(
                             &self.analytics,
@@ -2254,12 +2358,15 @@ impl ApiService {
 
                             // (cc 2.1.219) dispatch-header degradation: an
                             // HTTP 5xx on an attempt that carried
-                            // anthropic-dispatch-id strips it session-wide and
-                            // retries immediately WITHOUT consuming retry
-                            // budget ("retry:dispatch-header-strip").
-                            if let Some((reason, status)) =
-                                self.note_dispatch_header_failure(&prepared, &decode_err)
-                            {
+                            // anthropic-dispatch-id strips it for the rest of
+                            // this query and retries immediately WITHOUT
+                            // consuming retry budget
+                            // ("retry:dispatch-header-strip").
+                            if let Some((reason, status)) = Self::note_dispatch_header_failure(
+                                &mut dispatch,
+                                &prepared,
+                                &decode_err,
+                            ) {
                                 telemetry::emit_dispatch_header_fallback(
                                     &self.analytics,
                                     &req.model,
@@ -2406,7 +2513,8 @@ impl ApiService {
             &ResolveRetryEnv::from_process_env(),
             self.settings_max_retries,
         );
-        self.drive_non_stream(req, ctl).await
+        self.drive_non_stream(req, ctl, DispatchHeaderState::default())
+            .await
     }
 
     /// Non-streaming call with an explicit `max_tokens` escalation override
@@ -2438,7 +2546,8 @@ impl ApiService {
             &ResolveRetryEnv::from_process_env(),
             self.settings_max_retries,
         );
-        self.drive_non_stream(req, ctl).await
+        self.drive_non_stream(req, ctl, DispatchHeaderState::default())
+            .await
     }
 
     /// Run a session-bound side query through the same request builder,
@@ -2487,7 +2596,8 @@ impl ApiService {
             &ResolveRetryEnv::from_process_env(),
             self.settings_max_retries,
         );
-        self.drive_non_stream(req, ctl).await
+        self.drive_non_stream(req, ctl, DispatchHeaderState::AUXILIARY)
+            .await
     }
 
     /// Non-streaming call with the **Opus-fallback** policy wired
@@ -2559,8 +2669,14 @@ impl ApiService {
         if !effective_chain.is_empty() {
             ctl.allow_fallback = true;
         }
-        self.drive_non_stream_seeded_with_chain(req, ctl, 0, &effective_chain)
-            .await
+        self.drive_non_stream_seeded_with_chain(
+            req,
+            ctl,
+            0,
+            &effective_chain,
+            DispatchHeaderState::default(),
+        )
+        .await
     }
 
     /// Count the input tokens a non-streaming `messages.create` for
@@ -2631,8 +2747,14 @@ impl ApiService {
             &ResolveRetryEnv::from_process_env(),
             self.settings_max_retries,
         );
-        self.drive_non_stream_seeded_with_chain(req, ctl, initial_consecutive_overloaded, &[])
-            .await
+        self.drive_non_stream_seeded_with_chain(
+            req,
+            ctl,
+            initial_consecutive_overloaded,
+            &[],
+            DispatchHeaderState::default(),
+        )
+        .await
     }
 
     /// Enumerate available `provider/model` ids + `@aliases` for `/model`'s list
@@ -2696,7 +2818,9 @@ impl ApiService {
         let req = self.build_request(model, profile, system, messages, tools, true, None)?;
         let mut prepared = self.client.prepare(&req).await?;
         let request_id = new_request_id();
-        self.inject_stream_headers(&mut prepared, &request_id);
+        // Responses-WebSocket prewarm only — never a first-party Anthropic
+        // route, so the dispatch gate is inert here.
+        self.inject_stream_headers(&mut prepared, &request_id, DispatchHeaderState::default());
         let mut session = self.responses_ws_session.lock().await;
         self.client
             .prewarm_prepared_websocket(prepared, self.transport.as_ref(), &mut session)
@@ -2759,6 +2883,9 @@ impl ApiService {
         let thinking_budget: u32 = reasoning_budget(req.reasoning);
         // 2.1.198 `u`/`Ygf`: AWS-auth-triggered retries taken this drive.
         let mut aws_auth_attempts: u32 = 0;
+        // (cc 2.1.219) `Kt`/`no` — per-query, reset with every drive. Streams
+        // are main-thread or subagent turns, never `fB()==="auxiliary"`.
+        let mut dispatch = DispatchHeaderState::default();
 
         loop {
             // Prepare so we can inject headers, then call execute_stream via
@@ -2767,7 +2894,7 @@ impl ApiService {
                 Ok(p) => p,
                 Err(e) => return Err(e),
             };
-            self.inject_stream_headers(&mut prepared, &request_id);
+            self.inject_stream_headers(&mut prepared, &request_id, dispatch);
             // Captured before the move below — the dispatch degradation check
             // in the Err arm needs to know whether THIS attempt carried the
             // header.
@@ -2791,16 +2918,14 @@ impl ApiService {
             };
             match opened {
                 Err(transport_err) => {
-                    // (cc 2.1.219) dispatch-header degradation on the stream
-                    // CONNECT phase (nothing yielded yet — the oracle's
-                    // `!anyStreamEventYielded` guard holds by construction):
-                    // strip session-wide + immediate budget-free retry.
-                    if let Some((reason, status)) = self
-                        .note_dispatch_header_failure_carried(
-                            attempt_carried_dispatch,
-                            &transport_err,
-                        )
-                    {
+                    // (cc 2.1.219) dispatch-header degradation, arm 1 (2.1.220
+                    // @237555467) on the stream CONNECT phase: strip for the
+                    // rest of this query + immediate budget-free retry.
+                    if let Some((reason, status)) = Self::note_dispatch_header_failure_carried(
+                        &mut dispatch,
+                        attempt_carried_dispatch,
+                        &transport_err,
+                    ) {
                         telemetry::emit_dispatch_header_fallback(
                             &self.analytics,
                             &req.model,
@@ -2947,7 +3072,7 @@ impl ApiService {
                     decoder.set_provider_metadata(crate::stream_provider_metadata_from_headers(
                         &streaming.headers,
                     ));
-                    let frames = streaming.frames;
+                    let mut frames = streaming.frames;
 
                     // Clone analytics + metadata into the unfold state so
                     // emit_succeeded / emit_failed can fire from inside the async closure.
@@ -2962,11 +3087,53 @@ impl ApiService {
                         .stream_idle_timeout_override
                         .or_else(crate::model::stream_watchdog::resolve_stream_idle_timeout);
 
+                    // (cc 2.1.219) dispatch-header degradation, arm 2 (2.1.220
+                    // @237577972 — `reason:"body_phase"`): the oracle re-checks
+                    // the header inside the stream BODY catch, so a connection
+                    // error raised before the first event (`!oc`) strips it and
+                    // `continue e`s — ahead of, and without consuming, the
+                    // stale-connection budget (`ko<jt`). The port hands the
+                    // stream to the caller here, so the only point where an
+                    // attempt loop still exists is a one-frame lookahead. It is
+                    // taken ONLY when this attempt carried the header, i.e.
+                    // never on the default-off path; the frame it reads is
+                    // seeded back into the unfold so decoding is unchanged.
+                    let mut seed: Option<Result<Option<crate::RawStreamFrame>, LlmError>> = None;
+                    if attempt_carried_dispatch {
+                        let first = match stream_idle_timeout {
+                            Some(t) => match tokio::time::timeout(t, frames.next_frame()).await {
+                                Ok(r) => r,
+                                Err(_elapsed) => {
+                                    Err(crate::model::stream_watchdog::idle_timeout_error(t))
+                                }
+                            },
+                            None => frames.next_frame().await,
+                        };
+                        if let Err(first_err) = &first {
+                            if Self::note_dispatch_body_phase_failure(
+                                &mut dispatch,
+                                attempt_carried_dispatch,
+                                first_err,
+                            ) {
+                                telemetry::emit_dispatch_header_fallback(
+                                    &self.analytics,
+                                    &req.model,
+                                    "body_phase",
+                                    None,
+                                )
+                                .await;
+                                continue;
+                            }
+                        }
+                        seed = Some(first);
+                    }
+
                     // Assemble events via a manual unfold that drives next_frame + decode.
                     // We keep a queue of pre-decoded events and drain them first.
                     let stream_state = StreamState {
                         decoder,
                         frames,
+                        seed,
                         queue: VecDeque::new(),
                         finished: false,
                         done: false,
@@ -3011,20 +3178,21 @@ impl ApiService {
                                 // elapse, abort the stream with a detectable
                                 // idle-timeout error (binary
                                 // `tengu_streaming_watchdog_retry` surface).
-                                let frame = match s.idle_timeout {
-                                    Some(timeout) => {
-                                        match tokio::time::timeout(timeout, s.frames.next_frame())
-                                            .await
-                                        {
-                                            Ok(r) => r,
-                                            Err(_elapsed) => Err(
-                                                crate::model::stream_watchdog::idle_timeout_error(
-                                                    timeout,
-                                                ),
-                                            ),
-                                        }
-                                    }
-                                    None => s.frames.next_frame().await,
+                                let frame = match s.seed.take() {
+                                    Some(seeded) => seeded,
+                                    None => match s.idle_timeout {
+                                        Some(timeout) => tokio::time::timeout(
+                                            timeout,
+                                            s.frames.next_frame(),
+                                        )
+                                        .await
+                                        .unwrap_or_else(|_elapsed| {
+                                            Err(crate::model::stream_watchdog::idle_timeout_error(
+                                                timeout,
+                                            ))
+                                        }),
+                                        None => s.frames.next_frame().await,
+                                    },
                                 };
                                 match frame {
                                     Ok(Some(frame)) => match s.decoder.decode_frame(frame) {
@@ -3177,6 +3345,8 @@ const MAX_MEDIA_PER_REQUEST: usize = 100;
 const DISPATCH_ID_HEADER: &str = "anthropic-dispatch-id";
 /// (cc 2.1.219) `Vtp` — the dispatch-routing opt-in header value.
 const DISPATCH_ID_V2S: &str = "v2s";
+/// `T1e`'s allow-list — the only host `Yd()` accepts as first-party.
+const FIRST_PARTY_API_HOST: &str = "api.anthropic.com";
 
 /// True when a nested `tool_result.content` block (a raw JSON value, e.g. an MCP
 /// image/resource result) is a media item — `type === "image" || "document"`,

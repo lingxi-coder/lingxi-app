@@ -59,6 +59,15 @@ pub enum AgentLoadError {
         #[source]
         source: std::io::Error,
     },
+    /// `name` was present but invalid — leading `-`, or a `:` that is reserved
+    /// for plugin namespacing.
+    #[error("invalid agent name '{name}' in {path}")]
+    InvalidName {
+        /// Offending path.
+        path: PathBuf,
+        /// The rejected name.
+        name: String,
+    },
     /// Frontmatter was missing or its `---` terminator was not found.
     #[error("no valid frontmatter in {0}")]
     NoFrontmatter(PathBuf),
@@ -172,6 +181,46 @@ pub fn parse_agent_markdown(
     else {
         return Err(AgentLoadError::MissingName(path_for_error.to_path_buf()));
     };
+
+    // (1a) `name` must not start with `-`, and (1b) must not contain `:`,
+    // which is RESERVED for plugin namespacing (`plugin:agent`). claude-code
+    // `iju` (2.1.220 @231502000):
+    //   if (i.startsWith("-")) ... return null;
+    //   if (i.normalize("NFKC").includes(":")) ... return null;
+    // Order matters: a name that is both dash-led and colon-bearing reports
+    // the DASH problem, because that check runs first.
+    //
+    // The colon test runs on the NFKC-NORMALIZED name, so a Unicode lookalike
+    // (U+FF1A FULLWIDTH COLON, U+FE55 SMALL COLON) is rejected too. Testing the
+    // raw string would let such a name through and then have the namespace
+    // splitter — which already treats `:` as the plugin delimiter
+    // (`engine-desktop/src/agent_skill_loader.rs`) — disagree with the
+    // validator about where the agent's name ends.
+    if agent_type.starts_with('-') {
+        tracing::error!(
+            target: "lingxi::agent",
+            "Agent file {} has invalid name '{agent_type}': names must not start with '-'",
+            path_for_error.display()
+        );
+        return Err(AgentLoadError::InvalidName {
+            path: path_for_error.to_path_buf(),
+            name: agent_type.clone(),
+        });
+    }
+    {
+        use unicode_normalization::UnicodeNormalization;
+        if agent_type.nfkc().any(|c| c == ':') {
+            tracing::error!(
+                target: "lingxi::agent",
+                "Agent file {} has invalid name '{agent_type}': names must not contain ':' (reserved for plugin namespacing)",
+                path_for_error.display()
+            );
+            return Err(AgentLoadError::InvalidName {
+                path: path_for_error.to_path_buf(),
+                name: agent_type.clone(),
+            });
+        }
+    }
 
     // (2) `description` required: missing/non-string/EMPTY -> log + skip. claude
     // `!whenToUse` is falsy for `""`, so an empty description drops the agent.
@@ -1192,6 +1241,66 @@ mod tests {
     use super::*;
     use crate::definition::AgentEffort;
     use tempfile::TempDir;
+
+    fn parse_name(name: &str) -> Result<AgentDefinition, AgentLoadError> {
+        let raw = format!("---\nname: \"{name}\"\ndescription: d\n---\nBody");
+        parse_agent_markdown(
+            &raw,
+            AgentSource::UserDefined,
+            PathBuf::from("/tmp"),
+            Path::new("a.md"),
+        )
+    }
+
+    /// `:` is RESERVED for plugin namespacing (`plugin:agent`), so an agent
+    /// file claiming it must be dropped — otherwise the validator and the
+    /// namespace splitter disagree about where the name ends.
+    #[test]
+    fn a_name_containing_a_colon_is_rejected() {
+        for n in ["plugin:agent", "a:b:c", ":leading", "trailing:"] {
+            assert!(
+                matches!(parse_name(n), Err(AgentLoadError::InvalidName { .. })),
+                "{n} must be rejected"
+            );
+        }
+    }
+
+    /// The oracle tests the NFKC-NORMALIZED name, so a Unicode colon lookalike
+    /// is rejected too. Testing the raw string would let these through.
+    #[test]
+    fn unicode_colon_lookalikes_are_rejected_after_nfkc() {
+        for n in ["plugin\u{ff1a}agent", "plugin\u{fe55}agent"] {
+            assert!(
+                matches!(parse_name(n), Err(AgentLoadError::InvalidName { .. })),
+                "{n:?} must be rejected after NFKC"
+            );
+        }
+    }
+
+    #[test]
+    fn a_name_starting_with_a_dash_is_rejected() {
+        assert!(matches!(
+            parse_name("-agent"),
+            Err(AgentLoadError::InvalidName { .. })
+        ));
+    }
+
+    /// Order is behavioural: a name that is BOTH dash-led and colon-bearing
+    /// reports the dash, because the oracle runs that check first.
+    #[test]
+    fn dash_is_checked_before_colon() {
+        match parse_name("-a:b") {
+            Err(AgentLoadError::InvalidName { name, .. }) => assert_eq!(name, "-a:b"),
+            other => panic!("expected InvalidName, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ordinary_names_still_parse() {
+        for n in ["reviewer", "code-architect", "test_runner", "a-b-c"] {
+            assert!(parse_name(n).is_ok(), "{n} must parse");
+        }
+    }
 
     #[test]
     fn parse_minimal_frontmatter() {

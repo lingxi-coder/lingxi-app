@@ -49,6 +49,7 @@ dependencies = [
  "tool-api",
  "tracing",
  "traits",
+ "unicode-normalization",
 ]
 
 [[package]]

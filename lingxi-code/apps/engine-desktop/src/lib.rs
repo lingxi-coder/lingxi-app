@@ -3047,16 +3047,110 @@ pub enum BuildError {
 /// `user:inference` scope, via `llm_client::oauth::anthropic::subscription_from_scopes`)
 /// decides.
 ///
-/// PARITY-GAP: FD-inherited keys + managed-context OAuth forcing are not surfaced
-/// into [`DesktopConfig`]; the common desktop API-key-vs-OAuth split is covered.
-fn oauth_subscriber_flag(
-    api_key_present: bool,
-    auth_token_present: bool,
-    scopes: &[String],
+/// Inputs to [`oauth_subscriber_flag`], mirroring the locals of the oracle's
+/// `zb()` (`isAnthropicAuthEnabled`, 2.1.220 @228933380).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AuthSuppressionInputs {
+    /// `i` — an `ANTHROPIC_API_KEY` / apiKeyHelper-sourced key is the resolved
+    /// credential.
+    pub api_key_present: bool,
+    /// `n` — `ANTHROPIC_AUTH_TOKEN` is set.
+    pub auth_token_present: bool,
+    /// `r` — an `apiKeyHelper` is configured in settings.
+    pub api_key_helper_present: bool,
+    /// `s` — `CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR` (an FD-INHERITED key).
+    pub fd_key_present: bool,
+    /// `KWr()` — a managed FIRST-PARTY OAuth context.
+    pub managed_first_party_oauth: bool,
+    /// `YIt()` — a host-managed context (`CLAUDE_CODE_REMOTE` or a known host
+    /// entrypoint).
+    pub host_managed_context: bool,
+}
+
+/// Does the resolved OAuth token make this a Claude.ai subscriber session?
+///
+/// Ports the suppression term of `zb()`:
+/// ```js
+/// let a = (n || i) && !KWr() || (r || s) && !YIt();
+/// return !(e || a);
+/// ```
+/// Two exceptions carry the whole meaning, and the port previously had
+/// NEITHER — it treated any env credential as suppressing OAuth:
+///
+/// * under a MANAGED FIRST-PARTY OAuth context an env bearer / API key does
+///   NOT suppress stored OAuth (`&& !KWr()`), and
+/// * under a HOST-MANAGED context an apiKeyHelper or an FD-inherited key does
+///   not either (`&& !YIt()`).
+///
+/// Without them a managed host that also exports `ANTHROPIC_API_KEY` — routine
+/// on a remote/enterprise box — silently dropped out of subscriber mode even
+/// though the oracle keeps it there, so entitlement and rate-limit behaviour
+/// diverged for exactly the deployments that most depend on it.
+///
+/// `e` (no stored OAuth credentials) is implicit: this is only reached with
+/// tokens in hand.
+fn oauth_subscriber_flag(inputs: AuthSuppressionInputs, scopes: &[String]) -> bool {
+    let AuthSuppressionInputs {
+        api_key_present: i,
+        auth_token_present: n,
+        api_key_helper_present: r,
+        fd_key_present: s,
+        managed_first_party_oauth,
+        host_managed_context,
+    } = inputs;
+    let suppressed =
+        (n || i) && !managed_first_party_oauth || (r || s) && !host_managed_context;
+    !suppressed && llm_client::oauth::anthropic::subscription_from_scopes(scopes)
+}
+
+/// Evaluate the oracle's `YIt()` / `KWr()` from the process environment.
+///
+/// Read HERE rather than inside `build()`, which keeps its no-env-reads
+/// contract. `KWr()` = `YIt() && !CLAUDE_CODE_HOST_AUTH_ENV_VAR &&
+/// CLAUDE_CODE_ENTRYPOINT !== "claude-desktop-3p"`.
+#[must_use]
+pub fn host_auth_context_from_env() -> (bool, bool) {
+    (
+        host_managed_context(
+            std::env::var_os("CLAUDE_CODE_REMOTE").is_some(),
+            std::env::var("CLAUDE_CODE_ENTRYPOINT").ok().as_deref(),
+        ),
+        managed_first_party_oauth(
+            std::env::var_os("CLAUDE_CODE_REMOTE").is_some(),
+            std::env::var("CLAUDE_CODE_ENTRYPOINT").ok().as_deref(),
+            std::env::var_os("CLAUDE_CODE_HOST_AUTH_ENV_VAR").is_some(),
+        ),
+    )
+}
+
+/// Entrypoints the oracle treats as a managed HOST (`WBl`, 2.1.220 @226511006):
+/// `["claude-desktop","claude-desktop-3p","local-agent"]`.
+///
+/// Enumerated from the binary, not guessed — an editor-integration set
+/// (`vscode`, `jetbrains`) is a plausible-looking guess and is NOT this set.
+const HOST_ENTRYPOINTS: [&str; 3] = ["claude-desktop", "claude-desktop-3p", "local-agent"];
+
+/// `YIt()` = `CLAUDE_CODE_REMOTE || jN()`, where `jN()` is
+/// `entrypoint !== undefined && WBl.has(entrypoint)`. Pure, so the table is
+/// testable without touching the process environment.
+#[must_use]
+pub fn host_managed_context(remote: bool, entrypoint: Option<&str>) -> bool {
+    remote || entrypoint.is_some_and(|e| HOST_ENTRYPOINTS.contains(&e))
+}
+
+/// `KWr()` = `YIt() && !CLAUDE_CODE_HOST_AUTH_ENV_VAR && entrypoint !== "claude-desktop-3p"`.
+///
+/// An ABSENT entrypoint satisfies the last term — JS `undefined !== "..."` is
+/// true — so it must not be written as "is set and differs".
+#[must_use]
+pub fn managed_first_party_oauth(
+    remote: bool,
+    entrypoint: Option<&str>,
+    host_auth_env_var: bool,
 ) -> bool {
-    !api_key_present
-        && !auth_token_present
-        && llm_client::oauth::anthropic::subscription_from_scopes(scopes)
+    host_managed_context(remote, entrypoint)
+        && !host_auth_env_var
+        && entrypoint != Some("claude-desktop-3p")
 }
 
 /// Fold the profile + roles responses into the shared snapshot. Pure —
@@ -4255,9 +4349,19 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
     let mut is_subscriber = false;
     match credentials.get_oauth_tokens().await {
         Ok(Some(tokens)) => {
+            let (host_managed_context, managed_first_party_oauth) =
+                host_auth_context_from_env();
             is_subscriber = oauth_subscriber_flag(
-                resolved_anthropic_api_key.is_some(),
-                std::env::var_os("ANTHROPIC_AUTH_TOKEN").is_some(),
+                AuthSuppressionInputs {
+                    api_key_present: resolved_anthropic_api_key.is_some(),
+                    auth_token_present: std::env::var_os("ANTHROPIC_AUTH_TOKEN").is_some(),
+                    api_key_helper_present: cfg.api_key_helper.is_some(),
+                    // FD-inherited key (`s` in `zb`) — previously invisible here.
+                    fd_key_present: std::env::var_os("CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR")
+                        .is_some(),
+                    managed_first_party_oauth,
+                    host_managed_context,
+                },
                 &tokens.scopes,
             );
             // Re-seed the shared slot with the resolved subscriber flag so
@@ -9129,16 +9233,27 @@ mod tests {
         let inference = vec!["user:inference".to_string(), "user:profile".to_string()];
         let no_inference = vec!["user:profile".to_string()];
         // Clean OAuth (no overriding env key/token) + inference scope ⇒ subscriber.
-        assert!(super::oauth_subscriber_flag(false, false, &inference));
+        let plain = super::AuthSuppressionInputs::default;
+        let with_api_key = super::AuthSuppressionInputs {
+            api_key_present: true,
+            ..Default::default()
+        };
+        let with_auth_token = super::AuthSuppressionInputs {
+            auth_token_present: true,
+            ..Default::default()
+        };
+        assert!(super::oauth_subscriber_flag(plain(), &inference));
         // Inference scope present, but an env ANTHROPIC_API_KEY outranks stored
         // OAuth in the resolver ⇒ isAnthropicAuthEnabled() false ⇒ not subscriber.
-        assert!(!super::oauth_subscriber_flag(true, false, &inference));
+        // (Outside a managed context — see `auth_suppression_tests` for the
+        // managed-context exemptions this used to lack entirely.)
+        assert!(!super::oauth_subscriber_flag(with_api_key, &inference));
         // Likewise an env ANTHROPIC_AUTH_TOKEN bearer outranks stored OAuth.
-        assert!(!super::oauth_subscriber_flag(false, true, &inference));
+        assert!(!super::oauth_subscriber_flag(with_auth_token, &inference));
         // Clean OAuth but no inference scope (e.g. profile-only) ⇒ not subscriber.
-        assert!(!super::oauth_subscriber_flag(false, false, &no_inference));
+        assert!(!super::oauth_subscriber_flag(plain(), &no_inference));
         // No scopes at all ⇒ not subscriber.
-        assert!(!super::oauth_subscriber_flag(false, false, &[]));
+        assert!(!super::oauth_subscriber_flag(plain(), &[]));
     }
 
     /// A [`client_adapter::PermissionRequestSink`] that records the requests the
@@ -13490,5 +13605,136 @@ mod connected_fallback_tests {
         .expect("must reroute");
         assert_eq!(fb.model, "deepseek-reasoner");
         assert_eq!(fb.profile, "deepseek");
+    }
+}
+
+#[cfg(test)]
+mod auth_suppression_tests {
+    use super::{
+        host_managed_context, managed_first_party_oauth, oauth_subscriber_flag,
+        AuthSuppressionInputs,
+    };
+
+    fn sub_scopes() -> Vec<String> {
+        vec!["user:inference".to_string()]
+    }
+
+    #[test]
+    fn a_plain_oauth_session_is_a_subscriber() {
+        assert!(oauth_subscriber_flag(
+            AuthSuppressionInputs::default(),
+            &sub_scopes()
+        ));
+    }
+
+    #[test]
+    fn an_env_credential_suppresses_outside_a_managed_context() {
+        for inputs in [
+            AuthSuppressionInputs {
+                api_key_present: true,
+                ..Default::default()
+            },
+            AuthSuppressionInputs {
+                auth_token_present: true,
+                ..Default::default()
+            },
+        ] {
+            assert!(
+                !oauth_subscriber_flag(inputs, &sub_scopes()),
+                "{inputs:?} must suppress"
+            );
+        }
+    }
+
+    /// THE fix. Under a managed FIRST-PARTY OAuth context an env bearer or API
+    /// key does NOT suppress stored OAuth (`&& !KWr()`). Without this a managed
+    /// host that also exports ANTHROPIC_API_KEY — routine on a remote or
+    /// enterprise box — silently dropped out of subscriber mode.
+    #[test]
+    fn a_managed_first_party_context_keeps_oauth_despite_env_credentials() {
+        for inputs in [
+            AuthSuppressionInputs {
+                api_key_present: true,
+                managed_first_party_oauth: true,
+                host_managed_context: true,
+                ..Default::default()
+            },
+            AuthSuppressionInputs {
+                auth_token_present: true,
+                managed_first_party_oauth: true,
+                host_managed_context: true,
+                ..Default::default()
+            },
+        ] {
+            assert!(
+                oauth_subscriber_flag(inputs, &sub_scopes()),
+                "{inputs:?} must STAY a subscriber"
+            );
+        }
+    }
+
+    /// The apiKeyHelper / FD-inherited arm keys on `YIt()`, not `KWr()`.
+    #[test]
+    fn helper_and_fd_keys_are_exempted_by_the_host_managed_context() {
+        let suppressing = AuthSuppressionInputs {
+            fd_key_present: true,
+            ..Default::default()
+        };
+        assert!(!oauth_subscriber_flag(suppressing, &sub_scopes()));
+
+        let exempt = AuthSuppressionInputs {
+            fd_key_present: true,
+            host_managed_context: true,
+            ..Default::default()
+        };
+        assert!(oauth_subscriber_flag(exempt, &sub_scopes()));
+
+        let helper_exempt = AuthSuppressionInputs {
+            api_key_helper_present: true,
+            host_managed_context: true,
+            ..Default::default()
+        };
+        assert!(oauth_subscriber_flag(helper_exempt, &sub_scopes()));
+    }
+
+    #[test]
+    fn without_the_inference_scope_it_is_never_a_subscriber() {
+        assert!(!oauth_subscriber_flag(
+            AuthSuppressionInputs::default(),
+            &["user:profile".to_string()]
+        ));
+    }
+
+    /// `WBl` enumerated from the binary — an editor set (vscode/jetbrains) is a
+    /// plausible guess and is NOT it.
+    #[test]
+    fn host_entrypoint_set_matches_the_oracle() {
+        for e in ["claude-desktop", "claude-desktop-3p", "local-agent"] {
+            assert!(host_managed_context(false, Some(e)), "{e} is a host");
+        }
+        for e in ["vscode", "jetbrains", "cli", ""] {
+            assert!(!host_managed_context(false, Some(e)), "{e} is NOT a host");
+        }
+        // CLAUDE_CODE_REMOTE alone qualifies.
+        assert!(host_managed_context(true, None));
+    }
+
+    /// An ABSENT entrypoint satisfies `entrypoint !== "claude-desktop-3p"`
+    /// (JS `undefined !== "..."`), so remote-with-no-entrypoint IS managed
+    /// first-party.
+    #[test]
+    fn managed_first_party_excludes_3p_and_host_auth_env_var() {
+        assert!(managed_first_party_oauth(true, None, false));
+        assert!(!managed_first_party_oauth(
+            false,
+            Some("claude-desktop-3p"),
+            false
+        ));
+        assert!(!managed_first_party_oauth(true, None, true));
+        assert!(managed_first_party_oauth(
+            false,
+            Some("claude-desktop"),
+            false
+        ));
     }
 }

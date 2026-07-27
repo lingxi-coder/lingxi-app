@@ -281,6 +281,70 @@ pub fn resolve_shell_path() -> &'static str {
     }
 }
 
+// ===== git-operation metrics ================================================
+
+/// Record `claude_code.commit.count` / `claude_code.pull_request.count` from a
+/// completed Bash command.
+///
+/// Oracle `mEo(command, exitCode, ...)` (2.1.220 @232-ish, the git-command
+/// post-processor):
+/// ```js
+/// if (t !== 0) return {prResolved:!1};                       // FAILURES DO NOT COUNT
+/// if (prd.test(e)) { M("tengu_git_operation",{operation:"commit"}); jSi()?.add(1) }
+/// ... if (i?.action === "created") { lAt()?.add(1) }
+/// ```
+/// plus `Dyo(e)` for the MCP tool-name path
+/// (`^create[_-]?(pull|merge)[_-]?request$`).
+///
+/// Both counters existed in this port with NO desktop record site:
+/// `commit.count` was recorded only by the MOBILE git tool, and
+/// `pull_request.count` by nothing at all. Every commit and PR made the normal
+/// way — `git commit` / `gh pr create` through Bash — counted as zero.
+///
+/// The exit-status gate is the load-bearing part: a command that FAILED must
+/// not increment, or the metric counts attempts rather than commits.
+fn record_git_operation_metrics(command: &str, exit_code: i32) {
+    if exit_code != 0 {
+        return;
+    }
+    let c = command.trim();
+    if is_git_commit_command(c) {
+        telemetry::otel::record_counter(
+            telemetry::otel::metrics::COMMIT_COUNT,
+            1.0,
+            &telemetry::otel::Attributes::new(),
+        );
+    }
+    if is_pr_create_command(c) {
+        telemetry::otel::record_counter(
+            telemetry::otel::metrics::PULL_REQUEST_COUNT,
+            1.0,
+            &telemetry::otel::Attributes::new(),
+        );
+    }
+}
+
+/// Does this command create a git commit? (`prd` — `git commit`, including
+/// `--amend`, but not `git commit --help` style non-commits.)
+fn is_git_commit_command(command: &str) -> bool {
+    command.split("&&").chain(command.split(';')).any(|seg| {
+        let t = seg.trim();
+        let mut w = t.split_whitespace();
+        matches!((w.next(), w.next()), (Some("git"), Some("commit")))
+    })
+}
+
+/// Does this command CREATE a pull/merge request? Covers `gh pr create` and
+/// `glab mr create`; a `gh pr view`/`list` must not count.
+fn is_pr_create_command(command: &str) -> bool {
+    command.split("&&").chain(command.split(';')).any(|seg| {
+        let t = seg.trim();
+        let w: Vec<&str> = t.split_whitespace().collect();
+        matches!(w.as_slice(), [bin, kind, "create", ..]
+            if (*bin == "gh" && *kind == "pr") || (*bin == "glab" && *kind == "mr"))
+    })
+}
+
 // ===== Git Bash resolution (Windows) ========================================
 
 /// Basenames accepted as a Git-Bash binary (lowercased), from the oracle's
@@ -1975,6 +2039,7 @@ impl Tool for BashTool {
                 );
                 meta.insert("truncated".into(), AnalyticsValue::Bool(truncated_out));
                 self.ctx.bus.log_event(BASH_COMPLETED, meta).await;
+                record_git_operation_metrics(&cmd_str, out.exit_code);
                 invalidate_written_read_state(&self.ctx, &cwd, &cmd_str);
 
                 // Model sees the plain-text `[stdout, stderr].join("\n")` render
@@ -2102,6 +2167,47 @@ mod tests {
             classify_git_bash_override(Some("/nope/bash"), &no),
             GitBashOverride::Rejected { .. }
         ));
+    }
+
+    // ---- git-operation metric classification ------------------------------
+
+    #[test]
+    fn git_commit_variants_are_recognised() {
+        for c in [
+            "git commit -m x",
+            "git commit --amend --no-edit",
+            "  git commit  ",
+            "cd /tmp && git commit -m x",
+            "git add -A; git commit -m x",
+        ] {
+            assert!(is_git_commit_command(c), "{c} must count as a commit");
+        }
+    }
+
+    #[test]
+    fn non_commit_git_commands_do_not_count() {
+        for c in ["git status", "git push", "git log --oneline", "gitcommit", "echo git commit"] {
+            assert!(!is_git_commit_command(c), "{c} must NOT count");
+        }
+    }
+
+    #[test]
+    fn pr_creation_is_recognised_but_reads_are_not() {
+        assert!(is_pr_create_command("gh pr create --fill"));
+        assert!(is_pr_create_command("glab mr create"));
+        for c in ["gh pr view 1", "gh pr list", "gh issue create", "gh pr merge"] {
+            assert!(!is_pr_create_command(c), "{c} must NOT count as a PR create");
+        }
+    }
+
+    /// The exit-status gate: a FAILED command must not increment, or the
+    /// counter measures attempts rather than commits.
+    #[test]
+    fn a_failed_command_records_nothing() {
+        // No panic and no counter interaction when the runtime is absent; the
+        // guard under test is the early return on a non-zero status.
+        record_git_operation_metrics("git commit -m x", 1);
+        record_git_operation_metrics("gh pr create", 128);
     }
 
     #[test]

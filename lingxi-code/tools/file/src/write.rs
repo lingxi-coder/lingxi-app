@@ -388,7 +388,12 @@ impl Tool for FileWriteTool {
         };
         let (lines_added, lines_removed) = count_patch_lines(&structured_patch);
         if lines_added > 0 || lines_removed > 0 {
-            otel::record_lines_of_code_change("Write", lines_added, lines_removed);
+            // The oracle records the MODEL that made the change, not the tool.
+            otel::record_lines_of_code_change(
+                &ctx.options.main_loop_model,
+                lines_added,
+                lines_removed,
+            );
         }
 
         let bytes_written = content.as_bytes().len() as u64;

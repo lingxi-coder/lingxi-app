@@ -797,6 +797,7 @@ mod tests {
             disabled: false,
             timeout_ms: None,
             always_load: false,
+            config_error: None,
         }
     }
     fn stdio_spec(command: &str, args: &[&str]) -> McpTransportSpec {

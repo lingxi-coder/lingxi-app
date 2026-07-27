@@ -638,6 +638,15 @@ impl McpRegistry {
             return Ok(*connection_id);
         }
 
+        // Config-level error (claude `configError`, e.g. a url that expanded
+        // to an empty string): never dial. The oracle skips the connect
+        // entirely (`mcp_connect_skipped` reason "unconfigured") and reports
+        // the server failed with `errorCode:"UNCONFIGURED"`; the error text is
+        // the configError itself.
+        if let Some(err) = &config.config_error {
+            return Err(McpError::Connection(err.clone()));
+        }
+
         self.connections.write().await.insert(
             config.name.clone(),
             McpConnectionState::Connecting {
@@ -2482,6 +2491,7 @@ mod tests {
             disabled: false,
             timeout_ms: None,
             always_load: false,
+            config_error: None,
         }
     }
 
@@ -3235,6 +3245,7 @@ mod snapshot_tests {
             disabled: false,
             timeout_ms: None,
             always_load: false,
+            config_error: None,
         }
     }
 

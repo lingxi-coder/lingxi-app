@@ -19,6 +19,7 @@ fn mock_config() -> McpServerConfig {
         disabled: false,
         timeout_ms: None,
         always_load: false,
+        config_error: None,
     }
 }
 

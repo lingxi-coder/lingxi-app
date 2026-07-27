@@ -1,5 +1,6 @@
 //! MCP config-load diagnostics — a byte-faithful port of claude-code 2.1.206's
-//! `F7t` per-entry warnings.
+//! `F7t` per-entry warnings (2.1.220's `klr`), including the
+//! leading/trailing-whitespace scan (`ty_`) added in 2.1.219.
 //!
 //! `F7t` validates one config source's `mcpServers` and, for every entry it
 //! drops, records a user-facing warning. The port's loader
@@ -167,6 +168,24 @@ pub fn collect_mcp_config_warnings(
             );
             continue;
         }
+        // Leading/trailing whitespace (claude `ty_`, new in 2.1.219): the entry
+        // is still LOADED — the warning flags values that are "used exactly as
+        // written". Runs before the missing-env expansion pass, matching
+        // `klr`'s `let y=ty_(g)` placement. Both warnings can fire for one
+        // entry.
+        let ws_fields = collect_whitespace_fields(entry, ty);
+        if !ws_fields.is_empty() {
+            warn(
+                name,
+                format!(
+                    "Leading or trailing whitespace in: {}",
+                    ws_fields.join(", ")
+                ),
+                Some(format!(
+                    "Remove the whitespace from these values in the \"{name}\" entry \u{2014} they are used exactly as written"
+                )),
+            );
+        }
         // Missing env vars (claude `Osg` — only stdio/sse/http/ws expand).
         let missing = collect_missing_env_vars(entry, ty);
         if !missing.is_empty() {
@@ -216,6 +235,69 @@ fn invalid_reason(entry: &Value, ty: &str) -> String {
     } else {
         "invalid entry".to_string()
     }
+}
+
+/// claude `ty_` (2.1.219) — config fields whose value carries leading or
+/// trailing whitespace (`value !== value.trim()`). Field labels are byte-exact:
+/// `command`, `url`, `args[<i>]`, `env.<key>` / `headers.<key>` for values, and
+/// `env name <json>` / `header name <json>` (the key JSON-quoted via `Ie` =
+/// `JSON.stringify`) when the KEY itself has whitespace — the value of such a
+/// key is still checked under its raw `env.<key>` label.
+///
+/// `ty_` runs on the schema-VALIDATED entry, whose zod parse strips fields the
+/// transport type does not declare; the port mirrors that by gating on the
+/// type family (stdio → command/args/env, everything else → url/headers).
+fn collect_whitespace_fields(entry: &Value, ty: &str) -> Vec<String> {
+    let mut fields: Vec<String> = Vec::new();
+    fn check(label: String, value: &str, fields: &mut Vec<String>) {
+        if value != value.trim() {
+            fields.push(label);
+        }
+    }
+    // `Ie` = JSON.stringify (string serialization cannot fail).
+    fn json_quote(s: &str) -> String {
+        serde_json::to_string(s).unwrap_or_else(|_| format!("\"{s}\""))
+    }
+    match ty {
+        "stdio" => {
+            if let Some(c) = entry.get("command").and_then(Value::as_str) {
+                check("command".to_string(), c, &mut fields);
+            }
+            if let Some(args) = entry.get("args").and_then(Value::as_array) {
+                for (i, a) in args.iter().enumerate() {
+                    if let Some(s) = a.as_str() {
+                        check(format!("args[{i}]"), s, &mut fields);
+                    }
+                }
+            }
+            if let Some(env) = entry.get("env").and_then(Value::as_object) {
+                for (k, v) in env {
+                    if k != k.trim() {
+                        fields.push(format!("env name {}", json_quote(k)));
+                    }
+                    if let Some(s) = v.as_str() {
+                        check(format!("env.{k}"), s, &mut fields);
+                    }
+                }
+            }
+        }
+        _ => {
+            if let Some(u) = entry.get("url").and_then(Value::as_str) {
+                check("url".to_string(), u, &mut fields);
+            }
+            if let Some(h) = entry.get("headers").and_then(Value::as_object) {
+                for (k, v) in h {
+                    if k != k.trim() {
+                        fields.push(format!("header name {}", json_quote(k)));
+                    }
+                    if let Some(s) = v.as_str() {
+                        check(format!("headers.{k}"), s, &mut fields);
+                    }
+                }
+            }
+        }
+    }
+    fields
 }
 
 /// claude `Osg` — the env-var references left unresolved after expanding the
@@ -276,14 +358,27 @@ pub fn collect_all_mcp_config_warnings(
     cwd: &std::path::Path,
     global_config_path: Option<&std::path::Path>,
 ) -> Vec<McpConfigWarning> {
+    collect_all_mcp_config_warnings_at(&cwd.join(".mcp.json"), cwd, global_config_path)
+}
+
+/// [`collect_all_mcp_config_warnings`] with an EXPLICIT project `.mcp.json`
+/// path, for callers whose loader discovers the project file by walking up
+/// from `cwd` (the oracle resolves the project config at the workspace root,
+/// not literally `<cwd>/.mcp.json`). `cwd` still keys the local scope.
+#[must_use]
+pub fn collect_all_mcp_config_warnings_at(
+    project_mcp_path: &std::path::Path,
+    cwd: &std::path::Path,
+    global_config_path: Option<&std::path::Path>,
+) -> Vec<McpConfigWarning> {
     let mut out = Vec::new();
     let read_json = |p: &std::path::Path| -> Option<Value> {
         serde_json::from_str(&std::fs::read_to_string(p).ok()?).ok()
     };
 
-    // Project scope: `<cwd>/.mcp.json`.
-    let project = cwd.join(".mcp.json");
-    if let Some(v) = read_json(&project) {
+    // Project scope: the discovered `.mcp.json`.
+    let project = project_mcp_path;
+    if let Some(v) = read_json(project) {
         out.extend(collect_mcp_config_warnings(
             &v,
             ConfigScope::Project,
@@ -396,6 +491,73 @@ mod tests {
             w[0].suggestion.as_deref(),
             Some("Set the following environment variables: TOK, OTHER")
         );
+    }
+
+    #[test]
+    fn whitespace_warning_is_byte_exact_stdio() {
+        // `ty_` (2.1.219): field labels `command`, `args[<i>]`,
+        // `env name <json>` for a whitespace-carrying KEY (JSON-quoted via
+        // `Ie` = JSON.stringify), `env.<key>` (raw key) for its value.
+        let c = json!({"mcpServers":{"srv":{
+            "type":"stdio",
+            "command":"cmd ",
+            "args":[" a","b"],
+            "env":{" K ":"v ","OK":"clean"}
+        }}});
+        let w = only(&c);
+        assert_eq!(w.len(), 1);
+        assert_eq!(
+            w[0].message,
+            "Leading or trailing whitespace in: command, args[0], env name \" K \", env. K "
+        );
+        assert_eq!(
+            w[0].suggestion.as_deref(),
+            Some(
+                "Remove the whitespace from these values in the \"srv\" entry \u{2014} they are used exactly as written"
+            )
+        );
+        assert_eq!(w[0].severity, McpConfigSeverity::Warning);
+    }
+
+    #[test]
+    fn whitespace_warning_is_byte_exact_remote() {
+        let c = json!({"mcpServers":{"web":{
+            "type":"http",
+            "url":"https://x.test ",
+            "headers":{"X-A ":"v","X-B":" v"}
+        }}});
+        let w = only(&c);
+        assert_eq!(w.len(), 1);
+        assert_eq!(
+            w[0].message,
+            "Leading or trailing whitespace in: url, header name \"X-A \", headers.X-B"
+        );
+    }
+
+    #[test]
+    fn whitespace_and_missing_env_both_fire_for_one_entry() {
+        // `klr` runs `ty_` BEFORE the expansion pass; both warnings can fire.
+        let c = json!({"mcpServers":{"srv":{
+            "type":"stdio",
+            "command":"${LINGXI_DIAG_UNSET_M5} "
+        }}});
+        let w = only(&c);
+        assert_eq!(w.len(), 2);
+        assert_eq!(w[0].message, "Leading or trailing whitespace in: command");
+        assert_eq!(
+            w[1].message,
+            "Missing environment variables: LINGXI_DIAG_UNSET_M5"
+        );
+    }
+
+    #[test]
+    fn skipped_entries_get_no_whitespace_warning() {
+        // A reserved-name (or otherwise skipped) entry never reaches `ty_` —
+        // `klr` `continue`s before the whitespace scan.
+        let c = json!({"mcpServers":{"workspace":{"type":"stdio","command":"c "}}});
+        let w = only(&c);
+        assert_eq!(w.len(), 1);
+        assert!(w[0].message.contains("reserved MCP server name"));
     }
 
     #[test]

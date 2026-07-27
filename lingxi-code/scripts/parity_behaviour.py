@@ -83,6 +83,88 @@ PROBES: list[tuple[str, ...]] = [
 ]
 
 
+# Commands that WRITE. Each entry is a sequence of argv runs applied to the same
+# sandboxed HOME, after which the resulting config is compared.
+#
+# stdout alone is not enough here: two sides can print the same confirmation and
+# persist different JSON. The config FILE is the assertion.
+WRITE_PROBES: list[tuple[str, list[list[str]]]] = [
+    ("mcp add stdio (user)", [["mcp", "add", "demo", "--scope", "user", "--", "echo", "hi"]]),
+    ("mcp add http (user)",
+     [["mcp", "add", "web", "--scope", "user", "--transport", "http", "https://x.example/mcp"]]),
+    ("mcp add-json (user)",
+     [["mcp", "add-json", "js", '{"type":"stdio","command":"echo","args":["j"]}', "--scope", "user"]]),
+    ("mcp add then remove",
+     [["mcp", "add", "gone", "--scope", "user", "--", "echo", "x"],
+      ["mcp", "remove", "gone", "--scope", "user"]]),
+    ("mcp add duplicate name",
+     [["mcp", "add", "dup", "--scope", "user", "--", "echo", "1"],
+      ["mcp", "add", "dup", "--scope", "user", "--", "echo", "2"]]),
+]
+
+# Config keys the oracle writes as first-run bootstrap/telemetry state and the
+# port deliberately does not (machine + user IDs, migration flags). Compared
+# separately would be noise; they are not what these commands are about.
+BOOTSTRAP_KEYS = {
+    "firstStartTime", "machineID", "userID", "migrationVersion",
+    "opusProMigrationComplete", "sonnet1m45MigrationComplete",
+    "seenNotifications", "hasResetAutoModeOptInForDefaultOffer",
+    "hasCompletedOnboarding", "lastOnboardingVersion", "projects",
+    "cachedChangelog", "changelogLastFetched", "fallbackAvailableWarningThreshold",
+    "subscriptionNoticeCount", "hasAvailableSubscription", "installMethod",
+}
+
+
+def read_config(home: str) -> dict:
+    """The user config each side writes, minus first-run bootstrap keys."""
+    import json
+
+    for name in (".claude.json", ".lingxi.json"):
+        path = os.path.join(home, name)
+        if os.path.isfile(path):
+            try:
+                with open(path) as fh:
+                    doc = json.load(fh)
+            except (OSError, ValueError):
+                return {"«unreadable»": name}
+            return {k: v for k, v in doc.items() if k not in BOOTSTRAP_KEYS}
+    return {}
+
+
+def run_write_probes(oracle: str, cli: str, cli_name: str) -> tuple[int, list[str]]:
+    import json
+
+    same, diffs = 0, []
+    for label, runs in WRITE_PROBES:
+        oh, ph = tempfile.mkdtemp(prefix="wp-o-"), tempfile.mkdtemp(prefix="wp-p-")
+        try:
+            o_out, p_out = [], []
+            for argv in runs:
+                t, _ = run(oracle, argv, oh)
+                o_out.append(normalise(t, "claude"))
+                t, _ = run(cli, argv, ph)
+                p_out.append(normalise(t, cli_name))
+            o_cfg, p_cfg = read_config(oh), read_config(ph)
+        finally:
+            shutil.rmtree(oh, ignore_errors=True)
+            shutil.rmtree(ph, ignore_errors=True)
+        # Paths inside stdout already normalise to «tmp».
+        if o_cfg == p_cfg and o_out == p_out:
+            same += 1
+            continue
+        detail = [f"\n=== WRITE DIFFERS: {label} ==="]
+        if o_out != p_out:
+            for a, b in zip(o_out, p_out):
+                if a != b:
+                    detail.append(f"  stdout oracle: {a[:200]}")
+                    detail.append(f"  stdout port  : {b[:200]}")
+        if o_cfg != p_cfg:
+            detail.append(f"  config oracle: {json.dumps(o_cfg, sort_keys=True)[:400]}")
+            detail.append(f"  config port  : {json.dumps(p_cfg, sort_keys=True)[:400]}")
+        diffs.append("\n".join(detail))
+    return same, diffs
+
+
 def normalise(text: str, cli_name: str) -> str:
     """Fold known-legitimate branding differences to neutral tokens."""
     t = text
@@ -183,6 +265,11 @@ def main() -> int:
         print(f"  first difference at line {i + 1} of {len(ol)}/{len(pl)}")
         print(f"  oracle: {(ol[i] if i < len(ol) else '«missing line»')[:400]}")
         print(f"  port  : {(pl[i] if i < len(pl) else '«missing line»')[:400]}")
+
+    w_same, w_diffs = run_write_probes(args.oracle, args.cli, cli_name)
+    for d in w_diffs:
+        print(d)
+    print(f"\nwrite probes identical: {w_same}   differing: {len(w_diffs)}")
 
     print(
         f"\nidentical: {same}   differing: {len(differ)}   "

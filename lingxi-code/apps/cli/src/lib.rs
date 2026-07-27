@@ -278,6 +278,132 @@ fn commander_error(e: &clap::Error, args: &[OsString]) -> Option<String> {
 /// commander renders both spellings in the option heading.  The aliases below
 /// are part of Claude Code's public root-help contract, so keep their accepted
 /// parser spellings *and* present them in the same place in `--help` output.
+/// Move the `Usage:` block ahead of the description, as commander renders it.
+///
+/// The usage block is the `Usage:` line plus any following INDENTED
+/// continuation lines (clap wraps long usage strings that way); taking only the
+/// first line would strip the tail of a wrapped usage onto the wrong side of
+/// the description.
+fn normalise_preamble(help: &str) -> String {
+    let lines: Vec<&str> = help.lines().collect();
+    let Some(start) = lines.iter().position(|l| l.starts_with("Usage:")) else {
+        return help.to_string();
+    };
+    if start == 0 {
+        return help.to_string();
+    }
+    let mut end = start + 1;
+    while end < lines.len()
+        && lines[end].starts_with(char::is_whitespace)
+        && !lines[end].trim().is_empty()
+    {
+        end += 1;
+    }
+    let usage = &lines[start..end];
+    let before = &lines[..start];
+    let after = &lines[end..];
+    let mut out: Vec<&str> = Vec::with_capacity(lines.len() + 1);
+    out.extend_from_slice(usage);
+    out.push("");
+    out.extend(before.iter().copied());
+    out.extend(after.iter().copied());
+    let joined = out.join("\n");
+    let mut joined = joined;
+    while joined.contains("\n\n\n") {
+        joined = joined.replace("\n\n\n", "\n\n");
+    }
+    joined
+}
+
+/// Reorder clap's help sections into commander's order.
+///
+/// clap emits `Commands:` before `Arguments:`/`Options:`; commander emits
+/// `Arguments:` -> `Options:` -> `Commands:`. This is a pure text transform on
+/// the RENDERED help rather than a `help_template`, because a template must be
+/// written per command: `{all-args}` cannot be reordered, and spelling the
+/// sections out individually would print a bare `Arguments:` header for the
+/// ~40 subcommands that have no positionals.
+///
+/// Only sections that are actually present move, so a command with no
+/// positionals still emits no `Arguments:` header. Anything that is not one of
+/// the three known sections keeps its position relative to the preamble, so an
+/// unrecognised block cannot be silently dropped.
+fn reorder_help_sections(help: &str) -> String {
+    // A section header is a line at column 0 ending in ':' — clap's own format.
+    fn is_header(line: &str) -> bool {
+        !line.starts_with(char::is_whitespace)
+            && line.ends_with(':')
+            && line.len() > 1
+            && line.starts_with(|c: char| c.is_ascii_uppercase())
+    }
+
+    // Normalise the PREAMBLE first: commander leads with `Usage:` and puts the
+    // description after it; clap leads with the description on every
+    // subcommand. `help_template` is not inherited by subcommands in clap
+    // derive, so doing this on the rendered text covers all ~50 command paths
+    // with one mechanism instead of an attribute on every struct.
+    let help = &normalise_preamble(help);
+    let lines: Vec<&str> = help.lines().collect();
+    let first = lines.iter().position(|l| is_header(l));
+    let Some(first) = first else {
+        return help.to_string();
+    };
+    // `Usage:` is part of the preamble, not a movable section.
+    let mut preamble: Vec<&str> = lines[..first].to_vec();
+    let mut sections: Vec<(String, Vec<&str>)> = Vec::new();
+    let mut cur: Option<(String, Vec<&str>)> = None;
+    for line in &lines[first..] {
+        if is_header(line) {
+            if let Some(sec) = cur.take() {
+                sections.push(sec);
+            }
+            cur = Some(((*line).to_string(), Vec::new()));
+        } else if let Some((_, body)) = cur.as_mut() {
+            body.push(line);
+        }
+    }
+    if let Some(sec) = cur.take() {
+        sections.push(sec);
+    }
+    // `Usage:` renders as a header but belongs with the preamble.
+    while sections
+        .first()
+        .is_some_and(|(h, _)| h.starts_with("Usage:"))
+    {
+        let (h, body) = sections.remove(0);
+        preamble.push(Box::leak(h.into_boxed_str()));
+        preamble.extend(body);
+    }
+
+    let rank = |h: &str| match h {
+        _ if h.starts_with("Arguments:") => 0,
+        _ if h.starts_with("Options:") => 1,
+        _ if h.starts_with("Commands:") => 2,
+        _ => 3,
+    };
+    sections.sort_by_key(|(h, _)| rank(h));
+
+    let mut out = preamble.join("\n");
+    for (h, body) in sections {
+        // Exactly one blank line before every section header, as commander
+        // renders it. Rebuilding the blocks drops whatever spacing they had.
+        while out.ends_with('\n') {
+            out.pop();
+        }
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        out.push_str(&h);
+        out.push('\n');
+        out.push_str(&body.join("\n"));
+        out.push('\n');
+    }
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
 fn commander_help(e: &clap::Error) -> String {
     let mut help = e.to_string();
     for (canonical, alias) in [
@@ -293,7 +419,7 @@ fn commander_help(e: &clap::Error) -> String {
         );
         help = help.replace(&alias_paragraph, "");
     }
-    help
+    reorder_help_sections(&help)
 }
 
 /// Top-level entrypoint. Returns the process exit code.
@@ -1474,5 +1600,96 @@ mod cli_mode_settings_tests {
             Some(h) => std::env::set_var("HOME", h),
             None => std::env::remove_var("HOME"),
         }
+    }
+}
+
+#[cfg(test)]
+mod help_layout_tests {
+    use super::{normalise_preamble, reorder_help_sections};
+
+    /// clap renders subcommand help description-first with Commands before
+    /// Options; commander renders Usage-first with
+    /// Arguments -> Options -> Commands.
+    const CLAP_STYLE: &str = "\
+Configure and manage MCP servers
+
+Usage: lingxi-cli mcp [COMMAND]
+
+Commands:
+  add   Add a server
+  list  List servers
+
+Options:
+  -h, --help  Print help
+";
+
+    #[test]
+    fn usage_moves_ahead_of_the_description() {
+        let out = normalise_preamble(CLAP_STYLE);
+        let first = out.lines().next().unwrap();
+        assert!(first.starts_with("Usage:"), "{out}");
+        assert!(out.contains("Configure and manage MCP servers"), "{out}");
+    }
+
+    #[test]
+    fn a_wrapped_usage_block_moves_whole() {
+        // Taking only the first line would strip the wrapped tail onto the
+        // wrong side of the description.
+        let input = "Some description\n\nUsage: cli foo [OPTIONS]\n           [EXTRA]\n\nOptions:\n  -h\n";
+        let out = normalise_preamble(input);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], "Usage: cli foo [OPTIONS]");
+        assert_eq!(lines[1], "           [EXTRA]");
+    }
+
+    #[test]
+    fn sections_are_reordered_to_commander_order() {
+        let out = reorder_help_sections(CLAP_STYLE);
+        let opts = out.find("Options:").expect("options");
+        let cmds = out.find("Commands:").expect("commands");
+        assert!(opts < cmds, "Options must precede Commands:\n{out}");
+    }
+
+    #[test]
+    fn arguments_precede_options() {
+        let input =
+            "Usage: cli x\n\nOptions:\n  -h\n\nArguments:\n  [target]  A target\n";
+        let out = reorder_help_sections(input);
+        let args = out.find("Arguments:").expect("arguments");
+        let opts = out.find("Options:").expect("options");
+        assert!(args < opts, "Arguments must precede Options:\n{out}");
+    }
+
+    #[test]
+    fn a_command_without_positionals_gets_no_arguments_header() {
+        // The reason this is a text transform and not a help_template: a
+        // template spelling the sections out would print a bare `Arguments:`
+        // for the ~40 subcommands that have none.
+        let out = reorder_help_sections(CLAP_STYLE);
+        assert!(!out.contains("Arguments:"), "{out}");
+    }
+
+    #[test]
+    fn exactly_one_blank_line_precedes_each_header() {
+        let out = reorder_help_sections(CLAP_STYLE);
+        for header in ["Options:", "Commands:"] {
+            let at = out.find(header).expect(header);
+            assert!(out[..at].ends_with("\n\n"), "{header} spacing:\n{out:?}");
+            assert!(!out[..at].ends_with("\n\n\n"), "{header} doubled:\n{out:?}");
+        }
+    }
+
+    #[test]
+    fn an_unrecognised_section_is_not_dropped() {
+        let input = "Usage: cli x\n\nOptions:\n  -h\n\nExamples:\n  cli x --yes\n";
+        let out = reorder_help_sections(input);
+        assert!(out.contains("Examples:"), "{out}");
+        assert!(out.contains("cli x --yes"), "{out}");
+    }
+
+    #[test]
+    fn help_without_any_section_is_returned_unchanged() {
+        let input = "Usage: cli x\n\njust a description\n";
+        assert_eq!(reorder_help_sections(input), input);
     }
 }

@@ -11,8 +11,8 @@ what commands DO: it runs both binaries against a fresh sandboxed HOME per
 command, with argv as a list and stdin closed, and diffs stdout+stderr+exit
 status after folding known-legitimate branding to neutral tokens.
 
-Current state: **11 of 12 probed commands identical, 1 differing** — and that
-one is a deliberate divergence (below), not an unfixed defect.
+Current state: **12 of 12 probed commands identical, and 5 of 5 write probes
+identical** — stdout, stderr, exit status, and the resulting config JSON.
 
 It exists as a script because FOUR findings during this audit were artifacts of
 an ad-hoc shell probe rather than facts about the code. zsh does not word-split
@@ -70,48 +70,43 @@ commented as such.
   what a command touches is not harmlessly cautious — it steers people away
   from a safe command.
 
+- **`mcp list` now health-checks.** `Checking MCP server health…` plus a
+  per-server `✔ Connected` / `✘ Failed to connect — <error>`, matching the
+  oracle's structure exactly (including the trailing space an argless stdio
+  server renders: the oracle formats `{command} {args}` unconditionally).
+
+  The check SPAWNS stdio servers, so it runs ONLY for servers the user has
+  accepted: user- and local-scope servers came from an explicit `mcp add`, and
+  a project `.mcp.json` server stays PENDING until approved. That bound is what
+  makes it safe alongside ancestor discovery — an inherited `~/.mcp.json` is
+  listed, never executed, until someone approves it. Probe connections are torn
+  down, and a wedged server times out at 10s instead of hanging the listing.
+
+  The error DETAIL after the em-dash is implementation-specific and will not
+  match byte-for-byte (Rust `io` errors vs Node `ENOENT: … posix_spawn`).
+
 - **User-facing text told users to run `claude`**, a binary that does not exist
   in this product — 9 strings across `mcp.rs` and `argv.rs`, plus the
   `plugin list` empty-case hint.
 
-## 1. The one remaining behaviour difference: MCP health checks
+## 1. Surfaces still unprobed
 
-`claude mcp list` prints `Checking MCP server health…` and appends a per-server
-status (`✔ Connected` / `✘ Failed to connect`). This port prints neither.
+The harness covers 12 read-only verbs and 5 write sequences. Not yet compared:
+everything skipped BY NAME as interactive/network/server (`auth login`,
+`setup-token`, `gateway`, `remote-control`, `install`, `update`, `mcp serve`)
+and `plugin install` (network). These need either a mock registry/IdP or a
+recorded-transcript fixture; running them for real reaches third-party services.
 
-**This is a deliberate architectural stance, documented independently in three
-places** (`mcp list`, `mcp get`, and `doctor`, which says "No connection is
-attempted — this is purely the parsed config view"). Health-checking means
-spawning every configured stdio server, i.e. executing arbitrary configured
-commands as a side effect of a listing command.
+## 2. What remains different in `--help`
 
-It is now MORE consequential than before: this wave made ancestor `.mcp.json`
-discoverable, so a spawn-on-list would execute commands from an inherited
-`~/.mcp.json` in any subdirectory of `$HOME`. The oracle bounds this by only
-health-checking APPROVED servers (pending ones are skipped), so the risk is
-containable — but turning it on is a product decision about executing inherited
-config, not a parity cleanup. **Do not implement it without deciding that
-question first.**
+Section ORDER, preamble order, and 80-column wrapping now match the oracle
+(`Usage:` → description → Arguments → Options → Commands), implemented as a
+transform on clap's rendered help rather than per-command templates.
 
-## 2. Surfaces still unprobed
-
-The harness covers 12 read-only verbs. Not yet compared: commands that write
-(`mcp add`, `plugin install`, `project` mutations), and everything skipped by
-name as interactive/network/server (`auth login`, `setup-token`, `gateway`,
-`remote-control`, `doctor`, `install`, `update`, `mcp serve`). Extending it
-means constructing fixtures and asserting on resulting FILES, not just stdout —
-two sides can print identical bytes and write different files.
-
-## 3. `--help` section order
-
-`Usage:` leads, the description follows, and help wraps at 80 columns with
-hanging indents — matching the oracle. What remains is that clap's `{all-args}`
-orders Commands → Options where commander emits Arguments → Options → Commands.
-Reordering needs per-command templates, since a literal `Arguments:` header in
-a shared template would print for the ~40 subcommands that have no positionals.
-
-`--help` can never be byte-identical regardless: the binary name, product
-description, and command set legitimately differ.
+What cannot match: the binary name, the product description, the command set,
+and clap's own option rendering (`-h, --help  Print help` vs commander's
+`Display help for command`). `--help` is not a byte-parity target for a
+differently-named product.
 
 ## Two decisions, not fixes
 

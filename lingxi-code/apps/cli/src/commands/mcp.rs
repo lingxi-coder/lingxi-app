@@ -325,7 +325,7 @@ pub async fn run(cli: &Cli) -> i32 {
         Sub::Add(a) => run_add(a),
         Sub::AddJson(a) => run_add_json(a),
         Sub::Remove(a) => run_remove(a),
-        Sub::List => run_list(),
+        Sub::List => run_list().await,
         Sub::Get(a) => run_get(a),
         Sub::ResetProjectChoices => run_reset_project_choices(),
         Sub::Serve(a) => run_serve(a).await,
@@ -1858,27 +1858,61 @@ const PENDING_APPROVAL: &str = "\u{23F8} Pending approval (run `lingxi-cli` to a
 /// summary WITHOUT the network probe — the server inventory itself is
 /// byte-faithful. (The pending-approval status, unlike a health check, is
 /// derived purely from config and so is surfaced exactly.)
-fn run_list() -> i32 {
+/// How long a single server gets to complete its initialize handshake.
+///
+/// A wedged server must not hang the listing: it reports as a timeout and the
+/// remaining servers are still checked.
+const HEALTH_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+const CONNECTED: &str = "\u{2714} Connected";
+const FAILED_TO_CONNECT: &str = "\u{2718} Failed to connect";
+
+async fn run_list() -> i32 {
     let servers = load_all_servers();
     if servers.is_empty() {
         println!("No MCP servers configured. Use `lingxi-cli mcp add` to add a server.");
         return SUCCESS;
     }
     let (_, pending) = project_server_approval();
+
+    // The health check SPAWNS stdio servers and opens network connections, so
+    // it runs only for servers the user has actually accepted: user- and
+    // local-scope servers were added by an explicit `mcp add`, and a project
+    // `.mcp.json` server stays PENDING until approved. That bound is what makes
+    // this safe now that discovery walks up to ancestor `.mcp.json` files — an
+    // inherited config is listed, never executed, until someone approves it.
+    println!("Checking MCP server health\u{2026}");
+    println!();
+
+    let transport: std::sync::Arc<dyn traits::McpTransport> =
+        std::sync::Arc::new(platform_posix::PosixMcpTransport::new());
+    let registry = mcp::McpRegistry::new(transport);
+
     for cfg in &servers {
+        let summary = transport_summary(&cfg.spec);
         if is_pending_project_server(cfg, &pending) {
-            // Unapproved project server: Pending approval, never spawned. The
-            // transport summary still prints — the oracle's row is
-            // `name: url (HTTP) - ⏸ Pending approval`, and hiding the URL
-            // makes it impossible to see WHAT you are being asked to approve.
-            println!(
-                "{}: {} - {PENDING_APPROVAL}",
-                cfg.name,
-                transport_summary(&cfg.spec)
-            );
-        } else {
-            println!("{}: {}", cfg.name, transport_summary(&cfg.spec));
+            // Unapproved project server: never spawned, so never health-checked
+            // — 1:1 with the binary, whose pending branch skips `ySc`. The
+            // transport summary still prints: hiding the URL makes it
+            // impossible to see WHAT you are being asked to approve.
+            println!("{}: {summary} - {PENDING_APPROVAL}", cfg.name);
+            continue;
         }
+        let status =
+            match tokio::time::timeout(HEALTH_CHECK_TIMEOUT, registry.connect(cfg.clone())).await {
+                Ok(Ok(_)) => {
+                    // Tear the probe connection down; `mcp list` must not leave
+                    // a spawned child behind.
+                    let _ = registry.disconnect(&cfg.name).await;
+                    CONNECTED.to_string()
+                }
+                Ok(Err(e)) => format!("{FAILED_TO_CONNECT} \u{2014} {e}"),
+                Err(_) => format!(
+                    "{FAILED_TO_CONNECT} \u{2014} timed out after {}s",
+                    HEALTH_CHECK_TIMEOUT.as_secs()
+                ),
+            };
+        println!("{}: {summary} - {status}", cfg.name);
     }
     SUCCESS
 }
@@ -2222,11 +2256,11 @@ fn scope_contains_server(name: &str, scope: Scope) -> bool {
 fn transport_summary(spec: &traits::McpTransportSpec) -> String {
     match spec {
         traits::McpTransportSpec::Stdio { command, args, .. } => {
-            if args.is_empty() {
-                command.clone()
-            } else {
-                format!("{command} {}", args.join(" "))
-            }
+            // Unconditional `{command} {args}`, matching the oracle — an
+            // argless stdio server renders WITH a trailing space
+            // (`mock_stdio_mcp  - ✘ …`). Special-casing the empty-args case to
+            // trim it looks tidier and is a byte divergence.
+            format!("{command} {}", args.join(" "))
         }
         traits::McpTransportSpec::Sse { url, .. } => format!("{url} (SSE)"),
         traits::McpTransportSpec::Http { url, .. } => format!("{url} (HTTP)"),
@@ -2472,6 +2506,45 @@ fn print_file_modified(scope: Scope, path: &std::path::Path) {
         Scope::User | Scope::Project => {
             println!("File modified: {}", path.display());
         }
+    }
+}
+
+#[cfg(test)]
+mod transport_summary_tests {
+    use traits::McpTransportSpec;
+
+    #[test]
+    fn argless_stdio_keeps_the_oracle_trailing_space() {
+        // The oracle formats `{command} {args}` unconditionally, so an argless
+        // stdio server renders with a trailing space before the ` - status`
+        // separator (`mock_stdio_mcp  - ✘ …`). Trimming it looks tidier and is
+        // a byte divergence.
+        let spec = McpTransportSpec::Stdio {
+            command: "/bin/thing".into(),
+            args: vec![],
+            env: Default::default(),
+        };
+        assert_eq!(super::transport_summary(&spec), "/bin/thing ");
+    }
+
+    #[test]
+    fn stdio_with_args_joins_them() {
+        let spec = McpTransportSpec::Stdio {
+            command: "echo".into(),
+            args: vec!["hi".into(), "there".into()],
+            env: Default::default(),
+        };
+        assert_eq!(super::transport_summary(&spec), "echo hi there");
+    }
+
+    #[test]
+    fn http_and_sse_carry_their_transport_label() {
+        let http = McpTransportSpec::Http {
+            url: "https://x.example/mcp".into(),
+            headers: Default::default(),
+            oauth: None,
+        };
+        assert_eq!(super::transport_summary(&http), "https://x.example/mcp (HTTP)");
     }
 }
 

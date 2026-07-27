@@ -79,6 +79,10 @@ fn config_with_settings(settings_json: &str) -> (tempfile::TempDir, DesktopConfi
         api_base: "https://api.anthropic.com".to_string(),
         api_key: String::new(),
         api_key_helper: None,
+        // (M13) Inert auth-resolver inputs: no managed OAuth forcing, no
+        // FD-inherited key.
+        managed_oauth_only: false,
+        anthropic_key_fd_present: false,
         cwd: cwd.clone(),
         lingxi_home,
         default_model: "claude-sonnet-4-20250514".to_string(),

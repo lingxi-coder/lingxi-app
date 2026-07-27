@@ -1709,6 +1709,8 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 ///     api_key: "sk-test".to_string(),
 ///     isolated_credential_storage: false,
 ///     api_key_helper: None,
+///     managed_oauth_only: false,
+///     anthropic_key_fd_present: false,
 ///     cwd: PathBuf::from("/tmp/project"),
 ///     lingxi_home: PathBuf::from("/tmp/home/.lingxi"),
 ///     default_model: "claude-sonnet-5".to_string(),
@@ -1796,6 +1798,21 @@ pub struct DesktopConfig {
     /// Settings `apiKeyHelper`: shell command/path that prints the Anthropic
     /// auth value. Used only when no higher-priority API key/OAuth source wins.
     pub api_key_helper: Option<String>,
+    /// (M13) Managed context forces Claude.ai OAuth as the effective auth
+    /// source (managed settings `forceLoginMethod: "claudeai"`): with a stored
+    /// OAuth session it outranks even an env `ANTHROPIC_API_KEY` in the auth
+    /// resolver (`llm_client::oauth::anthropic::resolver`). Host-resolved
+    /// (F2-01: `build()` performs no managed-settings reads for this); the CLI
+    /// fills it from the managed tiers, bridge-server keeps the default
+    /// `false`.
+    pub managed_oauth_only: bool,
+    /// (M13) `true` when the launcher advertised an FD-inherited Anthropic API
+    /// key (`CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR` in claude-code's managed /
+    /// remote launches). In the auth resolver an FD key outranks stored OAuth,
+    /// so a stored session must NOT report as the Claude.ai-subscriber auth
+    /// source. LingXi ships no FD-passing launcher of its own; the CLI fills
+    /// this from env presence so the seam is closed for hosts that do.
+    pub anthropic_key_fd_present: bool,
     /// Working directory the orchestrator + tool context are rooted at.
     pub cwd: std::path::PathBuf,
     /// The `~/.claude` root the hook / agents / global-MCP / settings loaders
@@ -2327,6 +2344,10 @@ impl Default for DesktopConfig {
             // Production reads the real keychain; only isolated hosts opt out.
             isolated_credential_storage: false,
             api_key_helper: None,
+            // (M13) Default: no managed OAuth forcing, no FD-inherited key —
+            // hosts that resolve either fill them in.
+            managed_oauth_only: false,
+            anthropic_key_fd_present: false,
             cwd: std::path::PathBuf::from("."),
             lingxi_home: std::path::PathBuf::new(),
             default_model: DesktopEngineConfig::default().default_model,
@@ -3036,27 +3057,23 @@ pub enum BuildError {
 /// for a session that holds a stored OAuth token.
 ///
 /// `isClaudeAISubscriber()` is `isAnthropicAuthEnabled() && shouldUseClaudeAIAuth(scopes)`.
-/// `isAnthropicAuthEnabled()` is `false` whenever a non-OAuth source OUTRANKS
-/// stored OAuth in the auth resolver (`llm_client::oauth::anthropic::resolver`). The two such
-/// sources surfaced into the desktop build are the env `ANTHROPIC_API_KEY`
-/// (`api_key_present`) and `ANTHROPIC_AUTH_TOKEN` (`auth_token_present`); when
-/// either is set the effective auth is that key/bearer, not Claude.ai OAuth.
-/// Bedrock / api-key-helper / settings keys rank BELOW stored OAuth, so OAuth
-/// wins over them — no exclusion needed. With neither override present, the token
-/// is the effective auth and `shouldUseClaudeAIAuth(scopes)` (== presence of the
-/// `user:inference` scope, via `llm_client::oauth::anthropic::subscription_from_scopes`)
-/// decides.
-///
-/// PARITY-GAP: FD-inherited keys + managed-context OAuth forcing are not surfaced
-/// into [`DesktopConfig`]; the common desktop API-key-vs-OAuth split is covered.
+/// `isAnthropicAuthEnabled()` reduces to "the auth resolver picks the stored
+/// OAuth session" — `resolve` is driven with the FULL
+/// [`llm_client::oauth::anthropic::resolver::ResolverContext`] (M13), so every
+/// documented ranking applies: managed OAuth forcing outranks env keys, env
+/// `ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_API_KEY` and an FD-inherited key outrank
+/// stored OAuth, and stored OAuth outranks the stored/settings/helper/Bedrock
+/// keys. When OAuth is the effective source, `shouldUseClaudeAIAuth(scopes)`
+/// (== presence of the `user:inference` scope, via
+/// `llm_client::oauth::anthropic::subscription_from_scopes`) decides.
 fn oauth_subscriber_flag(
-    api_key_present: bool,
-    auth_token_present: bool,
+    source: &llm_client::oauth::anthropic::resolver::AuthSource,
     scopes: &[String],
 ) -> bool {
-    !api_key_present
-        && !auth_token_present
-        && llm_client::oauth::anthropic::subscription_from_scopes(scopes)
+    matches!(
+        source,
+        llm_client::oauth::anthropic::resolver::AuthSource::OAuthClaudeAi
+    ) && llm_client::oauth::anthropic::subscription_from_scopes(scopes)
 }
 
 /// Fold the profile + roles responses into the shared snapshot. Pure —
@@ -4223,9 +4240,16 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
     // platform `Arc<dyn SecureStorage>` for per-server token persistence.
     let mcp_oauth_storage = storage.clone();
     let credentials = Arc::new(CredentialManager::new(storage, clock.clone(), http.clone()));
+    // (M13) Track WHERE the key came from — the auth resolver ranks an
+    // env/host-supplied key ABOVE stored OAuth but a keychain-stored key BELOW
+    // it, so the two sources must stay distinguishable.
+    let mut stored_anthropic_api_key = false;
     let resolved_anthropic_api_key = if cfg.api_key.is_empty() {
         match credentials.get_anthropic_api_key().await {
-            Ok(Some(key)) => Some(key.expose_secret().clone()),
+            Ok(Some(key)) => {
+                stored_anthropic_api_key = true;
+                Some(key.expose_secret().clone())
+            }
             Ok(None) => None,
             Err(error) => {
                 tracing::warn!(%error, "could not read Anthropic API key from secure storage");
@@ -4256,11 +4280,36 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
     let mut persisted_subscription_type: Option<String> = None;
     match credentials.get_oauth_tokens().await {
         Ok(Some(tokens)) => {
-            is_subscriber = oauth_subscriber_flag(
-                resolved_anthropic_api_key.is_some(),
-                std::env::var_os("ANTHROPIC_AUTH_TOKEN").is_some(),
-                &tokens.scopes,
-            );
+            // (M13) Drive the documented auth-source resolver with the full
+            // context instead of a hand-rolled two-flag exclusion: managed
+            // OAuth forcing (`forceLoginMethod: "claudeai"`) makes the stored
+            // session the effective auth EVEN with an env key present, an
+            // FD-inherited key outranks the stored session, and a
+            // keychain-stored key ranks BELOW it. The below-OAuth sources
+            // (settings key / helper / Bedrock) cannot change the outcome once
+            // `has_stored_oauth` is true, so their slots stay conservative.
+            let auth_source =
+                llm_client::oauth::anthropic::resolver::resolve(
+                    &llm_client::oauth::anthropic::resolver::ResolverContext {
+                        managed_oauth_only: cfg.managed_oauth_only,
+                        env_auth_token: std::env::var("ANTHROPIC_AUTH_TOKEN")
+                            .ok()
+                            .filter(|v| !v.is_empty()),
+                        env_api_key: (!stored_anthropic_api_key)
+                            .then(|| resolved_anthropic_api_key.clone())
+                            .flatten(),
+                        fd_present: cfg.anthropic_key_fd_present,
+                        has_stored_oauth: true,
+                        has_stored_api_key: stored_anthropic_api_key,
+                        settings_api_key: None,
+                        api_key_helper_script: cfg
+                            .api_key_helper
+                            .as_ref()
+                            .map(std::path::PathBuf::from),
+                        aws_present: false,
+                    },
+                );
+            is_subscriber = oauth_subscriber_flag(&auth_source, &tokens.scopes);
             // (M13) The stored credential carries the tier persisted at login
             // (claude-code keeps `subscriptionType`/`rateLimitTier` inside
             // `claudeAiOauth`), so enterprise/tier-gated behaviour is correct
@@ -4474,11 +4523,15 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
     //       dep. A bad settings entry only emits a warning — the engine still boots
     //       with every well-formed profile (incl. the built-in Anthropic one).
     let has_api_key = resolved_anthropic_api_key.is_some();
-    // OAuth bridges into the client ONLY when there is no API key (api-key wins;
-    // the single credential slot + `oauth_subscriber_flag` enforce the
-    // exclusion). `has_oauth` selects `AuthStrategy::OAuthBearer`, which is what
-    // injects the required `oauth-2025-04-20` beta on Anthropic routes.
-    let has_oauth = !has_api_key && oauth_auth_state.is_some();
+    // OAuth bridges into the client exactly when the auth RESOLVER made the
+    // stored session the effective source (M13): `oauth_auth_state` is only
+    // captured for an OAuth-effective subscriber session, which outranks a
+    // keychain-stored key and — under managed `forceLoginMethod: "claudeai"` —
+    // even an env key. `has_oauth` selects `AuthStrategy::OAuthBearer`, which
+    // is what injects the required `oauth-2025-04-20` beta on Anthropic routes;
+    // the assemble input below drops the key claim when OAuth is effective so
+    // the ApiKey strategy can't shadow it.
+    let has_oauth = oauth_auth_state.is_some();
     let oauth_delegate: Option<Arc<dyn llm_client::CredentialProvider>> =
         oauth_auth_state.clone().map(|state| {
             let driver = Arc::new(RefreshDriver::new(state));
@@ -4489,7 +4542,7 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
     let assembled = provider_config::assemble(provider_config::AssembleInputs {
         anthropic_api_base: cfg.api_base.clone(),
         anthropic_models: anthropic_models_for(&cfg.default_model, cfg.fallback_model.as_deref()),
-        anthropic_has_api_key: has_api_key,
+        anthropic_has_api_key: has_api_key && !has_oauth,
         anthropic_has_oauth: has_oauth,
         user_providers: cfg.provider_profiles.clone().unwrap_or_default(),
         routing: cfg.routing.clone(),
@@ -9162,19 +9215,66 @@ mod tests {
 
     #[test]
     fn oauth_subscriber_flag_gating() {
+        use llm_client::oauth::anthropic::resolver::{resolve, ResolverContext};
         let inference = vec!["user:inference".to_string(), "user:profile".to_string()];
         let no_inference = vec!["user:profile".to_string()];
+        // The context `resolve_llm_stack` builds for a stored-OAuth session,
+        // parameterized over the sources that can outrank (or force) it.
+        let ctx = |managed: bool, env_key: bool, env_token: bool, fd: bool, stored_key: bool| {
+            resolve(&ResolverContext {
+                managed_oauth_only: managed,
+                env_auth_token: env_token.then(|| "tok".to_string()),
+                env_api_key: env_key.then(|| "sk-ant".to_string()),
+                fd_present: fd,
+                has_stored_oauth: true,
+                has_stored_api_key: stored_key,
+                settings_api_key: None,
+                api_key_helper_script: None,
+                aws_present: false,
+            })
+        };
         // Clean OAuth (no overriding env key/token) + inference scope ⇒ subscriber.
-        assert!(super::oauth_subscriber_flag(false, false, &inference));
+        assert!(super::oauth_subscriber_flag(
+            &ctx(false, false, false, false, false),
+            &inference
+        ));
         // Inference scope present, but an env ANTHROPIC_API_KEY outranks stored
         // OAuth in the resolver ⇒ isAnthropicAuthEnabled() false ⇒ not subscriber.
-        assert!(!super::oauth_subscriber_flag(true, false, &inference));
+        assert!(!super::oauth_subscriber_flag(
+            &ctx(false, true, false, false, false),
+            &inference
+        ));
         // Likewise an env ANTHROPIC_AUTH_TOKEN bearer outranks stored OAuth.
-        assert!(!super::oauth_subscriber_flag(false, true, &inference));
+        assert!(!super::oauth_subscriber_flag(
+            &ctx(false, false, true, false, false),
+            &inference
+        ));
+        // (M13) An FD-inherited key (managed/remote launch) outranks stored OAuth.
+        assert!(!super::oauth_subscriber_flag(
+            &ctx(false, false, false, true, false),
+            &inference
+        ));
+        // (M13) A keychain-STORED key ranks BELOW stored OAuth ⇒ still subscriber.
+        assert!(super::oauth_subscriber_flag(
+            &ctx(false, false, false, false, true),
+            &inference
+        ));
+        // (M13) Managed `forceLoginMethod: "claudeai"` forces the stored session
+        // even when an env ANTHROPIC_API_KEY is present.
+        assert!(super::oauth_subscriber_flag(
+            &ctx(true, true, false, false, false),
+            &inference
+        ));
         // Clean OAuth but no inference scope (e.g. profile-only) ⇒ not subscriber.
-        assert!(!super::oauth_subscriber_flag(false, false, &no_inference));
+        assert!(!super::oauth_subscriber_flag(
+            &ctx(false, false, false, false, false),
+            &no_inference
+        ));
         // No scopes at all ⇒ not subscriber.
-        assert!(!super::oauth_subscriber_flag(false, false, &[]));
+        assert!(!super::oauth_subscriber_flag(
+            &ctx(false, false, false, false, false),
+            &[]
+        ));
     }
 
     /// A [`client_adapter::PermissionRequestSink`] that records the requests the
@@ -9202,6 +9302,10 @@ mod tests {
             api_base: "https://api.anthropic.com".to_string(),
             api_key: String::new(),
             api_key_helper: None,
+            // (M13) Inert auth-resolver inputs: no managed OAuth forcing, no
+            // FD-inherited key.
+            managed_oauth_only: false,
+            anthropic_key_fd_present: false,
             cwd: cwd.clone(),
             lingxi_home,
             default_model: "claude-sonnet-4-20250514".to_string(),

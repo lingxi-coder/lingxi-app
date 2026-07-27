@@ -114,6 +114,7 @@ impl PermissionGate for ClassifierDenyGate {
         PermissionResolution::Deny {
             reason: self.reason.into(),
             source: PermissionDecisionSource::Classifier,
+            rule_source: None,
             decision_reason_type: None,
             decision_reason: None,
             behavior_ask: false,
@@ -143,6 +144,7 @@ impl PermissionGate for AskRejectGate {
         PermissionResolution::Deny {
             reason: self.reason.into(),
             source: PermissionDecisionSource::Unspecified,
+            rule_source: None,
             decision_reason_type: None,
             decision_reason: None,
             behavior_ask: true,

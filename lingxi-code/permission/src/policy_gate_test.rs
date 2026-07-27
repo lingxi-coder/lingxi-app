@@ -806,12 +806,35 @@ mod tests {
         let gate = PolicyPermissionGate::new(policy, inner.clone());
         assert_eq!(
             gate.resolve_detailed("Bash", &serde_json::json!({})).await,
-            PermissionResolution::Allow
+            // `policy_with` loads the rule from `userSettings` — the raw
+            // `SettingSource` token claude-code's `ZX_` reads off the matched
+            // rule to label the OTEL decision source.
+            PermissionResolution::Allow {
+                rule_source: Some("userSettings".into())
+            }
         );
         assert_eq!(
             inner.calls(),
             0,
             "resolve_detailed never consults the inner"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_detailed_session_allow_rule_carries_session_source() {
+        // A TUI "always allow" grant is a `session` rule — the one scope `ZX_`
+        // renders as `user_temporary` rather than `user_permanent`.
+        let policy = Arc::new(PermissionPolicy::from_rules(
+            PermissionMode::Default,
+            vec![crate::rule::PermissionRule::allow_tool_session("Bash")],
+        ));
+        let gate =
+            PolicyPermissionGate::new(policy, RecordingInner::new(PermissionDecision::Allow));
+        assert_eq!(
+            gate.resolve_detailed("Bash", &serde_json::json!({})).await,
+            PermissionResolution::Allow {
+                rule_source: Some("session".into())
+            }
         );
     }
 
@@ -824,8 +847,14 @@ mod tests {
         let gate =
             PolicyPermissionGate::new(policy, RecordingInner::new(PermissionDecision::Allow));
         match gate.resolve_detailed("Bash", &serde_json::json!({})).await {
-            PermissionResolution::Deny { source, reason, .. } => {
+            PermissionResolution::Deny {
+                source,
+                reason,
+                rule_source,
+                ..
+            } => {
                 assert_eq!(source, PermissionDecisionSource::Rule);
+                assert_eq!(rule_source.as_deref(), Some("userSettings"));
                 assert!(reason.contains("Bash"), "reason names the rule: {reason}");
             }
             other => panic!("expected Deny{{Rule}}, got {other:?}"),
@@ -839,8 +868,11 @@ mod tests {
         let gate =
             PolicyPermissionGate::new(policy, RecordingInner::new(PermissionDecision::Allow));
         match gate.resolve_detailed("Bash", &serde_json::json!({})).await {
-            PermissionResolution::Deny { source, .. } => {
+            PermissionResolution::Deny {
+                source, rule_source, ..
+            } => {
                 assert_eq!(source, PermissionDecisionSource::Mode);
+                assert_eq!(rule_source, None, "a mode deny matched no rule");
             }
             other => panic!("expected Deny{{Mode}}, got {other:?}"),
         }
@@ -855,7 +887,9 @@ mod tests {
         let gate = PolicyPermissionGate::new(policy, inner.clone());
         assert_eq!(
             gate.resolve_detailed("Read", &serde_json::json!({})).await,
-            PermissionResolution::Allow
+            // No rule matched — the auto-allow carries no settings scope, so
+            // `ZX_`'s default arm labels it "config".
+            PermissionResolution::Allow { rule_source: None }
         );
         assert_eq!(inner.calls(), 0, "read-only auto-allow never prompts");
     }
@@ -883,7 +917,7 @@ mod tests {
         let allow = RecordingInner::new(PermissionDecision::Allow);
         assert_eq!(
             allow.resolve_detailed("Bash", &serde_json::json!({})).await,
-            PermissionResolution::Allow
+            PermissionResolution::Allow { rule_source: None }
         );
         let deny = RecordingInner::new(PermissionDecision::Deny {
             reason: "nope".into(),

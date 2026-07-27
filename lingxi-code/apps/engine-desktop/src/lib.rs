@@ -7223,21 +7223,48 @@ pub async fn build(
         // into the tool for the session — the binary's `St().workflowSizeGuideline`
         // fed through `Jvd`. It flavors the Workflow tool's prompt appendix.
         // Absent / unknown ⇒ `unrestricted` (no appendix), via `from_wire`.
-        let workflow_size_guideline =
-            std::fs::read_to_string(cfg.lingxi_home.join("settings.json"))
-                .ok()
-                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-                .and_then(|v| {
-                    v.get("workflowSizeGuideline")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_string)
-                })
-                .map_or(tool_workflow::WorkflowSizeGuideline::Unrestricted, |s| {
-                    tool_workflow::WorkflowSizeGuideline::from_wire(&s)
-                });
+        // `workflowSizeGuideline` may come from ANY settings file (2.1.219),
+        // not just the user one; later tiers win. Absent everywhere ⇒ the
+        // oracle's default `medium` (`_Td`), NOT unrestricted.
+        let workflow_settings_files = [
+            crate::settings_watch::managed_settings_dir().join("managed-settings.json"),
+            cfg.lingxi_home.join("settings.json"),
+            cwd.join(branding::DOT_DIR).join("settings.json"),
+            cwd.join(branding::DOT_DIR).join("settings.local.json"),
+        ];
+        let read_setting = |key: &str| -> Option<serde_json::Value> {
+            let mut found = None;
+            for path in &workflow_settings_files {
+                if let Some(v) = std::fs::read_to_string(path)
+                    .ok()
+                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                    .and_then(|v| v.get(key).cloned())
+                {
+                    found = Some(v);
+                }
+            }
+            found
+        };
+        let workflow_size_guideline = read_setting("workflowSizeGuideline")
+            .as_ref()
+            .and_then(serde_json::Value::as_str)
+            .map_or_else(tool_workflow::WorkflowSizeGuideline::default, |s| {
+                tool_workflow::WorkflowSizeGuideline::from_wire(s)
+            });
+        // `disableWorkflows` is an ORG policy, so it is read from MANAGED
+        // settings only — a project or user file must not be able to turn the
+        // tool off on the org's behalf, nor to turn it back on.
+        let managed_disable_workflows = std::fs::read_to_string(
+            crate::settings_watch::managed_settings_dir().join("managed-settings.json"),
+        )
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|v| v.get("disableWorkflows").and_then(serde_json::Value::as_bool))
+        .unwrap_or(false);
         tools_inner.register_builtin(Arc::new(
             tool_workflow::WorkflowTool::new(Some(workflow_launcher))
-                .with_size_guideline(workflow_size_guideline),
+                .with_size_guideline(workflow_size_guideline)
+                .with_disable_workflows(managed_disable_workflows),
         ));
     }
     for (conn_id, mcp_tools) in

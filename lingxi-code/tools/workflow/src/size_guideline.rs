@@ -33,15 +33,23 @@
 //! per-session freeze is structural rather than a runtime cache.
 
 /// The four `workflowSizeGuideline` values, in the binary's `zvd` order
-/// (`unrestricted` first). `unrestricted` is the default / cleared state and
-/// produces no prompt appendix.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// (`unrestricted` first). `unrestricted` is the CLEARED state and produces no
+/// prompt appendix; it is NOT the default.
+///
+/// The default is [`Self::Medium`] (2.1.219). Oracle @234469666:
+/// `var rLs=["unrestricted","small","medium","large"], _Td="medium",
+/// oko={small:5,medium:15,large:50}`, with
+/// `Oft(e)` returning `{size:_Td,isDefault:!0}` when no source set it. This
+/// port previously defaulted to `Unrestricted`, i.e. shipped with NO agent cap
+/// where the oracle advises under 15.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WorkflowSizeGuideline {
-    /// No guideline — the default. No prompt appendix, no agent cap.
+    /// No guideline — the CLEARED state. No prompt appendix, no agent cap.
     Unrestricted,
     /// Keep workflows under 5 agents.
     Small,
-    /// Keep workflows under 15 agents.
+    /// Keep workflows under 15 agents. The shipped DEFAULT (`_Td`).
+    #[default]
     Medium,
     /// Keep workflows under 50 agents.
     Large,

@@ -96,7 +96,22 @@ impl ProcessRunner for RecordingRunner {
         let command = inner.args.last().cloned().unwrap_or_default();
         // Simulate `pwd -P` writing the post-`cd` physical cwd to the tracking
         // file the tool appended to the command.
-        let sim = self.sim_pwd.lock().unwrap().pop_front().flatten();
+        // Pop the next simulated readback, but KEEP the last one in place: a
+        // real `pwd -P` always reports the shell's cwd, it never runs out. As a
+        // one-shot queue this double was order-dependent — any additional
+        // `run()` consumed the only entry, the tracking file was never written,
+        // and the tool concluded the cwd had not changed. That surfaced under
+        // CPU saturation as "0 CwdChanged fires" and "a foreground cd must
+        // advance the shared live-cwd cell", both reproducible ~1-in-8 under
+        // load and never in isolation.
+        let sim = {
+            let mut q = self.sim_pwd.lock().unwrap();
+            if q.len() > 1 {
+                q.pop_front().flatten()
+            } else {
+                q.front().cloned().flatten()
+            }
+        };
         if let Some(target) = sim {
             if let Some(file) = extract_cwd_file(&command) {
                 std::fs::write(&file, format!("{}\n", target.display())).unwrap();

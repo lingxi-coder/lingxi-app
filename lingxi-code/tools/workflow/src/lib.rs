@@ -434,9 +434,13 @@ pub struct WorkflowTool {
     /// `St().workflowSizeGuideline`, frozen for the session via `Jvd`'s cache;
     /// here the composition root reads the persisted setting once and hands it
     /// in, so the freeze is structural. Drives the [`Tool::prompt`] appendix
-    /// (`qAs + VAs(size)`). Defaults to [`WorkflowSizeGuideline::Unrestricted`]
-    /// (no appendix) when unset.
+    /// (`qAs + VAs(size)`). Defaults to [`WorkflowSizeGuideline::Medium`]
+    /// (the oracle's `_Td`) when unset — NOT `Unrestricted`.
     size_guideline: WorkflowSizeGuideline,
+    /// MANAGED-settings `disableWorkflows` (binary `fbn()`'s second arm).
+    /// Threaded at registration because `ToolStaticContext` carries only
+    /// feature flags.
+    managed_disable_workflows: bool,
 }
 
 impl WorkflowTool {
@@ -448,7 +452,8 @@ impl WorkflowTool {
     pub fn new(launcher: Option<Arc<dyn WorkflowLauncher>>) -> Self {
         Self {
             launcher,
-            size_guideline: WorkflowSizeGuideline::Unrestricted,
+            size_guideline: WorkflowSizeGuideline::default(),
+            managed_disable_workflows: false,
         }
     }
 
@@ -460,6 +465,25 @@ impl WorkflowTool {
     pub fn with_size_guideline(mut self, size: WorkflowSizeGuideline) -> Self {
         self.size_guideline = size;
         self
+    }
+
+    /// Set the MANAGED-settings `disableWorkflows` gate (binary `fbn()`'s
+    /// second arm, `$H()?.settings.disableWorkflows === true`).
+    ///
+    /// Threaded at registration like [`Self::with_size_guideline`] rather than
+    /// through `ToolStaticContext`, which carries only feature flags. Without
+    /// it an organization that set `disableWorkflows: true` still had the tool
+    /// advertised and executable — the policy was parsed by nothing.
+    #[must_use]
+    pub fn with_disable_workflows(mut self, disabled: bool) -> Self {
+        self.managed_disable_workflows = disabled;
+        self
+    }
+
+    /// Is the tool disabled, by env var OR managed setting? Binary `fbn()`.
+    fn workflows_disabled(&self) -> bool {
+        self.managed_disable_workflows
+            || is_env_truthy(std::env::var("LINGXI_DISABLE_WORKFLOWS").ok().as_deref())
     }
 
     fn spec_from_input(input: &Value) -> WorkflowLaunchSpec {
@@ -523,18 +547,17 @@ impl Tool for WorkflowTool {
         //   `isEnvTruthy(process.env.LINGXI_DISABLE_WORKFLOWS)` OR
         //   `$H()?.settings.disableWorkflows === true`
         //
-        // LingXi: the env-var branch is implemented faithfully.
-        // ⚠️ managed-setting `disableWorkflows` has no ctx seam:
-        //   `ToolStaticContext` carries only `feature_flags`; the managed settings
-        //   object is not threaded to `is_enabled`. The setting gate is therefore
-        //   not implemented; a future refactor that adds managed-settings to
-        //   `ToolStaticContext` should add the second arm.
+        // BOTH arms are implemented. The managed-setting arm is threaded at
+        // REGISTRATION (`with_disable_workflows`) rather than through
+        // `ToolStaticContext`, which carries only feature flags — the seam that
+        // previously blocked it. Before this, an organization setting
+        // `disableWorkflows: true` still got the tool advertised and executable.
         //
         // The org/launch (`Xs("allow_workflows")`), GrowthBook
         // (`tengu_workflows_enabled`), and plan-availability gates have no LingXi
         // backing and are treated as permissive (enabled), matching the
         // Max/Team/null-plan default.
-        !is_env_truthy(std::env::var("LINGXI_DISABLE_WORKFLOWS").ok().as_deref())
+        !self.workflows_disabled()
     }
     fn max_result_size_chars(&self) -> usize {
         100000
@@ -610,14 +633,10 @@ impl Tool for WorkflowTool {
         // to `validate_input`. Kept as a named constant for documentation; the gate
         // is not wired.
         //
-        // errorCode 5 — `disableWorkflows` managed setting
-        // ⚠️ PARTIAL: the binary's `fbn()` checks an org-managed setting
-        // (`$H()?.settings.disableWorkflows`). `ToolStaticContext` carries only
-        // `feature_flags`; the managed-settings object is not threaded here. We
-        // fire the byte-exact message on the env-var branch (same branch as
-        // `is_enabled`) as a faithful-equivalent gate for local builds. The managed-
-        // setting arm is NOT reachable from this ctx.
-        if is_env_truthy(std::env::var("LINGXI_DISABLE_WORKFLOWS").ok().as_deref()) {
+        // errorCode 5 — `disableWorkflows`: env var OR managed setting
+        // (binary `fbn()`). Both arms reach here now; the managed value is
+        // threaded at registration (`with_disable_workflows`).
+        if self.workflows_disabled() {
             return Err(ValidationError(
                 "Dynamic workflows are disabled by managed settings (`disableWorkflows`).".into(),
             ));
@@ -999,11 +1018,67 @@ mod tests {
         assert!(!DESCRIPTION.contains("\\u2014"));
     }
 
+    /// Managed `disableWorkflows: true` must disable the tool. Before this was
+    /// wired there was no seam for the setting at all, so an organization that
+    /// set it still had Workflow advertised AND executable — the policy was
+    /// parsed by nothing.
+    #[test]
+    fn managed_disable_workflows_disables_the_tool() {
+        let ctx = ToolStaticContext::default();
+        assert!(
+            WorkflowTool::new(None).is_enabled(&ctx),
+            "enabled by default"
+        );
+        assert!(
+            !WorkflowTool::new(None)
+                .with_disable_workflows(true)
+                .is_enabled(&ctx),
+            "managed disableWorkflows must disable it"
+        );
+    }
+
+    #[tokio::test]
+    async fn managed_disable_workflows_also_rejects_at_validate() {
+        // `is_enabled` hides the tool; a caller that invokes it anyway must
+        // still be refused, with the byte-exact message.
+        let t = WorkflowTool::new(None).with_disable_workflows(true);
+        let ctx = tool_api::test_support::fresh_ctx();
+        // The env arm must be OFF so this proves the MANAGED arm fired.
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("LINGXI_DISABLE_WORKFLOWS");
+        let err = t
+            .validate_input(&serde_json::json!({"script": "x"}), &ctx)
+            .await
+            .expect_err("must reject");
+        assert_eq!(
+            err.0,
+            "Dynamic workflows are disabled by managed settings (`disableWorkflows`)."
+        );
+    }
+
+    #[test]
+    fn the_default_size_guideline_is_medium_not_unrestricted() {
+        assert_eq!(
+            WorkflowSizeGuideline::default(),
+            WorkflowSizeGuideline::Medium
+        );
+    }
+
     #[tokio::test]
     async fn prompt_appends_size_guideline_when_configured() {
         let opts = PromptOptions::default();
-        // Default (unrestricted): prompt is exactly the base description.
-        assert_eq!(tool(None).prompt(&opts).await, *DESCRIPTION);
+        // The DEFAULT is `medium` (oracle `_Td`), not unrestricted, so an
+        // unconfigured tool already carries the medium appendix. Shipping
+        // `Unrestricted` by default meant shipping NO agent cap where the
+        // oracle advises under 15.
+        assert_eq!(
+            tool(None).prompt(&opts).await,
+            format!(
+                "{}{}",
+                *DESCRIPTION,
+                WorkflowSizeGuideline::Medium.prompt_appendix()
+            )
+        );
         // Each configured size appends its byte-exact `VAs` appendix
         // (`qAs + VAs(size)`), with NO separator between description and appendix
         // (the appendix carries its own leading newline).

@@ -244,12 +244,18 @@ fn build_servers_from_map(
             }
         } else if let Some(url) = entry.url {
             let url = expand_field(&url, &mut missing);
+            // An entry whose url is blank (or whose `${VAR}` expanded to
+            // nothing) is KEPT, not dropped — oracle `a[u]=T` retains every
+            // entry and defers the decision to connect time (`zar`). Dropping
+            // it here made the server vanish from `mcp list` and `mcp get`
+            // entirely, so a user with a typo or an unset env var saw no
+            // server and no reason. It is refused at connect instead, where
+            // the refusal can be reported.
             if url.trim().is_empty() {
                 tracing::warn!(
                     server = %name,
-                    "mcp.json: remote entry missing url; skipping"
+                    "mcp.json: remote entry has no url; listed as Not configured"
                 );
-                continue;
             }
             let headers = expand_header_values(entry.headers, &mut missing);
             match entry.transport_type.as_deref() {
@@ -553,11 +559,24 @@ mod tests {
         assert!(cfgs.is_empty(), "bad entry skipped, no Err");
     }
 
+    /// An empty remote url is KEPT, not dropped.
+    ///
+    /// Verified by running both binaries over the same `.mcp.json`: the oracle
+    /// LISTS a `{"type":"http","url":""}` server (`a[u]=T` retains every entry)
+    /// and refuses it at CONNECT as UNCONFIGURED (`zar`). Dropping it here made
+    /// the server vanish from `mcp list` and `mcp get` with no explanation, so
+    /// a typo or an unset env var looked like the server had never been
+    /// configured at all.
     #[test]
-    fn empty_remote_url_is_skipped_not_loaded() {
+    fn empty_remote_url_is_kept_and_refused_at_connect() {
         let raw = r#"{"mcpServers":{"remote":{"type":"http","url":"   "}}}"#;
         let cfgs = parse_mcp_json_string(raw, ConfigScope::Project).unwrap();
-        assert!(cfgs.is_empty(), "empty remote url is invalid");
+        assert_eq!(cfgs.len(), 1, "the entry must be retained");
+        assert_eq!(cfgs[0].name, "remote");
+        assert!(
+            crate::registry::is_unconfigured_remote(&cfgs[0].spec),
+            "and must classify as unconfigured so connect refuses it"
+        );
     }
 
     #[test]

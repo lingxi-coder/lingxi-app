@@ -1865,6 +1865,9 @@ const PENDING_APPROVAL: &str = "\u{23F8} Pending approval (run `lingxi-cli` to a
 const HEALTH_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 const CONNECTED: &str = "\u{2714} Connected";
+/// Oracle `yEp`'s status for an `UNCONFIGURED` server.
+// Carries its OWN leading dash - the row must not add a second one.
+const NOT_CONFIGURED: &str = "- Not configured";
 const FAILED_TO_CONNECT: &str = "\u{2718} Failed to connect";
 
 async fn run_list() -> i32 {
@@ -1898,6 +1901,18 @@ async fn run_list() -> i32 {
             println!("{}: {summary} - {PENDING_APPROVAL}", cfg.name);
             continue;
         }
+        // An unconfigured remote server is never probed: the oracle reports
+        // `Not configured` and skips the connect entirely (`Qee`/`zar`). This
+        // check comes AFTER the pending one, matching the oracle - an
+        // unapproved project server reads "Pending approval" whether or not
+        // its URL resolves, because approval is the earlier question.
+        //
+        // These entries used to be dropped at config load, so a typo or an
+        // unset env var made the server vanish from the listing entirely.
+        if mcp::registry::is_unconfigured_remote(&cfg.spec) {
+            println!("{}: {summary} {NOT_CONFIGURED}", cfg.name);
+            continue;
+        }
         let status =
             match tokio::time::timeout(HEALTH_CHECK_TIMEOUT, registry.connect(cfg.clone())).await {
                 Ok(Ok(_)) => {
@@ -1914,7 +1929,55 @@ async fn run_list() -> i32 {
             };
         println!("{}: {summary} - {status}", cfg.name);
     }
+    print_mcp_config_diagnostics();
     SUCCESS
+}
+
+/// Print the `MCP config diagnostics` block the oracle appends to `mcp list`
+/// when any config carries a warning.
+///
+/// `mcp::config_diagnostics` produced these warnings all along and only
+/// tracing/doctor consumed them, so a user whose `${VAR}` never resolved saw a
+/// server with a literal `${VAR}` URL and no hint why. Silent when clean.
+fn print_mcp_config_diagnostics() {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let global = global_config_path();
+    let warnings =
+        mcp::config_diagnostics::collect_all_mcp_config_warnings(&cwd, global.as_deref());
+    if warnings.is_empty() {
+        return;
+    }
+    println!();
+    println!("MCP config diagnostics \u{26a0}");
+    println!();
+    println!("For help configuring MCP servers, see: https://code.claude.com/docs/en/mcp");
+    let mut order: Vec<String> = Vec::new();
+    let mut by_file: std::collections::HashMap<
+        String,
+        Vec<&mcp::config_diagnostics::McpConfigWarning>,
+    > = std::collections::HashMap::new();
+    for w in &warnings {
+        let key = w.file.clone().unwrap_or_default();
+        if !by_file.contains_key(&key) {
+            order.push(key.clone());
+        }
+        by_file.entry(key).or_default().push(w);
+    }
+    for file in order {
+        let group = &by_file[&file];
+        println!();
+        println!("[Contains warnings] {}", scope_detail(group[0].scope));
+        if !file.is_empty() {
+            println!("Location: {file}");
+        }
+        for w in group {
+            let name = w
+                .server_name
+                .as_deref()
+                .map_or(String::new(), |n| format!("[{n}] "));
+            println!(" \u{2514} [Warning] {name}{}: {}", w.path, w.message);
+        }
+    }
 }
 
 /// Implement `mcp get`. Prints one server's details, or the

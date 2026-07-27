@@ -45,6 +45,20 @@ pub fn expand_env_vars_in_string(value: &str) -> EnvExpansion {
     expand_env_vars_with(value, env_lookup)
 }
 
+/// [`expand_env_vars_in_string`] against an explicit env MAP instead of the
+/// live process environment.
+///
+/// Used by the enterprise-policy path, which must expand against a frozen
+/// startup snapshot plus the managed tiers — never the live process env, which
+/// settings files mutate.
+#[must_use]
+pub fn expand_env_vars_with_map(
+    value: &str,
+    env: &std::collections::BTreeMap<String, String>,
+) -> EnvExpansion {
+    expand_env_vars_with(value, |name| env.get(name).cloned())
+}
+
 /// [`expand_env_vars_in_string`] with an injected `lookup` (used by tests to
 /// avoid mutating the shared process environment). `lookup` plays the role of
 /// `process.env[varName]`: `Some(v)` for a set variable, `None` for unset.

@@ -44,7 +44,7 @@ pub fn agent_mcp_specs_to_scoped_configs(
         );
         return Vec::new();
     }
-    let mut out = Vec::new();
+    let mut out: Vec<mcp::McpServerConfig> = Vec::new();
     for spec in &def.mcp_servers {
         let record = match spec {
             // claude `typeof r === "string"` → by-name entries are resolved by
@@ -82,8 +82,14 @@ pub fn agent_mcp_specs_to_scoped_configs(
         }
         // `t[o] = {...i, scope: "agent"}` — the body shares the `.mcp.json`
         // entry shape; an invalid body is logged + dropped by the builder.
+        // A plain object assignment, so a name declared twice in one list is
+        // LAST-wins and keeps its original key position; the `Vec` stands in
+        // for `t`'s insertion order.
         if let Some(cfg) = mcp::build_server_from_json_entry(name, raw, mcp::ConfigScope::Agent) {
-            out.push(cfg);
+            match out.iter_mut().find(|c| c.name == cfg.name) {
+                Some(slot) => *slot = cfg,
+                None => out.push(cfg),
+            }
         }
     }
     out
@@ -240,6 +246,29 @@ mod tests {
         let cfgs = agent_mcp_specs_to_scoped_configs(&def, false);
         assert_eq!(cfgs.len(), 1);
         assert_eq!(cfgs[0].name, "ok");
+    }
+
+    #[test]
+    fn duplicate_names_are_last_wins_and_keep_their_position() {
+        // `obs` accumulates into an OBJECT (`t[o] = {...i, scope:"agent"}`), so
+        // the second `docs` overwrites the first — and JS keeps the key at its
+        // original insertion position, ahead of `other`.
+        let def = def_with_specs(
+            vec![
+                record("docs", serde_json::json!({"command": "first"})),
+                record("other", serde_json::json!({"command": "x"})),
+                record("docs", serde_json::json!({"command": "second"})),
+            ],
+            AgentSource::Project,
+        );
+        let cfgs = agent_mcp_specs_to_scoped_configs(&def, false);
+        assert_eq!(cfgs.len(), 2, "one config per name");
+        assert_eq!(cfgs[0].name, "docs");
+        assert_eq!(cfgs[1].name, "other");
+        assert!(
+            matches!(&cfgs[0].spec, traits::McpTransportSpec::Stdio { command, .. } if command == "second"),
+            "the LAST entry for a name wins"
+        );
     }
 
     #[test]

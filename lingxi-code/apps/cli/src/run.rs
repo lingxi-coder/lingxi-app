@@ -311,6 +311,17 @@ pub async fn run_stream_json_print(
     // to expose a `loaded_plugins()` accessor (follow-up).
     let plugins: Vec<(String, String, String)> = vec![];
 
+    // 2.1.219 `JW()`: why fast mode is unavailable here. The `-p` surface is
+    // the Agent SDK, so without the `--settings` `fastMode:true` opt-in this
+    // resolves `sdk_opt_in_required` (live 2.1.220 init/result capture).
+    let fast_mode_disabled_reason = {
+        let listings = runtime.orchestrator.list_model_listings().await;
+        resolve_fast_mode_disabled_reason(
+            session_model_is_first_party(&listings, &model_str),
+            flag_settings_fast_mode_opt_in(argv.settings.as_deref()),
+        )
+    };
+
     // Build the init parameters now that the runtime is available.
     let init_params = build_init_params(
         &session_id_str,
@@ -325,6 +336,7 @@ pub async fn run_stream_json_print(
         "default", // output_style
         None,      // memory_auto_path
         "off",     // fast_mode_state
+        fast_mode_disabled_reason,
     );
 
     // Thread the real params + session_id into the stream.
@@ -371,13 +383,13 @@ pub async fn run_stream_json_print(
         let err_msg = err.to_string();
         let subtype = stream_json_error_subtype(&err);
         stream
-            .emit_result_error(subtype, vec![err_msg], &cost, &model, "off", &betas)
+            .emit_result_error(subtype, vec![err_msg], &cost, &model, "off", fast_mode_disabled_reason, &betas)
             .await;
         stream.flush().await;
         exit_codes::RUNTIME_ERROR
     } else {
         stream
-            .emit_result_success(&result_text, "end_turn", &cost, &model, "off", &betas)
+            .emit_result_success(&result_text, "end_turn", &cost, &model, "off", fast_mode_disabled_reason, &betas)
             .await;
         stream.flush().await;
         exit_codes::SUCCESS
@@ -429,6 +441,7 @@ async fn dispatch_control_request(
     frame: &serde_json::Value,
     writer: &ControlPlaneWriter,
     cancel_tx: &tokio::sync::watch::Sender<bool>,
+    lifecycle: &crate::queued_commands::QueueLifecycle,
     orchestrator: &Arc<orchestrator::ConversationOrchestrator>,
     task_registry: &Arc<tasks::registry::TaskRegistry>,
     session_cwd: &Arc<tool_api::SessionCwd>,
@@ -438,6 +451,7 @@ async fn dispatch_control_request(
     init_agents: &[serde_json::Value],
     init_models: &[serde_json::Value],
     init_account: &serde_json::Value,
+    init_fast_mode_disabled_reason: Option<&'static str>,
 ) {
     // Request body fields live at `frame.request.<field>` (already key-normalized).
     let field = |k: &str| frame.get("request").and_then(|r| r.get(k));
@@ -450,13 +464,39 @@ async fn dispatch_control_request(
                 init_models,
                 init_account,
                 std::process::id(),
+                "off",
+                init_fast_mode_disabled_reason,
             );
             writer.reply_success(request_id, Some(payload));
         }
         "interrupt" => {
-            // §2.2 #1: cancel the per-turn token, then ack.
+            // §2.2 #1: cancel the per-turn token, then send the interrupt
+            // RECEIPT (2.1.220 `interrupt_receipt_v1`, advertised on
+            // system/init). Live-captured contract:
+            //   plain            → `{"still_queued":[uuids…]}` — queued async
+            //                      user messages SURVIVE the interrupt;
+            //   cancel_queued:true → sweep them too (2.1.219
+            //                      `interrupt_cancel_queued_v1`): a terminal
+            //                      `command_lifecycle`/`cancelled` frame per
+            //                      uuid, then `{"still_queued":[],
+            //                      "cancelled":[uuids…]}`. Idempotent — a
+            //                      repeat interrupt lists nothing twice.
             let _ = cancel_tx.send(true);
-            writer.reply_success(request_id, None);
+            if field("cancel_queued").and_then(Value::as_bool) == Some(true) {
+                let cancelled = lifecycle.queued.cancel_all_queued();
+                for uuid in &cancelled {
+                    lifecycle.emit(uuid, crate::queued_commands::LIFECYCLE_CANCELLED);
+                }
+                writer.reply_success(
+                    request_id,
+                    Some(json!({"still_queued": [], "cancelled": cancelled})),
+                );
+            } else {
+                writer.reply_success(
+                    request_id,
+                    Some(json!({"still_queued": lifecycle.queued.still_queued()})),
+                );
+            }
         }
         "set_model" => {
             // §2.2 #5: `"default"` (or an absent model) resolves to the session
@@ -908,6 +948,8 @@ fn pure_control_response(subtype: &str, frame: &serde_json::Value) -> PureContro
 /// `{commands, agents, output_style, available_output_styles, models, account,
 /// pid}` where `output_style` is `"default"` and `available_output_styles` is
 /// the 4-item list `["default","Proactive","Explanatory","Learning"]`.
+/// 2.1.220 (live re-capture) extends the tail with the remote-control gate
+/// booleans and `fast_mode_state` / `fast_mode_disabled_reason`.
 /// (NOTE: the separate REPL-bridge handler defaults these to `"normal"` /
 /// `["normal"]`, but that bridge is NOT the `-p --input-format stream-json`
 /// role this dispatcher models — the observable `-p` truth is the 4-item list.)
@@ -917,8 +959,15 @@ fn initialize_response_payload(
     models: &[serde_json::Value],
     account: &serde_json::Value,
     pid: u32,
+    fast_mode_state: &str,
+    fast_mode_disabled_reason: Option<&str>,
 ) -> serde_json::Value {
-    json!({
+    // 2.1.220 live capture appends five keys after `pid`:
+    // `remote_control_auto_enable`, `remote_control_auto_on_by_default`,
+    // `ide_rc_auto_enable_gate` (all `false` in a clean sandbox — LingXi has
+    // no remote-control feature, an accepted divergence, so `false` is always
+    // truthful), then `fast_mode_state` + optional `fast_mode_disabled_reason`.
+    let mut payload = json!({
         "commands": commands,
         "agents": agents,
         "output_style": "default",
@@ -926,7 +975,15 @@ fn initialize_response_payload(
         "models": models,
         "account": account,
         "pid": pid,
-    })
+        "remote_control_auto_enable": false,
+        "remote_control_auto_on_by_default": false,
+        "ide_rc_auto_enable_gate": false,
+        "fast_mode_state": fast_mode_state,
+    });
+    if let Some(reason) = fast_mode_disabled_reason {
+        payload["fast_mode_disabled_reason"] = json!(reason);
+    }
+    payload
 }
 
 /// Map the raw inner `control_response.response` permission payload onto a
@@ -1114,6 +1171,17 @@ pub async fn run_stream_json_input_loop(
 
     let plugins: Vec<(String, String, String)> = vec![];
 
+    // 2.1.219 `JW()`: fast-mode unavailability reason for this SDK surface —
+    // threaded into system/init, the `initialize` control_response, and every
+    // result frame (all live-verified 2.1.220 emission sites).
+    let fast_mode_disabled_reason = {
+        let listings = runtime.orchestrator.list_model_listings().await;
+        resolve_fast_mode_disabled_reason(
+            session_model_is_first_party(&listings, &model_str),
+            flag_settings_fast_mode_opt_in(argv.settings.as_deref()),
+        )
+    };
+
     let init_params = build_init_params(
         &session_id_str,
         tool_names,
@@ -1127,6 +1195,7 @@ pub async fn run_stream_json_input_loop(
         "default",
         None,
         "off",
+        fast_mode_disabled_reason,
     );
 
     stream.set_init_params(init_params).await;
@@ -1151,6 +1220,16 @@ pub async fn run_stream_json_input_loop(
     // The reader runs in a spawn_blocking thread so stdin I/O doesn't block
     // the async runtime. When stdin closes or a fatal error occurs all senders
     // drop, signalling EOF to all receivers.
+    // Interrupt-receipt substrate (2.1.220 `interrupt_receipt_v1` /
+    // `interrupt_cancel_queued_v1` / `msg_lifecycle_v1`): a shadow registry of
+    // uuid-stamped queued user messages, shared by the stdin router (`queued`
+    // lifecycle), the turn loop (`started` / terminal lifecycles + cancel
+    // skip), and the control dispatcher (interrupt receipts).
+    let queue_lifecycle = Arc::new(crate::queued_commands::QueueLifecycle::new(
+        stream.outbound_tx(),
+        session_id_str.clone(),
+    ));
+
     let StdinChannels {
         mut input_rx,
         mut control_req_rx,
@@ -1159,6 +1238,7 @@ pub async fn run_stream_json_input_loop(
         argv.replay_user_messages,
         session_id_str.clone(),
         stream.outbound_tx(),
+        queue_lifecycle.clone(),
     );
 
     // ORPHANED PERMISSION recovery channel. A late `control_response` whose
@@ -1299,6 +1379,7 @@ pub async fn run_stream_json_input_loop(
     let end_notify = Arc::new(tokio::sync::Notify::new());
     let end_notify_ctrl = end_notify.clone();
     let resolver_plane_for_cancel = control_plane.clone();
+    let ctrl_lifecycle = queue_lifecycle.clone();
     let ctrl_req_task = tokio::spawn(async move {
         // §2.2: a second `initialize` is an error, not a re-handshake — the
         // binary's handleInitializeRequest replies {subtype:'error', error:
@@ -1327,6 +1408,7 @@ pub async fn run_stream_json_input_loop(
                         &frame,
                         &ctrl_plane,
                         &cancel_tx_clone,
+                        &ctrl_lifecycle,
                         &ctrl_orch,
                         &ctrl_tasks,
                         &ctrl_session_cwd,
@@ -1336,6 +1418,7 @@ pub async fn run_stream_json_input_loop(
                         &init_agents,
                         &init_models,
                         &init_account,
+                        fast_mode_disabled_reason,
                     )
                     .await;
                 }
@@ -1433,6 +1516,15 @@ pub async fn run_stream_json_input_loop(
                 None => break, // stdin closed or fatal error — exit the loop.
             },
         };
+        // interrupt_cancel_queued_v1: a uuid cancelled while queue-resident
+        // must not run — its terminal `cancelled` lifecycle already went out
+        // with the interrupt receipt. `on_dequeued` also retires the uuid from
+        // the `still_queued` shadow registry.
+        if let Some(uuid) = turn.uuid.as_deref() {
+            if !queue_lifecycle.queued.on_dequeued(uuid) {
+                continue;
+            }
+        }
         had_any_turn = true;
         let prompt = content_to_prompt(&turn.content);
         let external_message_id = turn
@@ -1479,6 +1571,11 @@ pub async fn run_stream_json_input_loop(
             );
         }
 
+        // msg_lifecycle_v1: the dequeued command's turn is now dispatching.
+        if let Some(uuid) = turn.uuid.as_deref() {
+            queue_lifecycle.emit(uuid, crate::queued_commands::LIFECYCLE_STARTED);
+        }
+
         // Phase 1: use cancel-aware turn entry point so `interrupt` can abort
         // the in-flight SSE stream. A watcher task bridges the watch channel
         // to the CancellationToken that `run_turn_streaming_with_cancel` consumes.
@@ -1495,6 +1592,9 @@ pub async fn run_stream_json_input_loop(
         // `deny+interrupt` response (§3.4) can abort the whole turn.
         control_plane.set_active_turn(cancel.clone()).await;
 
+        // Probe handle: after the turn, `is_cancelled()` distinguishes an
+        // interrupt-aborted turn from a completed one (binary `mCo(reason)`).
+        let cancel_probe = cancel.clone();
         let turn_result = runtime
             .orchestrator
             .run_turn_streaming_with_cancel_image_sources_and_message_id(
@@ -1504,6 +1604,15 @@ pub async fn run_stream_json_input_loop(
                 external_message_id,
             )
             .await;
+        // msg_lifecycle_v1 terminal for the turn's own uuid.
+        if let Some(uuid) = turn.uuid.as_deref() {
+            let state = if cancel_probe.is_cancelled() {
+                crate::queued_commands::LIFECYCLE_CANCELLED
+            } else {
+                crate::queued_commands::LIFECYCLE_COMPLETED
+            };
+            queue_lifecycle.emit(uuid, state);
+        }
         stop_background_agents_at_budget(
             argv.max_budget_usd,
             runtime.orchestrator.as_ref(),
@@ -1525,6 +1634,12 @@ pub async fn run_stream_json_input_loop(
         }
     }
 
+    // Stream teardown (binary `Hkm`): every uuid still queue-resident gets a
+    // terminal `discarded` lifecycle — covers both stdin EOF and `end_session`.
+    for uuid in queue_lifecycle.queued.drain_for_discard() {
+        queue_lifecycle.emit(&uuid, crate::queued_commands::LIFECYCLE_DISCARDED);
+    }
+
     // Wait for the control dispatcher + response resolver to finish (they exit
     // when their channels close, which happens when the stdin reader task
     // finishes or drops the senders).
@@ -1535,7 +1650,7 @@ pub async fn run_stream_json_input_loop(
         // No user turns received — emit an empty-result envelope.
         let cost = runtime.orchestrator.snapshot_cost().await;
         stream
-            .emit_result_success("", "end_turn", &cost, &model_str, "off", &betas)
+            .emit_result_success("", "end_turn", &cost, &model_str, "off", fast_mode_disabled_reason, &betas)
             .await;
         stream.flush().await;
         return exit_codes::SUCCESS;
@@ -1554,17 +1669,96 @@ pub async fn run_stream_json_input_loop(
         let err_msg = err.to_string();
         let subtype = stream_json_error_subtype(&err);
         stream
-            .emit_result_error(subtype, vec![err_msg], &cost, &model, "off", &betas)
+            .emit_result_error(subtype, vec![err_msg], &cost, &model, "off", fast_mode_disabled_reason, &betas)
             .await;
         stream.flush().await;
         exit_codes::RUNTIME_ERROR
     } else {
         stream
-            .emit_result_success(&result_text, "end_turn", &cost, &model, "off", &betas)
+            .emit_result_success(&result_text, "end_turn", &cost, &model, "off", fast_mode_disabled_reason, &betas)
             .await;
         stream.flush().await;
         exit_codes::SUCCESS
     }
+}
+
+/// Port of the 2.1.219 fast-mode reason resolver `JW()` (binary @227890982),
+/// narrowed to the inputs reachable on the print/stream-json surface:
+///
+/// ```js
+/// function JW(e){
+///   if(!El())return xn()!=="firstParty"?"not_first_party":"disabled_by_env";
+///   if(Ke("tengu_penguins_off",null)!==null)return"unknown";
+///   if(!Hl(jkt())){…}                                    // model_not_allowed
+///   let t=Hr("flagSettings")?.fastMode===!0;
+///   if(_n()&&LVt()&&!t)return"sdk_opt_in_required";
+///   if(mB.status==="pending"&&…)return"pending";
+///   if(mB.status==="disabled"&&…)return mB.reason;       // free|preference|…
+///   return null}
+/// ```
+///
+/// * `El()` = firstParty provider && `!CLAUDE_CODE_DISABLE_FAST_MODE` (raw JS
+///   truthiness — any non-empty value disables).
+/// * `tengu_penguins_off` is a dynamic-config STRING read (`Ke(key,null)`);
+///   with no fetcher wired the shipped binary resolves `null` there too, so
+///   the port's flag-absent default falls through identically.
+/// * `Hl` (org allowed-models policy) has no port surface — managed
+///   `allowedModels` is unported, so `model_not_allowed` is unreachable.
+/// * `_n()&&LVt()` — the SDK/non-interactive entrypoint check — is
+///   constitutively TRUE here: this resolver only runs on the `-p`
+///   stream-json/json paths, which ARE the Agent-SDK surface.
+/// * The availability prober (`mB`) is unported; its `pending` and
+///   `free|preference|extra_usage_disabled|network_error|unknown` arms are
+///   unreachable, matching the fall-through `null` of an active status.
+fn resolve_fast_mode_disabled_reason(
+    first_party: bool,
+    sdk_fast_mode_opt_in: bool,
+) -> Option<&'static str> {
+    if !first_party {
+        return Some("not_first_party");
+    }
+    if std::env::var("CLAUDE_CODE_DISABLE_FAST_MODE").is_ok_and(|v| !v.is_empty()) {
+        return Some("disabled_by_env");
+    }
+    if !sdk_fast_mode_opt_in {
+        return Some("sdk_opt_in_required");
+    }
+    None
+}
+
+/// `xn()==="firstParty"` for the session model — LingXi multi-provider
+/// divergence: a model served by any non-Anthropic provider profile maps to
+/// `not_first_party` (the oracle only distinguishes bedrock/vertex/etc.).
+fn session_model_is_first_party(
+    listings: &[traits::orchestrator::ModelListing],
+    model: &str,
+) -> bool {
+    if let Some(listing) = listings.iter().find(|l| l.request_model == model) {
+        return listing.provider_id == "anthropic";
+    }
+    // Not in the live catalog (offline/test builds): bare `claude-*` ids and
+    // the `default` pseudo-model route to the first-party Anthropic profile.
+    model == "default" || model.to_lowercase().starts_with("claude-")
+}
+
+/// `Hr("flagSettings")?.fastMode===!0` — the Agent-SDK fast-mode opt-in
+/// carried by `--settings` (inline JSON or a settings-file path). Strictly
+/// boolean `true`, like the oracle's `===!0`.
+fn flag_settings_fast_mode_opt_in(settings: Option<&str>) -> bool {
+    let Some(raw) = settings else { return false };
+    let trimmed = raw.trim();
+    let text = if trimmed.starts_with('{') {
+        trimmed.to_string()
+    } else {
+        match std::fs::read_to_string(trimmed) {
+            Ok(t) => t,
+            Err(_) => return false,
+        }
+    };
+    serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|v| v.get("fastMode").and_then(serde_json::Value::as_bool))
+        == Some(true)
 }
 
 /// Map a model's `request_model` string to its capability flags.
@@ -3357,7 +3551,9 @@ mod tests {
     fn initialize_payload_output_style_defaults_match_p_oracle() {
         // ORACLE 2.1.201 `-p`: output_style "default" + the 4-item list.
         // Locks the `-p` truth (NOT the REPL-bridge "normal"/["normal"]).
-        let payload = initialize_response_payload(&[], &[], &[], &json!({}), 4242);
+        // 2.1.220 re-capture appends the remote-control gates + fast-mode tail
+        // (covered exhaustively by `initialize_payload_tail_matches_2_1_220`).
+        let payload = initialize_response_payload(&[], &[], &[], &json!({}), 4242, "off", None);
         assert_eq!(payload["output_style"], "default");
         assert_eq!(
             payload["available_output_styles"],
@@ -3381,6 +3577,10 @@ mod tests {
                 "models",
                 "account",
                 "pid",
+                "remote_control_auto_enable",
+                "remote_control_auto_on_by_default",
+                "ide_rc_auto_enable_gate",
+                "fast_mode_state",
             ]
         );
     }
@@ -3540,7 +3740,10 @@ mod tests {
         cwd: &std::path::Path,
     ) -> serde_json::Value {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let writer = ControlPlaneWriter::new(std::sync::Arc::new(tx));
+        let out_tx = std::sync::Arc::new(tx);
+        let writer = ControlPlaneWriter::new(out_tx.clone());
+        let lifecycle =
+            crate::queued_commands::QueueLifecycle::new(out_tx, "sess-test".to_string());
         let (cancel_tx, _cancel_rx) = tokio::sync::watch::channel(false);
         let end_notify = std::sync::Arc::new(tokio::sync::Notify::new());
         let session_cwd = std::sync::Arc::new(tool_api::SessionCwd::new(
@@ -3556,6 +3759,7 @@ mod tests {
             &frame,
             &writer,
             &cancel_tx,
+            &lifecycle,
             orch,
             task_registry,
             &session_cwd,
@@ -3565,10 +3769,274 @@ mod tests {
             &[],
             &[],
             &json!({}),
+            None,
         )
         .await;
         serde_json::from_str::<serde_json::Value>(&outbound_line(rx.recv().await.expect("reply")))
             .expect("valid control_response json")
+    }
+
+    /// 2.1.220 interrupt receipt contract (live-captured against the binary
+    /// with a seeded queue): a plain interrupt lists queue-resident uuids
+    /// under `still_queued`; `cancel_queued:true` sweeps them — one terminal
+    /// `command_lifecycle`/`cancelled` frame per uuid BEFORE the receipt,
+    /// then `{"still_queued":[],"cancelled":[…]}`; a repeat interrupt is
+    /// idempotent (nothing re-listed, nothing re-cancelled).
+    #[tokio::test]
+    async fn interrupt_receipt_contract_matches_2_1_220() {
+        let build = crate::init::build_runtime_for_tui(&tui_argv())
+            .await
+            .expect("build_runtime_for_tui");
+        let orch = &build.runtime.orchestrator;
+        let tasks = &build.runtime.task_registry;
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let out_tx = std::sync::Arc::new(tx);
+        let writer = ControlPlaneWriter::new(out_tx.clone());
+        let lifecycle =
+            crate::queued_commands::QueueLifecycle::new(out_tx, "sess-int".to_string());
+        // Seed: u1 dequeued for the in-flight turn; u2/u3 queue-resident.
+        lifecycle.queued.on_queued("u1");
+        lifecycle.queued.on_queued("u2");
+        lifecycle.queued.on_queued("u3");
+        assert!(lifecycle.queued.on_dequeued("u1"));
+
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let end_notify = std::sync::Arc::new(tokio::sync::Notify::new());
+        let session_cwd = std::sync::Arc::new(tool_api::SessionCwd::new(
+            std::env::temp_dir(),
+            vec![std::env::temp_dir()],
+        ));
+        let plane = std::sync::Arc::new(crate::control_plane::StdioControlPlane::new(
+            std::sync::Arc::new(tokio::sync::mpsc::unbounded_channel().0),
+        ));
+
+        // ① Plain interrupt: survivors listed, queue untouched.
+        dispatch_control_request(
+            "interrupt",
+            "i1",
+            &req("interrupt", json!({})),
+            &writer,
+            &cancel_tx,
+            &lifecycle,
+            orch,
+            tasks,
+            &session_cwd,
+            &plane,
+            &end_notify,
+            &[],
+            &[],
+            &[],
+            &json!({}),
+            None,
+        )
+        .await;
+        assert!(*cancel_rx.borrow(), "interrupt must fire the cancel signal");
+        let receipt: serde_json::Value =
+            serde_json::from_str(&outbound_line(rx.recv().await.expect("receipt"))).unwrap();
+        assert_eq!(receipt["response"]["subtype"], "success");
+        assert_eq!(receipt["response"]["request_id"], "i1");
+        assert_eq!(
+            receipt["response"]["response"],
+            json!({"still_queued": ["u2", "u3"]}),
+            "plain interrupt: survivors under still_queued, no cancelled key"
+        );
+
+        // ② cancel_queued:true — terminal lifecycles precede the receipt.
+        dispatch_control_request(
+            "interrupt",
+            "i2",
+            &req("interrupt", json!({"cancel_queued": true})),
+            &writer,
+            &cancel_tx,
+            &lifecycle,
+            orch,
+            tasks,
+            &session_cwd,
+            &plane,
+            &end_notify,
+            &[],
+            &[],
+            &[],
+            &json!({}),
+            None,
+        )
+        .await;
+        for expected in ["u2", "u3"] {
+            let life: serde_json::Value =
+                serde_json::from_str(&outbound_line(rx.recv().await.expect("lifecycle"))).unwrap();
+            assert_eq!(life["type"], "command_lifecycle");
+            assert_eq!(life["command_uuid"], expected);
+            assert_eq!(life["state"], "cancelled");
+            assert_eq!(life["session_id"], "sess-int");
+        }
+        let receipt2: serde_json::Value =
+            serde_json::from_str(&outbound_line(rx.recv().await.expect("receipt2"))).unwrap();
+        assert_eq!(
+            receipt2["response"]["response"],
+            json!({"still_queued": [], "cancelled": ["u2", "u3"]}),
+        );
+
+        // ③ Repeat interrupt: idempotent — empty receipt, no extra lifecycles.
+        dispatch_control_request(
+            "interrupt",
+            "i3",
+            &req("interrupt", json!({"cancel_queued": true})),
+            &writer,
+            &cancel_tx,
+            &lifecycle,
+            orch,
+            tasks,
+            &session_cwd,
+            &plane,
+            &end_notify,
+            &[],
+            &[],
+            &[],
+            &json!({}),
+            None,
+        )
+        .await;
+        let receipt3: serde_json::Value =
+            serde_json::from_str(&outbound_line(rx.recv().await.expect("receipt3"))).unwrap();
+        assert_eq!(
+            receipt3["response"]["response"],
+            json!({"still_queued": [], "cancelled": []}),
+        );
+
+        // ④ The swept uuids must not run when the turn loop dequeues them.
+        assert!(!lifecycle.queued.on_dequeued("u2"));
+        assert!(!lifecycle.queued.on_dequeued("u3"));
+    }
+
+    /// 2.1.220 initialize payload tail (live-captured): the remote-control
+    /// gate booleans then `fast_mode_state` + optional
+    /// `fast_mode_disabled_reason` follow `pid`; the reason key is omitted
+    /// when no reason resolved.
+    #[test]
+    fn initialize_payload_tail_matches_2_1_220() {
+        let p = initialize_response_payload(
+            &[],
+            &[],
+            &[],
+            &json!({}),
+            42,
+            "off",
+            Some("sdk_opt_in_required"),
+        );
+        let keys: Vec<&str> = p.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            vec![
+                "commands",
+                "agents",
+                "output_style",
+                "available_output_styles",
+                "models",
+                "account",
+                "pid",
+                "remote_control_auto_enable",
+                "remote_control_auto_on_by_default",
+                "ide_rc_auto_enable_gate",
+                "fast_mode_state",
+                "fast_mode_disabled_reason",
+            ],
+        );
+        assert_eq!(p["fast_mode_state"], "off");
+        assert_eq!(p["fast_mode_disabled_reason"], "sdk_opt_in_required");
+
+        let bare = initialize_response_payload(&[], &[], &[], &json!({}), 42, "off", None);
+        assert!(
+            !bare
+                .as_object()
+                .unwrap()
+                .contains_key("fast_mode_disabled_reason"),
+            "no reason ⇒ key omitted"
+        );
+    }
+
+    /// `JW()` resolution order: `not_first_party` (from `!El()`'s ternary)
+    /// outranks everything; the env kill-switch outranks the SDK opt-in gate;
+    /// a first-party opted-in session resolves no reason. Env mutation is
+    /// serialized because it is process-global.
+    #[test]
+    fn fast_mode_reason_resolver_matches_jw_order() {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::remove_var("CLAUDE_CODE_DISABLE_FAST_MODE");
+        assert_eq!(
+            resolve_fast_mode_disabled_reason(false, true),
+            Some("not_first_party")
+        );
+        assert_eq!(
+            resolve_fast_mode_disabled_reason(true, false),
+            Some("sdk_opt_in_required")
+        );
+        assert_eq!(resolve_fast_mode_disabled_reason(true, true), None);
+
+        std::env::set_var("CLAUDE_CODE_DISABLE_FAST_MODE", "1");
+        assert_eq!(
+            resolve_fast_mode_disabled_reason(true, true),
+            Some("disabled_by_env")
+        );
+        assert_eq!(
+            resolve_fast_mode_disabled_reason(false, true),
+            Some("not_first_party"),
+            "non-first-party wins the !El() ternary even with the env set"
+        );
+        std::env::remove_var("CLAUDE_CODE_DISABLE_FAST_MODE");
+    }
+
+    /// `--settings` fastMode opt-in: strict boolean `true` (oracle `===!0`),
+    /// accepted as inline JSON or a settings-file path.
+    #[test]
+    fn flag_settings_fast_mode_opt_in_parses_inline_and_file() {
+        assert!(flag_settings_fast_mode_opt_in(Some(r#"{"fastMode": true}"#)));
+        assert!(!flag_settings_fast_mode_opt_in(Some(
+            r#"{"fastMode": "true"}"#
+        )));
+        assert!(!flag_settings_fast_mode_opt_in(Some(r#"{}"#)));
+        assert!(!flag_settings_fast_mode_opt_in(None));
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        std::fs::write(&file, r#"{"fastMode": true}"#).unwrap();
+        assert!(flag_settings_fast_mode_opt_in(file.to_str()));
+        assert!(!flag_settings_fast_mode_opt_in(Some(
+            "/nonexistent/lingxi-settings.json"
+        )));
+    }
+
+    /// First-party detection prefers the live catalog row's provider; unknown
+    /// ids fall back to the `claude-*` / `default` family rule.
+    #[test]
+    fn session_model_first_party_uses_catalog_provider() {
+        let listings = vec![
+            traits::orchestrator::ModelListing {
+                display_model: "Opus".to_string(),
+                request_model: "claude-opus-4-8".to_string(),
+                provider_id: "anthropic".to_string(),
+                provider_label: "Anthropic".to_string(),
+                description: None,
+                supports_reasoning: true,
+            },
+            traits::orchestrator::ModelListing {
+                display_model: "GPT-4o".to_string(),
+                request_model: "gpt-4o".to_string(),
+                provider_id: "openai".to_string(),
+                provider_label: "OpenAI".to_string(),
+                description: None,
+                supports_reasoning: false,
+            },
+        ];
+        assert!(session_model_is_first_party(&listings, "claude-opus-4-8"));
+        assert!(!session_model_is_first_party(&listings, "gpt-4o"));
+        // Fallback family rule when the model is not in the catalog.
+        assert!(session_model_is_first_party(&listings, "claude-opus-5[1m]"));
+        assert!(session_model_is_first_party(&listings, "default"));
+        assert!(!session_model_is_first_party(&listings, "grok-3"));
     }
 
     #[tokio::test]

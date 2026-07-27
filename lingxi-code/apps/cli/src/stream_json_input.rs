@@ -672,6 +672,7 @@ pub fn spawn_stdin_router(
     replay_user_messages: bool,
     session_id: String,
     out_tx: Arc<OutboundTx>,
+    lifecycle: Arc<crate::queued_commands::QueueLifecycle>,
 ) -> StdinChannels {
     // Bounded channels: 64 buffered frames each. Turn channel is 64 (max burst
     // before the turn loop catches up). Control channels are 64 each.
@@ -699,6 +700,14 @@ pub fn spawn_stdin_router(
 
             match process_line(&line, &mut seen_uuids) {
                 Ok(FrameAction::UserTurn(turn)) => {
+                    // msg_lifecycle_v1: register the uuid + emit its `queued`
+                    // lifecycle BEFORE the (possibly blocking) send, so an
+                    // interrupt receipt can already list a frame that is
+                    // stuck behind backpressure ("pending-dispatch" in the
+                    // binary's contract wording).
+                    if let Some(uuid) = turn.uuid.as_deref() {
+                        lifecycle.command_queued(uuid);
+                    }
                     // Block if the channel is full (backpressure).
                     if input_tx.blocking_send(StreamInput::User(turn)).is_err() {
                         // Receiver dropped — turn driver has stopped; exit.

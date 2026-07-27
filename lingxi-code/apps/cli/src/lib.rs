@@ -78,6 +78,7 @@ pub mod mode;
 pub mod output;
 pub mod output_adapter;
 pub(crate) mod process_wrapper;
+pub mod queued_commands;
 pub mod repl;
 pub mod repl_loop;
 pub mod run;

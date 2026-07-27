@@ -426,6 +426,13 @@ fn commander_help(e: &clap::Error) -> String {
 /// Top-level entrypoint. Returns the process exit code.
 pub async fn run_cli(args: Vec<OsString>) -> i32 {
     startup_trace::start();
+    // Freeze the startup environment BEFORE anything can apply a settings-file
+    // `env` to the process. `${VAR}` inside a MANAGED MCP allow/deny matcher
+    // expands against this snapshot, so taking it late would let a lower-trust
+    // settings tier steer what an enterprise policy matches. The oracle gets
+    // this ordering implicitly (`Dut()` calls `NQr()` first); here it is
+    // explicit, and this is the earliest point in the process.
+    mcp::enterprise_policy::prime_startup_env();
     let mut parsed = match Argv::from_iter(args.clone()) {
         Ok(a) => a,
         Err(e) => {

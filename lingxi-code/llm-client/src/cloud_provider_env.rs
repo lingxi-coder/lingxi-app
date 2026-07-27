@@ -126,6 +126,11 @@ const VERTEX_REGION_TABLE: &[(&str, &str)] = &[
     ("claude-sonnet-5", "VERTEX_REGION_CLAUDE_5_SONNET"),
     ("claude-fable-5", "VERTEX_REGION_CLAUDE_FABLE_5"),
     ("claude-opus-4", "VERTEX_REGION_CLAUDE_4_0_OPUS"),
+    // Note the ORDER of the name parts: the oracle spells this
+    // `VERTEX_REGION_CLAUDE_5_OPUS`, not `..._OPUS_5` and not `..._5_0_OPUS`.
+    // Placed here to keep the len-desc/lex-asc invariant the prefix match
+    // depends on (13 chars, after `claude-opus-4`).
+    ("claude-opus-5", "VERTEX_REGION_CLAUDE_5_OPUS"),
 ];
 
 /// The `VERTEX_REGION_CLAUDE_*` env var name whose region pin applies to `model`,
@@ -399,6 +404,21 @@ mod tests {
     /// The table must be sorted by prefix length descending, then prefix lexical
     /// ascending, so `find` (linear) resolves the most-specific `startsWith`
     /// match first — exactly `l4f().sort(([a],[b]) => b.length-a.length || a<b?-1:...)`.
+    /// Opus 5 was absent from this port entirely — no catalog entry, no region
+    /// pin, no 1M context — despite being the oracle's 2.1.219 flagship.
+    #[test]
+    fn opus_5_has_its_vertex_region_pin() {
+        assert_eq!(
+            vertex_region_env_var_for_model("claude-opus-5"),
+            Some("VERTEX_REGION_CLAUDE_5_OPUS")
+        );
+        // Must not be captured by the shorter `claude-opus-4` prefix.
+        assert_eq!(
+            vertex_region_env_var_for_model("claude-opus-4"),
+            Some("VERTEX_REGION_CLAUDE_4_0_OPUS")
+        );
+    }
+
     #[test]
     fn region_table_is_sorted_len_desc_lex_asc() {
         for pair in VERTEX_REGION_TABLE.windows(2) {

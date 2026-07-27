@@ -211,6 +211,7 @@ fn entry_valid_for_type(entry: &Value, ty: &str) -> bool {
         .get("command")
         .and_then(Value::as_str)
         .is_some_and(|s| !s.trim().is_empty());
+
     let has_url = entry.get("url").and_then(Value::as_str).is_some();
     match ty {
         "stdio" => has_command,
@@ -454,12 +455,34 @@ mod tests {
             .starts_with("Skipped \u{2014} invalid MCP server config for \"bad\": "));
     }
 
+    /// A PRESENT-but-empty `url` is NOT a config warning.
+    ///
+    /// Verified by running both binaries over the same `.mcp.json`
+    /// (`{"blank":{"type":"http","url":""}}`): the oracle listed the server and
+    /// emitted NO diagnostic for it, warning only about a different server's
+    /// unresolved `${VAR}`. The entry is accepted here and refused at CONNECT
+    /// as UNCONFIGURED (`zar`).
+    ///
+    /// This test previously asserted a `Skipped - invalid MCP server config`
+    /// warning. That was wrong twice over: the oracle does not emit it, and
+    /// once the loader stopped dropping these entries the word "Skipped" was
+    /// simply false — the server is listed.
     #[test]
     fn blank_remote_url_is_schema_valid_and_only_absent_url_is_required() {
         // `cLi`/`J5n` declare `url: E.string()` with no `.min(1)`: a blank url
         // PASSES the schema, so the entry loads (and reports as
         // `- Not configured`). The only warning is `ty_`'s whitespace notice.
         let c = json!({"mcpServers":{"bad":{"type":"http","url":"   "}}});
+        assert!(
+            only(&c).is_empty(),
+            "an empty url is unconfigured, not a schema violation"
+        );
+    }
+
+    /// An ABSENT `url` on a remote type IS still invalid.
+    #[test]
+    fn a_missing_remote_url_is_still_reported_as_required() {
+        let c = json!({"mcpServers":{"bad":{"type":"http"}}});
         let w = only(&c);
         assert_eq!(w.len(), 1);
         assert_eq!(w[0].message, "Leading or trailing whitespace in: url");

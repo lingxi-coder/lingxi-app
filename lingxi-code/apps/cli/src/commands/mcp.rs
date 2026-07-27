@@ -1879,6 +1879,8 @@ const REJECTED: &str = "\u{2718} Rejected (see disabledMcpjsonServers in setting
 /// `Qee(r)` branch — connect skipped with `errorCode:"UNCONFIGURED"`). Reserved
 /// for `zar` ([`mcp::McpServerConfig::is_unconfigured`]): a blank `url` and NO
 /// `configError`. A `configError` is `INVALID_CONFIG`, which `Qee` rejects.
+///
+/// Carries its OWN leading dash — the row must not add a second one.
 const NOT_CONFIGURED: &str = "- Not configured";
 
 /// The status a server reports from its CONFIG alone — claude `Nxe`'s two
@@ -2569,6 +2571,9 @@ fn scope_detail(scope: ConfigScope) -> &'static str {
         ConfigScope::Enterprise => "Enterprise managed config",
         ConfigScope::ClaudeAi => "claude.ai connector",
         ConfigScope::Managed => "Managed config",
+        // Oracle `gV`: an agent-frontmatter server is scoped to the applied
+        // agent and lives only as long as it is applied.
+        ConfigScope::Agent => "Agent config (from agent frontmatter)",
     }
 }
 

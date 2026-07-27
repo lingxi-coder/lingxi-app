@@ -31,6 +31,8 @@ pub const FILE_STATE_CURRENT_SUFFIX: &str =
     " (file state is current in your context — no need to Read it back)";
 
 mod dir_validate;
+#[cfg(test)]
+pub(crate) mod test_env;
 pub mod edit;
 pub mod file_meta;
 pub mod glob;

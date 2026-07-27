@@ -42,7 +42,8 @@ pub struct SplitOptions {
     /// mode, `utils/api.ts:362-410`): the prefix block is **un**cached
     /// (`cacheScope=null`), the static content before
     /// [`SYSTEM_PROMPT_DYNAMIC_BOUNDARY`] is `global`-scoped, and the dynamic
-    /// content after it is uncached. When the boundary marker is absent
+    /// content after it is `org`-scoped (NOT uncached — see `y8s`). When the
+    /// boundary marker is absent
     /// (`boundaryIndex===-1`) this falls through to the org default — faithful to
     /// the TS `else` branch (`utils/api.ts:405-409`).
     pub global_scope: bool,
@@ -176,10 +177,24 @@ pub fn split_system_blocks_with(
                 });
             }
             if !dynamic_part.is_empty() {
-                // dynamic: cacheScope=null → never cached.
+                // dynamic: cacheScope="org".
+                //
+                // This was `None` with a comment claiming "never cached". The
+                // binary says otherwise — `y8s` (2.1.220 @237509234), the
+                // boundary split, ends:
+                //   let m = d.join("\n\n"); if (m) f.push({text:m, cacheScope:"global"});
+                //   let g = p.join("\n\n"); if (g) f.push({text:g, cacheScope:"org"});
+                // i.e. static-before-boundary is `global`, dynamic-after is
+                // `org`. Only the billing header and the `Pdo` block are null.
+                //
+                // The old comment cited `utils/api.ts:405-409`, which no longer
+                // describes this build — the citation outlived the behaviour.
+                // Leaving the dynamic half uncached means paying full input
+                // tokens for memory/env/output-style on EVERY request instead
+                // of a cache read.
                 out.push(SystemBlock {
                     text: dynamic_part.to_string(),
-                    cache_control: None,
+                    cache_control: org_cc(),
                 });
             }
             return out;
@@ -273,7 +288,13 @@ mod tests {
             })
         );
         assert_eq!(blocks[2].text, "dynamic body");
-        assert_eq!(blocks[2].cache_control, None); // dynamic cacheScope=null
+        // dynamic cacheScope="org" — `y8s` @237509234 ends
+        //   if (m) f.push({text:m, cacheScope:"global"});   // static
+        //   if (g) f.push({text:g, cacheScope:"org"});      // dynamic
+        // This previously asserted `None`, matching a stale comment that cited
+        // a TS line no longer describing this build. Uncached would mean paying
+        // full input tokens for the dynamic half on every request.
+        assert_eq!(blocks[2].cache_control, Some(CacheControl::Ephemeral));
     }
 
     #[test]

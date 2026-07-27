@@ -78,6 +78,7 @@ fn model_supports_1m(model: &str) -> bool {
         || canonical.contains("opus-4-6")
         || canonical.contains("opus-4-7")
         || canonical.contains("opus-4-8")
+        || canonical.contains("claude-opus-5")
         || canonical.contains("claude-fable-5")
         || canonical.contains("claude-mythos-5")
 }
@@ -101,6 +102,7 @@ fn model_native_1m(model: &str) -> bool {
     canonical.contains("claude-sonnet-5")
         || canonical.contains("opus-4-7")
         || canonical.contains("opus-4-8")
+        || canonical.contains("claude-opus-5")
         || canonical.contains("claude-fable-5")
         || canonical.contains("claude-mythos-5")
         || canonical == "claude-mythos-preview"

@@ -276,6 +276,124 @@ const TONE_AND_STYLE_SECTION: &str = concat!(
 /// here the leading newline is dropped because the assembler joins this block to
 /// the HEADER via its own `\n\n` separator (the net effect after the header
 /// separator is identical to the binary's prefix→body boundary).
+/// `gMy` — the lean `# Harness` bullet-3 prefix (`itp(t,"lean")`).
+const LEAN_SYSTEM_TURNS: &str = "The system may send updates, reminders, or modifications to rules via mid-conversation system turns. These are system-controlled, unlike function results.";
+
+/// `cMy` — the pronouns paragraph. Emitted for EVERY model (`sD("pronouns",
+/// () => cMy)` carries no gate), lean or long.
+const PRONOUNS_SECTION: &str = "When you use a pronoun for someone \u{2014} the user or anyone else you mention \u{2014} and their pronouns haven't been stated, use they/them. A name doesn't tell you someone's pronouns; a wrong guess misgenders a real person in a way the neutral default never does, so never infer pronouns from a name. This applies to all user-visible text, including visible thinking.";
+
+/// `iMy` — `action_caution`, emitted ONLY on the lean arm (`if(!TT(e)) return
+/// null`).
+///
+/// This is the lean arm's replacement for `# Executing actions with care`,
+/// which `wMy` drops. Shipping the lean body WITHOUT this would silently
+/// delete the confirm-before-irreversible-actions guidance for exactly the
+/// models the lean prompt targets — the dangerous half-fix.
+///
+/// The oracle appends the "contradicts how it was described" clause only when
+/// `YFc(model)` is FALSE. `YFc` = `SQt(env, gate, model)`, and `SQt`'s
+/// `tXn(model)` term is TRUE exactly when the model carries
+/// `opus_5_prompt_bundle` — which in the 2.1.220 table is `claude-opus-5`
+/// alone. So Opus 5 gets the SHORT form and every other lean model gets the
+/// clause.
+///
+/// An earlier revision of this port hardcoded the short form for everyone,
+/// having checked only an Opus 5 session. That is the trap in reading one
+/// rendered prompt and generalising: the rendering was correct for the model
+/// that produced it and wrong for the other three.
+fn action_caution_section(model: &str) -> String {
+    let extra = if has_opus_5_prompt_bundle(model) {
+        ""
+    } else {
+        " \u{2014} if what you find contradicts how it was described, or you didn't create it, surface that instead of proceeding"
+    };
+    format!(
+        "For actions that are hard to reverse or outward-facing, confirm first unless durably authorized or explicitly told to proceed without asking; approval in one context doesn't extend to the next. Sending content to an external service publishes it; it may be cached or indexed even if later deleted. Before deleting or overwriting, look at the target{extra}. Report outcomes faithfully: if tests fail, say so with the output; if a step was skipped, say that; when something is done and verified, state it plainly without hedging."
+    )
+}
+
+/// `# Delivering work` (`RMy`), emitted when `QFc(model)` is true.
+const DELIVERING_WORK_SECTION: &str = "# Delivering work\nDo ordinary work as asked, acting on the actual request rather than on speculation about what lies behind it. The requested scope is the deliverable \u{2014} don't quietly narrow, widen, or transform it. Interpret ambiguity the way a careful colleague would: make routine judgment calls yourself, and check in only when different readings would lead to materially different work. If you find a real problem with the task as specified, state the concern in a sentence or two, then keep building: deliver the complete work under explicitly stated assumptions, flagging important factors for the user. Finish the whole task, not just easy parts \u{2014} report completion only when fully done. If part of the scope turns out to be blocked or problematic, finish every other part in full and say explicitly what you left out and why \u{2014} scaling the work down is the user's call, not yours. Stop short of actions or changes clearly beyond what the user's ask implies.\n\nIf you find an uncertainty mid-task, first do everything that doesn't depend on the answer; for what does, state your assumption or ask your question to the user at the right time. Reserve blocking questions \u{2014} stopping with nothing delivered until the user answers \u{2014} for cases where proceeding under any assumption would be unsafe or would make the work useless if wrong.\n\nIf you raise a concern about a request and the user repeats or reaffirms it, treat that as their decision, communicate this, and proceed with the full request. Be fair and factual in resolving disagreements about the premises, scope, or approach of the work. Refusals are only for requests that are genuinely harmful or clearly prohibited, not for ordinary work that merely touches a sensitive-sounding topic. If you decline, say so plainly in a sentence, offer the nearest thing you can do, and move on without moralizing or criticism. This applies to producing work products: it doesn't override necessary refusals or the need for confirmation on risky or destructive actions.";
+
+/// `# Corrections` (`kMy`), emitted when `ZFc(model)` is true.
+const CORRECTIONS_SECTION: &str = "# Corrections\nAvoid unnecessary or excessive self-correction. Only correct an earlier statement in your user-facing text when the error would change the user's code, conclusions, or decisions. State corrections plainly and concisely, and continue the task; combine multiple corrections rather than enumerating them all. For slips that change nothing for the user, simply make the correction and move on - no need to note it explicitly. Don't add apologies or preambles, don't be overly self-critical, and don't ruminate or give a detailed account of the mistake or tally past errors. Sometimes, other agents will report incorrect or misleading results - don't always take them at face value immediately. If other agents correct your statements and they are right, then simply update your approach without narrating too much about the correction to the user. This instruction does not apply to thinking blocks.\n\nA follow-up question about your earlier work is not, by itself, a signal that you got something wrong \u{2014} answer what was asked. A statement that was accurate needs no correction: don't re-audit how you phrased it, how you verified it, or limits you already stated. When the user does point to a real error, correct it plainly as above.";
+
+/// `tXn(model)` — the shared term behind `QFc` / `ZFc` / `YFc`.
+///
+/// ```js
+/// function tXn(e){ if(e===void 0) return false;
+///                  if(LN(lo(e),"opus_5_prompt_bundle")!==true) return false;
+///                  return !Ke(nug,false); }            // kill-switch, default off
+/// ```
+/// So: the model must carry `opus_5_prompt_bundle`, which the 2.1.220 table
+/// gives to `claude-opus-5` ALONE. The other `SQt` terms are an env var and
+/// two feature gates that both default false, and this build has no gate
+/// client — so this capability IS the condition.
+fn has_opus_5_prompt_bundle(model: &str) -> bool {
+    traits::model_capabilities::has_capability(
+        model,
+        traits::model_capabilities::ModelCapability::Opus5PromptBundle,
+    )
+}
+
+/// `AMy` — `act_dont_rederive`. Note the oracle's text ends WITHOUT a full
+/// stop; that is not a transcription slip.
+const ACT_DONT_REDERIVE_SECTION: &str = "When you have enough information to act, act. Do not re-derive facts already established in the conversation, re-litigate a decision the user has already made, or narrate options you will not pursue. If you are weighing a choice, give a recommendation, not an exhaustive survey";
+
+/// `CMy()` — the `act_dont_rederive` gate. `env ?? Ke("tengu_cedar_lantern",
+/// true)`: DEFAULT TRUE, so the section ships unless explicitly turned off.
+fn act_dont_rederive_enabled() -> bool {
+    match std::env::var("LINGXI_ACT_DONT_REDERIVE")
+        .or_else(|_| std::env::var("CLAUDE_CODE_ACT_DONT_REDERIVE"))
+    {
+        Ok(v) => traits::env::is_env_truthy(Some(&v)),
+        Err(_) => true,
+    }
+}
+
+/// The LEAN main body (`wMy`) — the whole of the lean arm's static prompt.
+///
+/// The oracle assembles the main prompt as
+/// `[...o ? [wMy(c,t)] : [hMy(c), _My(t), yMy(), bMy(t), SMy(d), vMy()], ...dynamic]`
+/// (`O3` @237486776), where `o = TT(model)` is the lean gate. So a
+/// `lean_prompt` model receives THIS ONE SECTION in place of the six long
+/// statics — `# System`, `# Doing tasks`, `# Executing actions with care`,
+/// `# Using your tools`, `# Tone and style`, and the long opening.
+///
+/// This port previously implemented only the long arm, so a session on
+/// `claude-opus-5` / `claude-opus-4-8` / `claude-fable-5` / `claude-mythos-5`
+/// received a materially different system prompt from the oracle's.
+fn lean_body(output_style_active: bool) -> String {
+    let clause = if output_style_active {
+        "according to your \"Output Style\" below, which describes how you should respond to user queries."
+    } else {
+        "with software engineering tasks."
+    };
+    // NOTE: the lean opening deliberately omits the long arm's trailing
+    // "Use the instructions below and the tools available to you to assist the
+    // user." sentence — `wMy` does not carry it.
+    format!(
+        "You are an interactive agent that helps users {clause}\n\
+\n\
+{ZHO}\n\
+\n\
+# Harness\n\
+ - Text you output outside of tool use is displayed to the user as Github-flavored markdown in a terminal.\n\
+ - Tools run behind a user-selected permission mode; a denied call means the user declined it \u{2014} adjust, don't retry verbatim.\n\
+ - {LEAN_SYSTEM_TURNS} Hooks may intercept tool calls; treat hook output as user feedback.\n\
+ - Prefer the dedicated file/search tools over shell commands when one fits. Independent tool calls can run in parallel in one response.\n\
+ - Reference code as `file_path:line_number` \u{2014} it's clickable."
+    )
+}
+
+/// Does `model` take the LEAN main prompt? `TT(model)` / `Dh(model)`, which
+/// routes through the model CAPABILITY registry (`LN(t,"lean_prompt")`), not a
+/// model-name pattern.
+fn is_lean_prompt_model(model: &str) -> bool {
+    tool_api::model_prompt_gate::dh_simple_system_prompt(Some(model))
+}
+
 fn opening_paragraph(output_style_active: bool) -> String {
     let clause = if output_style_active {
         "according to your \"Output Style\" below, which describes how you should respond to user queries."
@@ -395,23 +513,55 @@ pub fn format(
     skills_available: bool,
 ) -> String {
     let mut sections: Vec<String> = Vec::with_capacity(9);
-    sections.push(opening_paragraph(output_style_active));
-    sections.push(SYSTEM_SECTION.to_string());
-    // `# Doing tasks` is dropped only for an active style with
-    // `keepCodingInstructions: false` (default true keeps it).
-    if !output_style_active || keep_coding_instructions {
-        sections.push(DOING_TASKS_SECTION.to_string());
+    let lean = is_lean_prompt_model(model);
+    if lean {
+        // `o ? [wMy(c,t)] : [...six]` — ONE section replaces all six statics.
+        sections.push(lean_body(output_style_active));
+    } else {
+        sections.push(opening_paragraph(output_style_active));
+        sections.push(SYSTEM_SECTION.to_string());
+        // `# Doing tasks` is dropped only for an active style with
+        // `keepCodingInstructions: false` (default true keeps it).
+        if !output_style_active || keep_coding_instructions {
+            sections.push(DOING_TASKS_SECTION.to_string());
+        }
+        sections.push(EXECUTING_ACTIONS_SECTION.to_string());
+        if let Some(tools) = using_your_tools(tool_names) {
+            sections.push(tools);
+        }
+        sections.push(TONE_AND_STYLE_SECTION.to_string());
     }
-    sections.push(EXECUTING_ACTIONS_SECTION.to_string());
-    if let Some(tools) = using_your_tools(tool_names) {
-        sections.push(tools);
-    }
-    sections.push(TONE_AND_STYLE_SECTION.to_string());
     // GAP-1: the `anti_verbosity` slot (`UJh`) — model-gated in 2.1.206.
     // Binary position: after Tone and style, before session_guidance (jHm).
     sections.push(anti_verbosity_section(model));
+    // Dynamic slots in `O3`'s order: anti_verbosity, pronouns, action_caution,
+    // ... , session_guidance. `pronouns` carries NO gate — every model gets it.
+    sections.push(PRONOUNS_SECTION.to_string());
+    // `action_caution` is lean-ONLY: it is what the lean arm has instead of
+    // `# Executing actions with care`.
+    if lean {
+        sections.push(action_caution_section(model));
+    }
     // GAP-3: `# Session-specific guidance` (jHm) — when bullets non-empty.
     // Binary position: after anti_verbosity, before env_info_simple.
+    // `act_dont_rederive` (`AMy`): `CMy()` is `env ?? Ke("tengu_cedar_lantern",
+    // TRUE)` — note the default is TRUE, unlike the `SQt` family below. So this
+    // is emitted for EVERY model unless explicitly disabled.
+    if act_dont_rederive_enabled() {
+        sections.push(ACT_DONT_REDERIVE_SECTION.to_string());
+    }
+    // `delivering_work_max` (`RMy`) and `overcorrection` (`kMy`) both gate on
+    // `SQt(...)`, whose only default-true term is `tXn` = the model carries
+    // `opus_5_prompt_bundle`. Everything else in `SQt` is an env var or a
+    // gate defaulting FALSE, so on this build the capability is the condition.
+    if has_opus_5_prompt_bundle(model) {
+        sections.push(DELIVERING_WORK_SECTION.to_string());
+        sections.push(CORRECTIONS_SECTION.to_string());
+    }
+    // NOTE: `task_continuity` (`sMy`) is deliberately NOT ported. Its gate is
+    // `function tBc(e){return!1}` — hard-disabled in 2.1.220, so the oracle
+    // never emits it. Porting the text would ADD a section the oracle does not
+    // send.
     let has_skill_tool = tool_names.iter().any(|t| t == "Skill");
     if let Some(sg) = session_guidance(
         is_interactive,
@@ -430,6 +580,135 @@ pub fn format(
 
 #[cfg(test)]
 mod tests {
+
+    /// A `lean_prompt` model gets `# Harness` INSTEAD of the six long statics.
+    /// The port previously implemented only the long arm, so every session on
+    /// the 2.1.219+ flagships got a materially different prompt from the
+    /// oracle's.
+    #[test]
+    fn lean_model_gets_the_harness_body_and_not_the_six_statics() {
+        let p = format(false, true, &["Read".into()], true, false, false, "claude-opus-5", false);
+        assert!(p.contains("# Harness"), "lean body missing:\n{p}");
+        for absent in [
+            "# System",
+            "# Doing tasks",
+            "# Executing actions with care",
+            "# Using your tools",
+            "# Tone and style",
+        ] {
+            assert!(!p.contains(absent), "lean arm must DROP {absent}:\n{p}");
+        }
+        // The lean opening omits the long arm's trailing sentence.
+        assert!(!p.contains("Use the instructions below and the tools available"));
+        // ...but keeps the security preamble.
+        assert!(p.contains("IMPORTANT: Assist with authorized security testing"));
+    }
+
+    #[test]
+    fn non_lean_model_still_gets_the_six_statics_and_no_harness() {
+        let p = format(false, true, &["Read".into()], true, false, false, "claude-opus-4-7", false);
+        assert!(!p.contains("# Harness"), "long arm must NOT emit # Harness");
+        for present in ["# System", "# Doing tasks", "# Executing actions with care", "# Tone and style"] {
+            assert!(p.contains(present), "long arm must keep {present}");
+        }
+    }
+
+    /// Every `lean_prompt` model routes through the CAPABILITY registry, so
+    /// this list is the registry's, not a name pattern.
+    #[test]
+    fn all_lean_capability_models_take_the_lean_arm() {
+        for m in ["claude-opus-4-8", "claude-opus-5", "claude-fable-5"] {
+            let p = format(false, true, &[], true, false, false, m, false);
+            assert!(p.contains("# Harness"), "{m} must take the lean arm");
+        }
+        for m in ["claude-opus-4-5", "claude-opus-4-6", "claude-opus-4-7"] {
+            let p = format(false, true, &[], true, false, false, m, false);
+            assert!(!p.contains("# Harness"), "{m} must take the long arm");
+        }
+    }
+
+    /// `action_caution` is the lean arm's replacement for
+    /// `# Executing actions with care`. Emitting the lean body without it
+    /// would delete the confirm-before-irreversible guidance outright.
+    #[test]
+    fn action_caution_is_lean_only_and_replaces_the_dropped_section() {
+        let lean = format(false, true, &[], true, false, false, "claude-opus-5", false);
+        assert!(lean.contains("For actions that are hard to reverse or outward-facing"));
+        let long = format(false, true, &[], true, false, false, "claude-opus-4-7", false);
+        assert!(!long.contains("For actions that are hard to reverse or outward-facing"));
+        assert!(long.contains("# Executing actions with care"));
+    }
+
+    /// `# Delivering work` / `# Corrections` gate on `opus_5_prompt_bundle`,
+    /// which the 2.1.220 table gives to `claude-opus-5` ALONE — not to every
+    /// lean model.
+    #[test]
+    fn delivering_work_and_corrections_are_opus_5_only() {
+        let o5 = format(false, true, &[], true, false, false, "claude-opus-5", false);
+        assert!(o5.contains("# Delivering work"), "opus-5 must get it");
+        assert!(o5.contains("# Corrections"), "opus-5 must get it");
+        // Lean, but WITHOUT the opus-5 bundle:
+        for m in ["claude-opus-4-8", "claude-fable-5"] {
+            let p = format(false, true, &[], true, false, false, m, false);
+            assert!(!p.contains("# Delivering work"), "{m} must NOT get it");
+            assert!(!p.contains("# Corrections"), "{m} must NOT get it");
+        }
+        // ...and not on the long arm either.
+        let long = format(false, true, &[], true, false, false, "claude-opus-4-7", false);
+        assert!(!long.contains("# Delivering work"));
+    }
+
+    /// The `action_caution` tail clause is SUPPRESSED only for
+    /// `opus_5_prompt_bundle` models. An earlier revision hardcoded the short
+    /// form for everyone after checking a single Opus 5 session — correct for
+    /// the model that produced the sample, wrong for the other three.
+    #[test]
+    fn action_caution_tail_clause_is_opus_5_suppressed_only() {
+        let tail = "if what you find contradicts how it was described";
+        let o5 = format(false, true, &[], true, false, false, "claude-opus-5", false);
+        assert!(!o5.contains(tail), "opus-5 gets the SHORT form:\n{o5}");
+        for m in ["claude-opus-4-8", "claude-fable-5"] {
+            let p = format(false, true, &[], true, false, false, m, false);
+            assert!(p.contains(tail), "{m} must KEEP the clause");
+        }
+    }
+
+    /// `act_dont_rederive` defaults TRUE (`Ke(...,true)`), unlike the `SQt`
+    /// family — so every model gets it, lean or long.
+    #[test]
+    fn act_dont_rederive_defaults_on_for_every_model() {
+        for m in ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"] {
+            let p = format(false, true, &[], true, false, false, m, false);
+            assert!(
+                p.contains("When you have enough information to act, act."),
+                "{m} must carry act_dont_rederive"
+            );
+        }
+    }
+
+    /// `task_continuity`'s gate is `function tBc(e){return!1}` — hard-disabled
+    /// in 2.1.220. Porting its text would ADD a section the oracle never
+    /// sends, so its absence is deliberate and asserted.
+    #[test]
+    fn task_continuity_is_never_emitted() {
+        for m in ["claude-opus-5", "claude-opus-4-7"] {
+            let p = format(false, true, &[], true, false, false, m, false);
+            assert!(
+                !p.contains("the approval covers it end to end"),
+                "{m} must NOT carry task_continuity"
+            );
+        }
+    }
+
+    /// `pronouns` carries no gate in `O3` — both arms get it.
+    #[test]
+    fn pronouns_is_emitted_for_both_arms() {
+        for m in ["claude-opus-5", "claude-opus-4-7"] {
+            let p = format(false, true, &[], true, false, false, m, false);
+            assert!(p.contains("use they/them"), "{m} must carry the pronouns section");
+        }
+    }
+
     use super::*;
 
     #[test]

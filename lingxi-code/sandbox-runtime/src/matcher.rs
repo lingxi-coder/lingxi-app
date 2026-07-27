@@ -90,6 +90,8 @@ pub fn filter_network_request(port: u16, host: &str, config: &NetworkConfig) -> 
             return true;
         }
     }
+    // No ask-callback exists on this path, so the unmatched case already
+    // denies — `strict_allowlist` cannot make it stricter and is not consulted.
     false
 }
 

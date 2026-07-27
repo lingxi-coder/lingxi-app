@@ -527,6 +527,14 @@ mod tests {
     use std::sync::Mutex;
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    /// Restores the prior value on drop. Does NOT take [`ENV_LOCK`] itself —
+    /// the caller must already hold it.
+    ///
+    /// Folding the lock into this guard looks tidier and DEADLOCKS: most tests
+    /// here take `ENV_LOCK` explicitly and then build a guard, so an internal
+    /// lock re-enters a non-reentrant `Mutex` and the whole module hangs. The
+    /// exclusion is enforced by every caller taking the lock, which is now
+    /// true of all of them.
     struct EnvGuard {
         key: &'static str,
         prev: Option<String>,
@@ -693,6 +701,10 @@ mod tests {
     /// scientific-notation or digit-separator budget now resolves to `Enabled`.
     #[test]
     fn max_thinking_tokens_accepts_scientific_and_separators() {
+        // Take ENV_LOCK like every sibling test: `EnvGuard` restores the value
+        // but provides no exclusion, so without this a concurrent reader saw
+        // MAX_THINKING_TOKENS mid-change ("left: 10000, right: 12000").
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         {
             let _g = EnvGuard::set("MAX_THINKING_TOKENS", "1e4");
             assert_eq!(

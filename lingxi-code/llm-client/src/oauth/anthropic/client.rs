@@ -497,6 +497,48 @@ mod exchange_tests {
         ClaudeAiOAuthClient::new(cfg, http as Arc<dyn HttpTransport>, cm).with_clock(clock)
     }
 
+    /// The two URLs MUST share one PKCE pair: a code obtained from the manual
+    /// page is exchanged with the verifier/state minted alongside the loopback
+    /// URL. Calling the single-URL builder twice would mint two pairs and the
+    /// exchange could never succeed.
+    #[test]
+    fn the_authorize_pair_shares_one_pkce_and_differs_only_by_redirect() {
+        let client = client_with(MockHttp::new(vec![]), 0);
+        let AuthorizeUrlPair {
+            automatic_url: auto,
+            manual_url: manual,
+            verifier,
+            state,
+        } = client.build_authorize_url_pair_with_options(
+            "http://localhost:45321/callback",
+            &AuthorizeOptions::default(),
+        );
+
+        assert!(!verifier.is_empty() && !state.is_empty());
+        let st = format!("state={state}");
+        assert!(auto.contains(&st), "auto missing state: {auto}");
+        assert!(manual.contains(&st), "manual missing state: {manual}");
+
+        assert!(auto.contains("redirect_uri=http%3A%2F%2Flocalhost%3A45321%2Fcallback"));
+        assert!(
+            manual.contains("oauth%2Fcode%2Fcallback"),
+            "manual must use MANUAL_REDIRECT_URL: {manual}"
+        );
+        assert_ne!(auto, manual);
+
+        let strip = |u: &str| {
+            u.split('&')
+                .filter(|p| !p.starts_with("redirect_uri="))
+                .collect::<Vec<_>>()
+                .join("&")
+        };
+        assert_eq!(
+            strip(&auto),
+            strip(&manual),
+            "the pair must differ ONLY in redirect_uri"
+        );
+    }
+
     #[test]
     fn authorize_url_matches_current_public_oauth_contract() {
         let http = MockHttp::new(vec![]);

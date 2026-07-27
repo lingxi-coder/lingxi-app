@@ -242,13 +242,17 @@ pub fn parse_agent_markdown(
         return Err(AgentLoadError::MissingName(path_for_error.to_path_buf()));
     };
 
-    // (1b) Name validation (claude `iju`, order preserved): a leading `-`
-    // (long-standing check), then a `:` anywhere in the NFKC-normalized name
-    // (added in cc 2.1.218 — `:` is the plugin-namespace delimiter, so a raw
-    // name carrying one would collide with the `plugin:agent` types built by
-    // the plugin manager; NFKC also catches look-alikes such as U+FF1A `：`).
-    // Both log the byte-exact claude error line (path + name run through the
-    // `UVe` display sanitizer) and drop ONLY this agent.
+    // (1b) Name validation (claude `iju` @231502134, order preserved): a
+    // leading `-` (long-standing check), then a `:` anywhere in the
+    // NFKC-normalized name (added in cc 2.1.218 — `:` is the plugin-namespace
+    // delimiter, so a raw name carrying one would collide with the
+    // `plugin:agent` types built by the plugin manager; NFKC also catches
+    // look-alikes such as U+FF1A `：` and U+FE55). Order matters: a name that
+    // is both dash-led and colon-bearing reports the DASH problem, because
+    // that check runs first. Both log the byte-exact claude error line — and
+    // claude runs BOTH the path and the name through the `UVe` display
+    // sanitizer (`Agent file ${UVe(e)} has invalid name '${UVe(i)}': …`) —
+    // then drop ONLY this agent.
     if agent_type.starts_with('-') {
         tracing::error!(
             "Agent file {} has invalid name '{}': names must not start with '-'",
@@ -1304,6 +1308,70 @@ mod tests {
     use super::*;
     use crate::definition::AgentEffort;
     use tempfile::TempDir;
+
+    fn parse_name(name: &str) -> Result<AgentDefinition, AgentLoadError> {
+        let raw = format!("---\nname: \"{name}\"\ndescription: d\n---\nBody");
+        parse_agent_markdown(
+            &raw,
+            AgentSource::UserDefined,
+            PathBuf::from("/tmp"),
+            Path::new("a.md"),
+        )
+    }
+
+    /// `:` is RESERVED for plugin namespacing (`plugin:agent`), so an agent
+    /// file claiming it must be dropped — otherwise the validator and the
+    /// namespace splitter disagree about where the name ends.
+    #[test]
+    fn a_name_containing_a_colon_is_rejected() {
+        for n in ["plugin:agent", "a:b:c", ":leading", "trailing:"] {
+            assert!(
+                matches!(parse_name(n), Err(AgentLoadError::InvalidName(_))),
+                "{n} must be rejected"
+            );
+        }
+    }
+
+    /// The oracle tests the NFKC-NORMALIZED name, so a Unicode colon lookalike
+    /// is rejected too. Testing the raw string would let these through.
+    #[test]
+    fn unicode_colon_lookalikes_are_rejected_after_nfkc() {
+        for n in ["plugin\u{ff1a}agent", "plugin\u{fe55}agent"] {
+            assert!(
+                matches!(parse_name(n), Err(AgentLoadError::InvalidName(_))),
+                "{n:?} must be rejected after NFKC"
+            );
+        }
+    }
+
+    #[test]
+    fn a_name_starting_with_a_dash_is_rejected() {
+        assert!(matches!(
+            parse_name("-agent"),
+            Err(AgentLoadError::InvalidName(_))
+        ));
+    }
+
+    /// A name that is BOTH dash-led and colon-bearing is still dropped exactly
+    /// once. The oracle checks the dash FIRST, so it is the dash message that
+    /// gets logged — but that ordering is observable only in the emitted log
+    /// line (`iju` logs then returns `null`), not in the error value, which is
+    /// the same `InvalidName` either way. This pins the rejection; the message
+    /// text itself is pinned at the call site.
+    #[test]
+    fn dash_and_colon_together_are_rejected_once() {
+        assert!(matches!(
+            parse_name("-a:b"),
+            Err(AgentLoadError::InvalidName(_))
+        ));
+    }
+
+    #[test]
+    fn ordinary_names_still_parse() {
+        for n in ["reviewer", "code-architect", "test_runner", "a-b-c"] {
+            assert!(parse_name(n).is_ok(), "{n} must parse");
+        }
+    }
 
     #[test]
     fn parse_minimal_frontmatter() {

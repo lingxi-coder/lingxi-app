@@ -309,9 +309,35 @@ mod tests {
     #[test]
     fn non_commit_git_commands_do_not_count() {
         assert_eq!(hits("git status"), (0, 0));
+        assert_eq!(hits("git push"), (0, 0));
+        assert_eq!(hits("git log --oneline"), (0, 0));
         assert_eq!(hits("git log commit"), (0, 0)); // `log` breaks the bridge
         assert_eq!(hits("mygit commit"), (0, 0)); // no \b before git
+        assert_eq!(hits("gitcommit"), (0, 0)); // ditto, run together
         assert_eq!(hits("git commits"), (0, 0)); // no \b after commit
+    }
+
+    /// `fur("commit")` is an unanchored regex, so it matches wherever the
+    /// sequence appears — after a `cd`, after a `;`, or with the whole command
+    /// padded. It also matches inside an `echo`, which looks like a false
+    /// positive but is exactly what the oracle counts; the port must not be
+    /// "smarter" than the thing it reproduces.
+    #[test]
+    fn the_commit_pattern_is_unanchored_like_the_oracle() {
+        assert_eq!(hits("  git commit  "), (1, 0));
+        assert_eq!(hits("cd /tmp && git commit -m x"), (1, 0));
+        assert_eq!(hits("git add -A; git commit -m x"), (1, 0));
+        // Deliberate: CC's `prd`/`fur` would match this too.
+        assert_eq!(hits("echo git commit"), (1, 0));
+    }
+
+    /// The `gh pr` verbs that are `mrd` entries WITHOUT `action:"created"`, plus
+    /// `gh issue create`, which is a different noun entirely.
+    #[test]
+    fn non_creating_gh_verbs_do_not_count() {
+        for cmd in ["gh pr view 1", "gh pr list", "gh issue create", "gh pr merge"] {
+            assert_eq!(hits(cmd), (0, 0), "{cmd} must not count as a PR create");
+        }
     }
 
     #[test]

@@ -718,6 +718,13 @@ pub fn anthropic_model_profiles() -> Vec<ModelProfile> {
         model("claude-opus-4-6", "claude-opus-4-6", &[], true),
         model("claude-opus-4-7", "claude-opus-4-7", &[], true),
         model("claude-opus-4-8", "claude-opus-4-8", &[], true),
+        // Opus 5 — 2.1.219 flagship. Present in the oracle's model table
+        // (`provider_ids.first_party = "claude-opus-5"`, vertex region
+        // `VERTEX_REGION_CLAUDE_5_OPUS`, 1M native context, capabilities
+        // incl. `lean_prompt` / `refusal_fallback` / `opus_5_prompt_bundle`)
+        // but absent from this port entirely, so it never reached the /model
+        // picker or any of the model-gated paths below.
+        model("claude-opus-5", "claude-opus-5", &[], true),
         model(
             "claude-haiku-4-20250307",
             "claude-haiku-4",
@@ -1149,7 +1156,7 @@ mod tests {
 
         assert_eq!(profile.profile_name, "anthropic");
         // 14 entries after claude-mythos-5 joined the table (2.1.201).
-        assert_eq!(profile.models.len(), 14);
+        assert_eq!(profile.models.len(), 15);
         assert!(profile
             .models
             .iter()

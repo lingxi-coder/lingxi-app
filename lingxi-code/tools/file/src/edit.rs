@@ -808,7 +808,12 @@ impl Tool for FileEditTool {
         let structured_patch = crate::structured_patch::build_structured_patch(&before, &after);
         let (lines_added, lines_removed) = count_patch_lines(&structured_patch);
         if lines_added > 0 || lines_removed > 0 {
-            otel::record_lines_of_code_change("Edit", lines_added, lines_removed);
+            // The oracle records the MODEL that made the change, not the tool.
+            otel::record_lines_of_code_change(
+                &ctx.options.main_loop_model,
+                lines_added,
+                lines_removed,
+            );
         }
 
         let duration_ms = started.elapsed().as_millis() as u64;

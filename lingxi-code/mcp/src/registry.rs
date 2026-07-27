@@ -213,6 +213,25 @@ pub struct McpRegistry {
     pub max_retry_count: u32,
 }
 
+/// Message for a remote server with no usable URL (oracle
+/// `"No URL configured for this server"`).
+pub const UNCONFIGURED_MESSAGE: &str = "No URL configured for this server";
+
+/// Is this a remote (url-bearing) spec whose URL is blank?
+///
+/// Oracle `zar(e)`'s fallback arm: `!e.configError && "url" in e &&
+/// e.url.trim() === ""`. Stdio servers have no url and are never unconfigured
+/// by this test.
+#[must_use]
+pub fn is_unconfigured_remote(spec: &McpTransportSpec) -> bool {
+    match spec {
+        McpTransportSpec::Sse { url, .. }
+        | McpTransportSpec::Http { url, .. }
+        | McpTransportSpec::WebSocket { url, .. } => url.trim().is_empty(),
+        _ => false,
+    }
+}
+
 impl McpRegistry {
     /// Build a registry bound to a platform transport.
     ///
@@ -606,6 +625,17 @@ impl McpRegistry {
     /// Re-uses the existing connection if `config.name` is already in the
     /// `Connected` state.
     pub async fn connect(&self, config: McpServerConfig) -> Result<McpConnectionId, McpError> {
+        // `zar()` — refuse an unconfigured remote server BEFORE opening a
+        // socket or spawning anything. Oracle @231408727:
+        //   if (zar(t)) return {type:"failed", errorCode:"UNCONFIGURED", ...}
+        //
+        // This guard is what makes it safe for `json_config` to keep
+        // blank-url entries: they now reach the listing, and `mcp list`
+        // health-probes approved servers, so without it a typo'd config would
+        // become a live connect attempt against an empty URL.
+        if is_unconfigured_remote(&config.spec) {
+            return Err(McpError::Connection(UNCONFIGURED_MESSAGE.to_string()));
+        }
         let lifecycle = self.lifecycle_lock(&config.name);
         let _guard = lifecycle.lock().await;
         self.connect_locked(config).await

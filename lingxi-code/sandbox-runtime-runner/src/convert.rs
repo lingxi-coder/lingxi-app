@@ -91,6 +91,11 @@ pub fn to_runtime_config(engine: &EngineConfig) -> RuntimeConfig {
         // to `None`, not `Some(false)`. The runtime matcher then denies
         // unmatched hosts deterministically instead of consulting the ask
         // callback.
+        //
+        // It MUST cross this boundary: the engine is what resolves the flag
+        // (source-restricted to user/managed/CLI) but only the runtime matcher
+        // can act on it. Dropping it here is how the flag came to be honored in
+        // settings and ignored in practice.
         strict_allowlist: net.strict_allowlist.then_some(true),
         allow_unix_sockets: some_if_nonempty(net.allow_unix_sockets.clone()),
         allow_all_unix_sockets: Some(net.allow_all_unix_sockets),

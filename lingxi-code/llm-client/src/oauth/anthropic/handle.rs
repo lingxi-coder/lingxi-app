@@ -77,7 +77,11 @@ pub struct OAuthHandle {
 
 /// Options shared by the top-level `auth login` flow and the interactive
 /// `/login` default.
-#[derive(Debug, Clone, Default)]
+/// Neither `Clone` nor a derived `Debug`: the manual-code channel is a
+/// single-consumer `oneshot::Receiver` (cloning it would be meaningless) and
+/// the URL callback is a closure. The only construction site builds it once
+/// and moves it, so neither derive was load-bearing.
+#[derive(Default)]
 pub struct OAuthLoginOptions {
     /// Pre-populate the account email in the provider UI.
     pub login_hint: Option<String>,
@@ -85,6 +89,16 @@ pub struct OAuthLoginOptions {
     pub sso: bool,
     /// Managed organization UUID forwarded to the provider.
     pub org_uuid: Option<String>,
+}
+
+impl std::fmt::Debug for OAuthLoginOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthLoginOptions")
+            .field("login_hint", &self.login_hint)
+            .field("sso", &self.sso)
+            .field("org_uuid", &self.org_uuid)
+            .finish()
+    }
 }
 
 impl OAuthHandle {
@@ -105,6 +119,14 @@ impl OAuthHandle {
         self
     }
 
+    /// Run the authorization-code flow, with the manual-entry fallback wired
+    /// through [`CodeFlowIo`].
+    ///
+    /// The loopback callback and a manually pasted code RACE: whichever
+    /// arrives first wins, and the token exchange uses THAT path's
+    /// redirect_uri. Exchanging a pasted code against the loopback redirect
+    /// (or vice versa) is rejected by the server, so the two must not be
+    /// crossed.
     async fn run_code_flow(
         &self,
         authorize: AuthorizeOptions,

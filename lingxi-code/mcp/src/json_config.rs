@@ -611,6 +611,14 @@ mod tests {
         assert!(cfgs.is_empty(), "bad entry skipped, no Err");
     }
 
+    /// An empty remote url is KEPT, not dropped.
+    ///
+    /// Verified by running both binaries over the same `.mcp.json`: the oracle
+    /// LISTS a `{"type":"http","url":""}` server (`a[u]=T` retains every entry)
+    /// and refuses it at CONNECT as UNCONFIGURED (`zar`). Dropping it here made
+    /// the server vanish from `mcp list` and `mcp get` with no explanation, so
+    /// a typo or an unset env var looked like the server had never been
+    /// configured at all.
     #[test]
     fn blank_remote_url_is_kept_as_unconfigured() {
         // `cLi`/`J5n` declare `url: E.string()` with NO `.min(1)` (contrast

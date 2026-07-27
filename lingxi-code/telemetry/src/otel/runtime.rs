@@ -443,15 +443,31 @@ pub fn mirror_analytics_event(name: &str, metadata: &LogEventMetadata) {
 }
 
 /// Record added/removed line counts from a concrete code-edit operation.
-pub fn record_lines_of_code_change(tool_name: &str, added: u64, removed: u64) {
+/// Record a lines-added/removed change on `claude_code.lines_of_code.count`.
+///
+/// Attributes are `type` and `model`, per the counter's OWN description
+/// ("...the 'type' attribute indicating whether lines were added or removed
+/// and the 'model' attribute indicating which model made the change") and its
+/// record site `Zen` (2.1.220 @232432655):
+///
+/// ```js
+/// j2n()?.add(n, {type:"added",   model:t}),
+/// j2n()?.add(o, {type:"removed", model:t})
+/// ```
+///
+/// This port emitted `type="add"/"remove"` and a `tool_name` key instead — so
+/// the series was unjoinable with the oracle's on BOTH attributes, and the
+/// question the metric exists to answer ("which MODEL wrote this code") was
+/// unanswerable because the tool name was recorded in its place.
+pub fn record_lines_of_code_change(model: &str, added: u64, removed: u64) {
     with_runtime(|runtime| {
         if added > 0 {
             runtime.record_counter(
                 metrics::LINES_OF_CODE_COUNT,
                 added as f64,
                 &attrs_from_optional_pairs([
-                    ("type", Some(AttrValue::from("add"))),
-                    ("tool_name", Some(AttrValue::from(tool_name.to_string()))),
+                    ("type", Some(AttrValue::from("added"))),
+                    ("model", Some(AttrValue::from(model.to_string()))),
                 ]),
             );
         }
@@ -460,8 +476,8 @@ pub fn record_lines_of_code_change(tool_name: &str, added: u64, removed: u64) {
                 metrics::LINES_OF_CODE_COUNT,
                 removed as f64,
                 &attrs_from_optional_pairs([
-                    ("type", Some(AttrValue::from("remove"))),
-                    ("tool_name", Some(AttrValue::from(tool_name.to_string()))),
+                    ("type", Some(AttrValue::from("removed"))),
+                    ("model", Some(AttrValue::from(model.to_string()))),
                 ]),
             );
         }

@@ -277,6 +277,41 @@ pub async fn port_guard() -> PortGuard {
     }
 }
 
+/// Bind the fixed callback ports for a TEST, retrying briefly if both are
+/// momentarily occupied.
+///
+/// Every in-binary binder already holds [`port_guard`], and `SO_REUSEADDR`
+/// removed the `TIME_WAIT` rebind failure, yet
+/// "both fixed ports 1455 and 1457 are already in use" still appeared
+/// occasionally with nothing listening at rest. 1455/1457 are ordinary
+/// registered ports on a shared developer machine: any other process can hold
+/// them for a moment, and no amount of in-suite locking makes the machine
+/// exclusive.
+///
+/// These tests are about the callback PROTOCOL — state validation, param
+/// parsing, the success page — not about winning a port race. Retrying here
+/// keeps the production `bind()` faithful (fixed ports, no retry, which IS the
+/// parity behaviour) while stopping an unrelated machine condition from
+/// failing an unrelated assertion.
+///
+/// # Panics
+/// After `ATTEMPTS` failures, with the underlying bind error — a genuinely
+/// wedged port still fails loudly rather than silently skipping.
+pub async fn bind_fixed_ports_for_test() -> super::callback::CallbackListener {
+    const ATTEMPTS: usize = 20;
+    let mut last = None;
+    for _ in 0..ATTEMPTS {
+        match super::callback::CallbackListener::bind().await {
+            Ok(l) => return l,
+            Err(e) => {
+                last = Some(e);
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        }
+    }
+    panic!("bind: {last:?} after {ATTEMPTS} attempts");
+}
+
 /// Held for the duration of a fixed-port test; releases both layers on drop.
 pub struct PortGuard {
     _in_process: tokio::sync::MutexGuard<'static, ()>,

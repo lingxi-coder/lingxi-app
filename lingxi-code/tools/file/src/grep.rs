@@ -1207,7 +1207,12 @@ mod tests {
 
     #[test]
     fn ripgrep_timeout_defaults_and_override() {
-        std::env::remove_var("LINGXI_GLOB_TIMEOUT_SECONDS");
+        // The SAME lock `glob.rs` takes: both modules read
+        // LINGXI_GLOB_TIMEOUT_SECONDS and share one process environment in one
+        // test binary. Without this, glob's helper cleared the var between
+        // this test's `set` and its next read, and the assertion saw the 60s
+        // WSL default instead of the 5s override.
+        let _env = crate::test_env::guard_file_env();
         assert_eq!(ripgrep_timeout(false), Duration::from_secs(20));
         assert_eq!(ripgrep_timeout(true), Duration::from_secs(60)); // WSL
         std::env::set_var("LINGXI_GLOB_TIMEOUT_SECONDS", "5");
@@ -1218,7 +1223,7 @@ mod tests {
         assert_eq!(ripgrep_timeout(false), Duration::from_secs(20));
         std::env::set_var("LINGXI_GLOB_TIMEOUT_SECONDS", "nope");
         assert_eq!(ripgrep_timeout(false), Duration::from_secs(20));
-        std::env::remove_var("LINGXI_GLOB_TIMEOUT_SECONDS");
+        // No manual cleanup: the guard restores the prior value on drop.
     }
 
     #[test]

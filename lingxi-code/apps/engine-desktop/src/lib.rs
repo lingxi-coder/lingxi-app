@@ -3082,6 +3082,22 @@ pub enum BuildError {
 /// keys. When OAuth is the effective source, `shouldUseClaudeAIAuth(scopes)`
 /// (== presence of the `user:inference` scope, via
 /// `llm_client::oauth::anthropic::subscription_from_scopes`) decides.
+///
+/// KNOWN RESIDUAL DIVERGENCE (`zb()` @228933355). The oracle suppresses on
+/// TWO arms with TWO DIFFERENT host predicates:
+/// ```js
+/// let a = (n||i) && !KWr() || (r||s) && !YIt();   // n=AUTH_TOKEN, i=API_KEY|apiKeyHelper,
+/// return !(e||a);                                //  r=settings apiKeyHelper, s=FD key
+/// ```
+/// `KWr()` is `YIt() && !CLAUDE_CODE_HOST_AUTH_ENV_VAR && entrypoint !== "claude-desktop-3p"`,
+/// so `KWr() ⊆ YIt()`. Routing everything through the resolver's single
+/// `managed_oauth_only` (the `KWr()` reading) collapses the two arms: in a
+/// context where `YIt()` holds but `KWr()` does NOT — `CLAUDE_CODE_HOST_AUTH_ENV_VAR`
+/// set, or the `claude-desktop-3p` entrypoint — the oracle EXEMPTS an
+/// apiKeyHelper / FD-inherited key (still a subscriber) while this port
+/// suppresses. The env-bearer/API-key arm (the common case, and the one AUTH-1
+/// fixed) is correct. Closing this needs the resolver to carry the `YIt()`
+/// reading alongside `managed_oauth_only`.
 fn oauth_subscriber_flag(
     source: &llm_client::oauth::anthropic::resolver::AuthSource,
     scopes: &[String],
@@ -7653,6 +7669,9 @@ pub async fn build(
     tools_inner.refresh_tool_search_view();
 
     let tools = Arc::new(tools_inner);
+    // Distinct alias: inside the `--agent` apply block below, `tools` is
+    // shadowed by the agent's destructured `AgentToolPolicy`.
+    let tool_registry_for_agent_mcp = tools.clone();
 
     // MCP servers can mutate their tool/prompt/resource catalogs while the
     // session is running. Refresh the registry snapshot on every generation-
@@ -7666,7 +7685,7 @@ pub async fn build(
     {
         let mcp_registry_weak = Arc::downgrade(&mcp_registry);
         let live_tools = tools.clone();
-        let live_mcp_tool_ctx = mcp_tool_ctx;
+        let live_mcp_tool_ctx = mcp_tool_ctx.clone();
         tokio::spawn(async move {
             let mut recovery = std::collections::VecDeque::new();
             loop {
@@ -8589,6 +8608,7 @@ pub async fn build(
                     orch.replace_main_thread_agent_hooks(&[]).await;
                 }
             }
+
         }
     }
 
@@ -14200,3 +14220,4 @@ mod connected_fallback_tests {
         assert_eq!(fb.profile, "deepseek");
     }
 }
+

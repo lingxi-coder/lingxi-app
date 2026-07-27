@@ -526,12 +526,12 @@ mod tests {
     /// Acquire the env lock and clear the glob toggles so a hostile ambient env
     /// can't perturb the default-path tests (defaults are NO_IGNORE=true,
     /// HIDDEN=true). The returned guard is held for the whole test body.
-    async fn lock_and_clear_glob_env() -> tokio::sync::MutexGuard<'static, ()> {
-        let g = ENV_MUTEX.lock().await;
-        std::env::remove_var("LINGXI_GLOB_NO_IGNORE");
-        std::env::remove_var("LINGXI_GLOB_HIDDEN");
-        std::env::remove_var("LINGXI_GLOB_TIMEOUT_SECONDS");
-        g
+    async fn lock_and_clear_glob_env() -> crate::test_env::FileEnvGuard {
+        // Delegates to the CRATE-WIDE guard so `grep.rs`'s tests serialize
+        // against these too — they read the same env vars from the same
+        // process. A second, module-local mutex would have looked correct and
+        // excluded nothing.
+        crate::test_env::guard_file_env()
     }
 
     #[test]

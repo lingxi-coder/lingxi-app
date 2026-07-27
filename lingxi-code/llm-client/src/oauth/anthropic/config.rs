@@ -26,6 +26,11 @@ pub struct ClaudeAiOAuthConfig {
     /// `code#state` for the user to paste back into the CLI when the loopback
     /// redirect can't fire (no browser / remote shell). `serde(default)` keeps
     /// previously-serialized configs loading.
+    ///
+    /// It is NOT interchangeable with [`Self::redirect_uri`]: claude selects
+    /// one for the authorize URL AND the same one for the token exchange
+    /// (`redirect_uri: o ? MANUAL_REDIRECT_URL : http://localhost:…/callback`).
+    /// Exchanging a manually-pasted code against the loopback redirect fails.
     #[serde(default = "default_manual_redirect_uri")]
     pub manual_redirect_uri: String,
     /// Scopes requested in the authorize URL.
@@ -69,6 +74,8 @@ impl ClaudeAiOAuthConfig {
             profile_endpoint: "https://api.anthropic.com/api/oauth/profile".into(),
             client_id: "9d1c250a-e61b-44d9-88ed-5944d1962f5e".into(),
             redirect_uri: format!("http://localhost:{port}/callback"),
+            // claude `MANUAL_REDIRECT_URL` for the prod tier (2.1.220
+            // @226014228), shared with the Console variant below.
             manual_redirect_uri: default_manual_redirect_uri(),
             scopes: CLAUDE_CODE_OAUTH_SCOPES
                 .iter()

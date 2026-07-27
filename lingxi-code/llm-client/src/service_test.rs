@@ -680,7 +680,8 @@ mod tests {
             })
         );
         assert_eq!(req.system[2].text, "dynamic");
-        assert_eq!(req.system[2].cache_control, None); // dynamic uncached
+        // dynamic is `org`-scoped, not uncached — `y8s` @237509234.
+        assert_eq!(req.system[2].cache_control, Some(CacheControl::Ephemeral));
     }
 
     // ── 1P cache-EDITING (cache_edits / cache_reference, RESIDUAL 4) ───────────

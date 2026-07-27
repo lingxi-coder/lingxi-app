@@ -112,6 +112,25 @@ fn print_family_help() {
 
 // ── login ──────────────────────────────────────────────────────────────────
 
+/// Parse a pasted manual auth code: `"<code>#<state>"`.
+///
+/// Oracle: `let [m,g] = f.trim().split("#"); if (!m || !g) -> invalid`. Both
+/// halves must be non-empty, so `"abc#"`, `"#xyz"` and a bare `"abc"` are all
+/// rejected. JS `split` keeps everything after the second `#` in later
+/// elements and only the first two are read, so `a#b#c` takes `a` and `b` —
+/// reproduced here with `splitn(2)` on the trimmed input... except that JS
+/// would give `g = "b"` while a naive `split_once` yields `"b#c"`. Use the
+/// first two segments explicitly.
+fn parse_manual_auth_code(line: &str) -> Option<(String, String)> {
+    let mut parts = line.trim().split('#');
+    let code = parts.next().unwrap_or_default();
+    let state = parts.next().unwrap_or_default();
+    if code.is_empty() || state.is_empty() {
+        return None;
+    }
+    Some((code.to_string(), state.to_string()))
+}
+
 /// `lingxi-cli auth login` — run the browser-PKCE flow without starting a chat
 /// turn.
 async fn run_login(args: &LoginArgs) -> i32 {
@@ -224,20 +243,6 @@ async fn run_login(args: &LoginArgs) -> i32 {
             RUNTIME_ERROR
         }
     }
-}
-
-/// Parse one pasted manual-entry line — claude's
-/// `let [m, g] = f.trim().split("#"); if (!m || !g) …`: trim, split on `#`,
-/// take the first two segments, both must be non-empty. Extra `#` segments are
-/// ignored (JS destructuring drops them).
-fn parse_manual_auth_code(line: &str) -> Option<(String, String)> {
-    let mut parts = line.trim().split('#');
-    let code = parts.next().unwrap_or_default();
-    let state = parts.next().unwrap_or_default();
-    if code.is_empty() || state.is_empty() {
-        return None;
-    }
-    Some((code.to_string(), state.to_string()))
 }
 
 /// claude's `Z2(url, undefined, {assumeSupport: true})`: with no separate link

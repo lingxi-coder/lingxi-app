@@ -379,6 +379,17 @@ fn get(s: &str) -> String {
     crate::env_expansion::expand_env_vars_in_string(s).expanded
 }
 
+/// Prime the frozen startup env snapshot ([`crate::env_expansion::startup_env_snapshot`])
+/// before anything can apply a settings-file `env` to the process environment.
+///
+/// The oracle gets this ordering for free because `Dut()` calls `NQr()` as its
+/// first statement. Here it is explicit, so the composition root calls it from
+/// its boot path. Calling it late is not fatal — the snapshot is simply taken
+/// then — but the freeze is the whole point, so call it early.
+pub fn prime_startup_env() {
+    let _ = crate::env_expansion::startup_env_snapshot();
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // Policy expansion environment (claude `NQr`/`cWu`/`U__`/`uWu`, 2.1.219+).
 //
@@ -1271,6 +1282,65 @@ pub fn apply_enterprise_mcp_policy(configs: &mut Vec<McpServerConfig>) {
 
 #[cfg(test)]
 mod tests {
+
+    /// Managed-tier `env` overrides the startup snapshot, folded FIRST-wins
+    /// across tiers (oracle `e[r] ??= n`, then `{...NQr(), ...e}`).
+    #[test]
+    fn managed_env_is_folded_first_wins_across_tiers() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("managed-settings.json"),
+            r#"{"env":{"POLICY_HOST":"base.example","ONLY_BASE":"b"}}"#,
+        )
+        .unwrap();
+        let dd = dir.path().join("managed-settings.d");
+        std::fs::create_dir_all(&dd).unwrap();
+        // A drop-in must NOT override a key the base tier already defined.
+        std::fs::write(
+            dd.join("10-late.json"),
+            r#"{"env":{"POLICY_HOST":"late.example","ONLY_LATE":"l"}}"#,
+        )
+        .unwrap();
+
+        let env = super::managed_sources_env_in(dir.path());
+        assert_eq!(
+            env.get("POLICY_HOST").map(String::as_str),
+            Some("base.example"),
+            "first tier to define a key wins"
+        );
+        assert_eq!(env.get("ONLY_BASE").map(String::as_str), Some("b"));
+        assert_eq!(env.get("ONLY_LATE").map(String::as_str), Some("l"));
+    }
+
+    #[test]
+    fn a_managed_dir_without_env_yields_an_empty_map() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("managed-settings.json"),
+            r#"{"deniedMcpServers":[]}"#,
+        )
+        .unwrap();
+        assert!(super::managed_sources_env_in(dir.path()).is_empty());
+    }
+
+    /// THE security property. `${VAR}` in a managed matcher expands against a
+    /// FROZEN startup snapshot plus managed tiers — never the live process
+    /// environment, which a settings file can write. Expanding against live env
+    /// would let a lower-trust tier steer what an enterprise policy matches.
+    #[test]
+    fn policy_expansion_ignores_a_variable_set_after_startup() {
+        // `startup_env()` is snapshotted on first use; prime it now so the
+        // variable set below is unambiguously "after startup".
+        super::prime_startup_env();
+        let key = "LINGXI_TEST_POLICY_EXPANSION_LATE";
+        std::env::set_var(key, "attacker.example");
+        let expanded = super::get(&format!("${{{key}}}"));
+        std::env::remove_var(key);
+        assert_ne!(
+            expanded, "attacker.example",
+            "a variable set AFTER the startup freeze must not reach policy expansion"
+        );
+    }
     use super::*;
 
     fn write(dir: &tempfile::TempDir, name: &str, body: &str) -> PathBuf {

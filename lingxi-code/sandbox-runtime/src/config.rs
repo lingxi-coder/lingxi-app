@@ -98,6 +98,14 @@ pub struct NetworkConfig {
     /// Hostname patterns always denied (checked before `allowed_domains`).
     #[serde(default)]
     pub denied_domains: Vec<String>,
+    /// When `Some(true)`, an UNMATCHED host is denied outright instead of
+    /// prompting (2.1.219 `strictAllowlist`).
+    ///
+    /// `Option` + skip-if-none reproduces the oracle's `... || void 0`: the key
+    /// is omitted when unset, so an existing serialized sandbox config stays
+    /// byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strict_allowlist: Option<bool>,
     /// macOS only: Unix socket paths to allow. Ignored on Linux.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_unix_sockets: Option<Vec<String>>,

@@ -281,6 +281,127 @@ pub fn resolve_shell_path() -> &'static str {
     }
 }
 
+// ===== Git Bash resolution (Windows) ========================================
+
+/// Basenames accepted as a Git-Bash binary (lowercased), from the oracle's
+/// `["bash.exe","sh.exe","bash","sh"]`.
+const GIT_BASH_BASENAMES: [&str; 4] = ["bash.exe", "sh.exe", "bash", "sh"];
+
+/// Standard Git-for-Windows install locations, in the oracle's probe order.
+const GIT_BASH_WELL_KNOWN: [&str; 2] = [
+    r"C:\Program Files\Git\bin\bash.exe",
+    r"C:\Program Files (x86)\Git\bin\bash.exe",
+];
+
+/// What an explicit `*_GIT_BASH_PATH` override resolved to.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum GitBashOverride {
+    /// Accepted: correct basename AND the file exists.
+    Accepted(String),
+    /// Rejected — carries the oracle's warning reason fragment.
+    Rejected {
+        /// `"is not a bash/sh binary"` or `"not found"`.
+        reason: &'static str,
+    },
+    /// No override set.
+    Unset,
+}
+
+/// Validate an explicit Git-Bash override. Pure, so the decision is testable
+/// without a Windows filesystem.
+///
+/// claude-code `MQ` (2.1.220 @226607421):
+/// ```js
+/// let n = basename(v).toLowerCase(),
+///     o = ["bash.exe","sh.exe","bash","sh"].includes(n);
+/// if (o && existsSync(v)) return v;
+/// warn(`... "${v}" ${o ? "not found" : "is not a bash/sh binary"}; falling back to auto-detection`)
+/// ```
+/// Note which way `o` reads: a VALID basename that does not exist reports
+/// "not found", an invalid basename reports "is not a bash/sh binary". Getting
+/// that backwards tells the user to look for the wrong problem.
+///
+/// A rejected override is IGNORED, not fatal — auto-detection continues.
+pub(crate) fn classify_git_bash_override(
+    value: Option<&str>,
+    exists: &dyn Fn(&str) -> bool,
+) -> GitBashOverride {
+    let Some(v) = value.filter(|v| !v.is_empty()) else {
+        return GitBashOverride::Unset;
+    };
+    // Split on BOTH separators rather than using `Path::file_name`: these are
+    // Windows paths, and on a Unix host `Path` does not treat `\` as a
+    // separator, so `C:\Git\bin\bash.exe` would come back whole and be
+    // misclassified as "not a bash/sh binary". The oracle's `path.basename`
+    // runs on Windows, where it handles both.
+    let base = v
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(v)
+        .to_ascii_lowercase();
+    let basename_ok = GIT_BASH_BASENAMES.contains(&base.as_str());
+    if basename_ok && exists(v) {
+        return GitBashOverride::Accepted(v.to_string());
+    }
+    GitBashOverride::Rejected {
+        reason: if basename_ok {
+            "not found"
+        } else {
+            "is not a bash/sh binary"
+        },
+    }
+}
+
+/// Resolve the Git-Bash executable on Windows: honored override, else the
+/// well-known install paths, else `git` on PATH resolved to `../../bin/bash.exe`.
+/// `None` when nothing is found (the oracle returns `null`).
+///
+/// `LINGXI_GIT_BASH_PATH` is accepted alongside the oracle's
+/// `CLAUDE_CODE_GIT_BASH_PATH`, matching how this port handles its other
+/// dual-named env flags.
+#[must_use]
+pub fn resolve_git_bash_path() -> Option<String> {
+    let exists = |p: &str| std::path::Path::new(p).exists();
+    let (var_name, raw) = ["LINGXI_GIT_BASH_PATH", "CLAUDE_CODE_GIT_BASH_PATH"]
+        .iter()
+        .find_map(|k| std::env::var(k).ok().map(|v| (*k, v)))
+        .map_or(("CLAUDE_CODE_GIT_BASH_PATH", String::new()), |(k, v)| (k, v));
+    match classify_git_bash_override(Some(raw.as_str()), &exists) {
+        GitBashOverride::Accepted(p) => return Some(p),
+        GitBashOverride::Rejected { reason } => {
+            tracing::warn!(
+                target: "lingxi::shell",
+                "{var_name} \"{raw}\" {reason}; falling back to auto-detection"
+            );
+        }
+        GitBashOverride::Unset => {}
+    }
+    for candidate in GIT_BASH_WELL_KNOWN {
+        if exists(candidate) {
+            return Some(candidate.to_string());
+        }
+    }
+    // `git` on PATH → `<git>/../../bin/bash.exe`.
+    let git = which_git()?;
+    let bash = std::path::Path::new(&git)
+        .parent()?
+        .parent()?
+        .join("bin")
+        .join("bash.exe");
+    let bash = bash.to_string_lossy().into_owned();
+    exists(&bash).then_some(bash)
+}
+
+/// Locate `git` on PATH (the oracle's `O6n("git")`).
+fn which_git() -> Option<String> {
+    let path = std::env::var_os("PATH")?;
+    let exe = if cfg!(windows) { "git.exe" } else { "git" };
+    std::env::split_paths(&path).find_map(|dir| {
+        let c = dir.join(exe);
+        c.is_file().then(|| c.to_string_lossy().into_owned())
+    })
+}
+
 // ===== BASH.3 — output-length env override ==================================
 
 /// claude-code `outputLimits.ts` `BASH_MAX_OUTPUT_DEFAULT`.
@@ -1920,6 +2041,69 @@ mod tests {
     /// concurrent Bash calls could share an id, hence share the
     /// `/tmp/claude-<id>-cwd` readback file, and one call's cleanup deleted the
     /// other's `cd` result.
+    // ---- Git Bash override classification ---------------------------------
+
+    #[test]
+    fn a_valid_basename_that_exists_is_accepted() {
+        let yes = |_: &str| true;
+        for p in [
+            r"C:\Git\bin\bash.exe",
+            r"C:\Git\bin\BASH.EXE",
+            "/usr/bin/bash",
+            "/bin/sh",
+            r"C:\Git\bin\sh.exe",
+        ] {
+            assert_eq!(
+                classify_git_bash_override(Some(p), &yes),
+                GitBashOverride::Accepted(p.to_string()),
+                "{p} must be accepted"
+            );
+        }
+    }
+
+    /// The reason fragment must match WHY it failed: a valid basename that is
+    /// missing reports "not found"; a wrong basename reports "is not a bash/sh
+    /// binary". Swapping them sends the user after the wrong problem.
+    #[test]
+    fn the_rejection_reason_distinguishes_missing_from_wrong_binary() {
+        let no = |_: &str| false;
+        assert_eq!(
+            classify_git_bash_override(Some(r"C:\Git\bin\bash.exe"), &no),
+            GitBashOverride::Rejected { reason: "not found" }
+        );
+        let yes = |_: &str| true;
+        for p in [r"C:\Windows\System32\cmd.exe", "/usr/bin/python3", "/bin/zsh"] {
+            assert_eq!(
+                classify_git_bash_override(Some(p), &yes),
+                GitBashOverride::Rejected {
+                    reason: "is not a bash/sh binary"
+                },
+                "{p} must be rejected as not-a-bash"
+            );
+        }
+    }
+
+    #[test]
+    fn an_absent_or_empty_override_is_unset() {
+        let yes = |_: &str| true;
+        assert_eq!(classify_git_bash_override(None, &yes), GitBashOverride::Unset);
+        assert_eq!(
+            classify_git_bash_override(Some(""), &yes),
+            GitBashOverride::Unset
+        );
+    }
+
+    /// A rejected override must NOT be fatal — the caller falls back to
+    /// auto-detection, so classification only reports, never aborts.
+    #[test]
+    fn rejection_is_reported_not_fatal() {
+        let no = |_: &str| false;
+        assert!(matches!(
+            classify_git_bash_override(Some("/nope/bash"), &no),
+            GitBashOverride::Rejected { .. }
+        ));
+    }
+
     #[test]
     fn ephemeral_id_is_unique_across_a_tight_loop() {
         let ids: std::collections::HashSet<String> =

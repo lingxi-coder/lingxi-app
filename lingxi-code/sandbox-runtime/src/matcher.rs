@@ -89,6 +89,8 @@ pub fn filter_network_request(port: u16, host: &str, config: &NetworkConfig) -> 
             return true;
         }
     }
+    // No ask-callback exists on this path, so the unmatched case already
+    // denies — `strict_allowlist` cannot make it stricter and is not consulted.
     false
 }
 
@@ -126,8 +128,16 @@ pub async fn filter_network_request_with_ask(
             return true;
         }
     }
-    // Unmatched — ask the user, or deny if there is no callback. A callback
-    // error (the TS callback throwing) denies, matching the TS `catch`.
+    // Unmatched. The oracle (@229871903):
+    //   if (!r || xl.network.strictAllowlist)
+    //       return log(`No matching config rule, denying: ...`), false;
+    //   log(`No matching config rule, asking user: ...`);
+    // so strictAllowlist collapses the ask into a deterministic DENY — that is
+    // the whole point of the setting. A callback error (the TS `catch`) also
+    // denies.
+    if config.strict_allowlist == Some(true) {
+        return false;
+    }
     match ask {
         Some(cb) => cb(host, port).await.unwrap_or(false),
         None => false,
@@ -138,6 +148,66 @@ pub async fn filter_network_request_with_ask(
 mod tests {
     use super::*;
     use crate::config::NetworkConfig;
+
+    fn cfg(allowed: &[&str], denied: &[&str], strict: Option<bool>) -> NetworkConfig {
+        NetworkConfig {
+            allowed_domains: allowed.iter().map(|s| (*s).to_string()).collect(),
+            denied_domains: denied.iter().map(|s| (*s).to_string()).collect(),
+            strict_allowlist: strict,
+            ..Default::default()
+        }
+    }
+
+    /// `strictAllowlist` turns the unmatched ASK into a deterministic DENY —
+    /// the entire point of the setting. Without this the flag was honored in
+    /// settings and ignored at the only place that can act on it.
+    #[tokio::test]
+    async fn strict_allowlist_denies_an_unmatched_host_without_asking() {
+        let asked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let a = asked.clone();
+        let ask: AskFn = std::sync::Arc::new(move |_h: &str, _p: u16| {
+            a.store(true, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async { Ok(true) })
+                as std::pin::Pin<Box<dyn std::future::Future<Output = _> + Send>>
+        });
+        let c = cfg(&["ok.example"], &[], Some(true));
+        assert!(
+            !filter_network_request_with_ask(443, "other.example", &c, Some(&ask)).await,
+            "unmatched host must be DENIED under strictAllowlist"
+        );
+        assert!(
+            !asked.load(std::sync::atomic::Ordering::SeqCst),
+            "the user must NOT be prompted under strictAllowlist"
+        );
+    }
+
+    /// Without the flag the unmatched case still asks — the default is
+    /// unchanged.
+    #[tokio::test]
+    async fn without_strict_allowlist_an_unmatched_host_still_asks() {
+        let asked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let a = asked.clone();
+        let ask: AskFn = std::sync::Arc::new(move |_h: &str, _p: u16| {
+            a.store(true, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async { Ok(true) })
+                as std::pin::Pin<Box<dyn std::future::Future<Output = _> + Send>>
+        });
+        let c = cfg(&["ok.example"], &[], None);
+        assert!(filter_network_request_with_ask(443, "other.example", &c, Some(&ask)).await);
+        assert!(
+            asked.load(std::sync::atomic::Ordering::SeqCst),
+            "the user MUST be prompted when strictAllowlist is off"
+        );
+    }
+
+    /// strictAllowlist changes only the UNMATCHED branch: an allowlisted host
+    /// is still allowed, and a denylisted one still denied.
+    #[tokio::test]
+    async fn strict_allowlist_does_not_change_explicit_matches() {
+        let c = cfg(&["ok.example"], &["bad.example"], Some(true));
+        assert!(filter_network_request_with_ask(443, "ok.example", &c, None).await);
+        assert!(!filter_network_request_with_ask(443, "bad.example", &c, None).await);
+    }
 
     #[test]
     fn wildcard_and_exact_matching() {

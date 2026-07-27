@@ -81,6 +81,11 @@ pub fn to_runtime_config(engine: &EngineConfig) -> RuntimeConfig {
         allowed_domains: net.allowed_domains.clone(),
         // Computed denylist (from WebFetch deny rules) — forwarded verbatim.
         denied_domains: net.denied_domains.clone(),
+        // `strictAllowlist` MUST cross this boundary: the engine resolves it
+        // (source-restricted to user/managed/CLI) but only the runtime matcher
+        // can act on it. Dropping it here is how the flag came to be honored
+        // in settings and ignored in practice.
+        strict_allowlist: net.strict_allowlist.then_some(true),
         allow_unix_sockets: some_if_nonempty(net.allow_unix_sockets.clone()),
         allow_all_unix_sockets: Some(net.allow_all_unix_sockets),
         allow_local_binding: Some(net.allow_local_binding),

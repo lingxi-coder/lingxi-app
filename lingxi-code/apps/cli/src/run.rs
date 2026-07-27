@@ -318,7 +318,11 @@ pub async fn run_stream_json_print(
     let fast_mode_disabled_reason = {
         let listings = runtime.orchestrator.list_model_listings().await;
         resolve_fast_mode_disabled_reason(
-            session_model_is_first_party(&listings, &model_str),
+            session_model_is_first_party(
+                env_api_provider_is_first_party(),
+                &listings,
+                &model_str,
+            ),
             sdk_fast_mode_opt_in,
         )
     };
@@ -1185,7 +1189,11 @@ pub async fn run_stream_json_input_loop(
     let fast_mode_disabled_reason = {
         let listings = runtime.orchestrator.list_model_listings().await;
         resolve_fast_mode_disabled_reason(
-            session_model_is_first_party(&listings, &model_str),
+            session_model_is_first_party(
+                env_api_provider_is_first_party(),
+                &listings,
+                &model_str,
+            ),
             sdk_fast_mode_opt_in,
         )
     };
@@ -1830,28 +1838,33 @@ fn resolve_fast_mode_disabled_reason(
 /// is `vertex`, hence `not_first_party` (live-captured on 2.1.220). `C_()` is
 /// the gateway-auth cell, which has no port surface. Value test is the shared
 /// `isEnvTruthy` allowlist, as everywhere else the port reads these vars.
+const MANAGED_CLOUD_PROVIDER_ENV: [&str; 6] = [
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_FOUNDRY",
+    "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+    "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
+    "CLAUDE_CODE_USE_MANTLE",
+    "CLAUDE_CODE_USE_VERTEX",
+];
+
+/// `xn()==="firstParty"` — see [`MANAGED_CLOUD_PROVIDER_ENV`].
 fn env_api_provider_is_first_party() -> bool {
-    [
-        "CLAUDE_CODE_USE_BEDROCK",
-        "CLAUDE_CODE_USE_FOUNDRY",
-        "CLAUDE_CODE_USE_ANTHROPIC_AWS",
-        "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
-        "CLAUDE_CODE_USE_MANTLE",
-        "CLAUDE_CODE_USE_VERTEX",
-    ]
-    .iter()
-    .all(|key| !traits::env::is_env_truthy(std::env::var(key).ok().as_deref()))
+    !MANAGED_CLOUD_PROVIDER_ENV
+        .iter()
+        .any(|key| traits::env::is_env_truthy(std::env::var(key).ok().as_deref()))
 }
 
-/// `xn()==="firstParty"` for this session: the env-derived provider above AND
-/// — LingXi multi-provider divergence, which the oracle has no analogue for —
-/// a model actually served by the Anthropic profile. Either half falsy maps to
+/// `xn()==="firstParty"` for this session: the env-derived provider
+/// (`env_first_party`, from [`env_api_provider_is_first_party`]) AND — LingXi
+/// multi-provider divergence, which the oracle has no analogue for — a model
+/// actually served by the Anthropic profile. Either half falsy maps to
 /// `not_first_party`.
 fn session_model_is_first_party(
+    env_first_party: bool,
     listings: &[traits::orchestrator::ModelListing],
     model: &str,
 ) -> bool {
-    if !env_api_provider_is_first_party() {
+    if !env_first_party {
         return false;
     }
     if let Some(listing) = listings.iter().find(|l| l.request_model == model) {
@@ -4309,17 +4322,26 @@ mod tests {
         );
     }
 
-    /// `CLAUDE_CODE_USE_*` is process-global; every test that sets or reads it
-    /// through `env_api_provider_is_first_party` serializes on this.
-    static API_PROVIDER_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     /// `xn()` (@227682549) is purely env-derived — a first-party Claude model
-    /// under any managed-cloud env var is `not_first_party`.
+    /// under any managed-cloud env var is `not_first_party`. The env read is
+    /// NOT exercised here: `CLAUDE_CODE_USE_*` is process-global and ~840
+    /// sibling tests resolve models off it, so the verdict is a parameter and
+    /// the var LIST is asserted against the binary instead.
     #[test]
     fn managed_cloud_env_forces_not_first_party() {
-        let _guard = API_PROVIDER_ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(
+            MANAGED_CLOUD_PROVIDER_ENV,
+            [
+                "CLAUDE_CODE_USE_BEDROCK",
+                "CLAUDE_CODE_USE_FOUNDRY",
+                "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+                "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
+                "CLAUDE_CODE_USE_MANTLE",
+                "CLAUDE_CODE_USE_VERTEX",
+            ],
+            "xn()'s provider chain, in binary order"
+        );
+
         let listings = vec![traits::orchestrator::ModelListing {
             display_model: "Opus".to_string(),
             request_model: "claude-opus-4-8".to_string(),
@@ -4328,42 +4350,31 @@ mod tests {
             description: None,
             supports_reasoning: true,
         }];
-        assert!(session_model_is_first_party(&listings, "claude-opus-4-8"));
-
-        for key in [
-            "CLAUDE_CODE_USE_BEDROCK",
-            "CLAUDE_CODE_USE_FOUNDRY",
-            "CLAUDE_CODE_USE_ANTHROPIC_AWS",
-            "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
-            "CLAUDE_CODE_USE_MANTLE",
-            "CLAUDE_CODE_USE_VERTEX",
-        ] {
-            std::env::set_var(key, "1");
-            assert!(
-                !session_model_is_first_party(&listings, "claude-opus-4-8"),
-                "{key} ⇒ xn() != firstParty"
-            );
-            assert_eq!(
-                resolve_fast_mode_disabled_reason(
-                    session_model_is_first_party(&listings, "claude-opus-4-8"),
-                    true,
-                ),
-                Some("not_first_party"),
-            );
-            // `isEnvTruthy` allowlist: a non-allowlisted value does not switch.
-            std::env::set_var(key, "0");
-            assert!(session_model_is_first_party(&listings, "claude-opus-4-8"));
-            std::env::remove_var(key);
-        }
+        // A first-party Claude model on a managed-cloud provider: the catalog
+        // says `anthropic`, `xn()` says otherwise, and `xn()` wins.
+        assert!(!session_model_is_first_party(
+            false,
+            &listings,
+            "claude-opus-4-8"
+        ));
+        assert_eq!(
+            resolve_fast_mode_disabled_reason(
+                session_model_is_first_party(false, &listings, "claude-opus-4-8"),
+                true,
+            ),
+            Some("not_first_party"),
+        );
+        assert!(session_model_is_first_party(
+            true,
+            &listings,
+            "claude-opus-4-8"
+        ));
     }
 
     /// First-party detection prefers the live catalog row's provider; unknown
     /// ids fall back to the `claude-*` / `default` family rule.
     #[test]
     fn session_model_first_party_uses_catalog_provider() {
-        let _guard = API_PROVIDER_ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let listings = vec![
             traits::orchestrator::ModelListing {
                 display_model: "Opus".to_string(),
@@ -4382,12 +4393,12 @@ mod tests {
                 supports_reasoning: false,
             },
         ];
-        assert!(session_model_is_first_party(&listings, "claude-opus-4-8"));
-        assert!(!session_model_is_first_party(&listings, "gpt-4o"));
+        assert!(session_model_is_first_party(true, &listings, "claude-opus-4-8"));
+        assert!(!session_model_is_first_party(true, &listings, "gpt-4o"));
         // Fallback family rule when the model is not in the catalog.
-        assert!(session_model_is_first_party(&listings, "claude-opus-5[1m]"));
-        assert!(session_model_is_first_party(&listings, "default"));
-        assert!(!session_model_is_first_party(&listings, "grok-3"));
+        assert!(session_model_is_first_party(true, &listings, "claude-opus-5[1m]"));
+        assert!(session_model_is_first_party(true, &listings, "default"));
+        assert!(!session_model_is_first_party(true, &listings, "grok-3"));
     }
 
     #[tokio::test]

@@ -121,3 +121,138 @@ M12-attach-detach, M12-midturn-backgrounding, M12-managed-row, P1-user_prompt-lo
 - Gate run 1 (head `db5a4bf6b`): `cargo build --workspace --tests` FAILED — E0063, M7's engine-desktop test helper missed mcp-stream's new `McpServerConfig.config_error` field (the second M5×M7 cross-lane seam; only `--tests` builds see it). Repaired in `51853980a`; the accompanying `cargo check -q --workspace --tests` sweep found no further sites (remaining warnings all pre-exist on base in files this wave never touched).
 - Gate run 2 (head `51853980a`): `cargo build --workspace --tests` exit 0; `cargo test --workspace` (doctests included) — **502 suites, 12694 passed, 0 failed, 10 ignored**. No test-count drop vs the ~12.6k baseline (count is UP ~80 from this wave's new tests), so no missing-test-binary red flag.
 - `CLAUDE_CODE_VERSION` was NOT bumped by this wave (stays `2.1.217`; the bump is the sibling session's M10, after both waves merge).
+
+## 8. Ultra-review remediation (2026-07-27)
+
+An adversarial ultra-review of the whole wave (review base `4c55d6aa4`) produced 48
+candidate findings across 8 lanes. 9 were refuted during review; the remaining **39
+were confirmed**, each re-verified against the 2.1.220 binary by its fix lane before
+any code changed, and handed to three fix lanes — `fix220/mcp`, `fix220/auth`,
+`fix220/soc` — all now merged into `gap220/integration`.
+
+### 8.1 Confirmed findings (39)
+
+| Id | Disposition | Commit | Lane |
+|---|---|---|---|
+| MCPCORE-1 | FIXED | `5ef7a725f` | mcp |
+| MCPCORE-2 | FIXED | `c2d0e8a76` | mcp |
+| MCPCLI-1 | FIXED | `5908afc55` | mcp |
+| MCPCLI-2 | FIXED | `fa61c9718` | mcp |
+| MCPCLI-3 | FIXED | `5908afc55` | mcp |
+| MCPCLI-4 | FIXED | `2a8c6fc3c` | auth |
+| MCPCLI-6 | FIXED | `5908afc55` | mcp |
+| MCPCLI-7 | FIXED | `529fb6c66` | mcp |
+| AUTH-1 | FIXED | `2a8c6fc3c` | auth |
+| AUTH-2 | FIXED | `9c55bd4fb` | auth |
+| AUTH-3 | FIXED | `c10a97e7c` | auth |
+| AUTH-6 | FIXED | `166ba3375` | auth |
+| AUTH-7 | FIXED | `6af0a2cda` | auth |
+| SANDBOX-1 | FIXED | `2c5bf5324` | auth |
+| TELSH-1 | FIXED | `c10a97e7c` | auth |
+| TELSH-2 | FIXED | `c10a97e7c` | auth |
+| TELSH-3 | FIXED | `6a8d96377` | soc |
+| TELSH-4 | FIXED | `caea97614` | auth |
+| TELSH-6 | FIXED | `0cf1830a9` | auth |
+| TELSH-7 | FIXED | `c10a97e7c` | auth |
+| TELSH-8 | FIXED | `c10a97e7c` | auth |
+| ORCH-1 | FIXED | `6a8d96377` | soc |
+| ORCH-2 | FIXED | `d71bb1585` | soc |
+| ORCH-3 | FIXED | `d71bb1585` | soc |
+| ORCH-4 | FIXED | `6a8d96377` | soc |
+| ORCH-5 | FIXED | `6a8d96377` | soc |
+| ORCH-8 | FIXED | `6a8d96377` | soc |
+| ORCH-9 | FIXED | `6a8d96377` | soc |
+| UISESS-1 | FIXED | `678da6d79` + `f7bf7af1e` | soc |
+| UISESS-2 | FIXED | `678da6d79` | soc |
+| UISESS-3 | FIXED | `70dc9409f` | soc |
+| UISESS-4 | FIXED | `70dc9409f` | soc |
+| UISESS-5 | FIXED | `678da6d79` | soc |
+| STREAM-1 | FIXED | `4a74df014` + `1c177cbe7` | soc |
+| STREAM-2 | FIXED | `1c177cbe7` | soc |
+| STREAM-3 | FIXED | `1c177cbe7` | soc |
+| STREAM-4 | FIXED | `1c177cbe7` | soc |
+| STREAM-5 | FIXED | `1c177cbe7` | soc |
+| STREAM-6 | FIXED | `1c177cbe7` + `63bfc5d6c` | soc |
+
+Nothing was DEFERRED or REFUTED-ON-RECHECK: all 39 were still real at `4c55d6aa4`
+when their lane re-verified them, and all 39 are present in the merged tree
+(spot-checked at the behaviour site, not just by commit message).
+
+Two follow-ups the lanes documented rather than fixed (both need files outside the
+fixing lane's ownership, neither is a regression):
+
+- **`afe` loader-side enterprise/`mcp`-locked exclusivity** — `mcp list` still prints
+  user/project/local rows under a managed `managed-mcp.json` that the oracle's `afe`
+  (@231822040) replaces with the managed set alone. MCPCLI-6 removed the *warning*
+  half; the server-set half needs `mcp/src/json_config.rs`.
+- **`Nxe`'s third pre-dial gate** (@232117552) — a syntactically invalid but non-blank
+  `url` is `INVALID_CONFIG` without dialing in the oracle; the port still dials and
+  reports the transport's error. Clean standalone follow-up in `mcp/src/registry.rs`.
+
+### 8.2 Refuted during review (9, for the record)
+
+| Id | Why it was dropped |
+|---|---|
+| MCPCORE-3 | Claimed `setenv`-reallocation race is impossible between Rust accessors — std's unix backend takes a process-wide `ENV_LOCK` in `env()`, `getenv` and `setenv`; the probe var is unique to the one test, and `OnceLock::get_or_init` populates the snapshot before the mutation. |
+| MCPCLI-5 | Real oracle divergence (zod `z.record` accepts `{}`; `obs` `continue`s per entry) but **pre-existing base behavior** — the `!map.is_empty()` guard dates to `412c597b6` (2026-06-19); the wave only rewrote the arm's body. Out of scope, re-file separately. |
+| AUTH-4 | Premise inverted: `forceLoginMethod`'s resolver `Ber()` has 5 call sites and **none** participate in auth-source resolution (`PA()`/`e1()` have no such branch), so `managed_oauth_only: false` at `mcp serve`/`auto-mode-setup` is oracle-CORRECT. Its FD half would be actively harmful (the port never reads the descriptor). The real entrypoint-consistency defect is MCPCLI-4, fixed by `2a8c6fc3c`. |
+| AUTH-5 | Decisive mechanism false: the CLI installs the OTEL runtime in its own `run()` (`apps/cli/src/lib.rs:477`) *before* subcommand dispatch (`:642`), and `AnalyticsBus::log_event` calls `mirror_analytics_event` unconditionally, so the event does egress. The sink-less half is workspace-wide pre-existing architecture (`attach_sink` has zero production call sites). |
+| SANDBOX-2 | No defect at HEAD — all three transports already call `filter_network_request_with_ask`, and the whole strict gate lives in that one shared function (which gained 3 dedicated tests). `socks_proxy.rs` has a zero-byte diff vs base; ask-coverage was 0/3 before the wave and is now 1/3. |
+| ORCH-6 | Cited cause chain is dead code: the sole production caller passes `pricing_provider_id_for_profile(...)`, whose range never includes `VertexClaude`/`FoundryClaude`, so the quoted arms are unreachable; the actual emitted value is the profile name. Claude-on-Vertex/Foundry only reaches LingXi through the multi-provider profile system (an accepted divergence). |
+| ORCH-7 | Out of scope + the quoted doc line is not false. The per-turn `current_date_string()` push is byte-identical at base `a13591ed6` and untouched by the diff; the wave strictly *reduced* divergence (two deltas → one). Worth filing on its own. |
+| ORCH-10 | Describes a hypothetical future regression, not a defect: at all five sites the deferred prepend runs first and `date_change` second, giving `[date_change, deferred_tools_delta, …]` — exactly what `Ky("date_change")` @237703570 inside a `Promise.all` requires. The untested-ordering property is pre-existing base convention. |
+| TELSH-5 | The `set_var` is inside `if cfg!(windows)` and its only caller gates on `cfg!(windows)` too, so it never executes on the platforms whose runtime the finding names; on Windows std documents `set_var` as always safe (bare `SetEnvironmentVariableW`). The oracle premise is also wrong — `P6n` is not memoized and has a lazy per-invocation call site @241508347. |
+
+### 8.3 Integration + gate (ultra-review remediation)
+
+- Merges into `gap220/integration`, in order: `fix220/mcp` → `29d675478`,
+  `fix220/auth` → `eb550b984`, `fix220/soc` → `6c73779e6`. **No conflicts.** The
+  anticipated `apps/engine-desktop/src/lib.rs` collision did not materialise
+  textually: the mcp lane's agent-frontmatter MCP merge region (`dynamic_names`,
+  the `FWt`/`afe` ordering fix) and the auth lane's credential region
+  (`subscription_seed`, `host_managed_oauth_only`, the `KWr()` read inside
+  `resolve_llm_stack`) are disjoint, and both intents are present in the merged
+  file — verified by reading the merged result, not by trusting the auto-merge.
+- `cargo check -q --workspace --tests` after the `fix220/mcp` merge and again after
+  the `fix220/auth` merge: **exit 0 both times**, so no compile-level repair was
+  needed (contrast the two `--tests`-only cross-lane breakages earlier in this
+  wave). The `--tests` flag still matters: `fix220/soc` turns
+  `traits::PermissionResolution::Allow` from a unit into a struct variant
+  (`rule_source`), which only test-side constructors would have exposed.
+- **One real repair — `dac087a04`.** Gate run 1 at `6c73779e6` built clean but
+  `-p llm-client --lib` failed ~50% of the time on
+  `global_fallback_model_works_without_chain_entry`
+  (`left: Some("claude-opus-4-6")`, i.e. the primary model on the attempt that
+  should have been the fallback). Root cause: `fix220/auth`'s `c10a97e7c` added
+  the first tests that flip `tengu_cedar_lattice` (`CedarLatticeOn`), and
+  `telemetry::test_set_flag` writes the PROCESS-GLOBAL override map (the port of
+  `ROt()`/`Uvi`). Serializing the flippers against each other left every OTHER
+  concurrently-running test in the binary reading the flipped value; a leaked
+  opt-in makes a first-party attempt carry `anthropic-dispatch-id`, and
+  `note_dispatch_header_failure` then inserts the oracle's budget-free
+  `"retry:dispatch-header-strip"` attempt — correct production behaviour that
+  silently shifts every attempt-count and fallback-position assertion.
+  The exact victim set (6 drive-loop tests + the 2 default-asserting flag tests)
+  was established by forcing `dispatch_v2s_opt_in()` to `true` for one run, and
+  `DISPATCH_FLAG_LOCK` became an `RwLock`: flippers take the write side, the
+  tests that need the opt-in OFF take the read side. **No production code changed
+  and no assertion was weakened.** 12/12 green after; removing just the one read
+  guard puts it back to 0/5.
+- Gate at head `dac087a04`: `cargo build --workspace --tests` **exit 0**;
+  `cargo test --workspace --no-fail-fast` (doctests included) —
+  **502 suites, 12738 passed, 0 failed, 10 ignored** (81 of the 502 are
+  doctest suites), exit 0.
+- Baseline for the count check was 502 suites / 12694 passed / 0 failed at
+  `51853980a`. The suite count is IDENTICAL (502 → 502) and the passing
+  count is UP 44 (12694 → 12738) from the fix lanes' new tests, so there is no
+  missing-test-binary red flag.
+- `CLAUDE_CODE_VERSION` was again **NOT** bumped (still the sibling session's M10).
+- `permission/src/policy_test.rs` (sibling-owned) was not touched by any lane in
+  this remediation; its last commit is still `80dc7a6a6`.
+- `main` was deliberately **not** merged or pulled: the duplicate-implementation
+  reconciliation flagged in §5 (H5/M11, `sandbox-runtime/src/{config,matcher}.rs`,
+  `sandbox-runtime-runner/src/convert.rs`, `tools/shell/src/bash.rs`) is scheduled
+  separately. Note that `fix220/auth` touched two of those four files
+  (`sandbox-runtime/src/matcher.rs` via SANDBOX-1, `tools/shell/src/bash.rs` via
+  TELSH-4), so the reconciliation must now keep the union of THREE
+  implementations' tests, not two.

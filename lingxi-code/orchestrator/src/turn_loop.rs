@@ -2725,7 +2725,21 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             .lock()
             .await
             .remove(tool_use_id);
+        // OTEL `code_edit_tool.decision` source label, threaded out of the
+        // decision branches below (CC `let f = u === "config" ? "config" :
+        // fI_(u)` — `fI_`: classifier/hook/user_permanent/user_temporary/
+        // user_abort/user_reject/unknown). Rule/mode/plan resolutions are
+        // "config"; the port's prompt transport does not surface CC's
+        // permanent-vs-temporary user grant, so a transport allow maps to
+        // "user_permanent" only when it carried `updatedPermissions` (a
+        // persisted grant) and "user_temporary" otherwise, and a transport
+        // deny (incl. an aborted prompt, which the gate folds into Deny) maps
+        // to "user_reject".
+        let mut decision_otel_source: &'static str = "config";
         let decision = if let Some(forced) = forced_decision {
+            // A recovered orphan's forced `control_response` — no structured
+            // decision reason survives the recovery (CC default arm).
+            decision_otel_source = "unknown";
             forced
         } else if plan_mode {
             let plan_decision = orch.perms.check_in_plan_mode(name, &effective_input).await;
@@ -2745,6 +2759,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             }
             plan_decision
         } else if hook_allowed {
+            decision_otel_source = "hook";
             // Carry the REAL tool_use_id so a hook-allow→ask-rule re-check emits a
             // byte-faithful stdio `can_use_tool` (correlatable id + decision_reason).
             let ctx = traits::permission_gate::PermissionCheckContext {
@@ -2808,6 +2823,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                     // auto-mode classifier, so classifier-source denies can
                     // reach this path in normal builds.
                     if matches!(source, PermissionDecisionSource::Classifier) {
+                        decision_otel_source = "classifier";
                         let denied_event = HookEvent::PermissionDenied {
                             tool_name: name.clone(),
                             tool_input: effective_input.clone(),
@@ -2869,6 +2885,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                     let req_agg = orch.hooks.execute(req_event, hook_ctx.clone()).await;
                     match req_agg.decision {
                         Some(HookDecision::Approve | HookDecision::Allow) => {
+                            decision_otel_source = "hook";
                             // (cc 2.1.218 `Fxy`) The headless PermissionRequest
                             // rescue re-checks the rules (`epr(_pt(...))`, where an
                             // ask rule becomes a HARD DENY — no prompt is available
@@ -2906,11 +2923,14 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                                     .await
                             }
                         }
-                        Some(HookDecision::Block) => PermissionDecision::Deny {
-                            reason: req_agg
-                                .reason
-                                .unwrap_or_else(|| "permission denied by hook".into()),
-                        },
+                        Some(HookDecision::Block) => {
+                            decision_otel_source = "hook";
+                            PermissionDecision::Deny {
+                                reason: req_agg
+                                    .reason
+                                    .unwrap_or_else(|| "permission denied by hook".into()),
+                            }
+                        }
                         _ => {
                             // Delegate to the inner prompt transport, carrying the
                             // REAL tool_use_id (so a stdio `can_use_tool` request is
@@ -2935,15 +2955,22 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                                     // `permission_updates` (the host's
                                     // `updatedPermissions`) are applied + persisted
                                     // inside the stdio gate itself, which holds the
-                                    // settings paths; nothing to do here.
-                                    permission_updates: _,
+                                    // settings paths; here they only discriminate a
+                                    // persisted user grant for the OTEL source label.
+                                    permission_updates,
                                 } => {
+                                    decision_otel_source = if permission_updates.is_empty() {
+                                        "user_temporary"
+                                    } else {
+                                        "user_permanent"
+                                    };
                                     if let Some(u) = updated_input {
                                         effective_input = u;
                                     }
                                     PermissionDecision::Allow
                                 }
                                 traits::permission_gate::PermissionOutcome::Deny { reason } => {
+                                    decision_otel_source = "user_reject";
                                     PermissionDecision::Deny { reason }
                                 }
                             }
@@ -2952,6 +2979,26 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 }
             }
         };
+        // OTEL: record the RESOLVED tool-permission decision — the CC
+        // `XNr()?.add(1, await ICs(...))` counter (Edit/Write/NotebookEdit
+        // only, gated inside) + the paired `tool_decision` `claude_code.events`
+        // record (every tool). The path argument is the `getPath` twin: the
+        // edit tools' `file_path` / NotebookEdit's `notebook_path` from the
+        // input the decision was made on. Byte-noop when OTEL is off.
+        telemetry::otel::record_tool_permission_decision(
+            name,
+            tool_use_id.as_str(),
+            effective_input
+                .get("file_path")
+                .or_else(|| effective_input.get("notebook_path"))
+                .and_then(serde_json::Value::as_str),
+            if matches!(decision, PermissionDecision::Allow) {
+                "accept"
+            } else {
+                "reject"
+            },
+            decision_otel_source,
+        );
         match decision {
             PermissionDecision::Allow => {}
             PermissionDecision::Deny { reason } => {

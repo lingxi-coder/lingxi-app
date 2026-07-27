@@ -845,6 +845,27 @@ struct WireToolSchemaCache {
     wire: Vec<serde_json::Value>,
 }
 
+/// `date_change` (cc `Cop`) per-conversation state.
+///
+/// The oracle keeps two things: `LGe = Vr(wcs)`, the local date memoized when
+/// the session started (the same date the env-context `currentDate` entry was
+/// first built from), and the delivered `date_change` attachment itself, which
+/// `Cop` re-finds by scanning `FT(messages)` — the slice AFTER the last
+/// `compact_boundary`. `clearSessionCaches` clears both. The port's reminders
+/// are outgoing-only, so the delivered date is carried here instead, and the
+/// whole struct is re-seeded whenever the live `SessionId` changes (`/clear`
+/// mints a new one; in-place resume adopts the named one).
+#[derive(Debug, Default)]
+pub(crate) struct DateChangeState {
+    /// Session this state belongs to; `None` until the first producer run.
+    session_id: Option<protocol::SessionId>,
+    /// `LGe()` — the local date memoized at session start.
+    session_date: String,
+    /// `newDate` of the reminder last DELIVERED to the model, within the
+    /// current post-compaction window.
+    delivered_date: Option<String>,
+}
+
 const TOOL_TOKEN_COUNT_OVERHEAD: u64 = 500;
 
 pub struct ConversationOrchestrator {
@@ -1323,17 +1344,8 @@ pub struct ConversationOrchestrator {
     /// [`Self::skill_listing_reminder_message`] returns `None` (no reminder that
     /// turn). Process-/session-local, exactly like the TS module-scope map.
     pub(crate) sent_skill_names: Mutex<std::collections::HashSet<String>>,
-    /// `date_change` (cc `Cop`): the local date memoized at session start
-    /// (`LGe = Vr(wcs)` — the same date the env-context `currentDate` entry was
-    /// first built from). A turn whose local date differs emits the
-    /// `date_change` reminder; equal dates emit nothing. Filled lazily on the
-    /// first producer run.
-    pub(crate) date_change_session_date: std::sync::OnceLock<String>,
-    /// `date_change` dedupe: the `newDate` of the last emitted reminder. The
-    /// oracle walks history for the last `date_change` attachment with the same
-    /// `newDate`; the port's reminders are outgoing-only (never persisted), so
-    /// the in-memory twin carries the same fact for the session's lifetime.
-    pub(crate) date_change_last_emitted: std::sync::Mutex<Option<String>>,
+    /// `date_change` (cc `Cop`) per-session state. See [`DateChangeState`].
+    pub(crate) date_change: std::sync::Mutex<DateChangeState>,
     /// `agent_listing_delta` delta: agent TYPES already announced in a prior
     /// turn's `agent_listing` reminder. Turn-0 (empty set) emits the FULL
     /// listing with the "Available agent types for the Agent tool:" header;
@@ -1626,8 +1638,7 @@ impl ConversationOrchestrator {
             conditional_rules_cache: Arc::new(std::sync::Mutex::new(None)),
             sent_conditional_rules: Mutex::new(std::collections::HashSet::new()),
             sent_skill_names: Mutex::new(std::collections::HashSet::new()),
-            date_change_session_date: std::sync::OnceLock::new(),
-            date_change_last_emitted: std::sync::Mutex::new(None),
+            date_change: std::sync::Mutex::new(DateChangeState::default()),
             sent_agent_names: Mutex::new(std::collections::HashSet::new()),
             memory_prefetch: None,
             end_conversation_slot: None,
@@ -3300,6 +3311,10 @@ impl ConversationOrchestrator {
             metadata.active_goal = s.active_goal.clone();
             s.history = history_after;
         }
+        // The boundary just moved past any delivered `date_change` attachment,
+        // so `Cop`'s `FT(messages)` window no longer contains it and the next
+        // request re-emits the reminder.
+        self.reset_date_change_dedupe();
 
         // P1-05: persist the full compaction transition (claude 2.1.207
         // `insertMessageChain` + the compact flow), so a cold `--resume`
@@ -4837,6 +4852,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             let mut session = self.session.lock().await;
             session.history.push(marker.clone());
         }
+        // Same `FT(messages)` window reset as the in-process compaction path.
+        self.reset_date_change_dedupe();
         let compact_metadata = camelize_json_keys(sdk_compact_metadata);
         self.persist_compact_boundary_jsonl_value(&marker, compact_metadata)
             .await;
@@ -7176,12 +7193,14 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // insert so the final order is [date_change, deferred_tools_delta,
             // …] — matching the oracle attachment batch order (`Ky("date_change")`
             // before `Ky("deferred_tools_delta")`). Computed ONCE per model
-            // step (the producer ADVANCES the emitted-date dedupe) and reused
-            // by the retry/fallback re-snapshots below, exactly like
-            // `deferred_reminder`. `None` (the overwhelmingly common same-date
-            // case) keeps the locked streaming fixtures byte-identical. See
+            // step and reused by the retry/fallback re-snapshots below, exactly
+            // like `deferred_reminder`; the dedupe is committed only once the
+            // stream actually opens (below the blocking-limit preempt). `None`
+            // (the overwhelmingly common same-date case) keeps the locked
+            // streaming fixtures byte-identical. See
             // [`Self::date_change_reminder_message`].
-            let date_change_reminder = self.date_change_reminder_message();
+            let date_change_reminder = self
+                .date_change_reminder_message(self.session.lock().await.session_id);
             if let Some(reminder) = date_change_reminder.clone() {
                 snapshot.insert(0, reminder);
             }
@@ -7230,6 +7249,9 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 final_message_id = id;
                 break;
             }
+            // Past the preempt: this step's snapshot WILL be sent, so the
+            // `date_change` reminder it carries counts as delivered.
+            self.commit_date_change_reminder();
 
             // Mid-stream tool dispatch (claude-code `query.ts:562` + `837-844`):
             // create the executor + pre-allocate this turn's assistant id BEFORE
@@ -7346,7 +7368,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     if let Some(reminder) = deferred_reminder.clone() {
                         recov_snapshot.insert(0, reminder);
                     }
-                    // Same for the step's `date_change` (dedupe already advanced).
+                    // Same for the step's `date_change` (already committed when
+                    // the stream opened).
                     if let Some(reminder) = date_change_reminder.clone() {
                         recov_snapshot.insert(0, reminder);
                     }
@@ -7358,6 +7381,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                         recov_snapshot,
                         wire_tools.clone(),
                         None,
+                        date_change_reminder.clone(),
                     )
                     .await?
                     {
@@ -9925,30 +9949,46 @@ As you answer the user's questions, you can use the following context:\n\
     /// table): a session that crosses local midnight tells the model the new
     /// date once per changed date. Producer logic 1:1 —
     /// `wcs()` = local `YYYY-MM-DD` ([`crate::prompt::env_meta::current_date_string`]),
-    /// `LGe()` = the memoized session-start date; equal ⇒ no attachment, and a
-    /// prior emission with the same `newDate` dedupes (the oracle walks history
-    /// for the last `date_change` attachment; the port's outgoing-only
-    /// reminders keep the same fact in [`Self::date_change_last_emitted`]).
+    /// `LGe()` = the memoized session-start date; equal ⇒ no attachment, and an
+    /// already-DELIVERED reminder for the same `newDate` dedupes.
+    ///
+    /// PURE — the dedupe is advanced by [`Self::commit_date_change_reminder`]
+    /// once the request carrying the reminder has actually been issued. The
+    /// oracle can latch on produce because it materialises the attachment as a
+    /// real message (`Va(c,o)`) and pushes it into the message array BEFORE the
+    /// call, so its dedupe reads the same fact it delivered; the port's
+    /// reminder lives only in the outgoing snapshot, so a step that ends before
+    /// the call (blocking-limit preempt, stream error, abort) must not consume
+    /// it.
+    ///
     /// Rendered through `pm([zr({content, isMeta:!0})])` = `<system-reminder>`
     /// wrap + meta user message, appended to THIS turn's OUTGOING snapshot only
     /// (never `session.history` / JSONL).
-    pub(crate) fn date_change_reminder_message(&self) -> Option<ConversationMessage> {
+    pub(crate) fn date_change_reminder_message(
+        &self,
+        session_id: protocol::SessionId,
+    ) -> Option<ConversationMessage> {
         let today = crate::prompt::env_meta::current_date_string();
-        // `LGe = Vr(wcs)` — first producer run seeds the memo, so the turn
-        // that creates the session can never fire (today == start).
-        let start = self.date_change_session_date.get_or_init(|| today.clone());
-        if *start == today {
-            return None;
-        }
-        let mut last = self
-            .date_change_last_emitted
+        let mut state = self
+            .date_change
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if last.as_deref() == Some(today.as_str()) {
+        // `LGe = Vr(wcs)` — first producer run of a session seeds the memo, so
+        // the turn that creates (or `/clear`s, or resumes) the session can never
+        // fire. `clearSessionCaches` clears BOTH `LGe`'s memo and the emitted
+        // date; keying on the live session id reproduces that, because `/clear`
+        // mints a fresh `SessionId` and in-place resume adopts the named one.
+        if state.session_id != Some(session_id) {
+            *state = DateChangeState {
+                session_id: Some(session_id),
+                session_date: today.clone(),
+                delivered_date: None,
+            };
+        }
+        if state.session_date == today || state.delivered_date.as_deref() == Some(today.as_str()) {
             return None;
         }
-        *last = Some(today.clone());
-        drop(last);
+        drop(state);
         // Byte-exact reminder body (renderer @238108493), wrapped by `Ww`:
         // `<system-reminder>\n{e}\n</system-reminder>`.
         let content = format!(
@@ -9956,6 +9996,27 @@ As you answer the user's questions, you can use the following context:\n\
 DO NOT mention this to the user explicitly because they are already aware.\n</system-reminder>"
         );
         Some(ConversationMessage::user_meta(MessageId::new(), content))
+    }
+
+    /// Mark the current local date's `date_change` reminder as DELIVERED — the
+    /// commit half of [`Self::date_change_reminder_message`]. Called once the
+    /// request carrying this turn's outgoing snapshot has actually been issued.
+    pub(crate) fn commit_date_change_reminder(&self) {
+        self.date_change
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .delivered_date = Some(crate::prompt::env_meta::current_date_string());
+    }
+
+    /// Drop the `date_change` dedupe at a compaction boundary. `Cop` scans only
+    /// `FT(messages)` — the slice AFTER the last `compact_boundary` — so a
+    /// compaction that drops the delivered attachment out of that window makes
+    /// the oracle re-emit the reminder on the next request.
+    pub(crate) fn reset_date_change_dedupe(&self) {
+        self.date_change
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .delivered_date = None;
     }
 
     /// Finding #73: increment BOTH reminder counters by one assistant turn.
@@ -12963,40 +13024,93 @@ You should not respond to this context unless it is highly relevant to your task
     // `date_change` (cc `Cop`): mid-session midnight crossing.
     // ------------------------------------------------------------------------
 
+    /// Rewind the memoized session-start date so the live local date always
+    /// differs — the "session started yesterday" setup.
+    fn seed_stale_session_date(orch: &ConversationOrchestrator, session_id: protocol::SessionId) {
+        let mut state = orch
+            .date_change
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.session_id = Some(session_id);
+        state.session_date = "2000-01-01".to_string();
+        state.delivered_date = None;
+    }
+
+    fn expected_date_change_body() -> String {
+        let today = crate::prompt::env_meta::current_date_string();
+        format!(
+            "<system-reminder>\nThe date has changed. Today's date is now {today}. \
+DO NOT mention this to the user explicitly because they are already aware.\n</system-reminder>"
+        )
+    }
+
     #[test]
     fn date_change_none_when_date_unchanged() {
         // First producer run seeds the session-start memo (`LGe = Vr(wcs)`), so
         // a same-day session NEVER emits — the locked fixtures stay identical.
         let orch = orch_with(Arc::new(StaticMemoryProvider::empty()), None);
-        assert!(orch.date_change_reminder_message().is_none());
-        assert!(orch.date_change_reminder_message().is_none());
+        let sid = protocol::SessionId::new();
+        assert!(orch.date_change_reminder_message(sid).is_none());
+        assert!(orch.date_change_reminder_message(sid).is_none());
     }
 
     #[test]
     fn date_change_emits_once_after_midnight() {
         let orch = orch_with(Arc::new(StaticMemoryProvider::empty()), None);
-        // Simulate a session started "yesterday" by seeding the memo with a
-        // date that can never equal the live local date.
-        orch.date_change_session_date
-            .set("2000-01-01".to_string())
-            .expect("fresh memo");
+        let sid = protocol::SessionId::new();
+        seed_stale_session_date(&orch, sid);
         let msg = orch
-            .date_change_reminder_message()
+            .date_change_reminder_message(sid)
             .expect("date differs from session start");
-        let today = crate::prompt::env_meta::current_date_string();
         // Byte-exact reminder (renderer @238108493) inside the `Ww` wrap.
-        let expected = format!(
-            "<system-reminder>\nThe date has changed. Today's date is now {today}. \
-DO NOT mention this to the user explicitly because they are already aware.\n</system-reminder>"
-        );
-        assert_eq!(text(&msg), expected);
+        assert_eq!(text(&msg), expected_date_change_body());
         // Meta user message (`zr({…, isMeta:!0})`).
         assert!(matches!(
             msg,
             ConversationMessage::User { is_meta: true, .. }
         ));
-        // Dedupe: the following turn (same date) emits nothing.
-        assert!(orch.date_change_reminder_message().is_none());
+        // The producer is PURE: without a commit the SAME reminder is still due,
+        // so a step that never reaches the model cannot swallow it.
+        assert!(orch.date_change_reminder_message(sid).is_some());
+        orch.commit_date_change_reminder();
+        // Dedupe: once delivered, the following turn (same date) emits nothing.
+        assert!(orch.date_change_reminder_message(sid).is_none());
+    }
+
+    #[test]
+    fn date_change_re_emits_after_a_compact_boundary() {
+        // `Cop` scans only `FT(messages)` — the slice AFTER the last
+        // `compact_boundary` — so a compaction that drops the delivered
+        // attachment out of that window makes the next request re-emit.
+        let orch = orch_with(Arc::new(StaticMemoryProvider::empty()), None);
+        let sid = protocol::SessionId::new();
+        seed_stale_session_date(&orch, sid);
+        assert!(orch.date_change_reminder_message(sid).is_some());
+        orch.commit_date_change_reminder();
+        assert!(orch.date_change_reminder_message(sid).is_none());
+
+        orch.reset_date_change_dedupe();
+        assert_eq!(
+            orch.date_change_reminder_message(sid).map(|m| text(&m)),
+            Some(expected_date_change_body())
+        );
+    }
+
+    #[test]
+    fn date_change_re_seeds_the_session_start_date_on_a_new_session() {
+        // `clearSessionCaches` clears BOTH `LGe`'s memo and the emitted date, so
+        // a `/clear` (fresh `SessionId`) or in-place resume (adopted id) must
+        // NOT fire a reminder into the brand-new conversation.
+        let orch = orch_with(Arc::new(StaticMemoryProvider::empty()), None);
+        let old = protocol::SessionId::new();
+        seed_stale_session_date(&orch, old);
+        assert!(orch.date_change_reminder_message(old).is_some());
+
+        let fresh = protocol::SessionId::new();
+        assert!(
+            orch.date_change_reminder_message(fresh).is_none(),
+            "a new session re-seeds the start date to today"
+        );
     }
 }
 

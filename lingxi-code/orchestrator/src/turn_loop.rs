@@ -524,10 +524,15 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // model the new date once per changed date. Prepended AFTER the deferred
     // insert so the final order is [date_change, deferred_tools_delta, …] —
     // matching the oracle attachment batch order (`Ky("date_change")` before
-    // `Ky("deferred_tools_delta")`). `None` (same-date turns) keeps the locked
+    // `Ky("deferred_tools_delta")`). Computed ONCE per step and reused by
+    // `call_api_with_ptl_recovery`'s retry/fallback re-snapshots, which rebuild
+    // the SAME request from raw history; the dedupe is committed in there, past
+    // the blocking-limit preempt. `None` (same-date turns) keeps the locked
     // turn-loop fixtures byte-identical. See
     // [`ConversationOrchestrator::date_change_reminder_message`].
-    if let Some(reminder) = orch.date_change_reminder_message() {
+    let date_change_reminder =
+        orch.date_change_reminder_message(orch.session.lock().await.session_id);
+    if let Some(reminder) = date_change_reminder.clone() {
         history_snapshot.insert(0, reminder);
     }
     // REC.A1: consume the one-shot escalated `max_tokens` override (armed by a
@@ -553,6 +558,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         history_snapshot,
         tools,
         max_tokens_override,
+        date_change_reminder,
     )
     .await
     {
@@ -1107,6 +1113,11 @@ pub(crate) async fn call_api_with_ptl_recovery(
     history_snapshot: Vec<ConversationMessage>,
     tools: Vec<serde_json::Value>,
     max_tokens_override: Option<u32>,
+    // This step's transient `date_change` reminder (already at index 0 of
+    // `history_snapshot`). The retry/fallback paths below rebuild the request
+    // from raw `session.history`, where the transient does not live, so it is
+    // re-prepended there — the streaming twin threads it the same way.
+    date_change_reminder: Option<ConversationMessage>,
 ) -> Result<PtlCallOutcome, OrchestratorError> {
     // (1) Blocking-limit preempt. `is_at_blocking_limit` is
     // `token_usage >= effective_window − MANUAL_COMPACT_BUFFER_TOKENS`
@@ -1161,9 +1172,14 @@ pub(crate) async fn call_api_with_ptl_recovery(
             "prompt at blocking limit — preempting before API call"
         );
         // PROACTIVE preempt ⇒ terminal reason `"blocking_limit"` (distinct from
-        // the reactive-exhausted `PromptTooLong` returned at the tail).
+        // the reactive-exhausted `PromptTooLong` returned at the tail). No
+        // request is issued, so the `date_change` reminder stays UNCOMMITTED and
+        // the next step re-emits it.
         return Ok(PtlCallOutcome::BlockingLimit);
     }
+    // Past the preempt: the snapshot WILL be sent, so this step's `date_change`
+    // reminder counts as delivered.
+    orch.commit_date_change_reminder();
 
     // (2) Initial call. When an Opus-fallback model is configured, route the
     // primary request through the fallback-aware seam. In Task 6, `LlmError`
@@ -1229,7 +1245,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
             let s = orch.session.lock().await;
             s.history.clone()
         };
-        let Some(truncated) =
+        let Some(mut truncated) =
             compaction::ptl_retry::truncate_head_for_ptl_retry(history, token_gap)
         else {
             // Nothing safe to drop (< 2 groups). Stop truncating and fall
@@ -1239,6 +1255,12 @@ pub(crate) async fn call_api_with_ptl_recovery(
         {
             let mut s = orch.session.lock().await;
             s.history.clone_from(&truncated);
+        }
+        // The re-snapshot came from raw `session.history`, so re-prepend this
+        // step's transient `date_change` reminder — the retried request is the
+        // SAME step's request and must still carry it.
+        if let Some(reminder) = date_change_reminder.clone() {
+            truncated.insert(0, reminder);
         }
         match orch
             .api

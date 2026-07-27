@@ -274,11 +274,165 @@ pub fn resolve_shell_path() -> &'static str {
             return Box::leak(v.into_boxed_str());
         }
     }
+    // Windows: Git Bash discovery (cc 2.1.219 `MQ`/`P6n`) — env override with
+    // validation, then Program Files probes, then git-on-PATH. Falls through to
+    // the compile-time default when nothing resolves (the `P6n` "Git Bash not
+    // found" case; the unavailable line is logged inside `git_bash_path`).
+    if cfg!(windows) {
+        if let Some(p) = git_bash_path() {
+            return p;
+        }
+    }
     if cfg!(target_os = "macos") {
         BASH_SHELL_MACOS
     } else {
         BASH_SHELL_LINUX
     }
+}
+
+// ===== BASH.GITBASH — Windows Git Bash resolution (cc 2.1.219 `MQ`/`P6n`) ===
+
+/// Verdict on a `CLAUDE_CODE_GIT_BASH_PATH` override (cc 2.1.219 `MQ` head).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitBashOverride {
+    /// Basename is a bash/sh binary AND the file exists — use it verbatim.
+    Valid,
+    /// Basename is acceptable but the file does not exist.
+    NotFound,
+    /// Basename is not `bash.exe`/`sh.exe`/`bash`/`sh` (existence is NOT
+    /// probed — the oracle short-circuits `o && e(v)` before the filesystem).
+    NotBashBinary,
+}
+
+/// Classify an override path: `basename(v).toLowerCase()` must be in
+/// `["bash.exe","sh.exe","bash","sh"]`, and only then is existence probed.
+/// Pure (existence injected) so the matrix is unit-testable on every OS.
+pub fn classify_git_bash_override(path: &str, exists: &dyn Fn(&str) -> bool) -> GitBashOverride {
+    // Node `path.basename` on win32 splits on both separators.
+    let basename = path
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(path)
+        .to_ascii_lowercase();
+    if !matches!(basename.as_str(), "bash.exe" | "sh.exe" | "bash" | "sh") {
+        return GitBashOverride::NotBashBinary;
+    }
+    if exists(path) {
+        GitBashOverride::Valid
+    } else {
+        GitBashOverride::NotFound
+    }
+}
+
+/// The byte-exact `MQ` rejection warning:
+/// `` CLAUDE_CODE_GIT_BASH_PATH "{v}" {not found|is not a bash/sh binary}; falling back to auto-detection ``.
+/// `var` is the env spelling that supplied the value (`LINGXI_GIT_BASH_PATH`
+/// is accepted as the rebrand twin; the `CLAUDE_CODE_` spelling reproduces the
+/// oracle bytes).
+#[must_use]
+pub fn git_bash_override_warning(var: &str, value: &str, verdict: GitBashOverride) -> String {
+    let reason = match verdict {
+        // `${o?"not found":"is not a bash/sh binary"}` — o = basename valid,
+        // so reaching the warning with a valid basename means the probe failed.
+        GitBashOverride::NotFound => "not found",
+        _ => "is not a bash/sh binary",
+    };
+    format!("{var} \"{value}\" {reason}; falling back to auto-detection")
+}
+
+/// Resolve the Git Bash binary (cc 2.1.219 `MQ` body, dependency-injected):
+/// validated env override first (invalid → warn + auto-detect), then the two
+/// Program Files installs, then git-on-PATH `join(git, "..","..","bin",
+/// "bash.exe")`.
+pub fn resolve_git_bash_path_with(
+    env_override: Option<(&str, &str)>,
+    exists: &dyn Fn(&str) -> bool,
+    which_git: &dyn Fn() -> Option<std::path::PathBuf>,
+) -> Option<String> {
+    if let Some((var, value)) = env_override {
+        match classify_git_bash_override(value, exists) {
+            GitBashOverride::Valid => return Some(value.to_string()),
+            verdict => {
+                tracing::warn!("{}", git_bash_override_warning(var, value, verdict));
+            }
+        }
+    }
+    for candidate in [
+        r"C:\Program Files\Git\bin\bash.exe",
+        r"C:\Program Files (x86)\Git\bin\bash.exe",
+    ] {
+        if exists(candidate) {
+            return Some(candidate.to_string());
+        }
+    }
+    if let Some(git) = which_git() {
+        // `WMe.join(git, "..", "..", "bin", "bash.exe")` — git.exe lives in
+        // `Git\cmd\` (or `Git\bin\`), so two `..` from the FILE path land on
+        // the install root.
+        let candidate = git.join("..").join("..").join("bin").join("bash.exe");
+        let display = candidate.to_string_lossy().into_owned();
+        if exists(&display) {
+            return Some(display);
+        }
+    }
+    None
+}
+
+/// Locate `git` on `PATH` (the `O6n("git")` which-alike used by `MQ`).
+/// Windows executable extensions only — this auto-detection chain is
+/// windows-only in the oracle.
+fn which_git_on_path() -> Option<std::path::PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        for name in ["git.exe", "git.cmd", "git"] {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// Memoized process-wide Git Bash path (`MQ` is memoized; `P6n` runs once at
+/// startup). On success the path is exported as `SHELL` and logged
+/// (`Using bash path: "{p}"`); on failure the `P6n` unavailable line is
+/// logged. Consulted by [`resolve_shell_path`] on Windows.
+///
+/// Env override: `LINGXI_GIT_BASH_PATH` first, then the upstream
+/// `CLAUDE_CODE_GIT_BASH_PATH` spelling; empty values count as unset.
+#[must_use]
+pub fn git_bash_path() -> Option<&'static str> {
+    static RESOLVED: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    RESOLVED
+        .get_or_init(|| {
+            let override_owned = ["LINGXI_GIT_BASH_PATH", "CLAUDE_CODE_GIT_BASH_PATH"]
+                .iter()
+                .find_map(|var| {
+                    std::env::var(var)
+                        .ok()
+                        .filter(|v| !v.is_empty())
+                        .map(|v| (*var, v))
+                });
+            let resolved = resolve_git_bash_path_with(
+                override_owned.as_ref().map(|(var, v)| (*var, v.as_str())),
+                &|p| std::path::Path::new(p).exists(),
+                &which_git_on_path,
+            );
+            // `P6n` side effects belong to the real windows runtime only —
+            // resolution stays testable everywhere.
+            if cfg!(windows) {
+                match &resolved {
+                    Some(p) => {
+                        std::env::set_var("SHELL", p);
+                        tracing::info!("Using bash path: \"{p}\"");
+                    }
+                    None => tracing::warn!("Git Bash not found; BashTool will be unavailable"),
+                }
+            }
+            resolved
+        })
+        .as_deref()
 }
 
 // ===== BASH.3 — output-length env override ==================================
@@ -2163,6 +2317,116 @@ mod tests {
         } else {
             assert_eq!(result, "/bin/bash");
         }
+    }
+
+    // ---- Git Bash resolution (cc 2.1.219 `MQ`/`P6n`) -----------------------
+
+    #[test]
+    fn git_bash_classifier_matrix() {
+        let all_exist = |_: &str| true;
+        let none_exist = |_: &str| false;
+        // Valid basenames, case-insensitive, both separators.
+        for p in [
+            r"C:\tools\bash.exe",
+            r"C:\tools\BASH.EXE",
+            "C:/git/bin/sh.exe",
+            r"D:\x\bash",
+            "/usr/bin/sh",
+        ] {
+            assert_eq!(
+                classify_git_bash_override(p, &all_exist),
+                GitBashOverride::Valid,
+                "{p}"
+            );
+            assert_eq!(
+                classify_git_bash_override(p, &none_exist),
+                GitBashOverride::NotFound,
+                "{p}"
+            );
+        }
+        // Invalid basenames never probe existence (`o && e(v)` short-circuit).
+        let must_not_probe = |p: &str| -> bool { panic!("existence probed for {p}") };
+        for p in [r"C:\tools\pwsh.exe", r"C:\Git\bin\bash.exe.bak", "cmd.exe"] {
+            assert_eq!(
+                classify_git_bash_override(p, &must_not_probe),
+                GitBashOverride::NotBashBinary,
+                "{p}"
+            );
+        }
+    }
+
+    #[test]
+    fn git_bash_warning_is_byte_exact() {
+        // `CLAUDE_CODE_GIT_BASH_PATH "${v}" ${o?"not found":"is not a bash/sh
+        // binary"}; falling back to auto-detection`
+        assert_eq!(
+            git_bash_override_warning(
+                "CLAUDE_CODE_GIT_BASH_PATH",
+                r"C:\x\bash.exe",
+                GitBashOverride::NotFound
+            ),
+            "CLAUDE_CODE_GIT_BASH_PATH \"C:\\x\\bash.exe\" not found; falling back to auto-detection"
+        );
+        assert_eq!(
+            git_bash_override_warning(
+                "CLAUDE_CODE_GIT_BASH_PATH",
+                r"C:\x\pwsh.exe",
+                GitBashOverride::NotBashBinary
+            ),
+            "CLAUDE_CODE_GIT_BASH_PATH \"C:\\x\\pwsh.exe\" is not a bash/sh binary; falling back to auto-detection"
+        );
+    }
+
+    #[test]
+    fn git_bash_resolution_order() {
+        // 1) Valid override wins verbatim.
+        let exists_override = |p: &str| p == r"D:\portable\bash.exe";
+        assert_eq!(
+            resolve_git_bash_path_with(
+                Some(("CLAUDE_CODE_GIT_BASH_PATH", r"D:\portable\bash.exe")),
+                &exists_override,
+                &|| None,
+            )
+            .as_deref(),
+            Some(r"D:\portable\bash.exe")
+        );
+        // 2) Invalid override falls back to the Program Files probes.
+        let exists_pf = |p: &str| p == r"C:\Program Files\Git\bin\bash.exe";
+        assert_eq!(
+            resolve_git_bash_path_with(
+                Some(("CLAUDE_CODE_GIT_BASH_PATH", r"D:\missing\bash.exe")),
+                &exists_pf,
+                &|| None,
+            )
+            .as_deref(),
+            Some(r"C:\Program Files\Git\bin\bash.exe")
+        );
+        // 3) (x86) probe is second.
+        let exists_x86 = |p: &str| p == r"C:\Program Files (x86)\Git\bin\bash.exe";
+        assert_eq!(
+            resolve_git_bash_path_with(None, &exists_x86, &|| None).as_deref(),
+            Some(r"C:\Program Files (x86)\Git\bin\bash.exe")
+        );
+        // 4) git-on-PATH: join(git, "..", "..", "bin", "bash.exe").
+        let git = std::path::PathBuf::from(r"C:\Custom\Git\cmd\git.exe");
+        let expected = git
+            .join("..")
+            .join("..")
+            .join("bin")
+            .join("bash.exe")
+            .to_string_lossy()
+            .into_owned();
+        let expected_cl = expected.clone();
+        let exists_git = move |p: &str| p == expected_cl;
+        assert_eq!(
+            resolve_git_bash_path_with(None, &exists_git, &|| Some(git.clone())).as_deref(),
+            Some(expected.as_str())
+        );
+        // 5) Nothing anywhere -> None.
+        assert_eq!(
+            resolve_git_bash_path_with(None, &|_| false, &|| None),
+            None
+        );
     }
 
     #[test]

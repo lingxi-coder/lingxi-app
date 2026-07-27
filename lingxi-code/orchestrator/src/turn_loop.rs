@@ -520,6 +520,16 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     if let Some(reminder) = orch.deferred_tools_reminder_message() {
         history_snapshot.insert(0, reminder);
     }
+    // `date_change` (batched twin): sessions crossing local midnight tell the
+    // model the new date once per changed date. Prepended AFTER the deferred
+    // insert so the final order is [date_change, deferred_tools_delta, …] —
+    // matching the oracle attachment batch order (`Ky("date_change")` before
+    // `Ky("deferred_tools_delta")`). `None` (same-date turns) keeps the locked
+    // turn-loop fixtures byte-identical. See
+    // [`ConversationOrchestrator::date_change_reminder_message`].
+    if let Some(reminder) = orch.date_change_reminder_message() {
+        history_snapshot.insert(0, reminder);
+    }
     // REC.A1: consume the one-shot escalated `max_tokens` override (armed by a
     // prior `max_tokens` recovery via `handle_max_output_tokens`). TAKE it so it
     // applies to EXACTLY this call and never leaks to the next turn.

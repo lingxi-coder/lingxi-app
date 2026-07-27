@@ -1323,6 +1323,17 @@ pub struct ConversationOrchestrator {
     /// [`Self::skill_listing_reminder_message`] returns `None` (no reminder that
     /// turn). Process-/session-local, exactly like the TS module-scope map.
     pub(crate) sent_skill_names: Mutex<std::collections::HashSet<String>>,
+    /// `date_change` (cc `Cop`): the local date memoized at session start
+    /// (`LGe = Vr(wcs)` — the same date the env-context `currentDate` entry was
+    /// first built from). A turn whose local date differs emits the
+    /// `date_change` reminder; equal dates emit nothing. Filled lazily on the
+    /// first producer run.
+    pub(crate) date_change_session_date: std::sync::OnceLock<String>,
+    /// `date_change` dedupe: the `newDate` of the last emitted reminder. The
+    /// oracle walks history for the last `date_change` attachment with the same
+    /// `newDate`; the port's reminders are outgoing-only (never persisted), so
+    /// the in-memory twin carries the same fact for the session's lifetime.
+    pub(crate) date_change_last_emitted: std::sync::Mutex<Option<String>>,
     /// `agent_listing_delta` delta: agent TYPES already announced in a prior
     /// turn's `agent_listing` reminder. Turn-0 (empty set) emits the FULL
     /// listing with the "Available agent types for the Agent tool:" header;
@@ -1615,6 +1626,8 @@ impl ConversationOrchestrator {
             conditional_rules_cache: Arc::new(std::sync::Mutex::new(None)),
             sent_conditional_rules: Mutex::new(std::collections::HashSet::new()),
             sent_skill_names: Mutex::new(std::collections::HashSet::new()),
+            date_change_session_date: std::sync::OnceLock::new(),
+            date_change_last_emitted: std::sync::Mutex::new(None),
             sent_agent_names: Mutex::new(std::collections::HashSet::new()),
             memory_prefetch: None,
             end_conversation_slot: None,
@@ -3876,6 +3889,9 @@ impl ConversationOrchestrator {
                 .values()
                 .map(|mu| traits::orchestrator::ModelUsageRow {
                     model: mu.model_ref.model.clone(),
+                    // (cc 2.1.218) `n.provider=n_(r)` — the serving provider,
+                    // pre-stringified so the transport row stays cost-free.
+                    provider: Some(mu.model_ref.provider.usage_wire_name()),
                     total_nano_usd: mu.cost_nano_usd,
                     input_tokens: mu.usage.tokens.input,
                     output_tokens: mu.usage.tokens.output,
@@ -7155,6 +7171,21 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 snapshot.insert(0, reminder);
             }
 
+            // `date_change` (streaming twin): sessions crossing local midnight
+            // tell the model the new date once. Prepended AFTER the deferred
+            // insert so the final order is [date_change, deferred_tools_delta,
+            // …] — matching the oracle attachment batch order (`Ky("date_change")`
+            // before `Ky("deferred_tools_delta")`). Computed ONCE per model
+            // step (the producer ADVANCES the emitted-date dedupe) and reused
+            // by the retry/fallback re-snapshots below, exactly like
+            // `deferred_reminder`. `None` (the overwhelmingly common same-date
+            // case) keeps the locked streaming fixtures byte-identical. See
+            // [`Self::date_change_reminder_message`].
+            let date_change_reminder = self.date_change_reminder_message();
+            if let Some(reminder) = date_change_reminder.clone() {
+                snapshot.insert(0, reminder);
+            }
+
             // RECOV.1: blocking-limit preempt — the streaming twin of the batched
             // `call_api_with_ptl_recovery` step (1) (TS `query.ts:592-648`). If the
             // pre-call prompt is already at the hard blocking limit
@@ -7313,6 +7344,10 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     // Reuse THIS step's delta (already computed above); do not
                     // re-invoke, which would advance the announced-set tracking.
                     if let Some(reminder) = deferred_reminder.clone() {
+                        recov_snapshot.insert(0, reminder);
+                    }
+                    // Same for the step's `date_change` (dedupe already advanced).
+                    if let Some(reminder) = date_change_reminder.clone() {
                         recov_snapshot.insert(0, reminder);
                     }
                     match call_api_with_ptl_recovery(
@@ -7547,6 +7582,11 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                                 if let Some(reminder) = deferred_reminder.clone() {
                                     re_snapshot.insert(0, reminder);
                                 }
+                                // Same for the step's `date_change` (dedupe
+                                // already advanced).
+                                if let Some(reminder) = date_change_reminder.clone() {
+                                    re_snapshot.insert(0, reminder);
+                                }
                                 match self
                                     .streaming_api
                                     .stream(
@@ -7690,6 +7730,11 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                             // Reuse THIS step's delta (computed above); do not
                             // re-invoke and re-advance the announced set.
                             if let Some(reminder) = deferred_reminder.clone() {
+                                non_stream_snapshot.insert(0, reminder);
+                            }
+                            // Same for the step's `date_change` (dedupe already
+                            // advanced).
+                            if let Some(reminder) = date_change_reminder.clone() {
                                 non_stream_snapshot.insert(0, reminder);
                             }
                             let tools_for_fallback = wire_tools.clone();
@@ -9874,6 +9919,43 @@ As you answer the user's questions, you can use the following context:\n\
                 Some(ConversationMessage::user(MessageId::new(), content))
             }
         }
+    }
+
+    /// `date_change` (cc `Cop` + renderer `date_change:` in the attachment
+    /// table): a session that crosses local midnight tells the model the new
+    /// date once per changed date. Producer logic 1:1 —
+    /// `wcs()` = local `YYYY-MM-DD` ([`crate::prompt::env_meta::current_date_string`]),
+    /// `LGe()` = the memoized session-start date; equal ⇒ no attachment, and a
+    /// prior emission with the same `newDate` dedupes (the oracle walks history
+    /// for the last `date_change` attachment; the port's outgoing-only
+    /// reminders keep the same fact in [`Self::date_change_last_emitted`]).
+    /// Rendered through `pm([zr({content, isMeta:!0})])` = `<system-reminder>`
+    /// wrap + meta user message, appended to THIS turn's OUTGOING snapshot only
+    /// (never `session.history` / JSONL).
+    pub(crate) fn date_change_reminder_message(&self) -> Option<ConversationMessage> {
+        let today = crate::prompt::env_meta::current_date_string();
+        // `LGe = Vr(wcs)` — first producer run seeds the memo, so the turn
+        // that creates the session can never fire (today == start).
+        let start = self.date_change_session_date.get_or_init(|| today.clone());
+        if *start == today {
+            return None;
+        }
+        let mut last = self
+            .date_change_last_emitted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if last.as_deref() == Some(today.as_str()) {
+            return None;
+        }
+        *last = Some(today.clone());
+        drop(last);
+        // Byte-exact reminder body (renderer @238108493), wrapped by `Ww`:
+        // `<system-reminder>\n{e}\n</system-reminder>`.
+        let content = format!(
+            "<system-reminder>\nThe date has changed. Today's date is now {today}. \
+DO NOT mention this to the user explicitly because they are already aware.\n</system-reminder>"
+        );
+        Some(ConversationMessage::user_meta(MessageId::new(), content))
     }
 
     /// Finding #73: increment BOTH reminder counters by one assistant turn.
@@ -12875,6 +12957,46 @@ You should not respond to this context unless it is highly relevant to your task
         let orch = orch_with(Arc::new(StaticMemoryProvider::empty()), Some("   "));
         let body = text(&orch.additional_context_message().await.expect("date"));
         assert!(!body.contains("# userEmail"));
+    }
+
+    // ------------------------------------------------------------------------
+    // `date_change` (cc `Cop`): mid-session midnight crossing.
+    // ------------------------------------------------------------------------
+
+    #[test]
+    fn date_change_none_when_date_unchanged() {
+        // First producer run seeds the session-start memo (`LGe = Vr(wcs)`), so
+        // a same-day session NEVER emits — the locked fixtures stay identical.
+        let orch = orch_with(Arc::new(StaticMemoryProvider::empty()), None);
+        assert!(orch.date_change_reminder_message().is_none());
+        assert!(orch.date_change_reminder_message().is_none());
+    }
+
+    #[test]
+    fn date_change_emits_once_after_midnight() {
+        let orch = orch_with(Arc::new(StaticMemoryProvider::empty()), None);
+        // Simulate a session started "yesterday" by seeding the memo with a
+        // date that can never equal the live local date.
+        orch.date_change_session_date
+            .set("2000-01-01".to_string())
+            .expect("fresh memo");
+        let msg = orch
+            .date_change_reminder_message()
+            .expect("date differs from session start");
+        let today = crate::prompt::env_meta::current_date_string();
+        // Byte-exact reminder (renderer @238108493) inside the `Ww` wrap.
+        let expected = format!(
+            "<system-reminder>\nThe date has changed. Today's date is now {today}. \
+DO NOT mention this to the user explicitly because they are already aware.\n</system-reminder>"
+        );
+        assert_eq!(text(&msg), expected);
+        // Meta user message (`zr({…, isMeta:!0})`).
+        assert!(matches!(
+            msg,
+            ConversationMessage::User { is_meta: true, .. }
+        ));
+        // Dedupe: the following turn (same date) emits nothing.
+        assert!(orch.date_change_reminder_message().is_none());
     }
 }
 

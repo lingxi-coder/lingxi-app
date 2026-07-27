@@ -51,6 +51,27 @@ pub enum ProviderId {
     },
 }
 
+impl ProviderId {
+    /// The `modelUsage[..].provider` wire value (cc 2.1.218 `n_(model)`).
+    ///
+    /// claude's schema documents `'firstParty' | 'bedrock' | 'vertex' |
+    /// 'foundry' | 'anthropicAws' | 'anthropicGoogleCloud' | 'mantle' |
+    /// 'gateway'` but the zod type is an OPEN string — LingXi's multi-provider
+    /// ids pass through verbatim (accepted divergence). Anthropic first-party
+    /// maps to `"firstParty"` and Bedrock to `"bedrock"` for byte parity on the
+    /// shared providers.
+    #[must_use]
+    pub fn usage_wire_name(&self) -> String {
+        match self {
+            Self::Anthropic => "firstParty".to_string(),
+            Self::AmazonBedrock => "bedrock".to_string(),
+            Self::OpenAI => "openai".to_string(),
+            Self::GoogleGemini => "gemini".to_string(),
+            Self::OpenAICompatible { name } | Self::Custom { name } => name.clone(),
+        }
+    }
+}
+
 /// Classification of a billable token category.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TokenClass {

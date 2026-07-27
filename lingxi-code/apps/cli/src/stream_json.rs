@@ -925,20 +925,29 @@ impl StreamJsonStream {
                 let canonical = cost::pricing::first_party_name_to_canonical(&row.model);
                 #[allow(clippy::cast_precision_loss)]
                 let cost_usd = row.total_nano_usd as f64 / 1_000_000_000.0;
-                model_usage.insert(
-                    row.model.clone(),
-                    json!({
-                        "inputTokens": row.input_tokens,
-                        "outputTokens": row.output_tokens,
-                        "cacheReadInputTokens": row.cache_read_input_tokens,
-                        "cacheCreationInputTokens": row.cache_creation_input_tokens,
-                        "webSearchRequests": 0_u64,
-                        "costUSD": cost_usd,
-                        "contextWindow": ctx_window,
-                        "maxOutputTokens": max_output,
-                        "canonicalModel": canonical
-                    }),
-                );
+                // (cc 2.1.218) `n.provider=n_(r)` — the sibling of
+                // canonicalModel: the API provider that served this model
+                // ("firstParty" for the Anthropic first-party API; LingXi
+                // provider ids pass through the open string). Omitted when the
+                // recording site could not attribute one (`.optional()`).
+                let mut entry = json!({
+                    "inputTokens": row.input_tokens,
+                    "outputTokens": row.output_tokens,
+                    "cacheReadInputTokens": row.cache_read_input_tokens,
+                    "cacheCreationInputTokens": row.cache_creation_input_tokens,
+                    "webSearchRequests": 0_u64,
+                    "costUSD": cost_usd,
+                    "contextWindow": ctx_window,
+                    "maxOutputTokens": max_output,
+                    "canonicalModel": canonical
+                });
+                if let Some(provider) = &row.provider {
+                    entry
+                        .as_object_mut()
+                        .expect("json! object")
+                        .insert("provider".into(), json!(provider));
+                }
+                model_usage.insert(row.model.clone(), entry);
             }
         } else if cost.input_tokens > 0 || cost.output_tokens > 0 || cost.total_usd > 0.0 {
             model_usage.insert(
@@ -1631,6 +1640,7 @@ mod canonical_model_tests {
         let mut per_model = traits::orchestrator::CostSnapshot::default();
         per_model.by_model = vec![traits::orchestrator::ModelUsageRow {
             model: "us.anthropic.claude-opus-4-7-v1:0".into(),
+            provider: Some("bedrock".into()),
             total_nano_usd: 1_000_000_000,
             input_tokens: 10,
             output_tokens: 20,
@@ -1642,9 +1652,16 @@ mod canonical_model_tests {
             .get("us.anthropic.claude-opus-4-7-v1:0")
             .expect("per-model row");
         assert_eq!(row["canonicalModel"], "claude-opus-4-7");
+        // (cc 2.1.218) `n.provider=n_(r)` — sibling of canonicalModel, keyed
+        // AFTER it (preserve_order map mirrors the oracle's assignment order).
+        assert_eq!(row["provider"], "bedrock");
+        let keys: Vec<&str> = row.as_object().unwrap().keys().map(String::as_str).collect();
+        let canon_idx = keys.iter().position(|k| *k == "canonicalModel").unwrap();
+        assert_eq!(keys.get(canon_idx + 1), Some(&"provider"));
         assert!(row.get("contextWindow").is_some(), "existing keys retained");
 
-        // Legacy aggregate fallback (no per-model rows).
+        // Legacy aggregate fallback (no per-model rows): provider is unknown
+        // there and must be OMITTED (`.optional()`), never null.
         let mut agg = traits::orchestrator::CostSnapshot::default();
         agg.input_tokens = 5;
         let block2 =
@@ -1653,6 +1670,7 @@ mod canonical_model_tests {
             .get("claude-opus-4-7-20251101")
             .expect("aggregate row");
         assert_eq!(row2["canonicalModel"], "claude-opus-4-7");
+        assert!(row2.get("provider").is_none(), "unknown provider is omitted");
     }
 }
 
@@ -2706,6 +2724,7 @@ mod tests {
             total_usd: 0.000_002,
             by_model: vec![traits::orchestrator::ModelUsageRow {
                 model: "claude-haiku-4-5".to_string(),
+                provider: Some("firstParty".to_string()),
                 total_nano_usd: 2_000,
                 input_tokens: 17,
                 output_tokens: 5,

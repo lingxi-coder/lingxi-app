@@ -222,6 +222,7 @@ mod tests {
         );
         let rows = vec![ModelUsageRow {
             model: "claude-opus-4-8".into(),
+            provider: None,
             total_nano_usd: 1_230_000_000, // $1.23
             input_tokens: 5_000,
             output_tokens: 2_000,
@@ -259,6 +260,7 @@ mod tests {
         let rows = vec![
             ModelUsageRow {
                 model: "claude-opus-4-8".into(),
+                provider: None,
                 total_nano_usd: 600_000_000, // $0.60
                 input_tokens: 1_000,
                 output_tokens: 500,
@@ -267,6 +269,7 @@ mod tests {
             },
             ModelUsageRow {
                 model: "claude-sonnet-4-20250514".into(),
+                provider: None,
                 total_nano_usd: 400_000_000, // $0.40
                 input_tokens: 2_000,
                 output_tokens: 100,
@@ -341,6 +344,7 @@ mod tests {
     fn cost_summary_from_snapshot_maps_fields() {
         let rows = vec![ModelUsageRow {
             model: "claude-opus-4-8".into(),
+            provider: None,
             total_nano_usd: 123_400_000,
             input_tokens: 5_000,
             output_tokens: 2_000,

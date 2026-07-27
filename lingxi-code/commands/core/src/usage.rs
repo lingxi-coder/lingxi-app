@@ -67,6 +67,7 @@ mod tests {
         use traits::orchestrator::ModelUsageRow;
         let rows = vec![ModelUsageRow {
             model: "claude-opus-4-8".into(),
+            provider: None,
             total_nano_usd: 123_400_000,
             input_tokens: 5_000,
             output_tokens: 2_000,

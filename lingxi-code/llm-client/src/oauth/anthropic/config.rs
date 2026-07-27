@@ -21,8 +21,21 @@ pub struct ClaudeAiOAuthConfig {
     pub client_id: String,
     /// Loopback redirect URI registered for the local CLI flow.
     pub redirect_uri: String,
+    /// Hosted "code page" redirect URI for the MANUAL copy-paste flow
+    /// (claude-code `MANUAL_REDIRECT_URL`): the landing page displays
+    /// `code#state` for the user to paste back into the CLI when the loopback
+    /// redirect can't fire (no browser / remote shell). `serde(default)` keeps
+    /// previously-serialized configs loading.
+    #[serde(default = "default_manual_redirect_uri")]
+    pub manual_redirect_uri: String,
     /// Scopes requested in the authorize URL.
     pub scopes: Vec<String>,
+}
+
+/// claude-code `MANUAL_REDIRECT_URL` (`constants/oauth.ts`) — shared by the
+/// claude.ai and Console variants of the OAuth application.
+fn default_manual_redirect_uri() -> String {
+    "https://platform.claude.com/oauth/code/callback".into()
 }
 
 /// Claude Code 2.1.217's normal interactive OAuth scopes, in wire order.
@@ -56,6 +69,7 @@ impl ClaudeAiOAuthConfig {
             profile_endpoint: "https://api.anthropic.com/api/oauth/profile".into(),
             client_id: "9d1c250a-e61b-44d9-88ed-5944d1962f5e".into(),
             redirect_uri: format!("http://localhost:{port}/callback"),
+            manual_redirect_uri: default_manual_redirect_uri(),
             scopes: CLAUDE_CODE_OAUTH_SCOPES
                 .iter()
                 .map(|s| (*s).into())

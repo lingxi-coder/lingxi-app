@@ -122,6 +122,20 @@ pub struct AuthorizeOptions {
     pub login_method: Option<String>,
 }
 
+/// The two authorize-URL variants of one grant, plus the PKCE verifier + state
+/// they share. See [`ClaudeAiOAuthClient::build_authorize_url_pair_with_options`].
+#[derive(Debug, Clone)]
+pub struct AuthorizeUrlPair {
+    /// Redirects to the loopback listener (`http://localhost:{port}/callback`).
+    pub automatic_url: String,
+    /// Redirects to the hosted code page that displays `code#state` for paste.
+    pub manual_url: String,
+    /// PKCE verifier for the eventual token exchange.
+    pub verifier: String,
+    /// CSRF state token embedded in both URLs.
+    pub state: String,
+}
+
 /// Tokens (plus optionally-resolved identity) returned by [`ClaudeAiOAuthClient::exchange_code`].
 #[derive(Debug)]
 pub struct ExchangedTokens {
@@ -249,6 +263,46 @@ impl ClaudeAiOAuthClient {
     ) -> (String, String, String) {
         let (verifier, challenge) = generate_pkce();
         let state = generate_state_token();
+        let url = self.format_authorize_url(redirect_uri, &challenge, &state, options);
+        (url, verifier, state)
+    }
+
+    /// Build BOTH authorize-URL variants for one PKCE/state grant, mirroring
+    /// the oracle's `lno({...o, isManual})` pair: the AUTOMATIC variant
+    /// redirects to the loopback listener (`redirect_uri`), the MANUAL variant
+    /// to the hosted code page ([`ClaudeAiOAuthConfig::manual_redirect_uri`])
+    /// that displays `code#state` for copy-paste. Sharing one verifier + state
+    /// lets either landing complete the same flow.
+    #[must_use]
+    pub fn build_authorize_url_pair_with_options(
+        &self,
+        redirect_uri: &str,
+        options: &AuthorizeOptions,
+    ) -> AuthorizeUrlPair {
+        let (verifier, challenge) = generate_pkce();
+        let state = generate_state_token();
+        AuthorizeUrlPair {
+            automatic_url: self.format_authorize_url(redirect_uri, &challenge, &state, options),
+            manual_url: self.format_authorize_url(
+                &self.config.manual_redirect_uri,
+                &challenge,
+                &state,
+                options,
+            ),
+            verifier,
+            state,
+        }
+    }
+
+    /// Serialize one authorize URL for an already-generated PKCE challenge +
+    /// state (shared by the single-URL and pair builders above).
+    fn format_authorize_url(
+        &self,
+        redirect_uri: &str,
+        challenge: &str,
+        state: &str,
+        options: &AuthorizeOptions,
+    ) -> String {
         let scopes = options
             .scopes
             .as_ref()
@@ -260,8 +314,8 @@ impl ClaudeAiOAuthClient {
             form_encode(&self.config.client_id),
             form_encode(redirect_uri),
             form_encode(&scopes),
-            form_encode(&challenge),
-            form_encode(&state),
+            form_encode(challenge),
+            form_encode(state),
         );
         if let Some(org_uuid) = options.org_uuid.as_deref() {
             url.push_str("&orgUUID=");
@@ -275,7 +329,7 @@ impl ClaudeAiOAuthClient {
             url.push_str("&login_method=");
             url.push_str(&urlencoding::encode(login_method));
         }
-        (url, verifier, state)
+        url
     }
 
     /// Exchange an authorization `code` for an access + refresh token pair.

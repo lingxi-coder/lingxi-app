@@ -833,11 +833,13 @@ impl ApiService {
     }
 
     /// Effective subscriber state: the live shared snapshot when provided and
-    /// resolved (closes the retry-gate half of the `OrchestratorConfig`
-    /// PARITY-GAP — `is_enterprise` was build-time `false` because the profile
-    /// fetch lands after construction), else the static build-time state.
-    /// Poisoned/empty slot → static fallback (conservative, pre-batch-5
-    /// behavior).
+    /// resolved, else the static build-time state. Since M13 the build-time
+    /// state (and the seed in the shared slot) already carries the enterprise
+    /// tier PERSISTED in the stored credential (claude-code keeps
+    /// `subscriptionType` inside `claudeAiOauth`), so the static fallback is
+    /// correct from request #1; the slot exists to FRESHEN it once the
+    /// background profile fetch lands. Poisoned/empty slot → static fallback
+    /// (conservative, pre-batch-5 behavior).
     ///
     /// Granularity: each drive fn hoists this ONCE before its retry loop, so
     /// `RetryState`'s 429/enterprise gate is stable across a request's retry

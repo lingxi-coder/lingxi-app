@@ -67,16 +67,33 @@ pub struct OAuthTokens {
     pub email: String,
     /// Anthropic organization id.
     pub org_id: String,
+    /// Claude.ai subscription tier (`"pro"`/`"max"`/`"team"`/`"enterprise"`),
+    /// persisted at login from the profile fetch — claude-code stores
+    /// `subscriptionType` INSIDE `claudeAiOauth` so enterprise/tier gates are
+    /// correct on the FIRST request of a fresh process, before any background
+    /// profile refresh lands. `None` on pre-existing blobs / profile-less
+    /// tokens.
+    pub subscription_type: Option<String>,
+    /// Organization `rate_limit_tier` from the same profile fetch
+    /// (claude-code `rateLimitTier`).
+    pub rate_limit_tier: Option<String>,
 }
 
 /// Non-secret session metadata persisted alongside the OAuth tokens. Serialized
 /// to JSON and stored in the `anthropic-oauth-meta` entry.
+///
+/// `subscription_type` / `rate_limit_tier` are `serde(default)` so blobs
+/// written before they existed still deserialize.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct OAuthSessionMeta {
     expires_at: SystemTime,
     scopes: Vec<String>,
     email: String,
     org_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    subscription_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rate_limit_tier: Option<String>,
 }
 
 /// A full `OpenAI` / `ChatGPT` OAuth credential set as returned by
@@ -424,7 +441,12 @@ impl CredentialManager {
     /// - `anthropic-oauth-meta`    — JSON session metadata (email / org / expiry / scopes)
     ///
     /// Each `store` overwrites any existing entry, so this is also the rotation
-    /// path used by the reactive / proactive refresh driver.
+    /// path used by the reactive / proactive refresh driver. The subscription
+    /// fields (`subscription_type` / `rate_limit_tier`) are CARRIED OVER from
+    /// the previous session blob — claude-code's `ltu()` merge
+    /// (`subscriptionType: t.subscriptionType ?? e?.subscriptionType ?? null`)
+    /// preserves them on every save; a login that resolved fresh values writes
+    /// them via [`Self::update_oauth_subscription`] afterwards.
     #[allow(clippy::too_many_arguments)]
     pub async fn store_oauth_tokens(
         &self,
@@ -436,6 +458,12 @@ impl CredentialManager {
         org_id: &str,
     ) -> Result<(), CredentialError> {
         let now = self.clock.now();
+
+        // Read the prior session blob (best-effort) BEFORE the meta entry is
+        // overwritten below, to preserve its subscription fields.
+        let prior_subscription = self.read_oauth_session_meta().await.map(|m| {
+            (m.subscription_type, m.rate_limit_tier)
+        });
 
         let access_meta = SecureStorageMetadata {
             created_at: now,
@@ -473,15 +501,60 @@ impl CredentialManager {
             }
         }
 
+        let (subscription_type, rate_limit_tier) = prior_subscription.unwrap_or((None, None));
         let meta = OAuthSessionMeta {
             expires_at,
             scopes,
             email: email.to_string(),
             org_id: org_id.to_string(),
+            subscription_type,
+            rate_limit_tier,
         };
+        self.write_oauth_session_meta(&meta, now).await
+    }
+
+    /// Merge freshly-resolved subscription fields into the persisted session
+    /// blob — claude-code `ltu()`:
+    /// `subscriptionType: t.subscriptionType ?? e?.subscriptionType ?? null`
+    /// (an incoming `None` PRESERVES the stored value; it never clears one).
+    /// No-op when no session blob exists (not logged in).
+    pub async fn update_oauth_subscription(
+        &self,
+        subscription_type: Option<&str>,
+        rate_limit_tier: Option<&str>,
+    ) -> Result<(), CredentialError> {
+        let Some(mut meta) = self.read_oauth_session_meta().await else {
+            return Ok(());
+        };
+        meta.subscription_type = subscription_type
+            .map(str::to_string)
+            .or(meta.subscription_type);
+        meta.rate_limit_tier = rate_limit_tier
+            .map(str::to_string)
+            .or(meta.rate_limit_tier);
+        self.write_oauth_session_meta(&meta, self.clock.now()).await
+    }
+
+    /// Best-effort read of the persisted session blob (`None` on absence or an
+    /// undecodable entry).
+    async fn read_oauth_session_meta(&self) -> Option<OAuthSessionMeta> {
+        let raw = self
+            .storage
+            .retrieve(OAUTH_SERVICE, OAUTH_META_ACCOUNT)
+            .await
+            .ok()??;
+        serde_json::from_slice(raw.expose_secret_bytes()).ok()
+    }
+
+    /// Serialize + store the session blob under `anthropic-oauth-meta`.
+    async fn write_oauth_session_meta(
+        &self,
+        meta: &OAuthSessionMeta,
+        now: SystemTime,
+    ) -> Result<(), CredentialError> {
         // Serialization of this fixed-shape struct cannot fail; fall back to an
         // empty object rather than panicking.
-        let meta_json = serde_json::to_vec(&meta).unwrap_or_else(|_| b"{}".to_vec());
+        let meta_json = serde_json::to_vec(meta).unwrap_or_else(|_| b"{}".to_vec());
         let meta_meta = SecureStorageMetadata {
             created_at: now,
             last_accessed: None,
@@ -541,6 +614,8 @@ impl CredentialManager {
             scopes: meta.scopes,
             email: meta.email,
             org_id: meta.org_id,
+            subscription_type: meta.subscription_type,
+            rate_limit_tier: meta.rate_limit_tier,
         }))
     }
 
@@ -842,6 +917,92 @@ mod oauth_tests {
     async fn get_returns_none_when_absent() {
         let (_storage, cm) = manager();
         assert!(cm.get_oauth_tokens().await.expect("get").is_none());
+    }
+
+    /// M13: subscription fields round-trip, survive token rotation (claude-code
+    /// `ltu()` carries `subscriptionType`/`rateLimitTier` on every save), and
+    /// `update_oauth_subscription`'s `new ?? old` merge never clears a stored
+    /// value with `None`.
+    #[tokio::test]
+    async fn subscription_fields_persist_and_merge() {
+        let (_storage, cm) = manager();
+        let expires = SystemTime::UNIX_EPOCH + Duration::from_secs(5_000);
+        cm.store_oauth_tokens("a1", Some("r1"), expires, vec![], "e@x", "o")
+            .await
+            .expect("store");
+        // Fresh blob: no tier known.
+        let got = cm.get_oauth_tokens().await.expect("get").expect("present");
+        assert!(got.subscription_type.is_none());
+        assert!(got.rate_limit_tier.is_none());
+
+        // Login-time profile resolution writes the tier.
+        cm.update_oauth_subscription(Some("max"), Some("default_claude_max_20x"))
+            .await
+            .expect("update");
+        let got = cm.get_oauth_tokens().await.expect("get").expect("present");
+        assert_eq!(got.subscription_type.as_deref(), Some("max"));
+        assert_eq!(got.rate_limit_tier.as_deref(), Some("default_claude_max_20x"));
+
+        // Refresh-driver rotation (store with no tier inputs) PRESERVES it.
+        cm.store_oauth_tokens("a2", None, expires, vec![], "e@x", "o")
+            .await
+            .expect("rotate");
+        let got = cm.get_oauth_tokens().await.expect("get").expect("present");
+        assert_eq!(got.access_token.expose_secret(), "a2");
+        assert_eq!(got.subscription_type.as_deref(), Some("max"));
+        assert_eq!(got.rate_limit_tier.as_deref(), Some("default_claude_max_20x"));
+
+        // Partial update: `None` keeps the old value, `Some` replaces.
+        cm.update_oauth_subscription(Some("enterprise"), None)
+            .await
+            .expect("partial update");
+        let got = cm.get_oauth_tokens().await.expect("get").expect("present");
+        assert_eq!(got.subscription_type.as_deref(), Some("enterprise"));
+        assert_eq!(got.rate_limit_tier.as_deref(), Some("default_claude_max_20x"));
+
+        // Logout clears the blob → a later update is a no-op (not an error).
+        cm.delete_oauth_tokens().await.expect("delete");
+        cm.update_oauth_subscription(Some("pro"), None)
+            .await
+            .expect("no-op update after logout");
+        assert!(cm.get_oauth_tokens().await.expect("get").is_none());
+    }
+
+    /// M13 back-compat: a pre-existing meta blob WITHOUT the subscription keys
+    /// still deserializes (serde defaults).
+    #[tokio::test]
+    async fn legacy_meta_blob_without_subscription_keys_still_loads() {
+        let (storage, cm) = manager();
+        let expires = SystemTime::UNIX_EPOCH + Duration::from_secs(5_000);
+        cm.store_oauth_tokens("a", None, expires, vec![], "e@x", "o")
+            .await
+            .expect("store");
+        // Rewrite the meta entry with the LEGACY shape (no subscription keys).
+        let legacy = serde_json::json!({
+            "expires_at": {"secs_since_epoch": 5_000, "nanos_since_epoch": 0},
+            "scopes": ["user:inference"],
+            "email": "legacy@x",
+            "org_id": "org-legacy",
+        });
+        storage
+            .store(
+                "lingxi",
+                "anthropic-oauth-meta",
+                SecureStorageData::new(
+                    serde_json::to_vec(&legacy).unwrap(),
+                    SecureStorageMetadata {
+                        created_at: SystemTime::UNIX_EPOCH,
+                        last_accessed: None,
+                        kind: SecretKind::AnthropicOAuthSessionMeta.as_dto(),
+                    },
+                ),
+            )
+            .await
+            .expect("seed legacy meta");
+        let got = cm.get_oauth_tokens().await.expect("get").expect("present");
+        assert_eq!(got.email, "legacy@x");
+        assert!(got.subscription_type.is_none());
+        assert!(got.rate_limit_tier.is_none());
     }
 
     #[tokio::test]

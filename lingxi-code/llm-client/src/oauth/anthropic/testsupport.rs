@@ -17,6 +17,11 @@ use traits::{
     SecureStorage, SecureStorageBackend, SecureStorageError,
 };
 
+/// Serializes tests that WRITE the process-global subscription cache
+/// (`traits::subscription::set_current_subscription`) so one test's write
+/// can't interleave with another's assertion. Poison-tolerant.
+pub static SUBSCRIPTION_CACHE_LOCK: Mutex<()> = Mutex::new(());
+
 /// One canned response keyed loosely by a URL substring + method.
 #[derive(Clone)]
 pub struct Canned {

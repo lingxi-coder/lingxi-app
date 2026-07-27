@@ -292,10 +292,11 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_and_publish_pro_plan_to_global() {
-        use crate::oauth::anthropic::testsupport::{Canned, MockHttp};
+        use crate::oauth::anthropic::testsupport::{Canned, MockHttp, SUBSCRIPTION_CACHE_LOCK};
         // Serialize: `publish_subscription` mutates the process-global cache.
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = SUBSCRIPTION_CACHE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
 
         let body = r#"{"organization":{"organization_type":"claude_pro","uuid":"o1",
             "rate_limit_tier":"default_claude_pro","billing_type":"stripe_subscription",

@@ -257,20 +257,36 @@ impl OAuthHandle {
             .await
             .map_err(|e| AuthError::ServerError(format!("persist: {e}")))?;
 
-        // (6b) Resolve + publish the subscription tier (claude-code
-        // `getOauthAccountInfo`, written at login from the profile + roles
-        // endpoints) into the process-global `traits::subscription` cache, so
-        // subscription-gated prompt logic (e.g. the `AgentTool` pro-plan gate)
-        // reflects the signed-in plan. Best-effort + scope-gated
-        // (`hasProfileScope`): a token without `user:profile`, or any fetch
-        // failure, leaves the cache unchanged.
+        // (6b) Resolve the subscription tier (claude-code `getOauthAccountInfo`,
+        // written at login from the profile + roles endpoints), then BOTH
+        // persist it into the stored credential (claude-code keeps
+        // `subscriptionType`/`rateLimitTier` INSIDE `claudeAiOauth`, so a fresh
+        // process has correct enterprise/tier state on its FIRST request) and
+        // publish it to the process-global `traits::subscription` cache for
+        // subscription-gated prompt logic (e.g. the `AgentTool` pro-plan gate).
+        // Best-effort + scope-gated (`hasProfileScope`): a token without
+        // `user:profile`, or any fetch failure, leaves both unchanged.
         let transport = self.client.http();
-        crate::oauth::anthropic::subscription::publish_subscription(
+        if let Some(snapshot) = crate::oauth::anthropic::subscription::resolve_subscription_snapshot(
             tokens.access_token.expose_secret(),
             &tokens.scopes,
             &transport,
         )
-        .await;
+        .await
+        {
+            if let Err(error) = self
+                .client
+                .credentials()
+                .update_oauth_subscription(
+                    snapshot.subscription_type.as_deref(),
+                    snapshot.rate_limit_tier.as_deref(),
+                )
+                .await
+            {
+                tracing::warn!(%error, "could not persist subscription tier into the credential store");
+            }
+            traits::subscription::set_current_subscription(Some(snapshot));
+        }
 
         // (7) Return the resolved identity.
         Ok(LoginInfo { email, org_id })
@@ -438,6 +454,18 @@ mod tests {
     /// in-memory keychain. Returns the handle, the storage (for assertions),
     /// and a flag set when the browser opener fired.
     fn handle_with_token_body(token_body: &str) -> (OAuthHandle, Arc<MemStorage>, Arc<AtomicBool>) {
+        handle_with_bodies(
+            token_body,
+            r#"{"account":{"email":"profile@example.com"},"organization":{"uuid":"org-from-profile"}}"#,
+        )
+    }
+
+    /// [`handle_with_token_body`] with an explicit profile-endpoint body (used
+    /// by the subscription-persistence test, which needs an org tier).
+    fn handle_with_bodies(
+        token_body: &str,
+        profile_body: &str,
+    ) -> (OAuthHandle, Arc<MemStorage>, Arc<AtomicBool>) {
         let http = MockHttp::new(vec![
             (
                 "oauth/token",
@@ -446,14 +474,13 @@ mod tests {
                     body: token_body.into(),
                 },
             ),
-            // Profile endpoint fallback (used only when the token body omits
-            // account/org).
+            // Profile endpoint (identity fallback when the token body omits
+            // account/org, and the subscription-tier resolution).
             (
                 "/api/oauth/profile",
                 Canned {
                     status: 200,
-                    body: r#"{"account":{"email":"profile@example.com"},"organization":{"uuid":"org-from-profile"}}"#
-                        .into(),
+                    body: profile_body.into(),
                 },
             ),
         ]);
@@ -642,6 +669,46 @@ mod tests {
             url.contains("redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback"),
             "sink got the manual variant, was: {url}"
         );
+    }
+
+    /// M13: a login whose token carries `user:profile` resolves the profile
+    /// tier and PERSISTS `subscription_type`/`rate_limit_tier` into the stored
+    /// credential (claude-code keeps them inside `claudeAiOauth`), so a fresh
+    /// process seeds correct enterprise/tier state before any network.
+    #[tokio::test]
+    async fn login_persists_subscription_tier_from_profile() {
+        // Binds the fixed loopback port 45321 — same machine-global resource
+        // contention as the OpenAI ports, and these tests raced each other.
+        let _g = crate::oauth::openai::testsupport::port_guard().await;
+        // This login WRITES the process-global subscription cache; serialize
+        // with the other global-cache tests.
+        let _s = crate::oauth::anthropic::testsupport::SUBSCRIPTION_CACHE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let token_body = r#"{
+            "access_token":"acc","refresh_token":"ref","expires_in":3600,
+            "scope":"org:create_api_key user:profile user:inference",
+            "account":{"uuid":"acc-uuid","email_address":"token@example.com"},
+            "organization":{"uuid":"org-token"}
+        }"#;
+        let profile_body = r#"{"organization":{"organization_type":"claude_max","uuid":"org-token",
+            "rate_limit_tier":"default_claude_max_20x"}}"#;
+        let (handle, storage, _) = handle_with_bodies(token_body, profile_body);
+        handle.login().await.expect("login ok");
+
+        let clock = TestClock::new(1_000);
+        let cm = mem_credential_manager(storage.clone(), clock);
+        let tokens = cm
+            .get_oauth_tokens()
+            .await
+            .expect("get")
+            .expect("persisted");
+        assert_eq!(tokens.subscription_type.as_deref(), Some("max"));
+        assert_eq!(
+            tokens.rate_limit_tier.as_deref(),
+            Some("default_claude_max_20x")
+        );
+        traits::subscription::set_current_subscription(None);
     }
 
     /// M8: with NO manual channel and a dead opener the flow still waits on

@@ -4253,6 +4253,7 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
     //        (3.2) API.6: while we have the token in hand, resolve the Claude.ai
     //        subscriber flag from its scopes (see [`oauth_subscriber_flag`]).
     let mut is_subscriber = false;
+    let mut persisted_subscription_type: Option<String> = None;
     match credentials.get_oauth_tokens().await {
         Ok(Some(tokens)) => {
             is_subscriber = oauth_subscriber_flag(
@@ -4260,16 +4261,23 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
                 std::env::var_os("ANTHROPIC_AUTH_TOKEN").is_some(),
                 &tokens.scopes,
             );
-            // Re-seed the shared slot with the resolved subscriber flag so
-            // readers see it even before (or without) the background
-            // profile+roles fetch landing. SECRECY: deliberately copy the
-            // access token (a `Secret<String>`, intentionally non-`Clone`) by
-            // exposing + re-wrapping — the audited copy pattern — BEFORE the
-            // original moves into `init_refresh_driver`; it is exposed again
-            // only inside the spawned fetch task.
+            // (M13) The stored credential carries the tier persisted at login
+            // (claude-code keeps `subscriptionType`/`rateLimitTier` inside
+            // `claudeAiOauth`), so enterprise/tier-gated behaviour is correct
+            // from request #1 — no async profile-fetch window.
+            persisted_subscription_type.clone_from(&tokens.subscription_type);
+            // Re-seed the shared slot with the resolved subscriber flag + the
+            // PERSISTED tier so readers see them even before (or without) the
+            // background profile+roles fetch landing. SECRECY: deliberately
+            // copy the access token (a `Secret<String>`, intentionally
+            // non-`Clone`) by exposing + re-wrapping — the audited copy
+            // pattern — BEFORE the original moves into `init_refresh_driver`;
+            // it is exposed again only inside the spawned fetch task.
             if let Ok(mut guard) = subscription.write() {
                 *guard = Some(traits::subscription::SubscriptionSnapshot {
                     is_subscriber,
+                    subscription_type: tokens.subscription_type.clone(),
+                    rate_limit_tier: tokens.rate_limit_tier.clone(),
                     ..Default::default()
                 });
             }
@@ -4295,14 +4303,18 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
                     if is_subscriber {
                         oauth_auth_state = Some(auth_state);
 
-                        // Task 4: background OAuth profile + roles fetch. This
-                        // closes the RENDERING half of the profile-fetch
-                        // PARITY-GAP documented at `orchestrator/src/config.rs:134`
-                        // (tier/billing/role data for rate-limit copy), without
-                        // touching the build hot path. Both fetchers swallow
+                        // Task 4: background OAuth profile + roles fetch — the
+                        // FRESHENER over the persisted-tier seed above (closes
+                        // the RENDERING half of the profile-fetch PARITY-GAP
+                        // documented at `orchestrator/src/config.rs:134` —
+                        // tier/billing/role data for rate-limit copy — without
+                        // touching the build hot path). Both fetchers swallow
                         // every error → `None` (matching the TS `logError` /
-                        // `return undefined` stance), so on any failure the
-                        // seeded `is_subscriber`-only snapshot simply stays.
+                        // `return undefined` stance); (M13) a FAILED profile
+                        // fetch skips the write entirely so the seeded
+                        // persisted-tier snapshot is never clobbered with an
+                        // empty one (oracle preserves stored `subscriptionType`
+                        // when the refresh can't resolve a new value).
                         //
                         // SharedSubscription locking contract (std `RwLock`):
                         // the guard must NEVER be held across an `.await` —
@@ -4315,25 +4327,42 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
                         {
                             let slot = subscription.clone();
                             let transport: std::sync::Arc<dyn traits::HttpTransport> = http.clone();
+                            let creds = credentials.clone();
                             // Move (not copy) the token into the task — its
                             // only consumer.
                             let token = profile_token;
                             tokio::spawn(async move {
                                 let token = token.expose_secret();
-                                let profile =
+                                let Some(profile) =
                                     llm_client::oauth::anthropic::fetch_profile_from_oauth_token(
                                         token, &transport,
                                     )
-                                    .await;
+                                    .await
+                                else {
+                                    return;
+                                };
                                 let roles = llm_client::oauth::anthropic::fetch_user_roles(
                                     token, &transport,
                                 )
                                 .await;
                                 let snap = subscription_snapshot_from(
                                     true,
-                                    profile.as_ref(),
+                                    Some(&profile),
                                     roles.as_ref(),
                                 );
+                                // (M13) Freshen the persisted tier too, so
+                                // pre-M13 logins self-heal and the NEXT boot
+                                // seeds from up-to-date values. `new ?? old`
+                                // merge — never clears a stored tier.
+                                if let Err(error) = creds
+                                    .update_oauth_subscription(
+                                        snap.subscription_type.as_deref(),
+                                        snap.rate_limit_tier.as_deref(),
+                                    )
+                                    .await
+                                {
+                                    tracing::warn!(%error, "could not persist freshened subscription tier");
+                                }
                                 if let Ok(mut guard) = slot.write() {
                                     *guard = Some(snap);
                                 }
@@ -4779,9 +4808,13 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
         let llm_cat = llm_catalog_from_cost(&assembled.pricing);
         Arc::new(CostEstimator::new(llm_cat, PricingPolicy::MarkUnestimated))
     };
+    // (M13) Enterprise state now comes from the PERSISTED credential tier
+    // (claude-code reads `subscriptionType` synchronously from the stored
+    // tokens), so the static build-time state is correct from request #1;
+    // the shared subscription slot freshens it per request.
     let subscriber_state = SubscriberState {
         is_subscriber,
-        is_enterprise: false,
+        is_enterprise: persisted_subscription_type.as_deref() == Some("enterprise"),
     };
 
     Ok(LlmStack {
@@ -5218,9 +5251,12 @@ pub async fn build(
     // (computed in step 3.2 from the OAuth token scopes) into the orchestrator
     // config so the fallback-aware api-client seam resolves the consecutive-529
     // Opus-fallback gate and the 429-retry gate exactly as claude-code does.
-    // `is_enterprise` stays `false` (PARITY-GAP: enterprise tier needs a profile
-    // fetch not performed in this build hot path).
+    // (M13) `is_enterprise` is seeded from the tier PERSISTED in the stored
+    // credential (claude-code reads `subscriptionType` synchronously from the
+    // stored tokens) — no profile fetch in the build hot path, and no async
+    // misclassification window before the background freshener lands.
     orch_cfg.is_subscriber = is_subscriber;
+    orch_cfg.is_enterprise = subscriber_state.is_enterprise;
     // OUTSTYLE.2: thread the merged `settings.outputStyle` (TS string) into the
     // orchestrator config so `build_system_prompt` injects the active style's
     // `# Output Style: <name>` section (Explanatory / Learning builtins). `None`

@@ -14,6 +14,11 @@
 //!   `Vec<String>`, forwarded verbatim. The engine populates this computed
 //!   denylist from `WebFetch(domain:...)` DENY rules; the runtime checks it
 //!   before the allow-list.
+//! - **`network.strict_allowlist`** — engine `bool` → runtime `Option<bool>`
+//!   as `true.then_some(true)`: the key exists only when true, mirroring the
+//!   sandbox-adapter's `strictAllowlist: …||void 0` (2.1.220 @230074348). The
+//!   runtime matcher denies unmatched hosts deterministically (never asks)
+//!   when set.
 //! - **`network.allow_unix_sockets`** — engine `Vec<String>` → runtime
 //!   `Option<Vec<String>>`: `Some` when non-empty, `None` when empty (the
 //!   runtime treats `None` and `Some(vec![])` identically, but `None` keeps the
@@ -81,6 +86,12 @@ pub fn to_runtime_config(engine: &EngineConfig) -> RuntimeConfig {
         allowed_domains: net.allowed_domains.clone(),
         // Computed denylist (from WebFetch deny rules) — forwarded verbatim.
         denied_domains: net.denied_domains.clone(),
+        // strictAllowlist (2.1.219): the adapter sets the key only when true
+        // (`…some(===!0)||void 0`, 2.1.220 @230074348), so engine `false` maps
+        // to `None`, not `Some(false)`. The runtime matcher then denies
+        // unmatched hosts deterministically instead of consulting the ask
+        // callback.
+        strict_allowlist: net.strict_allowlist.then_some(true),
         allow_unix_sockets: some_if_nonempty(net.allow_unix_sockets.clone()),
         allow_all_unix_sockets: Some(net.allow_all_unix_sockets),
         allow_local_binding: Some(net.allow_local_binding),
@@ -217,6 +228,25 @@ mod tests {
         assert_eq!(rt.network.allow_local_binding, Some(true));
         assert_eq!(rt.enable_weaker_nested_sandbox, Some(true));
         assert_eq!(rt.enable_weaker_network_isolation, Some(true));
+    }
+
+    #[test]
+    fn forwards_strict_allowlist_true_as_some_true() {
+        // Engine strictAllowlist=true reaches the srt config as Some(true) so
+        // the runtime matcher denies unmatched hosts before the ask callback
+        // (2.1.219 strictAllowlist; adapter shape @230074348).
+        let mut engine = engine_full();
+        engine.network.strict_allowlist = true;
+        let rt = to_runtime_config(&engine);
+        assert_eq!(rt.network.strict_allowlist, Some(true));
+    }
+
+    #[test]
+    fn strict_allowlist_false_is_omitted_not_some_false() {
+        // `…||void 0`: the key must be ABSENT when false — never Some(false) —
+        // so the serialized runtime config only ever carries the key as `true`.
+        let rt = to_runtime_config(&engine_full());
+        assert!(rt.network.strict_allowlist.is_none());
     }
 
     #[test]

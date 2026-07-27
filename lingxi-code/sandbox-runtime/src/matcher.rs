@@ -2,8 +2,9 @@
 //! is the synchronous, ask-callback-free core (absent callback ⇒ deny, which is
 //! the unmatched default anyway). [`filter_network_request_with_ask`] is the
 //! full async port that consults the interactive [`AskFn`] for the unmatched
-//! case — the security gate the `SandboxManager` wires into the running
-//! proxies.
+//! case — unless `strict_allowlist` is set, which denies unmatched hosts
+//! deterministically before the callback (2.1.219) — the security gate the
+//! `SandboxManager` wires into the running proxies.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -93,16 +94,23 @@ pub fn filter_network_request(port: u16, host: &str, config: &NetworkConfig) -> 
 }
 
 /// `filterNetworkRequest` WITH the interactive ask-callback path
-/// (`sandbox-manager.js:62-119`). Identical deny-first/allow core as
-/// [`filter_network_request`], but the *unmatched* case consults `ask`:
+/// (`sandbox-manager.js:62-119`; 2.1.220 `wSu` @229871400). Identical
+/// deny-first/allow core as [`filter_network_request`], but the *unmatched*
+/// case consults `ask`:
 ///
 /// - malformed host (`!is_valid_host`) → `false` and **never asks** (the host
 ///   bytes are untrusted; we refuse before any callback);
 /// - `denied_domains` match → `false`;
 /// - `allowed_domains` match → `true`;
+/// - unmatched + `ask = None` **or** `strict_allowlist == Some(true)` → `false`
+///   and **never asks** — the 2.1.219 strict gate runs before the callback
+///   (`if(!r||xl.network.strictAllowlist)` @229871903), logging the
+///   deterministic-deny line;
 /// - unmatched + `ask = Some(cb)` → `await cb(host, port)`; `Ok(true)` → allow,
-///   `Ok(false)` or `Err(_)` → deny (the TS `try/catch` denies on throw);
-/// - unmatched + `ask = None` → `false`.
+///   `Ok(false)` or `Err(_)` → deny (the TS `try/catch` denies on throw).
+///
+/// Every outcome logs the oracle's `yo(...)` line byte-for-byte (original
+/// `host`, not the canonical form — the TS templates interpolate `t`).
 ///
 /// `host` (not the canonicalized form) is passed to the callback, matching the
 /// TS which forwards the original `{ host, port }`.
@@ -113,24 +121,47 @@ pub async fn filter_network_request_with_ask(
     ask: Option<&AskFn>,
 ) -> bool {
     if !is_valid_host(host) {
+        // `Denying malformed host: ${JSON.stringify(t)}:${e}` — error level.
+        let quoted = serde_json::to_string(host).unwrap_or_else(|_| format!("{host:?}"));
+        tracing::error!("Denying malformed host: {quoted}:{port}");
         return false;
     }
     let canonical = canonicalize_host(host).unwrap_or_else(|| host.to_string());
     for denied in &config.denied_domains {
         if matches_domain_pattern(&canonical, denied) {
+            tracing::debug!("Denied by config rule: {host}:{port}");
             return false;
         }
     }
     for allowed in &config.allowed_domains {
         if matches_domain_pattern(&canonical, allowed) {
+            tracing::debug!("Allowed by config rule: {host}:{port}");
             return true;
         }
     }
-    // Unmatched — ask the user, or deny if there is no callback. A callback
-    // error (the TS callback throwing) denies, matching the TS `catch`.
-    match ask {
-        Some(cb) => cb(host, port).await.unwrap_or(false),
-        None => false,
+    // Unmatched — `if(!r||xl.network.strictAllowlist)`: no callback OR strict
+    // mode ⇒ deterministic deny BEFORE the callback is consulted (2.1.219
+    // `strictAllowlist` — strict must never fire the interactive ask).
+    let strict = config.strict_allowlist == Some(true);
+    let Some(cb) = ask.filter(|_| !strict) else {
+        tracing::debug!("No matching config rule, denying: {host}:{port}");
+        return false;
+    };
+    tracing::debug!("No matching config rule, asking user: {host}:{port}");
+    match cb(host, port).await {
+        Ok(true) => {
+            tracing::debug!("User allowed: {host}:{port}");
+            true
+        }
+        Ok(false) => {
+            tracing::debug!("User denied: {host}:{port}");
+            false
+        }
+        // A callback error (the TS callback throwing) denies — the TS `catch`.
+        Err(e) => {
+            tracing::error!("Error in permission callback: {e}");
+            false
+        }
     }
 }
 
@@ -295,6 +326,46 @@ mod tests {
                 .await
         );
         assert!(ran.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// `strictAllowlist` (2.1.219): unmatched host + ask callback PRESENT +
+    /// strict ⇒ deterministic deny, callback NEVER invoked — the oracle gate
+    /// `if(!r||xl.network.strictAllowlist)` runs before the ask
+    /// (2.1.220 @229871903).
+    #[tokio::test]
+    async fn unmatched_strict_denies_without_asking() {
+        let ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ask = ask_const(true, std::sync::Arc::clone(&ran));
+        let cfg = NetworkConfig {
+            strict_allowlist: Some(true),
+            ..allow_example()
+        };
+        assert!(!filter_network_request_with_ask(443, "unknown.com", &cfg, Some(&ask)).await);
+        assert!(!ran.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// `strictAllowlist: false` is the same as absent — unmatched still asks.
+    #[tokio::test]
+    async fn unmatched_strict_false_still_asks() {
+        let ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ask = ask_const(true, std::sync::Arc::clone(&ran));
+        let cfg = NetworkConfig {
+            strict_allowlist: Some(false),
+            ..allow_example()
+        };
+        assert!(filter_network_request_with_ask(443, "unknown.com", &cfg, Some(&ask)).await);
+        assert!(ran.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// Strict mode gates only the UNMATCHED case: an `allowed_domains` match
+    /// still allows (the loops run before the strict check in the oracle).
+    #[tokio::test]
+    async fn strict_does_not_shadow_allow_rule() {
+        let cfg = NetworkConfig {
+            strict_allowlist: Some(true),
+            ..allow_example()
+        };
+        assert!(filter_network_request_with_ask(443, "api.example.com", &cfg, None).await);
     }
 
     #[tokio::test]

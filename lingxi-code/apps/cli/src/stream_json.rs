@@ -298,11 +298,32 @@ pub struct StreamJsonInitParams {
     pub product_feedback_disabled: bool,
     pub memory_paths: Option<Value>,
     pub fast_mode_state: String,
+    /// Why fast mode is unavailable (2.1.219 `JW()` reason enum). `Some` ⇒
+    /// emitted directly after `fast_mode_state`; `None` ⇒ key omitted, the
+    /// serialization of the oracle's `undefined` assignment.
+    pub fast_mode_disabled_reason: Option<String>,
+    /// Protocol capabilities this CLI supports (binary `gPp`), spread into the
+    /// init frame between `plugins` and `mcp_server_errors` — SDK consumers
+    /// feature-detect on these instead of version-sniffing.
+    pub capabilities: Vec<String>,
     /// `--mcp-config` entries skipped by config validation. Emitted into the
     /// `system/init` frame ONLY when non-empty, matching the oracle's
     /// conditional spread (`...r.length>0&&{mcp_server_errors:…}`).
     pub mcp_server_errors: Vec<Value>,
 }
+
+/// The capability list the 2.1.220 `-p` init frame advertises (binary
+/// `gPp=[xsa,Jlb,Isa]`; live-captured verbatim):
+/// * `interrupt_receipt_v1` — interrupt success payloads carry `still_queued`.
+/// * `interrupt_cancel_queued_v1` — the interrupt request honors
+///   `cancel_queued:true` (queue swept, listed under `cancelled`).
+/// * `msg_lifecycle_v1` — `command_lifecycle` frames track uuid-stamped
+///   commands (`queued`/`started`/`completed`/`cancelled`/`discarded`).
+pub const STREAM_JSON_CAPABILITIES: [&str; 3] = [
+    "interrupt_receipt_v1",
+    "interrupt_cancel_queued_v1",
+    "msg_lifecycle_v1",
+];
 
 /// Shared outbound queue: sender half for the single-writer drain task.
 ///
@@ -641,6 +662,7 @@ impl StreamJsonStream {
         cost: &CostSnapshot,
         model_id: &str,
         fast_mode_state: &str,
+        fast_mode_disabled_reason: Option<&str>,
         betas: &[String],
     ) -> Value {
         let uuid = uuid::Uuid::new_v4().to_string();
@@ -679,6 +701,11 @@ impl StreamJsonStream {
         obj.insert("permission_denials".into(), json!([]));
         obj.insert("terminal_reason".into(), json!("completed"));
         obj.insert("fast_mode_state".into(), json!(fast_mode_state));
+        // 2.1.219 result schema: `fast_mode_disabled_reason` optional, sits
+        // directly after `fast_mode_state` (live 2.1.220 capture); omit on None.
+        if let Some(reason) = fast_mode_disabled_reason {
+            obj.insert("fast_mode_disabled_reason".into(), json!(reason));
+        }
         obj.insert("uuid".into(), json!(uuid));
 
         Value::Object(obj)
@@ -692,6 +719,7 @@ impl StreamJsonStream {
         cost: &CostSnapshot,
         model_id: &str,
         fast_mode_state: &str,
+        fast_mode_disabled_reason: Option<&str>,
         betas: &[String],
     ) -> Value {
         let frame = self
@@ -701,6 +729,7 @@ impl StreamJsonStream {
                 cost,
                 model_id,
                 fast_mode_state,
+                fast_mode_disabled_reason,
                 betas,
             )
             .await;
@@ -719,6 +748,7 @@ impl StreamJsonStream {
         cost: &CostSnapshot,
         model_id: &str,
         fast_mode_state: &str,
+        fast_mode_disabled_reason: Option<&str>,
         betas: &[String],
     ) -> Value {
         let uuid = uuid::Uuid::new_v4().to_string();
@@ -765,6 +795,10 @@ impl StreamJsonStream {
         obj.insert("permission_denials".into(), json!([]));
         obj.insert("terminal_reason".into(), json!(terminal_reason));
         obj.insert("fast_mode_state".into(), json!(fast_mode_state));
+        // Same optional slot as the success frame: after `fast_mode_state`.
+        if let Some(reason) = fast_mode_disabled_reason {
+            obj.insert("fast_mode_disabled_reason".into(), json!(reason));
+        }
         obj.insert("uuid".into(), json!(uuid));
 
         Value::Object(obj)
@@ -778,10 +812,19 @@ impl StreamJsonStream {
         cost: &CostSnapshot,
         model_id: &str,
         fast_mode_state: &str,
+        fast_mode_disabled_reason: Option<&str>,
         betas: &[String],
     ) -> Value {
         let frame = self
-            .build_result_error_frame(subtype, errors, cost, model_id, fast_mode_state, betas)
+            .build_result_error_frame(
+                subtype,
+                errors,
+                cost,
+                model_id,
+                fast_mode_state,
+                fast_mode_disabled_reason,
+                betas,
+            )
             .await;
         self.enqueue(&frame);
         frame
@@ -1398,6 +1441,11 @@ fn build_init_frame(session_id: &str, uuid: &str, p: &StreamJsonInitParams) -> V
     o.insert("agents".into(), json!(p.agents));
     o.insert("skills".into(), json!(p.skills));
     o.insert("plugins".into(), json!(p.plugins));
+    // 2.1.220: `...e.capabilities&&{capabilities:[...e.capabilities]}` —
+    // between `plugins` and `mcp_server_errors` (live-captured position).
+    if !p.capabilities.is_empty() {
+        o.insert("capabilities".into(), json!(p.capabilities));
+    }
     if !p.mcp_server_errors.is_empty() {
         o.insert("mcp_server_errors".into(), json!(p.mcp_server_errors));
     }
@@ -1409,6 +1457,11 @@ fn build_init_frame(session_id: &str, uuid: &str, p: &StreamJsonInitParams) -> V
     o.insert("uuid".into(), json!(uuid));
     o.insert("memory_paths".into(), json!(p.memory_paths));
     o.insert("fast_mode_state".into(), json!(p.fast_mode_state));
+    // 2.1.220: `n.fast_mode_disabled_reason=e.fastModeDisabledReason` — an
+    // `undefined` reason serializes to NO key, so `None` omits it.
+    if let Some(reason) = &p.fast_mode_disabled_reason {
+        o.insert("fast_mode_disabled_reason".into(), json!(reason));
+    }
     Value::Object(o)
 }
 
@@ -1459,6 +1512,7 @@ pub fn build_init_params(
     output_style: &str,
     memory_auto_path: Option<&str>,
     fast_mode_state: &str,
+    fast_mode_disabled_reason: Option<&str>,
 ) -> StreamJsonInitParams {
     let cwd = std::env::current_dir()
         .unwrap_or_default()
@@ -1514,6 +1568,11 @@ pub fn build_init_params(
         product_feedback_disabled: traits::traffic_mode::is_essential_traffic_only(),
         memory_paths,
         fast_mode_state: fast_mode_state.to_string(),
+        fast_mode_disabled_reason: fast_mode_disabled_reason.map(str::to_string),
+        capabilities: STREAM_JSON_CAPABILITIES
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect(),
     }
 }
 
@@ -1615,6 +1674,7 @@ mod tests {
             "default",
             None,
             "off",
+            None,
         )
     }
 
@@ -1654,6 +1714,7 @@ mod tests {
             "default",
             Some("/home/user/.lingxi/projects/test/memory/"),
             "off",
+            None,
         );
         let stream = Arc::new(StreamJsonStream::new(params));
         // Just verify it doesn't panic and the Agent→Task rename works.
@@ -1929,7 +1990,7 @@ mod tests {
             ..Default::default()
         };
         let frame = stream
-            .build_result_success_frame("pong", "end_turn", &cost, "claude-opus-4-8", "off", &[])
+            .build_result_success_frame("pong", "end_turn", &cost, "claude-opus-4-8", "off", None, &[])
             .await;
 
         let obj = frame.as_object().unwrap();
@@ -1983,6 +2044,55 @@ mod tests {
         assert_eq!(usage["output_tokens"], 10_u64);
     }
 
+    /// 2.1.219+: result frames carry `fast_mode_disabled_reason` directly
+    /// after `fast_mode_state` when a reason resolved (live 2.1.220 capture:
+    /// `…,"fast_mode_state":"off","fast_mode_disabled_reason":
+    /// "sdk_opt_in_required",…`), and omit the key when none did.
+    #[tokio::test]
+    async fn result_frames_carry_fast_mode_disabled_reason_after_state() {
+        let params = make_params("sess-fast-reason");
+        let stream = StreamJsonStream::new(params);
+        let cost = CostSnapshot::default();
+
+        let success = stream
+            .build_result_success_frame(
+                "ok",
+                "end_turn",
+                &cost,
+                "claude-opus-4-8",
+                "off",
+                Some("sdk_opt_in_required"),
+                &[],
+            )
+            .await;
+        let keys: Vec<&str> = success
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let state = keys.iter().position(|k| *k == "fast_mode_state").unwrap();
+        assert_eq!(
+            keys.get(state + 1),
+            Some(&"fast_mode_disabled_reason"),
+            "reason must sit directly after fast_mode_state, got {keys:?}"
+        );
+        assert_eq!(success["fast_mode_disabled_reason"], "sdk_opt_in_required");
+
+        let error = stream
+            .build_result_error_frame(
+                "error_during_execution",
+                vec!["boom".to_string()],
+                &cost,
+                "claude-opus-4-8",
+                "off",
+                Some("not_first_party"),
+                &[],
+            )
+            .await;
+        assert_eq!(error["fast_mode_disabled_reason"], "not_first_party");
+    }
+
     /// Verify that the result/error frame uses `errors` (not `result`).
     #[tokio::test]
     async fn result_frame_error_has_errors_not_result() {
@@ -1996,6 +2106,7 @@ mod tests {
                 &cost,
                 "claude-opus-4-8",
                 "off",
+                None,
                 &[],
             )
             .await;
@@ -2034,7 +2145,7 @@ mod tests {
         ];
         for (subtype, expected_terminal_reason) in &cases {
             let frame = stream
-                .build_result_error_frame(subtype, vec![], &cost, "model", "off", &[])
+                .build_result_error_frame(subtype, vec![], &cost, "model", "off", None, &[])
                 .await;
             assert_eq!(
                 frame["terminal_reason"], *expected_terminal_reason,
@@ -2277,6 +2388,7 @@ mod tests {
             "default",
             None,
             "off",
+            None,
         );
 
         params.mcp_server_errors = Vec::new();
@@ -2310,7 +2422,8 @@ mod tests {
         );
     }
 
-    fn init_frame_matches_2_1_201_p_mode_shape() {
+    #[test]
+    fn init_frame_matches_2_1_220_p_mode_shape() {
         let params = build_init_params(
             "sess-oracle",
             vec!["Bash".to_string()],
@@ -2324,6 +2437,7 @@ mod tests {
             "default",
             None,
             "off",
+            None,
         );
         let frame = build_init_frame("sess-oracle", "uuid-1234", &params);
         let obj = frame.as_object().expect("init frame is an object");
@@ -2346,13 +2460,14 @@ mod tests {
                 "agents",
                 "skills",
                 "plugins",
+                "capabilities",
                 "analytics_disabled",
                 "product_feedback_disabled",
                 "uuid",
                 "memory_paths",
                 "fast_mode_state",
             ],
-            "system/init key set + order must match the 2.1.201 -p oracle"
+            "system/init key set + order must match the 2.1.220 -p oracle"
         );
         // Positive: plugins present. Negative: no betas key (oracle has none).
         assert!(obj.contains_key("plugins"), "oracle init HAS plugins");
@@ -2364,6 +2479,60 @@ mod tests {
         assert_eq!(frame["subtype"], "init");
         assert_eq!(frame["session_id"], "sess-oracle");
         assert_eq!(frame["uuid"], "uuid-1234");
+    }
+
+    /// 2.1.220 live capture: `capabilities` advertises the three protocol
+    /// contracts verbatim, between `plugins` and (when present)
+    /// `mcp_server_errors`; a reason-less run omits
+    /// `fast_mode_disabled_reason`, and a reasoned run appends it directly
+    /// after `fast_mode_state` at the very end of the frame.
+    #[test]
+    fn init_frame_capabilities_and_fast_mode_reason_match_2_1_220() {
+        let mut params = build_init_params(
+            "sess-caps",
+            vec![],
+            vec![],
+            "claude-opus-4-8",
+            "default",
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            "default",
+            None,
+            "off",
+            None,
+        );
+        let frame = build_init_frame("sess-caps", "u", &params);
+        assert_eq!(
+            frame["capabilities"],
+            serde_json::json!([
+                "interrupt_receipt_v1",
+                "interrupt_cancel_queued_v1",
+                "msg_lifecycle_v1"
+            ]),
+            "capability list must match the binary's gPp verbatim"
+        );
+        assert!(
+            !frame.as_object().unwrap().contains_key("fast_mode_disabled_reason"),
+            "None reason ⇒ key omitted (oracle undefined-assignment semantics)"
+        );
+
+        params.fast_mode_disabled_reason = Some("sdk_opt_in_required".to_string());
+        let reasoned = build_init_frame("sess-caps", "u", &params);
+        let keys: Vec<&str> = reasoned
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys.last(),
+            Some(&"fast_mode_disabled_reason"),
+            "reason is the final key, directly after fast_mode_state"
+        );
+        assert_eq!(keys[keys.len() - 2], "fast_mode_state");
+        assert_eq!(reasoned["fast_mode_disabled_reason"], "sdk_opt_in_required");
     }
 
     // ── P4: --include-hook-events (hook lifecycle frames) ─────────────────────
@@ -2479,7 +2648,7 @@ mod tests {
         // opus-4-8 is natively 1M (2.1.198 registry native_1m:!0, M1b) —
         // contextWindow=1_000_000 with NO suffix; maxOutputTokens=64000.
         let frame = stream
-            .build_result_success_frame("hi", "end_turn", &cost, "claude-opus-4-8", "off", &[])
+            .build_result_success_frame("hi", "end_turn", &cost, "claude-opus-4-8", "off", None, &[])
             .await;
         let mu = frame["modelUsage"].as_object().unwrap();
         let entry = &mu["claude-opus-4-8"];
@@ -2494,7 +2663,7 @@ mod tests {
 
         // A 200k model (opus-4-6 has NO native_1m) keeps the default window.
         let frame200k = stream
-            .build_result_success_frame("hi", "end_turn", &cost, "claude-opus-4-6", "off", &[])
+            .build_result_success_frame("hi", "end_turn", &cost, "claude-opus-4-6", "off", None, &[])
             .await;
         let mu200k = frame200k["modelUsage"].as_object().unwrap();
         let entry200k = &mu200k["claude-opus-4-6"];
@@ -2510,7 +2679,7 @@ mod tests {
         // 1M context model (model id carries [1m] suffix):
         // contextWindow=1_000_000, maxOutputTokens=64_000.
         let frame1m = stream
-            .build_result_success_frame("hi", "end_turn", &cost, "claude-opus-4-8[1m]", "off", &[])
+            .build_result_success_frame("hi", "end_turn", &cost, "claude-opus-4-8[1m]", "off", None, &[])
             .await;
         let mu1m = frame1m["modelUsage"].as_object().unwrap();
         assert!(
@@ -2546,7 +2715,7 @@ mod tests {
             ..Default::default()
         };
         let frame = stream
-            .build_result_success_frame("done", "end_turn", &cost, "claude-opus-4-6", "off", &[])
+            .build_result_success_frame("done", "end_turn", &cost, "claude-opus-4-6", "off", None, &[])
             .await;
         let usage = frame["modelUsage"].as_object().expect("modelUsage map");
         assert!(!usage.contains_key("claude-opus-4-6"));
@@ -2627,6 +2796,7 @@ mod tests {
             "default",
             Some("/home/user/.lingxi/projects/test/memory/"),
             "off",
+            None,
         );
         let stream = Arc::new(StreamJsonStream::new(params));
 
@@ -2673,7 +2843,7 @@ mod tests {
             ..Default::default()
         };
         let frame = stream
-            .build_result_success_frame("pong", "end_turn", &cost, "claude-opus-4-8", "off", &[])
+            .build_result_success_frame("pong", "end_turn", &cost, "claude-opus-4-8", "off", None, &[])
             .await;
 
         // Golden assertions (volatile fields masked by shape, not value).

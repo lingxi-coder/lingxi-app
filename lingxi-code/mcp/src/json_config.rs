@@ -232,6 +232,9 @@ fn build_servers_from_map(
         // a non-fatal config error; a `warn!` is the closest non-breaking
         // analogue for this parser).
         let mut missing: Vec<String> = Vec::new();
+        // claude `configError` (`configErrorReason:"url_invalid"`): set when a
+        // remote `url` expands to empty; carried on the config, never fatal.
+        let mut config_error: Option<String> = None;
         let spec = if let Some(cmd) = entry.command {
             McpTransportSpec::Stdio {
                 command: expand_field(&cmd, &mut missing),
@@ -242,15 +245,36 @@ fn build_servers_from_map(
                     .collect(),
                 env: expand_map_values(entry.env, &mut missing),
             }
-        } else if let Some(url) = entry.url {
-            let url = expand_field(&url, &mut missing);
-            if url.trim().is_empty() {
-                tracing::warn!(
-                    server = %name,
-                    "mcp.json: remote entry missing url; skipping"
-                );
-                continue;
-            }
+        } else if let Some(raw_url) = entry.url {
+            let url = expand_field(&raw_url, &mut missing);
+            let url = if url.trim().is_empty() {
+                if raw_url.trim().is_empty() {
+                    // Literally-empty url: schema-invalid → log + skip (the
+                    // diagnostics pass reports `url: Required`).
+                    tracing::warn!(
+                        server = %name,
+                        "mcp.json: remote entry missing url; skipping"
+                    );
+                    continue;
+                }
+                // 2.1.220 `klr`/`ey_` (`urlExpandedToEmpty`): a NON-empty url
+                // that expanded to an empty string KEEPS the server, tagged
+                // with the byte-exact `configError` — `mcp list`/`get` show it
+                // as `- Not configured` and the connect path never dials.
+                // The spec keeps the UNEXPANDED url so list/get display shows
+                // the `${VAR}` reference (the oracle's display view `bEp` maps
+                // back to the `expandVars:false` config for the same effect).
+                config_error = Some(format!(
+                    "'url' {} expanded to an empty string. Set the referenced \
+                     environment variable, or update the server's config and \
+                     reconnect.",
+                    serde_json::to_string(&raw_url)
+                        .unwrap_or_else(|_| format!("\"{raw_url}\""))
+                ));
+                raw_url
+            } else {
+                url
+            };
             let headers = expand_header_values(entry.headers, &mut missing);
             match entry.transport_type.as_deref() {
                 Some("sse") => McpTransportSpec::Sse {
@@ -329,6 +353,7 @@ fn build_servers_from_map(
             disabled: entry.disabled,
             timeout_ms,
             always_load,
+            config_error,
         });
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -558,6 +583,45 @@ mod tests {
         let raw = r#"{"mcpServers":{"remote":{"type":"http","url":"   "}}}"#;
         let cfgs = parse_mcp_json_string(raw, ConfigScope::Project).unwrap();
         assert!(cfgs.is_empty(), "empty remote url is invalid");
+    }
+
+    #[test]
+    fn url_expanded_to_empty_is_kept_with_config_error() {
+        // 2.1.220 `klr`/`ey_` (`urlExpandedToEmpty`): a NON-empty url that
+        // expands to an empty string KEEPS the server, tagged with the
+        // byte-exact configError (reason `url_invalid`) — it lists as
+        // `- Not configured` instead of vanishing from the inventory.
+        //
+        // NB an UNSET `${VAR}` with no default stays LITERAL (bY returns the
+        // match) so it does NOT empty the url; emptiness needs a var that IS
+        // set to "" or — deterministic for a test — an empty `:-` default.
+        let raw = r#"{"mcpServers":{"r":{"type":"http","url":"${LINGXI_MCP_TEST_UNSET_M5:-}"}}}"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::Project).unwrap();
+        assert_eq!(cfgs.len(), 1, "expanded-to-empty url must keep the server");
+        assert_eq!(
+            cfgs[0].config_error.as_deref(),
+            Some(
+                "'url' \"${LINGXI_MCP_TEST_UNSET_M5:-}\" expanded to an empty string. \
+                 Set the referenced environment variable, or update the server's \
+                 config and reconnect."
+            )
+        );
+        // The spec keeps the UNEXPANDED url so list/get display the `${VAR}`
+        // reference (the oracle's display view maps back to the
+        // `expandVars:false` config for the same effect).
+        match &cfgs[0].spec {
+            McpTransportSpec::Http { url, .. } => {
+                assert_eq!(url, "${LINGXI_MCP_TEST_UNSET_M5:-}");
+            }
+            other => panic!("expected Http, got {other:?}"),
+        }
+        // A url that expands to something non-empty carries NO configError.
+        let ok = parse_mcp_json_string(
+            r#"{"mcpServers":{"r":{"type":"http","url":"${B:-https://x.test}"}}}"#,
+            ConfigScope::Project,
+        )
+        .unwrap();
+        assert_eq!(ok[0].config_error, None);
     }
 
     #[test]

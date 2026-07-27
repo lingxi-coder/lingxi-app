@@ -1,32 +1,84 @@
-//! `${VAR}` environment-variable expansion for MCP server configs.
+//! `${VAR}` environment-variable expansion for MCP server configs and the
+//! enterprise MCP policy.
 //!
-//! 1:1 port of claude-code's `services/mcp/envExpansion.ts`
-//! (`expandEnvVarsInString`, lines 10-38): expand `${VAR}` and
-//! `${VAR:-default}` occurrences in a string, tracking the names of any
-//! variables that are neither set in the environment nor given a default.
+//! 1:1 port of claude-code 2.1.220's `bY(value, env = process.env, fallback)`
+//! (which replaced the older `envExpansion.ts expandEnvVarsInString`): expand
+//! `${VAR}` and `${VAR:-default}` occurrences in a string against an explicit
+//! env map with an optional fallback map, tracking the names of variables that
+//! are neither set nor given a default, and the names of variables whose
+//! substituted VALUE carries wildcard semantics (`fqu`).
 //!
-//! Faithful to the TS regex `/\$\{([^}]+)\}/g`:
-//! - Only `${...}` with NON-EMPTY content (`[^}]+`) is a match; a literal
-//!   `${}` is left verbatim (the regex requires at least one inner char).
-//! - The captured content is split on the FIRST `:-` into `(name, default)`
-//!   (TS `split(':-', 2)` — only the first separator splits, so `:-` inside a
-//!   default value is preserved).
-//! - A set variable expands to its value; otherwise a present default is used;
-//!   otherwise the variable name is recorded in `missing_vars` and the WHOLE
-//!   `${...}` match is left LITERAL in the output (TS returns `match`).
+//! Faithful to the regex `/\$\{([A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?)\}/g`
+//! (`Uys` is the same pattern with the name alone captured):
+//! - Only an IDENTIFIER name matches (`[A-Za-z_][A-Za-z0-9_]*`). `${FOO.BAR}`,
+//!   `${9X}`, `${}` and `${X:default}` (no `:-`) are NOT matches — they are
+//!   left verbatim and are NOT reported as missing (the old `[^}]+` port
+//!   recorded such names as missing; 2.1.220 does not).
+//! - An optional `:-default` suffix supplies a default; the default may be
+//!   empty and may itself contain `:-` (`[^}]*` runs to the first `}`).
+//! - Resolution order per occurrence: primary env → present default →
+//!   fallback env → record in `missing_vars` and leave the WHOLE `${...}`
+//!   match LITERAL (the default BEATS the fallback env — `bY` returns the
+//!   default before consulting `r?.[c]`).
+//! - A value substituted from either env is checked by `fqu` for wildcard
+//!   semantics (a literal/NFKC/percent-encoded `*`); matching names are
+//!   recorded in `wildcard_vars` (one entry per occurrence).
 //!
-//! Pure functions — the only side effect is reading the process environment
-//! (mirroring TS `process.env[varName]`).
+//! Also home to `NQr()` — the frozen STARTUP env snapshot the enterprise
+//! policy expands against (see [`startup_env_snapshot`]).
+
+use indexmap::IndexMap;
+use std::sync::OnceLock;
+use unicode_normalization::UnicodeNormalization;
 
 /// Result of expanding `${...}` references in a string.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnvExpansion {
     /// The input with every resolvable `${...}` reference substituted.
     pub expanded: String,
-    /// Names of `${VAR}` references that were neither set nor defaulted. Each
-    /// such reference is left LITERAL in [`Self::expanded`]. Order and
-    /// duplicates mirror the TS `missingVars` array (one entry per occurrence).
+    /// Names of `${VAR}` references that were neither set (in env or fallback)
+    /// nor defaulted. Each such reference is left LITERAL in
+    /// [`Self::expanded`]. Order and duplicates mirror the `missingVars` array
+    /// (one entry per occurrence).
     pub missing_vars: Vec<String>,
+    /// Names whose SUBSTITUTED VALUE carries wildcard semantics (claude
+    /// `fqu`): a `*` after NFKC normalization, a percent-encoded `%2a`, or a
+    /// `*` after percent-decoding. One entry per occurrence, like
+    /// `missing_vars`. Defaults never contribute (only env/fallback values).
+    pub wildcard_vars: Vec<String>,
+}
+
+/// The `${NAME}` / `${NAME:-default}` reference pattern — claude `Uys` /
+/// the `bY` replace regex. Group 1 is the identifier name; group 2 (when
+/// present) is the `:-default` suffix including its `:-` prefix.
+pub(crate) fn env_ref_regex() -> &'static regex::Regex {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(:-[^}]*)?\}").expect("static env-ref regex")
+    })
+}
+
+/// claude `fqu(value)` — does a substituted value carry wildcard semantics?
+/// `*` after NFKC normalization (catching e.g. fullwidth `＊`), a literal
+/// `%2a`/`%2A`, or — when the value contains `%` — a `*` after
+/// `decodeURIComponent`-style percent-decoding (a decode failure is `false`;
+/// `urlencoding::decode` only fails on invalid UTF-8 where JS also throws on
+/// malformed `%` sequences — both land on `false` for values without any
+/// other `*` spelling).
+pub(crate) fn value_has_wildcard_semantics(value: &str) -> bool {
+    if value.nfkc().any(|c| c == '*') {
+        return true;
+    }
+    if value.to_ascii_lowercase().contains("%2a") {
+        return true;
+    }
+    if value.contains('%') {
+        if let Ok(decoded) = urlencoding::decode(value) {
+            return decoded.nfkc().any(|c| c == '*');
+        }
+        return false;
+    }
+    false
 }
 
 /// Look up `name` in the process environment. Mirrors `process.env[varName]`
@@ -35,133 +87,131 @@ fn env_lookup(name: &str) -> Option<String> {
     std::env::var(name).ok()
 }
 
-/// Expand `${VAR}` / `${VAR:-default}` references in `value`.
-///
-/// 1:1 with claude-code `expandEnvVarsInString` (`envExpansion.ts:10-38`).
-/// See the module docs for the exact matching semantics. Reads the process
-/// environment via [`env_lookup`].
+/// Expand `${VAR}` / `${VAR:-default}` references in `value` against the LIVE
+/// process environment (claude `byo(e)` = `bY(e).expanded`, and the config-side
+/// `expandEnvVars` inner `expandString` which routes through `bY`). No
+/// fallback env. See the module docs for the exact matching semantics.
 #[must_use]
 pub fn expand_env_vars_in_string(value: &str) -> EnvExpansion {
-    expand_env_vars_with(value, env_lookup)
+    expand_with_lookups(value, &env_lookup, None)
 }
 
-/// [`expand_env_vars_in_string`] with an injected `lookup` (used by tests to
-/// avoid mutating the shared process environment). `lookup` plays the role of
-/// `process.env[varName]`: `Some(v)` for a set variable, `None` for unset.
-fn expand_env_vars_with(value: &str, lookup: impl Fn(&str) -> Option<String>) -> EnvExpansion {
-    let mut missing_vars: Vec<String> = Vec::new();
+/// claude `bY(value, env, fallback)` — expand against an explicit env map with
+/// an optional fallback map (the enterprise-policy expansion path). Only
+/// map VALUES participate; a present key always wins over the fallback, and a
+/// `:-default` beats the fallback too (see module docs).
+#[must_use]
+pub fn expand_with_env(
+    value: &str,
+    env: &IndexMap<String, String>,
+    fallback: Option<&IndexMap<String, String>>,
+) -> EnvExpansion {
+    let env_fn = |name: &str| env.get(name).cloned();
+    match fallback {
+        Some(fb) => {
+            let fb_fn = |name: &str| fb.get(name).cloned();
+            expand_with_lookups(value, &env_fn, Some(&fb_fn))
+        }
+        None => expand_with_lookups(value, &env_fn, None),
+    }
+}
 
-    // Fast path: no `${` at all → no-op (the TS `.replace` would also leave
+/// The `bY` core over injected lookups (`env` plays `t[c]`, `fallback` plays
+/// `r?.[c]`). Used directly by the enterprise policy's masked/positional
+/// expansion passes (`dWu`/`j__`), which substitute proxy lookups.
+pub(crate) fn expand_with_lookups(
+    value: &str,
+    env: &dyn Fn(&str) -> Option<String>,
+    fallback: Option<&dyn Fn(&str) -> Option<String>>,
+) -> EnvExpansion {
+    let mut missing_vars: Vec<String> = Vec::new();
+    let mut wildcard_vars: Vec<String> = Vec::new();
+
+    // Fast path: no `${` at all → no-op (the JS `.replace` would also leave
     // the string untouched, but skipping the scan keeps the common case cheap).
     if !value.contains("${") {
         return EnvExpansion {
             expanded: value.to_string(),
             missing_vars,
+            wildcard_vars,
         };
     }
 
-    let bytes = value.as_bytes();
-    let mut out = String::with_capacity(value.len());
-    let mut i = 0usize;
-    while i < bytes.len() {
-        // A match starts at `${` followed by at least one non-`}` byte and a
-        // closing `}` (regex `\$\{([^}]+)\}`). Anything else copies verbatim.
-        if bytes[i] == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b'{' {
-            if let Some(close_rel) = find_close_brace(&bytes[i + 2..]) {
-                // `close_rel` is the offset of `}` within the slice after `${`.
-                // Non-empty content is guaranteed because `find_close_brace`
-                // requires at least one byte before the `}` (the `[^}]+`).
-                let content_start = i + 2;
-                let content_end = content_start + close_rel;
-                let content = &value[content_start..content_end];
-                let full_match = &value[i..=content_end]; // includes `${` and `}`.
+    let expanded = env_ref_regex()
+        .replace_all(value, |caps: &regex::Captures| {
+            let name = &caps[1];
+            // Group 2 carries the `:-` prefix; strip it for the default value.
+            let default_value = caps.get(2).map(|m| &m.as_str()[2..]);
 
-                out.push_str(&resolve(content, full_match, &lookup, &mut missing_vars));
-                i = content_end + 1; // continue past the closing `}`.
-                continue;
+            if let Some(env_value) = env(name) {
+                if value_has_wildcard_semantics(&env_value) {
+                    wildcard_vars.push(name.to_string());
+                }
+                return env_value;
             }
-        }
-        // Not a match — copy this byte. `value` is UTF-8 and we only special-
-        // case ASCII `$`/`{`/`}`, so byte indexing never splits a code point.
-        let ch_len = utf8_len(bytes[i]);
-        out.push_str(&value[i..i + ch_len]);
-        i += ch_len;
-    }
+            if let Some(default_value) = default_value {
+                // A present default (even empty) wins over the fallback env.
+                return default_value.to_string();
+            }
+            if let Some(fallback) = fallback {
+                if let Some(fb_value) = fallback(name) {
+                    if value_has_wildcard_semantics(&fb_value) {
+                        wildcard_vars.push(name.to_string());
+                    }
+                    return fb_value;
+                }
+            }
+            // Missing everywhere: record + leave the literal `${...}` in place.
+            missing_vars.push(name.to_string());
+            caps[0].to_string()
+        })
+        .into_owned();
 
     EnvExpansion {
-        expanded: out,
+        expanded,
         missing_vars,
+        wildcard_vars,
     }
 }
 
-/// Resolve one `${content}` occurrence. `full_match` is the verbatim
-/// `${...}` slice (returned when the variable is missing, mirroring the TS
-/// `return match`). Records missing variables into `missing`.
-fn resolve(
-    content: &str,
-    full_match: &str,
-    lookup: &impl Fn(&str) -> Option<String>,
-    missing: &mut Vec<String>,
-) -> String {
-    // TS: `const [varName, defaultValue] = varContent.split(':-', 2)`.
-    // Split on the FIRST `:-` only (preserving `:-` inside the default).
-    let (var_name, default_value) = match content.find(":-") {
-        Some(idx) => (&content[..idx], Some(&content[idx + 2..])),
-        None => (content, None),
-    };
-
-    if let Some(env_value) = lookup(var_name) {
-        return env_value;
-    }
-    if let Some(default_value) = default_value {
-        return default_value.to_string();
-    }
-
-    // Missing and no default: record + leave the literal `${...}` in place.
-    missing.push(var_name.to_string());
-    full_match.to_string()
-}
-
-/// Offset of the first `}` byte in `s`, requiring at least one byte before it
-/// (so the captured content is non-empty, matching `[^}]+`). Returns `None`
-/// when there is no `}` or the `}` is the very first byte (`${}` → no match).
-fn find_close_brace(s: &[u8]) -> Option<usize> {
-    let idx = s.iter().position(|&b| b == b'}')?;
-    if idx == 0 {
-        // Empty content (`${}`) — the `[^}]+` requires ≥1 char, so NOT a match.
-        None
-    } else {
-        Some(idx)
-    }
-}
-
-/// Length in bytes of the UTF-8 code point that starts with `first_byte`.
-fn utf8_len(first_byte: u8) -> usize {
-    match first_byte {
-        0x00..=0x7F => 1,
-        0xC0..=0xDF => 2,
-        0xE0..=0xEF => 3,
-        _ => 4,
-    }
+/// claude `NQr()` — a frozen copy of the process environment taken at FIRST
+/// use and never refreshed (`m_o ??= Object.freeze({...process.env})`).
+///
+/// The oracle freezes this snapshot BEFORE settings-file `env` blocks are
+/// assigned into `process.env` (`Dut()` calls `NQr()` first), so the
+/// enterprise MCP policy expands against the environment the process was
+/// LAUNCHED with — ambient settings-file env can never satisfy a policy
+/// predicate (only the managed sources' own env can, via the overlay in
+/// `enterprise_policy::policy_expansion_env`). This port never writes
+/// settings env into the process environment at all, so the lazy freeze is
+/// equivalent; it additionally shields the policy from any later
+/// `std::env::set_var`. Non-Unicode entries are skipped (JS `process.env`
+/// holds strings only).
+#[must_use]
+pub fn startup_env_snapshot() -> &'static IndexMap<String, String> {
+    static SNAPSHOT: OnceLock<IndexMap<String, String>> = OnceLock::new();
+    SNAPSHOT.get_or_init(|| {
+        std::env::vars_os()
+            .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
+            .collect()
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
     /// Build a `lookup` closure over a fixed map (avoids touching the shared
     /// process environment, which is global + racy under parallel tests).
-    fn map_lookup(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
-        let map: HashMap<String, String> = pairs
+    fn map(pairs: &[(&str, &str)]) -> IndexMap<String, String> {
+        pairs
             .iter()
             .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
-            .collect();
-        move |name: &str| map.get(name).cloned()
+            .collect()
     }
 
     fn expand(value: &str, pairs: &[(&str, &str)]) -> EnvExpansion {
-        expand_env_vars_with(value, map_lookup(pairs))
+        expand_with_env(value, &map(pairs), None)
     }
 
     #[test]
@@ -169,12 +219,13 @@ mod tests {
         let r = expand("hello ${NAME}", &[("NAME", "world")]);
         assert_eq!(r.expanded, "hello world");
         assert!(r.missing_vars.is_empty());
+        assert!(r.wildcard_vars.is_empty());
     }
 
     #[test]
     fn var_unset_no_default_is_left_literal_and_reported() {
         let r = expand("x=${MISSING}", &[]);
-        // The `${...}` is left verbatim (TS returns `match`)…
+        // The `${...}` is left verbatim (bY returns the whole match)…
         assert_eq!(r.expanded, "x=${MISSING}");
         // …and the missing name is reported.
         assert_eq!(r.missing_vars, vec!["MISSING".to_string()]);
@@ -205,7 +256,7 @@ mod tests {
 
     #[test]
     fn default_preserves_embedded_separator() {
-        // `split(':-', 2)` keeps `:-` inside the default value intact.
+        // The default runs to the first `}` — a `:-` inside it stays intact.
         let r = expand("${VAR:-a:-b}", &[]);
         assert_eq!(r.expanded, "a:-b");
         assert!(r.missing_vars.is_empty());
@@ -234,10 +285,30 @@ mod tests {
 
     #[test]
     fn empty_braces_are_not_a_match() {
-        // `${}` has empty content (`[^}]+` requires ≥1 char) → left verbatim,
-        // not reported as missing.
+        // `${}` has no identifier → left verbatim, not reported as missing.
         let r = expand("a${}b", &[]);
         assert_eq!(r.expanded, "a${}b");
+        assert!(r.missing_vars.is_empty());
+    }
+
+    #[test]
+    fn non_identifier_names_are_not_matches() {
+        // `[A-Za-z_][A-Za-z0-9_]*` only — dots, digits-first, dashes, and a
+        // bare `:` (no `:-`) all fail the pattern: left verbatim AND not
+        // recorded as missing (unlike the pre-2.1.220 `[^}]+` behaviour).
+        for s in ["${FOO.BAR}", "${9X}", "${A-B}", "${X:default}", "${ X}"] {
+            let r = expand(s, &[("FOO.BAR", "v"), ("X", "v")]);
+            assert_eq!(r.expanded, s, "input {s}");
+            assert!(r.missing_vars.is_empty(), "input {s}");
+        }
+    }
+
+    #[test]
+    fn adjacent_partial_ref_still_matches_inner() {
+        // JS regex scanning resumes per-position: `${A${B}` → `${A` literal,
+        // `${B}` expanded.
+        let r = expand("${A${B}", &[("B", "b")]);
+        assert_eq!(r.expanded, "${Ab");
         assert!(r.missing_vars.is_empty());
     }
 
@@ -257,6 +328,42 @@ mod tests {
     }
 
     #[test]
+    fn fallback_used_when_env_and_default_absent() {
+        let env = map(&[("A", "primary")]);
+        let fb = map(&[("A", "fallback-a"), ("B", "fallback-b")]);
+        let r = expand_with_env("${A}/${B}/${C}", &env, Some(&fb));
+        // Primary wins over fallback; fallback fills B; C missing everywhere.
+        assert_eq!(r.expanded, "primary/fallback-b/${C}");
+        assert_eq!(r.missing_vars, vec!["C".to_string()]);
+    }
+
+    #[test]
+    fn default_beats_fallback() {
+        // bY returns the `:-default` BEFORE consulting the fallback env.
+        let fb = map(&[("X", "fb")]);
+        let r = expand_with_env("${X:-def}", &map(&[]), Some(&fb));
+        assert_eq!(r.expanded, "def");
+        assert!(r.missing_vars.is_empty());
+    }
+
+    #[test]
+    fn wildcard_values_are_tracked() {
+        // Literal `*`, embedded `*`, percent-encoded `%2A`, NFKC fullwidth
+        // `＊`, and percent-encoded fullwidth `＊` all count (fqu).
+        for v in ["*", "a*b", "%2A", "\u{FF0A}", "%EF%BC%8A"] {
+            let r = expand("${W}", &[("W", v)]);
+            assert_eq!(r.wildcard_vars, vec!["W".to_string()], "value {v:?}");
+        }
+        // A clean value does not; nor does a wildcard in a DEFAULT.
+        assert!(expand("${W}", &[("W", "clean")]).wildcard_vars.is_empty());
+        assert!(expand("${W:-*}", &[]).wildcard_vars.is_empty());
+        // Tracked from the fallback env too, one entry per occurrence.
+        let fb = map(&[("W", "*")]);
+        let r = expand_with_env("${W} ${W}", &map(&[]), Some(&fb));
+        assert_eq!(r.wildcard_vars, vec!["W".to_string(), "W".to_string()]);
+    }
+
+    #[test]
     fn real_process_env_path_is_used() {
         // Smoke-test the public entry point against the real environment. A
         // never-set name must be left literal + reported.
@@ -266,5 +373,18 @@ mod tests {
             r.missing_vars,
             vec!["LINGXI_DEFINITELY_UNSET_VAR_XYZ".to_string()]
         );
+    }
+
+    #[test]
+    fn startup_snapshot_is_immune_to_later_set_var() {
+        // Freeze first (idempotent if another test won the race), then mutate
+        // the live env: the snapshot must not see the new variable while the
+        // live-env expansion path does.
+        let _ = startup_env_snapshot();
+        std::env::set_var("LINGXI_SNAPSHOT_IMMUNITY_PROBE", "live");
+        assert!(!startup_env_snapshot().contains_key("LINGXI_SNAPSHOT_IMMUNITY_PROBE"));
+        let live = expand_env_vars_in_string("${LINGXI_SNAPSHOT_IMMUNITY_PROBE}");
+        assert_eq!(live.expanded, "live");
+        std::env::remove_var("LINGXI_SNAPSHOT_IMMUNITY_PROBE");
     }
 }

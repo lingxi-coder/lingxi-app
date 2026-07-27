@@ -305,6 +305,7 @@ mod tests {
             disabled: false,
             timeout_ms: None,
             always_load: false,
+            config_error: None,
         };
 
         // Write a global config with a denylist entry for one server.
@@ -387,6 +388,7 @@ mod tests {
             disabled: false,
             timeout_ms: None,
             always_load: false,
+            config_error: None,
         };
 
         let dir = tempfile::tempdir().unwrap();
@@ -434,6 +436,7 @@ mod tests {
             disabled: false,
             timeout_ms: None,
             always_load: false,
+            config_error: None,
         };
 
         let dir = tempfile::tempdir().unwrap();

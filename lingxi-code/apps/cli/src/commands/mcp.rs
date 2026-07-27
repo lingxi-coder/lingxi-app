@@ -1851,13 +1851,13 @@ const PENDING_APPROVAL: &str = "\u{23F8} Pending approval (run `lingxi-cli` to a
 /// `status: n.has(i) ? SSc : (await ySc(i,a)).status`, where the pending branch
 /// skips the health check (`ySc` = the spawn/connect probe).
 ///
-/// NOTE: for APPROVED servers claude health-checks each over the network and
-/// appends a status (`✔ Connected` / `✘ Failed to connect` /
-/// `! Needs authentication`). lingxi's `mcp` crate is client-side and a real
-/// probe would require live connections, so this prints the configured transport
-/// summary WITHOUT the network probe — the server inventory itself is
-/// byte-faithful. (The pending-approval status, unlike a health check, is
-/// derived purely from config and so is surfaced exactly.)
+/// APPROVED servers are health-checked over the network (`✔ Connected` /
+/// `✘ Failed to connect`); pending ones show the approval status, servers
+/// with a config-level error show `- Not configured`, and explicitly-REJECTED
+/// project servers are omitted entirely (the binary's list-path `J9` call has
+/// no `includeRejectedProjectServers`). A config-diagnostics footer (`vgn`)
+/// follows the rows.
+///
 /// How long a single server gets to complete its initialize handshake.
 ///
 /// A wedged server must not hang the listing: it reports as a timeout and the
@@ -1867,13 +1867,29 @@ const HEALTH_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 const CONNECTED: &str = "\u{2714} Connected";
 const FAILED_TO_CONNECT: &str = "\u{2718} Failed to connect";
 
+/// Byte-exact claude-code status for an explicitly-rejected `.mcp.json` server
+/// (binary `fJy = "${qe.cross} Rejected (see disabledMcpjsonServers in
+/// settings)"`, `qe.cross` = U+2718). Shown by `mcp get`; `mcp list` OMITS
+/// rejected servers entirely (its `J9` call passes no
+/// `includeRejectedProjectServers`, so they never enter the server map).
+/// Rejected servers are never health-checked or spawned.
+const REJECTED: &str = "\u{2718} Rejected (see disabledMcpjsonServers in settings)";
+
+/// Byte-exact claude-code status for a server whose config makes it
+/// unconnectable (`yEp`'s `Qee(r)` branch — connect skipped with
+/// `errorCode:"UNCONFIGURED"`, e.g. a `url` that expanded to an empty string).
+const NOT_CONFIGURED: &str = "- Not configured";
+
 async fn run_list() -> i32 {
     let servers = load_all_servers();
     if servers.is_empty() {
         println!("No MCP servers configured. Use `lingxi-cli mcp add` to add a server.");
+        // The oracle renders the config-diagnostics panel (`vgn`) under the
+        // empty-state message too.
+        print_config_diagnostics();
         return SUCCESS;
     }
-    let (_, pending) = project_server_approval();
+    let approval = project_server_approval();
 
     // The health check SPAWNS stdio servers and opens network connections, so
     // it runs only for servers the user has actually accepted: user- and
@@ -1889,13 +1905,26 @@ async fn run_list() -> i32 {
     let registry = mcp::McpRegistry::new(transport);
 
     for cfg in &servers {
+        // Explicitly-rejected project server: OMITTED from the listing — the
+        // binary's list-path `J9` call passes no `includeRejectedProjectServers`,
+        // so a rejected server never enters the server map at all.
+        if is_rejected_project_server(cfg, &approval.rejected) {
+            continue;
+        }
         let summary = transport_summary(&cfg.spec);
-        if is_pending_project_server(cfg, &pending) {
+        if is_pending_project_server(cfg, &approval.pending) {
             // Unapproved project server: never spawned, so never health-checked
             // — 1:1 with the binary, whose pending branch skips `ySc`. The
             // transport summary still prints: hiding the URL makes it
             // impossible to see WHAT you are being asked to approve.
             println!("{}: {summary} - {PENDING_APPROVAL}", cfg.name);
+            continue;
+        }
+        if cfg.config_error.is_some() {
+            // configError (url expanded to empty): connect is skipped with
+            // `errorCode:"UNCONFIGURED"` → `yEp` reports `- Not configured`
+            // (no issue text), without dialing anything.
+            println!("{}: {summary} - {NOT_CONFIGURED}", cfg.name);
             continue;
         }
         let status =
@@ -1914,6 +1943,9 @@ async fn run_list() -> i32 {
             };
         println!("{}: {summary} - {status}", cfg.name);
     }
+    // Config diagnostics footer — the oracle's `vgn` panel rendered under the
+    // rows (missing env vars, whitespace, skipped entries, `servers` typo).
+    print_config_diagnostics();
     SUCCESS
 }
 
@@ -1931,17 +1963,26 @@ fn run_get(a: &GetArgs) -> i32 {
 
     // A pending (unapproved) project `.mcp.json` server in an untrusted
     // workspace is shown with the Pending-approval status and is NOT connected
-    // to — 1:1 with the binary `mcp get` (`qTf`): `i==="pending" ?
-    // {status:SSc} : … : await ySc(t,s)`, where the pending branch SKIPS the
-    // `ySc` health-check/spawn. The transport details are still printed (the
-    // binary keeps appending Type/URL/etc. after the Status line). Only PROJECT
-    // servers can be pending (user/local servers never require approval).
-    let is_pending = is_pending_project_server(cfg, &project_server_approval().1);
+    // to — 1:1 with the binary `mcp get` (`hJy`): `s==="pending" ?
+    // {status:TEp} : s==="rejected" ? {status:fJy} : await yEp(t,i)`, where the
+    // pending AND rejected branches SKIP the `yEp` health-check/spawn. The
+    // transport details are still printed (the binary keeps appending
+    // Type/URL/etc. after the Status line). Only PROJECT servers can be
+    // pending/rejected (user/local servers never require approval).
+    let approval = project_server_approval();
+    let is_pending = is_pending_project_server(cfg, &approval.pending);
+    let is_rejected = is_rejected_project_server(cfg, &approval.rejected);
 
     println!("{}:", cfg.name);
     println!("  Scope: {}", scope_detail(cfg.scope));
     if is_pending {
         println!("  Status: {PENDING_APPROVAL}");
+    } else if is_rejected {
+        println!("  Status: {REJECTED}");
+    } else if cfg.config_error.is_some() {
+        // configError → `yEp` skips the connect and reports `- Not configured`
+        // (`Qee`'s UNCONFIGURED branch carries no issue text).
+        println!("  Status: {NOT_CONFIGURED}");
     }
     match &cfg.spec {
         traits::McpTransportSpec::Stdio { command, args, env } => {
@@ -2064,6 +2105,104 @@ fn local_server_names() -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Print the oracle's "MCP config diagnostics" panel (`vgn`) as plain text
+/// under the `mcp list` output: title + docs link, then per-scope groups in
+/// the panel's order (user, project, local) with `[Error]` / `[Warning]` rows
+/// (`JQs`). Per-server WARNING rows whose server is overridden by a later
+/// scope are suppressed (`vSp`: user < project-when-approved < local); fatal
+/// rows never are. Silent when every config is clean, so a healthy setup
+/// prints nothing. (The ink panel's status glyph and tree guides have no
+/// plain-text equivalent; the strings themselves are byte-faithful.)
+fn print_config_diagnostics() {
+    use mcp::config_diagnostics::{McpConfigSeverity, McpConfigWarning};
+
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let project_mcp = nearest_project_mcp_json(&cwd);
+    let global = global_config_path();
+    let warnings = mcp::config_diagnostics::collect_all_mcp_config_warnings_at(
+        &project_mcp,
+        &cwd,
+        global.as_deref(),
+    );
+    if warnings.is_empty() {
+        return;
+    }
+
+    // `vSp` suppression inputs: server names defined (and active) in the
+    // scopes that override each source.
+    let local_names = local_server_names();
+    let approved_project = project_server_approval().approved;
+
+    let mut printed_header = false;
+    for scope in [ConfigScope::User, ConfigScope::Project, ConfigScope::Local] {
+        let rows: Vec<&McpConfigWarning> = warnings
+            .iter()
+            .filter(|w| w.scope == scope)
+            .filter(|w| {
+                if w.severity == McpConfigSeverity::Fatal {
+                    return true;
+                }
+                let Some(name) = &w.server_name else {
+                    return true;
+                };
+                match scope {
+                    // A user-scope server is overridden by an APPROVED project
+                    // server (`gKy`) or a local one.
+                    ConfigScope::User => {
+                        !approved_project.contains(name) && !local_names.contains(name)
+                    }
+                    ConfigScope::Project => !local_names.contains(name),
+                    _ => true,
+                }
+            })
+            .collect();
+        if rows.is_empty() {
+            continue;
+        }
+        if !printed_header {
+            printed_header = true;
+            println!();
+            println!("MCP config diagnostics");
+            println!(
+                "For help configuring MCP servers, see: https://code.claude.com/docs/en/mcp"
+            );
+        }
+        let has_fatal = rows
+            .iter()
+            .any(|w| w.severity == McpConfigSeverity::Fatal);
+        println!();
+        println!(
+            "[{}] {}",
+            if has_fatal {
+                "Failed to parse"
+            } else {
+                "Contains warnings"
+            },
+            scope_detail(scope)
+        );
+        if let Some(f) = rows.iter().find_map(|w| w.file.as_ref()) {
+            println!("Location: {f}");
+        }
+        for w in rows {
+            let tag = match w.severity {
+                McpConfigSeverity::Fatal => "[Error]",
+                McpConfigSeverity::Warning => "[Warning]",
+            };
+            let name = w
+                .server_name
+                .as_deref()
+                .map(|n| format!("[{n}] "))
+                .unwrap_or_default();
+            let path = if w.path.is_empty() {
+                String::new()
+            } else {
+                format!("{}: ", w.path)
+            };
+            println!("  {tag} {name}{path}{}", w.message);
+        }
+    }
+}
+
 /// Whether a LOADED server is a pending (unapproved) project `.mcp.json` server
 /// — the only servers shown as `\u23F8 Pending approval` and never spawned by
 /// `mcp list` / `mcp get`. A server qualifies iff its effective (loaded) scope is
@@ -2075,14 +2214,40 @@ fn is_pending_project_server(cfg: &mcp::connection::McpServerConfig, pending: &[
     cfg.scope == ConfigScope::Project && pending.iter().any(|n| n == &cfg.name)
 }
 
-/// Partition the project `.mcp.json` servers into `(approved, pending)` using the
-/// per-project approval state in `~/.lingxi.json` `projects.<key>`: a server is
-/// approved iff it is NOT in `disabledMcpjsonServers` AND
-/// (`enableAllProjectMcpServers` is true OR it is in `enabledMcpjsonServers`).
-/// `pending` (unapproved) project servers are the ones claude's `mcp get`
-/// not-found message omits from the list and flags with an awaiting-approval
-/// note.
-fn project_server_approval() -> (Vec<String>, Vec<String>) {
+/// Whether a LOADED server is an explicitly-rejected project `.mcp.json`
+/// server (in `disabledMcpjsonServers`). Same scope guard as
+/// [`is_pending_project_server`]: a same-named USER or LOCAL server (which
+/// takes precedence in the loaded view and never requires approval) must NOT
+/// be suppressed or labelled rejected.
+fn is_rejected_project_server(cfg: &mcp::connection::McpServerConfig, rejected: &[String]) -> bool {
+    cfg.scope == ConfigScope::Project && rejected.iter().any(|n| n == &cfg.name)
+}
+
+/// Per-project approval state of the `.mcp.json` servers, mirroring claude's
+/// three-way classifier (`SZr`): approved / pending / rejected.
+#[derive(Debug, Default)]
+struct ProjectServerApproval {
+    /// NOT in `disabledMcpjsonServers` AND (`enableAllProjectMcpServers` OR in
+    /// `enabledMcpjsonServers`) — loaded and health-checked normally.
+    approved: Vec<String>,
+    /// Neither approved nor rejected — shown as `⏸ Pending approval` and never
+    /// spawned.
+    pending: Vec<String>,
+    /// In `disabledMcpjsonServers` — explicitly rejected: OMITTED from `mcp
+    /// list` entirely and shown by `mcp get` as `✘ Rejected (see
+    /// disabledMcpjsonServers in settings)`, never spawned.
+    rejected: Vec<String>,
+}
+
+/// Partition the project `.mcp.json` servers into approved / pending /
+/// rejected using the per-project approval state in `~/.lingxi.json`
+/// `projects.<key>`: a server is REJECTED when in `disabledMcpjsonServers`
+/// (an explicit rejection always wins), APPROVED when
+/// `enableAllProjectMcpServers` is true OR it is in `enabledMcpjsonServers`,
+/// and PENDING otherwise. `pending` project servers are the ones claude's
+/// `mcp get` not-found message omits from the list and flags with an
+/// awaiting-approval note; `rejected` ones are omitted without the note.
+fn project_server_approval() -> ProjectServerApproval {
     let all: Vec<String> = project_mcp_json_read_path()
         .filter(|p| p.exists())
         .and_then(|p| read_json_object(&p).ok())
@@ -2090,7 +2255,7 @@ fn project_server_approval() -> (Vec<String>, Vec<String>) {
         .map(|m| m.keys().cloned().collect())
         .unwrap_or_default();
     if all.is_empty() {
-        return (Vec::new(), Vec::new());
+        return ProjectServerApproval::default();
     }
     let str_array = |cfg: &serde_json::Map<String, serde_json::Value>, key: &str| -> Vec<String> {
         cfg.get(key)
@@ -2115,16 +2280,41 @@ fn project_server_approval() -> (Vec<String>, Vec<String>) {
             )
         })
         .unwrap_or((false, Vec::new(), Vec::new()));
-    let mut approved = Vec::new();
-    let mut pending = Vec::new();
+    let mut out = ProjectServerApproval::default();
     for name in all {
-        if project_server_is_approved(&name, enable_all, &enabled, &disabled) {
-            approved.push(name);
-        } else {
-            pending.push(name);
+        match classify_project_server(&name, enable_all, &enabled, &disabled) {
+            ProjectServerState::Approved => out.approved.push(name),
+            ProjectServerState::Pending => out.pending.push(name),
+            ProjectServerState::Rejected => out.rejected.push(name),
         }
     }
-    (approved, pending)
+    out
+}
+
+/// Three-way project-server state, 1:1 with claude's `SZr` classifier values
+/// (`"approved" | "pending" | "rejected"`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProjectServerState {
+    Approved,
+    Pending,
+    Rejected,
+}
+
+/// claude `SZr`: an explicit rejection (`disabledMcpjsonServers`) always wins;
+/// otherwise approved per [`project_server_is_approved`], else pending.
+fn classify_project_server(
+    name: &str,
+    enable_all: bool,
+    enabled: &[String],
+    disabled: &[String],
+) -> ProjectServerState {
+    if disabled.iter().any(|d| d == name) {
+        ProjectServerState::Rejected
+    } else if project_server_is_approved(name, enable_all, enabled, disabled) {
+        ProjectServerState::Approved
+    } else {
+        ProjectServerState::Pending
+    }
 }
 
 /// Pure approval predicate for a project `.mcp.json` server, 1:1 with claude's
@@ -2151,11 +2341,12 @@ fn project_server_is_approved(
 /// appends an awaiting-approval note instead. Verified against the live 2.1.191
 /// binary.
 fn not_found_message_get(name: &str) -> String {
-    let (approved_project, pending_project) = project_server_approval();
+    let approval = project_server_approval();
+    let pending_project = approval.pending;
     let mut set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     set.extend(user_server_names());
     set.extend(local_server_names());
-    set.extend(approved_project);
+    set.extend(approval.approved);
     let names: Vec<String> = set.into_iter().collect(); // BTreeSet ⇒ already sorted/unique
     let clause = if pending_project.is_empty() {
         ""
@@ -2768,7 +2959,10 @@ mod name_validation_tests {
 
 #[cfg(test)]
 mod pending_approval_tests {
-    use super::{is_pending_project_server, project_server_is_approved, PENDING_APPROVAL};
+    use super::{
+        classify_project_server, is_pending_project_server, is_rejected_project_server,
+        project_server_is_approved, ProjectServerState, NOT_CONFIGURED, PENDING_APPROVAL, REJECTED,
+    };
     use mcp::connection::{ConfigScope, McpServerConfig};
     use std::collections::HashMap;
 
@@ -2784,6 +2978,7 @@ mod pending_approval_tests {
             disabled: false,
             timeout_ms: None,
             always_load: false,
+            config_error: None,
         }
     }
 
@@ -2875,5 +3070,85 @@ mod pending_approval_tests {
                 "{scope:?} server must not be treated as pending"
             );
         }
+    }
+
+    /// The rejected status string is byte-exact with the binary `fJy` —
+    /// `${qe.cross} Rejected (see disabledMcpjsonServers in settings)` with
+    /// `qe.cross` = U+2718 (HEAVY BALLOT X, same glyph as Failed to connect).
+    #[test]
+    fn rejected_string_is_byte_exact() {
+        assert_eq!(
+            REJECTED,
+            "\u{2718} Rejected (see disabledMcpjsonServers in settings)"
+        );
+        // And the UNCONFIGURED status (`yEp`'s `Qee` branch).
+        assert_eq!(NOT_CONFIGURED, "- Not configured");
+    }
+
+    /// `SZr` three-way classification: disabled always wins (rejected, even
+    /// against enable-all AND an explicit enable), enabled/enable-all is
+    /// approved, everything else is pending.
+    #[test]
+    fn classifier_matches_szr() {
+        // Rejected: in disabled, regardless of the other knobs.
+        assert_eq!(
+            classify_project_server("s", true, &["s".into()], &["s".into()]),
+            ProjectServerState::Rejected
+        );
+        // Approved: explicitly enabled, or enable-all.
+        assert_eq!(
+            classify_project_server("s", false, &["s".into()], &[]),
+            ProjectServerState::Approved
+        );
+        assert_eq!(
+            classify_project_server("s", true, &[], &[]),
+            ProjectServerState::Approved
+        );
+        // Pending: no choice recorded.
+        assert_eq!(
+            classify_project_server("s", false, &[], &[]),
+            ProjectServerState::Pending
+        );
+    }
+
+    /// A REJECTED project server is distinct from a pending one: `mcp list`
+    /// omits it entirely and `mcp get` shows the Rejected status. Same
+    /// scope guard as pending — a same-named user/local server is never
+    /// suppressed.
+    #[test]
+    fn rejected_project_server_scope_guard() {
+        let rejected = vec!["srv".to_string()];
+        assert!(is_rejected_project_server(
+            &stdio("srv", ConfigScope::Project),
+            &rejected
+        ));
+        for scope in [ConfigScope::User, ConfigScope::Local] {
+            assert!(
+                !is_rejected_project_server(&stdio("srv", scope), &rejected),
+                "{scope:?} server must not be treated as rejected"
+            );
+        }
+    }
+
+    /// A server carrying a parse-time `configError` (url expanded to empty)
+    /// reports `- Not configured` and must never be dialed: the registry
+    /// connect path short-circuits to a Connection error holding the
+    /// configError text.
+    #[tokio::test]
+    async fn config_error_server_is_not_dialed() {
+        let mut cfg = stdio("broken", ConfigScope::User);
+        cfg.config_error = Some(
+            "'url' \"${X}\" expanded to an empty string. Set the referenced \
+             environment variable, or update the server's config and reconnect."
+                .to_string(),
+        );
+        let transport: std::sync::Arc<dyn traits::McpTransport> =
+            std::sync::Arc::new(platform_posix::PosixMcpTransport::new());
+        let registry = mcp::McpRegistry::new(transport);
+        let err = registry.connect(cfg.clone()).await.unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!("connection failed: {}", cfg.config_error.unwrap())
+        );
     }
 }

@@ -35,6 +35,15 @@ pub struct McpServerConfig {
     /// on the API"). OR'd into each tool's `always_load` bit at list time.
     #[serde(default, skip_serializing_if = "is_false")]
     pub always_load: bool,
+    /// Config-level error that makes the server unconnectable (claude
+    /// `configError`, reason `url_invalid`): set at parse time when a remote
+    /// entry's `url` expanded to an empty string. The server is KEPT in the
+    /// inventory — `mcp list` / `mcp get` show it as `- Not configured` — but
+    /// the connect path short-circuits to a failure WITHOUT dialing (oracle
+    /// skips the connect entirely: `mcp_connect_skipped` reason
+    /// "unconfigured" → `errorCode:"UNCONFIGURED"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_error: Option<String>,
 }
 
 /// `skip_serializing_if` predicate: omit a `bool` field from the serialized

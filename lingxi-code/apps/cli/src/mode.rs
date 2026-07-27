@@ -339,6 +339,25 @@ pub(crate) async fn run_ratatui_with_initial_prompt(
     // `/commit` expands its embedded `!`git …`` bodies before submit.
     let shell_expansion = tui_build.runtime.shell_expansion.clone();
     let session = build_session_info(orchestrator.as_ref()).await;
+    // (cc 2.1.218) Persistent prompt history: the GLOBAL
+    // `~/.lingxi/history.jsonl` store (rows carry a `project` field), keyed to
+    // this session id for the recall ordering + dedupe key. `None` under the
+    // `CLAUDE_CODE_SKIP_PROMPT_HISTORY` escape hatch, keeping recall
+    // session-local like the pre-store TUI.
+    let prompt_history = if session::prompt_history::PromptHistoryStore::disabled_by_env() {
+        None
+    } else {
+        let history_session_id = orchestrator.current_session_id().await.to_string();
+        let history_cwd =
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        Some(std::sync::Arc::new(
+            session::prompt_history::PromptHistoryStore::new(
+                &crate::run::lingxi_home_dir(),
+                &history_cwd,
+                Some(history_session_id),
+            ),
+        ))
+    };
     let handle = tokio::runtime::Handle::current();
     let switch_orch = orchestrator.clone();
     // Cloned here (before the turn closure takes ownership) for the
@@ -1042,6 +1061,7 @@ pub(crate) async fn run_ratatui_with_initial_prompt(
             Some(sandbox_toggle),
             Some(command_registry),
             Some(task_registry_handle),
+            prompt_history,
             initial_permission_mode,
             bypass_available,
             emoji_completion_enabled,

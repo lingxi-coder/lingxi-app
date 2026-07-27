@@ -313,6 +313,12 @@ pub struct BottomPane {
     ///
     /// [`ChatWidget::set_command_registry`]: crate::chat_widget::ChatWidget::set_command_registry
     registry_commands: Vec<RegistrySlashRow>,
+    /// Persistent prompt-history store (`~/.lingxi/history.jsonl`, cc 2.1.218
+    /// locked/deduped writes). `None` (tests, headless) keeps recall
+    /// session-local. Seeded + set via [`Self::set_prompt_history_store`];
+    /// every submission enqueues its raw (placeholder-form) text and flushes
+    /// on a background thread — the store's `Drop` is the exit flush.
+    history_store: Option<std::sync::Arc<session::prompt_history::PromptHistoryStore>>,
 }
 
 impl BottomPane {
@@ -320,6 +326,7 @@ impl BottomPane {
     #[must_use]
     pub fn new(theme: Theme) -> Self {
         Self {
+            history_store: None,
             composer: Composer::default(),
             completion: None,
             emoji_completion_enabled: true,
@@ -882,6 +889,21 @@ impl BottomPane {
         self.composer.is_blank()
     }
 
+    /// Attach the persistent prompt-history store: seed the composer's recall
+    /// list from `history.jsonl` (claude-code `THo`: this project's entries,
+    /// current session first, cap 100) and keep the handle so submissions
+    /// persist. Recall order from the store is candidate-first; the composer
+    /// stores oldest-first, hence the reverse.
+    pub fn set_prompt_history_store(
+        &mut self,
+        store: std::sync::Arc<session::prompt_history::PromptHistoryStore>,
+    ) {
+        let mut seed = store.recall_displays();
+        seed.reverse();
+        self.composer.seed_history(seed);
+        self.history_store = Some(store);
+    }
+
     /// Take the composer's submission: pushes non-blank text to history,
     /// clears the buffer, and returns the trimmed text. `None` (buffer
     /// untouched) when the composer is blank.
@@ -890,6 +912,18 @@ impl BottomPane {
             return None;
         }
         let mut text = self.composer.take();
+        // Persist the typed prompt (claude-code `cgr` → queue + background
+        // flush). The PRE-expansion text is stored — CC's `display` field also
+        // carries the paste placeholders, with contents externalised into
+        // `pastedContents` (unported). Flush off-thread so the render loop
+        // never blocks on the history lockfile.
+        if let Some(store) = &self.history_store {
+            store.enqueue(&text);
+            let store = store.clone();
+            std::thread::spawn(move || {
+                let _ = store.flush();
+            });
+        }
         // Expand large-paste placeholders (codex `expand_pending_pastes`):
         // each placeholder still present becomes its full pasted text; a
         // placeholder the user deleted drops its paste. Longest-first so the
@@ -2925,6 +2959,42 @@ mod tests {
         // The submission was pushed to history.
         let _ = pane.handle_key(key(KeyCode::Up));
         assert_eq!(pane.composer().text(), "  hi there  ");
+    }
+
+    #[test]
+    fn prompt_history_store_persists_and_seeds_recall() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = std::path::Path::new("/proj/history-test");
+        let store = std::sync::Arc::new(session::prompt_history::PromptHistoryStore::new(
+            dir.path(),
+            project,
+            Some("s-1".into()),
+        ));
+        let mut pane = super::BottomPane::new(Theme::dark());
+        pane.set_prompt_history_store(store.clone());
+        typ(&mut pane, "persisted prompt");
+        assert_eq!(
+            pane.take_submission_state().as_deref(),
+            Some("persisted prompt")
+        );
+        // The submit spawned a background flush; a direct flush serializes
+        // behind it (the store's single-flight gate) so the row is on disk
+        // exactly once afterwards.
+        assert!(store.flush());
+        let raw = std::fs::read_to_string(dir.path().join("history.jsonl")).unwrap();
+        assert_eq!(raw.lines().count(), 1);
+        assert!(raw.contains("\"display\":\"persisted prompt\""));
+
+        // A NEW session's pane seeds its up-arrow recall from the store.
+        let fresh = std::sync::Arc::new(session::prompt_history::PromptHistoryStore::new(
+            dir.path(),
+            project,
+            Some("s-2".into()),
+        ));
+        let mut pane2 = super::BottomPane::new(Theme::dark());
+        pane2.set_prompt_history_store(fresh);
+        let _ = pane2.handle_key(key(KeyCode::Up));
+        assert_eq!(pane2.composer().text(), "persisted prompt");
     }
 
     #[test]

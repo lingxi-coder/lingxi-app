@@ -13,6 +13,7 @@ pub mod forked_skill;
 pub mod filestate;
 pub mod jsonl;
 pub mod metadata;
+pub mod prompt_history;
 pub mod resumer;
 pub mod rewind;
 pub mod rollout;

@@ -656,6 +656,18 @@ impl Composer {
         }
     }
 
+    /// Seed the recall history from the persistent prompt-history store
+    /// (`history.jsonl`), OLDEST first — up-arrow recall walks backward from
+    /// the end, so the last element is the first recall candidate. Called once
+    /// at startup, before any live submission is pushed; a live [`Self::take`]
+    /// then appends after the seeded entries exactly like claude-code's
+    /// in-memory-before-disk merge order.
+    pub fn seed_history(&mut self, entries: Vec<String>) {
+        debug_assert!(self.history.is_empty(), "seed before live submissions");
+        self.history = entries;
+        self.browse = None;
+    }
+
     /// Take the current text, pushing it to history (when non-blank) and
     /// resetting the buffer. Returns the raw (untrimmed) text.
     pub fn take(&mut self) -> String {

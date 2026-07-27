@@ -588,6 +588,10 @@ pub fn run_app(
     sandbox_toggle: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     command_registry: Option<std::sync::Arc<tokio::sync::RwLock<command_api::CommandRegistry>>>,
     task_registry: Option<std::sync::Arc<dyn traits::task_registry::TaskRegistryHandle>>,
+    // Persistent prompt-history store (`~/.lingxi/history.jsonl`, cc 2.1.218):
+    // seeds the composer recall + persists submissions. `None` = session-local
+    // recall only (tests, `CLAUDE_CODE_SKIP_PROMPT_HISTORY`).
+    prompt_history: Option<std::sync::Arc<session::prompt_history::PromptHistoryStore>>,
     // The resolved boot permission mode + whether bypass is an available
     // Shift+Tab cycle target — seeds the below-composer mode indicator.
     initial_permission_mode: permission::PermissionMode,
@@ -677,6 +681,9 @@ pub fn run_app(
     }
     if let Some(slot) = permission_snapshot {
         app.chat_widget.set_permission_snapshot(slot);
+    }
+    if let Some(store) = prompt_history {
+        app.chat_widget.set_prompt_history_store(store);
     }
     if let Some(slot) = plugin_snapshot {
         app.chat_widget.set_plugin_snapshot(slot);

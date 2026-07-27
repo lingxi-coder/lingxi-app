@@ -608,6 +608,17 @@ impl ChatWidget {
         self.command_registry = Some(registry);
     }
 
+    /// Wire the persistent prompt-history store (`~/.lingxi/history.jsonl`,
+    /// cc 2.1.218): seeds the composer's up-arrow recall from disk and makes
+    /// every submission persist through the locked/deduped writer. `None`
+    /// (every test widget) keeps recall session-local.
+    pub fn set_prompt_history_store(
+        &mut self,
+        store: std::sync::Arc<session::prompt_history::PromptHistoryStore>,
+    ) {
+        self.bottom_pane.set_prompt_history_store(store);
+    }
+
     /// Override where `/export` writes transcripts (tests/embedders; the
     /// default is [`crate::export::default_export_dir`]).
     pub fn set_export_dir(&mut self, dir: std::path::PathBuf) {

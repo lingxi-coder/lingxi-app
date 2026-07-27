@@ -92,6 +92,8 @@ dirs = "5"
 # trait's ~16 non-defaulted methods. `orchestrator` does not depend on `tui`, so
 # this dev-only edge introduces no dependency cycle.
 orchestrator = { path = "../orchestrator" }
+# Prompt-history persistence tests write a real `history.jsonl` in a tempdir.
+tempfile = "3.13"
 
 [lints]
 workspace = true

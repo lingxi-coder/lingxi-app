@@ -18,9 +18,11 @@
 //!   queued rows, then removing exactly the written entries from the queue —
 //!   a failed write keeps them queued (the 2.1.218 no-drop half).
 //! - **Read-merge dedupe** (`bHo`): reads yield the in-memory queue
-//!   newest-first, then the on-disk rows newest-first, deduplicated on the
-//!   `${timestamp}\x00${sessionId ?? ""}` key — the 2.1.218 no-duplicate half
-//!   (a row that raced into the file while still queued is yielded once).
+//!   newest-first, then the on-disk rows newest-first, suppressing any disk row
+//!   whose `${timestamp}\x00${sessionId ?? ""}` key is already QUEUED — the
+//!   2.1.218 no-duplicate half (a row that raced into the file while still
+//!   queued is yielded once). CC's set `t` is seeded from the queue and never
+//!   gains a disk key, so two identical on-disk rows are both yielded.
 //!   Unparseable lines log `Failed to parse history line: {err}` and are
 //!   skipped.
 //! - **Recall order** (`THo`): project-filtered, current-session entries
@@ -126,18 +128,15 @@ impl PromptHistoryStore {
         }
     }
 
-    /// Whether prompt-history persistence is disabled by env
-    /// (`CLAUDE_CODE_SKIP_PROMPT_HISTORY`, truthy check).
+    /// Whether prompt-history persistence is disabled by env — CC's
+    /// `Yt(process.env.CLAUDE_CODE_SKIP_PROMPT_HISTORY)` gate in `cgr`. `Yt` is
+    /// the TRUTHY set (`1`/`true`/`yes`/`on`), NOT the complement of the falsy
+    /// set, so `=2` / `=y` / `=enabled` keep recording.
     #[must_use]
     pub fn disabled_by_env() -> bool {
         ["LINGXI_SKIP_PROMPT_HISTORY", "CLAUDE_CODE_SKIP_PROMPT_HISTORY"]
             .iter()
-            .any(|var| {
-                std::env::var(var).is_ok_and(|v| {
-                    let t = v.trim().to_ascii_lowercase();
-                    !t.is_empty() && t != "0" && t != "false" && t != "no" && t != "off"
-                })
-            })
+            .any(|var| traits::env::is_env_truthy(std::env::var(var).ok().as_deref()))
     }
 
     /// Queue one typed prompt (`cuy`). Applies the consecutive-duplicate
@@ -244,17 +243,21 @@ impl PromptHistoryStore {
     }
 
     /// Read-merge iterator (`bHo`): queued entries newest-first, then on-disk
-    /// rows newest-first, deduplicated on `${timestamp}\x00${sessionId ?? ""}`.
+    /// rows newest-first, minus every disk row whose
+    /// `${timestamp}\x00${sessionId ?? ""}` key is already QUEUED.
     /// Unparseable lines log `Failed to parse history line: {err}` and are
     /// skipped; a missing file yields the queue only.
     #[must_use]
     pub fn read_merged(&self) -> Vec<PromptHistoryEntry> {
-        let mut seen: HashSet<String> = HashSet::new();
+        // `t = new Set(e.map(…))` — seeded from the QUEUE snapshot and never
+        // added to afterwards, so a disk row is only ever tested against the
+        // queue; two identical on-disk rows are both yielded.
+        let mut queued: HashSet<String> = HashSet::new();
         let mut out = Vec::new();
         {
             let pending = self.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             for entry in pending.queue.iter().rev() {
-                seen.insert(entry.dedupe_key());
+                queued.insert(entry.dedupe_key());
                 out.push(entry.clone());
             }
         }
@@ -269,7 +272,7 @@ impl PromptHistoryStore {
             }
             match serde_json::from_str::<PromptHistoryEntry>(line) {
                 Ok(entry) => {
-                    if seen.insert(entry.dedupe_key()) {
+                    if !queued.contains(&entry.dedupe_key()) {
                         out.push(entry);
                     }
                 }
@@ -357,36 +360,62 @@ struct LockGuard {
 impl LockGuard {
     fn acquire(target: &Path) -> std::io::Result<LockGuard> {
         let lock_dir = lock_dir_for(target);
+        // proper-lockfile's `iig`: `nig.operation({retries: 3, minTimeout: 50})`
+        // wraps ONE whole `n9i` pass per attempt and retries EVERY error
+        // (`if (i.retry(s)) return`), surfacing the last one when the budget is
+        // spent (`r(i.mainError())`). Acquisition is therefore bounded at four
+        // passes / ~350ms whatever state the lock path is in.
         let mut attempt = 0usize;
         loop {
-            match fs::create_dir(&lock_dir) {
-                Ok(()) => {
-                    return Ok(LockGuard {
-                        lock_dir,
-                    })
-                }
-                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                    // Stale? (proper-lockfile: lock mtime older than `stale`.)
-                    let stale = fs::metadata(&lock_dir)
-                        .and_then(|meta| meta.modified())
-                        .ok()
-                        .and_then(|mtime| SystemTime::now().duration_since(mtime).ok())
-                        .is_some_and(|age| age > LOCK_STALE);
-                    if stale {
-                        // Break the stale lock and retry immediately.
-                        let _ = fs::remove_dir_all(&lock_dir);
-                        continue;
-                    }
+            match acquire_once(&lock_dir) {
+                Ok(()) => return Ok(LockGuard { lock_dir }),
+                Err(err) => {
                     if attempt >= LOCK_RETRY_DELAYS_MS.len() {
                         return Err(err);
                     }
                     std::thread::sleep(Duration::from_millis(LOCK_RETRY_DELAYS_MS[attempt]));
                     attempt += 1;
                 }
-                Err(err) => return Err(err),
             }
         }
     }
+}
+
+/// One proper-lockfile `n9i` pass: mkdir the lock dir, and on `EEXIST` break it
+/// at most ONCE when it is stale. The break is `sIc` (rmdir — `ENOENT` counts as
+/// success, every other error PROPAGATES) followed by the `{...t, stale: 0}`
+/// re-entry, so a lock that survives the break is a hard `ELOCKED` rather than
+/// another staleness round. Both halves are load-bearing: an entry the process
+/// cannot remove (a plain file at the lock path, an unwritable parent) is a
+/// fixed point — discarding the rmdir error and re-testing staleness spins
+/// forever at 100% CPU while holding `flush_gate`.
+fn acquire_once(lock_dir: &Path) -> std::io::Result<()> {
+    let Err(err) = fs::create_dir(lock_dir) else {
+        return Ok(());
+    };
+    if err.kind() != std::io::ErrorKind::AlreadyExists {
+        return Err(err);
+    }
+    // `t.fs.stat(n, …)`: a lock that vanished between mkdir and stat re-enters
+    // with `stale: 0` (`i.code === "ENOENT"`); any other stat error propagates.
+    let mtime = match fs::metadata(lock_dir).and_then(|meta| meta.modified()) {
+        Ok(mtime) => mtime,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return fs::create_dir(lock_dir),
+        Err(err) => return Err(err),
+    };
+    // `iIc`: `mtime < Date.now() - stale` — a future mtime is NOT stale.
+    let stale = SystemTime::now()
+        .duration_since(mtime)
+        .is_ok_and(|age| age > LOCK_STALE);
+    if !stale {
+        return Err(err); // ELOCKED
+    }
+    match fs::remove_dir(lock_dir) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err),
+    }
+    fs::create_dir(lock_dir)
 }
 
 impl Drop for LockGuard {
@@ -512,6 +541,142 @@ mod tests {
         );
         filetime::set_file_mtime(&lock_dir, old).unwrap();
         assert!(store.flush(), "stale lock must be broken and the write proceed");
+    }
+
+    /// A lock entry the process cannot remove must FAIL the acquisition, not
+    /// spin: `remove_dir` reports ENOTDIR for a plain file at the lock path, and
+    /// proper-lockfile propagates that (`sIc` → `if (a) return r(a)`).
+    #[test]
+    fn unremovable_stale_lock_fails_instead_of_spinning() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(dir.path(), "s-1");
+        store.enqueue("blocked");
+        // A stale REGULAR FILE at the lock path: mkdir → EEXIST, stat succeeds
+        // (so the staleness test fires), rmdir → ENOTDIR forever.
+        let lock_path = dir.path().join("history.jsonl.lock");
+        fs::write(&lock_path, b"not a dir").unwrap();
+        let old = filetime::FileTime::from_unix_time(
+            (SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                - 60) as i64,
+            0,
+        );
+        filetime::set_file_mtime(&lock_path, old).unwrap();
+
+        let started = std::time::Instant::now();
+        assert!(!store.flush(), "an unbreakable lock must report failure");
+        // Bounded by the 50/100/200ms retry budget — a spin never returns.
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "acquisition must terminate, took {:?}",
+            started.elapsed()
+        );
+        // No drop: the batch is still queued for the next flush.
+        fs::remove_file(&lock_path).unwrap();
+        assert!(store.flush());
+        let raw = fs::read_to_string(dir.path().join("history.jsonl")).unwrap();
+        assert_eq!(raw.lines().count(), 1);
+    }
+
+    /// `n9i`'s arms, one pass each — every one of them TERMINATES.
+    #[test]
+    fn acquire_once_matches_n9i_arms() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock_dir = dir.path().join("history.jsonl.lock");
+        let stale = filetime::FileTime::from_unix_time(
+            (SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                - 60) as i64,
+            0,
+        );
+
+        // Free path ⇒ acquired.
+        acquire_once(&lock_dir).unwrap();
+        // Held, fresh ⇒ ELOCKED, and the holder's lock is left alone.
+        assert_eq!(
+            acquire_once(&lock_dir).unwrap_err().kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        assert!(lock_dir.is_dir());
+        // Held, stale ⇒ broken ONCE (`sIc`) and re-taken (`stale: 0` re-entry).
+        filetime::set_file_mtime(&lock_dir, stale).unwrap();
+        acquire_once(&lock_dir).unwrap();
+        assert!(lock_dir.is_dir());
+        // `stat` → ENOENT (a dangling symlink at the lock path): re-enter with
+        // `stale: 0`, whose mkdir fails EEXIST — bounded, not a staleness loop.
+        fs::remove_dir(&lock_dir).unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(dir.path().join("nowhere"), &lock_dir).unwrap();
+            assert_eq!(
+                acquire_once(&lock_dir).unwrap_err().kind(),
+                std::io::ErrorKind::AlreadyExists
+            );
+        }
+    }
+
+    /// `Yt` (the oracle's truthiness helper) is the TRUTHY set, not the
+    /// complement of the falsy set: `=2` keeps recording.
+    #[test]
+    fn skip_env_uses_the_oracle_truthy_set() {
+        static SERIAL: Mutex<()> = Mutex::new(());
+        let _guard = SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let var = "CLAUDE_CODE_SKIP_PROMPT_HISTORY";
+        std::env::remove_var(var);
+        assert!(!PromptHistoryStore::disabled_by_env());
+        for truthy in ["1", "true", "YES", " on "] {
+            std::env::set_var(var, truthy);
+            assert!(
+                PromptHistoryStore::disabled_by_env(),
+                "{truthy:?} is in `Yt`'s truthy set"
+            );
+        }
+        for other in ["0", "false", "no", "off", "", "2", "y", "enabled", "maybe"] {
+            std::env::set_var(var, other);
+            assert!(
+                !PromptHistoryStore::disabled_by_env(),
+                "{other:?} is NOT in `Yt`'s truthy set — CC keeps recording"
+            );
+        }
+        std::env::remove_var(var);
+    }
+
+    /// `bHo`'s dedupe set is seeded from the QUEUE and never gains a disk key,
+    /// so two identical on-disk rows are both yielded.
+    #[test]
+    fn read_merge_keeps_duplicate_on_disk_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(dir.path(), "s-1");
+        store.enqueue("retried prompt");
+        // The partial-write retry: the batch stayed queued and was re-appended
+        // verbatim, so the same row is on disk twice.
+        let line = serde_json::to_string(&store.read_merged()[0]).unwrap();
+        fs::write(
+            dir.path().join("history.jsonl"),
+            format!("{line}\n{line}\n"),
+        )
+        .unwrap();
+
+        let fresh = store_in(dir.path(), "s-2");
+        assert_eq!(
+            fresh.read_merged().len(),
+            2,
+            "disk rows are never deduped against each other"
+        );
+        // …but the queue still suppresses its own copy on disk.
+        assert_eq!(
+            store
+                .read_merged()
+                .iter()
+                .filter(|e| e.display == "retried prompt")
+                .count(),
+            1,
+            "the queued copy shadows BOTH disk copies of its own key"
+        );
     }
 
     #[test]

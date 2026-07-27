@@ -3192,6 +3192,8 @@ mod pending_approval_tests {
     /// configError as the issue (`RSp`, `INVALID_CONFIG ∈ CSp`).
     #[test]
     fn unconnectable_status_splits_unconfigured_from_invalid_config() {
+        const CONFIG_ERROR: &str = "'url' \"${VAR:-}\" expanded to an empty string. Set the referenced environment variable, or update the server's config and reconnect.";
+
         let http = |url: &str| traits::McpTransportSpec::Http {
             url: url.to_string(),
             headers: traits::McpHeaders::default(),
@@ -3207,7 +3209,6 @@ mod pending_approval_tests {
         );
 
         // configError: the failed branch WITH the issue text.
-        const CONFIG_ERROR: &str = "'url' \"${VAR:-}\" expanded to an empty string. Set the referenced environment variable, or update the server's config and reconnect.";
         let mut broken = stdio("broken", ConfigScope::Project);
         broken.spec = http("${VAR:-}");
         broken.config_error = Some(CONFIG_ERROR.to_string());

@@ -9420,15 +9420,14 @@ mod tests {
                 config_error: None,
             }
         }
+        // No `--mcp-config` servers in most cases below.
+        const NO_DYNAMIC: &[String] = &[];
         let open_gates = super::AgentMcpMergeGates {
             safe_mode: false,
             strict_mcp_config: false,
             enterprise_mcp_active: false,
         };
         let no_policy = mcp::enterprise_policy::McpPolicy::default();
-
-        // No `--mcp-config` servers in most cases below.
-        const NO_DYNAMIC: &[String] = &[];
 
         // No definition → no-op (`if(!t)return e`).
         let mut configs = vec![existing("keep")];

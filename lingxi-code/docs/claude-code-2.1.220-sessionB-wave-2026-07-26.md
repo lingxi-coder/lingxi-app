@@ -174,12 +174,13 @@ any code changed, and handed to three fix lanes — `fix220/mcp`, `fix220/auth`,
 | STREAM-5 | FIXED | `1c177cbe7` | soc |
 | STREAM-6 | FIXED | `1c177cbe7` + `63bfc5d6c` | soc |
 
-Nothing was DEFERRED or REFUTED-ON-RECHECK: all 39 were still real at `4c55d6aa4`
-when their lane re-verified them, and all 39 are present in the merged tree
-(spot-checked at the behaviour site, not just by commit message).
+No confirmed finding was DEFERRED or REFUTED-ON-RECHECK: all 39 were still real at
+`4c55d6aa4` when their lane re-verified them, and all 39 are present in the merged
+tree (spot-checked at the behaviour site, not just by commit message).
 
-Two follow-ups the lanes documented rather than fixed (both need files outside the
-fixing lane's ownership, neither is a regression):
+Six adjacent follow-ups the lanes documented rather than fixed (each needs a file
+outside the fixing lane's ownership, or is pre-existing; none is a regression from
+this remediation). These are BACKLOG, not silent drops:
 
 - **`afe` loader-side enterprise/`mcp`-locked exclusivity** — `mcp list` still prints
   user/project/local rows under a managed `managed-mcp.json` that the oracle's `afe`
@@ -188,6 +189,34 @@ fixing lane's ownership, neither is a regression):
 - **`Nxe`'s third pre-dial gate** (@232117552) — a syntactically invalid but non-blank
   `url` is `INVALID_CONFIG` without dialing in the oracle; the port still dials and
   reports the transport's error. Clean standalone follow-up in `mcp/src/registry.rs`.
+- **`afe`'s shadow rule for rejected project servers** (adjacent to MCPCLI-3) — the
+  oracle's project loop skips a name already present in user/local scope *before* the
+  rejected arm, so a rejected project server that shadows a USER server leaves the user
+  entry standing. The port's loader collapses by name into one `Vec` entry, so filtering
+  the rejected project server would drop the legitimate user row too. Needs
+  `mcp/src/json_config.rs`. No regression: the pre-fix row loop already skipped it.
+- **`disabledMcpServers` vs an agent server replacing a gated discovered one** (adjacent
+  to MCPCLI-2) — the oracle evaluates the disable check by name *downstream* of the map
+  merge; the port precomputes `McpServerConfig::disabled` in `apply_project_server_gate`,
+  which runs BEFORE the merge. After MCPCLI-2 an agent's replacement config carries
+  `disabled = false` — right for the rejected-`.mcp.json` case the finding cites, but it
+  lets an agent server named in `disabledMcpServers` connect. Distinguishing the two
+  needs `mcp/src/server_gate.rs` to record *why* a server was disabled.
+- **`mcp get` never health-checks a connectable server** (pre-existing, not from this
+  wave) — `hJy` @238844777 always calls `yEp(t,i)` and prints a `Status:` line for every
+  server; the port's `run_get` prints `Status:` only on the pending / rejected /
+  config-only branches, so a healthy server gets none. MCPCLI-1 only retargeted the
+  config-only branch.
+- **ORCH `decisionClassification` + `tool_parameters`** (documented at the site in
+  `6a8d96377`) — parsing the host's explicit `decisionClassification` needs a new field
+  on `PermissionOutcome` plus the stdio control-plane parse; `tool_parameters` (`HWr`
+  under `OTEL_LOG_TOOL_DETAILS`) is inert unless that env flag is set. Behaviour is
+  unchanged today.
+
+Two of the nine review-refuted ids (§8.2) were refuted for **scope**, not for being
+wrong about the oracle, and belong on the same backlog: **MCPCLI-5** (empty
+`mcpServers: {}` drops the whole JSON agent instead of warning per entry) and
+**ORCH-7** (the per-turn `# currentDate` push vs the oracle's memoized `LGe`).
 
 ### 8.2 Refuted during review (9, for the record)
 

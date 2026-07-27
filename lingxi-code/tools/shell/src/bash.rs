@@ -876,13 +876,30 @@ pub fn task_output_path(task_id: &str) -> PathBuf {
         .join(format!("{task_id}.out"))
 }
 
+/// A per-call id, unique within the process AND across processes.
+///
+/// The clock alone is NOT enough. This used to be `nanos ^ pid`, and
+/// `SystemTime::now()` does not advance on every call — two Bash tool calls
+/// issued concurrently (which the model does routinely; parallel tool calls
+/// are a supported feature) could land in the same tick and produce the SAME
+/// id. Both then used the same `/tmp/claude-<id>-cwd` readback file, and the
+/// first call to finish DELETED it during cleanup before the second read it —
+/// so a `cd` silently failed to persist to the next call.
+///
+/// It surfaced as a ~1-in-8 flake in `cwd_persistence.rs` under CPU load and
+/// was easy to mistake for test flakiness; it is a real concurrency defect in
+/// the tool. The atomic counter makes collisions impossible within a process,
+/// and the pid keeps ids distinct between them.
 fn ephemeral_id(prefix: &str) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let mix = (nanos as u64) ^ u64::from(std::process::id());
-    format!("{prefix}-{mix:016x}")
+    format!("{prefix}-{mix:016x}-{seq:x}")
 }
 
 fn cmd_hash(s: &str) -> String {
@@ -1896,6 +1913,41 @@ mod tests {
 
     fn use_ctx() -> ToolUseContext {
         tool_api::test_support::fresh_ctx()
+    }
+
+    /// `ephemeral_id` must never repeat within a process. It used to be
+    /// `nanos ^ pid`, and the clock does not advance on every call — two
+    /// concurrent Bash calls could share an id, hence share the
+    /// `/tmp/claude-<id>-cwd` readback file, and one call's cleanup deleted the
+    /// other's `cd` result.
+    #[test]
+    fn ephemeral_id_is_unique_across_a_tight_loop() {
+        let ids: std::collections::HashSet<String> =
+            (0..10_000).map(|_| ephemeral_id("bash")).collect();
+        assert_eq!(ids.len(), 10_000, "ephemeral_id collided within one process");
+    }
+
+    #[test]
+    fn ephemeral_id_is_unique_across_threads() {
+        use std::sync::{Arc, Mutex};
+        let seen = Arc::new(Mutex::new(std::collections::HashSet::new()));
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let seen = Arc::clone(&seen);
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..2_000 {
+                    let id = ephemeral_id("bash");
+                    assert!(
+                        seen.lock().unwrap().insert(id.clone()),
+                        "duplicate ephemeral_id across threads: {id}"
+                    );
+                }
+            }));
+        }
+        for h in handles {
+            h.join().expect("thread");
+        }
+        assert_eq!(seen.lock().unwrap().len(), 16_000);
     }
 
     #[test]

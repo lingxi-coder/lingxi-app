@@ -291,15 +291,66 @@ const PRONOUNS_SECTION: &str = "When you use a pronoun for someone \u{2014} the 
 /// delete the confirm-before-irreversible-actions guidance for exactly the
 /// models the lean prompt targets — the dangerous half-fix.
 ///
-/// The oracle appends "\u{2014} if what you find contradicts how it was
-/// described..." only when `YFc(e)` is FALSE (`tengu_gault_kestrel` /
-/// `CLAUDE_CODE_GAULT_KESTREL`). On a default install of 2.1.220 that clause
-/// is ABSENT, so the default here omits it too.
-const ACTION_CAUTION_SECTION: &str = "For actions that are hard to reverse or outward-facing, confirm first unless durably authorized or explicitly told to proceed without asking; approval in one context doesn't extend to the next. Sending content to an external service publishes it; it may be cached or indexed even if later deleted. Before deleting or overwriting, look at the target. Report outcomes faithfully: if tests fail, say so with the output; if a step was skipped, say that; when something is done and verified, state it plainly without hedging.";
+/// The oracle appends the "contradicts how it was described" clause only when
+/// `YFc(model)` is FALSE. `YFc` = `SQt(env, gate, model)`, and `SQt`'s
+/// `tXn(model)` term is TRUE exactly when the model carries
+/// `opus_5_prompt_bundle` — which in the 2.1.220 table is `claude-opus-5`
+/// alone. So Opus 5 gets the SHORT form and every other lean model gets the
+/// clause.
+///
+/// An earlier revision of this port hardcoded the short form for everyone,
+/// having checked only an Opus 5 session. That is the trap in reading one
+/// rendered prompt and generalising: the rendering was correct for the model
+/// that produced it and wrong for the other three.
+fn action_caution_section(model: &str) -> String {
+    let extra = if has_opus_5_prompt_bundle(model) {
+        ""
+    } else {
+        " \u{2014} if what you find contradicts how it was described, or you didn't create it, surface that instead of proceeding"
+    };
+    format!(
+        "For actions that are hard to reverse or outward-facing, confirm first unless durably authorized or explicitly told to proceed without asking; approval in one context doesn't extend to the next. Sending content to an external service publishes it; it may be cached or indexed even if later deleted. Before deleting or overwriting, look at the target{extra}. Report outcomes faithfully: if tests fail, say so with the output; if a step was skipped, say that; when something is done and verified, state it plainly without hedging."
+    )
+}
+
+/// `# Delivering work` (`RMy`), emitted when `QFc(model)` is true.
+const DELIVERING_WORK_SECTION: &str = "# Delivering work\nDo ordinary work as asked, acting on the actual request rather than on speculation about what lies behind it. The requested scope is the deliverable \u{2014} don't quietly narrow, widen, or transform it. Interpret ambiguity the way a careful colleague would: make routine judgment calls yourself, and check in only when different readings would lead to materially different work. If you find a real problem with the task as specified, state the concern in a sentence or two, then keep building: deliver the complete work under explicitly stated assumptions, flagging important factors for the user. Finish the whole task, not just easy parts \u{2014} report completion only when fully done. If part of the scope turns out to be blocked or problematic, finish every other part in full and say explicitly what you left out and why \u{2014} scaling the work down is the user's call, not yours. Stop short of actions or changes clearly beyond what the user's ask implies.\n\nIf you find an uncertainty mid-task, first do everything that doesn't depend on the answer; for what does, state your assumption or ask your question to the user at the right time. Reserve blocking questions \u{2014} stopping with nothing delivered until the user answers \u{2014} for cases where proceeding under any assumption would be unsafe or would make the work useless if wrong.\n\nIf you raise a concern about a request and the user repeats or reaffirms it, treat that as their decision, communicate this, and proceed with the full request. Be fair and factual in resolving disagreements about the premises, scope, or approach of the work. Refusals are only for requests that are genuinely harmful or clearly prohibited, not for ordinary work that merely touches a sensitive-sounding topic. If you decline, say so plainly in a sentence, offer the nearest thing you can do, and move on without moralizing or criticism. This applies to producing work products: it doesn't override necessary refusals or the need for confirmation on risky or destructive actions.";
+
+/// `# Corrections` (`kMy`), emitted when `ZFc(model)` is true.
+const CORRECTIONS_SECTION: &str = "# Corrections\nAvoid unnecessary or excessive self-correction. Only correct an earlier statement in your user-facing text when the error would change the user's code, conclusions, or decisions. State corrections plainly and concisely, and continue the task; combine multiple corrections rather than enumerating them all. For slips that change nothing for the user, simply make the correction and move on - no need to note it explicitly. Don't add apologies or preambles, don't be overly self-critical, and don't ruminate or give a detailed account of the mistake or tally past errors. Sometimes, other agents will report incorrect or misleading results - don't always take them at face value immediately. If other agents correct your statements and they are right, then simply update your approach without narrating too much about the correction to the user. This instruction does not apply to thinking blocks.\n\nA follow-up question about your earlier work is not, by itself, a signal that you got something wrong \u{2014} answer what was asked. A statement that was accurate needs no correction: don't re-audit how you phrased it, how you verified it, or limits you already stated. When the user does point to a real error, correct it plainly as above.";
+
+/// `tXn(model)` — the shared term behind `QFc` / `ZFc` / `YFc`.
+///
+/// ```js
+/// function tXn(e){ if(e===void 0) return false;
+///                  if(LN(lo(e),"opus_5_prompt_bundle")!==true) return false;
+///                  return !Ke(nug,false); }            // kill-switch, default off
+/// ```
+/// So: the model must carry `opus_5_prompt_bundle`, which the 2.1.220 table
+/// gives to `claude-opus-5` ALONE. The other `SQt` terms are an env var and
+/// two feature gates that both default false, and this build has no gate
+/// client — so this capability IS the condition.
+fn has_opus_5_prompt_bundle(model: &str) -> bool {
+    traits::model_capabilities::has_capability(
+        model,
+        traits::model_capabilities::ModelCapability::Opus5PromptBundle,
+    )
+}
 
 /// `AMy` — `act_dont_rederive`. Note the oracle's text ends WITHOUT a full
 /// stop; that is not a transcription slip.
 const ACT_DONT_REDERIVE_SECTION: &str = "When you have enough information to act, act. Do not re-derive facts already established in the conversation, re-litigate a decision the user has already made, or narrate options you will not pursue. If you are weighing a choice, give a recommendation, not an exhaustive survey";
+
+/// `CMy()` — the `act_dont_rederive` gate. `env ?? Ke("tengu_cedar_lantern",
+/// true)`: DEFAULT TRUE, so the section ships unless explicitly turned off.
+fn act_dont_rederive_enabled() -> bool {
+    match std::env::var("LINGXI_ACT_DONT_REDERIVE")
+        .or_else(|_| std::env::var("CLAUDE_CODE_ACT_DONT_REDERIVE"))
+    {
+        Ok(v) => traits::env::is_env_truthy(Some(&v)),
+        Err(_) => true,
+    }
+}
 
 /// The LEAN main body (`wMy`) — the whole of the lean arm's static prompt.
 ///
@@ -489,10 +540,28 @@ pub fn format(
     // `action_caution` is lean-ONLY: it is what the lean arm has instead of
     // `# Executing actions with care`.
     if lean {
-        sections.push(ACTION_CAUTION_SECTION.to_string());
+        sections.push(action_caution_section(model));
     }
     // GAP-3: `# Session-specific guidance` (jHm) — when bullets non-empty.
     // Binary position: after anti_verbosity, before env_info_simple.
+    // `act_dont_rederive` (`AMy`): `CMy()` is `env ?? Ke("tengu_cedar_lantern",
+    // TRUE)` — note the default is TRUE, unlike the `SQt` family below. So this
+    // is emitted for EVERY model unless explicitly disabled.
+    if act_dont_rederive_enabled() {
+        sections.push(ACT_DONT_REDERIVE_SECTION.to_string());
+    }
+    // `delivering_work_max` (`RMy`) and `overcorrection` (`kMy`) both gate on
+    // `SQt(...)`, whose only default-true term is `tXn` = the model carries
+    // `opus_5_prompt_bundle`. Everything else in `SQt` is an env var or a
+    // gate defaulting FALSE, so on this build the capability is the condition.
+    if has_opus_5_prompt_bundle(model) {
+        sections.push(DELIVERING_WORK_SECTION.to_string());
+        sections.push(CORRECTIONS_SECTION.to_string());
+    }
+    // NOTE: `task_continuity` (`sMy`) is deliberately NOT ported. Its gate is
+    // `function tBc(e){return!1}` — hard-disabled in 2.1.220, so the oracle
+    // never emits it. Porting the text would ADD a section the oracle does not
+    // send.
     let has_skill_tool = tool_names.iter().any(|t| t == "Skill");
     if let Some(sg) = session_guidance(
         is_interactive,
@@ -568,6 +637,67 @@ mod tests {
         let long = format(false, true, &[], true, false, false, "claude-opus-4-7", false);
         assert!(!long.contains("For actions that are hard to reverse or outward-facing"));
         assert!(long.contains("# Executing actions with care"));
+    }
+
+    /// `# Delivering work` / `# Corrections` gate on `opus_5_prompt_bundle`,
+    /// which the 2.1.220 table gives to `claude-opus-5` ALONE — not to every
+    /// lean model.
+    #[test]
+    fn delivering_work_and_corrections_are_opus_5_only() {
+        let o5 = format(false, true, &[], true, false, false, "claude-opus-5", false);
+        assert!(o5.contains("# Delivering work"), "opus-5 must get it");
+        assert!(o5.contains("# Corrections"), "opus-5 must get it");
+        // Lean, but WITHOUT the opus-5 bundle:
+        for m in ["claude-opus-4-8", "claude-fable-5"] {
+            let p = format(false, true, &[], true, false, false, m, false);
+            assert!(!p.contains("# Delivering work"), "{m} must NOT get it");
+            assert!(!p.contains("# Corrections"), "{m} must NOT get it");
+        }
+        // ...and not on the long arm either.
+        let long = format(false, true, &[], true, false, false, "claude-opus-4-7", false);
+        assert!(!long.contains("# Delivering work"));
+    }
+
+    /// The `action_caution` tail clause is SUPPRESSED only for
+    /// `opus_5_prompt_bundle` models. An earlier revision hardcoded the short
+    /// form for everyone after checking a single Opus 5 session — correct for
+    /// the model that produced the sample, wrong for the other three.
+    #[test]
+    fn action_caution_tail_clause_is_opus_5_suppressed_only() {
+        let tail = "if what you find contradicts how it was described";
+        let o5 = format(false, true, &[], true, false, false, "claude-opus-5", false);
+        assert!(!o5.contains(tail), "opus-5 gets the SHORT form:\n{o5}");
+        for m in ["claude-opus-4-8", "claude-fable-5"] {
+            let p = format(false, true, &[], true, false, false, m, false);
+            assert!(p.contains(tail), "{m} must KEEP the clause");
+        }
+    }
+
+    /// `act_dont_rederive` defaults TRUE (`Ke(...,true)`), unlike the `SQt`
+    /// family — so every model gets it, lean or long.
+    #[test]
+    fn act_dont_rederive_defaults_on_for_every_model() {
+        for m in ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"] {
+            let p = format(false, true, &[], true, false, false, m, false);
+            assert!(
+                p.contains("When you have enough information to act, act."),
+                "{m} must carry act_dont_rederive"
+            );
+        }
+    }
+
+    /// `task_continuity`'s gate is `function tBc(e){return!1}` — hard-disabled
+    /// in 2.1.220. Porting its text would ADD a section the oracle never
+    /// sends, so its absence is deliberate and asserted.
+    #[test]
+    fn task_continuity_is_never_emitted() {
+        for m in ["claude-opus-5", "claude-opus-4-7"] {
+            let p = format(false, true, &[], true, false, false, m, false);
+            assert!(
+                !p.contains("the approval covers it end to end"),
+                "{m} must NOT carry task_continuity"
+            );
+        }
     }
 
     /// `pronouns` carries no gate in `O3` — both arms get it.

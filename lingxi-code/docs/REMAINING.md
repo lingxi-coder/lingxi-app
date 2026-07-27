@@ -1,106 +1,143 @@
 # What is actually left, 2026-07-26
 
-Every audit backlog in `docs/` has been swept at the behaviour sites; this is
+Every audit backlog in `docs/` has been swept at the behaviour sites. This is
 the residue, with the blocker named for each so the next session starts from
 execution rather than re-derivation.
 
-## DONE since the previous revision
+## The behaviour audit now has a harness: `scripts/parity_behaviour.py`
 
-- **`mcp xaa` — the XAA (SEP-990) IdP connection subsystem. COMPLETE.**
-  `setup` / `login` / `show` / `clear`, wired at `apps/cli/src/commands/mcp_xaa.rs`.
+`parity_surface.py` compares which flags EXIST. `parity_behaviour.py` compares
+what commands DO: it runs both binaries against a fresh sandboxed HOME per
+command, with argv as a list and stdin closed, and diffs stdout+stderr+exit
+status after folding known-legitimate branding to neutral tokens.
 
-  **The previous revision of this file said XAA was "absent as a concept". That
-  was wrong, and wrong in the way this session kept being wrong:** the whole
-  engine already existed — `mcp/src/xaa_idp.rs`, 1328 lines of OIDC discovery,
-  the PKCE browser flow, the id_token cache and its 60s expiry buffer — with no
-  way to reach it from a terminal. What was missing was three storage writers
-  (`save_id_token_from_jwt`, `save_idp_client_secret`, `clear_idp_client_secret`)
-  and the CLI surface. Checking `mcp/src/` before writing the sentence would
-  have cost one command.
+Current state: **11 of 12 probed commands identical, 1 differing** — and that
+one is a deliberate divergence (below), not an unfixed defect.
 
-  Verified by execution against a sandboxed HOME, not by inference: every
-  validation message is byte-identical to the oracle, `setup` preserves
-  unrelated settings keys, client-id rotation clears the old credentials, and
-  `clear` removes only `xaaIdp`.
+It exists as a script because FOUR findings during this audit were artifacts of
+an ad-hoc shell probe rather than facts about the code. zsh does not word-split
+an unquoted variable, so `$cmd --help` with `cmd="mcp xaa setup"` arrives as ONE
+argv element; the CLI falls back to ROOT help and the diff reads as "five
+subcommands are missing". The same bug made both binaries treat
+`"auto-mode config"` as a chat prompt and run a real model session. Two more
+were interleaved stdout from concurrent processes sharing a terminal.
 
-  One deliberate divergence: remediation hints name `lingxi-cli mcp xaa setup`,
-  not `claude mcp xaa setup`. Telling a user to run a binary that does not exist
-  would be a defect, not fidelity.
+**The harness itself produced a false finding too** — its normalisation folded
+`claude` before `.claude`, so `.claude` became `.«cli»` while `.lingxi` became
+`«dotdir»`, and `auto-mode defaults` looked divergent immediately after being
+regenerated to byte-identical. Normalisation order is now load-bearing and
+commented as such.
 
-  One known behaviour delta, small and safer: `--callback-port 9000abc` is
-  REJECTED here, where the oracle's `parseInt` would accept it as 9000.
+## Fixed by the behaviour audit
 
-- **`--help` layout.** `Usage:` now leads, the description follows, and help
-  wraps at 80 columns with hanging indents (clap `help_template` +
-  `wrap_help` + `term_width = 80`) — matching the oracle's presentation.
+- **Project `.mcp.json` discovery did not walk ancestors.** The oracle resolves
+  the project config by walking UP from cwd; this port looked only at
+  `<cwd>/.mcp.json`, so a user in any subdirectory of their repo silently got
+  NO project MCP servers. One root cause, two symptoms — `mcp list` came up
+  empty and `mcp reset-project-choices` suppressed its second line.
 
-  Still divergent, and structurally so: clap orders `{all-args}` as
-  Commands → Options, where commander emits Arguments → Options → Commands.
-  Reordering needs per-command templates, because a literal `Arguments:` header
-  in a shared template would print for the ~40 subcommands that have no
-  positionals. Not worth that for section order.
+  Discovery walks; MUTATION deliberately does not. `mcp add --scope project`
+  and `mcp remove` still target `<cwd>/.mcp.json`, because rewriting a
+  `.mcp.json` that lives above the working directory — possibly in `$HOME`,
+  shared by every repo underneath — is a side effect no one asked for.
+  `scope_contains_server` is paired with the write path so `remove`'s
+  precondition matches what `remove` actually does.
 
-  Note that `--help` can never be byte-identical regardless: the binary name,
-  product description, and command set legitimately differ.
+- **`auto-mode critique` graded the shipped defaults, never the user's rules.**
+  Same verdict on every machine; it would report "no structural issues" to
+  someone whose own rules were malformed.
 
-## 1. 2.1.220 BEHAVIOUR audit — the real remaining work
+- **`auto-mode defaults` was three versions stale** (2.1.191): 35 of 65
+  `soft_deny`, 9 of 17 `allow`, 15 of 20 `environment` entries missing.
+  Regenerated to byte-identical. DISPLAY state only — the runtime gate is
+  `permission::classifier::classify_tool_call`, which reads no rules document,
+  so this was never an under-ask.
 
-Everything done so far compares SURFACE (does the flag/command exist). Nobody
-has compared what a flag DOES across the board. Two sides can advertise
-`--scope` and write to different tiers.
+- **`mcp xaa` was registered unconditionally.** The oracle gates the group on
+  `CLAUDE_CODE_ENABLE_XAA` (`vZ()`), so a default install answers
+  `error: unknown command 'xaa'`. Reproduced, including the hidden-from-help
+  behaviour. Found by the harness against code written earlier the same day.
 
-Start with `scripts/parity_surface.py` — it self-verifies its traversal and
-refuses to report a broken walk — then, per command, construct inputs and
-compare outputs against the oracle.
+- **`mcp get` printed an empty `Configured servers:` list** when nothing was
+  loaded but pending servers existed.
 
-**The harness the audit needs now exists in practice**: run the port against a
-temp `HOME` + `LINGXI_HOME` with a seeded `settings.json`, drive each
-subcommand with `< /dev/null`, and diff stdout/stderr/exit-code against the
-oracle run the same way. That is exactly how `mcp xaa` was verified above, and
-it caught two defects a unit test would not have (see below).
+- **The `doctor` description was false about its own code.** It warned that
+  "stdio servers from .mcp.json are spawned for health checks"; `doctor.rs`
+  says "No connection is attempted". It also called the command a check of the
+  "auto-updater" when it reports on much more, and the trust-prompt warning was
+  lifted from the oracle's `-p/--print` option rather than its `doctor`. Now
+  matches the oracle's wording, which is also true of this port. Overstating
+  what a command touches is not harmlessly cautious — it steers people away
+  from a safe command.
 
-**Slices done** (both binaries executed and diffed — evidence, not inference):
+- **User-facing text told users to run `claude`**, a binary that does not exist
+  in this product — 9 strings across `mcp.rs` and `argv.rs`, plus the
+  `plugin list` empty-case hint.
 
-- Pure-output commands: no behaviour DEFECT found.
-- `--version` SHAPE differs: oracle `2.1.220 (Claude Code)` vs port
-  `lingxi-cli 0.12.0`. The VALUE difference is correct — LingXi is its own
-  product, and the Claude-compat identifiers derive separately from
-  `traits::CLAUDE_CODE_VERSION`. The SHAPE is a branding call not yet made.
-- `mcp xaa`: full lifecycle diffed against the oracle's strings. Green.
+## 1. The one remaining behaviour difference: MCP health checks
 
-**Still uncovered:** `plugin`, `auto-mode`, `project`, `agents`, `auth`, and the
-`mcp` verbs other than `xaa`.
+`claude mcp list` prints `Checking MCP server health…` and appends a per-server
+status (`✔ Connected` / `✘ Failed to connect`). This port prints neither.
+
+**This is a deliberate architectural stance, documented independently in three
+places** (`mcp list`, `mcp get`, and `doctor`, which says "No connection is
+attempted — this is purely the parsed config view"). Health-checking means
+spawning every configured stdio server, i.e. executing arbitrary configured
+commands as a side effect of a listing command.
+
+It is now MORE consequential than before: this wave made ancestor `.mcp.json`
+discoverable, so a spawn-on-list would execute commands from an inherited
+`~/.mcp.json` in any subdirectory of `$HOME`. The oracle bounds this by only
+health-checking APPROVED servers (pending ones are skipped), so the risk is
+containable — but turning it on is a product decision about executing inherited
+config, not a parity cleanup. **Do not implement it without deciding that
+question first.**
+
+## 2. Surfaces still unprobed
+
+The harness covers 12 read-only verbs. Not yet compared: commands that write
+(`mcp add`, `plugin install`, `project` mutations), and everything skipped by
+name as interactive/network/server (`auth login`, `setup-token`, `gateway`,
+`remote-control`, `doctor`, `install`, `update`, `mcp serve`). Extending it
+means constructing fixtures and asserting on resulting FILES, not just stdout —
+two sides can print identical bytes and write different files.
+
+## 3. `--help` section order
+
+`Usage:` leads, the description follows, and help wraps at 80 columns with
+hanging indents — matching the oracle. What remains is that clap's `{all-args}`
+orders Commands → Options where commander emits Arguments → Options → Commands.
+Reordering needs per-command templates, since a literal `Arguments:` header in
+a shared template would print for the ~40 subcommands that have no positionals.
+
+`--help` can never be byte-identical regardless: the binary name, product
+description, and command set legitimately differ.
 
 ## Two decisions, not fixes
 
-- **`doctor` description** diverges beyond branding: the port additionally
-  warns that stdio servers from `.mcp.json` are spawned. That is more
-  informative than the oracle's text. Keep or align — a product call.
-- **Remote-session client** (`useRemoteSession`, the
-  `tengu_refusal_retraction_*` family) is an accepted divergence: no Anthropic
-  private relay / auth contract. If that ever changes, note that `fzf` applies
-  a retraction signal ONLY when `event.source === "worker"` — a trust boundary,
-  since an unauthenticated retraction can erase history.
+- **`--version` shape**: oracle `2.1.220 (Claude Code)` vs port
+  `lingxi-cli 0.12.0`. The VALUE difference is correct — LingXi is its own
+  product, and Claude-compat identifiers derive separately from
+  `traits::CLAUDE_CODE_VERSION`. The SHAPE is a branding call not yet made.
+- **Remote-session client** (`useRemoteSession`, `tengu_refusal_retraction_*`)
+  is an accepted divergence: no Anthropic private relay / auth contract. If that
+  changes, note `fzf` applies a retraction signal ONLY when
+  `event.source === "worker"` — an unauthenticated retraction can erase history.
 
 ## The rules this session kept re-learning
 
 **A comment or backlog heading that asserts a fact about OTHER code becomes a
-lie the moment that code moves.** Five false findings this session traced to
-exactly that — including this file's own "XAA is absent as a concept", and
-2.1.215's M-13 where an auditor read a stale module doc and filed a gap against
-working code. When deferring, point at the code; do not restate what it does.
+lie the moment that code moves.** This file's own "XAA is absent as a concept"
+was wrong — `mcp/src/xaa_idp.rs` had 1328 lines of working engine. Point at the
+code; do not restate what it does.
 
-**A generated absence is a hypothesis, not a finding.** A one-level walk
-produced 39 phantom flag gaps; a grep for two identifiers that never share a
-line reported a wired feature as missing; a `--help` probe reported five
-missing commands that were all present, because zsh does not word-split an
-unquoted variable and the whole path arrived as one argument. Confirm at the
-call site — `<cli> <sub> --help` with the arguments spelled out — before
-recording anything.
+**A generated absence is a hypothesis, not a finding.** Confirm at the call site
+before recording anything.
 
-**Do not report a state you could not read.** Two defects found reviewing the
-`mcp xaa` code against its own oracle, both of the same shape: `setup` reported
-"keychain save failed" when no secret had been requested, and `show` rendered a
-credential-storage ERROR as "Logged in: no". Both would have sent a user to fix
-something that was not broken. `unwrap_or(false)` on a fallible read is where
-this hides.
+**Do not report a state you could not read.** `setup` announced "keychain save
+failed" when no secret was requested; `show` rendered a storage ERROR as
+"Logged in: no". `unwrap_or(false)` on a fallible read is where this hides.
+
+**A lock serializes access; it does not undo what you did while holding it.** A
+process-global mutated under a lock must be RESTORED before release, or the
+lock just serializes the corruption.

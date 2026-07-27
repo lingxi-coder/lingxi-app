@@ -851,7 +851,7 @@ impl Argv {
     pub fn validate_background_args(&self) -> Result<(), String> {
         if self.background && self.print {
             return Err(
-                "--bg and --print conflict: --print never starts the interactive session that `claude agents` attaches to, so the job would be unattachable. The prompt is the positional \u{2014} drop --print: `claude --bg '<task>'`."
+                "--bg and --print conflict: --print never starts the interactive session that `lingxi-cli agents` attaches to, so the job would be unattachable. The prompt is the positional \u{2014} drop --print: `lingxi-cli --bg '<task>'`."
                     .to_string(),
             );
         }

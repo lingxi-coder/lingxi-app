@@ -144,6 +144,11 @@ pub enum Sub {
     /// Start the LingXi MCP server
     Serve(ServeArgs),
     /// Manage the XAA (SEP-990) IdP connection
+    ///
+    /// Hidden because the oracle registers this group only under
+    /// `CLAUDE_CODE_ENABLE_XAA` (see `mcp_xaa::xaa_enabled`); listing it
+    /// unconditionally would advertise a surface a default install refuses.
+    #[command(hide = true)]
     Xaa {
         #[command(subcommand)]
         sub: crate::commands::mcp_xaa::Sub,
@@ -1166,10 +1171,25 @@ fn project_key() -> Option<String> {
     Some(migrations::global_config::project_path_for_config(&cwd))
 }
 
-/// Path to the project `.mcp.json` (in the cwd).
+/// Path a project `.mcp.json` WRITE targets: always `<cwd>/.mcp.json`.
+///
+/// Deliberately does NOT walk ancestors, even though discovery does. `mcp add
+/// --scope project` and `mcp remove` mutate a file, and editing a `.mcp.json`
+/// that lives above the working directory — possibly in `$HOME`, shared by
+/// every repo underneath it — is a side effect no one asked for. Reading a
+/// config you inherit is ordinary; silently rewriting it is not.
 fn project_mcp_json_path() -> Option<PathBuf> {
     let cwd = std::env::current_dir().ok()?;
     Some(cwd.join(".mcp.json"))
+}
+
+/// Path project `.mcp.json` DISCOVERY reads: the nearest one at or above cwd.
+///
+/// See [`nearest_project_mcp_json`] for why this walks. Split from the write
+/// path so the asymmetry is explicit at every call site rather than implied.
+fn project_mcp_json_read_path() -> Option<PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    Some(nearest_project_mcp_json(&cwd))
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -1707,7 +1727,7 @@ fn run_remove(a: &RemoveArgs) -> i32 {
                 // claude prints the command hint with the name UNQUOTED (the
                 // surrounding message text quotes it, but the copy-paste command
                 // does not — verified against the live 2.1.191 binary).
-                eprintln!("  claude mcp remove {} -s {}", a.name, scope.label());
+                eprintln!("  lingxi-cli mcp remove {} -s {}", a.name, scope.label());
             }
             RUNTIME_ERROR
         }
@@ -1820,7 +1840,7 @@ fn remove_server(name: &str, scope: Scope) -> Result<Option<PathBuf>, String> {
 /// `SSc = "\u23F8 Pending approval (run \`claude\` to approve)"`). Shown by
 /// `mcp list` / `mcp get` for pending project servers, which are NEVER
 /// health-checked or spawned (the binary skips `ySc` for the pending branch).
-const PENDING_APPROVAL: &str = "\u{23F8} Pending approval (run `claude` to approve)";
+const PENDING_APPROVAL: &str = "\u{23F8} Pending approval (run `lingxi-cli` to approve)";
 
 /// Implement `mcp list`. Reads the merged server set across all three scopes
 /// and prints each as `<name>: <summary>`.
@@ -1841,14 +1861,21 @@ const PENDING_APPROVAL: &str = "\u{23F8} Pending approval (run `claude` to appro
 fn run_list() -> i32 {
     let servers = load_all_servers();
     if servers.is_empty() {
-        println!("No MCP servers configured. Use `claude mcp add` to add a server.");
+        println!("No MCP servers configured. Use `lingxi-cli mcp add` to add a server.");
         return SUCCESS;
     }
     let (_, pending) = project_server_approval();
     for cfg in &servers {
         if is_pending_project_server(cfg, &pending) {
-            // Unapproved project server: Pending approval, never spawned.
-            println!("{}: {PENDING_APPROVAL}", cfg.name);
+            // Unapproved project server: Pending approval, never spawned. The
+            // transport summary still prints — the oracle's row is
+            // `name: url (HTTP) - ⏸ Pending approval`, and hiding the URL
+            // makes it impossible to see WHAT you are being asked to approve.
+            println!(
+                "{}: {} - {PENDING_APPROVAL}",
+                cfg.name,
+                transport_summary(&cfg.spec)
+            );
         } else {
             println!("{}: {}", cfg.name, transport_summary(&cfg.spec));
         }
@@ -1909,19 +1936,42 @@ fn run_get(a: &GetArgs) -> i32 {
     println!();
     let scope_flag = scope_flag_label(cfg.scope);
     println!(
-        "To remove this server, run: claude mcp remove {} -s {scope_flag}",
+        "To remove this server, run: lingxi-cli mcp remove {} -s {scope_flag}",
         cfg.name
     );
     SUCCESS
 }
 
 /// Load every configured server across local + project + user scopes.
+/// The nearest `.mcp.json` at or above `cwd`, or `<cwd>/.mcp.json` when none
+/// exists anywhere up the tree.
+///
+/// The oracle resolves the project config by walking UP from the working
+/// directory, so `claude mcp list` from `repo/src/foo/` still sees
+/// `repo/.mcp.json`. This port only looked at `<cwd>/.mcp.json`, which meant a
+/// user anywhere but the repo root silently got NO project servers — verified
+/// against 2.1.220 with a parent/child fixture.
+///
+/// Discovery is not trust: a server found this way is still subject to the
+/// same project-approval gate, so it lists as "Pending approval" until the
+/// user accepts it. Falling back to `<cwd>/.mcp.json` keeps the "where would a
+/// new one be written" answer unchanged.
+fn nearest_project_mcp_json(cwd: &std::path::Path) -> PathBuf {
+    for dir in cwd.ancestors() {
+        let candidate = dir.join(".mcp.json");
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    cwd.join(".mcp.json")
+}
+
 fn load_all_servers() -> Vec<mcp::connection::McpServerConfig> {
     let cwd = match std::env::current_dir() {
         Ok(c) => c,
         Err(_) => PathBuf::from("."),
     };
-    let project_mcp = cwd.join(".mcp.json");
+    let project_mcp = nearest_project_mcp_json(&cwd);
     let Some(global) = global_config_path() else {
         // No home: only a project .mcp.json could exist.
         return mcp::json_config::load_mcp_servers(
@@ -1946,13 +1996,13 @@ fn configured_server_names_sorted() -> Vec<String> {
 fn not_found_message(name: &str) -> String {
     let names = configured_server_names_sorted();
     if names.is_empty() {
-        return format!("No MCP server named \"{name}\". Run `claude mcp add` to add one.");
+        return format!("No MCP server named \"{name}\". Run `lingxi-cli mcp add` to add one.");
     }
     const CAP: usize = 8;
     let shown = names[..names.len().min(CAP)].join(", ");
     let suffix = if names.len() > CAP {
         format!(
-            " (and {} more — run `claude mcp list` to see all)",
+            " (and {} more — run `lingxi-cli mcp list` to see all)",
             names.len() - CAP
         )
     } else {
@@ -1999,7 +2049,7 @@ fn is_pending_project_server(cfg: &mcp::connection::McpServerConfig, pending: &[
 /// not-found message omits from the list and flags with an awaiting-approval
 /// note.
 fn project_server_approval() -> (Vec<String>, Vec<String>) {
-    let all: Vec<String> = project_mcp_json_path()
+    let all: Vec<String> = project_mcp_json_read_path()
         .filter(|p| p.exists())
         .and_then(|p| read_json_object(&p).ok())
         .and_then(|m| m.get("mcpServers").and_then(|v| v.as_object()).cloned())
@@ -2076,16 +2126,26 @@ fn not_found_message_get(name: &str) -> String {
     let clause = if pending_project.is_empty() {
         ""
     } else {
-        " (.mcp.json servers are awaiting approval — run `claude` in this directory to review them.)"
+        " (.mcp.json servers are awaiting approval — run `lingxi-cli` in this directory to review them.)"
     };
     if names.is_empty() && clause.is_empty() {
-        return format!("No MCP server named \"{name}\". Run `claude mcp add` to add one.");
+        return format!("No MCP server named \"{name}\". Run `lingxi-cli mcp add` to add one.");
+    }
+    if names.is_empty() {
+        // Pending servers exist but NOTHING is loaded. Falling through would
+        // print an empty "Configured servers: " list and then parenthesise the
+        // note as an aside to a list that is not there. The oracle drops both
+        // and states the pending situation directly.
+        return format!(
+            "No MCP server named \"{name}\". \
+             .mcp.json servers are awaiting approval \u{2014} run `lingxi-cli` in this directory to review them."
+        );
     }
     const CAP: usize = 8;
     let shown = names[..names.len().min(CAP)].join(", ");
     let suffix = if names.len() > CAP {
         format!(
-            " (and {} more — run `claude mcp list` to see all)",
+            " (and {} more — run `lingxi-cli mcp list` to see all)",
             names.len() - CAP
         )
     } else {
@@ -2255,7 +2315,7 @@ fn run_reset_project_choices() -> i32 {
 /// `mcp reset-project-choices` only prints its "prompted next time" follow-up
 /// line when there are project servers that will need re-approval.
 fn project_mcp_json_has_servers() -> bool {
-    project_mcp_json_path()
+    project_mcp_json_read_path()
         .filter(|p| p.exists())
         .and_then(|p| read_json_object(&p).ok())
         .and_then(|m| m.get("mcpServers").and_then(|v| v.as_object()).cloned())
@@ -2412,6 +2472,55 @@ fn print_file_modified(scope: Scope, path: &std::path::Path) {
         Scope::User | Scope::Project => {
             println!("File modified: {}", path.display());
         }
+    }
+}
+
+#[cfg(test)]
+mod project_discovery_tests {
+    /// Project `.mcp.json` discovery walks ANCESTORS, matching the oracle.
+    /// This port used to look only at `<cwd>/.mcp.json`, so a user in any
+    /// subdirectory of their repo silently got no project servers — verified
+    /// against 2.1.220 with a parent/child fixture.
+
+    #[test]
+    fn discovery_finds_a_parent_mcp_json() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let parent = root.path().join("repo");
+        let child = parent.join("src").join("deep");
+        std::fs::create_dir_all(&child).unwrap();
+        let cfg = parent.join(".mcp.json");
+        std::fs::write(&cfg, "{}").unwrap();
+        assert_eq!(super::nearest_project_mcp_json(&child), cfg);
+    }
+
+    #[test]
+    fn discovery_prefers_the_nearest_ancestor() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let outer = root.path().join("outer");
+        let inner = outer.join("inner");
+        std::fs::create_dir_all(&inner).unwrap();
+        std::fs::write(outer.join(".mcp.json"), "{}").unwrap();
+        let near = inner.join(".mcp.json");
+        std::fs::write(&near, "{}").unwrap();
+        assert_eq!(super::nearest_project_mcp_json(&inner), near);
+    }
+
+    #[test]
+    fn discovery_falls_back_to_cwd_when_no_ancestor_has_one() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let dir = root.path().join("a").join("b");
+        std::fs::create_dir_all(&dir).unwrap();
+        // Keeps "where would a new one be written" unchanged.
+        assert_eq!(super::nearest_project_mcp_json(&dir), dir.join(".mcp.json"));
+    }
+
+    #[test]
+    fn a_directory_named_mcp_json_is_not_a_config() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let dir = root.path().join("proj");
+        std::fs::create_dir_all(dir.join(".mcp.json")).unwrap();
+        // `is_file()`, not `exists()`.
+        assert_eq!(super::nearest_project_mcp_json(&dir), dir.join(".mcp.json"));
     }
 }
 
@@ -2611,7 +2720,7 @@ mod pending_approval_tests {
     fn pending_approval_string_is_byte_exact() {
         assert_eq!(
             PENDING_APPROVAL,
-            "\u{23F8} Pending approval (run `claude` to approve)"
+            "\u{23F8} Pending approval (run `lingxi-cli` to approve)"
         );
         // The leading glyph is the PAUSE symbol, not e.g. a play/stop glyph.
         assert!(PENDING_APPROVAL.starts_with('\u{23F8}'));

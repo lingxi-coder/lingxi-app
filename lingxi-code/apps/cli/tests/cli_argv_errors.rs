@@ -79,7 +79,7 @@ fn resume_without_value_no_tui_empty_dir_exits_0() {
 /// API key / config dir is needed.
 #[test]
 fn bg_with_print_rejected_up_front_exits_1() {
-    let locked = "--bg and --print conflict: --print never starts the interactive session that `claude agents` attaches to, so the job would be unattachable. The prompt is the positional \u{2014} drop --print: `claude --bg '<task>'`.";
+    let locked = "--bg and --print conflict: --print never starts the interactive session that `lingxi-cli agents` attaches to, so the job would be unattachable. The prompt is the positional \u{2014} drop --print: `lingxi-cli --bg '<task>'`.";
     for args in [
         vec!["--bg", "--print", "task"],
         vec!["--background", "-p", "task"],

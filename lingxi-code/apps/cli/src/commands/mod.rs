@@ -65,9 +65,17 @@ pub enum Commands {
     /// hash-bound via --expect-sha256)
     #[command(name = "auto-mode-setup")]
     AutoModeSetup(auto_mode_setup::Cli),
-    /// Check the health of your LingXi auto-updater. Note: The workspace
-    /// trust dialog is skipped and stdio servers from .mcp.json are spawned for
-    /// health checks. Only use this command in directories you trust.
+    // Was: "...your LingXi auto-updater. Note: The workspace trust dialog is
+    // skipped and stdio servers from .mcp.json are spawned for health checks."
+    // Both halves were wrong about THIS port. `doctor` reports on far more than
+    // the updater, and it explicitly does NOT spawn anything — `doctor.rs`:
+    // "No connection is attempted — this is purely the parsed config view."
+    // The warning also came from the oracle's `-p/--print` option, not its
+    // `doctor`. A description that overstates what a command touches is not
+    // harmlessly cautious: it steers people away from a safe command.
+    /// Check the health of your LingXi installation. Reads settings files in
+    /// the current directory without a trust prompt. For a full checkup that
+    /// can also fix issues, run /doctor in a session.
     Doctor(doctor::Cli),
     /// Run the enterprise auth/telemetry gateway
     Gateway(gateway::Cli),

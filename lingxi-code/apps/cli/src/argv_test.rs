@@ -959,7 +959,7 @@ mod tests {
     /// (stderr line, no `Error:` prefix, exit 1) — note the real em dash.
     #[test]
     fn background_with_print_rejected_up_front() {
-        let locked = "--bg and --print conflict: --print never starts the interactive session that `claude agents` attaches to, so the job would be unattachable. The prompt is the positional \u{2014} drop --print: `claude --bg '<task>'`.";
+        let locked = "--bg and --print conflict: --print never starts the interactive session that `lingxi-cli agents` attaches to, so the job would be unattachable. The prompt is the positional \u{2014} drop --print: `lingxi-cli --bg '<task>'`.";
         // Every spelling pair conflicts: long/alias × long/short.
         for args in [
             ["lingxi-cli", "--bg", "--print", "task"],

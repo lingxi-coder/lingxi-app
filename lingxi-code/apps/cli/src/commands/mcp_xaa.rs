@@ -78,8 +78,30 @@ pub struct LoginArgs {
     pub id_token: Option<String>,
 }
 
+/// Env gate for the whole `xaa` group.
+///
+/// The oracle registers this group only when `CLAUDE_CODE_ENABLE_XAA` is
+/// truthy (`vZ()`, 2.1.220 @228861934) — `claude mcp xaa show` on a default
+/// install answers `error: unknown command 'xaa'`. Registering it
+/// unconditionally would advertise an enterprise IdP surface the oracle keeps
+/// behind a flag, so the gate is reproduced here.
+///
+/// `LINGXI_ENABLE_XAA` is accepted alongside the `CLAUDE_CODE_` name, matching
+/// how this port handles its other dual-named env flags.
+#[must_use]
+pub fn xaa_enabled() -> bool {
+    ["LINGXI_ENABLE_XAA", "CLAUDE_CODE_ENABLE_XAA"]
+        .iter()
+        .any(|k| traits::env::is_env_truthy(std::env::var(k).ok().as_deref()))
+}
+
 /// Dispatch `mcp xaa`.
 pub async fn run(sub: &Sub) -> i32 {
+    if !xaa_enabled() {
+        // Byte-matches the oracle's commander error for an unregistered group.
+        eprintln!("error: unknown command 'xaa'");
+        return RUNTIME_ERROR;
+    }
     match sub {
         Sub::Setup(a) => run_setup(a).await,
         Sub::Login(a) => run_login(a).await,

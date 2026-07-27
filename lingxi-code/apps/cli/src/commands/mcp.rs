@@ -2342,6 +2342,9 @@ fn scope_detail(scope: ConfigScope) -> &'static str {
         ConfigScope::Enterprise => "Enterprise managed config",
         ConfigScope::ClaudeAi => "claude.ai connector",
         ConfigScope::Managed => "Managed config",
+        // Oracle `gV`: an agent-frontmatter server is scoped to the applied
+        // agent and lives only as long as it is applied.
+        ConfigScope::Agent => "Agent config (from agent frontmatter)",
     }
 }
 

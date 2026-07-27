@@ -56,6 +56,9 @@ pub enum ConfigScope {
     Enterprise,
     ClaudeAi,
     Managed,
+    /// Declared in an agent's frontmatter `mcpServers` and connected only while
+    /// that agent is applied (oracle `scope:"agent"`).
+    Agent,
 }
 
 /// State machine for one MCP connection.

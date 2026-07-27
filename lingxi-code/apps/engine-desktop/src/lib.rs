@@ -7422,6 +7422,9 @@ pub async fn build(
     tools_inner.refresh_tool_search_view();
 
     let tools = Arc::new(tools_inner);
+    // Distinct alias: inside the `--agent` apply block below, `tools` is
+    // shadowed by the agent's destructured `AgentToolPolicy`.
+    let tool_registry_for_agent_mcp = tools.clone();
 
     // MCP servers can mutate their tool/prompt/resource catalogs while the
     // session is running. Refresh the registry snapshot on every generation-
@@ -7435,7 +7438,7 @@ pub async fn build(
     {
         let mcp_registry_weak = Arc::downgrade(&mcp_registry);
         let live_tools = tools.clone();
-        let live_mcp_tool_ctx = mcp_tool_ctx;
+        let live_mcp_tool_ctx = mcp_tool_ctx.clone();
         tokio::spawn(async move {
             let mut recovery = std::collections::VecDeque::new();
             loop {
@@ -8192,13 +8195,10 @@ pub async fn build(
     //     default behavior.` warning (claude `rVe`) and falls back to default. A
     //     re-passed `--agent` wins (claude `rVe`'s `if(t)return`) — it is applied
     //     via the explicit arm below and the resume read is skipped.
-    // RESIDUAL seam: frontmatter `mcpServers` (scope `"agent"`) — blocked on the
-    // composition-root MCP tool build, which snapshots the registry into the
-    // Arc-sealed `Arc<ToolRegistry>` (~L6130) BEFORE this final catalog is
-    // assembled (plugin agents land ~L6720), so a late `connect_all` here could
-    // not surface the servers' tools to the model (the SAME limitation plugin MCP
-    // servers already have — there is no runtime-mutable tool registry). Deferred
-    // until a mutable tool registry / earlier agent-resolution seam exists.
+    // Frontmatter `mcpServers` (scope `"agent"`) IS wired — see the end of the
+    // apply block below. The registry's `mcp_tools` partition is behind an
+    // `RwLock` and `register_mcp_tools` takes `&self`, so the sealed
+    // `Arc<ToolRegistry>` gains the servers' tools after boot.
     // (Built-in agent defs live in the subagent spawner, not this catalog, so
     // their names are absent from the miss warning's "Available agents" list —
     // residual.)
@@ -8379,6 +8379,72 @@ pub async fn build(
                     // bucket). A no-op at boot (the bucket starts empty), kept
                     // for parity with the resume site's clear.
                     orch.replace_main_thread_agent_hooks(&[]).await;
+                }
+            }
+
+            // Frontmatter `mcpServers` (scope `agent`) — oracle `obs` → `FWt`
+            // → `connect_all`, then the servers' tools reach the model.
+            //
+            // The old note here claimed this was blocked because "there is no
+            // runtime-mutable tool registry". That was FALSE: `mcp_tools` is a
+            // `RwLock` partition and `register_mcp_tools` takes `&self`
+            // precisely so the sealed `Arc<ToolRegistry>` can gain a server's
+            // tools later — the list_changed watcher above does exactly that on
+            // every notification. The comment outlived the code it described.
+            let agent_mcp_configs = agent::catalog::agent_mcp_specs_to_scoped_configs(
+                &resolved_definition,
+                // `uA("mcp")` — strictPluginOnlyCustomization is unwired here,
+                // exactly like the `hooks` arm above, so nothing is locked to
+                // plugins yet. Named rather than inlined so the day it is wired
+                // this call site is found.
+                false,
+            );
+            if !agent_mcp_configs.is_empty() {
+                let mut allowed = agent_mcp_configs.clone();
+                mcp::enterprise_policy::apply_enterprise_mcp_policy(&mut allowed);
+                let blocked: Vec<String> = agent_mcp_configs
+                    .iter()
+                    .filter(|c| !allowed.iter().any(|a| a.name == c.name))
+                    .map(|c| c.name.clone())
+                    .collect();
+                if !blocked.is_empty() {
+                    // Oracle `onBlocked` warning, byte-shaped.
+                    tracing::warn!(
+                        "Warning: agent frontmatter MCP {} blocked by enterprise policy: {}",
+                        if blocked.len() == 1 { "server" } else { "servers" },
+                        blocked.join(", ")
+                    );
+                }
+                for config in allowed {
+                    let name = config.name.clone();
+                    match mcp_registry.connect(config).await {
+                        Ok(conn_id) => {
+                            // Surface THIS server's tools into the live
+                            // registry, the same call the watcher uses.
+                            let built = tool_mcp::build_registered_mcp_tools(
+                                mcp_registry.as_ref(),
+                                mcp_tool_ctx.clone(),
+                            )
+                            .await;
+                            if let Some((_, handles)) =
+                                built.into_iter().find(|(id, _)| *id == conn_id)
+                            {
+                                tool_registry_for_agent_mcp
+                                    .register_mcp_tools(conn_id, handles);
+                                tool_registry_for_agent_mcp.refresh_tool_search_view();
+                            }
+                        }
+                        Err(error) => {
+                            // Never fatal: a bad frontmatter server must not
+                            // stop the agent from being applied.
+                            tracing::warn!(
+                                target: "lingxi_engine_desktop::mcp",
+                                server = %name,
+                                %error,
+                                "agent frontmatter MCP server failed to connect"
+                            );
+                        }
+                    }
                 }
             }
         }

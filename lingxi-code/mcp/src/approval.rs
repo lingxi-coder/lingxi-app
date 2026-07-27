@@ -61,9 +61,15 @@ impl McpApprovalPolicy {
             | ConfigScope::User
             | ConfigScope::Enterprise
             | ConfigScope::Managed => ApprovalStatus::Approved,
-            ConfigScope::Project | ConfigScope::Dynamic | ConfigScope::ClaudeAi => {
-                ApprovalStatus::PendingApproval
-            }
+            // `Agent` sits with the untrusted tiers deliberately. An agent
+            // definition can come from project settings, and an MCP server is
+            // arbitrary command execution — so a project-supplied agent must
+            // not be able to add one silently. Applying the agent is a weaker
+            // decision than trusting a server it declares.
+            ConfigScope::Project
+            | ConfigScope::Dynamic
+            | ConfigScope::ClaudeAi
+            | ConfigScope::Agent => ApprovalStatus::PendingApproval,
         }
     }
 }

@@ -2021,3 +2021,260 @@ mod tests {
         assert_eq!(out[0].agent_type, "good");
     }
 }
+
+/// Convert an agent's frontmatter `mcpServers` into scoped MCP configs.
+///
+/// 1:1 with claude-code `agentMcpSpecsToScopedConfigs` (`obs`, 2.1.220
+/// @231496980). Every filter is reproduced, in order:
+///
+/// 1. no `mcpServers` ⇒ empty;
+/// 2. `strictPluginOnlyCustomization` locks MCP to plugin-only and the agent is
+///    NOT plugin-sourced ⇒ empty, with a warning naming the source;
+/// 3. a bare STRING spec contributes nothing (`typeof r === "string"` →
+///    `continue`) — it names a server configured elsewhere, it does not define
+///    one;
+/// 4. a reserved server name is skipped;
+/// 5. the internal-only `sse-ide` / `ws-ide` transports are skipped;
+/// 6. survivors are stamped `scope: agent`.
+///
+/// Filters 4 and 5 are the security-relevant pair: without them an agent
+/// definition could shadow a reserved name or reach an IDE-internal transport
+/// that is not meant to be addressable from frontmatter.
+#[must_use]
+pub fn agent_mcp_specs_to_scoped_configs(
+    def: &AgentDefinition,
+    mcp_locked_to_plugins: bool,
+) -> Vec<mcp::McpServerConfig> {
+    if def.mcp_servers.is_empty() {
+        return Vec::new();
+    }
+    if mcp_locked_to_plugins && def.source != AgentSource::Plugin {
+        tracing::warn!(
+            target: "lingxi::agent",
+            "[Agent: {}] Skipping frontmatter MCP servers: strictPluginOnlyCustomization locks MCP to plugin-only (agent source: {:?})",
+            def.agent_type,
+            def.source
+        );
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for spec in &def.mcp_servers {
+        // A by-name spec REFERS to a server configured elsewhere; it defines
+        // nothing, so it produces no config (oracle skips string specs).
+        let AgentMcpServerSpec::Inline { name, config } = spec else {
+            continue;
+        };
+        if mcp::normalization::is_reserved_mcp_server_name(name) {
+            tracing::warn!(
+                target: "lingxi::agent",
+                "[Agent: {}] Skipping reserved MCP server name '{name}' in frontmatter",
+                def.agent_type
+            );
+            continue;
+        }
+        if let Some(kind) = internal_only_transport(&config.spec) {
+            tracing::warn!(
+                target: "lingxi::agent",
+                "[Agent: {}] Skipping internal-only MCP transport '{kind}' for '{name}' in frontmatter",
+                def.agent_type
+            );
+            continue;
+        }
+        let mut cfg = config.clone();
+        cfg.name = name.clone();
+        cfg.scope = mcp::connection::ConfigScope::Agent;
+        out.push(cfg);
+    }
+    out
+}
+
+/// The IDE-internal transport frontmatter may not request, or `None` when the
+/// transport is addressable.
+///
+/// The oracle names two — `sse-ide` and `ws-ide`. This port models only
+/// `SseIde`; there is no `ws-ide` transport to construct, so the second half
+/// of the oracle's check has nothing to match and is not a missing filter.
+/// If a `WsIde` variant is ever added, it belongs here.
+fn internal_only_transport(spec: &traits::McpTransportSpec) -> Option<&'static str> {
+    match spec {
+        traits::McpTransportSpec::SseIde { .. } => Some("sse-ide"),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod agent_mcp_spec_tests {
+    use super::{agent_mcp_specs_to_scoped_configs, AgentDefinition, AgentMcpServerSpec};
+    use crate::definition::AgentSource;
+
+    fn stdio_cfg(name: &str) -> mcp::McpServerConfig {
+        mcp::McpServerConfig {
+            name: name.to_string(),
+            spec: traits::McpTransportSpec::Stdio {
+                command: "echo".into(),
+                args: vec![],
+                env: Default::default(),
+            },
+            scope: mcp::connection::ConfigScope::Project,
+            disabled: false,
+            timeout_ms: None,
+            always_load: false,
+        }
+    }
+
+    fn def_with(source: AgentSource, specs: Vec<AgentMcpServerSpec>) -> AgentDefinition {
+        let raw = "---\nname: a\ndescription: d\n---\nBody";
+        let mut d = super::parse_agent_markdown(
+            raw,
+            source,
+            std::path::PathBuf::from("/tmp"),
+            std::path::Path::new("a.md"),
+        )
+        .expect("fixture parses");
+        d.mcp_servers = specs;
+        d
+    }
+
+    #[test]
+    fn no_specs_yields_nothing() {
+        let d = def_with(AgentSource::Project, vec![]);
+        assert!(agent_mcp_specs_to_scoped_configs(&d, false).is_empty());
+    }
+
+    #[test]
+    fn an_inline_spec_is_stamped_with_the_agent_scope() {
+        let d = def_with(
+            AgentSource::Project,
+            vec![AgentMcpServerSpec::Inline {
+                name: "docs".into(),
+                config: stdio_cfg("ignored"),
+            }],
+        );
+        let out = agent_mcp_specs_to_scoped_configs(&d, false);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].name, "docs");
+        assert_eq!(out[0].scope, mcp::connection::ConfigScope::Agent);
+    }
+
+    /// A by-name spec REFERS to a server configured elsewhere; it defines
+    /// nothing. The oracle skips string specs outright, and treating one as a
+    /// definition would invent a server the user never configured.
+    #[test]
+    fn a_by_name_spec_contributes_no_config() {
+        let d = def_with(
+            AgentSource::Project,
+            vec![AgentMcpServerSpec::ByName("already-configured".into())],
+        );
+        assert!(agent_mcp_specs_to_scoped_configs(&d, false).is_empty());
+    }
+
+    /// strictPluginOnlyCustomization locks MCP to plugin-sourced agents.
+    #[test]
+    fn strict_plugin_only_drops_non_plugin_agents_but_keeps_plugin_ones() {
+        let specs = || {
+            vec![AgentMcpServerSpec::Inline {
+                name: "docs".into(),
+                config: stdio_cfg("docs"),
+            }]
+        };
+        for src in [
+            AgentSource::Project,
+            AgentSource::UserDefined,
+            AgentSource::PolicySettings,
+        ] {
+            let d = def_with(src, specs());
+            assert!(
+                agent_mcp_specs_to_scoped_configs(&d, true).is_empty(),
+                "{src:?} must be dropped under strict-plugin-only"
+            );
+        }
+        let plugin = def_with(AgentSource::Plugin, specs());
+        assert_eq!(agent_mcp_specs_to_scoped_configs(&plugin, true).len(), 1);
+    }
+
+    /// Security filter: frontmatter must not shadow a reserved server name.
+    #[test]
+    fn a_reserved_server_name_is_skipped() {
+        // The real reserved set, not a guess: claude-in-chrome, computer-use,
+        // the Claude Preview/Browser names, and the RAW `workspace`.
+        for reserved in ["computer-use", "claude-in-chrome", "workspace"] {
+            assert!(
+                mcp::normalization::is_reserved_mcp_server_name(reserved),
+                "precondition: {reserved} must be reserved"
+            );
+            let d = def_with(
+                AgentSource::Project,
+                vec![AgentMcpServerSpec::Inline {
+                    name: reserved.into(),
+                    config: stdio_cfg(reserved),
+                }],
+            );
+            assert!(
+                agent_mcp_specs_to_scoped_configs(&d, false).is_empty(),
+                "{reserved} must be skipped"
+            );
+        }
+        // ...and an ordinary name is not caught by the filter.
+        let ok = def_with(
+            AgentSource::Project,
+            vec![AgentMcpServerSpec::Inline {
+                name: "docs".into(),
+                config: stdio_cfg("docs"),
+            }],
+        );
+        assert_eq!(agent_mcp_specs_to_scoped_configs(&ok, false).len(), 1);
+    }
+
+    /// Security filter: the IDE-internal transport is not addressable from
+    /// frontmatter.
+    #[test]
+    fn an_internal_only_transport_is_skipped() {
+        let mut cfg = stdio_cfg("ide-ish");
+        cfg.spec = traits::McpTransportSpec::SseIde {
+            url: "http://127.0.0.1:1/sse".into(),
+            ide_name: "x".into(),
+            ide_running_in_windows: false,
+        };
+        let d = def_with(
+            AgentSource::Project,
+            vec![AgentMcpServerSpec::Inline {
+                name: "sneaky".into(),
+                config: cfg,
+            }],
+        );
+        assert!(agent_mcp_specs_to_scoped_configs(&d, false).is_empty());
+    }
+
+    #[test]
+    fn surviving_specs_keep_their_order_and_skip_only_the_bad_ones() {
+        let mut bad = stdio_cfg("bad");
+        bad.spec = traits::McpTransportSpec::SseIde {
+            url: "http://127.0.0.1:1/sse".into(),
+            ide_name: "x".into(),
+            ide_running_in_windows: false,
+        };
+        let d = def_with(
+            AgentSource::Project,
+            vec![
+                AgentMcpServerSpec::Inline {
+                    name: "first".into(),
+                    config: stdio_cfg("first"),
+                },
+                AgentMcpServerSpec::Inline {
+                    name: "bad".into(),
+                    config: bad,
+                },
+                AgentMcpServerSpec::ByName("skipme".into()),
+                AgentMcpServerSpec::Inline {
+                    name: "second".into(),
+                    config: stdio_cfg("second"),
+                },
+            ],
+        );
+        let names: Vec<String> = agent_mcp_specs_to_scoped_configs(&d, false)
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        assert_eq!(names, vec!["first".to_string(), "second".to_string()]);
+    }
+}

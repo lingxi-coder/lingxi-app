@@ -369,13 +369,66 @@ pub fn resolve_git_bash_path_with(
         // `WMe.join(git, "..", "..", "bin", "bash.exe")` — git.exe lives in
         // `Git\cmd\` (or `Git\bin\`), so two `..` from the FILE path land on
         // the install root.
-        let candidate = git.join("..").join("..").join("bin").join("bash.exe");
-        let display = candidate.to_string_lossy().into_owned();
-        if exists(&display) {
-            return Some(display);
+        let candidate = git_bash_beside_git(&git.to_string_lossy());
+        if exists(&candidate) {
+            return Some(candidate);
         }
     }
     None
+}
+
+/// `WMe.join(git, "..", "..", "bin", "bash.exe")` where `WMe` is
+/// `R(require("path/win32"))` (@226607353) — Node's `path.win32.join`
+/// NORMALIZES, so the two `..` are collapsed and
+/// `C:\Custom\Git\cmd\git.exe` resolves to `C:\Custom\Git\bin\bash.exe`.
+///
+/// Deliberately string-level rather than `PathBuf::join`, which appends `..`
+/// verbatim: the result is not just probed, it is what `resolve_shell_path`
+/// returns, what `P6n` (@226606409) exports as `SHELL` to every child, and
+/// what the `Using bash path: "…"` line prints. Off Windows `std::path` also
+/// sees a backslash path as a SINGLE component, so it has nothing to pop.
+fn git_bash_beside_git(git: &str) -> String {
+    let is_sep = |c: char| c == '\\' || c == '/';
+    let root_len = win32_root_len(git);
+    let (root, rest) = git.split_at(root_len);
+    let rooted = root.ends_with(['\\', '/']);
+
+    let mut comps: Vec<&str> = rest
+        .split(is_sep)
+        .filter(|c| !c.is_empty() && *c != ".")
+        .collect();
+    // The two `..`. A rooted path swallows an over-pop at its root; a relative
+    // one keeps the leftovers as leading `..` (Node's `normalizeString`).
+    let mut deficit = 0;
+    for _ in 0..2 {
+        if comps.pop().is_none() {
+            deficit += 1;
+        }
+    }
+
+    let mut parts: Vec<&str> = Vec::new();
+    if !rooted {
+        parts.extend(std::iter::repeat_n("..", deficit));
+    }
+    parts.extend(comps);
+    parts.push("bin");
+    parts.push("bash.exe");
+    // `path/win32` renders every separator as a backslash.
+    format!("{}{}", root.replace('/', "\\"), parts.join("\\"))
+}
+
+/// Length of the win32 root prefix that `..` may not climb past: `\\` (UNC or
+/// `\\?\`), a drive spec (`C:` / `C:\`), or a bare leading separator.
+fn win32_root_len(path: &str) -> usize {
+    let b = path.as_bytes();
+    let sep = |c: u8| c == b'\\' || c == b'/';
+    if b.len() >= 2 && sep(b[0]) && sep(b[1]) {
+        return 2;
+    }
+    if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
+        return if b.len() >= 3 && sep(b[2]) { 3 } else { 2 };
+    }
+    usize::from(!b.is_empty() && sep(b[0]))
 }
 
 /// Locate `git` on `PATH` (the `O6n("git")` which-alike used by `MQ`).
@@ -2414,26 +2467,47 @@ mod tests {
             resolve_git_bash_path_with(None, &exists_x86, &|| None).as_deref(),
             Some(r"C:\Program Files (x86)\Git\bin\bash.exe")
         );
-        // 4) git-on-PATH: join(git, "..", "..", "bin", "bash.exe").
+        // 4) git-on-PATH: join(git, "..", "..", "bin", "bash.exe"). The
+        // expectation is the LITERAL normalized path, not a recomputation of
+        // the code under test — `path.win32.join` collapses the two `..`, so
+        // no `..` may survive into the returned string.
         let git = std::path::PathBuf::from(r"C:\Custom\Git\cmd\git.exe");
-        let expected = git
-            .join("..")
-            .join("..")
-            .join("bin")
-            .join("bash.exe")
-            .to_string_lossy()
-            .into_owned();
-        let expected_cl = expected.clone();
-        let exists_git = move |p: &str| p == expected_cl;
+        let exists_git = |p: &str| p == r"C:\Custom\Git\bin\bash.exe";
         assert_eq!(
             resolve_git_bash_path_with(None, &exists_git, &|| Some(git.clone())).as_deref(),
-            Some(expected.as_str())
+            Some(r"C:\Custom\Git\bin\bash.exe")
         );
         // 5) Nothing anywhere -> None.
         assert_eq!(
             resolve_git_bash_path_with(None, &|_| false, &|| None),
             None
         );
+    }
+
+    /// `WMe.join` is `path/win32`'s (@226607353), which normalizes. The result
+    /// is exported as `SHELL` and printed by the `Using bash path:` line, so a
+    /// surviving `..` is byte-drift on three surfaces at once.
+    #[test]
+    fn git_bash_candidate_is_win32_normalized() {
+        assert_eq!(
+            git_bash_beside_git(r"C:\Custom\Git\cmd\git.exe"),
+            r"C:\Custom\Git\bin\bash.exe"
+        );
+        assert!(!git_bash_beside_git(r"C:\Custom\Git\cmd\git.exe").contains(".."));
+        // Forward slashes in a PATH entry still render as backslashes.
+        assert_eq!(
+            git_bash_beside_git("C:/Custom/Git/cmd/git.exe"),
+            r"C:\Custom\Git\bin\bash.exe"
+        );
+        // `..` cannot climb past the drive root.
+        assert_eq!(git_bash_beside_git(r"C:\Git\git.exe"), r"C:\bin\bash.exe");
+        // UNC share root is preserved.
+        assert_eq!(
+            git_bash_beside_git(r"\\srv\share\Git\cmd\git.exe"),
+            r"\\srv\share\Git\bin\bash.exe"
+        );
+        // Relative PATH entry keeps the leftover `..` (Node's normalizeString).
+        assert_eq!(git_bash_beside_git(r".\git.exe"), r"..\bin\bash.exe");
     }
 
     #[test]

@@ -284,20 +284,18 @@ pub fn build_server_from_json_entry(
             }
         } else if let Some(raw_url) = entry.url {
             let url = expand_field(&raw_url, &mut missing);
-            let url = if url.trim().is_empty() {
-                if raw_url.trim().is_empty() {
-                    // Literally-empty url: schema-invalid → log + skip (the
-                    // diagnostics pass reports `url: Required`).
-                    tracing::warn!(
-                        server = %name,
-                        "mcp.json: remote entry missing url; skipping"
-                    );
-                    return None;
-                }
-                // 2.1.220 `klr`/`ey_` (`urlExpandedToEmpty`): a NON-empty url
-                // that expanded to an empty string KEEPS the server, tagged
-                // with the byte-exact `configError` — `mcp list`/`get` show it
-                // as `- Not configured` and the connect path never dials.
+            // `ey_`'s `urlExpandedToEmpty` = `url.trim() !== "" && expanded
+            // .trim() === ""`. A url that was ALREADY blank is not that case:
+            // the remote schemas (`cLi` @226761199, `J5n` @226762069) declare
+            // `url: E.string()` with NO `.min(1)`, so a blank url is
+            // schema-VALID and the entry is kept with no `configError` — which
+            // is precisely the `zar` shape `mcp list`/`get` render as
+            // `- Not configured` (see `McpServerConfig::is_unconfigured`).
+            let url = if !raw_url.trim().is_empty() && url.trim().is_empty() {
+                // 2.1.220 `klr`/`ey_`: a NON-blank url that expanded to an
+                // empty string KEEPS the server, tagged with the byte-exact
+                // `configError` (reason `url_invalid` ⇒ INVALID_CONFIG, NOT
+                // unconfigured); the connect path never dials it.
                 // The spec keeps the UNEXPANDED url so list/get display shows
                 // the `${VAR}` reference (the oracle's display view `bEp` maps
                 // back to the `expandVars:false` config for the same effect).
@@ -614,18 +612,32 @@ mod tests {
     }
 
     #[test]
-    fn empty_remote_url_is_skipped_not_loaded() {
-        let raw = r#"{"mcpServers":{"remote":{"type":"http","url":"   "}}}"#;
-        let cfgs = parse_mcp_json_string(raw, ConfigScope::Project).unwrap();
-        assert!(cfgs.is_empty(), "empty remote url is invalid");
+    fn blank_remote_url_is_kept_as_unconfigured() {
+        // `cLi`/`J5n` declare `url: E.string()` with NO `.min(1)` (contrast
+        // stdio's `command: E.string().min(1)`), so a blank url is
+        // schema-VALID: `klr` keeps the entry with NO configError, which is
+        // exactly `zar`'s shape ⇒ `- Not configured`.
+        for raw in [
+            r#"{"mcpServers":{"remote":{"type":"http","url":"   "}}}"#,
+            r#"{"mcpServers":{"remote":{"type":"http","url":""}}}"#,
+        ] {
+            let cfgs = parse_mcp_json_string(raw, ConfigScope::Project).unwrap();
+            assert_eq!(cfgs.len(), 1, "blank remote url must keep the server");
+            assert_eq!(cfgs[0].config_error, None, "blank url is not a configError");
+            assert!(
+                cfgs[0].is_unconfigured(),
+                "blank url with no configError is claude `zar`"
+            );
+        }
     }
 
     #[test]
     fn url_expanded_to_empty_is_kept_with_config_error() {
         // 2.1.220 `klr`/`ey_` (`urlExpandedToEmpty`): a NON-empty url that
         // expands to an empty string KEEPS the server, tagged with the
-        // byte-exact configError (reason `url_invalid`) — it lists as
-        // `- Not configured` instead of vanishing from the inventory.
+        // byte-exact configError. Reason `url_invalid` ⇒ `zar` is false and
+        // `Nxe` classifies it INVALID_CONFIG (`✘ Failed to connect` + the
+        // configError as the issue), NOT `- Not configured`.
         //
         // NB an UNSET `${VAR}` with no default stays LITERAL (bY returns the
         // match) so it does NOT empty the url; emptiness needs a var that IS
@@ -650,6 +662,10 @@ mod tests {
             }
             other => panic!("expected Http, got {other:?}"),
         }
+        assert!(
+            !cfgs[0].is_unconfigured(),
+            "`configErrorReason:\"url_invalid\"` is INVALID_CONFIG, not UNCONFIGURED"
+        );
         // A url that expands to something non-empty carries NO configError.
         let ok = parse_mcp_json_string(
             r#"{"mcpServers":{"r":{"type":"http","url":"${B:-https://x.test}"}}}"#,
@@ -657,6 +673,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(ok[0].config_error, None);
+        assert!(!ok[0].is_unconfigured());
     }
 
     #[test]

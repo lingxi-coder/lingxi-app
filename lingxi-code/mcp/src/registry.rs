@@ -638,11 +638,25 @@ impl McpRegistry {
             return Ok(*connection_id);
         }
 
-        // Config-level error (claude `configError`, e.g. a url that expanded
-        // to an empty string): never dial. The oracle skips the connect
-        // entirely (`mcp_connect_skipped` reason "unconfigured") and reports
-        // the server failed with `errorCode:"UNCONFIGURED"`; the error text is
-        // the configError itself.
+        // claude `Nxe`'s two pre-dial gates, in order — neither dials.
+        //
+        // 1. `zar`: nothing to dial (a blank `url` and no `configError`). The
+        //    oracle logs `mcp_connect_skipped` reason "unconfigured" and fails
+        //    with `errorCode:"UNCONFIGURED"`; the text is
+        //    `configError ?? "No URL configured for this server"`, and the port
+        //    reaches this arm only with `configError` absent.
+        // 2. A `configError` (e.g. a url that expanded to an empty string) →
+        //    `errorCode:"INVALID_CONFIG"`, error text = the configError.
+        //
+        // The frozen `McpError` carries no error code, so both surface as a
+        // `Connection` error holding the oracle's text; callers that need the
+        // distinction (the `mcp list`/`mcp get` status) re-derive it from the
+        // config via [`McpServerConfig::is_unconfigured`].
+        if config.is_unconfigured() {
+            return Err(McpError::Connection(
+                crate::connection::UNCONFIGURED_ERROR.to_string(),
+            ));
+        }
         if let Some(err) = &config.config_error {
             return Err(McpError::Connection(err.clone()));
         }
@@ -3253,6 +3267,44 @@ mod snapshot_tests {
     async fn snapshot_empty_registry() {
         let r = McpRegistry::new(Arc::new(StubTransport));
         assert_eq!(r.snapshot().await, Vec::<McpServerInfo>::new());
+    }
+
+    #[tokio::test]
+    async fn unconfigured_and_invalid_config_short_circuit_before_dialing() {
+        // `StubTransport::connect` is `unreachable!()`, so reaching the dial
+        // panics — both of `Nxe`'s pre-dial gates have to fire here, and they
+        // carry DIFFERENT oracle error codes (UNCONFIGURED vs INVALID_CONFIG)
+        // that `mcp list`/`mcp get` render differently.
+        let r = McpRegistry::new(Arc::new(StubTransport));
+
+        let mut blank = stdio_cfg("blank");
+        blank.spec = McpTransportSpec::Http {
+            url: "   ".into(),
+            headers: traits::McpHeaders::default(),
+            oauth: None,
+        };
+        assert!(blank.is_unconfigured(), "blank url + no configError = `zar`");
+        assert_eq!(
+            r.connect(blank).await.unwrap_err().to_string(),
+            "connection failed: No URL configured for this server"
+        );
+
+        let mut broken = stdio_cfg("broken");
+        broken.spec = McpTransportSpec::Http {
+            url: "${MISSING:-}".into(),
+            headers: traits::McpHeaders::default(),
+            oauth: None,
+        };
+        broken.config_error =
+            Some("'url' \"${MISSING:-}\" expanded to an empty string.".to_string());
+        assert!(
+            !broken.is_unconfigured(),
+            "`url_invalid` is INVALID_CONFIG, never UNCONFIGURED"
+        );
+        assert_eq!(
+            r.connect(broken).await.unwrap_err().to_string(),
+            "connection failed: 'url' \"${MISSING:-}\" expanded to an empty string."
+        );
     }
 
     #[tokio::test]

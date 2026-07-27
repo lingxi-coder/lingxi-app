@@ -201,16 +201,17 @@ pub fn collect_mcp_config_warnings(
 }
 
 /// Loader validity per type (aligned with [`crate::json_config`]): stdio needs
-/// a `command`, every remote type needs a `url`.
+/// a `command`, every remote type needs a `url`. The remote schemas (`cLi`
+/// @226761199, `J5n` @226762069) declare `url: E.string()` with NO `.min(1)`
+/// — unlike stdio's `command: E.string().min(1)` — so a present-but-blank
+/// `url` is schema-VALID and the entry loads (it then reports as
+/// `- Not configured`, claude `zar`).
 fn entry_valid_for_type(entry: &Value, ty: &str) -> bool {
     let has_command = entry
         .get("command")
         .and_then(Value::as_str)
         .is_some_and(|s| !s.trim().is_empty());
-    let has_url = entry
-        .get("url")
-        .and_then(Value::as_str)
-        .is_some_and(|s| !s.trim().is_empty());
+    let has_url = entry.get("url").and_then(Value::as_str).is_some();
     match ty {
         "stdio" => has_command,
         _ => has_url,
@@ -454,8 +455,18 @@ mod tests {
     }
 
     #[test]
-    fn empty_remote_url_is_reported_as_required() {
+    fn blank_remote_url_is_schema_valid_and_only_absent_url_is_required() {
+        // `cLi`/`J5n` declare `url: E.string()` with no `.min(1)`: a blank url
+        // PASSES the schema, so the entry loads (and reports as
+        // `- Not configured`). The only warning is `ty_`'s whitespace notice.
         let c = json!({"mcpServers":{"bad":{"type":"http","url":"   "}}});
+        let w = only(&c);
+        assert_eq!(w.len(), 1);
+        assert_eq!(w[0].message, "Leading or trailing whitespace in: url");
+        // A truly empty string is valid AND whitespace-clean ⇒ no warning.
+        assert!(only(&json!({"mcpServers":{"bad":{"type":"http","url":""}}})).is_empty());
+        // An ABSENT url is still the schema failure.
+        let c = json!({"mcpServers":{"bad":{"type":"http"}}});
         let w = only(&c);
         assert_eq!(w.len(), 1);
         assert_eq!(

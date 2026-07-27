@@ -348,6 +348,23 @@ mod tests {
         );
     }
 
+    /// A `strictAllowlist` flip is STRUCTURAL: it must move the key (reset +
+    /// re-init picks up the new bit) rather than being mistaken for a no-op —
+    /// `active_net` compares only the domain lists, so nothing else would
+    /// propagate the change to the running proxies. Host-independent.
+    #[test]
+    fn structural_key_tracks_strict_allowlist() {
+        let base = to_runtime_config(&cfg_with_domains(&["github.com"]));
+        let mut strict_cfg = cfg_with_domains(&["github.com"]);
+        strict_cfg.network.strict_allowlist = true;
+        let strict = to_runtime_config(&strict_cfg);
+        assert_ne!(
+            structural_key(&base),
+            structural_key(&strict),
+            "a strictAllowlist change must move the structural key"
+        );
+    }
+
     /// `cleanup_after_command` and `reset` on a never-wrapped runner are no-ops
     /// (no manager, empty mount points) and must not panic — host-independent.
     #[tokio::test]

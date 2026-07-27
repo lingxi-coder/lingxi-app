@@ -302,18 +302,21 @@ fn parse_int_radix10(s: &str) -> Option<i64> {
 }
 
 /// Reference to an MCP server an agent should connect to.
+///
+/// Mirrors claude's `AgentMcpServerSpecSchema` union — `string | record` — with
+/// the record kept RAW: validation + conversion to scoped
+/// [`mcp::McpServerConfig`]s happens in
+/// [`crate::mcp_servers::agent_mcp_specs_to_scoped_configs`] (claude `obs`),
+/// which is also where a record with more than one key is rejected
+/// (`Object.entries(r).length !== 1`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AgentMcpServerSpec {
-    /// Refer to a server already registered by name in the host's
-    /// [`mcp::McpRegistry`].
+    /// String entry: refer to a server already configured by name in the host
+    /// (skipped by the scoped-config conversion, claude `typeof r==="string"`).
     ByName(String),
-    /// Provide a full inline configuration, registered on demand.
-    Inline {
-        /// Logical name of the inline server.
-        name: String,
-        /// Connection configuration.
-        config: mcp::McpServerConfig,
-    },
+    /// Record entry: `{ name: config }` with the config body in the same shape
+    /// as one `.mcp.json` server entry, held raw until conversion.
+    Record(serde_json::Map<String, serde_json::Value>),
 }
 
 /// Whether the agent needs an isolated git worktree.

@@ -86,9 +86,9 @@ fn err(msg: impl Into<String>) -> ConfigValidationError {
 /// = DENY-ALL (the netns is unshared and no proxy sockets are bound) — NOT
 /// allow-all (`sandbox-manager.js:590-599`).
 ///
-/// Everything after `denied_domains` is additive and optional; the matcher and
-/// proxy read only the two domain lists, so adding these never changes their
-/// behavior.
+/// Everything after `strict_allowlist` is additive and optional; the matcher
+/// reads only the two domain lists plus `strict_allowlist`, so adding these
+/// never changes its behavior.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NetworkConfig {
@@ -98,6 +98,13 @@ pub struct NetworkConfig {
     /// Hostname patterns always denied (checked before `allowed_domains`).
     #[serde(default)]
     pub denied_domains: Vec<String>,
+    /// When `Some(true)`, an unmatched host is deterministically denied instead
+    /// of consulting the ask callback (2.1.219 `strictAllowlist`; the filter's
+    /// `if(!r||xl.network.strictAllowlist)` gate, 2.1.220 @229871903). The
+    /// adapter sets the key only when true (`…||void 0`, @230074348), so the
+    /// serialized shape omits it otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strict_allowlist: Option<bool>,
     /// macOS only: Unix socket paths to allow. Ignored on Linux.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_unix_sockets: Option<Vec<String>>,
@@ -629,6 +636,24 @@ mod tests {
         assert!(nc.mitm_proxy.is_none() && nc.parent_proxy.is_none());
         let back = serde_json::to_string(&nc).expect("ser");
         assert_eq!(back, r#"{"allowedDomains":["a.com"],"deniedDomains":[]}"#);
+    }
+
+    #[test]
+    fn strict_allowlist_serde_shape() {
+        // Absent key parses to None (pre-2.1.219 configs stay valid)…
+        let json = r#"{"allowedDomains":["a.com"],"deniedDomains":[]}"#;
+        let nc: NetworkConfig = serde_json::from_str(json).expect("parse");
+        assert!(nc.strict_allowlist.is_none());
+        // …and only a set value serializes, camelCased, right after the domain
+        // lists — matching the adapter's `strictAllowlist: …||void 0` shape.
+        let json = r#"{"allowedDomains":["a.com"],"deniedDomains":[],"strictAllowlist":true}"#;
+        let nc: NetworkConfig = serde_json::from_str(json).expect("parse");
+        assert_eq!(nc.strict_allowlist, Some(true));
+        let back = serde_json::to_string(&nc).expect("ser");
+        assert_eq!(
+            back,
+            r#"{"allowedDomains":["a.com"],"deniedDomains":[],"strictAllowlist":true}"#
+        );
     }
 
     #[test]

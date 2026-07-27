@@ -706,6 +706,14 @@ pub(crate) fn resolve_desktop_config(
         api_base: resolve_api_base(),
         api_key: std::env::var("ANTHROPIC_API_KEY").unwrap_or_default(),
         api_key_helper: load_settings_api_key_helper(incl_user, incl_project),
+        // (M13) Managed OAuth forcing needs the managed settings tiers (async
+        // file reads); `build_runtime_from_config` fills it right before the
+        // engine build so ALL CLI paths share one resolution point.
+        managed_oauth_only: false,
+        // (M13) FD-inherited key presence — claude-code's managed/remote
+        // launcher contract. Env presence only; LingXi never reads the FD.
+        anthropic_key_fd_present: std::env::var("CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR")
+            .is_ok_and(|v| !v.trim().is_empty()),
         cwd,
         lingxi_home,
         default_model,
@@ -834,6 +842,11 @@ pub(crate) fn resolve_desktop_config(
         // CLI `--mcp-config <configs...>` servers (parsed above), merged over the
         // discovered servers in `build()`.
         cli_mcp_servers,
+        // `--strict-mcp-config` proper: the discovered paths were already nulled
+        // above; the flag ALSO gates the agent-frontmatter MCP merge in `build()`
+        // (claude `FWt`: frontmatter servers skipped under strict mode unless the
+        // agent came from `--agents`).
+        strict_mcp_config: argv.strict_mcp_config,
         // CLI `--exclude-dynamic-system-prompt-sections`: move per-machine env
         // sections out of the cacheable system prompt into the first user message.
         exclude_dynamic_system_prompt_sections: argv.exclude_dynamic_system_prompt_sections,
@@ -948,6 +961,14 @@ pub async fn build_runtime_from_config(
     output: Arc<dyn OutputStream>,
 ) -> Result<Runtime, InitError> {
     crate::startup_trace::mark("runtime_build_start");
+    // (M13) Managed `forceLoginMethod: "claudeai"` forces the stored OAuth
+    // session as the effective auth source (it outranks an env API key in the
+    // auth resolver). Resolved HERE — the shared async choke point every CLI
+    // mode's runtime flows through — because `resolve_desktop_config` is sync
+    // and the managed tiers are file reads.
+    let mut cfg = cfg;
+    cfg.managed_oauth_only = crate::commands::auth::effective_force_login_method().await
+        == Some(engine::settings::enterprise::ForceLoginMethod::ClaudeAi);
     let permission_sink: Arc<dyn client_adapter::PermissionRequestSink> =
         Arc::new(NoopPermissionRequestSink);
     let rt = build(cfg, output, permission_sink).await?;

@@ -363,6 +363,12 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         // stored provider key as "connected").
         isolated_credential_storage: false,
         api_key_helper,
+        // (M13) The bridge host does not resolve managed login-method forcing
+        // (the Electron parent owns credential policy) and passes no
+        // FD-inherited key — both auth-resolver inputs stay at their inert
+        // defaults.
+        managed_oauth_only: false,
+        anthropic_key_fd_present: false,
         cwd,
         lingxi_home,
         default_model,
@@ -1020,6 +1026,10 @@ mod tests {
             api_base: DEFAULT_API_BASE.to_string(),
             api_key: String::new(),
             api_key_helper: None,
+            // (M13) Inert auth-resolver inputs: no managed OAuth forcing, no
+            // FD-inherited key.
+            managed_oauth_only: false,
+            anthropic_key_fd_present: false,
             cwd: cwd.clone(),
             lingxi_home: cwd.join(".lingxi"),
             default_model: "claude-sonnet-4-20250514".to_string(),

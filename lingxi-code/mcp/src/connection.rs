@@ -65,6 +65,12 @@ pub enum ConfigScope {
     Enterprise,
     ClaudeAi,
     Managed,
+    /// Agent frontmatter `mcpServers` (claude scope `"agent"`, stamped by
+    /// `agentMcpSpecsToScopedConfigs`). Session-scoped like [`Self::Dynamic`],
+    /// but NEVER project-approval-gated (claude's approval prompt covers
+    /// `.mcp.json` project servers only) and subject to the enterprise
+    /// allow/deny policy at merge time (claude `Z__` contains `"agent"`).
+    Agent,
 }
 
 /// State machine for one MCP connection.

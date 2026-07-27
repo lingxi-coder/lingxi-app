@@ -670,6 +670,47 @@ mod tests {
         assert!(line.contains("403"), "expected 403, got {line}");
     }
 
+    /// `strictAllowlist` (2.1.219) at the enforcement layer: an unmatched
+    /// CONNECT is 403'd deterministically even though an ask callback is
+    /// wired — the filter's strict gate (`if(!r||xl.network.strictAllowlist)`,
+    /// 2.1.220 @229871903) runs BEFORE the callback, so it never fires.
+    #[tokio::test]
+    async fn connect_strict_allowlist_denies_despite_ask() {
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ran_in = Arc::clone(&ran);
+        let ask: AskFn = Arc::new(move |_host: &str, _port: u16| {
+            let ran = Arc::clone(&ran_in);
+            Box::pin(async move {
+                ran.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(true)
+            })
+                as std::pin::Pin<
+                    Box<dyn std::future::Future<Output = Result<bool, _>> + Send>,
+                >
+        });
+        let cfg = NetworkConfig {
+            allowed_domains: vec!["allowed.example".into()],
+            denied_domains: vec![],
+            strict_allowlist: Some(true),
+            ..Default::default()
+        };
+        let pport = start_proxy(Arc::new(ProxyOptions::with_static_config(
+            cfg,
+            None,
+            None,
+            None,
+            None,
+            Some(ask),
+        )))
+        .await;
+        let (line, _s) = connect_via_proxy(pport, "unmatched.example:443").await;
+        assert!(line.contains("403"), "expected 403, got {line}");
+        assert!(
+            !ran.load(std::sync::atomic::Ordering::SeqCst),
+            "strict mode must not consult the ask callback"
+        );
+    }
+
     #[tokio::test]
     async fn connect_malformed_target_400() {
         let pport = start_proxy(opts(NetworkConfig::default())).await;

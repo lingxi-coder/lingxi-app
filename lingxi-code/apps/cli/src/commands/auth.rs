@@ -21,7 +21,7 @@ use crate::exit_codes::{RUNTIME_ERROR, SUCCESS};
 use engine::settings::enterprise::{ForceLoginMethod, ForceLoginOrgPin, OrgMembershipCheck};
 use llm_client::oauth::anthropic::client::ClaudeAiOAuthClient;
 use llm_client::oauth::anthropic::config::ClaudeAiOAuthConfig;
-use llm_client::oauth::anthropic::handle::{OAuthHandle, OAuthLoginOptions};
+use llm_client::oauth::anthropic::handle::{CodeFlowIo, OAuthHandle, OAuthLoginOptions, UrlSink};
 use std::sync::Arc;
 use traits::AuthHandle;
 
@@ -147,13 +147,58 @@ async fn run_login(args: &LoginArgs) -> i32 {
         }
     };
 
-    println!("Opening browser to sign in…");
-    let login = auth.login_with_options(OAuthLoginOptions {
-        login_hint: args.email.clone(),
-        sso: args.sso,
-        org_uuid,
+    // Manual `code#state` fallback (claude `cli auth login`): a stdin line
+    // reader races the loopback callback. Each valid paste is forwarded into
+    // the flow; a malformed one gets claude's exact stderr line and the reader
+    // keeps listening.
+    let (manual_tx, manual_rx) = tokio::sync::mpsc::channel::<(String, String)>(4);
+    let stdin_reader = tokio::spawn(async move {
+        use tokio::io::AsyncBufReadExt;
+        let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            match parse_manual_auth_code(&line) {
+                Some(pair) => {
+                    telemetry::AnalyticsBus::new()
+                        .log_event("tengu_oauth_manual_entry", telemetry::LogEventMetadata::new())
+                        .await;
+                    if manual_tx.send(pair).await.is_err() {
+                        break;
+                    }
+                }
+                None => eprintln!("Invalid code. Please make sure the full code was copied."),
+            }
+        }
     });
-    let info = match tokio::time::timeout(std::time::Duration::from_secs(300), login).await {
+
+    // claude's `startOAuthFlow` callback — printed with the MANUAL URL variant
+    // once the flow has bound its listener. Byte-exact strings; the URL is
+    // OSC-8 hyperlinked on a TTY (`Z2(url, undefined, {assumeSupport: true})`).
+    let on_url: UrlSink = Arc::new(|url: &str| {
+        println!("Opening browser to sign in…");
+        println!(
+            "If the browser didn't open, visit: {}",
+            hyperlink_assume_support(url)
+        );
+        print!("Paste code here if prompted > ");
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+    });
+
+    let login = auth.login_with_options_and_io(
+        OAuthLoginOptions {
+            login_hint: args.email.clone(),
+            sso: args.sso,
+            org_uuid,
+        },
+        CodeFlowIo {
+            on_url: Some(on_url),
+            manual_rx: Some(manual_rx),
+        },
+    );
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(300), login).await;
+    // claude's `finally { p.close() }` — stop consuming stdin either way.
+    stdin_reader.abort();
+    let info = match outcome {
         Ok(Ok(info)) => info,
         Ok(Err(error)) => {
             eprintln!("Login failed: {error}");
@@ -178,6 +223,34 @@ async fn run_login(args: &LoginArgs) -> i32 {
             eprintln!("{message}");
             RUNTIME_ERROR
         }
+    }
+}
+
+/// Parse one pasted manual-entry line — claude's
+/// `let [m, g] = f.trim().split("#"); if (!m || !g) …`: trim, split on `#`,
+/// take the first two segments, both must be non-empty. Extra `#` segments are
+/// ignored (JS destructuring drops them).
+fn parse_manual_auth_code(line: &str) -> Option<(String, String)> {
+    let mut parts = line.trim().split('#');
+    let code = parts.next().unwrap_or_default();
+    let state = parts.next().unwrap_or_default();
+    if code.is_empty() || state.is_empty() {
+        return None;
+    }
+    Some((code.to_string(), state.to_string()))
+}
+
+/// claude's `Z2(url, undefined, {assumeSupport: true})`: with no separate link
+/// text and assumed support, a TTY stdout gets an OSC-8 hyperlink whose
+/// visible text is the URL itself in blueBright; a non-TTY stdout gets the
+/// plain URL (the `assumeSupport` arm still requires `process.stdout.isTTY`).
+fn hyperlink_assume_support(url: &str) -> String {
+    use std::io::IsTerminal;
+    if std::io::stdout().is_terminal() {
+        // OSC 8 open (BEL-terminated), blueBright text, OSC 8 close.
+        format!("\u{1b}]8;;{url}\u{7}\u{1b}[94m{url}\u{1b}[39m\u{1b}]8;;\u{7}")
+    } else {
+        url.to_string()
     }
 }
 
@@ -461,5 +534,36 @@ fn env_truthy(var: &str) -> bool {
             matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
         }
         Err(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_manual_auth_code;
+
+    /// M8: `code#state` splitting mirrors claude's
+    /// `f.trim().split("#")` + `!m || !g` validity check.
+    #[test]
+    fn manual_code_parse_matrix() {
+        assert_eq!(
+            parse_manual_auth_code("abc#xyz"),
+            Some(("abc".into(), "xyz".into()))
+        );
+        // Surrounding whitespace is trimmed BEFORE the split.
+        assert_eq!(
+            parse_manual_auth_code("  abc#xyz \n"),
+            Some(("abc".into(), "xyz".into()))
+        );
+        // Extra segments are dropped (JS `[m, g] = …` destructuring).
+        assert_eq!(
+            parse_manual_auth_code("a#b#c"),
+            Some(("a".into(), "b".into()))
+        );
+        // Either side empty (or no `#` at all) is invalid.
+        assert_eq!(parse_manual_auth_code("abc"), None);
+        assert_eq!(parse_manual_auth_code("abc#"), None);
+        assert_eq!(parse_manual_auth_code("#xyz"), None);
+        assert_eq!(parse_manual_auth_code(""), None);
+        assert_eq!(parse_manual_auth_code("   "), None);
     }
 }

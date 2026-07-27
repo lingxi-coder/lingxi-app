@@ -21,6 +21,7 @@ pub mod display;
 pub mod fork;
 pub mod handle;
 pub mod hooks_trust;
+pub mod mcp_servers;
 pub mod model_resolution;
 pub mod multi_dispatch;
 pub mod permission_mode;
@@ -50,6 +51,7 @@ pub use handle::{
 pub use traits::subagent_spawn::{format_agent_line, should_inject_agent_list_in_messages};
 // Fork-subagent helpers live in the leaf `traits` crate (reachable by both
 // `tool-agent` and `agent`); re-export under `agent::` for ergonomic access.
+pub use mcp_servers::agent_mcp_specs_to_scoped_configs;
 pub use model_resolution::resolve_agent_model;
 pub use tool_resolver::resolve_subagent_tools;
 pub use traits::fork_subagent::{

@@ -33,6 +33,24 @@ const LOGIN_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// tests pass a no-op (optionally recording the URL).
 pub type BrowserOpener = Arc<dyn Fn(&str) -> Result<(), AuthError> + Send + Sync>;
 
+/// Host callback invoked with the MANUAL authorize URL before the browser
+/// opens (oracle `startOAuthFlow(async (url) => ...)`): the CLI prints the
+/// "If the browser didn't open, visit:" fallback trio from it.
+pub type UrlSink = Arc<dyn Fn(&str) + Send + Sync>;
+
+/// Host IO seams for the interactive code flow (oracle `startOAuthFlow`
+/// callback + `handleManualAuthCodeInput`). Default = fully headless: no URL
+/// surfaced, no manual entry (the pre-existing programmatic behaviour).
+#[derive(Default)]
+pub struct CodeFlowIo {
+    /// Receives the MANUAL authorize URL before the browser opens.
+    pub on_url: Option<UrlSink>,
+    /// Manual `(code, state)` pairs pasted by the user (`code#state`). Raced
+    /// against the loopback listener; a closed channel (stdin EOF) simply
+    /// leaves the listener waiting.
+    pub manual_rx: Option<tokio::sync::mpsc::Receiver<(String, String)>>,
+}
+
 /// Profile-endpoint shapes. `account.email` (note: the token-exchange response
 /// uses `email_address` instead) and `organization.uuid`.
 #[derive(Debug, Deserialize)]
@@ -91,6 +109,7 @@ impl OAuthHandle {
         &self,
         authorize: AuthorizeOptions,
         expires_in: Option<u64>,
+        io: CodeFlowIo,
     ) -> Result<ExchangedTokens, AuthError> {
         // (1+) Bind the loopback listener first so the redirect target exists
         // before the browser opens. Port 0 → OS-assigned; read it back and bake
@@ -100,30 +119,82 @@ impl OAuthHandle {
             .map_err(callback_to_auth_err)?;
         let redirect_uri = format!("http://localhost:{}/callback", listener.port());
 
-        let (url, verifier, state) = self
+        let urls = self
             .client
-            .build_authorize_url_with_options(&redirect_uri, &authorize);
+            .build_authorize_url_pair_with_options(&redirect_uri, &authorize);
 
-        // (2) Open the browser (no-op under test).
-        (self.browser_open)(&url)?;
+        // (1b) Surface the MANUAL URL variant to the host FIRST (oracle
+        // `await e(i)` before `await Cc(s)`), so the fallback instructions are
+        // visible even when the browser spawn below fails.
+        if let Some(sink) = &io.on_url {
+            sink(&urls.manual_url);
+        }
 
-        // (3) Await the redirect. The socket was already bound before the
-        // browser was opened, so the kernel backlog safely holds an immediate
-        // callback. Keeping the accept future in this task also means a caller
-        // timeout cancels and closes the listener instead of leaking a detached
-        // callback task.
-        let params = listener
-            .accept(&state)
-            .await
-            .map_err(callback_to_auth_err)?;
+        // (2) Open the browser on the AUTOMATIC variant (no-op under test).
+        // Best-effort: the oracle's opener (`Cc`) reports failure as a value
+        // instead of throwing, so a spawn error must NOT abort the flow — the
+        // surfaced URL + manual `code#state` paste is the recovery path.
+        if let Err(error) = (self.browser_open)(&urls.automatic_url) {
+            tracing::warn!(
+                %error,
+                "could not open browser for OAuth login; complete the flow via the printed URL"
+            );
+        }
 
-        // (4) Exchange the code for tokens.
+        // (3) Await the redirect, racing any manual `code#state` paste. The
+        // socket was already bound before the browser was opened, so the kernel
+        // backlog safely holds an immediate callback. Keeping the accept future
+        // in this task also means a caller timeout cancels and closes the
+        // listener instead of leaking a detached callback task. A manual win
+        // drops (closes) the listener — oracle `handleManualAuthCodeInput`
+        // closes the `authCodeListener`.
+        let accept = listener.accept(&urls.state);
+        tokio::pin!(accept);
+        let mut manual_rx = io.manual_rx;
+        let (code, via_manual) = loop {
+            if let Some(rx) = manual_rx.as_mut() {
+                tokio::select! {
+                    res = accept.as_mut() => {
+                        break (res.map_err(callback_to_auth_err)?.code, false);
+                    }
+                    pasted = rx.recv() => match pasted {
+                        // Oracle `handleManualAuthCodeInput` consumes only the
+                        // CODE; the exchange runs with the flow's own state and
+                        // the manual redirect_uri (`useManualRedirect`), so the
+                        // pasted state is syntax-validated by the CLI but not
+                        // re-checked here (the token endpoint enforces it).
+                        Some((code, _state)) => break (code, true),
+                        // Manual channel closed (stdin EOF) — keep waiting on
+                        // the loopback listener alone.
+                        None => manual_rx = None,
+                    },
+                }
+            } else {
+                break (
+                    accept
+                        .as_mut()
+                        .await
+                        .map_err(callback_to_auth_err)?
+                        .code,
+                    false,
+                );
+            }
+        };
+
+        // (4) Exchange the code for tokens. A manually-pasted code was minted
+        // against the hosted code page, so the exchange must present THAT
+        // redirect_uri (oracle `useManualRedirect: !automatic`).
+        let exchange_redirect = if via_manual {
+            self.client.config().manual_redirect_uri.clone()
+        } else {
+            redirect_uri
+        };
         self.client
             .exchange_code_with_options(
-                &params.code,
-                &verifier,
-                &params.state,
-                &redirect_uri,
+                &code,
+                &urls.verifier,
+                &urls.state,
+                &exchange_redirect,
                 expires_in,
             )
             .await
@@ -135,13 +206,26 @@ impl OAuthHandle {
         &self,
         options: OAuthLoginOptions,
     ) -> Result<LoginInfo, AuthError> {
+        self.login_with_options_and_io(options, CodeFlowIo::default())
+            .await
+    }
+
+    /// [`Self::login_with_options`] with host IO seams: `io.on_url` receives
+    /// the MANUAL authorize URL before the browser opens, and `io.manual_rx`
+    /// feeds pasted `code#state` pairs that race the loopback callback (the
+    /// `claude auth login` browser-failure fallback).
+    pub async fn login_with_options_and_io(
+        &self,
+        options: OAuthLoginOptions,
+        io: CodeFlowIo,
+    ) -> Result<LoginInfo, AuthError> {
         let authorize = AuthorizeOptions {
             org_uuid: options.org_uuid,
             login_hint: options.login_hint,
             login_method: options.sso.then(|| "sso".to_string()),
             scopes: None,
         };
-        let tokens = self.run_code_flow(authorize, None).await?;
+        let tokens = self.run_code_flow(authorize, None, io).await?;
 
         // (5) Resolve email + org. Prefer the exchange response; otherwise fetch
         //     the profile endpoint with the bearer token.
@@ -173,20 +257,36 @@ impl OAuthHandle {
             .await
             .map_err(|e| AuthError::ServerError(format!("persist: {e}")))?;
 
-        // (6b) Resolve + publish the subscription tier (claude-code
-        // `getOauthAccountInfo`, written at login from the profile + roles
-        // endpoints) into the process-global `traits::subscription` cache, so
-        // subscription-gated prompt logic (e.g. the `AgentTool` pro-plan gate)
-        // reflects the signed-in plan. Best-effort + scope-gated
-        // (`hasProfileScope`): a token without `user:profile`, or any fetch
-        // failure, leaves the cache unchanged.
+        // (6b) Resolve the subscription tier (claude-code `getOauthAccountInfo`,
+        // written at login from the profile + roles endpoints), then BOTH
+        // persist it into the stored credential (claude-code keeps
+        // `subscriptionType`/`rateLimitTier` INSIDE `claudeAiOauth`, so a fresh
+        // process has correct enterprise/tier state on its FIRST request) and
+        // publish it to the process-global `traits::subscription` cache for
+        // subscription-gated prompt logic (e.g. the `AgentTool` pro-plan gate).
+        // Best-effort + scope-gated (`hasProfileScope`): a token without
+        // `user:profile`, or any fetch failure, leaves both unchanged.
         let transport = self.client.http();
-        crate::oauth::anthropic::subscription::publish_subscription(
+        if let Some(snapshot) = crate::oauth::anthropic::subscription::resolve_subscription_snapshot(
             tokens.access_token.expose_secret(),
             &tokens.scopes,
             &transport,
         )
-        .await;
+        .await
+        {
+            if let Err(error) = self
+                .client
+                .credentials()
+                .update_oauth_subscription(
+                    snapshot.subscription_type.as_deref(),
+                    snapshot.rate_limit_tier.as_deref(),
+                )
+                .await
+            {
+                tracing::warn!(%error, "could not persist subscription tier into the credential store");
+            }
+            traits::subscription::set_current_subscription(Some(snapshot));
+        }
 
         // (7) Return the resolved identity.
         Ok(LoginInfo { email, org_id })
@@ -207,6 +307,7 @@ impl OAuthHandle {
                     login_method: None,
                 },
                 Some(LONG_LIVED_OAUTH_TOKEN_TTL_SECONDS),
+                CodeFlowIo::default(),
             )
             .await?;
         Ok(tokens.access_token)
@@ -308,8 +409,9 @@ fn callback_to_auth_err(e: CallbackError) -> AuthError {
 }
 
 /// Open `url` in the user's default browser via the platform command. Best
-/// effort — a spawn failure surfaces as a server error so the CLI can fall back
-/// to printing the URL.
+/// effort — a spawn failure surfaces as a server error, which `run_code_flow`
+/// logs and IGNORES (oracle `Cc` reports failure as a value): the surfaced
+/// manual URL + `code#state` paste is the recovery path.
 fn real_browser_open(url: &str) -> Result<(), AuthError> {
     #[cfg(target_os = "macos")]
     let (cmd, args): (&str, Vec<&str>) = ("open", vec![url]);
@@ -352,6 +454,18 @@ mod tests {
     /// in-memory keychain. Returns the handle, the storage (for assertions),
     /// and a flag set when the browser opener fired.
     fn handle_with_token_body(token_body: &str) -> (OAuthHandle, Arc<MemStorage>, Arc<AtomicBool>) {
+        handle_with_bodies(
+            token_body,
+            r#"{"account":{"email":"profile@example.com"},"organization":{"uuid":"org-from-profile"}}"#,
+        )
+    }
+
+    /// [`handle_with_token_body`] with an explicit profile-endpoint body (used
+    /// by the subscription-persistence test, which needs an org tier).
+    fn handle_with_bodies(
+        token_body: &str,
+        profile_body: &str,
+    ) -> (OAuthHandle, Arc<MemStorage>, Arc<AtomicBool>) {
         let http = MockHttp::new(vec![
             (
                 "oauth/token",
@@ -360,14 +474,13 @@ mod tests {
                     body: token_body.into(),
                 },
             ),
-            // Profile endpoint fallback (used only when the token body omits
-            // account/org).
+            // Profile endpoint (identity fallback when the token body omits
+            // account/org, and the subscription-tier resolution).
             (
                 "/api/oauth/profile",
                 Canned {
                     status: 200,
-                    body: r#"{"account":{"email":"profile@example.com"},"organization":{"uuid":"org-from-profile"}}"#
-                        .into(),
+                    body: profile_body.into(),
                 },
             ),
         ]);
@@ -501,5 +614,119 @@ mod tests {
         let body = r#"{"access_token":"acc","expires_in":1}"#;
         let (handle, _storage, _) = handle_with_token_body(body);
         assert!(handle.current_user().await.is_none());
+    }
+
+    /// M8: a failing browser opener no longer aborts the flow, the host URL
+    /// sink receives the MANUAL authorize URL, and a pasted `code#state` pair
+    /// completes the login — with the token exchange presenting the MANUAL
+    /// redirect_uri (oracle `useManualRedirect`).
+    #[tokio::test]
+    async fn manual_code_entry_completes_login_when_browser_fails() {
+        // Binds the fixed loopback port 45321 — same machine-global resource
+        // contention as the OpenAI ports, and these tests raced each other.
+        let _g = crate::oauth::openai::testsupport::port_guard().await;
+        let body = r#"{
+            "access_token":"acc","refresh_token":"ref","expires_in":3600,
+            "scope":"read:user",
+            "account":{"uuid":"acc-uuid","email_address":"token@example.com"},
+            "organization":{"uuid":"org-token"}
+        }"#;
+        let (handle, _storage, opened) = handle_with_token_body(body);
+        // Failing opener: never drives the loopback callback.
+        let handle = handle.with_browser_opener(Arc::new(|_url: &str| {
+            Err(AuthError::ServerError(
+                "could not open browser: boom".into(),
+            ))
+        }));
+
+        let seen_url = Arc::new(std::sync::Mutex::new(String::new()));
+        let sink_url = seen_url.clone();
+        let on_url: UrlSink = Arc::new(move |url: &str| {
+            *sink_url.lock().unwrap() = url.to_string();
+        });
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<(String, String)>(1);
+        tx.send(("PASTEDCODE".into(), "pasted-state".into()))
+            .await
+            .expect("queue manual code");
+
+        let info = handle
+            .login_with_options_and_io(
+                OAuthLoginOptions::default(),
+                CodeFlowIo {
+                    on_url: Some(on_url),
+                    manual_rx: Some(rx),
+                },
+            )
+            .await
+            .expect("login completes via manual entry despite browser failure");
+        assert_eq!(info.email, "token@example.com");
+        assert!(!opened.load(Ordering::SeqCst), "flag opener replaced");
+
+        // The sink got the MANUAL URL variant (hosted code page redirect).
+        let url = seen_url.lock().unwrap().clone();
+        assert!(
+            url.contains("redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback"),
+            "sink got the manual variant, was: {url}"
+        );
+    }
+
+    /// M13: a login whose token carries `user:profile` resolves the profile
+    /// tier and PERSISTS `subscription_type`/`rate_limit_tier` into the stored
+    /// credential (claude-code keeps them inside `claudeAiOauth`), so a fresh
+    /// process seeds correct enterprise/tier state before any network.
+    #[tokio::test]
+    async fn login_persists_subscription_tier_from_profile() {
+        // Binds the fixed loopback port 45321 — same machine-global resource
+        // contention as the OpenAI ports, and these tests raced each other.
+        let _g = crate::oauth::openai::testsupport::port_guard().await;
+        // This login WRITES the process-global subscription cache; serialize
+        // with the other global-cache tests.
+        let _s = crate::oauth::anthropic::testsupport::SUBSCRIPTION_CACHE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let token_body = r#"{
+            "access_token":"acc","refresh_token":"ref","expires_in":3600,
+            "scope":"org:create_api_key user:profile user:inference",
+            "account":{"uuid":"acc-uuid","email_address":"token@example.com"},
+            "organization":{"uuid":"org-token"}
+        }"#;
+        let profile_body = r#"{"organization":{"organization_type":"claude_max","uuid":"org-token",
+            "rate_limit_tier":"default_claude_max_20x"}}"#;
+        let (handle, storage, _) = handle_with_bodies(token_body, profile_body);
+        handle.login().await.expect("login ok");
+
+        let clock = TestClock::new(1_000);
+        let cm = mem_credential_manager(storage.clone(), clock);
+        let tokens = cm
+            .get_oauth_tokens()
+            .await
+            .expect("get")
+            .expect("persisted");
+        assert_eq!(tokens.subscription_type.as_deref(), Some("max"));
+        assert_eq!(
+            tokens.rate_limit_tier.as_deref(),
+            Some("default_claude_max_20x")
+        );
+        traits::subscription::set_current_subscription(None);
+    }
+
+    /// M8: with NO manual channel and a dead opener the flow still waits on
+    /// the listener (regression: it used to abort with the opener error). The
+    /// caller timeout is what ends it.
+    #[tokio::test]
+    async fn browser_failure_alone_keeps_waiting_not_error() {
+        let _g = crate::oauth::openai::testsupport::port_guard().await;
+        let body = r#"{"access_token":"acc","expires_in":3600}"#;
+        let (handle, _storage, _) = handle_with_token_body(body);
+        let handle = handle.with_browser_opener(Arc::new(|_url: &str| {
+            Err(AuthError::ServerError("could not open browser".into()))
+        }));
+        let out = tokio::time::timeout(
+            Duration::from_millis(200),
+            handle.login_with_options(OAuthLoginOptions::default()),
+        )
+        .await;
+        assert!(out.is_err(), "flow keeps waiting instead of aborting");
     }
 }

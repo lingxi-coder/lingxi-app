@@ -284,7 +284,10 @@ impl AuthState {
     /// read back from the previously-persisted session metadata and preserved.
     /// If no prior session blob exists (refresh before any login persisted),
     /// the identity falls back to empty strings — the access / refresh tokens
-    /// are still written so the next process start can use them.
+    /// are still written so the next process start can use them. The persisted
+    /// `subscription_type` / `rate_limit_tier` are carried over INSIDE
+    /// `store_oauth_tokens` (claude-code `ltu()` merge), so rotation never
+    /// drops them.
     async fn persist_to_keychain(&self, info: &TokenInfo) -> Result<(), OAuthError> {
         let Some(cm) = &self.credentials else {
             return Ok(());

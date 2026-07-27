@@ -1709,6 +1709,8 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 ///     api_key: "sk-test".to_string(),
 ///     isolated_credential_storage: false,
 ///     api_key_helper: None,
+///     managed_oauth_only: false,
+///     anthropic_key_fd_present: false,
 ///     cwd: PathBuf::from("/tmp/project"),
 ///     lingxi_home: PathBuf::from("/tmp/home/.lingxi"),
 ///     default_model: "claude-sonnet-5".to_string(),
@@ -1739,6 +1741,7 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 ///     disable_slash_commands: false,
 ///     add_dir: Vec::new(),
 ///     cli_mcp_servers: Vec::new(),
+///     strict_mcp_config: false,
 ///     exclude_dynamic_system_prompt_sections: false,
 ///     setting_source_scope: (true, true),
 ///     customization_gates: engine_desktop::CustomizationGates::default(),
@@ -1796,6 +1799,21 @@ pub struct DesktopConfig {
     /// Settings `apiKeyHelper`: shell command/path that prints the Anthropic
     /// auth value. Used only when no higher-priority API key/OAuth source wins.
     pub api_key_helper: Option<String>,
+    /// (M13) Managed context forces Claude.ai OAuth as the effective auth
+    /// source (managed settings `forceLoginMethod: "claudeai"`): with a stored
+    /// OAuth session it outranks even an env `ANTHROPIC_API_KEY` in the auth
+    /// resolver (`llm_client::oauth::anthropic::resolver`). Host-resolved
+    /// (F2-01: `build()` performs no managed-settings reads for this); the CLI
+    /// fills it from the managed tiers, bridge-server keeps the default
+    /// `false`.
+    pub managed_oauth_only: bool,
+    /// (M13) `true` when the launcher advertised an FD-inherited Anthropic API
+    /// key (`CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR` in claude-code's managed /
+    /// remote launches). In the auth resolver an FD key outranks stored OAuth,
+    /// so a stored session must NOT report as the Claude.ai-subscriber auth
+    /// source. LingXi ships no FD-passing launcher of its own; the CLI fills
+    /// this from env presence so the seam is closed for hosts that do.
+    pub anthropic_key_fd_present: bool,
     /// Working directory the orchestrator + tool context are rooted at.
     pub cwd: std::path::PathBuf,
     /// The `~/.claude` root the hook / agents / global-MCP / settings loaders
@@ -1968,6 +1986,14 @@ pub struct DesktopConfig {
     /// `--strict-mcp-config` the host nulls the discovered paths, so these are
     /// the ONLY servers. Empty (the default) ⟶ none.
     pub cli_mcp_servers: Vec<mcp::McpServerConfig>,
+    /// CLI `--strict-mcp-config` ("Only use MCP servers from --mcp-config,
+    /// ignoring all other MCP configurations"). The host already nulls the
+    /// discovered `.mcp.json` paths when set; the flag itself is threaded here
+    /// because the agent-frontmatter MCP merge (claude `FWt`, cc2.1.220) skips
+    /// frontmatter servers under strict mode UNLESS the agent came from the
+    /// `--agents` flag (`r?.strictMcpConfig && t.source !== "flagSettings"`).
+    /// `false` (the default) ⟶ no strict gating.
+    pub strict_mcp_config: bool,
     /// CLI `--exclude-dynamic-system-prompt-sections`. Threaded into
     /// `OrchestratorConfig::exclude_dynamic_system_prompt_sections`: moves the
     /// per-machine env block out of the (cacheable) system prompt and into the
@@ -2292,6 +2318,7 @@ impl std::fmt::Debug for DesktopConfig {
             )
             .field("add_dir", &self.add_dir)
             .field("cli_mcp_server_count", &self.cli_mcp_servers.len())
+            .field("strict_mcp_config", &self.strict_mcp_config)
             .field(
                 "exclude_dynamic_system_prompt_sections",
                 &self.exclude_dynamic_system_prompt_sections,
@@ -2327,6 +2354,10 @@ impl Default for DesktopConfig {
             // Production reads the real keychain; only isolated hosts opt out.
             isolated_credential_storage: false,
             api_key_helper: None,
+            // (M13) Default: no managed OAuth forcing, no FD-inherited key —
+            // hosts that resolve either fill them in.
+            managed_oauth_only: false,
+            anthropic_key_fd_present: false,
             cwd: std::path::PathBuf::from("."),
             lingxi_home: std::path::PathBuf::new(),
             default_model: DesktopEngineConfig::default().default_model,
@@ -2357,6 +2388,8 @@ impl Default for DesktopConfig {
             disable_slash_commands: false,
             add_dir: Vec::new(),
             cli_mcp_servers: Vec::new(),
+            // Default: no `--strict-mcp-config` (ambient MCP configs load).
+            strict_mcp_config: false,
             exclude_dynamic_system_prompt_sections: false,
             // Default: all setting tiers load (absent `--setting-sources`).
             setting_source_scope: (true, true),
@@ -3036,27 +3069,23 @@ pub enum BuildError {
 /// for a session that holds a stored OAuth token.
 ///
 /// `isClaudeAISubscriber()` is `isAnthropicAuthEnabled() && shouldUseClaudeAIAuth(scopes)`.
-/// `isAnthropicAuthEnabled()` is `false` whenever a non-OAuth source OUTRANKS
-/// stored OAuth in the auth resolver (`llm_client::oauth::anthropic::resolver`). The two such
-/// sources surfaced into the desktop build are the env `ANTHROPIC_API_KEY`
-/// (`api_key_present`) and `ANTHROPIC_AUTH_TOKEN` (`auth_token_present`); when
-/// either is set the effective auth is that key/bearer, not Claude.ai OAuth.
-/// Bedrock / api-key-helper / settings keys rank BELOW stored OAuth, so OAuth
-/// wins over them — no exclusion needed. With neither override present, the token
-/// is the effective auth and `shouldUseClaudeAIAuth(scopes)` (== presence of the
-/// `user:inference` scope, via `llm_client::oauth::anthropic::subscription_from_scopes`)
-/// decides.
-///
-/// PARITY-GAP: FD-inherited keys + managed-context OAuth forcing are not surfaced
-/// into [`DesktopConfig`]; the common desktop API-key-vs-OAuth split is covered.
+/// `isAnthropicAuthEnabled()` reduces to "the auth resolver picks the stored
+/// OAuth session" — `resolve` is driven with the FULL
+/// [`llm_client::oauth::anthropic::resolver::ResolverContext`] (M13), so every
+/// documented ranking applies: managed OAuth forcing outranks env keys, env
+/// `ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_API_KEY` and an FD-inherited key outrank
+/// stored OAuth, and stored OAuth outranks the stored/settings/helper/Bedrock
+/// keys. When OAuth is the effective source, `shouldUseClaudeAIAuth(scopes)`
+/// (== presence of the `user:inference` scope, via
+/// `llm_client::oauth::anthropic::subscription_from_scopes`) decides.
 fn oauth_subscriber_flag(
-    api_key_present: bool,
-    auth_token_present: bool,
+    source: &llm_client::oauth::anthropic::resolver::AuthSource,
     scopes: &[String],
 ) -> bool {
-    !api_key_present
-        && !auth_token_present
-        && llm_client::oauth::anthropic::subscription_from_scopes(scopes)
+    matches!(
+        source,
+        llm_client::oauth::anthropic::resolver::AuthSource::OAuthClaudeAi
+    ) && llm_client::oauth::anthropic::subscription_from_scopes(scopes)
 }
 
 /// Fold the profile + roles responses into the shared snapshot. Pure —
@@ -3522,6 +3551,75 @@ fn merge_cli_flag_agents(
             agents.push(a);
         }
     }
+}
+
+/// (M7 cc2.1.220) Boot gates for [`merge_agent_frontmatter_mcp_servers`],
+/// resolved by the composition root (env/flag safe mode, `--strict-mcp-config`,
+/// `managed-mcp.json` presence) and injected so the merge is a pure,
+/// unit-testable function.
+#[derive(Debug, Clone, Copy)]
+struct AgentMcpMergeGates {
+    /// claude `Gl()` — `CLAUDE_CODE_SAFE_MODE` env truthy or `--safe-mode`.
+    safe_mode: bool,
+    /// claude `r?.strictMcpConfig` — the `--strict-mcp-config` CLI flag.
+    strict_mcp_config: bool,
+    /// claude `T3()` — a managed `managed-mcp.json` takes EXCLUSIVE control of
+    /// the MCP server set; agent frontmatter servers never merge.
+    enterprise_mcp_active: bool,
+}
+
+/// (M7 cc2.1.220) claude `FWt(existing, agentDef, opts)` @245974724 — merge the
+/// resolved main-thread agent's frontmatter `mcpServers` into the to-connect
+/// MCP config list, so they register + connect exactly like `--mcp-config`
+/// servers. Returns the enterprise-BLOCKED server names for the caller's
+/// `onBlocked` stderr warning (only the composition root prints — claude's
+/// TUI/resume `FWt` call sites pass no `onBlocked`).
+///
+/// Gate order, byte-faithful to `FWt`:
+/// 1. no agent definition → no-op (`if(!t)return e`);
+/// 2. safe mode → no-op (`if(Gl())return e`);
+/// 3. `--strict-mcp-config` UNLESS the agent came from `--agents`
+///    (`r?.strictMcpConfig && t.source !== "flagSettings"`), OR a managed MCP
+///    config is active (`|| T3()`) → no-op;
+/// 4. convert via `obs` ([`agent::agent_mcp_specs_to_scoped_configs`]);
+/// 5. `Yee` enterprise allow/deny filter (sdk-type always allowed) → blocked
+///    names collected;
+/// 6. `{...allowed, ...existing}` — an EXISTING same-name server wins; agent
+///    servers only fill gaps.
+fn merge_agent_frontmatter_mcp_servers(
+    existing: &mut Vec<mcp::McpServerConfig>,
+    def: Option<&agent::AgentDefinition>,
+    gates: AgentMcpMergeGates,
+    policy: &mcp::enterprise_policy::McpPolicy,
+) -> Vec<String> {
+    let Some(def) = def else {
+        return Vec::new();
+    };
+    if gates.safe_mode {
+        return Vec::new();
+    }
+    if (gates.strict_mcp_config && def.source != agent::AgentSource::Flag)
+        || gates.enterprise_mcp_active
+    {
+        return Vec::new();
+    }
+    // `Y0("mcp")` strictPluginOnlyCustomization: the composition root never
+    // populates the strict policy today (`StrictPluginOnlyPolicy::empty()`
+    // above), so the lock is always open — pass `false`; the gate itself lives
+    // inside the conversion for 1:1 structure.
+    let scoped = agent::agent_mcp_specs_to_scoped_configs(def, false);
+    let mut blocked = Vec::new();
+    for cfg in scoped {
+        // `Yee` — enterprise allow/deny per server (sdk short-circuit inside).
+        if !mcp::enterprise_policy::is_server_allowed(&cfg, policy) {
+            blocked.push(cfg.name);
+            continue;
+        }
+        if !existing.iter().any(|x| x.name == cfg.name) {
+            existing.push(cfg);
+        }
+    }
+    blocked
 }
 
 /// Read the merged `settings.enabledPlugins` allowlist (`plugin@marketplace` →
@@ -4223,9 +4321,16 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
     // platform `Arc<dyn SecureStorage>` for per-server token persistence.
     let mcp_oauth_storage = storage.clone();
     let credentials = Arc::new(CredentialManager::new(storage, clock.clone(), http.clone()));
+    // (M13) Track WHERE the key came from — the auth resolver ranks an
+    // env/host-supplied key ABOVE stored OAuth but a keychain-stored key BELOW
+    // it, so the two sources must stay distinguishable.
+    let mut stored_anthropic_api_key = false;
     let resolved_anthropic_api_key = if cfg.api_key.is_empty() {
         match credentials.get_anthropic_api_key().await {
-            Ok(Some(key)) => Some(key.expose_secret().clone()),
+            Ok(Some(key)) => {
+                stored_anthropic_api_key = true;
+                Some(key.expose_secret().clone())
+            }
             Ok(None) => None,
             Err(error) => {
                 tracing::warn!(%error, "could not read Anthropic API key from secure storage");
@@ -4253,23 +4358,56 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
     //        (3.2) API.6: while we have the token in hand, resolve the Claude.ai
     //        subscriber flag from its scopes (see [`oauth_subscriber_flag`]).
     let mut is_subscriber = false;
+    let mut persisted_subscription_type: Option<String> = None;
     match credentials.get_oauth_tokens().await {
         Ok(Some(tokens)) => {
-            is_subscriber = oauth_subscriber_flag(
-                resolved_anthropic_api_key.is_some(),
-                std::env::var_os("ANTHROPIC_AUTH_TOKEN").is_some(),
-                &tokens.scopes,
-            );
-            // Re-seed the shared slot with the resolved subscriber flag so
-            // readers see it even before (or without) the background
-            // profile+roles fetch landing. SECRECY: deliberately copy the
-            // access token (a `Secret<String>`, intentionally non-`Clone`) by
-            // exposing + re-wrapping — the audited copy pattern — BEFORE the
-            // original moves into `init_refresh_driver`; it is exposed again
-            // only inside the spawned fetch task.
+            // (M13) Drive the documented auth-source resolver with the full
+            // context instead of a hand-rolled two-flag exclusion: managed
+            // OAuth forcing (`forceLoginMethod: "claudeai"`) makes the stored
+            // session the effective auth EVEN with an env key present, an
+            // FD-inherited key outranks the stored session, and a
+            // keychain-stored key ranks BELOW it. The below-OAuth sources
+            // (settings key / helper / Bedrock) cannot change the outcome once
+            // `has_stored_oauth` is true, so their slots stay conservative.
+            let auth_source =
+                llm_client::oauth::anthropic::resolver::resolve(
+                    &llm_client::oauth::anthropic::resolver::ResolverContext {
+                        managed_oauth_only: cfg.managed_oauth_only,
+                        env_auth_token: std::env::var("ANTHROPIC_AUTH_TOKEN")
+                            .ok()
+                            .filter(|v| !v.is_empty()),
+                        env_api_key: (!stored_anthropic_api_key)
+                            .then(|| resolved_anthropic_api_key.clone())
+                            .flatten(),
+                        fd_present: cfg.anthropic_key_fd_present,
+                        has_stored_oauth: true,
+                        has_stored_api_key: stored_anthropic_api_key,
+                        settings_api_key: None,
+                        api_key_helper_script: cfg
+                            .api_key_helper
+                            .as_ref()
+                            .map(std::path::PathBuf::from),
+                        aws_present: false,
+                    },
+                );
+            is_subscriber = oauth_subscriber_flag(&auth_source, &tokens.scopes);
+            // (M13) The stored credential carries the tier persisted at login
+            // (claude-code keeps `subscriptionType`/`rateLimitTier` inside
+            // `claudeAiOauth`), so enterprise/tier-gated behaviour is correct
+            // from request #1 — no async profile-fetch window.
+            persisted_subscription_type.clone_from(&tokens.subscription_type);
+            // Re-seed the shared slot with the resolved subscriber flag + the
+            // PERSISTED tier so readers see them even before (or without) the
+            // background profile+roles fetch landing. SECRECY: deliberately
+            // copy the access token (a `Secret<String>`, intentionally
+            // non-`Clone`) by exposing + re-wrapping — the audited copy
+            // pattern — BEFORE the original moves into `init_refresh_driver`;
+            // it is exposed again only inside the spawned fetch task.
             if let Ok(mut guard) = subscription.write() {
                 *guard = Some(traits::subscription::SubscriptionSnapshot {
                     is_subscriber,
+                    subscription_type: tokens.subscription_type.clone(),
+                    rate_limit_tier: tokens.rate_limit_tier.clone(),
                     ..Default::default()
                 });
             }
@@ -4295,14 +4433,18 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
                     if is_subscriber {
                         oauth_auth_state = Some(auth_state);
 
-                        // Task 4: background OAuth profile + roles fetch. This
-                        // closes the RENDERING half of the profile-fetch
-                        // PARITY-GAP documented at `orchestrator/src/config.rs:134`
-                        // (tier/billing/role data for rate-limit copy), without
-                        // touching the build hot path. Both fetchers swallow
+                        // Task 4: background OAuth profile + roles fetch — the
+                        // FRESHENER over the persisted-tier seed above (closes
+                        // the RENDERING half of the profile-fetch PARITY-GAP
+                        // documented at `orchestrator/src/config.rs:134` —
+                        // tier/billing/role data for rate-limit copy — without
+                        // touching the build hot path). Both fetchers swallow
                         // every error → `None` (matching the TS `logError` /
-                        // `return undefined` stance), so on any failure the
-                        // seeded `is_subscriber`-only snapshot simply stays.
+                        // `return undefined` stance); (M13) a FAILED profile
+                        // fetch skips the write entirely so the seeded
+                        // persisted-tier snapshot is never clobbered with an
+                        // empty one (oracle preserves stored `subscriptionType`
+                        // when the refresh can't resolve a new value).
                         //
                         // SharedSubscription locking contract (std `RwLock`):
                         // the guard must NEVER be held across an `.await` —
@@ -4315,25 +4457,42 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
                         {
                             let slot = subscription.clone();
                             let transport: std::sync::Arc<dyn traits::HttpTransport> = http.clone();
+                            let creds = credentials.clone();
                             // Move (not copy) the token into the task — its
                             // only consumer.
                             let token = profile_token;
                             tokio::spawn(async move {
                                 let token = token.expose_secret();
-                                let profile =
+                                let Some(profile) =
                                     llm_client::oauth::anthropic::fetch_profile_from_oauth_token(
                                         token, &transport,
                                     )
-                                    .await;
+                                    .await
+                                else {
+                                    return;
+                                };
                                 let roles = llm_client::oauth::anthropic::fetch_user_roles(
                                     token, &transport,
                                 )
                                 .await;
                                 let snap = subscription_snapshot_from(
                                     true,
-                                    profile.as_ref(),
+                                    Some(&profile),
                                     roles.as_ref(),
                                 );
+                                // (M13) Freshen the persisted tier too, so
+                                // pre-M13 logins self-heal and the NEXT boot
+                                // seeds from up-to-date values. `new ?? old`
+                                // merge — never clears a stored tier.
+                                if let Err(error) = creds
+                                    .update_oauth_subscription(
+                                        snap.subscription_type.as_deref(),
+                                        snap.rate_limit_tier.as_deref(),
+                                    )
+                                    .await
+                                {
+                                    tracing::warn!(%error, "could not persist freshened subscription tier");
+                                }
                                 if let Ok(mut guard) = slot.write() {
                                     *guard = Some(snap);
                                 }
@@ -4445,11 +4604,15 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
     //       dep. A bad settings entry only emits a warning — the engine still boots
     //       with every well-formed profile (incl. the built-in Anthropic one).
     let has_api_key = resolved_anthropic_api_key.is_some();
-    // OAuth bridges into the client ONLY when there is no API key (api-key wins;
-    // the single credential slot + `oauth_subscriber_flag` enforce the
-    // exclusion). `has_oauth` selects `AuthStrategy::OAuthBearer`, which is what
-    // injects the required `oauth-2025-04-20` beta on Anthropic routes.
-    let has_oauth = !has_api_key && oauth_auth_state.is_some();
+    // OAuth bridges into the client exactly when the auth RESOLVER made the
+    // stored session the effective source (M13): `oauth_auth_state` is only
+    // captured for an OAuth-effective subscriber session, which outranks a
+    // keychain-stored key and — under managed `forceLoginMethod: "claudeai"` —
+    // even an env key. `has_oauth` selects `AuthStrategy::OAuthBearer`, which
+    // is what injects the required `oauth-2025-04-20` beta on Anthropic routes;
+    // the assemble input below drops the key claim when OAuth is effective so
+    // the ApiKey strategy can't shadow it.
+    let has_oauth = oauth_auth_state.is_some();
     let oauth_delegate: Option<Arc<dyn llm_client::CredentialProvider>> =
         oauth_auth_state.clone().map(|state| {
             let driver = Arc::new(RefreshDriver::new(state));
@@ -4460,7 +4623,7 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
     let assembled = provider_config::assemble(provider_config::AssembleInputs {
         anthropic_api_base: cfg.api_base.clone(),
         anthropic_models: anthropic_models_for(&cfg.default_model, cfg.fallback_model.as_deref()),
-        anthropic_has_api_key: has_api_key,
+        anthropic_has_api_key: has_api_key && !has_oauth,
         anthropic_has_oauth: has_oauth,
         user_providers: cfg.provider_profiles.clone().unwrap_or_default(),
         routing: cfg.routing.clone(),
@@ -4779,9 +4942,13 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
         let llm_cat = llm_catalog_from_cost(&assembled.pricing);
         Arc::new(CostEstimator::new(llm_cat, PricingPolicy::MarkUnestimated))
     };
+    // (M13) Enterprise state now comes from the PERSISTED credential tier
+    // (claude-code reads `subscriptionType` synchronously from the stored
+    // tokens), so the static build-time state is correct from request #1;
+    // the shared subscription slot freshens it per request.
     let subscriber_state = SubscriberState {
         is_subscriber,
-        is_enterprise: false,
+        is_enterprise: persisted_subscription_type.as_deref() == Some("enterprise"),
     };
 
     Ok(LlmStack {
@@ -5218,9 +5385,12 @@ pub async fn build(
     // (computed in step 3.2 from the OAuth token scopes) into the orchestrator
     // config so the fallback-aware api-client seam resolves the consecutive-529
     // Opus-fallback gate and the 429-retry gate exactly as claude-code does.
-    // `is_enterprise` stays `false` (PARITY-GAP: enterprise tier needs a profile
-    // fetch not performed in this build hot path).
+    // (M13) `is_enterprise` is seeded from the tier PERSISTED in the stored
+    // credential (claude-code reads `subscriptionType` synchronously from the
+    // stored tokens) — no profile fetch in the build hot path, and no async
+    // misclassification window before the background freshener lands.
     orch_cfg.is_subscriber = is_subscriber;
+    orch_cfg.is_enterprise = subscriber_state.is_enterprise;
     // OUTSTYLE.2: thread the merged `settings.outputStyle` (TS string) into the
     // orchestrator config so `build_system_prompt` injects the active style's
     // `# Output Style: <name>` section (Explanatory / Learning builtins). `None`
@@ -5548,6 +5718,125 @@ pub async fn build(
     {
         eprintln!("{}", w.to_stderr_line());
     }
+
+    // (5.3) Agent catalog — load from project + user agents/. Project wins on
+    //       collision (passed SECOND; later paths win). The user agents dir is
+    //       `cfg.lingxi_home/agents` (was `dirs::home_dir()/.lingxi/agents`).
+    //       HOISTED above the MCP registry build (M7 cc2.1.220): the
+    //       agent-frontmatter MCP merge just below must see the wanted agent's
+    //       markdown/flag definition BEFORE `connect_all` snapshots the config
+    //       list. Nothing between here and the former position reads the
+    //       catalog; plugin agents still land later via the plugin bootstrap's
+    //       `plugin_agent_catalog` writes.
+    let project_agents_dir = cwd.join(branding::DOT_DIR).join("agents");
+    let user_agents_dir = cfg.lingxi_home.join("agents");
+    // (M3 cc2.1.198) `--safe-mode` / `--bare` disable custom agent definitions
+    // (`V5d.agents:!0`, `K5d.agents:!1`) — skip the dir scan, empty catalog.
+    let mut agents = if cfg.customization_gates.disables_custom_agents() {
+        Vec::new()
+    } else {
+        agent::load_agents_from_dirs(&[
+            (user_agents_dir, agent::definition::AgentSource::UserDefined),
+            (project_agents_dir, agent::definition::AgentSource::Project),
+        ])
+        .await
+    };
+    // (M4 cc2.1.198) `--agents <json>` flag agents — see
+    // [`merge_cli_flag_agents`].
+    merge_cli_flag_agents(
+        &mut agents,
+        cfg.cli_agents_json.as_deref(),
+        cfg.customization_gates.safe_mode,
+    );
+
+    // (P2-02 cc2.1.207 / M7 cc2.1.220) The agent to apply to the MAIN loop: an
+    // EXPLICIT `--agent` (fresh boot or re-passed on `--resume`) wins;
+    // otherwise, on a resume with no `--agent`, the persisted `agentSetting`
+    // (`rVe` restoration). `from_resume` selects the miss warning + suppresses
+    // the re-persist (the record is already on disk). Computed HERE — before
+    // the MCP registry connects — because claude merges the resolved
+    // main-thread agent's frontmatter `mcpServers` into `dynamicMcpConfig`
+    // (`FWt`) BEFORE the MCP clients connect. The APPLICATION to the
+    // orchestrator seam still happens later, against the FINAL
+    // (plugin-inclusive) catalog.
+    let (wanted_agent, resumed_agent_snapshot, from_resume): (
+        Option<String>,
+        Option<serde_json::Value>,
+        bool,
+    ) = match cfg.cli_agent.clone() {
+        Some(w) => (Some(w), None, false),
+        None if cfg.session_id_override.is_some() => {
+            let snapshot_fs =
+                Arc::new(PosixFileSystem::new(cwd.clone())) as Arc<dyn traits::FileSystem>;
+            let (persisted, snapshot) = session::jsonl::read_agent_resume_state(
+                &main_transcript_path,
+                snapshot_fs,
+                &main_session_uuid,
+            )
+            .await;
+            (persisted, snapshot, true)
+        }
+        None => (None, None, false),
+    };
+    // (M7 cc2.1.220) Resolve the definition the `FWt` merge consults. The
+    // FINAL catalog does not exist yet (plugin agents land with the plugin
+    // bootstrap), but plugin agents cannot carry `mcpServers` (LingXi's
+    // parse-time privilege gate rejects them; claude strips the field with a
+    // warning), so the markdown/flag set + the resume snapshot covers every
+    // server-bearing definition. Miss handling (the "not found" warning) stays
+    // with the application block below.
+    let main_agent_def_for_mcp: Option<agent::AgentDefinition> =
+        wanted_agent.as_ref().and_then(|wanted| {
+            resumed_agent_snapshot
+                .as_ref()
+                .and_then(|v| serde_json::from_value::<agent::AgentDefinition>(v.clone()).ok())
+                .filter(|a| &a.agent_type == wanted)
+                .or_else(|| {
+                    agents
+                        .iter()
+                        .find(|a| &a.agent_type == wanted)
+                        .or_else(|| {
+                            let suffix = format!(":{wanted}");
+                            agents.iter().find(|a| a.agent_type.ends_with(&suffix))
+                        })
+                        .cloned()
+                })
+        });
+    // (M7 cc2.1.220) `FWt(existing, agentDef, opts)` — fold the agent's
+    // frontmatter `mcpServers` into the to-connect list so they register,
+    // connect and surface tools EXACTLY like `--mcp-config` servers. Applied
+    // AFTER `apply_project_server_gate` + `apply_enterprise_mcp_policy`: agent
+    // servers are never project-approval-gated (claude approval covers
+    // `.mcp.json` servers) and the merge runs its OWN `Yee` enterprise filter +
+    // `T3()` managed-exclusive skip below, mirroring claude's ordering (`FWt`
+    // merges into `dynamicMcpConfig` after discovery filtering).
+    let agent_mcp_blocked = merge_agent_frontmatter_mcp_servers(
+        &mut mcp_configs,
+        main_agent_def_for_mcp.as_ref(),
+        AgentMcpMergeGates {
+            safe_mode: cfg.customization_gates.safe_mode,
+            strict_mcp_config: cfg.strict_mcp_config,
+            enterprise_mcp_active: mcp::enterprise_policy::enterprise_mcp_active(),
+        },
+        &mcp::enterprise_policy::read_managed_mcp_policy(),
+    );
+    if !agent_mcp_blocked.is_empty() {
+        // claude's headless-start `onBlocked` (the only site that prints):
+        // `Warning: agent frontmatter MCP ${Tt(len,"server")} blocked by
+        // enterprise policy: ${names.join(", ")}` — `Tt` pluralizes WITHOUT a
+        // count.
+        eprintln!(
+            "Warning: agent frontmatter MCP {} blocked by enterprise policy: {}",
+            if agent_mcp_blocked.len() == 1 {
+                "server"
+            } else {
+                "servers"
+            },
+            agent_mcp_blocked.join(", ")
+        );
+    }
+    let agent_catalog = Arc::new(tokio::sync::RwLock::new(agents));
+
     // Build one concrete `PosixMcpTransport` and hand it to the registry as
     // BOTH the `McpTransport` (discovery) and the `RawConnectionProvider`
     // (live-client bridge), so a connected server yields a working `McpClient`
@@ -6087,31 +6376,6 @@ pub async fn build(
     // Clone handles the runtime `/add-dir` live effect needs (the same registry
     // Arc is moved into the orchestrator builder below via `with_mcp_registry`).
     let runtime_mcp_registry = mcp_registry.clone();
-
-    // (5.3) Agent catalog — load from project + user agents/. Project wins on
-    //       collision (passed SECOND; later paths win). The user agents dir is
-    //       `cfg.lingxi_home/agents` (was `dirs::home_dir()/.lingxi/agents`).
-    let project_agents_dir = cwd.join(branding::DOT_DIR).join("agents");
-    let user_agents_dir = cfg.lingxi_home.join("agents");
-    // (M3 cc2.1.198) `--safe-mode` / `--bare` disable custom agent definitions
-    // (`V5d.agents:!0`, `K5d.agents:!1`) — skip the dir scan, empty catalog.
-    let mut agents = if cfg.customization_gates.disables_custom_agents() {
-        Vec::new()
-    } else {
-        agent::load_agents_from_dirs(&[
-            (user_agents_dir, agent::definition::AgentSource::UserDefined),
-            (project_agents_dir, agent::definition::AgentSource::Project),
-        ])
-        .await
-    };
-    // (M4 cc2.1.198) `--agents <json>` flag agents — see
-    // [`merge_cli_flag_agents`].
-    merge_cli_flag_agents(
-        &mut agents,
-        cfg.cli_agents_json.as_deref(),
-        cfg.customization_gates.safe_mode,
-    );
-    let agent_catalog = Arc::new(tokio::sync::RwLock::new(agents));
 
     // (5.4) Real compaction. Threshold 150_000 tokens (M3 design lock for the
     //       Anthropic prod context window). In-Loop Compaction Batch 6: back the
@@ -8088,40 +8352,17 @@ pub async fn build(
     //     default behavior.` warning (claude `rVe`) and falls back to default. A
     //     re-passed `--agent` wins (claude `rVe`'s `if(t)return`) — it is applied
     //     via the explicit arm below and the resume read is skipped.
-    // RESIDUAL seam: frontmatter `mcpServers` (scope `"agent"`) — blocked on the
-    // composition-root MCP tool build, which snapshots the registry into the
-    // Arc-sealed `Arc<ToolRegistry>` (~L6130) BEFORE this final catalog is
-    // assembled (plugin agents land ~L6720), so a late `connect_all` here could
-    // not surface the servers' tools to the model (the SAME limitation plugin MCP
-    // servers already have — there is no runtime-mutable tool registry). Deferred
-    // until a mutable tool registry / earlier agent-resolution seam exists.
+    //   • frontmatter `mcpServers` (scope `"agent"`) — CLOSED (M7 cc2.1.220):
+    //     merged into the to-connect config list by the `FWt` pre-pass in
+    //     (5.1)/(5.3) above, BEFORE the MCP registry `connect_all` and the
+    //     `Arc<ToolRegistry>` snapshot — the servers register, connect and
+    //     surface tools exactly like `--mcp-config` servers. The
+    //     `(wanted_agent, resumed_agent_snapshot, from_resume)` triple this
+    //     block consumes is computed THERE (one transcript read serves both the
+    //     merge and this application).
     // (Built-in agent defs live in the subagent spawner, not this catalog, so
     // their names are absent from the miss warning's "Available agents" list —
     // residual.)
-    //
-    // (P2-02 cc2.1.207) The agent to apply: an EXPLICIT `--agent` (fresh boot or
-    // re-passed on `--resume`) wins; otherwise, on a resume with no `--agent`, the
-    // persisted `agentSetting` (`rVe` restoration). `from_resume` selects the miss
-    // warning + suppresses the re-persist (the record is already on disk).
-    let (wanted_agent, resumed_agent_snapshot, from_resume): (
-        Option<String>,
-        Option<serde_json::Value>,
-        bool,
-    ) = match cfg.cli_agent.clone() {
-        Some(w) => (Some(w), None, false),
-        None if cfg.session_id_override.is_some() => {
-            let snapshot_fs =
-                Arc::new(PosixFileSystem::new(watch_cwd.clone())) as Arc<dyn traits::FileSystem>;
-            let (persisted, snapshot) = session::jsonl::read_agent_resume_state(
-                &main_transcript_path,
-                snapshot_fs,
-                &main_session_uuid,
-            )
-            .await;
-            (persisted, snapshot, true)
-        }
-        None => (None, None, false),
-    };
     if let Some(wanted) = wanted_agent {
         // Resolve against the FINAL catalog, extracting what the main thread
         // applies (agentType + system prompt + tool policy + model) so the
@@ -9124,21 +9365,220 @@ mod tests {
         assert_eq!(bad.len(), 1);
     }
 
+    /// (M7 cc2.1.220) `merge_agent_frontmatter_mcp_servers` — the `FWt` port:
+    /// gate order, existing-name-wins merge, enterprise blocked names.
+    #[test]
+    fn merge_agent_frontmatter_mcp_servers_fwt_gates_and_merge() {
+        fn agent_with_server(name: &str, source: agent::AgentSource) -> agent::AgentDefinition {
+            let mut def = agent::parse_agent_from_json(
+                "helper",
+                &serde_json::json!({"description": "d", "prompt": "p"}),
+                source,
+            )
+            .expect("valid agent");
+            let mut map = serde_json::Map::new();
+            map.insert(
+                name.to_string(),
+                serde_json::json!({"command": "npx", "args": ["-y", "docs-mcp"]}),
+            );
+            def.mcp_servers = vec![agent::AgentMcpServerSpec::Record(map)];
+            def
+        }
+        fn existing(name: &str) -> mcp::McpServerConfig {
+            mcp::McpServerConfig {
+                name: name.to_string(),
+                spec: traits::McpTransportSpec::Stdio {
+                    command: "prior".into(),
+                    args: vec![],
+                    env: std::collections::HashMap::new(),
+                },
+                scope: mcp::ConfigScope::Project,
+                disabled: false,
+                timeout_ms: None,
+                always_load: false,
+            }
+        }
+        let open_gates = super::AgentMcpMergeGates {
+            safe_mode: false,
+            strict_mcp_config: false,
+            enterprise_mcp_active: false,
+        };
+        let no_policy = mcp::enterprise_policy::McpPolicy::default();
+
+        // No definition → no-op (`if(!t)return e`).
+        let mut configs = vec![existing("keep")];
+        let blocked =
+            super::merge_agent_frontmatter_mcp_servers(&mut configs, None, open_gates, &no_policy);
+        assert!(blocked.is_empty());
+        assert_eq!(configs.len(), 1);
+
+        // Open gates: the frontmatter server joins the to-connect list with
+        // scope Agent, exactly like a `--mcp-config` server.
+        let def = agent_with_server("docs", agent::AgentSource::Project);
+        let mut configs = vec![existing("keep")];
+        let blocked = super::merge_agent_frontmatter_mcp_servers(
+            &mut configs,
+            Some(&def),
+            open_gates,
+            &no_policy,
+        );
+        assert!(blocked.is_empty());
+        assert_eq!(configs.len(), 2);
+        let added = configs.iter().find(|c| c.name == "docs").unwrap();
+        assert_eq!(added.scope, mcp::ConfigScope::Agent);
+
+        // `{...allowed, ...existing}` — an existing same-name server WINS.
+        let mut configs = vec![existing("docs")];
+        super::merge_agent_frontmatter_mcp_servers(
+            &mut configs,
+            Some(&def),
+            open_gates,
+            &no_policy,
+        );
+        assert_eq!(configs.len(), 1);
+        assert!(
+            matches!(&configs[0].spec, traits::McpTransportSpec::Stdio { command, .. } if command == "prior"),
+            "existing config must win on name collision"
+        );
+        assert_eq!(configs[0].scope, mcp::ConfigScope::Project);
+
+        // Gl(): safe mode → no merge.
+        let mut configs = vec![];
+        super::merge_agent_frontmatter_mcp_servers(
+            &mut configs,
+            Some(&def),
+            super::AgentMcpMergeGates {
+                safe_mode: true,
+                ..open_gates
+            },
+            &no_policy,
+        );
+        assert!(configs.is_empty());
+
+        // strictMcpConfig: skipped UNLESS the agent came from `--agents`
+        // (`t.source !== "flagSettings"`).
+        let strict = super::AgentMcpMergeGates {
+            strict_mcp_config: true,
+            ..open_gates
+        };
+        let mut configs = vec![];
+        super::merge_agent_frontmatter_mcp_servers(&mut configs, Some(&def), strict, &no_policy);
+        assert!(configs.is_empty(), "strict mode blocks non-flag agents");
+        let flag_def = agent_with_server("docs", agent::AgentSource::Flag);
+        let mut configs = vec![];
+        super::merge_agent_frontmatter_mcp_servers(
+            &mut configs,
+            Some(&flag_def),
+            strict,
+            &no_policy,
+        );
+        assert_eq!(configs.len(), 1, "flagSettings agents bypass strict mode");
+
+        // T3(): managed-MCP exclusive control → no merge.
+        let mut configs = vec![];
+        super::merge_agent_frontmatter_mcp_servers(
+            &mut configs,
+            Some(&def),
+            super::AgentMcpMergeGates {
+                enterprise_mcp_active: true,
+                ..open_gates
+            },
+            &no_policy,
+        );
+        assert!(configs.is_empty());
+
+        // Yee: a deny-listed server is BLOCKED (returned for the stderr
+        // warning), an allowed sibling still merges.
+        let mut two = agent_with_server("docs", agent::AgentSource::Project);
+        let mut denied = serde_json::Map::new();
+        denied.insert(
+            "denied".to_string(),
+            serde_json::json!({"command": "evil"}),
+        );
+        two.mcp_servers
+            .push(agent::AgentMcpServerSpec::Record(denied));
+        let deny_policy = mcp::enterprise_policy::McpPolicy {
+            denied: Some(vec![mcp::enterprise_policy::McpServerMatcher {
+                server_name: Some("denied".into()),
+                server_command: None,
+                server_url: None,
+            }]),
+            allowed: None,
+        };
+        let mut configs = vec![];
+        let blocked = super::merge_agent_frontmatter_mcp_servers(
+            &mut configs,
+            Some(&two),
+            open_gates,
+            &deny_policy,
+        );
+        assert_eq!(blocked, vec!["denied".to_string()]);
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].name, "docs");
+    }
+
     #[test]
     fn oauth_subscriber_flag_gating() {
+        use llm_client::oauth::anthropic::resolver::{resolve, ResolverContext};
         let inference = vec!["user:inference".to_string(), "user:profile".to_string()];
         let no_inference = vec!["user:profile".to_string()];
+        // The context `resolve_llm_stack` builds for a stored-OAuth session,
+        // parameterized over the sources that can outrank (or force) it.
+        let ctx = |managed: bool, env_key: bool, env_token: bool, fd: bool, stored_key: bool| {
+            resolve(&ResolverContext {
+                managed_oauth_only: managed,
+                env_auth_token: env_token.then(|| "tok".to_string()),
+                env_api_key: env_key.then(|| "sk-ant".to_string()),
+                fd_present: fd,
+                has_stored_oauth: true,
+                has_stored_api_key: stored_key,
+                settings_api_key: None,
+                api_key_helper_script: None,
+                aws_present: false,
+            })
+        };
         // Clean OAuth (no overriding env key/token) + inference scope ⇒ subscriber.
-        assert!(super::oauth_subscriber_flag(false, false, &inference));
+        assert!(super::oauth_subscriber_flag(
+            &ctx(false, false, false, false, false),
+            &inference
+        ));
         // Inference scope present, but an env ANTHROPIC_API_KEY outranks stored
         // OAuth in the resolver ⇒ isAnthropicAuthEnabled() false ⇒ not subscriber.
-        assert!(!super::oauth_subscriber_flag(true, false, &inference));
+        assert!(!super::oauth_subscriber_flag(
+            &ctx(false, true, false, false, false),
+            &inference
+        ));
         // Likewise an env ANTHROPIC_AUTH_TOKEN bearer outranks stored OAuth.
-        assert!(!super::oauth_subscriber_flag(false, true, &inference));
+        assert!(!super::oauth_subscriber_flag(
+            &ctx(false, false, true, false, false),
+            &inference
+        ));
+        // (M13) An FD-inherited key (managed/remote launch) outranks stored OAuth.
+        assert!(!super::oauth_subscriber_flag(
+            &ctx(false, false, false, true, false),
+            &inference
+        ));
+        // (M13) A keychain-STORED key ranks BELOW stored OAuth ⇒ still subscriber.
+        assert!(super::oauth_subscriber_flag(
+            &ctx(false, false, false, false, true),
+            &inference
+        ));
+        // (M13) Managed `forceLoginMethod: "claudeai"` forces the stored session
+        // even when an env ANTHROPIC_API_KEY is present.
+        assert!(super::oauth_subscriber_flag(
+            &ctx(true, true, false, false, false),
+            &inference
+        ));
         // Clean OAuth but no inference scope (e.g. profile-only) ⇒ not subscriber.
-        assert!(!super::oauth_subscriber_flag(false, false, &no_inference));
+        assert!(!super::oauth_subscriber_flag(
+            &ctx(false, false, false, false, false),
+            &no_inference
+        ));
         // No scopes at all ⇒ not subscriber.
-        assert!(!super::oauth_subscriber_flag(false, false, &[]));
+        assert!(!super::oauth_subscriber_flag(
+            &ctx(false, false, false, false, false),
+            &[]
+        ));
     }
 
     /// A [`client_adapter::PermissionRequestSink`] that records the requests the
@@ -9166,6 +9606,10 @@ mod tests {
             api_base: "https://api.anthropic.com".to_string(),
             api_key: String::new(),
             api_key_helper: None,
+            // (M13) Inert auth-resolver inputs: no managed OAuth forcing, no
+            // FD-inherited key.
+            managed_oauth_only: false,
+            anthropic_key_fd_present: false,
             cwd: cwd.clone(),
             lingxi_home,
             default_model: "claude-sonnet-4-20250514".to_string(),
@@ -9200,6 +9644,7 @@ mod tests {
             disable_slash_commands: false,
             add_dir: Vec::new(),
             cli_mcp_servers: Vec::new(),
+            strict_mcp_config: false,
             exclude_dynamic_system_prompt_sections: false,
             setting_source_scope: (true, true),
             customization_gates: super::CustomizationGates::default(),
@@ -10740,6 +11185,84 @@ mod tests {
         assert!(
             !hooks.iter().any(|h| h.event == "SubagentStop"),
             "is_agent=false must NOT retarget the main-thread agent's Stop hook: {hooks:?}"
+        );
+    }
+
+    /// (M7 cc2.1.220) `FWt` end-to-end: a `--agent` selection whose definition
+    /// declares inline frontmatter `mcpServers` gets those servers MERGED into
+    /// the boot config list BEFORE `connect_all`, so they REGISTER in the live
+    /// MCP registry exactly like `--mcp-config` servers (connect failure is
+    /// fine — a dead command still registers as `Disconnected`). ByName entries
+    /// materialize nothing (claude `obs` skips strings — the host resolves
+    /// them by name against already-configured servers).
+    #[tokio::test]
+    async fn build_registers_agent_frontmatter_mcp_servers() {
+        let (_tmp, mut cfg) = test_config(true);
+        cfg.cli_agents_json = Some(
+            r#"{ "tester": {
+                "description": "a test agent",
+                "prompt": "you are the tester",
+                "mcpServers": [
+                    "slack",
+                    { "docs": { "command": "/nonexistent-lingxi-m7-mcp", "args": [] } }
+                ]
+            } }"#
+                .to_string(),
+        );
+        cfg.cli_agent = Some("tester".to_string());
+
+        let output: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+
+        let rt = build(cfg, output, perm_sink)
+            .await
+            .expect("build() must succeed with agent frontmatter mcpServers");
+
+        let names = rt.mcp_registry.server_names().await;
+        assert!(
+            names.iter().any(|n| n == "docs"),
+            "the agent's inline frontmatter server must register in the live \
+             MCP registry (like a --mcp-config server): {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n == "slack"),
+            "a ByName entry must NOT materialize a server config: {names:?}"
+        );
+    }
+
+    /// (M7 cc2.1.220) `FWt` gate: with NO `--agent` selection the same agents
+    /// payload contributes NO MCP servers (the merge consults only the RESOLVED
+    /// main-thread agent).
+    #[tokio::test]
+    async fn build_without_agent_selection_registers_no_frontmatter_mcp_servers() {
+        let (_tmp, mut cfg) = test_config(true);
+        cfg.cli_agents_json = Some(
+            r#"{ "tester": {
+                "description": "a test agent",
+                "prompt": "you are the tester",
+                "mcpServers": [
+                    { "docs": { "command": "/nonexistent-lingxi-m7-mcp", "args": [] } }
+                ]
+            } }"#
+                .to_string(),
+        );
+        cfg.cli_agent = None;
+
+        let output: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+
+        let rt = build(cfg, output, perm_sink)
+            .await
+            .expect("build() must succeed");
+
+        let names = rt.mcp_registry.server_names().await;
+        assert!(
+            !names.iter().any(|n| n == "docs"),
+            "an unselected agent's frontmatter servers must not register: {names:?}"
         );
     }
 

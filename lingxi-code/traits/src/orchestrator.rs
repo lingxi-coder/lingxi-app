@@ -161,15 +161,24 @@ pub struct ResumeRuntimeSnapshot {
 /// `traits`). `cost::render::usage_by_model_block` consumes `&[ModelUsageRow]`
 /// directly.
 ///
-/// The row carries only the model NAME (`model`), not a full `cost::ModelRef`:
-/// `ModelRef`/`ProviderId` live in `cost::pricing`, not `protocol`, so a typed
-/// field would require the very `cost` dependency this type exists to avoid —
-/// and the renderer's label is `${model}:` (just the name String), so the name
-/// is all the transport needs.
+/// The row carries only the model NAME (`model`) plus a pre-stringified
+/// serving-provider id, not a full `cost::ModelRef`: `ModelRef`/`ProviderId`
+/// live in `cost::pricing`, not `protocol`, so a typed field would require the
+/// very `cost` dependency this type exists to avoid — and the renderer's label
+/// is `${model}:` (just the name String), so the name is all the transport
+/// needs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelUsageRow {
     /// Model name for the row label (claude-code uses `${model}:`).
     pub model: String,
+    /// Serving API provider for the result-frame `modelUsage.provider` field
+    /// (cc 2.1.218 `n.provider=n_(r)`; open string — `"firstParty"` for the
+    /// Anthropic first-party API, `"bedrock"` for Bedrock, LingXi provider
+    /// names otherwise). `None` when the recording site cannot attribute one
+    /// (legacy aggregate rows); the field is then omitted, matching the zod
+    /// `.optional()`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
     /// Cumulative cost for this model in nano-USD.
     pub total_nano_usd: u64,
     /// Cumulative input tokens for this model.

@@ -3876,6 +3876,9 @@ impl ConversationOrchestrator {
                 .values()
                 .map(|mu| traits::orchestrator::ModelUsageRow {
                     model: mu.model_ref.model.clone(),
+                    // (cc 2.1.218) `n.provider=n_(r)` — the serving provider,
+                    // pre-stringified so the transport row stays cost-free.
+                    provider: Some(mu.model_ref.provider.usage_wire_name()),
                     total_nano_usd: mu.cost_nano_usd,
                     input_tokens: mu.usage.tokens.input,
                     output_tokens: mu.usage.tokens.output,

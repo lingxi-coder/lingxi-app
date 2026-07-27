@@ -910,6 +910,7 @@ mod tests {
             code_lines_removed: 1,
             by_model: vec![ModelUsageRow {
                 model: "claude-opus-4-8".into(),
+                provider: None,
                 total_nano_usd: 123_400_000,
                 input_tokens: 5_000,
                 output_tokens: 2_000,

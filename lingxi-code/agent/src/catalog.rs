@@ -76,6 +76,14 @@ pub enum AgentLoadError {
     /// likely co-located reference documentation, not an agent attempt).
     #[error("missing required \"name\" field in {0}")]
     MissingName(PathBuf),
+    /// `name` failed validation: leading `-` (long-standing), or a `:` after
+    /// NFKC normalization (cc 2.1.218 — `:` is reserved for the
+    /// `plugin:agent` namespacing built by the plugin manager). The byte-exact
+    /// claude error line is logged at the rejection site inside
+    /// [`parse_agent_markdown`] (`iju` logs via `w(…, {level:"error"})` then
+    /// returns `null`), so callers skip the file WITHOUT logging again.
+    #[error("invalid \"name\" field in {0}")]
+    InvalidName(PathBuf),
     /// Required `description` field was missing/non-string. claude logs and
     /// returns `null`.
     #[error("missing required \"description\" field in {0}")]
@@ -120,6 +128,67 @@ struct Frontmatter {
     color: Option<serde_yaml::Value>,
     #[serde(default, rename = "initialPrompt")]
     initial_prompt: Option<serde_yaml::Value>,
+}
+
+/// claude 2.1.220 `UVe`: sanitize a path/name for log display — replace
+/// control (`\p{Cc}`) and format (`\p{Cf}`) characters with a space, collapse
+/// whitespace runs to one space, trim, and cap at 200 characters (JS
+/// `slice(0,200)` counts UTF-16 units; a `chars` cap is the closest faithful
+/// equivalent for non-astral input).
+fn sanitize_for_display(raw: &str) -> String {
+    /// Unicode `Cf` (format) — `char::is_control` only covers `Cc`, so the
+    /// `\p{Cf}` half of the `UVe` character class is spelled out (Unicode 15
+    /// Cf set).
+    fn is_format_char(c: char) -> bool {
+        matches!(
+            c,
+            '\u{00AD}'
+                | '\u{0600}'..='\u{0605}'
+                | '\u{061C}'
+                | '\u{06DD}'
+                | '\u{070F}'
+                | '\u{0890}'..='\u{0891}'
+                | '\u{08E2}'
+                | '\u{180E}'
+                | '\u{200B}'..='\u{200F}'
+                | '\u{202A}'..='\u{202E}'
+                | '\u{2060}'..='\u{2064}'
+                | '\u{2066}'..='\u{206F}'
+                | '\u{FEFF}'
+                | '\u{FFF9}'..='\u{FFFB}'
+                | '\u{110BD}'
+                | '\u{110CD}'
+                | '\u{13430}'..='\u{1343F}'
+                | '\u{1BCA0}'..='\u{1BCA3}'
+                | '\u{1D173}'..='\u{1D17A}'
+                | '\u{E0001}'
+                | '\u{E0020}'..='\u{E007F}'
+        )
+    }
+    let replaced: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_control() || is_format_char(c) {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect();
+    let mut out = String::with_capacity(replaced.len());
+    let mut in_ws = false;
+    for c in replaced.chars() {
+        if c.is_whitespace() {
+            if !in_ws {
+                out.push(' ');
+            }
+            in_ws = true;
+        } else {
+            out.push(c);
+            in_ws = false;
+        }
+    }
+    out.trim().chars().take(200).collect()
 }
 
 /// Parse a single agent markdown buffer.
@@ -172,6 +241,35 @@ pub fn parse_agent_markdown(
     else {
         return Err(AgentLoadError::MissingName(path_for_error.to_path_buf()));
     };
+
+    // (1b) Name validation (claude `iju`, order preserved): a leading `-`
+    // (long-standing check), then a `:` anywhere in the NFKC-normalized name
+    // (added in cc 2.1.218 — `:` is the plugin-namespace delimiter, so a raw
+    // name carrying one would collide with the `plugin:agent` types built by
+    // the plugin manager; NFKC also catches look-alikes such as U+FF1A `：`).
+    // Both log the byte-exact claude error line (path + name run through the
+    // `UVe` display sanitizer) and drop ONLY this agent.
+    if agent_type.starts_with('-') {
+        tracing::error!(
+            "Agent file {} has invalid name '{}': names must not start with '-'",
+            sanitize_for_display(&path_for_error.display().to_string()),
+            sanitize_for_display(&agent_type)
+        );
+        return Err(AgentLoadError::InvalidName(path_for_error.to_path_buf()));
+    }
+    {
+        use unicode_normalization::UnicodeNormalization;
+        let nfkc: String = agent_type.nfkc().collect();
+        if nfkc.contains(':') {
+            tracing::error!(
+                "Agent file {} has invalid name '{}': names must not contain ':' \
+(reserved for plugin namespacing)",
+                sanitize_for_display(&path_for_error.display().to_string()),
+                sanitize_for_display(&agent_type)
+            );
+            return Err(AgentLoadError::InvalidName(path_for_error.to_path_buf()));
+        }
+    }
 
     // (2) `description` required: missing/non-string/EMPTY -> log + skip. claude
     // `!whenToUse` is falsy for `""`, so an empty description drops the agent.
@@ -1172,6 +1270,11 @@ pub async fn load_agents_from_dirs(paths: &[(PathBuf, AgentSource)]) -> Vec<Agen
                 // claude SILENTLY skips files without a `name` field (likely
                 // co-located reference docs, not agent attempts).
                 Err(AgentLoadError::MissingName(_)) => {}
+                // Invalid name (leading `-` / `:` namespacing collision): the
+                // byte-exact claude error was already logged inside
+                // `parse_agent_markdown` (`iju` logs then returns null) — skip
+                // without double-logging.
+                Err(AgentLoadError::InvalidName(_)) => {}
                 Err(e) => {
                     tracing::warn!(
                         error = %e,
@@ -1285,6 +1388,80 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, AgentLoadError::MissingName(_)));
+    }
+
+    #[test]
+    fn name_with_colon_is_invalid() {
+        // cc 2.1.218 `iju`: `name.normalize("NFKC").includes(":")` -> logged
+        // error + dropped (":" is reserved for plugin namespacing).
+        let raw = "---\nname: \"a:b\"\ndescription: d\n---\nBody";
+        let err = parse_agent_markdown(
+            raw,
+            AgentSource::UserDefined,
+            PathBuf::from("/tmp"),
+            Path::new("x.md"),
+        )
+        .unwrap_err();
+        assert!(matches!(err, AgentLoadError::InvalidName(_)));
+    }
+
+    #[test]
+    fn name_with_fullwidth_colon_is_invalid() {
+        // NFKC normalizes U+FF1A FULLWIDTH COLON to ':' — the look-alike is
+        // rejected exactly like a raw colon.
+        let raw = "---\nname: \"a\u{FF1A}b\"\ndescription: d\n---\nBody";
+        let err = parse_agent_markdown(
+            raw,
+            AgentSource::UserDefined,
+            PathBuf::from("/tmp"),
+            Path::new("x.md"),
+        )
+        .unwrap_err();
+        assert!(matches!(err, AgentLoadError::InvalidName(_)));
+    }
+
+    #[test]
+    fn name_with_leading_dash_is_invalid() {
+        // `iju` rejects a leading '-' BEFORE the ':' check (flag-look-alike
+        // names). The flag-JSON path keeps its own '-'-only guard.
+        let raw = "---\nname: \"-x\"\ndescription: d\n---\nBody";
+        let err = parse_agent_markdown(
+            raw,
+            AgentSource::UserDefined,
+            PathBuf::from("/tmp"),
+            Path::new("x.md"),
+        )
+        .unwrap_err();
+        assert!(matches!(err, AgentLoadError::InvalidName(_)));
+    }
+
+    #[tokio::test]
+    async fn invalid_name_drops_only_that_file() {
+        // A directory mixing an invalid-name agent with a valid one loads the
+        // valid one (per-file drop, not a directory abort).
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("bad.md"),
+            "---\nname: \"a:b\"\ndescription: d\n---\nBody",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("good.md"),
+            "---\nname: good\ndescription: d\n---\nBody",
+        )
+        .unwrap();
+        let defs =
+            load_agents_from_dirs(&[(dir.path().to_path_buf(), AgentSource::UserDefined)]).await;
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].agent_type, "good");
+    }
+
+    #[test]
+    fn sanitize_for_display_strips_controls_and_caps() {
+        // `UVe`: Cc/Cf -> space, whitespace collapsed, trimmed, capped at 200.
+        assert_eq!(sanitize_for_display("  a\u{0007}b\u{200B}c  "), "a b c");
+        let long = "x".repeat(300);
+        assert_eq!(sanitize_for_display(&long).chars().count(), 200);
     }
 
     #[test]

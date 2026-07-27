@@ -38,10 +38,24 @@ pub const ARMED_WINDOW_MS: u64 = 3000;
 pub const EDITED_EMPTY_WINDOW_MS: u64 = 2000;
 
 /// The hint shown when the gesture arms (claude's default for
-/// `leftArrowConfirmHint`).
+/// `leftArrowConfirmHint` — `s ?? "Press ← again"`). In practice the REPL's
+/// handler picker `kGt` always supplies one of the three specific hints
+/// below, so this fallback only fires for a handler installed without one.
 pub const CONFIRM_HINT: &str = "Press \u{2190} again";
 /// The hint shown when an ATTACHED session arms.
 pub const ATTACH_CONFIRM_HINT: &str = "Ambiguous \u{2190}, press again to detach";
+
+/// `kGt` confirm hint when the handler opens the agents view over the current
+/// conversation (the main-chat case, `Zan(yt) && kCt` where
+/// `kCt = Rt().leftArrowOpensAgents !== false`).
+pub const OPEN_AGENTS_CONFIRM_HINT: &str = "Press \u{2190} again to open agents";
+/// `kGt` confirm hint for a session attached FROM the agent view
+/// (`yt.ok && yt.via === "detach"`): ← detaches back to agents, keeping the
+/// session running.
+pub const BACK_TO_AGENTS_CONFIRM_HINT: &str = "Press \u{2190} again to go back to agents";
+/// `kGt` confirm hint when the host supplied an explicit back handler
+/// (`if (A) return { handler: A, confirmHint: … }`).
+pub const GO_BACK_CONFIRM_HINT: &str = "Press \u{2190} again to go back";
 
 /// What a ← press on an empty composer should do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -407,6 +421,12 @@ mod tests {
     fn hints_and_timings_are_byte_locked() {
         assert_eq!(CONFIRM_HINT, "Press ← again");
         assert_eq!(ATTACH_CONFIRM_HINT, "Ambiguous ←, press again to detach");
+        assert_eq!(OPEN_AGENTS_CONFIRM_HINT, "Press ← again to open agents");
+        assert_eq!(
+            BACK_TO_AGENTS_CONFIRM_HINT,
+            "Press ← again to go back to agents"
+        );
+        assert_eq!(GO_BACK_CONFIRM_HINT, "Press ← again to go back");
         assert_eq!(FEEDBACK_TIMEOUT_MS, 3000);
         assert_eq!(KEY_REPEAT_MS, 1000);
         assert_eq!(ATTACH_CONFIRM_MIN_MS, 150);

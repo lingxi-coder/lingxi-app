@@ -168,17 +168,32 @@ impl ScreenView {
     /// The `/config` screen: the session-scoped settings this backend owns
     /// plus the on-disk settings files (read-only; plan Phase 8 — no
     /// settings-write API reaches the TUI, so the view is honest about it).
+    /// The agents-view rows appear only while `agent_view_enabled` (the
+    /// oracle's `...$H()?[row]:[]` / `...H7e()?[row]:[]` spreads).
     #[must_use]
+    #[allow(clippy::fn_params_excessive_bools)]
     pub fn settings(
         theme: ThemeName,
         vim: bool,
         verbose: bool,
+        agent_view_enabled: bool,
+        left_arrow_opens_agents: bool,
+        default_to_agents_view: bool,
         lingxi_home: &str,
         cwd: &str,
     ) -> Self {
         Self::new(
             "Settings",
-            settings_lines(theme, vim, verbose, lingxi_home, cwd),
+            settings_lines(
+                theme,
+                vim,
+                verbose,
+                agent_view_enabled,
+                left_arrow_opens_agents,
+                default_to_agents_view,
+                lingxi_home,
+                cwd,
+            ),
             "esc to close · ↑/↓ scroll",
         )
     }
@@ -589,10 +604,14 @@ fn status_lines(
 
 /// `/config` body: session-scoped settings plus the on-disk settings files
 /// (existence probed at open time, mirroring the capture-at-open contract).
+#[allow(clippy::fn_params_excessive_bools)]
 fn settings_lines(
     theme: ThemeName,
     vim: bool,
     verbose: bool,
+    agent_view_enabled: bool,
+    left_arrow_opens_agents: bool,
+    default_to_agents_view: bool,
     lingxi_home: &str,
     cwd: &str,
 ) -> Vec<Line<'static>> {
@@ -607,9 +626,19 @@ fn settings_lines(
         row("└ Vim mode", on_off(vim)),
         row("└ Verbose", on_off(verbose)),
         row("└ Dynamic workflow size", &workflow_size),
-        Line::from(""),
-        header("Settings files"),
     ];
+    // parity 2.1.220 agents-view rows, oracle order (`defaultToAgentsView`
+    // "Open agents view by default" first, then `leftArrowOpensAgents`
+    // "${DW} opens agents"), hidden entirely while agent view is disabled.
+    if agent_view_enabled {
+        out.push(row(
+            "└ Open agents view by default",
+            on_off(default_to_agents_view),
+        ));
+        out.push(row("└ ← opens agents", on_off(left_arrow_opens_agents)));
+    }
+    out.push(Line::from(""));
+    out.push(header("Settings files"));
     let files = [
         format!("{lingxi_home}/settings.json"),
         format!("{cwd}/.lingxi/settings.json"),
@@ -739,7 +768,16 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("tempdir");
         std::fs::write(dir.join("settings.json"), b"{}").expect("write settings");
         let home = dir.display().to_string();
-        let lines = settings_lines(ThemeName::Dark, false, true, &home, "/no/such/project");
+        let lines = settings_lines(
+            ThemeName::Dark,
+            false,
+            true,
+            true,
+            true,
+            false,
+            &home,
+            "/no/such/project",
+        );
         std::fs::remove_dir_all(&dir).ok();
         let text = text_of(&lines);
         assert!(text.contains("Session settings"), "{text}");
@@ -750,6 +788,28 @@ mod tests {
         assert!(text.contains("absent"), "{text}");
         assert!(text.contains("Read-only view"), "{text}");
         assert!(text.contains("Verbose") && text.contains("on"), "{text}");
+        // Agents-view rows (2.1.220), oracle order and labels.
+        assert!(text.contains("Open agents view by default"), "{text}");
+        assert!(text.contains("← opens agents"), "{text}");
+    }
+
+    /// With agent view disabled the two agents-view rows disappear entirely,
+    /// mirroring the oracle's `...$H()?[row]:[]` / `...H7e()?[row]:[]`.
+    #[test]
+    fn settings_screen_hides_agents_rows_when_agent_view_is_disabled() {
+        let lines = settings_lines(
+            ThemeName::Dark,
+            false,
+            true,
+            false,
+            true,
+            true,
+            "/no/such/home",
+            "/no/such/project",
+        );
+        let text = text_of(&lines);
+        assert!(!text.contains("Open agents view by default"), "{text}");
+        assert!(!text.contains("opens agents"), "{text}");
     }
 
     #[test]

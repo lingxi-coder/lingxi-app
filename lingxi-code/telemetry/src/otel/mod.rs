@@ -42,13 +42,21 @@
 //! schema identifier is kept verbatim (`OTel` wire contract; collectors key on
 //! them). See [`config`] for the full rationale.
 //!
-//! ## Remainder (partial — see H-BIN-06 / H-09 return notes)
+//! ## Remainder (see the coverage list in [`record`])
 //!
-//! The provider/runtime layer now exists ([`runtime`]). The remaining work is
-//! broader app-code record-site coverage beyond the narrow startup/shutdown +
-//! assistant-response wiring landed with this module.
+//! The provider/runtime layer exists ([`runtime`]) and the `claude_code.*`
+//! record sites are wired — via the analytics-bus bridge
+//! (`runtime::mirror_analytics_event`) plus the direct
+//! `record_lines_of_code_change` / `record_git_operation_counters` /
+//! `record_tool_permission_decision` / `emit_hook_lifecycle` helpers. Still
+//! open: the `user_prompt` named log record (its CC emit site is the
+//! prompt-assembly seam, unported); `active_time.total` is intentionally
+//! registered-but-unrecorded — the 2.1.220 binary defines the instrument but
+//! has no `add()` call site.
 
+mod code_language;
 pub mod config;
+mod git_ops;
 pub mod headers_helper;
 pub mod logs;
 pub mod metrics;
@@ -70,8 +78,8 @@ pub use record::{
 };
 pub use runtime::{
     emit_assistant_response_log, emit_hook_lifecycle, emit_named_log_event, install_process,
-    install_process_with_config, prometheus_text, record_counter, record_histogram,
-    record_lines_of_code_change, TelemetryGuard,
+    install_process_with_config, prometheus_text, record_counter, record_git_operation_counters,
+    record_histogram, record_lines_of_code_change, record_tool_permission_decision, TelemetryGuard,
 };
 
 /// Whether the OpenTelemetry monitoring stack is enabled for this process

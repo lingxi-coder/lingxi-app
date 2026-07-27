@@ -1758,6 +1758,138 @@ mod tests {
         );
     }
 
+    // ── (cc 2.1.219) `anthropic-dispatch-id: v2s` opt-in ────────────────────
+
+    /// Serializes the CLAUDE_CODE_DISPATCH_V2S env-mutating tests.
+    static DISPATCH_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[tokio::test]
+    async fn dispatch_header_absent_by_default() {
+        let _g = DISPATCH_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::remove_var("CLAUDE_CODE_DISPATCH_V2S");
+        let headers = headers_after_inject_for_protocol(
+            ProtocolFamily::AnthropicMessages,
+            ProviderId::AnthropicFirstParty,
+            "https://api.anthropic.com",
+        )
+        .await;
+        assert!(
+            !headers.contains_key("anthropic-dispatch-id"),
+            "default-off: no env, flag default false — {headers:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_header_env_opt_in_first_party_only() {
+        let _g = DISPATCH_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::set_var("CLAUDE_CODE_DISPATCH_V2S", "1");
+        let anthropic = headers_after_inject_for_protocol(
+            ProtocolFamily::AnthropicMessages,
+            ProviderId::AnthropicFirstParty,
+            "https://api.anthropic.com",
+        )
+        .await;
+        // Anthropic-wire but NOT first-party: never gets the header.
+        let compatible = headers_after_inject_for_protocol(
+            ProtocolFamily::AnthropicMessages,
+            ProviderId::OpenAICompatible {
+                name: "proxy".to_string(),
+            },
+            "https://proxy.example.com",
+        )
+        .await;
+        // Env "0" beats the (default-false) flag in the disabled direction too
+        // (`Mg.CLAUDE_CODE_DISPATCH_V2S ?? Ke(...)` — a SET env always wins).
+        std::env::set_var("CLAUDE_CODE_DISPATCH_V2S", "0");
+        let disabled = headers_after_inject_for_protocol(
+            ProtocolFamily::AnthropicMessages,
+            ProviderId::AnthropicFirstParty,
+            "https://api.anthropic.com",
+        )
+        .await;
+        std::env::remove_var("CLAUDE_CODE_DISPATCH_V2S");
+        assert_eq!(
+            anthropic.get("anthropic-dispatch-id").map(String::as_str),
+            Some("v2s")
+        );
+        assert!(!compatible.contains_key("anthropic-dispatch-id"));
+        assert!(!disabled.contains_key("anthropic-dispatch-id"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_header_stripped_after_5xx_and_not_on_429() {
+        let _g = DISPATCH_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::set_var("CLAUDE_CODE_DISPATCH_V2S", "true");
+        let adapter = make_adapter_for_protocol(
+            ProtocolFamily::AnthropicMessages,
+            ProviderId::AnthropicFirstParty,
+            "https://api.anthropic.com",
+        );
+        let request = LlmRequest::new("model").with_user_text("hi");
+        let mut prepared = adapter.client.prepare(&request).await.expect("prepare");
+        adapter.inject_headers(&mut prepared, "req_test");
+        assert!(prepared
+            .provider_request
+            .headers
+            .contains_key("anthropic-dispatch-id"));
+
+        // A 429 on a header-carrying attempt does NOT strip (only 5xx/conn).
+        assert_eq!(
+            adapter.note_dispatch_header_failure(
+                &prepared,
+                &LlmError::RateLimited {
+                    retry_after: None,
+                    scope: None
+                }
+            ),
+            None
+        );
+        // A 500 strips: reason "5xx" + the status, latched session-wide.
+        assert_eq!(
+            adapter.note_dispatch_header_failure(&prepared, &LlmError::ProviderInternal),
+            Some(("5xx", Some(500)))
+        );
+        // Latched: the next attempt's injection omits the header even though
+        // the opt-in is still on…
+        let mut prepared2 = adapter.client.prepare(&request).await.expect("prepare");
+        adapter.inject_headers(&mut prepared2, "req_test2");
+        assert!(
+            !prepared2
+                .provider_request
+                .headers
+                .contains_key("anthropic-dispatch-id"),
+            "fallback latch must strip the header for the rest of the session"
+        );
+        // …and a repeat failure reports nothing new (single telemetry event).
+        assert_eq!(
+            adapter.note_dispatch_header_failure(&prepared, &LlmError::ProviderInternal),
+            None
+        );
+        std::env::remove_var("CLAUDE_CODE_DISPATCH_V2S");
+
+        // Connection errors classify as "conn_err" with no status.
+        let adapter2 = make_adapter_for_protocol(
+            ProtocolFamily::AnthropicMessages,
+            ProviderId::AnthropicFirstParty,
+            "https://api.anthropic.com",
+        );
+        assert_eq!(
+            adapter2.note_dispatch_header_failure_carried(
+                true,
+                &LlmError::Transport {
+                    message: "connect reset".to_string()
+                }
+            ),
+            Some(("conn_err", None))
+        );
+    }
+
     #[tokio::test]
     async fn anthropic_beta_header_is_anthropic_family_and_provider_scoped() {
         let anthropic_headers = headers_after_inject_for_protocol(

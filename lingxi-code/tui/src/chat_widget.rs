@@ -608,6 +608,17 @@ impl ChatWidget {
         self.command_registry = Some(registry);
     }
 
+    /// Wire the persistent prompt-history store (`~/.lingxi/history.jsonl`,
+    /// cc 2.1.218): seeds the composer's up-arrow recall from disk and makes
+    /// every submission persist through the locked/deduped writer. `None`
+    /// (every test widget) keeps recall session-local.
+    pub fn set_prompt_history_store(
+        &mut self,
+        store: std::sync::Arc<session::prompt_history::PromptHistoryStore>,
+    ) {
+        self.bottom_pane.set_prompt_history_store(store);
+    }
+
     /// Override where `/export` writes transcripts (tests/embedders; the
     /// default is [`crate::export::default_export_dir`]).
     pub fn set_export_dir(&mut self, dir: std::path::PathBuf) {
@@ -2212,10 +2223,10 @@ impl ChatWidget {
     /// set settings directly (claude-code 2.1.205's `/config` shorthand). The
     /// format/unknown-key/bad-value errors are byte-exact with the reference;
     /// the settable keys are the ones LingXi applies live this session (`vim`,
-    /// `verbose`, `theme`). Applying is session-scoped (LingXi has no writable
-    /// settings-file store on this path — the same read-only-file limitation
-    /// the settings screen documents), so the change takes effect immediately
-    /// but is not persisted for new sessions.
+    /// `verbose`, `theme`, `leftArrowOpensAgents`) plus the persisted-only
+    /// `workflowSizeGuideline` and `defaultToAgentsView` (those take effect
+    /// next session). Each set is also persisted best-effort to
+    /// `~/.lingxi/settings.json` — see [`Self::apply_config_shorthand`].
     pub(crate) fn cmd_config(&mut self, args: &str) -> ChatOutcome {
         let args = args.trim();
         if args.is_empty() {
@@ -2223,6 +2234,12 @@ impl ChatWidget {
                 self.theme_name,
                 self.bottom_pane.vim_enabled(),
                 self.transcript.verbose(),
+                // Agents-view rows (2.1.220): shown only while agent view is
+                // enabled, mirroring the oracle's `...$H()?[row]:[]` /
+                // `...H7e()?[row]:[]` spreads.
+                traits::agent_view::is_enabled(),
+                self.bottom_pane.left_arrow_opens_agents(),
+                tui_core::theme_persist::load_default_to_agents_view().unwrap_or(false),
                 &self.session.doctor.lingxi_home,
                 &self.session.doctor.cwd,
             );
@@ -2316,6 +2333,24 @@ impl ChatWidget {
                 }
                 tui_core::theme_persist::save_workflow_size_guideline(value);
                 Ok(format!("Set workflowSizeGuideline to {value}."))
+            }
+            // parity 2.1.220 agents-view settings (the `/config` rows
+            // "← opens agents" / "Open agents view by default").
+            // `leftArrowOpensAgents` applies live to the ←-on-empty gesture
+            // (still ANDed with agent-view enablement, like `C2t`'s
+            // `fleetEnabled: $H()`); the raw value is persisted either way.
+            // `defaultToAgentsView` takes effect at the next startup.
+            "leftArrowOpensAgents" => {
+                let want = parse_bool("leftArrowOpensAgents")?;
+                self.bottom_pane
+                    .set_left_arrow_opens_agents(want && traits::agent_view::is_enabled());
+                tui_core::theme_persist::save_left_arrow_opens_agents(want);
+                Ok(format!("Set leftArrowOpensAgents to {want}."))
+            }
+            "defaultToAgentsView" => {
+                let want = parse_bool("defaultToAgentsView")?;
+                tui_core::theme_persist::save_default_to_agents_view(want);
+                Ok(format!("Set defaultToAgentsView to {want}."))
             }
             other => Err(format!(
                 "{other} isn't a /config setting. Run /config to see what's available."
@@ -2546,6 +2581,21 @@ impl ChatWidget {
         }
         self.bottom_pane.show_tasks(rows);
         ChatOutcome::Continue
+    }
+
+    /// Open the agents view over the current conversation — the ←-on-empty
+    /// gesture's handler (claude `kGt`'s open-agents arm) and the
+    /// `defaultToAgentsView` startup path. The conversation stays live
+    /// underneath (LingXi's agents-view seam is the `/tasks` picker modal),
+    /// so Esc returns to the backgrounded conversation via the picker close.
+    pub(crate) fn open_agents_view(&mut self) -> ChatOutcome {
+        self.cmd_tasks("")
+    }
+
+    /// Apply the `leftArrowOpensAgents` gate to the composer's ←-on-empty
+    /// gesture (the composition root ANDs in agent-view enablement).
+    pub fn set_left_arrow_opens_agents(&mut self, enabled: bool) {
+        self.bottom_pane.set_left_arrow_opens_agents(enabled);
     }
 
     /// `/workflows`: open the interactive "Dynamic workflows" picker over a
@@ -3508,7 +3558,7 @@ impl ChatWidget {
             // through the SAME path as `/tasks` so the two cannot drift — the
             // row snapshot comes from the live registry, which only the owner
             // holds.
-            BottomPaneOutcome::OpenAgentsView => self.cmd_tasks(""),
+            BottomPaneOutcome::OpenAgentsView => self.open_agents_view(),
             BottomPaneOutcome::Quit => ChatOutcome::Quit,
             BottomPaneOutcome::Interrupt => {
                 if let Some(token) = self.current_compaction.as_ref() {
@@ -4665,6 +4715,37 @@ mod tests {
             "workflowSizeGuideline takes one of: unrestricted, small, medium, large"
         );
         assert!(sys.is_error());
+
+        // parity 2.1.220 agents-view keys: a bad bool reports the exact error
+        // (and persists nothing).
+        let mut w = widget();
+        w.cmd_config("leftArrowOpensAgents=maybe");
+        let sys = cell::<crate::history_cell::system::SystemTextCell>(&w, 0);
+        assert_eq!(
+            sys.body(),
+            "leftArrowOpensAgents takes true or false, not \"maybe\""
+        );
+        assert!(sys.is_error());
+
+        let mut w = widget();
+        w.cmd_config("defaultToAgentsView=sometimes");
+        let sys = cell::<crate::history_cell::system::SystemTextCell>(&w, 0);
+        assert_eq!(
+            sys.body(),
+            "defaultToAgentsView takes true or false, not \"sometimes\""
+        );
+        assert!(sys.is_error());
+    }
+
+    /// The widget-level `leftArrowOpensAgents` setter reaches the pane's
+    /// ←-on-empty gesture gate (the composition root and `/config
+    /// leftArrowOpensAgents=…` both go through it).
+    #[test]
+    fn set_left_arrow_opens_agents_gates_the_pane_gesture() {
+        let mut w = widget();
+        assert!(w.bottom_pane().left_arrow_opens_agents());
+        w.set_left_arrow_opens_agents(false);
+        assert!(!w.bottom_pane().left_arrow_opens_agents());
     }
 
     /// `/cd` (parity 2.1.207 `local-jsx` `name:"cd"`): bare `/cd` shows the

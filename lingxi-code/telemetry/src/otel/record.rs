@@ -19,37 +19,38 @@
 //! - [`recorder_from_config`]: the factory — `Some(config)` when the gate is on
 //!   yields the in-memory recorder; the gate-off path yields [`NoopRecorder`].
 //!
-//! ## Explicit, documented follow-ups (NOT in this commit)
+//! ## Record-site coverage (live via [`super::runtime`])
 //!
-//! 1. **OTLP transport.** The real grpc/http egress that drains the accumulated
-//!    counters/histograms/logs to a collector lives *behind* these traits. It
-//!    needs the heavy `opentelemetry_otlp` + `tonic`/grpc stack and network I/O,
-//!    so it is deferred: implement a third `OtlpRecorder: MetricRecorder +
-//!    LogRecorder` that reads [`OtelConfig::metrics`]/`logs`/`traces` transport
-//!    config and periodically flushes on the configured export intervals.
-//! 2. **The ~20 app-code record sites.** These live in currently-dirty files and
-//!    are intentionally left unwired here. Each site resolves a recorder (via
-//!    [`recorder_from_config`]) and calls one primitive. The mapping, keyed by
-//!    the [`super::metrics`] / log-event schema, is:
-//!    - `session.count` counter — CLI session start.
-//!    - `token.usage` / `cost.usage` counters — per API response (attrs:
-//!      `type`/`token_type`, `model`).
-//!    - `lines_of_code.count` counter — Edit/Write apply (attr: `type`
-//!      add/remove).
-//!    - `pull_request.count` / `commit.count` counters — gh PR / git commit.
-//!    - `tool.execution` / `tool.blocked_on_user` counters, `code_edit_tool.decision`
-//!      counter (attrs: `decision`, `tool_name`, `tool_source`, `language`).
-//!    - `subagent.spawn` counter — Task/Agent dispatch.
-//!    - `active_time.total` counter — interaction activity accounting.
-//!    - `mcp.rpc` / `hook` / `compaction` / `bash.subprocess` histograms
-//!      (`duration_ms`) + companion counters.
-//!    - `claude_code.events` logs: `user_prompt`, `assistant_response`,
-//!      `tool_result`, `tool_decision`, `api_request` / `api_response` /
-//!      `api_error`, `hook_execution_*`, `mcp_server_connection`,
-//!      `subagent_completed`, … each gated by the matching [`super::logs`]
-//!      `OTEL_LOG_*` opt-in before the content body is attached.
-//!    - `claude_code.llm_request` / `claude_code.tracing` spans — the tracer
-//!      surface, part of follow-up (1).
+//! The OTLP/console/prometheus egress now exists ([`super::runtime`]), and the
+//! record sites are wired — most through the analytics-bus bridge
+//! (`crate::bus` mirrors every post-privacy-gate event into
+//! `runtime::mirror_analytics_event`), the rest through direct
+//! `runtime::record_*` helpers:
+//!
+//! - `session.count` — `install_process` at CLI start.
+//! - `token.usage` / `cost.usage` / `llm_request` — bridged from
+//!   `tengu_api_success` (+ failed/rate-limited/cancelled statuses).
+//! - `lines_of_code.count` — `record_lines_of_code_change` (Edit/Write apply).
+//! - `pull_request.count` / `commit.count` — `record_git_operation_counters`
+//!   (the Bash tool's completion seam; the `mEo` counter subset, see
+//!   [`super::git_ops`]).
+//! - `tool.execution` / `tool.blocked_on_user` / `bash.subprocess` /
+//!   `mcp.rpc` / `subagent.spawn` / `compaction` — bridged from the
+//!   `tengu_tool_*` / compaction event families.
+//! - `code_edit_tool.decision` — `record_tool_permission_decision` (attrs:
+//!   `decision`, `source`, `tool_name`, `language` via
+//!   [`super::code_language`]).
+//! - `active_time.total` — REGISTERED but never recorded: the 2.1.220 binary
+//!   defines the instrument (`Mt.activeTimeCounter`) and its getter yet has NO
+//!   `add()` call site, so a record site here would be anti-parity.
+//! - `hook` — `emit_hook_lifecycle`.
+//! - `claude_code.events` logs — `assistant_response` (turn loop, gated),
+//!   `tool_decision` (`record_tool_permission_decision`), and the
+//!   `api_request` / `api_error` / `tool_result` CC-name translations in the
+//!   bridge; large content attrs remain behind the [`super::logs`]
+//!   `OTEL_LOG_*` opt-ins. `user_prompt` still lacks a port emit site (the
+//!   prompt-assembly seam) — the one documented remainder.
+//! - `claude_code.tracing` spans — start/stop lifecycle spans only.
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;

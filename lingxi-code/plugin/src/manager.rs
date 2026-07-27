@@ -641,6 +641,10 @@ impl PluginManager {
                         agent_defs.push(def);
                     }
                     Err(agent::AgentLoadError::MissingName(_)) => {}
+                    // Invalid name (leading `-` / `:` namespacing collision):
+                    // the byte-exact claude error was already logged inside
+                    // `parse_agent_markdown` — skip without double-logging.
+                    Err(agent::AgentLoadError::InvalidName(_)) => {}
                     Err(error) => tracing::warn!(
                         path = %abs.display(),
                         error = %error,

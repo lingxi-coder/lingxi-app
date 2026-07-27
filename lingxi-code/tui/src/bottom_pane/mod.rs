@@ -243,9 +243,18 @@ pub struct BottomPane {
     /// [`BottomPaneOutcome::Quit`].
     ctrl_c_at: Option<Instant>,
     /// ←-on-empty gesture timestamps (`tui_core::left_arrow_gesture`). Pane-
-    /// local like `ctrl_c_at`: it drives the "Press ← again" footer hint and
-    /// decides whether the next ← moves the cursor or opens the agents view.
+    /// local like `ctrl_c_at`: it drives the "Press ← again to open agents"
+    /// footer hint and decides whether the next ← moves the cursor or opens
+    /// the agents view.
     left_arrow: tui_core::left_arrow_gesture::LeftArrowState,
+    /// The `leftArrowOpensAgents` setting (claude 2.1.220
+    /// `kCt = Rt().leftArrowOpensAgents !== false`, default ON). `false`
+    /// removes the gesture entirely — `kGt` installs no handler, so ← on an
+    /// empty composer is an ordinary cursor move and never arms, hints, or
+    /// opens the agents view. The composition root ANDs in the agent-view
+    /// enablement gate (`C2t`'s `fleetEnabled: $H()` — a disabled agent view
+    /// yields `{ok:false, reason:"fleet-disabled"}`, failing `Zan`).
+    left_arrow_opens_agents: bool,
     /// When the gesture armed, so the hint can expire on its own after
     /// `FEEDBACK_TIMEOUT_MS` even if the user never presses anything else.
     left_arrow_hint_at: Option<Instant>,
@@ -304,6 +313,12 @@ pub struct BottomPane {
     ///
     /// [`ChatWidget::set_command_registry`]: crate::chat_widget::ChatWidget::set_command_registry
     registry_commands: Vec<RegistrySlashRow>,
+    /// Persistent prompt-history store (`~/.lingxi/history.jsonl`, cc 2.1.218
+    /// locked/deduped writes). `None` (tests, headless) keeps recall
+    /// session-local. Seeded + set via [`Self::set_prompt_history_store`];
+    /// every submission enqueues its raw (placeholder-form) text and flushes
+    /// on a background thread — the store's `Drop` is the exit flush.
+    history_store: Option<std::sync::Arc<session::prompt_history::PromptHistoryStore>>,
 }
 
 impl BottomPane {
@@ -311,6 +326,7 @@ impl BottomPane {
     #[must_use]
     pub fn new(theme: Theme) -> Self {
         Self {
+            history_store: None,
             composer: Composer::default(),
             completion: None,
             emoji_completion_enabled: true,
@@ -321,6 +337,7 @@ impl BottomPane {
             vim_insert_remap_pending: None,
             ctrl_c_at: None,
             left_arrow: tui_core::left_arrow_gesture::LeftArrowState::default(),
+            left_arrow_opens_agents: true,
             left_arrow_hint_at: None,
             left_arrow_epoch: Instant::now(),
             paste_burst: paste_burst::PasteBurst::default(),
@@ -433,6 +450,28 @@ impl BottomPane {
             self.permission_mode = next;
             return BottomPaneOutcome::CyclePermissionMode(next);
         }
+        // ←-gesture bookkeeping wraps BOTH editors (vim and plain), because
+        // the vim layer consumes its keys before `on_composer_key`: any key
+        // that is not another ← disarms the gesture and takes its hint down
+        // (the user moved on, so a later ← must start the confirmation over),
+        // and an edit that empties the composer — including a Normal-mode
+        // `x`/`dd` — stamps the guard that makes the very next ← ambiguous.
+        if !matches!(key.code, KeyCode::Left) {
+            self.left_arrow.disarm();
+            self.left_arrow_hint_at = None;
+        }
+        let had_text = !self.composer.is_empty();
+        let outcome = self.on_editor_key(key);
+        if had_text && self.composer.is_empty() {
+            let now_ms = self.left_arrow_epoch.elapsed().as_millis() as u64 + 1;
+            self.left_arrow.note_edited_to_empty(now_ms);
+        }
+        outcome
+    }
+
+    /// The editing layers under the ←-gesture bookkeeping: the vim layer
+    /// (when enabled) first, then the plain composer path.
+    fn on_editor_key(&mut self, key: KeyEvent) -> BottomPaneOutcome {
         // When vim is enabled, the vim layer sees the key first. It fully
         // handles Normal-mode motions/edits; Insert-mode typing + all Ctrl
         // chords fall through to the normal composer handling below.
@@ -441,23 +480,39 @@ impl BottomPane {
                 self.sync_completion();
                 return outcome;
             }
-            let vim_outcome = {
-                let vim = self.vim.as_mut().expect("vim is Some");
-                crate::vim::handle_key(vim, &mut self.composer, key)
-            };
-            match vim_outcome {
-                VimOutcome::Consumed => {
-                    self.sync_completion();
-                    return BottomPaneOutcome::Consumed;
+            // Normal-mode ← on an EMPTY composer is the agents-view gesture,
+            // exactly like the plain editor — claude routes BOTH editors'
+            // onLeft through the same `kGt` handler. It must bypass the vim
+            // motion layer (which would swallow it as an `h`-equivalent), so
+            // it falls through to `on_composer_key` below, whose ← branch
+            // owns the gesture and still degrades to an ordinary cursor move
+            // on `PassThrough`. Everything else keeps vim-first routing.
+            let normal_left_on_empty = matches!(key.code, KeyCode::Left)
+                && key.modifiers.is_empty()
+                && self.composer.is_empty()
+                && self
+                    .vim
+                    .as_ref()
+                    .is_some_and(|v| v.mode == crate::vim::VimMode::Normal);
+            if !normal_left_on_empty {
+                let vim_outcome = {
+                    let vim = self.vim.as_mut().expect("vim is Some");
+                    crate::vim::handle_key(vim, &mut self.composer, key)
+                };
+                match vim_outcome {
+                    VimOutcome::Consumed => {
+                        self.sync_completion();
+                        return BottomPaneOutcome::Consumed;
+                    }
+                    VimOutcome::Submit => {
+                        let outcome = self
+                            .take_submission_state()
+                            .map_or(BottomPaneOutcome::Consumed, BottomPaneOutcome::Submitted);
+                        self.sync_completion();
+                        return outcome;
+                    }
+                    VimOutcome::Passthrough => {}
                 }
-                VimOutcome::Submit => {
-                    let outcome = self
-                        .take_submission_state()
-                        .map_or(BottomPaneOutcome::Consumed, BottomPaneOutcome::Submitted);
-                    self.sync_completion();
-                    return outcome;
-                }
-                VimOutcome::Passthrough => {}
             }
         }
         let outcome = self.on_composer_key(key);
@@ -834,6 +889,21 @@ impl BottomPane {
         self.composer.is_blank()
     }
 
+    /// Attach the persistent prompt-history store: seed the composer's recall
+    /// list from `history.jsonl` (claude-code `THo`: this project's entries,
+    /// current session first, cap 100) and keep the handle so submissions
+    /// persist. Recall order from the store is candidate-first; the composer
+    /// stores oldest-first, hence the reverse.
+    pub fn set_prompt_history_store(
+        &mut self,
+        store: std::sync::Arc<session::prompt_history::PromptHistoryStore>,
+    ) {
+        let mut seed = store.recall_displays();
+        seed.reverse();
+        self.composer.seed_history(seed);
+        self.history_store = Some(store);
+    }
+
     /// Take the composer's submission: pushes non-blank text to history,
     /// clears the buffer, and returns the trimmed text. `None` (buffer
     /// untouched) when the composer is blank.
@@ -842,6 +912,18 @@ impl BottomPane {
             return None;
         }
         let mut text = self.composer.take();
+        // Persist the typed prompt (claude-code `cgr` → queue + background
+        // flush). The PRE-expansion text is stored — CC's `display` field also
+        // carries the paste placeholders, with contents externalised into
+        // `pastedContents` (unported). Flush off-thread so the render loop
+        // never blocks on the history lockfile.
+        if let Some(store) = &self.history_store {
+            store.enqueue(&text);
+            let store = store.clone();
+            std::thread::spawn(move || {
+                let _ = store.flush();
+            });
+        }
         // Expand large-paste placeholders (codex `expand_pending_pastes`):
         // each placeholder still present becomes its full pasted text; a
         // placeholder the user deleted drops its paste. Longest-first so the
@@ -998,13 +1080,32 @@ impl BottomPane {
         &self.view_stack
     }
 
+    /// Apply the `leftArrowOpensAgents` setting (ANDed with the agent-view
+    /// enablement gate by the composition root — see the field doc).
+    pub fn set_left_arrow_opens_agents(&mut self, enabled: bool) {
+        self.left_arrow_opens_agents = enabled;
+        if !enabled {
+            self.left_arrow.disarm();
+            self.left_arrow_hint_at = None;
+        }
+    }
+
+    /// The live `leftArrowOpensAgents` gate (for the `/config` screen row).
+    #[must_use]
+    pub fn left_arrow_opens_agents(&self) -> bool {
+        self.left_arrow_opens_agents
+    }
+
     /// The armed ←-gesture hint, if one is showing and has not timed out.
+    /// The pane's only gesture handler opens the agents view, so the hint is
+    /// `kGt`'s open-agents `confirmHint` (the `GLe` arm), not the state
+    /// machine's bare `s ?? "Press ← again"` fallback.
     fn left_arrow_hint(&self) -> Option<&'static str> {
         let at = self.left_arrow_hint_at?;
         if at.elapsed().as_millis() as u64 >= tui_core::left_arrow_gesture::FEEDBACK_TIMEOUT_MS {
             return None;
         }
-        Some(tui_core::left_arrow_gesture::CONFIRM_HINT)
+        Some(tui_core::left_arrow_gesture::OPEN_AGENTS_CONFIRM_HINT)
     }
 
     /// Route a ← pressed on an EMPTY composer through the gesture guard.
@@ -1272,31 +1373,15 @@ impl BottomPane {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let is_ctrl_c = ctrl && matches!(key.code, KeyCode::Char('c'));
         // Any key other than a repeat Ctrl-C disarms the press-twice-to-exit.
+        // (The ←-gesture's disarm/edited-to-empty bookkeeping lives one level
+        // up in `handle_key`, so it also covers keys the vim layer consumes.)
         if !is_ctrl_c {
             self.ctrl_c_at = None;
         }
-        // Anything that is not another ← disarms the gesture and takes its hint
-        // down: the user moved on, so a later ← must start the confirmation
-        // over rather than fire on a stale one.
-        if !matches!(key.code, KeyCode::Left) {
-            self.left_arrow.disarm();
-            self.left_arrow_hint_at = None;
-        }
-        // Whether the composer had text BEFORE this key, so an edit that
-        // empties it can be stamped below. That stamp is what makes the very
-        // next ← ambiguous — without it the guard never arms.
-        let had_text = !self.composer.is_empty();
-        let out = self.on_composer_key_inner(key, ctrl);
-        if had_text && self.composer.is_empty() {
-            let now_ms = self.left_arrow_epoch.elapsed().as_millis() as u64 + 1;
-            self.left_arrow.note_edited_to_empty(now_ms);
-        }
-        out
+        self.on_composer_key_inner(key, ctrl)
     }
 
-    /// The body of [`Self::on_composer_key`], split out so the caller can
-    /// observe the composer text on BOTH sides of the key — the edit-to-empty
-    /// transition is what arms the ← gesture's guard.
+    /// The body of [`Self::on_composer_key`].
     fn on_composer_key_inner(&mut self, key: KeyEvent, ctrl: bool) -> BottomPaneOutcome {
         // Paste-burst layer (codex `handle_input_basic` ordering): flush any
         // DUE burst first so buffered text never lags behind this key, then
@@ -1414,9 +1499,11 @@ impl BottomPane {
                 // ← on an EMPTY composer is a gesture (open the agents view),
                 // not a cursor move. It is guarded, because ← is also how you
                 // step away from a character you just deleted — see
-                // `tui_core::left_arrow_gesture`.
+                // `tui_core::left_arrow_gesture`. With `leftArrowOpensAgents`
+                // off there is no handler at all (claude's `kCt` gate in
+                // `kGt`), so the press falls straight through to the move.
                 let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-                if self.composer.is_empty() && !shift {
+                if self.composer.is_empty() && !shift && self.left_arrow_opens_agents {
                     // A ← inside a paste burst is pasted content, not a
                     // deliberate keystroke.
                     let solo = !self.paste_burst_pending();
@@ -2875,6 +2962,42 @@ mod tests {
     }
 
     #[test]
+    fn prompt_history_store_persists_and_seeds_recall() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = std::path::Path::new("/proj/history-test");
+        let store = std::sync::Arc::new(session::prompt_history::PromptHistoryStore::new(
+            dir.path(),
+            project,
+            Some("s-1".into()),
+        ));
+        let mut pane = super::BottomPane::new(Theme::dark());
+        pane.set_prompt_history_store(store.clone());
+        typ(&mut pane, "persisted prompt");
+        assert_eq!(
+            pane.take_submission_state().as_deref(),
+            Some("persisted prompt")
+        );
+        // The submit spawned a background flush; a direct flush serializes
+        // behind it (the store's single-flight gate) so the row is on disk
+        // exactly once afterwards.
+        assert!(store.flush());
+        let raw = std::fs::read_to_string(dir.path().join("history.jsonl")).unwrap();
+        assert_eq!(raw.lines().count(), 1);
+        assert!(raw.contains("\"display\":\"persisted prompt\""));
+
+        // A NEW session's pane seeds its up-arrow recall from the store.
+        let fresh = std::sync::Arc::new(session::prompt_history::PromptHistoryStore::new(
+            dir.path(),
+            project,
+            Some("s-2".into()),
+        ));
+        let mut pane2 = super::BottomPane::new(Theme::dark());
+        pane2.set_prompt_history_store(fresh);
+        let _ = pane2.handle_key(key(KeyCode::Up));
+        assert_eq!(pane2.composer().text(), "persisted prompt");
+    }
+
+    #[test]
     fn vim_routing_normal_mode_edits_and_enter_submits() {
         let mut pane = pane();
         assert!(!pane.vim_enabled());
@@ -3542,7 +3665,7 @@ mod tests {
         ));
         assert_eq!(
             p.left_arrow_hint(),
-            Some(tui_core::left_arrow_gesture::CONFIRM_HINT)
+            Some(tui_core::left_arrow_gesture::OPEN_AGENTS_CONFIRM_HINT)
         );
 
         // Synthetic keystrokes all land in the same millisecond, which the
@@ -3594,7 +3717,110 @@ mod tests {
         let props = p.footer_props();
         assert!(matches!(
             props.mode,
-            footer::FooterMode::LeftArrowReminder(h) if h == "Press \u{2190} again"
+            footer::FooterMode::LeftArrowReminder(h) if h == "Press \u{2190} again to open agents"
+        ));
+    }
+
+    /// `leftArrowOpensAgents: false` (claude's `kCt` gate) removes the gesture
+    /// entirely: ← on an empty composer is an ordinary cursor move and never
+    /// arms, hints, or opens the agents view — even on the guarded
+    /// edit-to-empty path.
+    #[test]
+    fn the_setting_disables_the_gesture_entirely() {
+        let mut p = pane();
+        p.set_left_arrow_opens_agents(false);
+        assert!(matches!(
+            p.handle_key(k(KeyCode::Left)),
+            BottomPaneOutcome::Consumed
+        ));
+        assert_eq!(p.left_arrow_hint(), None);
+        p.handle_key(k(KeyCode::Char('h')));
+        p.handle_key(k(KeyCode::Backspace));
+        assert!(matches!(
+            p.handle_key(k(KeyCode::Left)),
+            BottomPaneOutcome::Consumed
+        ));
+        assert_eq!(p.left_arrow_hint(), None, "the guard never arms either");
+    }
+
+    /// Turning the setting off while a hint is showing takes the hint down —
+    /// a dead handler must not leave a live "press again" promise on screen.
+    #[test]
+    fn disabling_the_setting_takes_an_armed_hint_down() {
+        let mut p = pane();
+        p.handle_key(k(KeyCode::Char('h')));
+        p.handle_key(k(KeyCode::Backspace));
+        p.handle_key(k(KeyCode::Left));
+        assert!(p.left_arrow_hint().is_some());
+        p.set_left_arrow_opens_agents(false);
+        assert_eq!(p.left_arrow_hint(), None);
+    }
+
+    /// Vim NORMAL mode: ← on a long-empty composer opens the agents view
+    /// exactly like the plain editor — claude routes both editors' onLeft
+    /// through the same `kGt` handler.
+    #[test]
+    fn vim_normal_left_on_an_empty_composer_opens_the_agents_view() {
+        let mut p = pane();
+        p.toggle_vim();
+        p.handle_key(k(KeyCode::Esc)); // Insert → Normal
+        assert!(matches!(
+            p.handle_key(k(KeyCode::Left)),
+            BottomPaneOutcome::OpenAgentsView
+        ));
+    }
+
+    /// Vim NORMAL mode honors the edit-to-empty guard: `x`-deleting the last
+    /// character (a vim-layer-consumed edit) arms the confirmation, and the
+    /// second ← fires. This is what the bookkeeping wrapping the vim layer
+    /// buys — the stamp would otherwise never be taken.
+    #[test]
+    fn vim_normal_delete_to_empty_arms_before_firing() {
+        let mut p = pane();
+        p.toggle_vim();
+        p.handle_key(k(KeyCode::Char('h'))); // Insert-mode typing
+        p.handle_key(k(KeyCode::Esc)); // → Normal, cursor on 'h'
+        p.handle_key(k(KeyCode::Char('x'))); // delete → empty
+        assert!(matches!(
+            p.handle_key(k(KeyCode::Left)),
+            BottomPaneOutcome::Consumed
+        ));
+        assert!(p.left_arrow_hint().is_some(), "first press only arms");
+        p.left_arrow_epoch = Instant::now() - std::time::Duration::from_millis(1_500);
+        assert!(matches!(
+            p.handle_key(k(KeyCode::Left)),
+            BottomPaneOutcome::OpenAgentsView
+        ));
+    }
+
+    /// A vim-layer-consumed key (a NORMAL-mode motion) also disarms an armed
+    /// gesture — the disarm lives above the vim layer, not just on the plain
+    /// composer path.
+    #[test]
+    fn a_vim_consumed_key_disarms_the_gesture() {
+        let mut p = pane();
+        p.toggle_vim();
+        p.handle_key(k(KeyCode::Char('h')));
+        p.handle_key(k(KeyCode::Esc));
+        p.handle_key(k(KeyCode::Char('x')));
+        p.handle_key(k(KeyCode::Left));
+        assert!(p.left_arrow_hint().is_some());
+        p.handle_key(k(KeyCode::Char('l'))); // vim motion, vim-consumed
+        assert_eq!(p.left_arrow_hint(), None, "the hint is taken down");
+        assert_eq!(p.left_arrow.armed_at_ms, 0, "and the gesture is disarmed");
+    }
+
+    /// Vim NORMAL mode with TEXT in the composer: ← stays an ordinary motion,
+    /// never the gesture.
+    #[test]
+    fn vim_normal_left_on_a_non_empty_composer_is_a_motion() {
+        let mut p = pane();
+        p.toggle_vim();
+        p.handle_key(k(KeyCode::Char('h')));
+        p.handle_key(k(KeyCode::Esc)); // → Normal
+        assert!(matches!(
+            p.handle_key(k(KeyCode::Left)),
+            BottomPaneOutcome::Consumed
         ));
     }
 

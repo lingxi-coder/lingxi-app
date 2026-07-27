@@ -680,39 +680,34 @@ impl Tool for SkillTool {
     }
 
     async fn prompt(&self, _: &PromptOptions) -> String {
-        // Binary-grounded text (bytes 198002225+): the exact Skill tool
-        // description sent to the model. MUST NOT be changed without a binary
-        // re-audit.
-        "Execute a skill within the main conversation\n\
+        // Binary-grounded text (cc 2.1.220 `Xh_`, bytes 231510981; verified
+        // against the live-captured 2.1.220 request body — INCLUDING the
+        // trailing newline the template literal ends with). The background-
+        // return sentence ("A skill that runs in the background…") was added in
+        // cc 2.1.218. Unlike Bash/Agent this text is NOT model-conditional
+        // (identical for opus-4-8 and opus-5 in 2.1.220), so a single string
+        // suffices. MUST NOT be changed without a binary re-audit.
+        "Invoke a skill.\n\
 \n\
-When users ask you to perform tasks, check if any of the available skills match. \
-Skills provide specialized capabilities and domain knowledge.\n\
+A skill is a packaged set of instructions the user or project has set up for a particular \
+kind of task (deploy steps, a review checklist, a repo-specific workflow). Available \
+skills appear in a system-reminder listing with one-line descriptions. When the task at \
+hand is one a listed skill covers, call this tool first — the skill's instructions load \
+into the turn for you to follow in place of your default approach; some skills instead \
+run in a subagent and return the finished result. A skill that runs in the background \
+returns only the agent's name — its result arrives later as a task notification, so \
+don't wait on it or invoke it again in the meantime. Users may also ask for one by name \
+(`/<name>`, or \"slash command\"); that's a request to invoke it.\n\
 \n\
-When users reference a \"slash command\" or \"/<something>\", they are referring to a skill. \
-Use this tool to invoke it.\n\
+- `skill`: exact name from the listing, no leading slash. Plugin skills use \
+`plugin:skill`. Directory-scoped skills are listed with a path prefix (`apps/web:deploy`); \
+when both scoped and unscoped variants of a name exist, pick the one whose directory \
+contains the files you're working on (most specific wins; unscoped otherwise).\n\
+- `args`: optional arguments to pass through.\n\
 \n\
-How to invoke:\n\
-- Set `skill` to the exact name of an available skill (no leading slash). \
-For plugin-namespaced skills use the fully qualified `plugin:skill` form.\n\
-- Set `args` to pass optional arguments.\n\
-- Some skills are scoped to a directory: their name is prefixed with the directory \
-(e.g. `apps/web:deploy`) and their description says which directory they apply to. \
-When a skill name has both a scoped and an unscoped variant, pick by the files you \
-are working on: if the files are under a variant's directory, invoke that variant \
-(most specific directory wins); otherwise invoke the unscoped one.\n\
-\n\
-Important:\n\
-- Available skills are listed in system-reminder messages in the conversation\n\
-- Only invoke a skill that appears in that list, or one the user explicitly typed as \
-`/<name>` in their message. Never guess or invent a skill name from training data; \
-otherwise do not call this tool\n\
-- When a skill matches the user's request, this is a BLOCKING REQUIREMENT: invoke \
-the relevant Skill tool BEFORE generating any other response about the task\n\
-- NEVER mention a skill without actually calling this tool\n\
-- Do not invoke a skill that is already running\n\
-- Do not use this tool for built-in CLI commands (like /help, /clear, etc.)\n\
-- If you see a <command-name> tag in the current conversation turn, the skill has \
-ALREADY been loaded - follow the instructions directly instead of calling this tool again"
+Only names from the listing (or that the user typed explicitly) are valid. Built-in CLI \
+commands (`/help`, `/clear`, …) aren't skills. If a `<command-name>` block is already \
+present this turn, the skill is loaded — follow it directly rather than calling again.\n"
             .into()
     }
 

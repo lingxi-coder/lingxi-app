@@ -1165,54 +1165,37 @@ mod tests {
     }
 
     // ========================================================================
-    // Parity: prompt() byte-exact comparison (binary bytes 198002225+)
+    // Parity: prompt() byte-exact comparison (cc 2.1.220 `Xh_`, bytes 231510981)
     // ========================================================================
 
-    /// The `prompt()` string must match the binary's Skill tool description
-    /// exactly (byte-for-byte). This test locks the full text so any future
-    /// change requires an explicit binary re-audit.
+    /// The `prompt()` string must match the 2.1.220 binary's Skill tool
+    /// description exactly (byte-for-byte, verified against a live-captured
+    /// request body). This test locks the full text so any future change
+    /// requires an explicit binary re-audit. The background-return sentence is
+    /// the cc 2.1.218 addition; the template literal ends with a trailing
+    /// newline that IS sent on the wire.
     #[tokio::test]
     async fn prompt_is_binary_faithful() {
         let tool = SkillTool::new(shell_test_ctx(dummy_out()));
         let p = tool.prompt(&PromptOptions::default()).await;
-        // Key phrases that must be present (guards against accidental truncation
-        // or whitespace normalization).
-        assert!(
-            p.starts_with("Execute a skill within the main conversation"),
-            "prompt must start with binary-faithful opening line"
-        );
-        assert!(
-            p.contains("available skills"),
-            "prompt must mention available skills list"
-        );
-        assert!(
-            p.contains("BLOCKING REQUIREMENT"),
-            "prompt must contain BLOCKING REQUIREMENT clause"
-        );
-        assert!(
-            p.contains("plugin:skill"),
-            "prompt must mention plugin:skill qualified form"
-        );
-        assert!(
-            p.contains("<command-name>"),
-            "prompt must contain <command-name> re-entry guard"
-        );
-        assert!(
-            p.contains("apps/web:deploy"),
-            "prompt must contain scoped-skill directory example"
-        );
-        assert!(
-            p.contains("NEVER mention a skill without actually calling this tool"),
-            "prompt must contain NEVER-mention clause"
-        );
-        assert!(
-            p.contains("Do not invoke a skill that is already running"),
-            "prompt must contain already-running guard"
-        );
-        assert!(
-            p.contains("/help, /clear"),
-            "prompt must contain built-in CLI commands example"
-        );
+        let expected = "Invoke a skill.\n\nA skill is a packaged set of instructions the \
+user or project has set up for a particular kind of task (deploy steps, a review \
+checklist, a repo-specific workflow). Available skills appear in a system-reminder \
+listing with one-line descriptions. When the task at hand is one a listed skill covers, \
+call this tool first — the skill's instructions load into the turn for you to follow in \
+place of your default approach; some skills instead run in a subagent and return the \
+finished result. A skill that runs in the background returns only the agent's name — its \
+result arrives later as a task notification, so don't wait on it or invoke it again in \
+the meantime. Users may also ask for one by name (`/<name>`, or \"slash command\"); \
+that's a request to invoke it.\n\n- `skill`: exact name from the listing, no leading \
+slash. Plugin skills use `plugin:skill`. Directory-scoped skills are listed with a path \
+prefix (`apps/web:deploy`); when both scoped and unscoped variants of a name exist, pick \
+the one whose directory contains the files you're working on (most specific wins; \
+unscoped otherwise).\n- `args`: optional arguments to pass through.\n\nOnly names from \
+the listing (or that the user typed explicitly) are valid. Built-in CLI commands \
+(`/help`, `/clear`, …) aren't skills. If a `<command-name>` block is already present \
+this turn, the skill is loaded — follow it directly rather than calling again.\n";
+        assert_eq!(p, expected, "Skill tool prompt must be byte-exact vs 2.1.220");
     }
 
     // P2-12 / `zSr`: a successful skill invocation records the skill in the

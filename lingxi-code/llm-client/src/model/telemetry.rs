@@ -205,6 +205,41 @@ pub async fn emit_max_tokens_overflow_adjustment(
         .await;
 }
 
+/// Emit `tengu_dispatch_header_fallback` (cc 2.1.219): an attempt carrying the
+/// opt-in `anthropic-dispatch-id: v2s` header failed with an HTTP 5xx
+/// (`reason:"5xx"`, `status` set) or a connection error (`reason:"conn_err"`,
+/// `status` absent — the oracle sends the literal `"none"`), and the header is
+/// stripped for the rest of the session.
+///
+/// No-op when `bus` is `None`.
+pub async fn emit_dispatch_header_fallback(
+    bus: &Option<Arc<AnalyticsBus>>,
+    model: &str,
+    reason: &'static str,
+    status: Option<u16>,
+) {
+    let Some(bus) = bus else { return };
+    let mut m = LogEventMetadata::new();
+    m.insert(
+        "model".into(),
+        AnalyticsValue::String(
+            Verified::assert_safe(model.to_string())
+                .as_str()
+                .to_string(),
+        ),
+    );
+    m.insert("reason".into(), AnalyticsValue::String(reason.to_string()));
+    m.insert(
+        "status".into(),
+        match status {
+            Some(s) => AnalyticsValue::Int(i64::from(s)),
+            // `status:Te("none")` — the oracle stringifies the absent status.
+            None => AnalyticsValue::String("none".to_string()),
+        },
+    );
+    bus.log_event("tengu_dispatch_header_fallback", m).await;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

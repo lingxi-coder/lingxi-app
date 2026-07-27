@@ -588,6 +588,10 @@ pub fn run_app(
     sandbox_toggle: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     command_registry: Option<std::sync::Arc<tokio::sync::RwLock<command_api::CommandRegistry>>>,
     task_registry: Option<std::sync::Arc<dyn traits::task_registry::TaskRegistryHandle>>,
+    // Persistent prompt-history store (`~/.lingxi/history.jsonl`, cc 2.1.218):
+    // seeds the composer recall + persists submissions. `None` = session-local
+    // recall only (tests, `CLAUDE_CODE_SKIP_PROMPT_HISTORY`).
+    prompt_history: Option<std::sync::Arc<session::prompt_history::PromptHistoryStore>>,
     // The resolved boot permission mode + whether bypass is an available
     // Shift+Tab cycle target — seeds the below-composer mode indicator.
     initial_permission_mode: permission::PermissionMode,
@@ -678,6 +682,9 @@ pub fn run_app(
     if let Some(slot) = permission_snapshot {
         app.chat_widget.set_permission_snapshot(slot);
     }
+    if let Some(store) = prompt_history {
+        app.chat_widget.set_prompt_history_store(store);
+    }
     if let Some(slot) = plugin_snapshot {
         app.chat_widget.set_plugin_snapshot(slot);
     }
@@ -713,6 +720,23 @@ pub fn run_app(
     // snapshot. `None` (tests / no engine) keeps `/tasks` a graceful no-op.
     if let Some(handle) = task_registry {
         app.chat_widget.set_task_registry(handle);
+    }
+    // Agents-view settings (claude 2.1.220): `leftArrowOpensAgents`
+    // (`kCt = Rt().leftArrowOpensAgents !== false`, default ON) gates the
+    // ←-on-empty gesture; it is ANDed with the agent-view enablement gate,
+    // because a disabled agent view fails `kGt`'s `Zan(C2t({fleetEnabled:
+    // $H(), …}))` check and installs no handler at all.
+    let agent_view_enabled = traits::agent_view::is_enabled();
+    app.chat_widget.set_left_arrow_opens_agents(
+        tui_core::theme_persist::load_left_arrow_opens_agents().unwrap_or(true)
+            && agent_view_enabled,
+    );
+    // `defaultToAgentsView` ("Open agents view by default" / "Start in agent
+    // view", default OFF): open the agents view over the fresh conversation
+    // at startup. Runs after the task registry is wired so the view has rows.
+    if tui_core::theme_persist::load_default_to_agents_view().unwrap_or(false) && agent_view_enabled
+    {
+        app.chat_widget.open_agents_view();
     }
     // A background PTY session can carry an initial prompt even though its
     // hidden child is deliberately launched without a positional prompt (a

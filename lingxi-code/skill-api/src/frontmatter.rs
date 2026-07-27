@@ -109,6 +109,63 @@ mod tests {
         );
     }
 
+    // ---- cc 2.1.218 boolean coercion (yes/no/on/off/1/0) ---------------------
+
+    #[test]
+    fn boolean_coercion_truthy_spellings() {
+        // 2.1.218 changelog: yes/no/on/off/1/0 (case-insensitive) join
+        // true/false for skill frontmatter booleans. `yes` is a STRING in
+        // YAML 1.2, so pre-218 this was a whole-skill parse error.
+        for raw in [
+            "disable-model-invocation: yes",
+            "disable-model-invocation: \"On\"",
+            "disable-model-invocation: 1",
+            "disable-model-invocation: \"1\"",
+            "disable-model-invocation: TRUE",
+        ] {
+            let s = parse(&format!("{raw}\nname: x"), "body");
+            assert!(s.frontmatter.disable_model_invocation, "raw: {raw}");
+        }
+    }
+
+    #[test]
+    fn boolean_coercion_falsy_and_garbage() {
+        for raw in [
+            "disable-model-invocation: no",
+            "disable-model-invocation: \"OFF\"",
+            "disable-model-invocation: 0",
+            // rtr = Kde ?? false: declared garbage lands on false, not error.
+            "disable-model-invocation: sometimes",
+        ] {
+            let s = parse(&format!("{raw}\nname: x"), "body");
+            assert!(!s.frontmatter.disable_model_invocation, "raw: {raw}");
+        }
+    }
+
+    #[test]
+    fn user_invocable_coerces_and_declares_on_garbage() {
+        // Present key always declares (`U === void 0 ? !0 : rtr(U)`): the
+        // truthy/falsy spellings map, garbage lands on Some(false).
+        let s = parse("user-invocable: off\nname: x", "body");
+        assert_eq!(s.frontmatter.user_invocable, Some(false));
+        let s = parse("user-invocable: yes\nname: x", "body");
+        assert_eq!(s.frontmatter.user_invocable, Some(true));
+        let s = parse("user-invocable: whatever\nname: x", "body");
+        assert_eq!(s.frontmatter.user_invocable, Some(false));
+    }
+
+    #[test]
+    fn background_kde_garbage_is_undeclared() {
+        // Bare `Kde`: `background ?? true` must survive a typo — garbage is
+        // UNDECLARED (None), never false.
+        let s = parse("background: yes\nname: x", "body");
+        assert_eq!(s.frontmatter.background, Some(true));
+        let s = parse("background: \"0\"\nname: x", "body");
+        assert_eq!(s.frontmatter.background, Some(false));
+        let s = parse("background: maybe\nname: x", "body");
+        assert_eq!(s.frontmatter.background, None);
+    }
+
     // ---- disallowed-tools (P1 gap #4) ----------------------------------------
 
     #[test]

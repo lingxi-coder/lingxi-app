@@ -208,6 +208,43 @@ fn build_servers_from_map(
 ) -> Vec<McpServerConfig> {
     let mut out = Vec::new();
     for (name, raw_entry) in entries {
+        if let Some(cfg) = build_server_from_json_entry(name, raw_entry, scope) {
+            out.push(cfg);
+        }
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+/// Quiet shape check for one raw `.mcp.json`-style entry value: does it
+/// deserialize as a server entry AND carry a transport (`command` or `url`)?
+/// Mirrors the zod `safeParse` success predicate WITHOUT logging — used by the
+/// strict JSON-agent `mcpServers` validator (`z.array(AgentMcpServerSpecSchema)`,
+/// where any invalid record value drops the whole agent) so validation at parse
+/// time does not double-log the entry the conversion would log again later.
+#[must_use]
+pub fn server_entry_shape_is_valid(raw_entry: &serde_json::Value) -> bool {
+    McpJsonEntry::deserialize(raw_entry)
+        .map(|e| e.command.is_some() || e.url.is_some())
+        .unwrap_or(false)
+}
+
+/// Build ONE validated [`McpServerConfig`] from a raw `{ name: entry }` map
+/// entry (the loop body of [`build_servers_from_map`], extracted). `None` when
+/// the entry is invalid — logged + skipped (TS `safeParse` failure →
+/// `logForDebugging` + `continue`), keeping valid siblings.
+///
+/// Public because agent frontmatter `mcpServers` bodies share EXACTLY this
+/// config shape: claude `agentMcpSpecsToScopedConfigs` (obs) spreads the parsed
+/// config and stamps `scope:"agent"` — the agent crate's conversion calls this
+/// with [`ConfigScope::Agent`].
+#[must_use]
+pub fn build_server_from_json_entry(
+    name: &str,
+    raw_entry: &serde_json::Value,
+    scope: ConfigScope,
+) -> Option<McpServerConfig> {
+    {
         // Per-entry validation: a shape that fails to deserialize is logged and
         // skipped (TS `safeParse` failure → `logForDebugging` + `continue`),
         // keeping the valid siblings rather than dropping the whole file.
@@ -219,10 +256,10 @@ fn build_servers_from_map(
                     error = %e,
                     "mcp.json: invalid server config; skipping entry"
                 );
-                continue;
+                return None;
             }
         };
-        let name = name.clone();
+        let name = name.to_string();
         // Expand `${VAR}` / `${VAR:-default}` references in the transport
         // fields, mirroring claude-code `expandEnvVars(config)`
         // (`services/mcp/config.ts:556-615`): stdio expands `command`/`args`/
@@ -249,7 +286,7 @@ fn build_servers_from_map(
                     server = %name,
                     "mcp.json: remote entry missing url; skipping"
                 );
-                continue;
+                return None;
             }
             let headers = expand_header_values(entry.headers, &mut missing);
             match entry.transport_type.as_deref() {
@@ -293,7 +330,7 @@ fn build_servers_from_map(
                 server = %name,
                 "mcp.json: entry missing both command and url; skipping"
             );
-            continue;
+            return None;
         };
         if !missing.is_empty() {
             // Dedup preserving first-seen order (TS `[...new Set(missingVars)]`).
@@ -322,17 +359,15 @@ fn build_servers_from_map(
             _ => entry.timeout,
         };
         let always_load = entry.always_load.unwrap_or(false);
-        out.push(McpServerConfig {
+        Some(McpServerConfig {
             name,
             spec,
             scope,
             disabled: entry.disabled,
             timeout_ms,
             always_load,
-        });
+        })
     }
-    out.sort_by(|a, b| a.name.cmp(&b.name));
-    out
 }
 
 /// Load + merge MCP configs from the project `.mcp.json` (cwd) and the user

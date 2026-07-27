@@ -842,6 +842,11 @@ pub(crate) fn resolve_desktop_config(
         // CLI `--mcp-config <configs...>` servers (parsed above), merged over the
         // discovered servers in `build()`.
         cli_mcp_servers,
+        // `--strict-mcp-config` proper: the discovered paths were already nulled
+        // above; the flag ALSO gates the agent-frontmatter MCP merge in `build()`
+        // (claude `FWt`: frontmatter servers skipped under strict mode unless the
+        // agent came from `--agents`).
+        strict_mcp_config: argv.strict_mcp_config,
         // CLI `--exclude-dynamic-system-prompt-sections`: move per-machine env
         // sections out of the cacheable system prompt into the first user message.
         exclude_dynamic_system_prompt_sections: argv.exclude_dynamic_system_prompt_sections,

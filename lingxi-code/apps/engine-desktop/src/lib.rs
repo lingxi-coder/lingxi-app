@@ -1741,6 +1741,7 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 ///     disable_slash_commands: false,
 ///     add_dir: Vec::new(),
 ///     cli_mcp_servers: Vec::new(),
+///     strict_mcp_config: false,
 ///     exclude_dynamic_system_prompt_sections: false,
 ///     setting_source_scope: (true, true),
 ///     customization_gates: engine_desktop::CustomizationGates::default(),
@@ -1985,6 +1986,14 @@ pub struct DesktopConfig {
     /// `--strict-mcp-config` the host nulls the discovered paths, so these are
     /// the ONLY servers. Empty (the default) ⟶ none.
     pub cli_mcp_servers: Vec<mcp::McpServerConfig>,
+    /// CLI `--strict-mcp-config` ("Only use MCP servers from --mcp-config,
+    /// ignoring all other MCP configurations"). The host already nulls the
+    /// discovered `.mcp.json` paths when set; the flag itself is threaded here
+    /// because the agent-frontmatter MCP merge (claude `FWt`, cc2.1.220) skips
+    /// frontmatter servers under strict mode UNLESS the agent came from the
+    /// `--agents` flag (`r?.strictMcpConfig && t.source !== "flagSettings"`).
+    /// `false` (the default) ⟶ no strict gating.
+    pub strict_mcp_config: bool,
     /// CLI `--exclude-dynamic-system-prompt-sections`. Threaded into
     /// `OrchestratorConfig::exclude_dynamic_system_prompt_sections`: moves the
     /// per-machine env block out of the (cacheable) system prompt and into the
@@ -2309,6 +2318,7 @@ impl std::fmt::Debug for DesktopConfig {
             )
             .field("add_dir", &self.add_dir)
             .field("cli_mcp_server_count", &self.cli_mcp_servers.len())
+            .field("strict_mcp_config", &self.strict_mcp_config)
             .field(
                 "exclude_dynamic_system_prompt_sections",
                 &self.exclude_dynamic_system_prompt_sections,
@@ -2378,6 +2388,8 @@ impl Default for DesktopConfig {
             disable_slash_commands: false,
             add_dir: Vec::new(),
             cli_mcp_servers: Vec::new(),
+            // Default: no `--strict-mcp-config` (ambient MCP configs load).
+            strict_mcp_config: false,
             exclude_dynamic_system_prompt_sections: false,
             // Default: all setting tiers load (absent `--setting-sources`).
             setting_source_scope: (true, true),
@@ -3539,6 +3551,75 @@ fn merge_cli_flag_agents(
             agents.push(a);
         }
     }
+}
+
+/// (M7 cc2.1.220) Boot gates for [`merge_agent_frontmatter_mcp_servers`],
+/// resolved by the composition root (env/flag safe mode, `--strict-mcp-config`,
+/// `managed-mcp.json` presence) and injected so the merge is a pure,
+/// unit-testable function.
+#[derive(Debug, Clone, Copy)]
+struct AgentMcpMergeGates {
+    /// claude `Gl()` — `CLAUDE_CODE_SAFE_MODE` env truthy or `--safe-mode`.
+    safe_mode: bool,
+    /// claude `r?.strictMcpConfig` — the `--strict-mcp-config` CLI flag.
+    strict_mcp_config: bool,
+    /// claude `T3()` — a managed `managed-mcp.json` takes EXCLUSIVE control of
+    /// the MCP server set; agent frontmatter servers never merge.
+    enterprise_mcp_active: bool,
+}
+
+/// (M7 cc2.1.220) claude `FWt(existing, agentDef, opts)` @245974724 — merge the
+/// resolved main-thread agent's frontmatter `mcpServers` into the to-connect
+/// MCP config list, so they register + connect exactly like `--mcp-config`
+/// servers. Returns the enterprise-BLOCKED server names for the caller's
+/// `onBlocked` stderr warning (only the composition root prints — claude's
+/// TUI/resume `FWt` call sites pass no `onBlocked`).
+///
+/// Gate order, byte-faithful to `FWt`:
+/// 1. no agent definition → no-op (`if(!t)return e`);
+/// 2. safe mode → no-op (`if(Gl())return e`);
+/// 3. `--strict-mcp-config` UNLESS the agent came from `--agents`
+///    (`r?.strictMcpConfig && t.source !== "flagSettings"`), OR a managed MCP
+///    config is active (`|| T3()`) → no-op;
+/// 4. convert via `obs` ([`agent::agent_mcp_specs_to_scoped_configs`]);
+/// 5. `Yee` enterprise allow/deny filter (sdk-type always allowed) → blocked
+///    names collected;
+/// 6. `{...allowed, ...existing}` — an EXISTING same-name server wins; agent
+///    servers only fill gaps.
+fn merge_agent_frontmatter_mcp_servers(
+    existing: &mut Vec<mcp::McpServerConfig>,
+    def: Option<&agent::AgentDefinition>,
+    gates: AgentMcpMergeGates,
+    policy: &mcp::enterprise_policy::McpPolicy,
+) -> Vec<String> {
+    let Some(def) = def else {
+        return Vec::new();
+    };
+    if gates.safe_mode {
+        return Vec::new();
+    }
+    if (gates.strict_mcp_config && def.source != agent::AgentSource::Flag)
+        || gates.enterprise_mcp_active
+    {
+        return Vec::new();
+    }
+    // `Y0("mcp")` strictPluginOnlyCustomization: the composition root never
+    // populates the strict policy today (`StrictPluginOnlyPolicy::empty()`
+    // above), so the lock is always open — pass `false`; the gate itself lives
+    // inside the conversion for 1:1 structure.
+    let scoped = agent::agent_mcp_specs_to_scoped_configs(def, false);
+    let mut blocked = Vec::new();
+    for cfg in scoped {
+        // `Yee` — enterprise allow/deny per server (sdk short-circuit inside).
+        if !mcp::enterprise_policy::is_server_allowed(&cfg, policy) {
+            blocked.push(cfg.name);
+            continue;
+        }
+        if !existing.iter().any(|x| x.name == cfg.name) {
+            existing.push(cfg);
+        }
+    }
+    blocked
 }
 
 /// Read the merged `settings.enabledPlugins` allowlist (`plugin@marketplace` →
@@ -5637,6 +5718,125 @@ pub async fn build(
     {
         eprintln!("{}", w.to_stderr_line());
     }
+
+    // (5.3) Agent catalog — load from project + user agents/. Project wins on
+    //       collision (passed SECOND; later paths win). The user agents dir is
+    //       `cfg.lingxi_home/agents` (was `dirs::home_dir()/.lingxi/agents`).
+    //       HOISTED above the MCP registry build (M7 cc2.1.220): the
+    //       agent-frontmatter MCP merge just below must see the wanted agent's
+    //       markdown/flag definition BEFORE `connect_all` snapshots the config
+    //       list. Nothing between here and the former position reads the
+    //       catalog; plugin agents still land later via the plugin bootstrap's
+    //       `plugin_agent_catalog` writes.
+    let project_agents_dir = cwd.join(branding::DOT_DIR).join("agents");
+    let user_agents_dir = cfg.lingxi_home.join("agents");
+    // (M3 cc2.1.198) `--safe-mode` / `--bare` disable custom agent definitions
+    // (`V5d.agents:!0`, `K5d.agents:!1`) — skip the dir scan, empty catalog.
+    let mut agents = if cfg.customization_gates.disables_custom_agents() {
+        Vec::new()
+    } else {
+        agent::load_agents_from_dirs(&[
+            (user_agents_dir, agent::definition::AgentSource::UserDefined),
+            (project_agents_dir, agent::definition::AgentSource::Project),
+        ])
+        .await
+    };
+    // (M4 cc2.1.198) `--agents <json>` flag agents — see
+    // [`merge_cli_flag_agents`].
+    merge_cli_flag_agents(
+        &mut agents,
+        cfg.cli_agents_json.as_deref(),
+        cfg.customization_gates.safe_mode,
+    );
+
+    // (P2-02 cc2.1.207 / M7 cc2.1.220) The agent to apply to the MAIN loop: an
+    // EXPLICIT `--agent` (fresh boot or re-passed on `--resume`) wins;
+    // otherwise, on a resume with no `--agent`, the persisted `agentSetting`
+    // (`rVe` restoration). `from_resume` selects the miss warning + suppresses
+    // the re-persist (the record is already on disk). Computed HERE — before
+    // the MCP registry connects — because claude merges the resolved
+    // main-thread agent's frontmatter `mcpServers` into `dynamicMcpConfig`
+    // (`FWt`) BEFORE the MCP clients connect. The APPLICATION to the
+    // orchestrator seam still happens later, against the FINAL
+    // (plugin-inclusive) catalog.
+    let (wanted_agent, resumed_agent_snapshot, from_resume): (
+        Option<String>,
+        Option<serde_json::Value>,
+        bool,
+    ) = match cfg.cli_agent.clone() {
+        Some(w) => (Some(w), None, false),
+        None if cfg.session_id_override.is_some() => {
+            let snapshot_fs =
+                Arc::new(PosixFileSystem::new(cwd.clone())) as Arc<dyn traits::FileSystem>;
+            let (persisted, snapshot) = session::jsonl::read_agent_resume_state(
+                &main_transcript_path,
+                snapshot_fs,
+                &main_session_uuid,
+            )
+            .await;
+            (persisted, snapshot, true)
+        }
+        None => (None, None, false),
+    };
+    // (M7 cc2.1.220) Resolve the definition the `FWt` merge consults. The
+    // FINAL catalog does not exist yet (plugin agents land with the plugin
+    // bootstrap), but plugin agents cannot carry `mcpServers` (LingXi's
+    // parse-time privilege gate rejects them; claude strips the field with a
+    // warning), so the markdown/flag set + the resume snapshot covers every
+    // server-bearing definition. Miss handling (the "not found" warning) stays
+    // with the application block below.
+    let main_agent_def_for_mcp: Option<agent::AgentDefinition> =
+        wanted_agent.as_ref().and_then(|wanted| {
+            resumed_agent_snapshot
+                .as_ref()
+                .and_then(|v| serde_json::from_value::<agent::AgentDefinition>(v.clone()).ok())
+                .filter(|a| &a.agent_type == wanted)
+                .or_else(|| {
+                    agents
+                        .iter()
+                        .find(|a| &a.agent_type == wanted)
+                        .or_else(|| {
+                            let suffix = format!(":{wanted}");
+                            agents.iter().find(|a| a.agent_type.ends_with(&suffix))
+                        })
+                        .cloned()
+                })
+        });
+    // (M7 cc2.1.220) `FWt(existing, agentDef, opts)` — fold the agent's
+    // frontmatter `mcpServers` into the to-connect list so they register,
+    // connect and surface tools EXACTLY like `--mcp-config` servers. Applied
+    // AFTER `apply_project_server_gate` + `apply_enterprise_mcp_policy`: agent
+    // servers are never project-approval-gated (claude approval covers
+    // `.mcp.json` servers) and the merge runs its OWN `Yee` enterprise filter +
+    // `T3()` managed-exclusive skip below, mirroring claude's ordering (`FWt`
+    // merges into `dynamicMcpConfig` after discovery filtering).
+    let agent_mcp_blocked = merge_agent_frontmatter_mcp_servers(
+        &mut mcp_configs,
+        main_agent_def_for_mcp.as_ref(),
+        AgentMcpMergeGates {
+            safe_mode: cfg.customization_gates.safe_mode,
+            strict_mcp_config: cfg.strict_mcp_config,
+            enterprise_mcp_active: mcp::enterprise_policy::enterprise_mcp_active(),
+        },
+        &mcp::enterprise_policy::read_managed_mcp_policy(),
+    );
+    if !agent_mcp_blocked.is_empty() {
+        // claude's headless-start `onBlocked` (the only site that prints):
+        // `Warning: agent frontmatter MCP ${Tt(len,"server")} blocked by
+        // enterprise policy: ${names.join(", ")}` — `Tt` pluralizes WITHOUT a
+        // count.
+        eprintln!(
+            "Warning: agent frontmatter MCP {} blocked by enterprise policy: {}",
+            if agent_mcp_blocked.len() == 1 {
+                "server"
+            } else {
+                "servers"
+            },
+            agent_mcp_blocked.join(", ")
+        );
+    }
+    let agent_catalog = Arc::new(tokio::sync::RwLock::new(agents));
+
     // Build one concrete `PosixMcpTransport` and hand it to the registry as
     // BOTH the `McpTransport` (discovery) and the `RawConnectionProvider`
     // (live-client bridge), so a connected server yields a working `McpClient`
@@ -6176,31 +6376,6 @@ pub async fn build(
     // Clone handles the runtime `/add-dir` live effect needs (the same registry
     // Arc is moved into the orchestrator builder below via `with_mcp_registry`).
     let runtime_mcp_registry = mcp_registry.clone();
-
-    // (5.3) Agent catalog — load from project + user agents/. Project wins on
-    //       collision (passed SECOND; later paths win). The user agents dir is
-    //       `cfg.lingxi_home/agents` (was `dirs::home_dir()/.lingxi/agents`).
-    let project_agents_dir = cwd.join(branding::DOT_DIR).join("agents");
-    let user_agents_dir = cfg.lingxi_home.join("agents");
-    // (M3 cc2.1.198) `--safe-mode` / `--bare` disable custom agent definitions
-    // (`V5d.agents:!0`, `K5d.agents:!1`) — skip the dir scan, empty catalog.
-    let mut agents = if cfg.customization_gates.disables_custom_agents() {
-        Vec::new()
-    } else {
-        agent::load_agents_from_dirs(&[
-            (user_agents_dir, agent::definition::AgentSource::UserDefined),
-            (project_agents_dir, agent::definition::AgentSource::Project),
-        ])
-        .await
-    };
-    // (M4 cc2.1.198) `--agents <json>` flag agents — see
-    // [`merge_cli_flag_agents`].
-    merge_cli_flag_agents(
-        &mut agents,
-        cfg.cli_agents_json.as_deref(),
-        cfg.customization_gates.safe_mode,
-    );
-    let agent_catalog = Arc::new(tokio::sync::RwLock::new(agents));
 
     // (5.4) Real compaction. Threshold 150_000 tokens (M3 design lock for the
     //       Anthropic prod context window). In-Loop Compaction Batch 6: back the
@@ -8177,40 +8352,17 @@ pub async fn build(
     //     default behavior.` warning (claude `rVe`) and falls back to default. A
     //     re-passed `--agent` wins (claude `rVe`'s `if(t)return`) — it is applied
     //     via the explicit arm below and the resume read is skipped.
-    // RESIDUAL seam: frontmatter `mcpServers` (scope `"agent"`) — blocked on the
-    // composition-root MCP tool build, which snapshots the registry into the
-    // Arc-sealed `Arc<ToolRegistry>` (~L6130) BEFORE this final catalog is
-    // assembled (plugin agents land ~L6720), so a late `connect_all` here could
-    // not surface the servers' tools to the model (the SAME limitation plugin MCP
-    // servers already have — there is no runtime-mutable tool registry). Deferred
-    // until a mutable tool registry / earlier agent-resolution seam exists.
+    //   • frontmatter `mcpServers` (scope `"agent"`) — CLOSED (M7 cc2.1.220):
+    //     merged into the to-connect config list by the `FWt` pre-pass in
+    //     (5.1)/(5.3) above, BEFORE the MCP registry `connect_all` and the
+    //     `Arc<ToolRegistry>` snapshot — the servers register, connect and
+    //     surface tools exactly like `--mcp-config` servers. The
+    //     `(wanted_agent, resumed_agent_snapshot, from_resume)` triple this
+    //     block consumes is computed THERE (one transcript read serves both the
+    //     merge and this application).
     // (Built-in agent defs live in the subagent spawner, not this catalog, so
     // their names are absent from the miss warning's "Available agents" list —
     // residual.)
-    //
-    // (P2-02 cc2.1.207) The agent to apply: an EXPLICIT `--agent` (fresh boot or
-    // re-passed on `--resume`) wins; otherwise, on a resume with no `--agent`, the
-    // persisted `agentSetting` (`rVe` restoration). `from_resume` selects the miss
-    // warning + suppresses the re-persist (the record is already on disk).
-    let (wanted_agent, resumed_agent_snapshot, from_resume): (
-        Option<String>,
-        Option<serde_json::Value>,
-        bool,
-    ) = match cfg.cli_agent.clone() {
-        Some(w) => (Some(w), None, false),
-        None if cfg.session_id_override.is_some() => {
-            let snapshot_fs =
-                Arc::new(PosixFileSystem::new(watch_cwd.clone())) as Arc<dyn traits::FileSystem>;
-            let (persisted, snapshot) = session::jsonl::read_agent_resume_state(
-                &main_transcript_path,
-                snapshot_fs,
-                &main_session_uuid,
-            )
-            .await;
-            (persisted, snapshot, true)
-        }
-        None => (None, None, false),
-    };
     if let Some(wanted) = wanted_agent {
         // Resolve against the FINAL catalog, extracting what the main thread
         // applies (agentType + system prompt + tool policy + model) so the
@@ -9213,6 +9365,158 @@ mod tests {
         assert_eq!(bad.len(), 1);
     }
 
+    /// (M7 cc2.1.220) `merge_agent_frontmatter_mcp_servers` — the `FWt` port:
+    /// gate order, existing-name-wins merge, enterprise blocked names.
+    #[test]
+    fn merge_agent_frontmatter_mcp_servers_fwt_gates_and_merge() {
+        fn agent_with_server(name: &str, source: agent::AgentSource) -> agent::AgentDefinition {
+            let mut def = agent::parse_agent_from_json(
+                "helper",
+                &serde_json::json!({"description": "d", "prompt": "p"}),
+                source,
+            )
+            .expect("valid agent");
+            let mut map = serde_json::Map::new();
+            map.insert(
+                name.to_string(),
+                serde_json::json!({"command": "npx", "args": ["-y", "docs-mcp"]}),
+            );
+            def.mcp_servers = vec![agent::AgentMcpServerSpec::Record(map)];
+            def
+        }
+        fn existing(name: &str) -> mcp::McpServerConfig {
+            mcp::McpServerConfig {
+                name: name.to_string(),
+                spec: traits::McpTransportSpec::Stdio {
+                    command: "prior".into(),
+                    args: vec![],
+                    env: std::collections::HashMap::new(),
+                },
+                scope: mcp::ConfigScope::Project,
+                disabled: false,
+                timeout_ms: None,
+                always_load: false,
+            }
+        }
+        let open_gates = super::AgentMcpMergeGates {
+            safe_mode: false,
+            strict_mcp_config: false,
+            enterprise_mcp_active: false,
+        };
+        let no_policy = mcp::enterprise_policy::McpPolicy::default();
+
+        // No definition → no-op (`if(!t)return e`).
+        let mut configs = vec![existing("keep")];
+        let blocked =
+            super::merge_agent_frontmatter_mcp_servers(&mut configs, None, open_gates, &no_policy);
+        assert!(blocked.is_empty());
+        assert_eq!(configs.len(), 1);
+
+        // Open gates: the frontmatter server joins the to-connect list with
+        // scope Agent, exactly like a `--mcp-config` server.
+        let def = agent_with_server("docs", agent::AgentSource::Project);
+        let mut configs = vec![existing("keep")];
+        let blocked = super::merge_agent_frontmatter_mcp_servers(
+            &mut configs,
+            Some(&def),
+            open_gates,
+            &no_policy,
+        );
+        assert!(blocked.is_empty());
+        assert_eq!(configs.len(), 2);
+        let added = configs.iter().find(|c| c.name == "docs").unwrap();
+        assert_eq!(added.scope, mcp::ConfigScope::Agent);
+
+        // `{...allowed, ...existing}` — an existing same-name server WINS.
+        let mut configs = vec![existing("docs")];
+        super::merge_agent_frontmatter_mcp_servers(
+            &mut configs,
+            Some(&def),
+            open_gates,
+            &no_policy,
+        );
+        assert_eq!(configs.len(), 1);
+        assert!(
+            matches!(&configs[0].spec, traits::McpTransportSpec::Stdio { command, .. } if command == "prior"),
+            "existing config must win on name collision"
+        );
+        assert_eq!(configs[0].scope, mcp::ConfigScope::Project);
+
+        // Gl(): safe mode → no merge.
+        let mut configs = vec![];
+        super::merge_agent_frontmatter_mcp_servers(
+            &mut configs,
+            Some(&def),
+            super::AgentMcpMergeGates {
+                safe_mode: true,
+                ..open_gates
+            },
+            &no_policy,
+        );
+        assert!(configs.is_empty());
+
+        // strictMcpConfig: skipped UNLESS the agent came from `--agents`
+        // (`t.source !== "flagSettings"`).
+        let strict = super::AgentMcpMergeGates {
+            strict_mcp_config: true,
+            ..open_gates
+        };
+        let mut configs = vec![];
+        super::merge_agent_frontmatter_mcp_servers(&mut configs, Some(&def), strict, &no_policy);
+        assert!(configs.is_empty(), "strict mode blocks non-flag agents");
+        let flag_def = agent_with_server("docs", agent::AgentSource::Flag);
+        let mut configs = vec![];
+        super::merge_agent_frontmatter_mcp_servers(
+            &mut configs,
+            Some(&flag_def),
+            strict,
+            &no_policy,
+        );
+        assert_eq!(configs.len(), 1, "flagSettings agents bypass strict mode");
+
+        // T3(): managed-MCP exclusive control → no merge.
+        let mut configs = vec![];
+        super::merge_agent_frontmatter_mcp_servers(
+            &mut configs,
+            Some(&def),
+            super::AgentMcpMergeGates {
+                enterprise_mcp_active: true,
+                ..open_gates
+            },
+            &no_policy,
+        );
+        assert!(configs.is_empty());
+
+        // Yee: a deny-listed server is BLOCKED (returned for the stderr
+        // warning), an allowed sibling still merges.
+        let mut two = agent_with_server("docs", agent::AgentSource::Project);
+        let mut denied = serde_json::Map::new();
+        denied.insert(
+            "denied".to_string(),
+            serde_json::json!({"command": "evil"}),
+        );
+        two.mcp_servers
+            .push(agent::AgentMcpServerSpec::Record(denied));
+        let deny_policy = mcp::enterprise_policy::McpPolicy {
+            denied: Some(vec![mcp::enterprise_policy::McpServerMatcher {
+                server_name: Some("denied".into()),
+                server_command: None,
+                server_url: None,
+            }]),
+            allowed: None,
+        };
+        let mut configs = vec![];
+        let blocked = super::merge_agent_frontmatter_mcp_servers(
+            &mut configs,
+            Some(&two),
+            open_gates,
+            &deny_policy,
+        );
+        assert_eq!(blocked, vec!["denied".to_string()]);
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].name, "docs");
+    }
+
     #[test]
     fn oauth_subscriber_flag_gating() {
         use llm_client::oauth::anthropic::resolver::{resolve, ResolverContext};
@@ -9340,6 +9644,7 @@ mod tests {
             disable_slash_commands: false,
             add_dir: Vec::new(),
             cli_mcp_servers: Vec::new(),
+            strict_mcp_config: false,
             exclude_dynamic_system_prompt_sections: false,
             setting_source_scope: (true, true),
             customization_gates: super::CustomizationGates::default(),
@@ -10880,6 +11185,84 @@ mod tests {
         assert!(
             !hooks.iter().any(|h| h.event == "SubagentStop"),
             "is_agent=false must NOT retarget the main-thread agent's Stop hook: {hooks:?}"
+        );
+    }
+
+    /// (M7 cc2.1.220) `FWt` end-to-end: a `--agent` selection whose definition
+    /// declares inline frontmatter `mcpServers` gets those servers MERGED into
+    /// the boot config list BEFORE `connect_all`, so they REGISTER in the live
+    /// MCP registry exactly like `--mcp-config` servers (connect failure is
+    /// fine — a dead command still registers as `Disconnected`). ByName entries
+    /// materialize nothing (claude `obs` skips strings — the host resolves
+    /// them by name against already-configured servers).
+    #[tokio::test]
+    async fn build_registers_agent_frontmatter_mcp_servers() {
+        let (_tmp, mut cfg) = test_config(true);
+        cfg.cli_agents_json = Some(
+            r#"{ "tester": {
+                "description": "a test agent",
+                "prompt": "you are the tester",
+                "mcpServers": [
+                    "slack",
+                    { "docs": { "command": "/nonexistent-lingxi-m7-mcp", "args": [] } }
+                ]
+            } }"#
+                .to_string(),
+        );
+        cfg.cli_agent = Some("tester".to_string());
+
+        let output: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+
+        let rt = build(cfg, output, perm_sink)
+            .await
+            .expect("build() must succeed with agent frontmatter mcpServers");
+
+        let names = rt.mcp_registry.server_names().await;
+        assert!(
+            names.iter().any(|n| n == "docs"),
+            "the agent's inline frontmatter server must register in the live \
+             MCP registry (like a --mcp-config server): {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n == "slack"),
+            "a ByName entry must NOT materialize a server config: {names:?}"
+        );
+    }
+
+    /// (M7 cc2.1.220) `FWt` gate: with NO `--agent` selection the same agents
+    /// payload contributes NO MCP servers (the merge consults only the RESOLVED
+    /// main-thread agent).
+    #[tokio::test]
+    async fn build_without_agent_selection_registers_no_frontmatter_mcp_servers() {
+        let (_tmp, mut cfg) = test_config(true);
+        cfg.cli_agents_json = Some(
+            r#"{ "tester": {
+                "description": "a test agent",
+                "prompt": "you are the tester",
+                "mcpServers": [
+                    { "docs": { "command": "/nonexistent-lingxi-m7-mcp", "args": [] } }
+                ]
+            } }"#
+                .to_string(),
+        );
+        cfg.cli_agent = None;
+
+        let output: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+
+        let rt = build(cfg, output, perm_sink)
+            .await
+            .expect("build() must succeed");
+
+        let names = rt.mcp_registry.server_names().await;
+        assert!(
+            !names.iter().any(|n| n == "docs"),
+            "an unselected agent's frontmatter servers must not register: {names:?}"
         );
     }
 

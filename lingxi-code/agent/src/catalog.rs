@@ -293,7 +293,7 @@ pub fn parse_agent_markdown(
         .and_then(yaml_as_string)
         .filter(|s| !s.trim().is_empty());
 
-    // (16) mcpServers: parse each array item as ByName/Inline; invalid -> log + skip.
+    // (16) mcpServers: parse each array item as ByName/Record; invalid -> log + skip.
     let mcp_servers = parse_mcp_servers(fm.mcp_servers.as_ref(), path_for_error);
 
     // (17) hooks: parse via the hooks crate (HookSource::FrontMatter).
@@ -596,7 +596,7 @@ fn parse_permission_mode(value: Option<&serde_yaml::Value>, path: &Path) -> Agen
 }
 
 /// claude mcpServers coercion: each array item is either a string (ByName) or
-/// an inline `{ name: config }` map (Inline); invalid items are logged +
+/// an inline `{ name: config }` map (Record); invalid items are logged +
 /// skipped. Non-array input contributes nothing.
 fn parse_mcp_servers(value: Option<&serde_yaml::Value>, path: &Path) -> Vec<AgentMcpServerSpec> {
     let Some(serde_yaml::Value::Sequence(seq)) = value else {
@@ -617,16 +617,21 @@ fn parse_mcp_servers(value: Option<&serde_yaml::Value>, path: &Path) -> Vec<Agen
     out
 }
 
-/// Parse one `AgentMcpServerSpec` item: a string -> `ByName`; a single-entry
-/// `{ name: config }` map -> `Inline`.
+/// Parse one `AgentMcpServerSpec` item: a string -> `ByName`; a mapping ->
+/// `Record` (kept RAW — the body is validated and converted by
+/// [`crate::mcp_servers::agent_mcp_specs_to_scoped_configs`], which also
+/// rejects records with more than one key, exactly like claude `obs`).
 fn parse_mcp_server_spec(item: &serde_yaml::Value) -> Option<AgentMcpServerSpec> {
     match item {
         serde_yaml::Value::String(s) => Some(AgentMcpServerSpec::ByName(s.clone())),
-        serde_yaml::Value::Mapping(map) if map.len() == 1 => {
-            let (k, v) = map.iter().next()?;
-            let name = k.as_str()?.to_string();
-            let config: mcp::McpServerConfig = serde_yaml::from_value(v.clone()).ok()?;
-            Some(AgentMcpServerSpec::Inline { name, config })
+        serde_yaml::Value::Mapping(_) => {
+            // YAML mapping → JSON record (non-string keys / YAML tags fail the
+            // conversion → item skipped, like a zod safeParse failure).
+            let json: serde_json::Value = serde_yaml::from_value(item.clone()).ok()?;
+            let serde_json::Value::Object(map) = json else {
+                return None;
+            };
+            Some(AgentMcpServerSpec::Record(map))
         }
         _ => None,
     }
@@ -1072,11 +1077,12 @@ fn json_string_array_to_yaml(arr: Vec<String>) -> serde_yaml::Value {
 
 /// Strictly validate `z.array(AgentMcpServerSpecSchema()).optional()` for JSON
 /// agents: `None`/`null` -> `Ok([])`; an array where EVERY item is a valid spec
-/// (a string, or a record of name -> [`mcp::McpServerConfig`]) -> `Ok(specs)`;
+/// (a string, or a record of name -> server-config body) -> `Ok(specs)`;
 /// a non-array OR any invalid item -> `Err(())` (zod throw -> drop the agent).
 ///
 /// A multi-key record `{ a: cfgA, b: cfgB }` is valid for zod's
-/// `z.record(...)`; each entry becomes its own [`AgentMcpServerSpec::Inline`].
+/// `z.record(...)` and is kept as ONE [`AgentMcpServerSpec::Record`] — claude
+/// `obs` later warns + skips it (`expected exactly one key`).
 #[allow(clippy::result_unit_err)]
 fn parse_mcp_servers_json_strict(
     value: Option<&serde_json::Value>,
@@ -1091,14 +1097,17 @@ fn parse_mcp_servers_json_strict(
         match item {
             serde_json::Value::String(s) => out.push(AgentMcpServerSpec::ByName(s.clone())),
             serde_json::Value::Object(map) if !map.is_empty() => {
-                for (k, v) in map {
-                    let config: mcp::McpServerConfig =
-                        serde_json::from_value(v.clone()).map_err(|_| ())?;
-                    out.push(AgentMcpServerSpec::Inline {
-                        name: k.clone(),
-                        config,
-                    });
+                // zod validates each record VALUE against the server-config
+                // union; any invalid body throws → drop the whole agent. The
+                // record itself is kept RAW (multi-key included) — the
+                // exactly-one-key rule is enforced later by claude `obs`
+                // (`crate::mcp_servers::agent_mcp_specs_to_scoped_configs`).
+                for v in map.values() {
+                    if !mcp::server_entry_shape_is_valid(v) {
+                        return Err(());
+                    }
                 }
+                out.push(AgentMcpServerSpec::Record(map.clone()));
             }
             _ => return Err(()),
         }
@@ -1596,6 +1605,26 @@ mod tests {
         assert!(
             matches!(def.mcp_servers.as_slice(), [AgentMcpServerSpec::ByName(n)] if n == "slack")
         );
+    }
+
+    /// (M7 cc2.1.220) A real-world inline server body (`{command, args}` — one
+    /// `.mcp.json` entry, NOT a serialized `McpServerConfig`) parses to a raw
+    /// `Record`; the scoped-config conversion (`obs`) validates it later.
+    #[test]
+    fn mcp_servers_inline_record_kept_raw() {
+        let def = md(concat!(
+            "---\nname: a\ndescription: d\nmcpServers:\n",
+            "  - docs:\n      command: npx\n      args: [\"-y\", \"docs-mcp\"]\n",
+            "---\n"
+        ));
+        match def.mcp_servers.as_slice() {
+            [AgentMcpServerSpec::Record(map)] => {
+                assert_eq!(map.len(), 1);
+                let body = map.get("docs").expect("keyed by server name");
+                assert_eq!(body.get("command").and_then(|v| v.as_str()), Some("npx"));
+            }
+            other => panic!("expected one Record spec, got {other:?}"),
+        }
     }
 
     // ── JSON agents ──

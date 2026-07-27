@@ -57,10 +57,16 @@ impl McpApprovalPolicy {
             return ApprovalStatus::Approved;
         }
         match scope {
+            // `Agent`: frontmatter servers are merged like flag-supplied dynamic
+            // configs but are NEVER project-approval-gated (claude's approval
+            // prompt covers `.mcp.json` project servers; `FWt` merges agent
+            // servers straight into `dynamicMcpConfig` after the enterprise
+            // filter).
             ConfigScope::Local
             | ConfigScope::User
             | ConfigScope::Enterprise
-            | ConfigScope::Managed => ApprovalStatus::Approved,
+            | ConfigScope::Managed
+            | ConfigScope::Agent => ApprovalStatus::Approved,
             ConfigScope::Project | ConfigScope::Dynamic | ConfigScope::ClaudeAi => {
                 ApprovalStatus::PendingApproval
             }

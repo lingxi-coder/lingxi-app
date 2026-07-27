@@ -2276,6 +2276,8 @@ fn scope_detail(scope: ConfigScope) -> &'static str {
         ConfigScope::User => "User config (available in all your projects)",
         ConfigScope::Project => "Project config (shared via .mcp.json)",
         ConfigScope::Dynamic => "Dynamic",
+        // claude `Llr`: `case"agent":return"Agent config (from agent frontmatter)"`.
+        ConfigScope::Agent => "Agent config (from agent frontmatter)",
         ConfigScope::Enterprise => "Enterprise managed config",
         ConfigScope::ClaudeAi => "claude.ai connector",
         ConfigScope::Managed => "Managed config",

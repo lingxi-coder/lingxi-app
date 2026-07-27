@@ -115,6 +115,7 @@ fn config_with_settings(settings_json: &str) -> (tempfile::TempDir, DesktopConfi
         disable_slash_commands: false,
         add_dir: Vec::new(),
         cli_mcp_servers: Vec::new(),
+        strict_mcp_config: false,
         exclude_dynamic_system_prompt_sections: false,
         setting_source_scope: (true, true),
         customization_gates: engine_desktop::CustomizationGates::default(),

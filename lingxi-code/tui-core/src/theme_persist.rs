@@ -283,6 +283,75 @@ pub fn save_workflow_size_guideline(value: &str) {
     }
 }
 
+/// The `leftArrowOpensAgents` config field (claude-code 2.1.220
+/// `kCt = Rt().leftArrowOpensAgents !== false`): whether ← on an empty
+/// composer opens the agents view. Absent ⇒ enabled (the `!== false` default).
+const LEFT_ARROW_OPENS_AGENTS_KEY: &str = "leftArrowOpensAgents";
+
+/// The `defaultToAgentsView` config field (claude-code's `/config` row
+/// "Open agents view by default" / settings row "Start in agent view"):
+/// whether a new session starts in the agents view. Absent ⇒ `false`
+/// (the oracle's `?? !1`).
+const DEFAULT_TO_AGENTS_VIEW_KEY: &str = "defaultToAgentsView";
+
+/// Read the stored `leftArrowOpensAgents` flag. `None` on any error / absent
+/// key (caller defaults to `true`, mirroring `!== false`).
+#[must_use]
+pub fn load_left_arrow_opens_agents() -> Option<bool> {
+    load_bool_field_from(&settings_path()?, LEFT_ARROW_OPENS_AGENTS_KEY)
+}
+
+/// Test seam: read the flag from an explicit path.
+#[must_use]
+pub fn load_left_arrow_opens_agents_from(path: &Path) -> Option<bool> {
+    load_bool_field_from(path, LEFT_ARROW_OPENS_AGENTS_KEY)
+}
+
+/// Best-effort save of `leftArrowOpensAgents`. Logs + swallows errors
+/// (session-only on failure).
+pub fn save_left_arrow_opens_agents(enabled: bool) {
+    let Some(path) = settings_path() else {
+        return;
+    };
+    if let Err(e) = save_bool_field_to(&path, LEFT_ARROW_OPENS_AGENTS_KEY, enabled) {
+        tracing::debug!(error = %e, "leftArrowOpensAgents persist failed (session-only)");
+    }
+}
+
+/// Test seam: write the flag at an explicit path.
+pub fn save_left_arrow_opens_agents_to(path: &Path, enabled: bool) -> std::io::Result<()> {
+    save_bool_field_to(path, LEFT_ARROW_OPENS_AGENTS_KEY, enabled)
+}
+
+/// Read the stored `defaultToAgentsView` flag. `None` on any error / absent
+/// key (caller defaults to `false`).
+#[must_use]
+pub fn load_default_to_agents_view() -> Option<bool> {
+    load_bool_field_from(&settings_path()?, DEFAULT_TO_AGENTS_VIEW_KEY)
+}
+
+/// Test seam: read the flag from an explicit path.
+#[must_use]
+pub fn load_default_to_agents_view_from(path: &Path) -> Option<bool> {
+    load_bool_field_from(path, DEFAULT_TO_AGENTS_VIEW_KEY)
+}
+
+/// Best-effort save of `defaultToAgentsView`. Logs + swallows errors
+/// (session-only on failure).
+pub fn save_default_to_agents_view(enabled: bool) {
+    let Some(path) = settings_path() else {
+        return;
+    };
+    if let Err(e) = save_bool_field_to(&path, DEFAULT_TO_AGENTS_VIEW_KEY, enabled) {
+        tracing::debug!(error = %e, "defaultToAgentsView persist failed (session-only)");
+    }
+}
+
+/// Test seam: write the flag at an explicit path.
+pub fn save_default_to_agents_view_to(path: &Path, enabled: bool) -> std::io::Result<()> {
+    save_bool_field_to(path, DEFAULT_TO_AGENTS_VIEW_KEY, enabled)
+}
+
 /// Shared read: a top-level bool field at an explicit path.
 #[must_use]
 fn load_bool_field_from(path: &Path, key: &str) -> Option<bool> {
@@ -389,6 +458,29 @@ mod tests {
                 Some(want)
             );
         }
+        assert_eq!(load_editor_mode_is_vim_from(&path), Some(true));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn agents_view_flags_round_trip_preserving_other_keys() {
+        let dir = std::env::temp_dir().join(format!("lingxi_agv_persist_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        let _ = std::fs::remove_file(&path);
+
+        // Absent → None (callers default `leftArrowOpensAgents` to true —
+        // the oracle's `!== false` — and `defaultToAgentsView` to false).
+        assert_eq!(load_left_arrow_opens_agents_from(&path), None);
+        assert_eq!(load_default_to_agents_view_from(&path), None);
+
+        // Seed another key, then round-trip both flags; the earlier key survives.
+        save_string_field_to(&path, EDITOR_MODE_KEY, "vim").unwrap();
+        save_left_arrow_opens_agents_to(&path, false).unwrap();
+        assert_eq!(load_left_arrow_opens_agents_from(&path), Some(false));
+        save_default_to_agents_view_to(&path, true).unwrap();
+        assert_eq!(load_default_to_agents_view_from(&path), Some(true));
+        assert_eq!(load_left_arrow_opens_agents_from(&path), Some(false));
         assert_eq!(load_editor_mode_is_vim_from(&path), Some(true));
         let _ = std::fs::remove_file(&path);
     }

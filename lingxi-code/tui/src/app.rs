@@ -714,6 +714,23 @@ pub fn run_app(
     if let Some(handle) = task_registry {
         app.chat_widget.set_task_registry(handle);
     }
+    // Agents-view settings (claude 2.1.220): `leftArrowOpensAgents`
+    // (`kCt = Rt().leftArrowOpensAgents !== false`, default ON) gates the
+    // ←-on-empty gesture; it is ANDed with the agent-view enablement gate,
+    // because a disabled agent view fails `kGt`'s `Zan(C2t({fleetEnabled:
+    // $H(), …}))` check and installs no handler at all.
+    let agent_view_enabled = traits::agent_view::is_enabled();
+    app.chat_widget.set_left_arrow_opens_agents(
+        tui_core::theme_persist::load_left_arrow_opens_agents().unwrap_or(true)
+            && agent_view_enabled,
+    );
+    // `defaultToAgentsView` ("Open agents view by default" / "Start in agent
+    // view", default OFF): open the agents view over the fresh conversation
+    // at startup. Runs after the task registry is wired so the view has rows.
+    if tui_core::theme_persist::load_default_to_agents_view().unwrap_or(false) && agent_view_enabled
+    {
+        app.chat_widget.open_agents_view();
+    }
     // A background PTY session can carry an initial prompt even though its
     // hidden child is deliberately launched without a positional prompt (a
     // positional prompt selects print mode at the CLI router). Submit it only

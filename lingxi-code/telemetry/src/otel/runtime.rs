@@ -25,7 +25,9 @@ use opentelemetry_sdk::trace::{
 use opentelemetry_sdk::Resource;
 use prometheus::{Encoder, Registry, TextEncoder};
 
+use super::code_language::language_for_path;
 use super::config::{ExporterKind, OtelConfig, OtlpExporterConfig, OtlpProtocol};
+use super::git_ops::git_counter_hits;
 use super::metrics;
 use super::record::{truncate_content, AttrValue, Attributes};
 use crate::sink::{AnalyticsValue, LogEventMetadata};
@@ -528,6 +530,87 @@ pub fn emit_named_log_event(name: &'static str, attrs: &Attributes) {
     with_runtime(|runtime| runtime.emit_log_event(name, attrs));
 }
 
+/// The code-editing tools whose permission decisions feed the
+/// `claude_code.code_edit_tool.decision` counter (binary `pI_`).
+const CODE_EDIT_TOOLS: [&str; 3] = ["Edit", "Write", "NotebookEdit"];
+
+/// Record one RESOLVED tool-permission decision into OTEL — the twin of the
+/// binary's adjacent `XNr()?.add(1, await ICs(...))` counter and
+/// `vc("tool_decision", …)` log record (2.1.220, the `toolDecisions`
+/// bookkeeping site).
+///
+/// * `decision` — `"accept"` / `"reject"` (CC `c`).
+/// * `source` — CC `f`: `"config"` for a rule/mode decision, else the
+///   `fI_(decisionReason)` label (`classifier` / `hook` / `user_permanent` /
+///   `user_temporary` / `user_abort` / `user_reject` / `unknown`).
+/// * `file_path` — the tool's `getPath` result (Edit/Write `file_path`,
+///   NotebookEdit `notebook_path`); when present the counter carries a
+///   `language` attribute resolved via the highlight.js registry (`UMt`),
+///   including the explicit `"unknown"` fallback — only a MISSING path omits
+///   the attribute (CC `...o&&{language:o}`).
+///
+/// The counter fires only for [`CODE_EDIT_TOOLS`] (`xCs`); the `tool_decision`
+/// log record fires for every tool. Byte-noop when no runtime is installed.
+pub fn record_tool_permission_decision(
+    tool_name: &str,
+    tool_use_id: &str,
+    file_path: Option<&str>,
+    decision: &str,
+    source: &str,
+) {
+    with_runtime(|runtime| {
+        if CODE_EDIT_TOOLS.contains(&tool_name) {
+            let mut attrs = attrs_from_pairs(&[
+                ("decision", AttrValue::from(decision.to_string())),
+                ("source", AttrValue::from(source.to_string())),
+                ("tool_name", AttrValue::from(tool_name.to_string())),
+            ]);
+            if let Some(path) = file_path {
+                attrs.insert("language".into(), AttrValue::from(language_for_path(path)));
+            }
+            runtime.record_counter(metrics::CODE_EDIT_TOOL_DECISION, 1.0, &attrs);
+        }
+        // CC log-record attrs are strings (`vc("tool_decision", {decision:c,
+        // source:f, tool_name:ua(n.name), tool_use_id:a, …})`).
+        runtime.emit_log_event(
+            "tool_decision",
+            &attrs_from_pairs(&[
+                ("decision", AttrValue::from(decision.to_string())),
+                ("source", AttrValue::from(source.to_string())),
+                ("tool_name", AttrValue::from(tool_name.to_string())),
+                ("tool_use_id", AttrValue::from(tool_use_id.to_string())),
+            ]),
+        );
+    });
+}
+
+/// Record the `claude_code.commit.count` / `claude_code.pull_request.count`
+/// increments for one COMPLETED foreground bash command — the counter subset of
+/// the binary's `mEo(command, code, output)` (see [`super::git_ops`]).
+///
+/// Byte-noop when no runtime is installed (the command scan itself runs inside
+/// the runtime closure, so a disabled process pays only the slot read); no-op
+/// for non-zero exit codes (CC `if(t!==0)return`). Neither counter carries
+/// attributes (`add(1)` bare in the binary).
+pub fn record_git_operation_counters(command: &str, exit_code: i32) {
+    with_runtime(|runtime| {
+        if exit_code != 0 {
+            return;
+        }
+        let hits = git_counter_hits(command);
+        if hits.commits > 0 {
+            runtime.record_counter(metrics::COMMIT_COUNT, f64::from(hits.commits), &Attributes::new());
+        }
+        if hits.pull_requests > 0 {
+            runtime.record_counter(
+                metrics::PULL_REQUEST_COUNT,
+                f64::from(hits.pull_requests),
+                &Attributes::new(),
+            );
+        }
+    });
+}
+
 /// Render the active Prometheus registry, when the metrics exporter is
 /// configured for `prometheus`.
 #[must_use]
@@ -568,6 +651,107 @@ impl OtelRuntime {
 
         let attrs = analytics_log_attrs(&self.config, metadata);
         self.emit_dynamic_log_event(name, &attrs);
+
+        // CC-name translation: collectors keying on the binary's
+        // `claude_code.events` bodies (`api_request` / `api_error` /
+        // `tool_result`) must match even though the port's bus carries
+        // `tengu_*` names. The tengu passthrough above is kept for the extra
+        // events CC has no named twin for.
+        if let Some((cc_name, cc_attrs)) = cc_named_log_for_event(name, metadata) {
+            self.emit_log_event(cc_name, &cc_attrs);
+        }
+    }
+}
+
+/// Translate one analytics-bus event into the binary's named
+/// `claude_code.events` record, where a faithful twin exists:
+///
+/// * `tengu_api_success` → `api_request` (CC attr names: `input_tokens`,
+///   `cache_read_tokens`, `cost_usd`/`cost_usd_micros`, `duration_ms`,
+///   `speed`, `query_source`, …). Numeric attrs stay numeric, as in CC.
+/// * `tengu_api_request_failed` / `tengu_api_rate_limited` → `api_error`
+///   (`error` carries the port's stable `error_kind` label — CC puts the
+///   provider error message there, which the bus does not transport).
+/// * the tool `_completed`/`_failed`/`_timeout` families → `tool_result`
+///   (`success`/`duration_ms` are STRING attrs, matching `vc("tool_result",
+///   {success:"true", duration_ms:String(…)})`). The event set mirrors the
+///   metric bridge's `tool.execution` coverage, including its
+///   `tool_name_for_event` name inference.
+///
+/// `user_prompt` and `tool_decision` have no bus twin; they are emitted at
+/// their sites via [`emit_named_log_event`] / [`record_tool_permission_decision`].
+fn cc_named_log_for_event(
+    name: &str,
+    metadata: &LogEventMetadata,
+) -> Option<(&'static str, Attributes)> {
+    match name {
+        "tengu_api_success" => {
+            let mut attrs = attrs_from_optional_pairs([
+                ("model", stable_string(metadata, "model")),
+                ("input_tokens", int_value(metadata, "inputTokens").map(AttrValue::from)),
+                ("output_tokens", int_value(metadata, "outputTokens").map(AttrValue::from)),
+                (
+                    "cache_read_tokens",
+                    int_value(metadata, "cachedInputTokens").map(AttrValue::from),
+                ),
+                (
+                    "cache_creation_tokens",
+                    int_value(metadata, "uncachedInputTokens").map(AttrValue::from),
+                ),
+                ("cost_usd", float_value(metadata, "costUSD").map(AttrValue::from)),
+                ("duration_ms", int_value(metadata, "durationMs").map(AttrValue::from)),
+                ("request_id", stable_string(metadata, "requestId")),
+                ("query_source", stable_string(metadata, "querySource")),
+            ]);
+            if let Some(cost_usd) = float_value(metadata, "costUSD") {
+                // CC `cost_usd_micros: Math.round(V*1e6)`.
+                attrs.insert(
+                    "cost_usd_micros".into(),
+                    AttrValue::from((cost_usd * 1e6).round() as i64),
+                );
+            }
+            // CC `speed: O ? "fast" : "normal"` — from the bus `fastMode` bool.
+            if let Some(AnalyticsValue::Bool(fast)) = metadata.get("fastMode") {
+                attrs.insert(
+                    "speed".into(),
+                    AttrValue::from(if *fast { "fast" } else { "normal" }),
+                );
+            }
+            Some(("api_request", attrs))
+        }
+        "tengu_api_request_failed" | "tengu_api_rate_limited" => {
+            let mut attrs = attrs_from_optional_pairs([
+                ("model", stable_string(metadata, "model")),
+                ("error", stable_string(metadata, "error_kind")),
+                ("request_id", stable_string(metadata, "request_id")),
+                ("status_code", int_value(metadata, "status_code").map(AttrValue::from)),
+            ]);
+            if name == "tengu_api_rate_limited" && !attrs.contains_key("error") {
+                attrs.insert("error".into(), AttrValue::from("rate_limited"));
+            }
+            Some(("api_error", attrs))
+        }
+        _ => {
+            if !(name.contains("_completed") || name.contains("_failed") || name.contains("_timeout"))
+            {
+                return None;
+            }
+            let tool_name = tool_name_for_event(name, metadata)?;
+            let success = if tool_status(name) == "completed" {
+                "true"
+            } else {
+                "false"
+            };
+            let mut attrs = attrs_from_pairs(&[
+                ("tool_name", tool_name),
+                ("success", AttrValue::from(success)),
+            ]);
+            if let Some(duration_ms) = int_value(metadata, "duration_ms") {
+                // CC stringifies (`duration_ms: String(se)`).
+                attrs.insert("duration_ms".into(), AttrValue::from(duration_ms.to_string()));
+            }
+            Some(("tool_result", attrs))
+        }
     }
 }
 
@@ -1922,6 +2106,206 @@ mod tests {
                 "secret-bearing key {key} must be redacted by name"
             );
         }
+    }
+
+    #[test]
+    fn bus_api_success_translates_to_api_request_log() {
+        let _lock = RUNTIME_SLOT_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_runtime();
+        let runtime = install_test_runtime(local_runtime_config());
+        let bus = AnalyticsBus::new();
+        Runtime::new().unwrap().block_on(async {
+            let mut md = LogEventMetadata::new();
+            md.insert(
+                "model".into(),
+                AnalyticsValue::String("claude-opus-4-6".into()),
+            );
+            md.insert("inputTokens".into(), AnalyticsValue::Int(1000));
+            md.insert("outputTokens".into(), AnalyticsValue::Int(500));
+            md.insert("cachedInputTokens".into(), AnalyticsValue::Int(128));
+            md.insert("uncachedInputTokens".into(), AnalyticsValue::Int(64));
+            md.insert("costUSD".into(), AnalyticsValue::Float(0.0175));
+            md.insert("durationMs".into(), AnalyticsValue::Int(250));
+            md.insert("requestId".into(), AnalyticsValue::String("req-1".into()));
+            md.insert("querySource".into(), AnalyticsValue::String("user".into()));
+            md.insert("fastMode".into(), AnalyticsValue::Bool(false));
+            bus.log_event("tengu_api_success", md).await;
+        });
+        let debug = snapshot(&runtime);
+        let api_request = debug
+            .logs
+            .iter()
+            .find(|sample| sample.event_name == "api_request")
+            .expect("api_request log record");
+        assert_eq!(
+            api_request.attributes.get("input_tokens"),
+            Some(&AttrValue::Int(1000))
+        );
+        assert_eq!(
+            api_request.attributes.get("cache_read_tokens"),
+            Some(&AttrValue::Int(128))
+        );
+        assert_eq!(
+            api_request.attributes.get("cost_usd_micros"),
+            Some(&AttrValue::Int(17500))
+        );
+        assert_eq!(
+            api_request.attributes.get("speed"),
+            Some(&AttrValue::from("normal"))
+        );
+        // The tengu passthrough record is still emitted alongside.
+        assert!(debug
+            .logs
+            .iter()
+            .any(|sample| sample.event_name == "tengu_api_success"));
+        clear_runtime();
+    }
+
+    #[test]
+    fn bus_api_failure_translates_to_api_error_log() {
+        let _lock = RUNTIME_SLOT_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_runtime();
+        let runtime = install_test_runtime(local_runtime_config());
+        let bus = AnalyticsBus::new();
+        Runtime::new().unwrap().block_on(async {
+            let mut md = LogEventMetadata::new();
+            md.insert("model".into(), AnalyticsValue::String("m".into()));
+            md.insert(
+                "error_kind".into(),
+                AnalyticsValue::String("overloaded".into()),
+            );
+            md.insert("status_code".into(), AnalyticsValue::Int(529));
+            bus.log_event("tengu_api_request_failed", md).await;
+        });
+        let debug = snapshot(&runtime);
+        let api_error = debug
+            .logs
+            .iter()
+            .find(|sample| sample.event_name == "api_error")
+            .expect("api_error log record");
+        assert_eq!(
+            api_error.attributes.get("error"),
+            Some(&AttrValue::from("overloaded"))
+        );
+        assert_eq!(
+            api_error.attributes.get("status_code"),
+            Some(&AttrValue::Int(529))
+        );
+        clear_runtime();
+    }
+
+    #[test]
+    fn bus_tool_completion_translates_to_tool_result_log() {
+        let _lock = RUNTIME_SLOT_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_runtime();
+        let runtime = install_test_runtime(local_runtime_config());
+        let bus = AnalyticsBus::new();
+        Runtime::new().unwrap().block_on(async {
+            let mut md = LogEventMetadata::new();
+            md.insert("duration_ms".into(), AnalyticsValue::Int(42));
+            bus.log_event("tengu_tool_bash_completed", md).await;
+            bus.log_event("tengu_tool_write_failed", LogEventMetadata::new())
+                .await;
+            // Non-terminal lifecycle events must NOT synthesize a tool_result.
+            bus.log_event("tengu_tool_bash_started", LogEventMetadata::new())
+                .await;
+        });
+        let debug = snapshot(&runtime);
+        let results: Vec<_> = debug
+            .logs
+            .iter()
+            .filter(|sample| sample.event_name == "tool_result")
+            .collect();
+        assert_eq!(results.len(), 2);
+        // CC stringifies success/duration_ms in the log record.
+        assert!(results.iter().any(|sample| {
+            sample.attributes.get("tool_name") == Some(&AttrValue::from("Bash"))
+                && sample.attributes.get("success") == Some(&AttrValue::from("true"))
+                && sample.attributes.get("duration_ms") == Some(&AttrValue::from("42"))
+        }));
+        assert!(results.iter().any(|sample| {
+            sample.attributes.get("tool_name") == Some(&AttrValue::from("Write"))
+                && sample.attributes.get("success") == Some(&AttrValue::from("false"))
+        }));
+        clear_runtime();
+    }
+
+    #[test]
+    fn tool_permission_decision_records_counter_and_log() {
+        let _lock = RUNTIME_SLOT_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_runtime();
+        let runtime = install_test_runtime(local_runtime_config());
+
+        record_tool_permission_decision("Edit", "toolu_1", Some("/tmp/main.rs"), "accept", "config");
+        record_tool_permission_decision("Bash", "toolu_2", None, "reject", "user_reject");
+
+        let debug = snapshot(&runtime);
+        // Counter fires only for the code-edit tools (`pI_`), with language.
+        let decisions: Vec<_> = debug
+            .counters
+            .iter()
+            .filter(|sample| sample.instrument == metrics::CODE_EDIT_TOOL_DECISION)
+            .collect();
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(
+            decisions[0].attributes.get("decision"),
+            Some(&AttrValue::from("accept"))
+        );
+        assert_eq!(
+            decisions[0].attributes.get("source"),
+            Some(&AttrValue::from("config"))
+        );
+        assert_eq!(
+            decisions[0].attributes.get("language"),
+            Some(&AttrValue::from("Rust"))
+        );
+        // The tool_decision log record fires for BOTH tools.
+        let logs: Vec<_> = debug
+            .logs
+            .iter()
+            .filter(|sample| sample.event_name == "tool_decision")
+            .collect();
+        assert_eq!(logs.len(), 2);
+        assert!(logs.iter().any(|sample| {
+            sample.attributes.get("tool_use_id") == Some(&AttrValue::from("toolu_2"))
+                && sample.attributes.get("decision") == Some(&AttrValue::from("reject"))
+        }));
+        clear_runtime();
+    }
+
+    #[test]
+    fn git_operation_counters_gate_on_exit_code() {
+        let _lock = RUNTIME_SLOT_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_runtime();
+        let runtime = install_test_runtime(local_runtime_config());
+
+        record_git_operation_counters("git commit -m x && gh pr create", 0);
+        record_git_operation_counters("git commit -m y", 1); // non-zero exit: no-op
+
+        let debug = snapshot(&runtime);
+        let commit = debug
+            .counters
+            .iter()
+            .filter(|sample| sample.instrument == metrics::COMMIT_COUNT)
+            .fold(0.0, |acc, sample| acc + sample.value);
+        let pr = debug
+            .counters
+            .iter()
+            .filter(|sample| sample.instrument == metrics::PULL_REQUEST_COUNT)
+            .fold(0.0, |acc, sample| acc + sample.value);
+        assert!((commit - 1.0).abs() < f64::EPSILON);
+        assert!((pr - 1.0).abs() < f64::EPSILON);
+        clear_runtime();
     }
 
     #[test]

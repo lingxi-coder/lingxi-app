@@ -28,7 +28,10 @@ pub const COMMIT_COUNT: &str = "claude_code.commit.count";
 pub const TOOL_EXECUTION: &str = "claude_code.tool.execution";
 /// Counter: tool calls blocked awaiting user (`claude_code.tool.blocked_on_user`).
 pub const TOOL_BLOCKED_ON_USER: &str = "claude_code.tool.blocked_on_user";
-/// Counter/histogram: total active time (`claude_code.active_time.total`).
+/// Counter: total active time in seconds (`claude_code.active_time.total`).
+/// NOTE: the 2.1.220 binary REGISTERS this instrument (`Mt.activeTimeCounter`,
+/// unit `s`) but never calls `add()` on it — its getter (`GSi`) has zero call
+/// sites — so the port likewise defines the name without a record site.
 pub const ACTIVE_TIME_TOTAL: &str = "claude_code.active_time.total";
 /// Counter: accept/reject decisions on edit tools (`claude_code.code_edit_tool.decision`).
 pub const CODE_EDIT_TOOL_DECISION: &str = "claude_code.code_edit_tool.decision";

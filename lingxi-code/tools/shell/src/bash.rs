@@ -1882,6 +1882,13 @@ impl Tool for BashTool {
                     &crate::shared::normalize_stdout(&stdout_clean),
                 );
 
+                // OTEL `claude_code.commit.count` / `claude_code.pull_request.count`
+                // (the counter subset of claude-code's `mEo(command, code, output)`,
+                // gated on exit 0 inside). Foreground completions only — the
+                // background launch returns before this arm, matching CC's
+                // `!m.backgroundTaskId` guard. Byte-noop when OTEL is off.
+                telemetry::otel::record_git_operation_counters(&cmd_str, out.exit_code);
+
                 // Image-output short-circuit (claude-code `BashTool/utils.ts`
                 // `formatOutput`:138-144 + `BashTool.tsx`:785-802): when the
                 // model-facing stdout is a base64 `data:image/…;base64,…` URI

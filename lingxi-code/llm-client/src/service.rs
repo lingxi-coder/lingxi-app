@@ -3181,21 +3181,16 @@ impl ApiService {
                                 let frame = match s.seed.take() {
                                     Some(seeded) => seeded,
                                     None => match s.idle_timeout {
-                                        Some(timeout) => {
-                                            match tokio::time::timeout(
+                                        Some(timeout) => tokio::time::timeout(
+                                            timeout,
+                                            s.frames.next_frame(),
+                                        )
+                                        .await
+                                        .unwrap_or_else(|_elapsed| {
+                                            Err(crate::model::stream_watchdog::idle_timeout_error(
                                                 timeout,
-                                                s.frames.next_frame(),
-                                            )
-                                            .await
-                                            {
-                                                Ok(r) => r,
-                                                Err(_elapsed) => Err(
-                                                crate::model::stream_watchdog::idle_timeout_error(
-                                                    timeout,
-                                                ),
-                                            ),
-                                            }
-                                        }
+                                            ))
+                                        }),
                                         None => s.frames.next_frame().await,
                                     },
                                 };

@@ -9396,6 +9396,7 @@ mod tests {
                 disabled: false,
                 timeout_ms: None,
                 always_load: false,
+                config_error: None,
             }
         }
         let open_gates = super::AgentMcpMergeGates {

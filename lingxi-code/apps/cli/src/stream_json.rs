@@ -298,6 +298,10 @@ pub struct StreamJsonInitParams {
     pub product_feedback_disabled: bool,
     pub memory_paths: Option<Value>,
     pub fast_mode_state: String,
+    /// `--mcp-config` entries skipped by config validation. Emitted into the
+    /// `system/init` frame ONLY when non-empty, matching the oracle's
+    /// conditional spread (`...r.length>0&&{mcp_server_errors:…}`).
+    pub mcp_server_errors: Vec<Value>,
 }
 
 /// Shared outbound queue: sender half for the single-writer drain task.
@@ -1373,28 +1377,68 @@ impl OutputStream for StreamJsonStream {
 /// SDK-subprocess `initialize` payload — a different structure — is the one
 /// that carries `betas`; the streaming `system/init` frame does not.
 fn build_init_frame(session_id: &str, uuid: &str, p: &StreamJsonInitParams) -> Value {
-    json!({
-        "type": "system",
-        "subtype": "init",
-        "cwd": p.cwd,
-        "session_id": session_id,
-        "tools": p.tools,
-        "mcp_servers": p.mcp_servers,
-        "model": p.model,
-        "permissionMode": p.permission_mode,
-        "slash_commands": p.slash_commands,
-        "apiKeySource": p.api_key_source,
-        "claude_code_version": p.claude_code_version,
-        "output_style": p.output_style,
-        "agents": p.agents,
-        "skills": p.skills,
-        "plugins": p.plugins,
-        "analytics_disabled": p.analytics_disabled,
-        "product_feedback_disabled": p.product_feedback_disabled,
-        "uuid": uuid,
-        "memory_paths": p.memory_paths,
-        "fast_mode_state": p.fast_mode_state
-    })
+    // Built by ordered insertion rather than one `json!` literal because
+    // `mcp_server_errors` is CONDITIONAL: the oracle spreads it in only when
+    // non-empty (`...r.length>0&&{mcp_server_errors:…}`), and it sits between
+    // `plugins` and `analytics_disabled`. `serde_json`'s `preserve_order`
+    // feature is what makes insertion order the emitted order.
+    let mut o = serde_json::Map::new();
+    o.insert("type".into(), json!("system"));
+    o.insert("subtype".into(), json!("init"));
+    o.insert("cwd".into(), json!(p.cwd));
+    o.insert("session_id".into(), json!(session_id));
+    o.insert("tools".into(), json!(p.tools));
+    o.insert("mcp_servers".into(), json!(p.mcp_servers));
+    o.insert("model".into(), json!(p.model));
+    o.insert("permissionMode".into(), json!(p.permission_mode));
+    o.insert("slash_commands".into(), json!(p.slash_commands));
+    o.insert("apiKeySource".into(), json!(p.api_key_source));
+    o.insert("claude_code_version".into(), json!(p.claude_code_version));
+    o.insert("output_style".into(), json!(p.output_style));
+    o.insert("agents".into(), json!(p.agents));
+    o.insert("skills".into(), json!(p.skills));
+    o.insert("plugins".into(), json!(p.plugins));
+    if !p.mcp_server_errors.is_empty() {
+        o.insert("mcp_server_errors".into(), json!(p.mcp_server_errors));
+    }
+    o.insert("analytics_disabled".into(), json!(p.analytics_disabled));
+    o.insert(
+        "product_feedback_disabled".into(),
+        json!(p.product_feedback_disabled),
+    );
+    o.insert("uuid".into(), json!(uuid));
+    o.insert("memory_paths".into(), json!(p.memory_paths));
+    o.insert("fast_mode_state".into(), json!(p.fast_mode_state));
+    Value::Object(o)
+}
+
+/// `--mcp-config` / config-file entries that validation skipped, in the frame's
+/// wire shape.
+///
+/// `mcp::config_diagnostics` has produced these for a while; nothing published
+/// them. Only entries that actually caused a server to be SKIPPED belong here —
+/// an advisory warning about a healthy server is not a "server error".
+fn mcp_server_errors_json() -> Vec<Value> {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let global = crate::run::lingxi_home_dir().join(".lingxi.json");
+    mcp::config_diagnostics::collect_all_mcp_config_warnings(&cwd, Some(&global))
+        .into_iter()
+        .map(|w| {
+            let mut e = serde_json::Map::new();
+            if let Some(f) = w.file {
+                e.insert("file".into(), json!(f));
+            }
+            e.insert("path".into(), json!(w.path));
+            e.insert("message".into(), json!(w.message));
+            if let Some(sug) = w.suggestion {
+                e.insert("suggestion".into(), json!(sug));
+            }
+            if let Some(name) = w.server_name {
+                e.insert("server_name".into(), json!(name));
+            }
+            Value::Object(e)
+        })
+        .collect()
 }
 
 /// Build `StreamJsonInitParams` from the CLI environment, the resolved
@@ -1447,6 +1491,7 @@ pub fn build_init_params(
         session_id: session_id.to_string(),
         tools,
         mcp_servers: mcp_servers_json,
+        mcp_server_errors: mcp_server_errors_json(),
         model: model.to_string(),
         permission_mode: permission_mode.to_string(),
         slash_commands,
@@ -2212,6 +2257,59 @@ mod tests {
     /// `initialize` payload carries does NOT appear on this streaming frame —
     /// verified live against 2.1.201.)
     #[test]
+    /// `mcp_server_errors` is CONDITIONAL: absent when clean, present between
+    /// `plugins` and `analytics_disabled` when a `--mcp-config` entry was
+    /// skipped. The oracle spreads it in only when non-empty
+    /// (`...r.length>0&&{mcp_server_errors:…}`), so an always-present empty
+    /// array would be a wire divergence.
+    #[test]
+    fn mcp_server_errors_appears_only_when_non_empty_and_in_position() {
+        let mut params = build_init_params(
+            "sess-e",
+            vec!["Bash".to_string()],
+            vec![],
+            "claude-opus-4-8",
+            "default",
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            "default",
+            None,
+            "off",
+        );
+
+        params.mcp_server_errors = Vec::new();
+        let clean = build_init_frame("sess-e", "u", &params);
+        assert!(
+            !clean.as_object().unwrap().contains_key("mcp_server_errors"),
+            "a clean config must emit NO mcp_server_errors key"
+        );
+
+        params.mcp_server_errors = vec![serde_json::json!({
+            "file": "/x/.mcp.json",
+            "path": "mcpServers.bad",
+            "message": "skipped",
+        })];
+        let dirty = build_init_frame("sess-e", "u", &params);
+        let keys: Vec<&str> = dirty
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let at = keys
+            .iter()
+            .position(|k| *k == "mcp_server_errors")
+            .expect("present when non-empty");
+        let plugins = keys.iter().position(|k| *k == "plugins").unwrap();
+        let analytics = keys.iter().position(|k| *k == "analytics_disabled").unwrap();
+        assert!(
+            plugins < at && at < analytics,
+            "must sit between plugins and analytics_disabled, got {keys:?}"
+        );
+    }
+
     fn init_frame_matches_2_1_201_p_mode_shape() {
         let params = build_init_params(
             "sess-oracle",

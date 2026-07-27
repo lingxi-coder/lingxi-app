@@ -189,43 +189,123 @@ enum MatcherListKind {
     Denied,
 }
 
-/// The zod validation an allow/deny entry must pass (claude `gqn`/`_qn`),
-/// byte-exact messages. Field checks run before the exactly-one refine, like
-/// zod. `None` ⇒ valid.
-fn matcher_validation_error(m: &McpServerMatcher, kind: MatcherListKind) -> Option<&'static str> {
-    if let Some(name) = m.server_name.as_deref() {
-        match kind {
-            MatcherListKind::Allowed => {
-                // gqn: `/^[a-zA-Z0-9_-]+$/`.
-                if name.is_empty()
-                    || !name
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-                {
-                    return Some(
-                        "Server name can only contain letters, numbers, hyphens, and underscores",
-                    );
-                }
+/// claude's byte-exact warning when `allowedMcpServers` is present but is not
+/// an array (`RLi`'s array-level `.catch`). The fallback is `[]`, and an EMPTY
+/// allowlist admits nothing (`ZFe`: `length===0 ⇒ false`) — this side fails
+/// CLOSED.
+const ALLOWED_LIST_INVALID: &str = "\"allowedMcpServers\" was present but invalid; enforcing an empty allowlist (no MCP servers admitted) until it is fixed.";
+
+/// claude's byte-exact warning when `deniedMcpServers` is present but is not an
+/// array. `RLi`'s catch returns `undefined` here, so the denylist is simply not
+/// enforced (no fail-closed counterpart — a bad denylist cannot be inverted
+/// into "deny everything" without locking the user out).
+const DENIED_LIST_INVALID: &str = "\"deniedMcpServers\" was present but invalid and was dropped; its entries cannot be enforced until it is fixed.";
+
+/// zod v4's `Mjm` (@225600556) — the `received` half of an `invalid_type`
+/// message. (JS-only outcomes — `NaN`, class names — cannot arise from JSON.)
+fn json_type_name(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+/// zod v4's default `invalid_type` message (@225601574).
+fn invalid_type(expected: &str, got: &Value) -> String {
+    format!(
+        "Invalid input: expected {expected}, received {}",
+        json_type_name(got)
+    )
+}
+
+/// The `serverName` refinements of claude `gqn` (allowed) / `_qn` (denied),
+/// byte-exact messages. `None` ⇒ valid.
+fn server_name_error(name: &str, kind: MatcherListKind) -> Option<&'static str> {
+    match kind {
+        MatcherListKind::Allowed => {
+            // gqn: `/^[a-zA-Z0-9_-]+$/`.
+            if name.is_empty()
+                || !name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+            {
+                return Some(
+                    "Server name can only contain letters, numbers, hyphens, and underscores",
+                );
             }
-            MatcherListKind::Denied => {
-                if name.is_empty() {
-                    return Some("Server name must be non-empty");
-                }
-                if name.trim().is_empty() {
-                    return Some("Server name must not be whitespace-only");
-                }
-                if name != name.trim() {
-                    return Some(
-                        "Server name has leading or trailing whitespace and will never match (names are compared verbatim)",
-                    );
-                }
+        }
+        MatcherListKind::Denied => {
+            if name.is_empty() {
+                return Some("Server name must be non-empty");
+            }
+            if name.trim().is_empty() {
+                return Some("Server name must not be whitespace-only");
+            }
+            if name != name.trim() {
+                return Some(
+                    "Server name has leading or trailing whitespace and will never match (names are compared verbatim)",
+                );
             }
         }
     }
-    if let Some(cmd) = m.server_command.as_ref() {
-        if cmd.is_empty() {
-            return Some("Server command must have at least one element (the command)");
+    None
+}
+
+/// Validate ONE raw allow/deny list element against claude `gqn`/`_qn`,
+/// returning the message of the FIRST zod issue on failure — what `Xql`'s
+/// element-level `.catch` reports.
+///
+/// The element is parsed from the raw [`Value`] rather than through serde
+/// because the two halves of `gqn`/`_qn` are inseparable in zod: the TYPE
+/// checks (`serverName: E.string()`, `serverCommand: E.array(E.string())`) and
+/// the refinements live in one schema behind one `.catch`, so a type error must
+/// drop only its own element. Deserializing the list as a `Vec` first made a
+/// single mistyped entry collapse the WHOLE list to `None` — i.e. fail OPEN.
+/// Checks run in zod's shape order (`serverName`, `serverCommand`, `serverUrl`,
+/// then the object-level refine), each field's type check before its own
+/// refinements, so the reported message is `issues[0]`.
+///
+/// `.optional()` is `undefined | T`: a key present with a JSON `null` is a type
+/// error, NOT an absent field.
+fn parse_matcher_entry(raw: &Value, kind: MatcherListKind) -> Result<McpServerMatcher, String> {
+    let Some(obj) = raw.as_object() else {
+        return Err(invalid_type("object", raw));
+    };
+    let mut m = McpServerMatcher::default();
+    if let Some(v) = obj.get("serverName") {
+        let Some(name) = v.as_str() else {
+            return Err(invalid_type("string", v));
+        };
+        if let Some(msg) = server_name_error(name, kind) {
+            return Err(msg.to_string());
         }
+        m.server_name = Some(name.to_string());
+    }
+    if let Some(v) = obj.get("serverCommand") {
+        let Some(items) = v.as_array() else {
+            return Err(invalid_type("array", v));
+        };
+        let mut cmd = Vec::with_capacity(items.len());
+        for item in items {
+            let Some(s) = item.as_str() else {
+                return Err(invalid_type("string", item));
+            };
+            cmd.push(s.to_string());
+        }
+        if cmd.is_empty() {
+            return Err("Server command must have at least one element (the command)".to_string());
+        }
+        m.server_command = Some(cmd);
+    }
+    if let Some(v) = obj.get("serverUrl") {
+        let Some(url) = v.as_str() else {
+            return Err(invalid_type("string", v));
+        };
+        m.server_url = Some(url.to_string());
     }
     let present = [
         m.server_name.is_some(),
@@ -233,15 +313,18 @@ fn matcher_validation_error(m: &McpServerMatcher, kind: MatcherListKind) -> Opti
         m.server_url.is_some(),
     ];
     if present.iter().filter(|p| **p).count() != 1 {
-        return Some("Entry must have exactly one of \"serverName\", \"serverCommand\", or \"serverUrl\"");
+        return Err(
+            "Entry must have exactly one of \"serverName\", \"serverCommand\", or \"serverUrl\""
+                .to_string(),
+        );
     }
-    None
+    Ok(m)
 }
 
 /// [`read_managed_mcp_policy`] rooted at an explicit dir (testable). Entries
-/// failing the zod-mirrored validation ([`matcher_validation_error`]) are
-/// dropped with a warning — they never participate in matching, exactly as an
-/// entry the oracle's typed settings never contained.
+/// failing the zod-mirrored validation ([`parse_matcher_entry`]) are dropped
+/// with a warning — they never participate in matching, exactly as an entry the
+/// oracle's typed settings never contained.
 #[must_use]
 pub fn read_managed_mcp_policy_in(dir: &Path) -> McpPolicy {
     let mut merged = serde_json::Map::new();
@@ -250,17 +333,33 @@ pub fn read_managed_mcp_policy_in(dir: &Path) -> McpPolicy {
             merged.insert(k.clone(), v.clone());
         }
     });
+    // claude `Xql(key, elementSchema, warn)`: the `.catch` sits on the ELEMENT
+    // schema and substitutes the `Jql` sentinel, which a `.transform` then
+    // filters out — one malformed entry drops itself and its valid siblings
+    // survive. Only a non-ARRAY value escapes to `RLi`'s outer `.catch`, whose
+    // two sides are deliberately ASYMMETRIC (see the two consts above).
     let parse = |key: &str, kind: MatcherListKind| -> Option<Vec<McpServerMatcher>> {
-        let list = merged
-            .get(key)
-            .and_then(|v| serde_json::from_value::<Vec<McpServerMatcher>>(v.clone()).ok())?;
+        let raw = merged.get(key)?; // absent ⇒ `.optional()` ⇒ undefined
+        let Some(items) = raw.as_array() else {
+            return match kind {
+                MatcherListKind::Allowed => {
+                    tracing::warn!("{key}: {ALLOWED_LIST_INVALID}");
+                    Some(Vec::new())
+                }
+                MatcherListKind::Denied => {
+                    tracing::warn!("{key}: {DENIED_LIST_INVALID}");
+                    None
+                }
+            };
+        };
         Some(
-            list.into_iter()
-                .filter(|m| match matcher_validation_error(m, kind) {
-                    None => true,
-                    Some(msg) => {
-                        tracing::warn!("{key}: {msg}");
-                        false
+            items
+                .iter()
+                .filter_map(|item| match parse_matcher_entry(item, kind) {
+                    Ok(m) => Some(m),
+                    Err(msg) => {
+                        tracing::warn!("{key}[]: Invalid entry was ignored: {msg}");
+                        None
                     }
                 })
                 .collect(),
@@ -1646,6 +1745,144 @@ mod tests {
                 .filter_map(|m| m.server_name.as_deref())
                 .collect::<Vec<_>>(),
             ["corp"]
+        );
+    }
+
+    #[test]
+    fn read_managed_policy_drops_only_the_mistyped_entry() {
+        // `Xql`'s `.catch` is on the ELEMENT schema: a structurally invalid
+        // entry is replaced by the `Jql` sentinel and filtered out, keeping its
+        // valid siblings. Deserializing the list as one `Vec` used to collapse
+        // every list here to `None` — allow-all + deny-nothing, i.e. fail OPEN.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("managed-settings.json"),
+            r#"{
+                "allowedMcpServers":[
+                    {"serverCommand":"npx -y evil"},
+                    "junk",
+                    {"serverName":123},
+                    {"serverUrl":null},
+                    {"serverCommand":["npx","-y","corp"]},
+                    {"serverName":"good_1"}
+                ],
+                "deniedMcpServers":[
+                    17,
+                    {"serverCommand":["npx",7]},
+                    {"serverName":"corp"}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let p = read_managed_mcp_policy_in(dir.path());
+        let allowed = p.allowed.as_ref().unwrap();
+        assert_eq!(allowed.len(), 2, "valid siblings must survive");
+        assert_eq!(
+            allowed[0].server_command.as_deref(),
+            Some(["npx".to_string(), "-y".to_string(), "corp".to_string()].as_slice())
+        );
+        assert_eq!(allowed[1].server_name.as_deref(), Some("good_1"));
+        assert_eq!(
+            p.denied
+                .as_ref()
+                .unwrap()
+                .iter()
+                .filter_map(|m| m.server_name.as_deref())
+                .collect::<Vec<_>>(),
+            ["corp"]
+        );
+        // …and the surviving allowlist still gates. A remote candidate falls to
+        // the name branch (no `serverUrl` entry survived), so `good_1` is
+        // admitted and an unlisted name is not.
+        let envs = PolicyExpansionEnv {
+            env: map(&[]),
+            fallback_env: map(&[]),
+        };
+        let remote = http("https://x.test/mcp");
+        assert!(is_allowed_with_env("good_1", &remote, &p, &envs));
+        assert!(!is_allowed_with_env("rogue", &remote, &p, &envs));
+        assert!(is_denied_with_env("corp", &remote, &p, &envs));
+    }
+
+    #[test]
+    fn matcher_entry_errors_are_zod_byte_exact() {
+        use MatcherListKind::{Allowed, Denied};
+        let err = |raw: &str, kind| {
+            parse_matcher_entry(&serde_json::from_str::<Value>(raw).unwrap(), kind).unwrap_err()
+        };
+        assert_eq!(
+            err(r#""junk""#, Allowed),
+            "Invalid input: expected object, received string"
+        );
+        assert_eq!(
+            err(r#"{"serverName":123}"#, Allowed),
+            "Invalid input: expected string, received number"
+        );
+        assert_eq!(
+            err(r#"{"serverCommand":"npx -y foo"}"#, Denied),
+            "Invalid input: expected array, received string"
+        );
+        assert_eq!(
+            err(r#"{"serverCommand":["npx",7]}"#, Denied),
+            "Invalid input: expected string, received number"
+        );
+        // `.optional()` is `undefined | T` — an explicit JSON null is a type
+        // error, not an absent field.
+        assert_eq!(
+            err(r#"{"serverUrl":null}"#, Allowed),
+            "Invalid input: expected string, received null"
+        );
+        // The FIELD type check precedes the object-level refine (zod reports
+        // `issues[0]`, and field issues are collected in shape order).
+        assert_eq!(
+            err(r#"{"serverName":true,"serverUrl":"https://x.com"}"#, Allowed),
+            "Invalid input: expected string, received boolean"
+        );
+        assert_eq!(
+            err(r#"{"serverCommand":[]}"#, Allowed),
+            "Server command must have at least one element (the command)"
+        );
+    }
+
+    #[test]
+    fn non_array_allowed_list_denies_everything_and_denied_list_is_dropped() {
+        // `RLi`'s array-level catches are asymmetric: `allowedMcpServers` falls
+        // back to `[]` (and `ZFe`'s `length===0` ⇒ deny all) while
+        // `deniedMcpServers` falls back to `undefined` (nothing enforced).
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("managed-settings.json"),
+            r#"{"allowedMcpServers":{},"deniedMcpServers":"nope"}"#,
+        )
+        .unwrap();
+        let p = read_managed_mcp_policy_in(dir.path());
+        assert!(
+            p.allowed.as_ref().is_some_and(Vec::is_empty),
+            "a non-array allowlist must fail CLOSED (empty allowlist), not vanish"
+        );
+        assert!(p.denied.is_none(), "a non-array denylist is dropped");
+        let envs = PolicyExpansionEnv {
+            env: map(&[]),
+            fallback_env: map(&[]),
+        };
+        assert!(!is_allowed_with_env(
+            "anything",
+            &stdio("c", &[]),
+            &p,
+            &envs
+        ));
+        assert!(!is_denied_with_env("anything", &stdio("c", &[]), &p, &envs));
+    }
+
+    #[test]
+    fn invalid_list_warnings_are_byte_exact() {
+        assert_eq!(
+            ALLOWED_LIST_INVALID,
+            "\"allowedMcpServers\" was present but invalid; enforcing an empty allowlist (no MCP servers admitted) until it is fixed."
+        );
+        assert_eq!(
+            DENIED_LIST_INVALID,
+            "\"deniedMcpServers\" was present but invalid and was dropped; its entries cannot be enforced until it is fixed."
         );
     }
 

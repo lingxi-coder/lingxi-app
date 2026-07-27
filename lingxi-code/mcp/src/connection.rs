@@ -38,12 +38,51 @@ pub struct McpServerConfig {
     /// Config-level error that makes the server unconnectable (claude
     /// `configError`, reason `url_invalid`): set at parse time when a remote
     /// entry's `url` expanded to an empty string. The server is KEPT in the
-    /// inventory — `mcp list` / `mcp get` show it as `- Not configured` — but
-    /// the connect path short-circuits to a failure WITHOUT dialing (oracle
-    /// skips the connect entirely: `mcp_connect_skipped` reason
-    /// "unconfigured" → `errorCode:"UNCONFIGURED"`).
+    /// inventory, but the connect path short-circuits to a failure WITHOUT
+    /// dialing.
+    ///
+    /// This is claude's `INVALID_CONFIG`, not `UNCONFIGURED`: `klr`
+    /// (@231828222) tags the case `configErrorReason:"url_invalid"`, so `zar`
+    /// (@231408681) is false on both disjuncts and `Nxe` (@232117552) falls
+    /// through the unconfigured gate into the next one →
+    /// `errorCode:"INVALID_CONFIG"`. `Qee` (@231862992) is therefore false and
+    /// `yEp` renders `✘ Failed to connect` with this text as the issue —
+    /// `- Not configured` is reserved for [`McpServerConfig::is_unconfigured`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_error: Option<String>,
+}
+
+/// claude's error text for a server with nothing to dial (`Nxe`'s
+/// `t.configError ?? "No URL configured for this server"`).
+pub const UNCONFIGURED_ERROR: &str = "No URL configured for this server";
+
+impl McpServerConfig {
+    /// claude `zar` (@231408681) — is this server *unconfigured* (nothing to
+    /// dial) rather than *misconfigured*? True when no [`Self::config_error`]
+    /// was recorded and the transport carries a blank `url`. `Nxe` then skips
+    /// the connect with `errorCode:"UNCONFIGURED"`, the ONLY case `mcp list` /
+    /// `mcp get` render as `- Not configured` (`Qee` → `yEp`).
+    ///
+    /// `zar`'s other disjunct (`configErrorReason === "url_empty"`) is produced
+    /// only by the plugin-MCP normalizer (@231445287), a path this port does
+    /// not model, so the reason discriminator is not carried on the config.
+    #[must_use]
+    pub fn is_unconfigured(&self) -> bool {
+        if self.config_error.is_some() {
+            return false;
+        }
+        // `"url" in e` — the transports whose config object declares a `url`.
+        let url = match &self.spec {
+            McpTransportSpec::Sse { url, .. }
+            | McpTransportSpec::Http { url, .. }
+            | McpTransportSpec::WebSocket { url, .. }
+            | McpTransportSpec::SseIde { url, .. } => url,
+            McpTransportSpec::Stdio { .. }
+            | McpTransportSpec::InProcess { .. }
+            | McpTransportSpec::SdkControl { .. } => return false,
+        };
+        url.trim().is_empty()
+    }
 }
 
 /// `skip_serializing_if` predicate: omit a `bool` field from the serialized

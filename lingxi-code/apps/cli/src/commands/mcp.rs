@@ -1875,21 +1875,54 @@ const FAILED_TO_CONNECT: &str = "\u{2718} Failed to connect";
 /// Rejected servers are never health-checked or spawned.
 const REJECTED: &str = "\u{2718} Rejected (see disabledMcpjsonServers in settings)";
 
-/// Byte-exact claude-code status for a server whose config makes it
-/// unconnectable (`yEp`'s `Qee(r)` branch — connect skipped with
-/// `errorCode:"UNCONFIGURED"`, e.g. a `url` that expanded to an empty string).
+/// Byte-exact claude-code status for a server with nothing to dial (`yEp`'s
+/// `Qee(r)` branch — connect skipped with `errorCode:"UNCONFIGURED"`). Reserved
+/// for `zar` ([`mcp::McpServerConfig::is_unconfigured`]): a blank `url` and NO
+/// `configError`. A `configError` is `INVALID_CONFIG`, which `Qee` rejects.
 const NOT_CONFIGURED: &str = "- Not configured";
 
+/// The status a server reports from its CONFIG alone — claude `Nxe`'s two
+/// pre-dial gates, in order, as `yEp` renders them. `None` means the server has
+/// to be dialed to know.
+///
+/// * `zar` (blank `url`, no `configError`) → `errorCode:"UNCONFIGURED"`, `Qee`
+///   true → [`NOT_CONFIGURED`] with no issue text.
+/// * a `configError` (a `url` that expanded to empty, tagged
+///   `configErrorReason:"url_invalid"`) → `errorCode:"INVALID_CONFIG"`, so
+///   `Qee` is FALSE and `yEp` takes the failed branch: `✘ Failed to connect`
+///   plus `RSp(r)` as the issue. `INVALID_CONFIG ∈ CSp` (@238771612), so `RSp`
+///   returns `e.error` — the configError text verbatim.
+///
+/// The issue rides the row after an em dash in `mcp list` (`fEp` @238843029)
+/// and on its own `  Issue:` line in `mcp get` (`hJy` @238844777).
+fn unconnectable_status(
+    cfg: &mcp::connection::McpServerConfig,
+) -> Option<(&'static str, Option<&str>)> {
+    if cfg.is_unconfigured() {
+        return Some((NOT_CONFIGURED, None));
+    }
+    cfg.config_error
+        .as_deref()
+        .map(|err| (FAILED_TO_CONNECT, Some(err)))
+}
+
 async fn run_list() -> i32 {
-    let servers = load_all_servers();
+    let approval = project_server_approval();
+    // Explicitly-rejected project servers are REMOVED before anything else
+    // looks at the list: the oracle's list path calls `J9` without
+    // `includeRejectedProjectServers`, so `afe` (@231822034) never puts them in
+    // the server map — which is the map `mJy` tests for emptiness
+    // (`Object.keys(t).length === 0`). A workspace whose only server is rejected
+    // therefore gets the empty-state message, not an empty health check.
+    let servers = listed_servers(load_all_servers(), &approval.rejected);
+    let suppress_warnings = mcp_config_warnings_suppressed().await;
     if servers.is_empty() {
         println!("No MCP servers configured. Use `lingxi-cli mcp add` to add a server.");
         // The oracle renders the config-diagnostics panel (`vgn`) under the
         // empty-state message too.
-        print_config_diagnostics();
+        print_config_diagnostics(suppress_warnings);
         return SUCCESS;
     }
-    let approval = project_server_approval();
 
     // The health check SPAWNS stdio servers and opens network connections, so
     // it runs only for servers the user has actually accepted: user- and
@@ -1905,12 +1938,6 @@ async fn run_list() -> i32 {
     let registry = mcp::McpRegistry::new(transport);
 
     for cfg in &servers {
-        // Explicitly-rejected project server: OMITTED from the listing — the
-        // binary's list-path `J9` call passes no `includeRejectedProjectServers`,
-        // so a rejected server never enters the server map at all.
-        if is_rejected_project_server(cfg, &approval.rejected) {
-            continue;
-        }
         let summary = transport_summary(&cfg.spec);
         if is_pending_project_server(cfg, &approval.pending) {
             // Unapproved project server: never spawned, so never health-checked
@@ -1920,11 +1947,14 @@ async fn run_list() -> i32 {
             println!("{}: {summary} - {PENDING_APPROVAL}", cfg.name);
             continue;
         }
-        if cfg.config_error.is_some() {
-            // configError (url expanded to empty): connect is skipped with
-            // `errorCode:"UNCONFIGURED"` → `yEp` reports `- Not configured`
-            // (no issue text), without dialing anything.
-            println!("{}: {summary} - {NOT_CONFIGURED}", cfg.name);
+        if let Some((status, issue)) = unconnectable_status(cfg) {
+            // The config alone decides the outcome; nothing is dialed. `fEp`
+            // joins an issue onto the status with an em dash.
+            let status = match issue {
+                Some(issue) => format!("{status} \u{2014} {issue}"),
+                None => status.to_string(),
+            };
+            println!("{}: {summary} - {status}", cfg.name);
             continue;
         }
         let status =
@@ -1945,8 +1975,22 @@ async fn run_list() -> i32 {
     }
     // Config diagnostics footer — the oracle's `vgn` panel rendered under the
     // rows (missing env vars, whitespace, skipped entries, `servers` typo).
-    print_config_diagnostics();
+    print_config_diagnostics(suppress_warnings);
     SUCCESS
+}
+
+/// The servers `mcp list` shows: everything loaded MINUS the explicitly-rejected
+/// project servers, which `afe` (@231822034) drops from the map entirely unless
+/// the caller asks for `includeRejectedProjectServers` (the list path does not;
+/// `mcp get` does, which is why it can still render the `REJECTED` status).
+fn listed_servers(
+    servers: Vec<mcp::connection::McpServerConfig>,
+    rejected: &[String],
+) -> Vec<mcp::connection::McpServerConfig> {
+    servers
+        .into_iter()
+        .filter(|cfg| !is_rejected_project_server(cfg, rejected))
+        .collect()
 }
 
 /// Implement `mcp get`. Prints one server's details, or the
@@ -1979,10 +2023,13 @@ fn run_get(a: &GetArgs) -> i32 {
         println!("  Status: {PENDING_APPROVAL}");
     } else if is_rejected {
         println!("  Status: {REJECTED}");
-    } else if cfg.config_error.is_some() {
-        // configError → `yEp` skips the connect and reports `- Not configured`
-        // (`Qee`'s UNCONFIGURED branch carries no issue text).
-        println!("  Status: {NOT_CONFIGURED}");
+    } else if let Some((status, issue)) = unconnectable_status(cfg) {
+        // `hJy` emits the issue on its own line right after the status:
+        // `` `  Status: ${a.status}`, ...a.issue ? [`  Issue: ${a.issue}`] : [] ``.
+        println!("  Status: {status}");
+        if let Some(issue) = issue {
+            println!("  Issue: {issue}");
+        }
     }
     match &cfg.spec {
         traits::McpTransportSpec::Stdio { command, args, env } => {
@@ -2105,15 +2152,79 @@ fn local_server_names() -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// claude `vSp`'s `i` term — `n.scope !== "enterprise" && (t.enterpriseActive
+/// || t.mcpLocked)`, fed by `vgn` (@238768414) as `{enterpriseActive: T3(),
+/// mcpLocked: Y0("mcp")}`. Under either, `afe` (@231822040) never LOADS the
+/// user/project/local configs (`T3()` returns the managed set alone; `Y0("mcp")`
+/// swaps all three scopes for an empty map), so their warnings would be pure
+/// noise. Every scope this port collects diagnostics for is non-enterprise, so
+/// the term is a single flag here.
+async fn mcp_config_warnings_suppressed() -> bool {
+    // `T3()` — a parseable `managed-mcp.json`.
+    if mcp::enterprise_policy::enterprise_mcp_active() {
+        return true;
+    }
+    // `Y0("mcp")` — `policySettings.strictPluginOnlyCustomization` is `true`, or
+    // an array naming the `mcp` slot. Managed tiers ascend in priority, so the
+    // last tier that sets the key wins.
+    let mut locked = false;
+    for raw in engine_desktop::settings_watch::managed_settings_raw_tiers().await {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
+        match value.get("strictPluginOnlyCustomization") {
+            Some(serde_json::Value::Bool(b)) => locked = *b,
+            Some(serde_json::Value::Array(slots)) => {
+                locked = slots.iter().any(|s| s.as_str() == Some("mcp"));
+            }
+            _ => {}
+        }
+    }
+    locked
+}
+
+/// claude `vSp`'s row filter, in its order: a non-warning row always survives;
+/// then `if(i) return !1` drops every warning row under the
+/// enterprise/mcp-locked term; then a per-server warning is dropped when a
+/// LATER scope defines the same server (`e.slice(o+1).some(...)`, with a
+/// project scope counting only when the server is approved — `gKy`). A warning
+/// with no `serverName` survives the override check (`!c || !a(c)`).
+fn diagnostic_row_survives(
+    w: &mcp::config_diagnostics::McpConfigWarning,
+    suppress_warnings: bool,
+    approved_project: &[String],
+    local_names: &[String],
+) -> bool {
+    use mcp::config_diagnostics::McpConfigSeverity;
+
+    if w.severity == McpConfigSeverity::Fatal {
+        return true;
+    }
+    if suppress_warnings {
+        return false;
+    }
+    let Some(name) = &w.server_name else {
+        return true;
+    };
+    match w.scope {
+        // A user-scope server is overridden by an APPROVED project server
+        // (`gKy`) or a local one.
+        ConfigScope::User => !approved_project.contains(name) && !local_names.contains(name),
+        ConfigScope::Project => !local_names.contains(name),
+        _ => true,
+    }
+}
+
 /// Print the oracle's "MCP config diagnostics" panel (`vgn`) as plain text
 /// under the `mcp list` output: title + docs link, then per-scope groups in
 /// the panel's order (user, project, local) with `[Error]` / `[Warning]` rows
 /// (`JQs`). Per-server WARNING rows whose server is overridden by a later
-/// scope are suppressed (`vSp`: user < project-when-approved < local); fatal
-/// rows never are. Silent when every config is clean, so a healthy setup
-/// prints nothing. (The ink panel's status glyph and tree guides have no
+/// scope are suppressed (`vSp`: user < project-when-approved < local), as is
+/// EVERY warning row when `suppress_warnings` ([`mcp_config_warnings_suppressed`])
+/// holds; fatal rows never are. Silent when every config is clean, so a healthy
+/// setup prints nothing. (The ink panel's status glyph and tree guides have no
 /// plain-text equivalent; the strings themselves are byte-faithful.)
-fn print_config_diagnostics() {
+fn print_config_diagnostics(suppress_warnings: bool) {
     use mcp::config_diagnostics::{McpConfigSeverity, McpConfigWarning};
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -2139,21 +2250,7 @@ fn print_config_diagnostics() {
             .iter()
             .filter(|w| w.scope == scope)
             .filter(|w| {
-                if w.severity == McpConfigSeverity::Fatal {
-                    return true;
-                }
-                let Some(name) = &w.server_name else {
-                    return true;
-                };
-                match scope {
-                    // A user-scope server is overridden by an APPROVED project
-                    // server (`gKy`) or a local one.
-                    ConfigScope::User => {
-                        !approved_project.contains(name) && !local_names.contains(name)
-                    }
-                    ConfigScope::Project => !local_names.contains(name),
-                    _ => true,
-                }
+                diagnostic_row_survives(w, suppress_warnings, &approved_project, &local_names)
             })
             .collect();
         if rows.is_empty() {
@@ -2962,8 +3059,9 @@ mod name_validation_tests {
 #[cfg(test)]
 mod pending_approval_tests {
     use super::{
-        classify_project_server, is_pending_project_server, is_rejected_project_server,
-        project_server_is_approved, ProjectServerState, NOT_CONFIGURED, PENDING_APPROVAL, REJECTED,
+        classify_project_server, diagnostic_row_survives, is_pending_project_server,
+        is_rejected_project_server, listed_servers, project_server_is_approved,
+        unconnectable_status, ProjectServerState, NOT_CONFIGURED, PENDING_APPROVAL, REJECTED,
     };
     use mcp::connection::{ConfigScope, McpServerConfig};
     use std::collections::HashMap;
@@ -3085,6 +3183,109 @@ mod pending_approval_tests {
         );
         // And the UNCONFIGURED status (`yEp`'s `Qee` branch).
         assert_eq!(NOT_CONFIGURED, "- Not configured");
+    }
+
+    /// `zar` vs `configError`: only a BLANK url with no `configError` is
+    /// `- Not configured`. A url that expanded to empty is tagged
+    /// `configErrorReason:"url_invalid"` ⇒ `INVALID_CONFIG`, which `Qee`
+    /// rejects, so `yEp` reports `✘ Failed to connect` and carries the
+    /// configError as the issue (`RSp`, `INVALID_CONFIG ∈ CSp`).
+    #[test]
+    fn unconnectable_status_splits_unconfigured_from_invalid_config() {
+        const CONFIG_ERROR: &str = "'url' \"${VAR:-}\" expanded to an empty string. Set the referenced environment variable, or update the server's config and reconnect.";
+
+        let http = |url: &str| traits::McpTransportSpec::Http {
+            url: url.to_string(),
+            headers: traits::McpHeaders::default(),
+            oauth: None,
+        };
+
+        // `zar`: blank url, no configError.
+        let mut blank = stdio("blank", ConfigScope::Project);
+        blank.spec = http("   ");
+        assert_eq!(
+            unconnectable_status(&blank),
+            Some(("- Not configured", None))
+        );
+
+        // configError: the failed branch WITH the issue text.
+        let mut broken = stdio("broken", ConfigScope::Project);
+        broken.spec = http("${VAR:-}");
+        broken.config_error = Some(CONFIG_ERROR.to_string());
+        assert_eq!(
+            unconnectable_status(&broken),
+            Some(("\u{2718} Failed to connect", Some(CONFIG_ERROR))),
+            "url_invalid is INVALID_CONFIG — never `- Not configured`, and the issue must survive"
+        );
+
+        // A healthy server has to be dialed to know.
+        assert_eq!(unconnectable_status(&stdio("ok", ConfigScope::User)), None);
+    }
+
+    /// `mcp list` decides its empty state on the map `afe` actually built:
+    /// rejected project servers are gone before `Object.keys(t).length === 0`
+    /// runs, so a workspace whose ONLY server is rejected prints the
+    /// "No MCP servers configured" empty state, not an empty health check.
+    #[test]
+    fn rejected_only_workspace_is_empty_for_list() {
+        let rejected = vec!["repo-srv".to_string()];
+        assert!(
+            listed_servers(vec![stdio("repo-srv", ConfigScope::Project)], &rejected).is_empty(),
+            "a rejected project server never enters the list-path server map"
+        );
+        // A same-named USER server never requires approval and is kept.
+        assert_eq!(
+            listed_servers(vec![stdio("repo-srv", ConfigScope::User)], &rejected).len(),
+            1
+        );
+        // Non-rejected servers survive alongside a rejected one.
+        let kept = listed_servers(
+            vec![
+                stdio("repo-srv", ConfigScope::Project),
+                stdio("other", ConfigScope::Project),
+            ],
+            &rejected,
+        );
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].name, "other");
+    }
+
+    /// `vSp`'s `i` term: with a managed MCP config active (or the `mcp` slot
+    /// locked) every WARNING row from a non-enterprise scope is dropped before
+    /// the later-scope-override check — fatal rows are never suppressed.
+    #[test]
+    fn enterprise_or_locked_suppresses_only_warning_rows() {
+        use mcp::config_diagnostics::{McpConfigSeverity, McpConfigWarning};
+
+        let row = |severity, server: Option<&str>| McpConfigWarning {
+            scope: ConfigScope::User,
+            severity,
+            server_name: server.map(ToString::to_string),
+            path: String::new(),
+            message: "boom".into(),
+            suggestion: None,
+            file: None,
+        };
+
+        let warn = row(McpConfigSeverity::Warning, Some("docs"));
+        let anonymous = row(McpConfigSeverity::Warning, None);
+        let fatal = row(McpConfigSeverity::Fatal, None);
+
+        // Unsuppressed: both warning shapes print (no later scope defines `docs`).
+        assert!(diagnostic_row_survives(&warn, false, &[], &[]));
+        assert!(diagnostic_row_survives(&anonymous, false, &[], &[]));
+        // Suppressed: every warning goes, INCLUDING one with no server name.
+        assert!(!diagnostic_row_survives(&warn, true, &[], &[]));
+        assert!(!diagnostic_row_survives(&anonymous, true, &[], &[]));
+        // Fatal rows survive either way (`severity !== "warning"` returns early).
+        assert!(diagnostic_row_survives(&fatal, true, &[], &[]));
+        // The override half still applies when nothing is suppressed.
+        assert!(!diagnostic_row_survives(
+            &warn,
+            false,
+            &[],
+            &["docs".to_string()]
+        ));
     }
 
     /// `SZr` three-way classification: disabled always wins (rejected, even

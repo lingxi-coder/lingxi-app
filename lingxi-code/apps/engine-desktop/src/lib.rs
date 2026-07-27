@@ -3584,10 +3584,19 @@ struct AgentMcpMergeGates {
 /// 4. convert via `obs` ([`agent::agent_mcp_specs_to_scoped_configs`]);
 /// 5. `Yee` enterprise allow/deny filter (sdk-type always allowed) → blocked
 ///    names collected;
-/// 6. `{...allowed, ...existing}` — an EXISTING same-name server wins; agent
-///    servers only fill gaps.
+/// 6. `{...allowed, ...existing}` — but `existing` there is `dynamicMcpConfig`
+///    ALONE, not the whole to-connect set. `Ot` is seeded `{}` (@245992990) and
+///    only ever accumulates `--mcp-config` / Chrome / Computer-Use entries;
+///    `afe`'s discovered map (`Object.assign({}, plugin, user, project, local)`
+///    @231823400) deliberately excludes it. The headless site then spreads the
+///    dynamic bucket LAST — `po = {...an, ...Uo}` @246008983 — so an agent
+///    server BEATS a same-named discovered `.mcp.json`/user/local server and
+///    loses only to a `--mcp-config` one. `dynamic_names` is that bucket's key
+///    set, which this port cannot recover from the flattened list (CLI servers
+///    are parsed at `ConfigScope::Project`).
 fn merge_agent_frontmatter_mcp_servers(
     existing: &mut Vec<mcp::McpServerConfig>,
+    dynamic_names: &[String],
     def: Option<&agent::AgentDefinition>,
     gates: AgentMcpMergeGates,
     policy: &mcp::enterprise_policy::McpPolicy,
@@ -3615,8 +3624,14 @@ fn merge_agent_frontmatter_mcp_servers(
             blocked.push(cfg.name);
             continue;
         }
-        if !existing.iter().any(|x| x.name == cfg.name) {
-            existing.push(cfg);
+        match existing.iter_mut().find(|x| x.name == cfg.name) {
+            // `{...allowed, ...dynamic}`: a `--mcp-config` server of this name
+            // was spread after the agent's, so it wins.
+            Some(_) if dynamic_names.iter().any(|n| n == &cfg.name) => {}
+            // `{...discovered, ...dynamic}`: the agent's server REPLACES the
+            // discovered entry, transport spec and all.
+            Some(slot) => *slot = cfg,
+            None => existing.push(cfg),
         }
     }
     blocked
@@ -5809,9 +5824,14 @@ pub async fn build(
     // servers are never project-approval-gated (claude approval covers
     // `.mcp.json` servers) and the merge runs its OWN `Yee` enterprise filter +
     // `T3()` managed-exclusive skip below, mirroring claude's ordering (`FWt`
-    // merges into `dynamicMcpConfig` after discovery filtering).
+    // merges into `dynamicMcpConfig` after discovery filtering). The
+    // `--mcp-config` names stand in for `dynamicMcpConfig`'s key set: `mcp_configs`
+    // is flat here, and only those entries outrank an agent's server.
+    let dynamic_mcp_names: Vec<String> =
+        cfg.cli_mcp_servers.iter().map(|c| c.name.clone()).collect();
     let agent_mcp_blocked = merge_agent_frontmatter_mcp_servers(
         &mut mcp_configs,
+        &dynamic_mcp_names,
         main_agent_def_for_mcp.as_ref(),
         AgentMcpMergeGates {
             safe_mode: cfg.customization_gates.safe_mode,
@@ -9366,7 +9386,8 @@ mod tests {
     }
 
     /// (M7 cc2.1.220) `merge_agent_frontmatter_mcp_servers` — the `FWt` port:
-    /// gate order, existing-name-wins merge, enterprise blocked names.
+    /// gate order, merge precedence (agent beats discovered, loses to
+    /// `--mcp-config`), enterprise blocked names.
     #[test]
     fn merge_agent_frontmatter_mcp_servers_fwt_gates_and_merge() {
         fn agent_with_server(name: &str, source: agent::AgentSource) -> agent::AgentDefinition {
@@ -9399,6 +9420,8 @@ mod tests {
                 config_error: None,
             }
         }
+        // No `--mcp-config` servers in most cases below.
+        const NO_DYNAMIC: &[String] = &[];
         let open_gates = super::AgentMcpMergeGates {
             safe_mode: false,
             strict_mcp_config: false,
@@ -9408,8 +9431,13 @@ mod tests {
 
         // No definition → no-op (`if(!t)return e`).
         let mut configs = vec![existing("keep")];
-        let blocked =
-            super::merge_agent_frontmatter_mcp_servers(&mut configs, None, open_gates, &no_policy);
+        let blocked = super::merge_agent_frontmatter_mcp_servers(
+            &mut configs,
+            NO_DYNAMIC,
+            None,
+            open_gates,
+            &no_policy,
+        );
         assert!(blocked.is_empty());
         assert_eq!(configs.len(), 1);
 
@@ -9419,6 +9447,7 @@ mod tests {
         let mut configs = vec![existing("keep")];
         let blocked = super::merge_agent_frontmatter_mcp_servers(
             &mut configs,
+            NO_DYNAMIC,
             Some(&def),
             open_gates,
             &no_policy,
@@ -9428,10 +9457,49 @@ mod tests {
         let added = configs.iter().find(|c| c.name == "docs").unwrap();
         assert_eq!(added.scope, mcp::ConfigScope::Agent);
 
-        // `{...allowed, ...existing}` — an existing same-name server WINS.
+        // `po = {...discovered, ...dynamic}` — the agent's server REPLACES a
+        // same-named DISCOVERED (`.mcp.json`/user/local) server, in place.
+        let mut configs = vec![existing("docs"), existing("keep")];
+        super::merge_agent_frontmatter_mcp_servers(
+            &mut configs,
+            NO_DYNAMIC,
+            Some(&def),
+            open_gates,
+            &no_policy,
+        );
+        assert_eq!(configs.len(), 2);
+        assert_eq!(configs[0].name, "docs");
+        assert!(
+            matches!(&configs[0].spec, traits::McpTransportSpec::Stdio { command, .. } if command == "npx"),
+            "the agent's config must win over a discovered one"
+        );
+        assert_eq!(configs[0].scope, mcp::ConfigScope::Agent);
+
+        // …including a DISABLED discovered server: claude's `afe` drops a
+        // rejected project server from the discovered map entirely, leaving the
+        // agent's entry as the only one to connect.
+        let mut gated = existing("docs");
+        gated.disabled = true;
+        let mut configs = vec![gated];
+        super::merge_agent_frontmatter_mcp_servers(
+            &mut configs,
+            NO_DYNAMIC,
+            Some(&def),
+            open_gates,
+            &no_policy,
+        );
+        assert_eq!(configs.len(), 1);
+        assert!(
+            !configs[0].disabled,
+            "a rejected discovered server must not suppress the agent's"
+        );
+
+        // `{...allowed, ...dynamic}` — a `--mcp-config` server of the same name
+        // outranks the agent's and is left untouched.
         let mut configs = vec![existing("docs")];
         super::merge_agent_frontmatter_mcp_servers(
             &mut configs,
+            &["docs".to_string()],
             Some(&def),
             open_gates,
             &no_policy,
@@ -9439,7 +9507,7 @@ mod tests {
         assert_eq!(configs.len(), 1);
         assert!(
             matches!(&configs[0].spec, traits::McpTransportSpec::Stdio { command, .. } if command == "prior"),
-            "existing config must win on name collision"
+            "a --mcp-config server must win on name collision"
         );
         assert_eq!(configs[0].scope, mcp::ConfigScope::Project);
 
@@ -9447,6 +9515,7 @@ mod tests {
         let mut configs = vec![];
         super::merge_agent_frontmatter_mcp_servers(
             &mut configs,
+            NO_DYNAMIC,
             Some(&def),
             super::AgentMcpMergeGates {
                 safe_mode: true,
@@ -9463,12 +9532,19 @@ mod tests {
             ..open_gates
         };
         let mut configs = vec![];
-        super::merge_agent_frontmatter_mcp_servers(&mut configs, Some(&def), strict, &no_policy);
+        super::merge_agent_frontmatter_mcp_servers(
+            &mut configs,
+            NO_DYNAMIC,
+            Some(&def),
+            strict,
+            &no_policy,
+        );
         assert!(configs.is_empty(), "strict mode blocks non-flag agents");
         let flag_def = agent_with_server("docs", agent::AgentSource::Flag);
         let mut configs = vec![];
         super::merge_agent_frontmatter_mcp_servers(
             &mut configs,
+            NO_DYNAMIC,
             Some(&flag_def),
             strict,
             &no_policy,
@@ -9479,6 +9555,7 @@ mod tests {
         let mut configs = vec![];
         super::merge_agent_frontmatter_mcp_servers(
             &mut configs,
+            NO_DYNAMIC,
             Some(&def),
             super::AgentMcpMergeGates {
                 enterprise_mcp_active: true,
@@ -9509,6 +9586,7 @@ mod tests {
         let mut configs = vec![];
         let blocked = super::merge_agent_frontmatter_mcp_servers(
             &mut configs,
+            NO_DYNAMIC,
             Some(&two),
             open_gates,
             &deny_policy,

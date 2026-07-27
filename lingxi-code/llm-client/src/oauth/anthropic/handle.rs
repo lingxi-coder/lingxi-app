@@ -452,8 +452,12 @@ mod tests {
 
     /// Build a handle whose token endpoint returns `token_body`, over an
     /// in-memory keychain. Returns the handle, the storage (for assertions),
-    /// and a flag set when the browser opener fired.
-    fn handle_with_token_body(token_body: &str) -> (OAuthHandle, Arc<MemStorage>, Arc<AtomicBool>) {
+    /// a flag set when the browser opener fired, and the transport (for
+    /// request-BODY assertions — the exchange carries `redirect_uri` in the
+    /// body, never in the URL).
+    fn handle_with_token_body(
+        token_body: &str,
+    ) -> (OAuthHandle, Arc<MemStorage>, Arc<AtomicBool>, Arc<MockHttp>) {
         handle_with_bodies(
             token_body,
             r#"{"account":{"email":"profile@example.com"},"organization":{"uuid":"org-from-profile"}}"#,
@@ -465,7 +469,7 @@ mod tests {
     fn handle_with_bodies(
         token_body: &str,
         profile_body: &str,
-    ) -> (OAuthHandle, Arc<MemStorage>, Arc<AtomicBool>) {
+    ) -> (OAuthHandle, Arc<MemStorage>, Arc<AtomicBool>, Arc<MockHttp>) {
         let http = MockHttp::new(vec![
             (
                 "oauth/token",
@@ -489,7 +493,8 @@ mod tests {
         let cm = mem_credential_manager(storage.clone(), clock.clone());
         let cfg = ClaudeAiOAuthConfig::default_with_port(0);
         let client = Arc::new(
-            ClaudeAiOAuthClient::new(cfg, http as Arc<dyn HttpTransport>, cm).with_clock(clock),
+            ClaudeAiOAuthClient::new(cfg, http.clone() as Arc<dyn HttpTransport>, cm)
+                .with_clock(clock),
         );
 
         let was_opened = Arc::new(AtomicBool::new(false));
@@ -524,7 +529,26 @@ mod tests {
             OAuthHandle::new(client).with_browser_opener(opener),
             storage,
             was_opened,
+            http,
         )
+    }
+
+    /// `redirect_uri` off the `oauth/token` POST body. It travels ONLY in the
+    /// body (the URL is the fixed `token_endpoint`), so the transport's URL
+    /// routing cannot observe it — assertions on the exchange must come here.
+    fn exchange_redirect_uri(http: &MockHttp) -> String {
+        let reqs = http.requests.lock().unwrap();
+        let exchange = reqs
+            .iter()
+            .find(|r| r.url.contains("oauth/token"))
+            .expect("token exchange was issued");
+        let body: serde_json::Value =
+            serde_json::from_str(exchange.body.as_deref().expect("exchange has a body"))
+                .expect("exchange body is JSON");
+        body["redirect_uri"]
+            .as_str()
+            .expect("exchange body carries redirect_uri")
+            .to_string()
     }
 
     fn parse_authorize_url(url: &str) -> (u16, String) {
@@ -563,7 +587,7 @@ mod tests {
             "account":{"uuid":"acc-uuid","email_address":"token@example.com"},
             "organization":{"uuid":"org-token"}
         }"#;
-        let (handle, storage, opened) = handle_with_token_body(body);
+        let (handle, storage, opened, _http) = handle_with_token_body(body);
         let info = handle.login().await.expect("login ok");
         assert_eq!(info.email, "token@example.com");
         assert_eq!(info.org_id, "org-token");
@@ -584,7 +608,7 @@ mod tests {
         let _g = crate::oauth::openai::testsupport::port_guard().await;
         // Token body omits account/organization → profile GET is used.
         let body = r#"{"access_token":"acc","refresh_token":"ref","expires_in":3600}"#;
-        let (handle, _storage, _opened) = handle_with_token_body(body);
+        let (handle, _storage, _opened, _http) = handle_with_token_body(body);
         let info = handle.login().await.expect("login ok");
         assert_eq!(info.email, "profile@example.com");
         assert_eq!(info.org_id, "org-from-profile");
@@ -597,7 +621,7 @@ mod tests {
         let _g = crate::oauth::openai::testsupport::port_guard().await;
         let body = r#"{"access_token":"acc","refresh_token":"ref","expires_in":3600,
             "account":{"uuid":"u","email_address":"e@x"},"organization":{"uuid":"o"}}"#;
-        let (handle, storage, _) = handle_with_token_body(body);
+        let (handle, storage, _, _http) = handle_with_token_body(body);
         handle.login().await.expect("login ok");
         assert_eq!(storage.count("lingxi"), 3);
 
@@ -612,7 +636,7 @@ mod tests {
     #[tokio::test]
     async fn current_user_none_when_not_logged_in() {
         let body = r#"{"access_token":"acc","expires_in":1}"#;
-        let (handle, _storage, _) = handle_with_token_body(body);
+        let (handle, _storage, _, _http) = handle_with_token_body(body);
         assert!(handle.current_user().await.is_none());
     }
 
@@ -631,7 +655,7 @@ mod tests {
             "account":{"uuid":"acc-uuid","email_address":"token@example.com"},
             "organization":{"uuid":"org-token"}
         }"#;
-        let (handle, _storage, opened) = handle_with_token_body(body);
+        let (handle, _storage, opened, http) = handle_with_token_body(body);
         // Failing opener: never drives the loopback callback.
         let handle = handle.with_browser_opener(Arc::new(|_url: &str| {
             Err(AuthError::ServerError(
@@ -669,6 +693,45 @@ mod tests {
             url.contains("redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback"),
             "sink got the manual variant, was: {url}"
         );
+
+        // …and so did the EXCHANGE. The pasted code was minted against the
+        // hosted code page, so presenting the loopback redirect here is an
+        // `invalid_grant` — oracle `iJi` @228909300:
+        // `redirect_uri: o ? Ds().MANUAL_REDIRECT_URL : \`http://localhost:${n}/callback\``
+        // with `useManualRedirect: !l` (@234950372, `l = hasPendingResponse()`).
+        assert_eq!(
+            exchange_redirect_uri(&http),
+            "https://platform.claude.com/oauth/code/callback",
+            "manual paste must exchange against MANUAL_REDIRECT_URL"
+        );
+    }
+
+    /// Companion to the manual case: when the loopback listener wins the race
+    /// (`hasPendingResponse()` true ⇒ `useManualRedirect: false`), the exchange
+    /// must present the LOOPBACK redirect the code was actually minted against.
+    /// Together the two pin both arms of the `exchange_redirect` selection.
+    #[tokio::test]
+    async fn loopback_callback_exchanges_against_the_loopback_redirect() {
+        // Binds the fixed loopback port 45321 — same machine-global resource
+        // contention as the OpenAI ports, and these tests raced each other.
+        let _g = crate::oauth::openai::testsupport::port_guard().await;
+        let body = r#"{
+            "access_token":"acc","refresh_token":"ref","expires_in":3600,
+            "scope":"read:user",
+            "account":{"uuid":"acc-uuid","email_address":"token@example.com"},
+            "organization":{"uuid":"org-token"}
+        }"#;
+        let (handle, _storage, opened, http) = handle_with_token_body(body);
+        handle.login().await.expect("login ok");
+        assert!(opened.load(Ordering::SeqCst), "loopback opener drove the flow");
+
+        let redirect = exchange_redirect_uri(&http);
+        let port = redirect
+            .strip_prefix("http://localhost:")
+            .and_then(|rest| rest.strip_suffix("/callback"))
+            .and_then(|p| p.parse::<u16>().ok())
+            .unwrap_or_else(|| panic!("expected a loopback redirect, was: {redirect}"));
+        assert!(port > 0, "redirect must carry the bound port, was: {redirect}");
     }
 
     /// M13: a login whose token carries `user:profile` resolves the profile
@@ -693,7 +756,7 @@ mod tests {
         }"#;
         let profile_body = r#"{"organization":{"organization_type":"claude_max","uuid":"org-token",
             "rate_limit_tier":"default_claude_max_20x"}}"#;
-        let (handle, storage, _) = handle_with_bodies(token_body, profile_body);
+        let (handle, storage, _, _http) = handle_with_bodies(token_body, profile_body);
         handle.login().await.expect("login ok");
 
         let clock = TestClock::new(1_000);
@@ -718,7 +781,7 @@ mod tests {
     async fn browser_failure_alone_keeps_waiting_not_error() {
         let _g = crate::oauth::openai::testsupport::port_guard().await;
         let body = r#"{"access_token":"acc","expires_in":3600}"#;
-        let (handle, _storage, _) = handle_with_token_body(body);
+        let (handle, _storage, _, _http) = handle_with_token_body(body);
         let handle = handle.with_browser_opener(Arc::new(|_url: &str| {
             Err(AuthError::ServerError("could not open browser".into()))
         }));

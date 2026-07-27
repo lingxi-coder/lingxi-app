@@ -123,13 +123,40 @@ struct RawFrontmatter {
     agent: Option<String>,
 }
 
-/// A frontmatter value that TS `parseBooleanFrontmatter` accepts as a boolean:
-/// either a real YAML bool or the literal string `"true"`.
+/// A frontmatter value the boolean coercer accepts: a real YAML bool, a
+/// string, or a bare number (cc 2.1.218 `Kde` takes `boolean|string|number` —
+/// unquoted `1`/`0` must not fail the untagged deserialization).
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum Boolish {
     Bool(bool),
+    Num(serde_yaml::Number),
     Str(String),
+}
+
+impl Boolish {
+    /// cc 2.1.218 `Kde` (`r0e` when introduced): coerce a frontmatter scalar to
+    /// a boolean. Bools pass through; strings/numbers are stringified then
+    /// trim+lowercase matched against the truthy set `{"true","1","yes","on"}`
+    /// and the falsy set `{"false","0","no","off"}` (`Yt`/`su`). Anything else
+    /// is `None` — the field is treated as UNDECLARED, not `false`.
+    fn coerce(&self) -> Option<bool> {
+        let s = match self {
+            Self::Bool(b) => return Some(*b),
+            // JS `String(number)`: integers print without a fraction. YAML
+            // floats keep their dot (`1.0` → "1" in JS vs "1.0" here) — a
+            // fractional spelling matches neither set either way, and the
+            // integral spellings the changelog names (`1`/`0`) parse as YAML
+            // integers, so the sets line up.
+            Self::Num(n) => n.to_string(),
+            Self::Str(s) => s.clone(),
+        };
+        match s.trim().to_lowercase().as_str() {
+            "true" | "1" | "yes" | "on" => Some(true),
+            "false" | "0" | "no" | "off" => Some(false),
+            _ => None,
+        }
+    }
 }
 
 /// `allowed-tools` accepts either a single string or a list of strings
@@ -721,26 +748,20 @@ fn build_frontmatter(raw: RawFrontmatter) -> CommandFrontmatter {
         "powershell" => Some(crate::model::FrontmatterShell::PowerShell),
         _ => None,
     });
-    // SLASH.1: TS `parseBooleanFrontmatter` (frontmatterParser.ts) returns true
-    // ONLY for a boolean `true` or the exact string `"true"` — every other value
-    // (including `"false"`, `"yes"`, `1`) is false.
-    let disable_model_invocation = match raw.disable_model_invocation {
-        Some(Boolish::Bool(b)) => b,
-        Some(Boolish::Str(s)) => s == "true",
-        None => false,
-    };
-    // `background` follows the same boolean-frontmatter rule as
-    // `disable-model-invocation` (claude `parseBooleanFrontmatter`): a real
-    // boolean, or the exact strings `"true"` / `"false"`. Anything else is not
-    // a declaration at all and leaves the default (background) in force —
-    // NOT `false`, which would silently un-background a forking skill over a
-    // typo.
-    let background = match raw.background {
-        Some(Boolish::Bool(b)) => Some(b),
-        Some(Boolish::Str(s)) if s == "true" => Some(true),
-        Some(Boolish::Str(s)) if s == "false" => Some(false),
-        Some(Boolish::Str(_)) | None => None,
-    };
+    // SLASH.1 (updated for cc 2.1.218): frontmatter booleans coerce via `Kde`
+    // — `yes`/`no`/`on`/`off`/`1`/`0` (case-insensitive, trimmed) join
+    // `true`/`false`. `disable-model-invocation` uses `rtr` = `Kde(v) ?? false`
+    // (a garbage value that coerces to neither set falls back to false).
+    let disable_model_invocation = raw
+        .disable_model_invocation
+        .as_ref()
+        .and_then(Boolish::coerce)
+        .unwrap_or(false);
+    // `background` uses bare `Kde` (claude `background:Kde(…)`): a value that
+    // coerces to neither set is not a declaration at all and leaves the
+    // default (background) in force — NOT `false`, which would silently
+    // un-background a forking skill over a typo.
+    let background = raw.background.as_ref().and_then(Boolish::coerce);
     CommandFrontmatter {
         disallowed_tools,
         context: raw.context,
@@ -1257,22 +1278,51 @@ mod tests {
 
     #[test]
     fn frontmatter_disable_model_invocation_bool_and_string_true() {
-        // SLASH.1: TS parseBooleanFrontmatter is true ONLY for `true` / "true".
-        let (fm, _) = parse_frontmatter("---\ndisable-model-invocation: true\n---\nx");
-        assert!(fm.disable_model_invocation);
-        let (fm, _) = parse_frontmatter("---\ndisable-model-invocation: \"true\"\n---\nx");
-        assert!(fm.disable_model_invocation);
+        // SLASH.1 / cc 2.1.218 `Kde`: `true`, "true", and the 2.1.218 truthy
+        // spellings ("yes"/"on"/"1", case-insensitive) all coerce to true.
+        for raw in [
+            "---\ndisable-model-invocation: true\n---\nx",
+            "---\ndisable-model-invocation: \"true\"\n---\nx",
+            "---\ndisable-model-invocation: yes\n---\nx",
+            "---\ndisable-model-invocation: \"ON\"\n---\nx",
+            "---\ndisable-model-invocation: 1\n---\nx",
+        ] {
+            let (fm, _) = parse_frontmatter(raw);
+            assert!(fm.disable_model_invocation, "raw: {raw}");
+        }
     }
 
     #[test]
     fn frontmatter_disable_model_invocation_false_and_absent() {
-        // SLASH.1: anything other than true/"true" (incl. "false", absent) is false.
-        let (fm, _) = parse_frontmatter("---\ndisable-model-invocation: false\n---\nx");
-        assert!(!fm.disable_model_invocation);
-        let (fm, _) = parse_frontmatter("---\ndisable-model-invocation: \"yes\"\n---\nx");
-        assert!(!fm.disable_model_invocation);
+        // cc 2.1.218: the falsy set ("false"/"no"/"off"/"0"), garbage (rtr →
+        // Kde ?? false), and absent are all false.
+        for raw in [
+            "---\ndisable-model-invocation: false\n---\nx",
+            "---\ndisable-model-invocation: \"No\"\n---\nx",
+            "---\ndisable-model-invocation: off\n---\nx",
+            "---\ndisable-model-invocation: 0\n---\nx",
+            "---\ndisable-model-invocation: \"garbage\"\n---\nx",
+            "---\ndescription: d\n---\nx",
+        ] {
+            let (fm, _) = parse_frontmatter(raw);
+            assert!(!fm.disable_model_invocation, "raw: {raw}");
+        }
+    }
+
+    #[test]
+    fn frontmatter_background_coercion_and_undeclared() {
+        // `background` uses bare `Kde`: truthy/falsy spellings declare it;
+        // garbage leaves it UNDECLARED (None) — never false.
+        let (fm, _) = parse_frontmatter("---\nbackground: yes\n---\nx");
+        assert_eq!(fm.background, Some(true));
+        let (fm, _) = parse_frontmatter("---\nbackground: \"off\"\n---\nx");
+        assert_eq!(fm.background, Some(false));
+        let (fm, _) = parse_frontmatter("---\nbackground: 0\n---\nx");
+        assert_eq!(fm.background, Some(false));
+        let (fm, _) = parse_frontmatter("---\nbackground: maybe\n---\nx");
+        assert_eq!(fm.background, None);
         let (fm, _) = parse_frontmatter("---\ndescription: d\n---\nx");
-        assert!(!fm.disable_model_invocation);
+        assert_eq!(fm.background, None);
     }
 
     #[test]

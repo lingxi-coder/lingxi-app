@@ -61,12 +61,24 @@ pub struct SkillFrontmatter {
     /// When `false` the model cannot invoke this via the Skill tool; only users
     /// can type the slash command. When unset (`None`) the default behaviour
     /// applies (both user and model may invoke). Binary bytes 71015792, 94993776.
-    #[serde(rename = "user-invocable")]
+    /// cc 2.1.218: the declared value coerces via `rtr` = `Kde(v) ?? false`
+    /// (`yes`/`on`/`1` → `Some(true)`, `no`/`off`/`0` → `Some(false)`, any
+    /// other declared value → `Some(false)`).
+    #[serde(
+        rename = "user-invocable",
+        default,
+        deserialize_with = "de_declared_bool_rtr"
+    )]
     pub user_invocable: Option<bool>,
     /// When `true` the `Skill` tool is not permitted to invoke this skill — only
     /// a user typing the slash command may invoke it.
     /// Binary bytes 94993776 + SkillTool error string `disable-model-invocation`.
-    #[serde(rename = "disable-model-invocation")]
+    /// cc 2.1.218: coerces via `rtr` = `Kde(v) ?? false`.
+    #[serde(
+        rename = "disable-model-invocation",
+        default,
+        deserialize_with = "de_bool_rtr"
+    )]
     pub disable_model_invocation: bool,
     /// Placeholder text shown after the slash command name in the UI.
     /// Binary bytes 94993872. Accepts the `arguments` alias used in some docs.
@@ -104,20 +116,29 @@ pub struct SkillFrontmatter {
     /// (see `tools/skill::fork::should_background_fork`). Only the background
     /// path freezes command denies and writes the scoping sidecars, because
     /// only it can be resumed later.
+    /// cc 2.1.218: coerces via bare `Kde` — a garbage value is UNDECLARED
+    /// (`None`, so the `?? true` default stays in force), never `false`.
+    #[serde(default, deserialize_with = "de_declared_bool_kde")]
     pub background: Option<bool>,
     /// Model override for this skill invocation. Binary bytes 196457593.
     pub model: Option<String>,
     /// Hide this skill from the slash-command listing shown to the model.
-    /// Binary bytes 155749616.
-    #[serde(rename = "hide-from-slash-command-tool")]
+    /// Binary bytes 155749616. cc 2.1.218: coerces via `rtr` = `Kde(v) ?? false`.
+    #[serde(
+        rename = "hide-from-slash-command-tool",
+        default,
+        deserialize_with = "de_bool_rtr"
+    )]
     pub hide_from_slash_command_tool: bool,
     /// Author metadata (survey tracking). Binary bytes 94994016.
     pub created_by: Option<String>,
     /// Improver metadata (survey tracking). Binary bytes 94994048.
     pub improved_by: Option<String>,
     /// When true the registry may surface this skill via auto-search.
-    /// LingXi-only extension (not in binary's frontmatter key list).
-    #[serde(default = "default_true")]
+    /// LingXi-only extension (not in binary's frontmatter key list); accepts
+    /// the same `Kde` boolean spellings, with garbage keeping the `true`
+    /// default (undeclared).
+    #[serde(default = "default_true", deserialize_with = "de_bool_default_true")]
     pub auto_search: bool,
     /// Phrases that should trigger discovery of this skill.
     /// LingXi-only extension (not in binary's frontmatter key list).
@@ -126,6 +147,80 @@ pub struct SkillFrontmatter {
 
 fn default_true() -> bool {
     true
+}
+
+/// A frontmatter scalar the cc 2.1.218 boolean coercer (`Kde`, née `r0e`)
+/// accepts: `boolean | string | number`. Any other shape (list, map, null)
+/// coerces to "not a boolean".
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum BoolishScalar {
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    Str(String),
+}
+
+impl BoolishScalar {
+    /// `Kde`: bool passthrough; strings/numbers stringify (JS `String(e)` —
+    /// integral floats print without a fraction) then trim+lowercase-match the
+    /// truthy set `{"true","1","yes","on"}` / falsy set `{"false","0","no",
+    /// "off"}` (`Yt`/`su`). Anything else is `None` (not declared).
+    fn coerce(&self) -> Option<bool> {
+        let s = match self {
+            Self::Bool(b) => return Some(*b),
+            Self::Int(n) => n.to_string(),
+            #[allow(clippy::cast_possible_truncation)]
+            Self::Float(f) if f.fract() == 0.0 && f.is_finite() => (*f as i64).to_string(),
+            Self::Float(f) => f.to_string(),
+            Self::Str(s) => s.clone(),
+        };
+        match s.trim().to_lowercase().as_str() {
+            "true" | "1" | "yes" | "on" => Some(true),
+            "false" | "0" | "no" | "off" => Some(false),
+            _ => None,
+        }
+    }
+}
+
+/// `rtr` = `Kde(v) ?? false` for a plain `bool` field. Only invoked when the
+/// key is PRESENT (serde `deserialize_with`), so a declared-but-garbage value
+/// (and YAML `null`) lands on `false`, exactly like the oracle.
+fn de_bool_rtr<'de, D>(d: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = Option::<BoolishScalar>::deserialize(d)?;
+    Ok(v.and_then(|b| b.coerce()).unwrap_or(false))
+}
+
+/// `rtr` for an `Option<bool>` field whose ABSENCE means "unset": a present
+/// key always declares (`U === void 0 ? !0 : rtr(U)` — garbage/null → false).
+fn de_declared_bool_rtr<'de, D>(d: D) -> Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = Option::<BoolishScalar>::deserialize(d)?;
+    Ok(Some(v.and_then(|b| b.coerce()).unwrap_or(false)))
+}
+
+/// Bare `Kde` for an `Option<bool>` field: a value coercing to neither set is
+/// UNDECLARED (`None`), never `false`.
+fn de_declared_bool_kde<'de, D>(d: D) -> Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = Option::<BoolishScalar>::deserialize(d)?;
+    Ok(v.and_then(|b| b.coerce()))
+}
+
+/// `Kde(v) ?? true` — for the LingXi-only `auto_search` default-true flag.
+fn de_bool_default_true<'de, D>(d: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = Option::<BoolishScalar>::deserialize(d)?;
+    Ok(v.and_then(|b| b.coerce()).unwrap_or(true))
 }
 
 /// Where the skill originally came from (provenance classification).

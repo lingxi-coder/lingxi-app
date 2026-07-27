@@ -27,6 +27,10 @@ branding.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml = "0.9"
+# cc 2.1.218 agent-name validation: `name.normalize("NFKC").includes(":")` —
+# NFKC catches colon look-alikes (U+FF1A/U+FE55) before the plugin-namespace
+# reservation check. Same crate/version as `mcp`.
+unicode-normalization = "0.1"
 boon = "0.6"
 thiserror.workspace = true
 async-trait.workspace = true

@@ -1760,9 +1760,39 @@ mod tests {
 
     // ── (cc 2.1.219) `anthropic-dispatch-id: v2s` opt-in ────────────────────
 
-    /// Serializes the tests that flip the process-global `tengu_cedar_lattice`
-    /// override (and `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL`).
-    static DISPATCH_FLAG_LOCK: Mutex<()> = Mutex::new(());
+    /// Guards the process-global `tengu_cedar_lattice` override (and
+    /// `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL`).
+    ///
+    /// `telemetry::test_set_flag` writes a PROCESS-GLOBAL map, so serializing
+    /// only the tests that flip it is not enough: while the flip is live, every
+    /// *concurrently running* test in this binary reads the flipped value too.
+    /// A leaked opt-in makes first-party attempts carry `anthropic-dispatch-id`,
+    /// and [`AnthropicAdapter::note_dispatch_header_failure`] then inserts one
+    /// extra, budget-free "strip and retry" attempt on the first 5xx — which
+    /// silently shifts every attempt-count and fallback-position assertion in
+    /// the drive-loop tests (they consumed one more canned response than they
+    /// expected and never reached the fallback entry).
+    ///
+    /// So: a test that FLIPS the flag takes [`cedar_lattice_write`]; a test
+    /// whose expectations depend on the header being ABSENT takes
+    /// [`cedar_lattice_read`]. Readers exclude writers, which is the whole
+    /// invariant — concurrent readers of an unflipped flag are fine.
+    static DISPATCH_FLAG_LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+    /// Exclusive side of [`DISPATCH_FLAG_LOCK`] — for tests that flip the flag.
+    fn cedar_lattice_write() -> std::sync::RwLockWriteGuard<'static, ()> {
+        DISPATCH_FLAG_LOCK
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Shared side of [`DISPATCH_FLAG_LOCK`] — for tests that require the
+    /// dispatch opt-in to stay OFF (attempt counts, fallback walking, backoff).
+    fn cedar_lattice_read() -> std::sync::RwLockReadGuard<'static, ()> {
+        DISPATCH_FLAG_LOCK
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 
     /// Turns `tengu_cedar_lattice` on for the duration of a test and clears it
     /// on drop, so a panicking test cannot leak the opt-in into its neighbours.
@@ -1783,9 +1813,9 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_header_absent_by_default() {
-        let _g = DISPATCH_FLAG_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Reader: asserts the DEFAULT (unflipped) value, so it only has to
+        // exclude the flippers, not its fellow readers.
+        let _g = cedar_lattice_read();
         let headers = headers_after_inject_for_protocol(
             ProtocolFamily::AnthropicMessages,
             ProviderId::AnthropicFirstParty,
@@ -1805,9 +1835,7 @@ mod tests {
     /// treated a set env var as authoritative in both directions.
     #[tokio::test]
     async fn dispatch_header_ignores_the_inert_env_var() {
-        let _g = DISPATCH_FLAG_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _g = cedar_lattice_write();
         std::env::set_var("CLAUDE_CODE_DISPATCH_V2S", "1");
         let flag_off = headers_after_inject_for_protocol(
             ProtocolFamily::AnthropicMessages,
@@ -1843,9 +1871,7 @@ mod tests {
     /// `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL` is truthy.
     #[tokio::test]
     async fn dispatch_header_needs_both_halves_of_ooe() {
-        let _g = DISPATCH_FLAG_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _g = cedar_lattice_write();
         let _on = CedarLatticeOn::set();
         let first_party = headers_after_inject_for_protocol(
             ProtocolFamily::AnthropicMessages,
@@ -1910,9 +1936,7 @@ mod tests {
     /// `undefined`) does.
     #[tokio::test]
     async fn dispatch_header_skips_auxiliary_queries() {
-        let _g = DISPATCH_FLAG_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _g = cedar_lattice_write();
         let _on = CedarLatticeOn::set();
         let adapter = make_adapter_for_protocol(
             ProtocolFamily::AnthropicMessages,
@@ -1938,9 +1962,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_header_stripped_after_5xx_and_not_on_429() {
-        let _g = DISPATCH_FLAG_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _g = cedar_lattice_write();
         let _on = CedarLatticeOn::set();
         let adapter = make_adapter_for_protocol(
             ProtocolFamily::AnthropicMessages,
@@ -2143,9 +2165,7 @@ mod tests {
         use ::telemetry::AnalyticsValue;
         use futures::StreamExt as _;
 
-        let _g = DISPATCH_FLAG_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _g = cedar_lattice_write();
         let _on = CedarLatticeOn::set();
         let transport = Arc::new(BodyPhaseDropThenOk {
             attempts: Mutex::new(Vec::new()),
@@ -2381,6 +2401,10 @@ mod tests {
     /// Plan test: budget terminates after DEFAULT_MAX_RETRIES + 1 executions.
     #[tokio::test]
     async fn retry_terminal_after_budget() {
+        // The drive loop's attempt budget is only stable while the dispatch
+        // opt-in stays OFF: a leaked `tengu_cedar_lattice` adds one extra,
+        // budget-free "strip and retry" attempt on the first 5xx.
+        let _dispatch_off = cedar_lattice_read();
         // All responses are 500 — should retry DEFAULT_MAX_RETRIES times then fail.
         let transport = FakeTransport::sequence(vec![FakeResponse::Ok(ProviderResponse::json(
             500,
@@ -3981,6 +4005,10 @@ mod tests {
     /// Asserts the model sequence primary→c0→c1 via captured request bodies.
     #[tokio::test]
     async fn two_entry_chain_walks_both_entries() {
+        // The drive loop's attempt budget is only stable while the dispatch
+        // opt-in stays OFF: a leaked `tengu_cedar_lattice` adds one extra,
+        // budget-free "strip and retry" attempt on the first 5xx.
+        let _dispatch_off = cedar_lattice_read();
         let overloaded = serde_json::json!({
             "type": "error",
             "error": {"type": "overloaded_error", "message": "Overloaded"}
@@ -4120,6 +4148,10 @@ mod tests {
     /// verifies via `seen_body_model` that the model sequence is correct.
     #[tokio::test]
     async fn single_entry_chain_behaves_like_batch1() {
+        // The drive loop's attempt budget is only stable while the dispatch
+        // opt-in stays OFF: a leaked `tengu_cedar_lattice` adds one extra,
+        // budget-free "strip and retry" attempt on the first 5xx.
+        let _dispatch_off = cedar_lattice_read();
         let overloaded = serde_json::json!({
             "type": "error",
             "error": {"type": "overloaded_error", "message": "Overloaded"}
@@ -4186,6 +4218,10 @@ mod tests {
     /// the same code path; this test guards that wiring.
     #[tokio::test]
     async fn global_fallback_model_works_without_chain_entry() {
+        // The drive loop's attempt budget is only stable while the dispatch
+        // opt-in stays OFF: a leaked `tengu_cedar_lattice` adds one extra,
+        // budget-free "strip and retry" attempt on the first 5xx.
+        let _dispatch_off = cedar_lattice_read();
         let overloaded = serde_json::json!({
             "type": "error",
             "error": {"type": "overloaded_error", "message": "Overloaded"}
@@ -4247,6 +4283,10 @@ mod tests {
     /// effective limit.  We temporarily clear the env var then restore it.
     #[tokio::test]
     async fn settings_max_retries_beats_default() {
+        // The drive loop's attempt budget is only stable while the dispatch
+        // opt-in stays OFF: a leaked `tengu_cedar_lattice` adds one extra,
+        // budget-free "strip and retry" attempt on the first 5xx.
+        let _dispatch_off = cedar_lattice_read();
         // We can test the settings path directly: when the env var is absent
         // the settings_max_retries field applies.  We control LINGXI_MAX_RETRIES
         // for the duration of this test — accept minor isolation risk since the
@@ -4351,6 +4391,10 @@ mod tests {
     /// un-scaled upper bound (600 ms) which proves scaling is active.
     #[tokio::test(start_paused = true)]
     async fn backoff_ms_scales_jitter_base() {
+        // The drive loop's attempt budget is only stable while the dispatch
+        // opt-in stays OFF: a leaked `tengu_cedar_lattice` adds one extra,
+        // budget-free "strip and retry" attempt on the first 5xx.
+        let _dispatch_off = cedar_lattice_read();
         let transport = FakeTransport::sequence(vec![
             FakeResponse::Ok(ProviderResponse::json(
                 500,

@@ -471,26 +471,20 @@ mod tests {
     fn blank_remote_url_is_schema_valid_and_only_absent_url_is_required() {
         // `cLi`/`J5n` declare `url: E.string()` with no `.min(1)`: a blank url
         // PASSES the schema, so the entry loads (and reports as
-        // `- Not configured`). The only warning is `ty_`'s whitespace notice.
-        let c = json!({"mcpServers":{"bad":{"type":"http","url":"   "}}});
-        assert!(
-            only(&c).is_empty(),
-            "an empty url is unconfigured, not a schema violation"
-        );
+        // `- Not configured`). A WHITESPACE-only url is schema-valid too; the
+        // only thing said about it is `ty_`'s whitespace notice.
+        let w = only(&json!({"mcpServers":{"bad":{"type":"http","url":"   "}}}));
+        assert_eq!(w.len(), 1, "whitespace url is not a schema violation: {w:?}");
+        assert_eq!(w[0].message, "Leading or trailing whitespace in: url");
+        // A truly empty string is valid AND whitespace-clean ⇒ nothing at all.
+        assert!(only(&json!({"mcpServers":{"bad":{"type":"http","url":""}}})).is_empty());
     }
 
-    /// An ABSENT `url` on a remote type IS still invalid.
+    /// An ABSENT `url` on a remote type IS still invalid — that is the case the
+    /// schema rejects, and it is the one `url: Required` belongs to.
     #[test]
     fn a_missing_remote_url_is_still_reported_as_required() {
-        let c = json!({"mcpServers":{"bad":{"type":"http"}}});
-        let w = only(&c);
-        assert_eq!(w.len(), 1);
-        assert_eq!(w[0].message, "Leading or trailing whitespace in: url");
-        // A truly empty string is valid AND whitespace-clean ⇒ no warning.
-        assert!(only(&json!({"mcpServers":{"bad":{"type":"http","url":""}}})).is_empty());
-        // An ABSENT url is still the schema failure.
-        let c = json!({"mcpServers":{"bad":{"type":"http"}}});
-        let w = only(&c);
+        let w = only(&json!({"mcpServers":{"bad":{"type":"http"}}}));
         assert_eq!(w.len(), 1);
         assert_eq!(
             w[0].message,

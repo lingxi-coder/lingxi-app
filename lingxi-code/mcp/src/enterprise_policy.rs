@@ -1283,10 +1283,20 @@ pub fn apply_enterprise_mcp_policy(configs: &mut Vec<McpServerConfig>) {
 #[cfg(test)]
 mod tests {
 
-    /// Managed-tier `env` overrides the startup snapshot, folded FIRST-wins
-    /// across tiers (oracle `e[r] ??= n`, then `{...NQr(), ...e}`).
+    /// Within the FILE tier, a `managed-settings.d` drop-in OVERRIDES the base
+    /// `managed-settings.json`, and the drop-ins are applied in sorted order.
+    ///
+    /// Oracle `g4r`: `r = N7(r, base, woe)` then, for each sorted `.d` entry,
+    /// `r = N7(r, dropIn, woe)`. `N7` is lodash `mergeWith` and `woe` only
+    /// customizes ARRAYS (concat+dedup, or replace for `fallbackModel`), so a
+    /// scalar like an `env` value takes the LAST writer.
+    ///
+    /// Do not confuse this with `cWu`'s `e[r] ??= n`, which is first-wins — that
+    /// fold runs one level up, ACROSS the `VQ()` tiers (remote → plist/hklm →
+    /// file), where the whole file tier below has already been collapsed by
+    /// `g4r` into a single settings object.
     #[test]
-    fn managed_env_is_folded_first_wins_across_tiers() {
+    fn a_managed_drop_in_overrides_the_base_file() {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(
             dir.path().join("managed-settings.json"),
@@ -1295,7 +1305,6 @@ mod tests {
         .unwrap();
         let dd = dir.path().join("managed-settings.d");
         std::fs::create_dir_all(&dd).unwrap();
-        // A drop-in must NOT override a key the base tier already defined.
         std::fs::write(
             dd.join("10-late.json"),
             r#"{"env":{"POLICY_HOST":"late.example","ONLY_LATE":"l"}}"#,
@@ -1305,9 +1314,10 @@ mod tests {
         let env = super::managed_sources_env_in(dir.path());
         assert_eq!(
             env.get("POLICY_HOST").map(String::as_str),
-            Some("base.example"),
-            "first tier to define a key wins"
+            Some("late.example"),
+            "the drop-in is merged ON TOP of the base file"
         );
+        // Keys only one of them defines survive either way.
         assert_eq!(env.get("ONLY_BASE").map(String::as_str), Some("b"));
         assert_eq!(env.get("ONLY_LATE").map(String::as_str), Some("l"));
     }
@@ -1329,16 +1339,27 @@ mod tests {
     /// would let a lower-trust tier steer what an enterprise policy matches.
     #[test]
     fn policy_expansion_ignores_a_variable_set_after_startup() {
-        // `startup_env()` is snapshotted on first use; prime it now so the
-        // variable set below is unambiguously "after startup".
+        // The snapshot is taken on first use; prime it now so the variable set
+        // below is unambiguously "after startup".
         super::prime_startup_env();
         let key = "LINGXI_TEST_POLICY_EXPANSION_LATE";
         std::env::set_var(key, "attacker.example");
-        let expanded = super::get(&format!("${{{key}}}"));
+        let envs = super::policy_expansion_env();
+        let expanded = super::expand_policy_string(&format!("${{{key}}}"), &envs.env, None);
+        let via_get = super::get(&format!("${{{key}}}"));
         std::env::remove_var(key);
         assert_ne!(
             expanded, "attacker.example",
-            "a variable set AFTER the startup freeze must not reach policy expansion"
+            "a variable set AFTER the startup freeze must not reach POLICY expansion"
+        );
+        // The candidate-config side is the deliberate contrast: `byo(e)` is
+        // `bY(e)` with NO env argument (@231815041's neighbourhood), i.e. the
+        // LIVE process env, while policy predicates go through
+        // `uWu(e, cWu(), …)`. Asserting both directions here keeps a future
+        // "unify these two" refactor from silently re-opening the hole.
+        assert_eq!(
+            via_get, "attacker.example",
+            "the CANDIDATE side expands against the live env, by design"
         );
     }
     use super::*;

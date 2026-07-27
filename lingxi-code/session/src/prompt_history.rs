@@ -565,13 +565,19 @@ mod tests {
         );
         filetime::set_file_mtime(&lock_path, old).unwrap();
 
-        let started = std::time::Instant::now();
-        assert!(!store.flush(), "an unbreakable lock must report failure");
-        // Bounded by the 50/100/200ms retry budget — a spin never returns.
+        // Flush off-thread so a regression reports a timeout instead of hanging
+        // the whole suite: bounded by the 50/100/200ms budget, a spin never
+        // returns at all.
+        let store = std::sync::Arc::new(store);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let flusher = std::sync::Arc::clone(&store);
+        std::thread::spawn(move || {
+            let _ = tx.send(flusher.flush());
+        });
         assert!(
-            started.elapsed() < Duration::from_secs(5),
-            "acquisition must terminate, took {:?}",
-            started.elapsed()
+            !rx.recv_timeout(Duration::from_secs(5))
+                .expect("acquisition must terminate"),
+            "an unbreakable lock must report failure"
         );
         // No drop: the batch is still queued for the next flush.
         fs::remove_file(&lock_path).unwrap();

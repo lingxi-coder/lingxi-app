@@ -114,6 +114,25 @@ fn print_family_help() {
 
 /// `lingxi-cli auth login` — run the browser-PKCE flow without starting a chat
 /// turn.
+/// Parse a pasted manual auth code: `"<code>#<state>"`.
+///
+/// Oracle: `let [m,g] = f.trim().split("#"); if (!m || !g) -> invalid`. Both
+/// halves must be non-empty, so `"abc#"`, `"#xyz"` and a bare `"abc"` are all
+/// rejected. JS `split` keeps everything after the second `#` in later
+/// elements and only the first two are read, so `a#b#c` takes `a` and `b` —
+/// reproduced here with `splitn(2)` on the trimmed input... except that JS
+/// would give `g = "b"` while a naive `split_once` yields `"b#c"`. Use the
+/// first two segments explicitly.
+fn parse_manual_auth_code(line: &str) -> Option<(String, String)> {
+    let mut parts = line.trim().split('#');
+    let code = parts.next().unwrap_or_default();
+    let state = parts.next().unwrap_or_default();
+    if code.is_empty() || state.is_empty() {
+        return None;
+    }
+    Some((code.to_string(), state.to_string()))
+}
+
 async fn run_login(args: &LoginArgs) -> i32 {
     // claude: "Error: --console and --claudeai cannot be used together." (exit 1)
     if args.console && args.claudeai {
@@ -147,11 +166,43 @@ async fn run_login(args: &LoginArgs) -> i32 {
         }
     };
 
-    println!("Opening browser to sign in…");
+    // Manual fallback (oracle @246875900): a readline over stdin accepts
+    // `code#state` pasted from the manual redirect page, racing the loopback
+    // listener. Without it, a user whose browser cannot reach the loopback
+    // (headless box, SSH session, locked-down desktop) had NO way to finish
+    // login — the flow simply timed out after 300s.
+    let (manual_tx, manual_rx) = tokio::sync::oneshot::channel::<(String, String)>();
+    let stdin_reader = tokio::task::spawn_blocking(move || {
+        use std::io::BufRead;
+        let stdin = std::io::stdin();
+        let mut tx = Some(manual_tx);
+        for line in stdin.lock().lines().map_while(Result::ok) {
+            match parse_manual_auth_code(&line) {
+                Some((code, state)) => {
+                    if let Some(tx) = tx.take() {
+                        let _ = tx.send((code, state));
+                    }
+                    return;
+                }
+                // Byte-exact oracle text, on stderr, and the loop CONTINUES —
+                // a typo must not end the login attempt.
+                None => eprintln!("Invalid code. Please make sure the full code was copied."),
+            }
+        }
+    });
+
     let login = auth.login_with_options(OAuthLoginOptions {
         login_hint: args.email.clone(),
         sso: args.sso,
         org_uuid,
+        on_authorize_url: Some(std::sync::Arc::new(|url: &str| {
+            // All three lines print here, in the oracle's order.
+            println!("Opening browser to sign in\u{2026}");
+            println!("If the browser didn't open, visit: {url}");
+            print!("Paste code here if prompted > ");
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+        })),
+        manual_code: Some(manual_rx),
     });
     let info = match tokio::time::timeout(std::time::Duration::from_secs(300), login).await {
         Ok(Ok(info)) => info,
@@ -164,6 +215,9 @@ async fn run_login(args: &LoginArgs) -> i32 {
             return RUNTIME_ERROR;
         }
     };
+
+    // The flow is done; stop reading stdin (oracle `p.close()` in `finally`).
+    stdin_reader.abort();
 
     match engine::settings::enterprise::check_org_membership(
         &org_pin,
@@ -461,5 +515,44 @@ fn env_truthy(var: &str) -> bool {
             matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
         }
         Err(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod manual_auth_code_tests {
+    /// Oracle: `let [m,g]=f.trim().split("#"); if(!m||!g) -> invalid`.
+    #[test]
+    fn a_well_formed_manual_code_parses() {
+        assert_eq!(
+            super::parse_manual_auth_code("abc123#state456"),
+            Some(("abc123".into(), "state456".into()))
+        );
+        // Surrounding whitespace is trimmed before splitting.
+        assert_eq!(
+            super::parse_manual_auth_code("  abc#st  \n"),
+            Some(("abc".into(), "st".into()))
+        );
+    }
+
+    #[test]
+    fn a_missing_half_is_rejected() {
+        for line in ["abc", "abc#", "#state", "", "   ", "#"] {
+            assert_eq!(
+                super::parse_manual_auth_code(line),
+                None,
+                "{line:?} must be rejected"
+            );
+        }
+    }
+
+    /// JS `split("#")` then reading only the first two elements: `a#b#c`
+    /// yields `("a","b")`, NOT `("a","b#c")` — a `split_once` would get this
+    /// wrong and exchange a state the server never issued.
+    #[test]
+    fn extra_hashes_take_only_the_first_two_segments() {
+        assert_eq!(
+            super::parse_manual_auth_code("a#b#c"),
+            Some(("a".into(), "b".into()))
+        );
     }
 }

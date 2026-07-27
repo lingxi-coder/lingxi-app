@@ -242,6 +242,36 @@ impl ClaudeAiOAuthClient {
     /// Build an authorize URL with the optional fields exposed by Claude
     /// Code's public authentication commands.
     #[must_use]
+    /// Build the loopback AND manual authorize URLs from ONE PKCE pair.
+    ///
+    /// Calling [`Self::build_authorize_url_with_options`] twice would mint two
+    /// different verifier/state pairs, so a code obtained from one URL could
+    /// never be exchanged against the other. The oracle builds a single pair
+    /// and varies only `redirect_uri`
+    /// (`redirect_uri: n ? MANUAL_REDIRECT_URL : http://localhost:${r}/callback`,
+    /// @228908876).
+    ///
+    /// Returns `(auto_url, manual_url, verifier, state)`.
+    #[must_use]
+    pub fn build_authorize_url_pair(
+        &self,
+        loopback_redirect: &str,
+        options: &AuthorizeOptions,
+    ) -> (String, String, String, String) {
+        let (auto, verifier, state) =
+            self.build_authorize_url_with_options(loopback_redirect, options);
+        // Same pair, different redirect: swap the encoded redirect_uri rather
+        // than regenerating, so verifier/state stay identical by construction.
+        let manual = auto.replace(
+            &format!("redirect_uri={}", form_encode(loopback_redirect)),
+            &format!(
+                "redirect_uri={}",
+                form_encode(&self.config.manual_redirect_uri)
+            ),
+        );
+        (auto, manual, verifier, state)
+    }
+
     pub fn build_authorize_url_with_options(
         &self,
         redirect_uri: &str,
@@ -441,6 +471,41 @@ mod exchange_tests {
         let cm = mem_credential_manager(MemStorage::new(), clock.clone());
         let cfg = ClaudeAiOAuthConfig::default_with_port(45_321);
         ClaudeAiOAuthClient::new(cfg, http as Arc<dyn HttpTransport>, cm).with_clock(clock)
+    }
+
+    /// The two URLs MUST share one PKCE pair: a code obtained from the manual
+    /// page is exchanged with the verifier/state minted alongside the loopback
+    /// URL. Calling the single-URL builder twice would mint two pairs and the
+    /// exchange could never succeed.
+    #[test]
+    fn the_authorize_pair_shares_one_pkce_and_differs_only_by_redirect() {
+        let client = client_with(MockHttp::new(vec![]), 0);
+        let (auto, manual, verifier, state) = client
+            .build_authorize_url_pair("http://localhost:45321/callback", &AuthorizeOptions::default());
+
+        assert!(!verifier.is_empty() && !state.is_empty());
+        let st = format!("state={state}");
+        assert!(auto.contains(&st), "auto missing state: {auto}");
+        assert!(manual.contains(&st), "manual missing state: {manual}");
+
+        assert!(auto.contains("redirect_uri=http%3A%2F%2Flocalhost%3A45321%2Fcallback"));
+        assert!(
+            manual.contains("oauth%2Fcode%2Fcallback"),
+            "manual must use MANUAL_REDIRECT_URL: {manual}"
+        );
+        assert_ne!(auto, manual);
+
+        let strip = |u: &str| {
+            u.split('&')
+                .filter(|p| !p.starts_with("redirect_uri="))
+                .collect::<Vec<_>>()
+                .join("&")
+        };
+        assert_eq!(
+            strip(&auto),
+            strip(&manual),
+            "the pair must differ ONLY in redirect_uri"
+        );
     }
 
     #[test]

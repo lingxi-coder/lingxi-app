@@ -21,6 +21,14 @@ pub struct ClaudeAiOAuthConfig {
     pub client_id: String,
     /// Loopback redirect URI registered for the local CLI flow.
     pub redirect_uri: String,
+    /// Redirect URI for the MANUAL (paste-the-code) fallback — oracle
+    /// `MANUAL_REDIRECT_URL`.
+    ///
+    /// It is NOT interchangeable with [`Self::redirect_uri`]: the oracle
+    /// selects one for the authorize URL AND the same one for the token
+    /// exchange (`redirect_uri: o ? MANUAL_REDIRECT_URL : http://localhost:.../callback`).
+    /// Exchanging a manually-pasted code against the loopback redirect fails.
+    pub manual_redirect_uri: String,
     /// Scopes requested in the authorize URL.
     pub scopes: Vec<String>,
 }
@@ -56,6 +64,9 @@ impl ClaudeAiOAuthConfig {
             profile_endpoint: "https://api.anthropic.com/api/oauth/profile".into(),
             client_id: "9d1c250a-e61b-44d9-88ed-5944d1962f5e".into(),
             redirect_uri: format!("http://localhost:{port}/callback"),
+            // Oracle `MANUAL_REDIRECT_URL` for the prod tier
+            // (2.1.220 @226014228).
+            manual_redirect_uri: "https://platform.claude.com/oauth/code/callback".into(),
             scopes: CLAUDE_CODE_OAUTH_SCOPES
                 .iter()
                 .map(|s| (*s).into())

@@ -59,7 +59,11 @@ pub struct OAuthHandle {
 
 /// Options shared by the top-level `auth login` flow and the interactive
 /// `/login` default.
-#[derive(Debug, Clone, Default)]
+/// Neither `Clone` nor a derived `Debug`: the manual-code channel is a
+/// single-consumer `oneshot::Receiver` (cloning it would be meaningless) and
+/// the URL callback is a closure. The only construction site builds it once
+/// and moves it, so neither derive was load-bearing.
+#[derive(Default)]
 pub struct OAuthLoginOptions {
     /// Pre-populate the account email in the provider UI.
     pub login_hint: Option<String>,
@@ -67,6 +71,29 @@ pub struct OAuthLoginOptions {
     pub sso: bool,
     /// Managed organization UUID forwarded to the provider.
     pub org_uuid: Option<String>,
+    /// Receives the MANUAL authorize URL so the host can print it when the
+    /// browser cannot open (oracle prints it unconditionally alongside
+    /// "Opening browser to sign in…").
+    ///
+    /// It receives the MANUAL url, not the loopback one: a user who follows
+    /// the printed link ends on the manual redirect page and pastes a code,
+    /// which only exchanges against the manual redirect_uri.
+    pub on_authorize_url: Option<Arc<dyn Fn(&str) + Send + Sync>>,
+    /// A manually pasted `(authorization_code, state)`, racing the loopback
+    /// listener. Oracle `handleManualAuthCodeInput`.
+    pub manual_code: Option<tokio::sync::oneshot::Receiver<(String, String)>>,
+}
+
+impl std::fmt::Debug for OAuthLoginOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthLoginOptions")
+            .field("login_hint", &self.login_hint)
+            .field("sso", &self.sso)
+            .field("org_uuid", &self.org_uuid)
+            .field("on_authorize_url", &self.on_authorize_url.is_some())
+            .field("manual_code", &self.manual_code.is_some())
+            .finish()
+    }
 }
 
 impl OAuthHandle {
@@ -92,6 +119,24 @@ impl OAuthHandle {
         authorize: AuthorizeOptions,
         expires_in: Option<u64>,
     ) -> Result<ExchangedTokens, AuthError> {
+        self.run_code_flow_with(authorize, expires_in, None, None)
+            .await
+    }
+
+    /// [`Self::run_code_flow`] with the manual-entry fallback wired.
+    ///
+    /// The loopback callback and a manually pasted code RACE: whichever
+    /// arrives first wins, and the token exchange uses THAT path's
+    /// redirect_uri. Exchanging a pasted code against the loopback redirect
+    /// (or vice versa) is rejected by the server, so the two must not be
+    /// crossed.
+    async fn run_code_flow_with(
+        &self,
+        authorize: AuthorizeOptions,
+        expires_in: Option<u64>,
+        on_authorize_url: Option<Arc<dyn Fn(&str) + Send + Sync>>,
+        manual_code: Option<tokio::sync::oneshot::Receiver<(String, String)>>,
+    ) -> Result<ExchangedTokens, AuthError> {
         // (1+) Bind the loopback listener first so the redirect target exists
         // before the browser opens. Port 0 → OS-assigned; read it back and bake
         // the real port into the redirect_uri so authorize + exchange agree.
@@ -100,30 +145,54 @@ impl OAuthHandle {
             .map_err(callback_to_auth_err)?;
         let redirect_uri = format!("http://localhost:{}/callback", listener.port());
 
-        let (url, verifier, state) = self
+        // ONE PKCE pair, two URLs differing only in redirect_uri.
+        let (auto_url, manual_url, verifier, state) = self
             .client
-            .build_authorize_url_with_options(&redirect_uri, &authorize);
+            .build_authorize_url_pair(&redirect_uri, &authorize);
 
-        // (2) Open the browser (no-op under test).
-        (self.browser_open)(&url)?;
+        // (2) Surface the MANUAL url first, then open the browser — the
+        // oracle's order (`await e(i)` then the browser open), so the printed
+        // fallback is visible even if opening the browser blocks or fails.
+        if let Some(cb) = &on_authorize_url {
+            cb(&manual_url);
+        }
+        (self.browser_open)(&auto_url)?;
 
         // (3) Await the redirect. The socket was already bound before the
         // browser was opened, so the kernel backlog safely holds an immediate
         // callback. Keeping the accept future in this task also means a caller
         // timeout cancels and closes the listener instead of leaking a detached
         // callback task.
-        let params = listener
-            .accept(&state)
-            .await
-            .map_err(callback_to_auth_err)?;
+        // (3) Race the loopback redirect against a manually pasted code.
+        let (code, got_state, exchange_redirect) = match manual_code {
+            Some(rx) => {
+                tokio::select! {
+                    r = listener.accept(&state) => {
+                        let p = r.map_err(callback_to_auth_err)?;
+                        (p.code, p.state, redirect_uri.clone())
+                    }
+                    m = rx => {
+                        let (code, st) = m.map_err(|_| {
+                            AuthError::ServerError("manual code channel closed".into())
+                        })?;
+                        // Pasted codes were issued against the MANUAL redirect.
+                        (code, st, self.client.config().manual_redirect_uri.clone())
+                    }
+                }
+            }
+            None => {
+                let p = listener.accept(&state).await.map_err(callback_to_auth_err)?;
+                (p.code, p.state, redirect_uri.clone())
+            }
+        };
 
-        // (4) Exchange the code for tokens.
+        // (4) Exchange the code for tokens, against the redirect that issued it.
         self.client
             .exchange_code_with_options(
-                &params.code,
+                &code,
                 &verifier,
-                &params.state,
-                &redirect_uri,
+                &got_state,
+                &exchange_redirect,
                 expires_in,
             )
             .await
@@ -141,7 +210,14 @@ impl OAuthHandle {
             login_method: options.sso.then(|| "sso".to_string()),
             scopes: None,
         };
-        let tokens = self.run_code_flow(authorize, None).await?;
+        let tokens = self
+            .run_code_flow_with(
+                authorize,
+                None,
+                options.on_authorize_url,
+                options.manual_code,
+            )
+            .await?;
 
         // (5) Resolve email + org. Prefer the exchange response; otherwise fetch
         //     the profile endpoint with the bearer token.

@@ -76,6 +76,20 @@ impl TasksView {
             Style::default().fg(accent).add_modifier(Modifier::BOLD),
         )));
         lines.push(Line::from(""));
+        if self.rows.is_empty() {
+            // The oracle's Background dialog keeps its empty state INSIDE the
+            // dialog (`children: D.length === 0 ? "No tasks currently running"
+            // : …`) — the agents-view entry opens the picker even with nothing
+            // running, so the line has to render here rather than as a
+            // transcript cell.
+            lines.push(Line::from(Span::styled(
+                "No tasks currently running",
+                dim_style,
+            )));
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled("Esc close", dim_style)));
+            return lines;
+        }
         for (i, r) in self.rows.iter().enumerate() {
             let marker = if i == self.selected {
                 "\u{276f} "
@@ -215,6 +229,32 @@ mod tests {
 
     fn view(rows: Vec<TaskRow>) -> TasksView {
         TasksView::new(rows, Theme::dark())
+    }
+
+    /// The agents-view entry opens this picker with nothing running, so the
+    /// oracle's in-dialog empty body has to render here (Background dialog:
+    /// `children: D.length === 0 ? "No tasks currently running" : …`).
+    #[test]
+    fn empty_snapshot_renders_the_in_view_empty_state() {
+        let v = view(Vec::new());
+        let body: Vec<String> = v
+            .lines()
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        assert_eq!(body[0], "Background Tasks (0)");
+        assert!(
+            body.contains(&"No tasks currently running".to_string()),
+            "empty state missing: {body:?}"
+        );
+        // Nothing to navigate or stop — only the close hint.
+        assert!(!body.iter().any(|l| l.contains("stop task")));
+        assert_eq!(body.last().unwrap(), "Esc close");
     }
 
     #[test]

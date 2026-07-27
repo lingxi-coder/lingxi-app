@@ -73,7 +73,19 @@ fn uwu_standard_model(model: &str) -> bool {
     {
         return true;
     }
-    if t == "claude-opus-4-8" || t == "claude-fable-5" || t == "claude-mythos-5" {
+    // Oracle `oug()` @228079752 asks the CAPABILITY REGISTRY first:
+    //   `if (LN(t,"lean_prompt") || t === "claude-mythos-5") return false;`
+    // This used to be a hardcoded name list (`claude-opus-4-8 | claude-fable-5
+    // | claude-mythos-5`). That list omitted `claude-opus-5`, which reached the
+    // right answer only by falling through to the default below — correct by
+    // accident, and silently wrong for any model added later. `mythos-5` stays
+    // a NAME check because the oracle keeps it one: it carries no capabilities
+    // at all yet must still take this branch.
+    if traits::model_capabilities::has_capability(
+        &t,
+        traits::model_capabilities::ModelCapability::LeanPrompt,
+    ) || t == "claude-mythos-5"
+    {
         return false;
     }
     // `return !pd()` — provider class unavailable in the tool layer; default
@@ -129,6 +141,31 @@ mod tests {
     fn none_is_long() {
         assert!(!dh_simple_system_prompt(None));
         assert!(!dh_simple_system_prompt(Some("")));
+    }
+
+    /// `claude-opus-5` is SHORT because it carries `lean_prompt` in the
+    /// capability registry — not because it fell off the end of a name list.
+    /// Before the registry it was absent from both branches and reached the
+    /// right answer by accident.
+    #[test]
+    fn opus_5_is_short_via_the_capability_registry() {
+        assert!(dh_simple_system_prompt(Some("claude-opus-5")));
+        assert!(traits::model_capabilities::has_capability(
+            "claude-opus-5",
+            traits::model_capabilities::ModelCapability::LeanPrompt
+        ));
+    }
+
+    /// Every model the oracle marks `lean_prompt` takes the SHORT prompt, and
+    /// the pre-lean Opus models still take the LONG one.
+    #[test]
+    fn lean_prompt_models_are_short_and_older_opus_is_long() {
+        for m in ["claude-opus-4-8", "claude-opus-5", "claude-fable-5"] {
+            assert!(dh_simple_system_prompt(Some(m)), "{m} must be SHORT");
+        }
+        for m in ["claude-opus-4-5", "claude-opus-4-6", "claude-opus-4-7"] {
+            assert!(!dh_simple_system_prompt(Some(m)), "{m} must be LONG");
+        }
     }
 
     #[test]

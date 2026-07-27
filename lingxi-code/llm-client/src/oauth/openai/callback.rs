@@ -257,7 +257,7 @@ mod tests {
     #[tokio::test]
     async fn returns_params_on_valid_callback() {
         let _g = port_guard().await;
-        let listener = CallbackListener::bind().await.expect("bind");
+        let listener = crate::oauth::openai::testsupport::bind_fixed_ports_for_test().await;
         let port = listener.port();
         assert!(port == 1455 || port == 1457, "unexpected port {port}");
 
@@ -279,7 +279,7 @@ mod tests {
     #[tokio::test]
     async fn state_mismatch_is_rejected() {
         let _g = port_guard().await;
-        let listener = CallbackListener::bind().await.expect("bind");
+        let listener = crate::oauth::openai::testsupport::bind_fixed_ports_for_test().await;
         let port = listener.port();
         let server = tokio::spawn(async move { listener.accept("EXPECTED").await });
         let _ = send_get(port, "/auth/callback?code=abc&state=WRONG").await;
@@ -290,7 +290,7 @@ mod tests {
     #[tokio::test]
     async fn url_encoded_values_are_decoded() {
         let _g = port_guard().await;
-        let listener = CallbackListener::bind().await.expect("bind");
+        let listener = crate::oauth::openai::testsupport::bind_fixed_ports_for_test().await;
         let port = listener.port();
         // code contains a percent-escaped slash; state is plain.
         let server = tokio::spawn(async move { listener.accept("ST").await });
@@ -302,7 +302,7 @@ mod tests {
     #[tokio::test]
     async fn non_auth_callback_path_is_404_then_callback_succeeds() {
         let _g = port_guard().await;
-        let listener = CallbackListener::bind().await.expect("bind");
+        let listener = crate::oauth::openai::testsupport::bind_fixed_ports_for_test().await;
         let port = listener.port();
         let server = tokio::spawn(async move { listener.accept("S").await });
 
@@ -319,7 +319,7 @@ mod tests {
     #[tokio::test]
     async fn binds_fixed_port_or_fallback() {
         let _g = port_guard().await;
-        let l = CallbackListener::bind().await.expect("bind");
+        let l = crate::oauth::openai::testsupport::bind_fixed_ports_for_test().await;
         assert!(l.port() == 1455 || l.port() == 1457);
     }
 }

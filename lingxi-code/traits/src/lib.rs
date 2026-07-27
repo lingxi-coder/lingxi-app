@@ -34,6 +34,7 @@ pub mod computer_control;
 pub mod coordinator_mode;
 pub mod effect_handler;
 pub mod env;
+pub mod model_capabilities;
 pub mod file_history_sink;
 pub mod fork_resume_gate;
 pub mod parked_agent_store;

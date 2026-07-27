@@ -293,7 +293,7 @@ mod tests {
         let adapter = make_adapter_for_protocol(protocol, provider_id, base_url);
         let request = LlmRequest::new("model").with_user_text("hi");
         let mut prepared = adapter.client.prepare(&request).await.expect("prepare");
-        adapter.inject_headers(&mut prepared, "req_test");
+        adapter.inject_headers(&mut prepared, "req_test", DispatchHeaderState::default());
         prepared.provider_request.headers
     }
 
@@ -1311,7 +1311,7 @@ mod tests {
     /// run the `CLAUDE_CODE_EXTRA_BODY` merge), returning the outgoing body.
     async fn body_after_inject(adapter: &ApiService, request: &LlmRequest) -> serde_json::Value {
         let mut prepared = adapter.client.prepare(request).await.expect("prepare");
-        adapter.inject_headers(&mut prepared, "req_test");
+        adapter.inject_headers(&mut prepared, "req_test", DispatchHeaderState::default());
         prepared.provider_request.body_json
     }
 
@@ -1760,15 +1760,32 @@ mod tests {
 
     // ── (cc 2.1.219) `anthropic-dispatch-id: v2s` opt-in ────────────────────
 
-    /// Serializes the CLAUDE_CODE_DISPATCH_V2S env-mutating tests.
-    static DISPATCH_ENV_LOCK: Mutex<()> = Mutex::new(());
+    /// Serializes the tests that flip the process-global `tengu_cedar_lattice`
+    /// override (and `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL`).
+    static DISPATCH_FLAG_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Turns `tengu_cedar_lattice` on for the duration of a test and clears it
+    /// on drop, so a panicking test cannot leak the opt-in into its neighbours.
+    struct CedarLatticeOn;
+
+    impl CedarLatticeOn {
+        fn set() -> Self {
+            ::telemetry::test_set_flag("tengu_cedar_lattice", true);
+            Self
+        }
+    }
+
+    impl Drop for CedarLatticeOn {
+        fn drop(&mut self) {
+            ::telemetry::test_clear_flag("tengu_cedar_lattice");
+        }
+    }
 
     #[tokio::test]
     async fn dispatch_header_absent_by_default() {
-        let _g = DISPATCH_ENV_LOCK
+        let _g = DISPATCH_FLAG_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        std::env::remove_var("CLAUDE_CODE_DISPATCH_V2S");
         let headers = headers_after_inject_for_protocol(
             ProtocolFamily::AnthropicMessages,
             ProviderId::AnthropicFirstParty,
@@ -1777,23 +1794,66 @@ mod tests {
         .await;
         assert!(
             !headers.contains_key("anthropic-dispatch-id"),
-            "default-off: no env, flag default false — {headers:?}"
+            "default-off: `tengu_cedar_lattice` defaults false — {headers:?}"
         );
     }
 
+    /// `Mg` is `oMl({}, null)` (2.1.220 @226176806), so
+    /// `Mg.CLAUDE_CODE_DISPATCH_V2S` is ALWAYS `undefined` and the nullish `??`
+    /// always falls through to the flag: the env var can neither enable nor
+    /// disable the header in the oracle. Regression guard for the port having
+    /// treated a set env var as authoritative in both directions.
     #[tokio::test]
-    async fn dispatch_header_env_opt_in_first_party_only() {
-        let _g = DISPATCH_ENV_LOCK
+    async fn dispatch_header_ignores_the_inert_env_var() {
+        let _g = DISPATCH_FLAG_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         std::env::set_var("CLAUDE_CODE_DISPATCH_V2S", "1");
-        let anthropic = headers_after_inject_for_protocol(
+        let flag_off = headers_after_inject_for_protocol(
             ProtocolFamily::AnthropicMessages,
             ProviderId::AnthropicFirstParty,
             "https://api.anthropic.com",
         )
         .await;
-        // Anthropic-wire but NOT first-party: never gets the header.
+        std::env::set_var("CLAUDE_CODE_DISPATCH_V2S", "0");
+        let flag_on = {
+            let _on = CedarLatticeOn::set();
+            headers_after_inject_for_protocol(
+                ProtocolFamily::AnthropicMessages,
+                ProviderId::AnthropicFirstParty,
+                "https://api.anthropic.com",
+            )
+            .await
+        };
+        std::env::remove_var("CLAUDE_CODE_DISPATCH_V2S");
+        assert!(
+            !flag_off.contains_key("anthropic-dispatch-id"),
+            "a truthy env var must NOT enable what the oracle cannot enable"
+        );
+        assert_eq!(
+            flag_on.get("anthropic-dispatch-id").map(String::as_str),
+            Some("v2s"),
+            "env \"0\" must NOT disable a true flag (`??` is nullish-only)"
+        );
+    }
+
+    /// `Ooe() = xn()==="firstParty" && Yd()` (2.1.220 @227683488): BOTH halves
+    /// gate the header. `Yd()`/`d6r()`/`T1e()` require the base URL to resolve
+    /// to host `api.anthropic.com` unless
+    /// `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL` is truthy.
+    #[tokio::test]
+    async fn dispatch_header_needs_both_halves_of_ooe() {
+        let _g = DISPATCH_FLAG_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _on = CedarLatticeOn::set();
+        let first_party = headers_after_inject_for_protocol(
+            ProtocolFamily::AnthropicMessages,
+            ProviderId::AnthropicFirstParty,
+            "https://api.anthropic.com",
+        )
+        .await;
+        // Anthropic-wire but NOT first-party: fails the `xn()` half.
         let compatible = headers_after_inject_for_protocol(
             ProtocolFamily::AnthropicMessages,
             ProviderId::OpenAICompatible {
@@ -1802,38 +1862,97 @@ mod tests {
             "https://proxy.example.com",
         )
         .await;
-        // Env "0" beats the (default-false) flag in the disabled direction too
-        // (`Mg.CLAUDE_CODE_DISPATCH_V2S ?? Ke(...)` — a SET env always wins).
-        std::env::set_var("CLAUDE_CODE_DISPATCH_V2S", "0");
-        let disabled = headers_after_inject_for_protocol(
+        // First-party id pointed at an enterprise gateway: fails the `Yd()`
+        // half, which the port used not to model at all.
+        let gateway_base = headers_after_inject_for_protocol(
             ProtocolFamily::AnthropicMessages,
             ProviderId::AnthropicFirstParty,
-            "https://api.anthropic.com",
+            "https://proxy.example.com",
         )
         .await;
-        std::env::remove_var("CLAUDE_CODE_DISPATCH_V2S");
+        // `URL.host` keeps a non-default port, so this is NOT the allow-listed
+        // host either.
+        let ported_host = headers_after_inject_for_protocol(
+            ProtocolFamily::AnthropicMessages,
+            ProviderId::AnthropicFirstParty,
+            "https://api.anthropic.com:8443",
+        )
+        .await;
+        std::env::set_var("_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL", "1");
+        let assumed = headers_after_inject_for_protocol(
+            ProtocolFamily::AnthropicMessages,
+            ProviderId::AnthropicFirstParty,
+            "https://proxy.example.com",
+        )
+        .await;
+        std::env::remove_var("_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL");
+
         assert_eq!(
-            anthropic.get("anthropic-dispatch-id").map(String::as_str),
+            first_party.get("anthropic-dispatch-id").map(String::as_str),
             Some("v2s")
         );
         assert!(!compatible.contains_key("anthropic-dispatch-id"));
-        assert!(!disabled.contains_key("anthropic-dispatch-id"));
+        assert!(
+            !gateway_base.contains_key("anthropic-dispatch-id"),
+            "Yd(): a custom API base must get no dispatch header"
+        );
+        assert!(!ported_host.contains_key("anthropic-dispatch-id"));
+        assert_eq!(
+            assumed.get("anthropic-dispatch-id").map(String::as_str),
+            Some("v2s"),
+            "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL short-circuits Yd()"
+        );
     }
 
+    /// `fB(i.querySource)!=="auxiliary"` (`fB` @227888239): utility queries —
+    /// the side-query driver's compaction / recap / title-generation traffic —
+    /// never carry the header, while an unclassified query (`fB(void 0)` ⇒
+    /// `undefined`) does.
     #[tokio::test]
-    async fn dispatch_header_stripped_after_5xx_and_not_on_429() {
-        let _g = DISPATCH_ENV_LOCK
+    async fn dispatch_header_skips_auxiliary_queries() {
+        let _g = DISPATCH_FLAG_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        std::env::set_var("CLAUDE_CODE_DISPATCH_V2S", "true");
+        let _on = CedarLatticeOn::set();
         let adapter = make_adapter_for_protocol(
             ProtocolFamily::AnthropicMessages,
             ProviderId::AnthropicFirstParty,
             "https://api.anthropic.com",
         );
         let request = LlmRequest::new("model").with_user_text("hi");
+        let mut aux = adapter.client.prepare(&request).await.expect("prepare");
+        adapter.inject_headers(&mut aux, "req_aux", DispatchHeaderState::AUXILIARY);
+        let mut main = adapter.client.prepare(&request).await.expect("prepare");
+        adapter.inject_headers(&mut main, "req_main", DispatchHeaderState::default());
+        assert!(
+            !aux.provider_request
+                .headers
+                .contains_key("anthropic-dispatch-id"),
+            "auxiliary (side-query) traffic must not carry the header"
+        );
+        assert!(main
+            .provider_request
+            .headers
+            .contains_key("anthropic-dispatch-id"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_header_stripped_after_5xx_and_not_on_429() {
+        let _g = DISPATCH_FLAG_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _on = CedarLatticeOn::set();
+        let adapter = make_adapter_for_protocol(
+            ProtocolFamily::AnthropicMessages,
+            ProviderId::AnthropicFirstParty,
+            "https://api.anthropic.com",
+        );
+        let request = LlmRequest::new("model").with_user_text("hi");
+        // `Kt`/`no` live in the per-QUERY `let` list of `erp` (2.1.220
+        // @237543834), so this is what one drive owns.
+        let mut query = DispatchHeaderState::default();
         let mut prepared = adapter.client.prepare(&request).await.expect("prepare");
-        adapter.inject_headers(&mut prepared, "req_test");
+        adapter.inject_headers(&mut prepared, "req_test", query);
         assert!(prepared
             .provider_request
             .headers
@@ -1841,7 +1960,8 @@ mod tests {
 
         // A 429 on a header-carrying attempt does NOT strip (only 5xx/conn).
         assert_eq!(
-            adapter.note_dispatch_header_failure(
+            ApiService::note_dispatch_header_failure(
+                &mut query,
                 &prepared,
                 &LlmError::RateLimited {
                     retry_after: None,
@@ -1850,43 +1970,232 @@ mod tests {
             ),
             None
         );
-        // A 500 strips: reason "5xx" + the status, latched session-wide.
+        // A 500 strips: reason "5xx" + the status, latched for this query.
         assert_eq!(
-            adapter.note_dispatch_header_failure(&prepared, &LlmError::ProviderInternal),
+            ApiService::note_dispatch_header_failure(
+                &mut query,
+                &prepared,
+                &LlmError::ProviderInternal
+            ),
             Some(("5xx", Some(500)))
         );
-        // Latched: the next attempt's injection omits the header even though
+        // Latched: the next attempt OF THIS QUERY omits the header even though
         // the opt-in is still on…
         let mut prepared2 = adapter.client.prepare(&request).await.expect("prepare");
-        adapter.inject_headers(&mut prepared2, "req_test2");
+        adapter.inject_headers(&mut prepared2, "req_test2", query);
         assert!(
             !prepared2
                 .provider_request
                 .headers
                 .contains_key("anthropic-dispatch-id"),
-            "fallback latch must strip the header for the rest of the session"
+            "fallback latch must strip the header for the rest of this query"
         );
         // …and a repeat failure reports nothing new (single telemetry event).
         assert_eq!(
-            adapter.note_dispatch_header_failure(&prepared, &LlmError::ProviderInternal),
+            ApiService::note_dispatch_header_failure(
+                &mut query,
+                &prepared,
+                &LlmError::ProviderInternal
+            ),
             None
         );
-        std::env::remove_var("CLAUDE_CODE_DISPATCH_V2S");
+
+        // The NEXT query starts from a fresh `Kt` on the SAME service and
+        // re-sends the header — the oracle's latch is per-query, not
+        // module-scope.
+        let next_query = DispatchHeaderState::default();
+        let mut prepared3 = adapter.client.prepare(&request).await.expect("prepare");
+        adapter.inject_headers(&mut prepared3, "req_test3", next_query);
+        assert_eq!(
+            prepared3
+                .provider_request
+                .headers
+                .get("anthropic-dispatch-id")
+                .map(String::as_str),
+            Some("v2s"),
+            "the fallback must NOT survive into the next query"
+        );
 
         // Connection errors classify as "conn_err" with no status.
-        let adapter2 = make_adapter_for_protocol(
-            ProtocolFamily::AnthropicMessages,
-            ProviderId::AnthropicFirstParty,
-            "https://api.anthropic.com",
-        );
+        let mut conn_query = DispatchHeaderState::default();
         assert_eq!(
-            adapter2.note_dispatch_header_failure_carried(
+            ApiService::note_dispatch_header_failure_carried(
+                &mut conn_query,
                 true,
                 &LlmError::Transport {
                     message: "connect reset".to_string()
                 }
             ),
             Some(("conn_err", None))
+        );
+    }
+
+    /// Oracle arm 2 (2.1.220 @237577972): a CONNECTION error in the stream body
+    /// before the first event latches `Kt` and retries; anything else (a 5xx
+    /// has no body phase, the watchdog's `StreamInterrupted` is not `x2()`) is
+    /// left to the normal classification.
+    #[test]
+    fn dispatch_body_phase_arm_only_fires_on_a_carried_connection_error() {
+        let mut st = DispatchHeaderState::default();
+        assert!(!ApiService::note_dispatch_body_phase_failure(
+            &mut st,
+            false,
+            &LlmError::Transport {
+                message: "reset".to_string()
+            }
+        ));
+        assert!(!ApiService::note_dispatch_body_phase_failure(
+            &mut st,
+            true,
+            &LlmError::StreamInterrupted {
+                message: "idle".to_string()
+            }
+        ));
+        assert!(!st.fallen_back);
+        assert!(ApiService::note_dispatch_body_phase_failure(
+            &mut st,
+            true,
+            &LlmError::Transport {
+                message: "reset".to_string()
+            }
+        ));
+        assert!(st.fallen_back, "arm 2 latches Kt for the rest of the query");
+        // `no && !Kt` — a second body-phase error in the same query is a no-op.
+        assert!(!ApiService::note_dispatch_body_phase_failure(
+            &mut st,
+            true,
+            &LlmError::Transport {
+                message: "reset".to_string()
+            }
+        ));
+    }
+
+    /// A `FrameStream` whose body drops with a connection error before any
+    /// event — the oracle's `Bs!==null && !oc`.
+    struct ConnErrOnFirstFrame;
+
+    impl crate::FrameStream for ConnErrOnFirstFrame {
+        fn next_frame(&mut self) -> BoxFuture<'_, Result<Option<crate::RawStreamFrame>, LlmError>> {
+            Box::pin(async {
+                Err(LlmError::Transport {
+                    message: "ECONNRESET".to_string(),
+                })
+            })
+        }
+    }
+
+    /// Connect succeeds on both attempts; the FIRST stream body drops before
+    /// the first event, the second is a clean anthropic stream. Records the
+    /// `anthropic-dispatch-id` value seen per attempt.
+    struct BodyPhaseDropThenOk {
+        attempts: Mutex<Vec<Option<String>>>,
+    }
+
+    impl Transport for BodyPhaseDropThenOk {
+        fn execute<'a>(
+            &'a self,
+            _request: &'a ProviderRequest,
+        ) -> BoxFuture<'a, Result<ProviderResponse, LlmError>> {
+            Box::pin(async {
+                Err(LlmError::Transport {
+                    message: "execute not used".to_string(),
+                })
+            })
+        }
+
+        fn open_stream<'a>(
+            &'a self,
+            request: &'a ProviderRequest,
+        ) -> BoxFuture<'a, Result<StreamingResponse, LlmError>> {
+            let attempt = {
+                let mut seen = self
+                    .attempts
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                seen.push(request.headers.get("anthropic-dispatch-id").cloned());
+                seen.len()
+            };
+            Box::pin(async move {
+                let frames: Box<dyn crate::FrameStream> = if attempt == 1 {
+                    Box::new(ConnErrOnFirstFrame)
+                } else {
+                    Box::new(ScriptedFrames::new(vec![
+                        br#"{"type":"message_start","message":{"id":"msg_t","model":"claude-sonnet-4-20250514","usage":{"input_tokens":1,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}"#.to_vec(),
+                        br#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}"#.to_vec(),
+                        br#"{"type":"message_stop"}"#.to_vec(),
+                    ]))
+                };
+                Ok(StreamingResponse {
+                    status: 200,
+                    headers: BTreeMap::new(),
+                    frames,
+                })
+            })
+        }
+    }
+
+    /// End-to-end arm 2: the drive loop's one-frame lookahead must strip the
+    /// header, emit `tengu_dispatch_header_fallback{reason:"body_phase",
+    /// status:"none"}` and re-open — and the seeded frame must flow through the
+    /// unfold untouched on the retry that succeeds.
+    #[tokio::test]
+    async fn dispatch_body_phase_drop_strips_the_header_and_re_opens() {
+        use ::telemetry::AnalyticsValue;
+        use futures::StreamExt as _;
+
+        let _g = DISPATCH_FLAG_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _on = CedarLatticeOn::set();
+        let transport = Arc::new(BodyPhaseDropThenOk {
+            attempts: Mutex::new(Vec::new()),
+        });
+        let (adapter, sink) = make_stream_adapter_with_bus(transport.clone()).await;
+
+        let mut stream = adapter
+            .stream(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+                None,
+                None,
+            )
+            .await
+            .expect("stream open ok");
+        let mut yielded = 0_usize;
+        while let Some(item) = stream.next().await {
+            assert!(item.is_ok(), "retry stream must decode cleanly: {item:?}");
+            yielded += 1;
+        }
+        assert!(yielded > 0, "the seeded retry stream must yield events");
+
+        let seen = transport
+            .attempts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert_eq!(
+            seen,
+            vec![Some("v2s".to_string()), None],
+            "attempt 1 carries the header; the body-phase retry must drop it"
+        );
+
+        let events = sink.events().await;
+        let fallback = events
+            .iter()
+            .find(|e| e.name == "tengu_dispatch_header_fallback")
+            .expect("body-phase fallback event must be emitted");
+        assert!(
+            matches!(&fallback.metadata["reason"], AnalyticsValue::String(s) if s == "body_phase"),
+            "reason must be body_phase; got {:?}",
+            fallback.metadata["reason"]
+        );
+        assert!(
+            matches!(&fallback.metadata["status"], AnalyticsValue::String(s) if s == "none"),
+            "status must stringify to none; got {:?}",
+            fallback.metadata["status"]
         );
     }
 
@@ -2031,7 +2340,7 @@ mod tests {
             .provider_request
             .headers
             .insert("User-Agent".to_string(), "LingXi-Code".to_string());
-        adapter.inject_headers(&mut prepared, "req_test");
+        adapter.inject_headers(&mut prepared, "req_test", DispatchHeaderState::default());
         let h = &prepared.provider_request.headers;
         assert_eq!(h.get("User-Agent").map(String::as_str), Some("LingXi-Code"));
         assert!(

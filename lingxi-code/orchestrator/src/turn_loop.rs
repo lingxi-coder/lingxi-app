@@ -524,10 +524,15 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // model the new date once per changed date. Prepended AFTER the deferred
     // insert so the final order is [date_change, deferred_tools_delta, …] —
     // matching the oracle attachment batch order (`Ky("date_change")` before
-    // `Ky("deferred_tools_delta")`). `None` (same-date turns) keeps the locked
+    // `Ky("deferred_tools_delta")`). Computed ONCE per step and reused by
+    // `call_api_with_ptl_recovery`'s retry/fallback re-snapshots, which rebuild
+    // the SAME request from raw history; the dedupe is committed in there, past
+    // the blocking-limit preempt. `None` (same-date turns) keeps the locked
     // turn-loop fixtures byte-identical. See
     // [`ConversationOrchestrator::date_change_reminder_message`].
-    if let Some(reminder) = orch.date_change_reminder_message() {
+    let date_change_reminder =
+        orch.date_change_reminder_message(orch.session.lock().await.session_id);
+    if let Some(reminder) = date_change_reminder.clone() {
         history_snapshot.insert(0, reminder);
     }
     // REC.A1: consume the one-shot escalated `max_tokens` override (armed by a
@@ -553,6 +558,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         history_snapshot,
         tools,
         max_tokens_override,
+        date_change_reminder,
     )
     .await
     {
@@ -1107,6 +1113,11 @@ pub(crate) async fn call_api_with_ptl_recovery(
     history_snapshot: Vec<ConversationMessage>,
     tools: Vec<serde_json::Value>,
     max_tokens_override: Option<u32>,
+    // This step's transient `date_change` reminder (already at index 0 of
+    // `history_snapshot`). The retry/fallback paths below rebuild the request
+    // from raw `session.history`, where the transient does not live, so it is
+    // re-prepended there — the streaming twin threads it the same way.
+    date_change_reminder: Option<ConversationMessage>,
 ) -> Result<PtlCallOutcome, OrchestratorError> {
     // (1) Blocking-limit preempt. `is_at_blocking_limit` is
     // `token_usage >= effective_window − MANUAL_COMPACT_BUFFER_TOKENS`
@@ -1161,9 +1172,14 @@ pub(crate) async fn call_api_with_ptl_recovery(
             "prompt at blocking limit — preempting before API call"
         );
         // PROACTIVE preempt ⇒ terminal reason `"blocking_limit"` (distinct from
-        // the reactive-exhausted `PromptTooLong` returned at the tail).
+        // the reactive-exhausted `PromptTooLong` returned at the tail). No
+        // request is issued, so the `date_change` reminder stays UNCOMMITTED and
+        // the next step re-emits it.
         return Ok(PtlCallOutcome::BlockingLimit);
     }
+    // Past the preempt: the snapshot WILL be sent, so this step's `date_change`
+    // reminder counts as delivered.
+    orch.commit_date_change_reminder();
 
     // (2) Initial call. When an Opus-fallback model is configured, route the
     // primary request through the fallback-aware seam. In Task 6, `LlmError`
@@ -1229,7 +1245,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
             let s = orch.session.lock().await;
             s.history.clone()
         };
-        let Some(truncated) =
+        let Some(mut truncated) =
             compaction::ptl_retry::truncate_head_for_ptl_retry(history, token_gap)
         else {
             // Nothing safe to drop (< 2 groups). Stop truncating and fall
@@ -1239,6 +1255,12 @@ pub(crate) async fn call_api_with_ptl_recovery(
         {
             let mut s = orch.session.lock().await;
             s.history.clone_from(&truncated);
+        }
+        // The re-snapshot came from raw `session.history`, so re-prepend this
+        // step's transient `date_change` reminder — the retried request is the
+        // SAME step's request and must still carry it.
+        if let Some(reminder) = date_change_reminder.clone() {
+            truncated.insert(0, reminder);
         }
         match orch
             .api
@@ -2129,6 +2151,38 @@ pub(crate) async fn dispatch_tool_uses(
     Ok(dispatch_tool_uses_tracked(orch, tool_uses, None).await?.0)
 }
 
+/// claude-code `ZX_(rule.source, behavior)`: the OTEL decision-source label a
+/// matched permission RULE contributes.
+///
+/// ```text
+/// session                     → allow ? "user_temporary" : "user_reject"
+/// localSettings|userSettings  → allow ? "user_permanent" : "user_reject"
+/// default                     → "config"
+/// ```
+///
+/// The three user-OWNED `SettingSource`s are the only ones that read as a user
+/// decision; `projectSettings`/`policySettings`/`flagSettings`/`cliArg`/… (and a
+/// decision with no rule at all — mode, classifier, safety check) stay "config".
+pub(crate) fn rule_decision_otel_source(rule_source: Option<&str>, allow: bool) -> &'static str {
+    match rule_source {
+        Some("session") => {
+            if allow {
+                "user_temporary"
+            } else {
+                "user_reject"
+            }
+        }
+        Some("localSettings" | "userSettings") => {
+            if allow {
+                "user_permanent"
+            } else {
+                "user_reject"
+            }
+        }
+        _ => "config",
+    }
+}
+
 /// HOOK.2 twin of [`dispatch_tool_uses`] that ALSO returns whether any
 /// `PreToolUse` hook in this batch requested `continue:false`
 /// (preventContinuation). The batched turn loop
@@ -2735,16 +2789,23 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             .lock()
             .await
             .remove(tool_use_id);
-        // OTEL `code_edit_tool.decision` source label, threaded out of the
-        // decision branches below (CC `let f = u === "config" ? "config" :
-        // fI_(u)` — `fI_`: classifier/hook/user_permanent/user_temporary/
-        // user_abort/user_reject/unknown). Rule/mode/plan resolutions are
-        // "config"; the port's prompt transport does not surface CC's
-        // permanent-vs-temporary user grant, so a transport allow maps to
-        // "user_permanent" only when it carried `updatedPermissions` (a
-        // persisted grant) and "user_temporary" otherwise, and a transport
-        // deny (incl. an aborted prompt, which the gate folds into Deny) maps
-        // to "user_reject".
+        // OTEL `code_edit_tool.decision` / `tool_decision` source label,
+        // threaded out of the decision branches below.
+        //
+        // claude-code has two publishers: `qtd` (driven by the permission
+        // checker's own `logDecision`, which also records
+        // `toolDecisions[toolUseID]`) and the dispatch-site one, guarded on
+        // `toolDecisions?.[t] === void 0`, which derives the label from the
+        // structured decision reason with `eQ_`. The port has no `logDecision`
+        // twin — no gate emits OTEL and nothing writes a `toolDecisions`
+        // record — so this site, which is the dispatch-site publisher's twin,
+        // always fires and `eQ_` is the whole taxonomy:
+        //   rule                       → `ZX_` (see [`rule_decision_otel_source`])
+        //   hook                       → "hook"
+        //   permissionPromptTool       → the host's `decisionClassification`,
+        //                                defaulting to user_temporary/user_reject
+        //   other (request aborted)    → "user_abort"
+        //   mode/classifier/…/no reason→ "config"
         let mut decision_otel_source: &'static str = "config";
         let decision = if let Some(forced) = forced_decision {
             // A recovered orphan's forced `control_response` — no structured
@@ -2769,16 +2830,29 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             }
             plan_decision
         } else if hook_allowed {
-            decision_otel_source = "hook";
             // Carry the REAL tool_use_id so a hook-allow→ask-rule re-check emits a
             // byte-faithful stdio `can_use_tool` (correlatable id + decision_reason).
             let ctx = traits::permission_gate::PermissionCheckContext {
                 tool_use_id: Some(tool_use_id.to_string()),
                 ..Default::default()
             };
-            orch.perms
+            let hook_decision = orch
+                .perms
                 .check_after_hook_allow_ctx(name, &effective_input, &ctx)
-                .await
+                .await;
+            // The hook only OWNS the label when its allow stands: `han` returns
+            // the hook's own `{behavior:"allow"}` (decisionReason `hook`) there,
+            // but when the re-check overrides it (`Hook returned '…' but deny
+            // rule overrides`) the decision — and therefore the label — is the
+            // RULE's, which `ZX_` renders as "config" for every non-user-owned
+            // SettingSource. `PermissionDecision` is 2-valued, so the overriding
+            // rule's own scope is not separable here.
+            decision_otel_source = if matches!(hook_decision, PermissionDecision::Allow) {
+                "hook"
+            } else {
+                "config"
+            };
+            hook_decision
         } else {
             // NORMAL permission path. Resolve the decision SOURCE first (without
             // delegating to the prompt transport) so the source-gated permission
@@ -2801,21 +2875,27 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             // This flag is metadata for an existing Ask/callback path; it must
             // not create an Ask by itself. The normal TUI tool owns its question
             // UI, and a generic permission prompt here would duplicate it.
-            let resolution = if hook_ask && matches!(resolution, PermissionResolution::Allow) {
+            let resolution = if hook_ask && matches!(resolution, PermissionResolution::Allow { .. })
+            {
                 PermissionResolution::Ask
             } else {
                 resolution
             };
             match resolution {
-                PermissionResolution::Allow => PermissionDecision::Allow,
+                PermissionResolution::Allow { rule_source } => {
+                    decision_otel_source = rule_decision_otel_source(rule_source.as_deref(), true);
+                    PermissionDecision::Allow
+                }
                 PermissionResolution::Deny {
                     reason,
                     source,
+                    rule_source,
                     decision_reason_type,
                     decision_reason,
                     behavior_ask,
                     content_blocks,
                 } => {
+                    decision_otel_source = rule_decision_otel_source(rule_source.as_deref(), false);
                     // `ask`-behavior rejection contentBlocks (`toolExecution.ts:1040-1043`):
                     // claude-code appends `permissionDecision.contentBlocks` to the deny
                     // user message at top level ONLY when `behavior === 'ask'`. Carry them
@@ -2833,7 +2913,13 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                     // auto-mode classifier, so classifier-source denies can
                     // reach this path in normal builds.
                     if matches!(source, PermissionDecisionSource::Classifier) {
-                        decision_otel_source = "classifier";
+                        // NOTE: the OTEL label stays "config" — `eQ_` groups
+                        // `classifier` with `mode`/`safetyCheck`/… in the
+                        // "config" arm. (`fI_` does have a "classifier" arm, but
+                        // it needs a `logDecision({source:{type:"classifier"}})`
+                        // and 2.1.220 has no such call site — every
+                        // `source:{type:…}` there is user/user_reject/
+                        // user_abort/hook.)
                         let denied_event = HookEvent::PermissionDenied {
                             tool_name: name.clone(),
                             tool_input: effective_input.clone(),
@@ -2895,7 +2981,6 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                     let req_agg = orch.hooks.execute(req_event, hook_ctx.clone()).await;
                     match req_agg.decision {
                         Some(HookDecision::Approve | HookDecision::Allow) => {
-                            decision_otel_source = "hook";
                             // (cc 2.1.218 `Fxy`) The headless PermissionRequest
                             // rescue re-checks the rules (`epr(_pt(...))`, where an
                             // ask rule becomes a HARD DENY — no prompt is available
@@ -2914,7 +2999,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                             if let Some(updated) = req_agg.modified_input {
                                 effective_input = updated;
                             }
-                            if rewritten || requires_user_interaction {
+                            let hook_decision = if rewritten || requires_user_interaction {
                                 // Rewritten input, or a tool that requires user
                                 // interaction: re-check via `epr(_pt(...))` — an ask
                                 // becomes a hard deny carrying the ask's `c.message`
@@ -2931,7 +3016,18 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                                 orch.perms
                                     .honour_hook_allow(name, &effective_input)
                                     .await
-                            }
+                            };
+                            // `handleHookAllow` logs `source:{type:"hook"}`, but the
+                            // `updatedInput` re-check that DENIES logs
+                            // `{decision:"reject",source:"config"}` instead — the hook
+                            // owns the label only while its allow stands.
+                            decision_otel_source =
+                                if matches!(hook_decision, PermissionDecision::Allow) {
+                                    "hook"
+                                } else {
+                                    "config"
+                                };
+                            hook_decision
                         }
                         Some(HookDecision::Block) => {
                             decision_otel_source = "hook";
@@ -2965,22 +3061,42 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                                     // `permission_updates` (the host's
                                     // `updatedPermissions`) are applied + persisted
                                     // inside the stdio gate itself, which holds the
-                                    // settings paths; here they only discriminate a
-                                    // persisted user grant for the OTEL source label.
-                                    permission_updates,
+                                    // settings paths.
+                                    permission_updates: _,
                                 } => {
-                                    decision_otel_source = if permission_updates.is_empty() {
-                                        "user_temporary"
-                                    } else {
-                                        "user_permanent"
-                                    };
+                                    // "user_temporary", NOT an `updatedPermissions`
+                                    // heuristic: `eQ_`'s `permissionPromptTool` arm
+                                    // reads the HOST's `decisionClassification` off
+                                    // the `can_use_tool` response and, when it is
+                                    // absent or invalid, falls back to "temporary for
+                                    // allow, reject for deny" (`fAm`'s own describe()).
+                                    // `updatedPermissions` has no bearing on the label.
+                                    // DEFERRED: the port does not yet parse
+                                    // `decisionClassification` (it would have to come
+                                    // up through `PermissionOutcome::Allow`), so a host
+                                    // that sets it explicitly still gets the fallback.
+                                    decision_otel_source = "user_temporary";
                                     if let Some(u) = updated_input {
                                         effective_input = u;
                                     }
                                     PermissionDecision::Allow
                                 }
                                 traits::permission_gate::PermissionOutcome::Deny { reason } => {
-                                    decision_otel_source = "user_reject";
+                                    // An ABORTED prompt is a distinct label: claude-code
+                                    // denies with `decisionReason: iYt` ("tool permission
+                                    // request aborted") when `signal.aborted`, and `eQ_`
+                                    // maps that `other` reason to "user_abort" (the
+                                    // interactive twin is the prompt's `case "cancelled"`
+                                    // → `source:{type:"user_abort"}`). The gate folds both
+                                    // into `Deny`, so the turn's cancel token — the same
+                                    // signal the stdio gate raced to produce this deny —
+                                    // is what separates them.
+                                    decision_otel_source =
+                                        if cancel.as_ref().is_some_and(|t| t.is_cancelled()) {
+                                            "user_abort"
+                                        } else {
+                                            "user_reject"
+                                        };
                                     PermissionDecision::Deny { reason }
                                 }
                             }
@@ -3008,6 +3124,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 "reject"
             },
             decision_otel_source,
+            tool_handle.is_mcp(),
         );
         match decision {
             PermissionDecision::Allow => {}
@@ -3986,5 +4103,67 @@ mod code_change_accumulation_tests {
         let snap = tracker.snapshot().await;
         assert_eq!(snap.total_lines_added, 0);
         assert_eq!(snap.total_lines_removed, 0);
+    }
+}
+
+// ORCH-1: the `ZX_` rule-scope → OTEL decision-source mapping, kept out of the
+// concurrently-edited turn_loop_test.rs.
+#[cfg(test)]
+mod decision_otel_source_tests {
+    use super::rule_decision_otel_source;
+
+    #[test]
+    fn session_rule_is_temporary_on_allow_and_reject_on_deny() {
+        assert_eq!(
+            rule_decision_otel_source(Some("session"), true),
+            "user_temporary"
+        );
+        assert_eq!(
+            rule_decision_otel_source(Some("session"), false),
+            "user_reject"
+        );
+    }
+
+    #[test]
+    fn user_owned_settings_rules_are_permanent_on_allow() {
+        for scope in ["localSettings", "userSettings"] {
+            assert_eq!(
+                rule_decision_otel_source(Some(scope), true),
+                "user_permanent",
+                "{scope}"
+            );
+            assert_eq!(
+                rule_decision_otel_source(Some(scope), false),
+                "user_reject",
+                "{scope}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_other_setting_source_falls_through_to_config() {
+        // `ZX_`'s `default:` arm — projectSettings is deliberately NOT in the
+        // user-owned set even though `U0s` (the interactive persistence check)
+        // includes it.
+        for scope in [
+            "projectSettings",
+            "policySettings",
+            "flagSettings",
+            "cliArg",
+            "command",
+            "toolsNarrowing",
+            "mcpServerPolicy",
+        ] {
+            assert_eq!(rule_decision_otel_source(Some(scope), true), "config", "{scope}");
+            assert_eq!(rule_decision_otel_source(Some(scope), false), "config", "{scope}");
+        }
+    }
+
+    #[test]
+    fn no_matched_rule_is_config() {
+        // `eQ_` reaches `ZX_` only for `decisionReason.type === "rule"`; a mode /
+        // classifier / safety-check decision carries no rule and stays "config".
+        assert_eq!(rule_decision_otel_source(None, true), "config");
+        assert_eq!(rule_decision_otel_source(None, false), "config");
     }
 }

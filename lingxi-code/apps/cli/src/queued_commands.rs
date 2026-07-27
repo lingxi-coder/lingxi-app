@@ -52,6 +52,53 @@ pub const LIFECYCLE_CANCELLED: &str = "cancelled";
 /// Terminal: still queue-resident when the input stream tore down (`Hkm`).
 pub const LIFECYCLE_DISCARDED: &str = "discarded";
 
+/// `mCo(reason)` (binary @233106078: `function mCo(e){return Wpt(e)||Bxs(e)}`)
+/// — does this turn terminal reason retire its folded commands as `cancelled`?
+///
+/// * `Wpt` (@233105388) is the interrupt pair:
+///   `e==="aborted_streaming"||e==="aborted_tools"`.
+/// * `Bxs` (@233105456) is the hard-failure set; every other reason
+///   (`stop_hook_prevented`, `hook_stopped`, `tool_deferred`, `max_turns`,
+///   `background_requested`, `completed`) and every unknown value fall through
+///   the `default:return!1` arm to `completed`.
+///
+/// The schema calls this out as deliberate: "cancelled-over-completed is
+/// deliberate dup-over-loss for exactly-once resenders" (@246207831).
+#[must_use]
+pub fn terminal_reason_is_cancelled(reason: &str) -> bool {
+    matches!(
+        reason,
+        // Wpt
+        "aborted_streaming"
+            | "aborted_tools"
+            // Bxs
+            | "blocking_limit"
+            | "rapid_refill_breaker"
+            | "prompt_too_long"
+            | "image_error"
+            | "model_error"
+            | "api_error"
+            | "malformed_tool_use_exhausted"
+            | "budget_exhausted"
+            | "structured_output_retry_exhausted"
+            | "tool_deferred_unavailable"
+            | "turn_setup_failed"
+    )
+}
+
+/// `Njo(reason, aborted)` (binary @239414857:
+/// `function Njo(e,t){return t||mCo(e)?"cancelled":"completed"}`) — the
+/// terminal `command_lifecycle` state for every uuid folded into a finished
+/// turn. `reason` is `undefined` when the turn produced no terminal reason.
+#[must_use]
+pub fn terminal_lifecycle_state(reason: Option<&str>, aborted: bool) -> &'static str {
+    if aborted || reason.is_some_and(terminal_reason_is_cancelled) {
+        LIFECYCLE_CANCELLED
+    } else {
+        LIFECYCLE_COMPLETED
+    }
+}
+
 /// Shadow registry of uuid-stamped user messages between stdin arrival and
 /// turn dispatch.
 #[derive(Default)]
@@ -245,6 +292,63 @@ mod tests {
         // …and the cancel mark is consumed (a re-used uuid runs normally).
         q.on_queued("u1");
         assert!(q.on_dequeued("u1"));
+    }
+
+    /// `mCo = Wpt || Bxs` over the binary's FULL switch (@233105388 /
+    /// @233105456): every `return!0` arm is `cancelled`, every `return!1` arm
+    /// and the `default` fall-through stay `completed`.
+    #[test]
+    fn terminal_reason_split_matches_wpt_and_bxs() {
+        for reason in [
+            // Wpt
+            "aborted_streaming",
+            "aborted_tools",
+            // Bxs `return!0`
+            "blocking_limit",
+            "rapid_refill_breaker",
+            "prompt_too_long",
+            "image_error",
+            "model_error",
+            "api_error",
+            "malformed_tool_use_exhausted",
+            "budget_exhausted",
+            "structured_output_retry_exhausted",
+            "tool_deferred_unavailable",
+            "turn_setup_failed",
+        ] {
+            assert!(
+                terminal_reason_is_cancelled(reason),
+                "mCo({reason}) must be true"
+            );
+            assert_eq!(terminal_lifecycle_state(Some(reason), false), "cancelled");
+        }
+        for reason in [
+            // Bxs `return!1`
+            "stop_hook_prevented",
+            "hook_stopped",
+            "tool_deferred",
+            "max_turns",
+            "background_requested",
+            "completed",
+            // `default:return!1`
+            "something_new",
+        ] {
+            assert!(
+                !terminal_reason_is_cancelled(reason),
+                "mCo({reason}) must be false"
+            );
+            assert_eq!(terminal_lifecycle_state(Some(reason), false), "completed");
+        }
+    }
+
+    /// `Njo(e,t)`: the abort flag alone forces `cancelled`, and an absent
+    /// reason (`e===void 0` ⇒ `Bxs` returns `!1`) is `completed`.
+    #[test]
+    fn terminal_state_honours_abort_flag_and_absent_reason() {
+        assert_eq!(terminal_lifecycle_state(None, false), "completed");
+        assert_eq!(terminal_lifecycle_state(None, true), "cancelled");
+        assert_eq!(terminal_lifecycle_state(Some("max_turns"), true), "cancelled");
+        assert_eq!(terminal_lifecycle_state(Some("completed"), false), "completed");
     }
 
     #[test]

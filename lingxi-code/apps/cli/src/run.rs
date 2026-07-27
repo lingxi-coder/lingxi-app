@@ -314,13 +314,23 @@ pub async fn run_stream_json_print(
     // 2.1.219 `JW()`: why fast mode is unavailable here. The `-p` surface is
     // the Agent SDK, so without the `--settings` `fastMode:true` opt-in this
     // resolves `sdk_opt_in_required` (live 2.1.220 init/result capture).
+    let sdk_fast_mode_opt_in = flag_settings_fast_mode_opt_in(argv.settings.as_deref());
     let fast_mode_disabled_reason = {
         let listings = runtime.orchestrator.list_model_listings().await;
         resolve_fast_mode_disabled_reason(
-            session_model_is_first_party(&listings, &model_str),
-            flag_settings_fast_mode_opt_in(argv.settings.as_deref()),
+            session_model_is_first_party(
+                env_api_provider_is_first_party(),
+                &listings,
+                &model_str,
+            ),
+            sdk_fast_mode_opt_in,
         )
     };
+    // `cK(mt,ce.fastMode)` — the state rides the SAME inputs as the reason, so
+    // an opted-in first-party fast-mode model reports `on` instead of the
+    // self-contradicting `off`-with-no-reason pair.
+    let fast_mode_state =
+        resolve_fast_mode_state(&model_str, fast_mode_disabled_reason, sdk_fast_mode_opt_in);
 
     // Build the init parameters now that the runtime is available.
     let init_params = build_init_params(
@@ -335,7 +345,7 @@ pub async fn run_stream_json_print(
         plugins,
         "default", // output_style
         None,      // memory_auto_path
-        "off",     // fast_mode_state
+        fast_mode_state,
         fast_mode_disabled_reason,
     );
 
@@ -383,13 +393,13 @@ pub async fn run_stream_json_print(
         let err_msg = err.to_string();
         let subtype = stream_json_error_subtype(&err);
         stream
-            .emit_result_error(subtype, vec![err_msg], &cost, &model, "off", fast_mode_disabled_reason, &betas)
+            .emit_result_error(subtype, vec![err_msg], &cost, &model, fast_mode_state, fast_mode_disabled_reason, &betas)
             .await;
         stream.flush().await;
         exit_codes::RUNTIME_ERROR
     } else {
         stream
-            .emit_result_success(&result_text, "end_turn", &cost, &model, "off", fast_mode_disabled_reason, &betas)
+            .emit_result_success(&result_text, "end_turn", &cost, &model, fast_mode_state, fast_mode_disabled_reason, &betas)
             .await;
         stream.flush().await;
         exit_codes::SUCCESS
@@ -451,6 +461,7 @@ async fn dispatch_control_request(
     init_agents: &[serde_json::Value],
     init_models: &[serde_json::Value],
     init_account: &serde_json::Value,
+    init_fast_mode_state: &'static str,
     init_fast_mode_disabled_reason: Option<&'static str>,
 ) {
     // Request body fields live at `frame.request.<field>` (already key-normalized).
@@ -464,7 +475,7 @@ async fn dispatch_control_request(
                 init_models,
                 init_account,
                 std::process::id(),
-                "off",
+                init_fast_mode_state,
                 init_fast_mode_disabled_reason,
             );
             writer.reply_success(request_id, Some(payload));
@@ -1174,13 +1185,22 @@ pub async fn run_stream_json_input_loop(
     // 2.1.219 `JW()`: fast-mode unavailability reason for this SDK surface —
     // threaded into system/init, the `initialize` control_response, and every
     // result frame (all live-verified 2.1.220 emission sites).
+    let sdk_fast_mode_opt_in = flag_settings_fast_mode_opt_in(argv.settings.as_deref());
     let fast_mode_disabled_reason = {
         let listings = runtime.orchestrator.list_model_listings().await;
         resolve_fast_mode_disabled_reason(
-            session_model_is_first_party(&listings, &model_str),
-            flag_settings_fast_mode_opt_in(argv.settings.as_deref()),
+            session_model_is_first_party(
+                env_api_provider_is_first_party(),
+                &listings,
+                &model_str,
+            ),
+            sdk_fast_mode_opt_in,
         )
     };
+    // `cK(mt,ce.fastMode)` — same inputs as the reason (see
+    // `resolve_fast_mode_state`), so the two never contradict each other.
+    let fast_mode_state =
+        resolve_fast_mode_state(&model_str, fast_mode_disabled_reason, sdk_fast_mode_opt_in);
 
     let init_params = build_init_params(
         &session_id_str,
@@ -1194,7 +1214,7 @@ pub async fn run_stream_json_input_loop(
         plugins,
         "default",
         None,
-        "off",
+        fast_mode_state,
         fast_mode_disabled_reason,
     );
 
@@ -1356,9 +1376,12 @@ pub async fn run_stream_json_input_loop(
     });
 
     // ③ Phase 1: cancel watch channel for interrupt support.
-    // The cancel_tx is shared with the ctrl-dispatcher task; the turn loop
-    // listens to cancel_rx so it can abort an in-flight turn on `interrupt`.
-    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    // The cancel_tx is shared with the ctrl-dispatcher task; each turn
+    // subscribes so it can abort an in-flight turn on `interrupt`.
+    // `_cancel_anchor_rx` is never read — it exists because
+    // `watch::Sender::send` is a no-op at zero receivers, and BETWEEN turns
+    // (no subscriber) an `interrupt` would otherwise be silently dropped.
+    let (cancel_tx, _cancel_anchor_rx) = tokio::sync::watch::channel(false);
     let cancel_tx_clone = cancel_tx.clone();
 
     // ③ Drain control-request/control-cancel and control-response channels
@@ -1418,6 +1441,7 @@ pub async fn run_stream_json_input_loop(
                         &init_agents,
                         &init_models,
                         &init_account,
+                        fast_mode_state,
                         fast_mode_disabled_reason,
                     )
                     .await;
@@ -1547,6 +1571,7 @@ pub async fn run_stream_json_input_loop(
                         &session_id_str,
                     );
                 }
+                emit_dedup_skip_terminal(&queue_lifecycle, uuid);
                 continue;
             }
         }
@@ -1579,12 +1604,26 @@ pub async fn run_stream_json_input_loop(
         // Phase 1: use cancel-aware turn entry point so `interrupt` can abort
         // the in-flight SSE stream. A watcher task bridges the watch channel
         // to the CancellationToken that `run_turn_streaming_with_cancel` consumes.
+        //
+        // `subscribe()` — NOT `cancel_rx.clone()`: a watch Receiver clone
+        // inherits the version its source last SAW, and `cancel_rx` is never
+        // awaited, so from turn 2 on (after the end-of-turn `send(false)`
+        // below) a clone would satisfy `changed()` immediately with `false`,
+        // the bridge would exit, and no later `interrupt` could reach the
+        // token. Loop rather than await a single change so a `false` reset
+        // racing the turn start does not retire the bridge either.
         let cancel = tokio_util::sync::CancellationToken::new();
         let cancel_clone = cancel.clone();
-        let mut cancel_rx2 = cancel_rx.clone();
-        tokio::spawn(async move {
-            if cancel_rx2.changed().await.is_ok() && *cancel_rx2.borrow() {
-                cancel_clone.cancel();
+        let mut cancel_rx2 = cancel_tx.subscribe();
+        let cancel_bridge = tokio::spawn(async move {
+            loop {
+                if *cancel_rx2.borrow_and_update() {
+                    cancel_clone.cancel();
+                    return;
+                }
+                if cancel_rx2.changed().await.is_err() {
+                    return;
+                }
             }
         });
 
@@ -1604,15 +1643,15 @@ pub async fn run_stream_json_input_loop(
                 external_message_id,
             )
             .await;
-        // msg_lifecycle_v1 terminal for the turn's own uuid.
-        if let Some(uuid) = turn.uuid.as_deref() {
-            let state = if cancel_probe.is_cancelled() {
-                crate::queued_commands::LIFECYCLE_CANCELLED
-            } else {
-                crate::queued_commands::LIFECYCLE_COMPLETED
-            };
-            queue_lifecycle.emit(uuid, state);
-        }
+        // The bridge outlives the turn otherwise (it parks on `changed()`),
+        // and the next turn subscribes its own.
+        cancel_bridge.abort();
+        emit_turn_terminal_lifecycle(
+            &queue_lifecycle,
+            turn.uuid.as_deref(),
+            &turn_result,
+            cancel_probe.is_cancelled(),
+        );
         stop_background_agents_at_budget(
             argv.max_budget_usd,
             runtime.orchestrator.as_ref(),
@@ -1650,7 +1689,7 @@ pub async fn run_stream_json_input_loop(
         // No user turns received — emit an empty-result envelope.
         let cost = runtime.orchestrator.snapshot_cost().await;
         stream
-            .emit_result_success("", "end_turn", &cost, &model_str, "off", fast_mode_disabled_reason, &betas)
+            .emit_result_success("", "end_turn", &cost, &model_str, fast_mode_state, fast_mode_disabled_reason, &betas)
             .await;
         stream.flush().await;
         return exit_codes::SUCCESS;
@@ -1669,17 +1708,76 @@ pub async fn run_stream_json_input_loop(
         let err_msg = err.to_string();
         let subtype = stream_json_error_subtype(&err);
         stream
-            .emit_result_error(subtype, vec![err_msg], &cost, &model, "off", fast_mode_disabled_reason, &betas)
+            .emit_result_error(subtype, vec![err_msg], &cost, &model, fast_mode_state, fast_mode_disabled_reason, &betas)
             .await;
         stream.flush().await;
         exit_codes::RUNTIME_ERROR
     } else {
         stream
-            .emit_result_success(&result_text, "end_turn", &cost, &model, "off", fast_mode_disabled_reason, &betas)
+            .emit_result_success(&result_text, "end_turn", &cost, &model, fast_mode_state, fast_mode_disabled_reason, &betas)
             .await;
         stream.flush().await;
         exit_codes::SUCCESS
     }
+}
+
+/// The oracle terminal reason (`In` at the stream-json call site @240906553)
+/// for a port turn outcome, so the `command_lifecycle` terminal can run
+/// through the real `Njo`/`mCo` split instead of a bare cancel probe.
+/// `Cancelled` is the interrupt arm `Wpt` reports as `aborted_streaming`;
+/// `MaxTurns` and `EndTurn` are two of `Bxs`'s `completed` arms.
+fn turn_outcome_terminal_reason(outcome: &orchestrator::TurnOutcome) -> &'static str {
+    match outcome {
+        orchestrator::TurnOutcome::Cancelled => "aborted_streaming",
+        orchestrator::TurnOutcome::MaxTurns => "max_turns",
+        orchestrator::TurnOutcome::EndTurn => "completed",
+    }
+}
+
+/// msg_lifecycle_v1 terminal for a command the resume dedup skipped — the
+/// binary's stdin dedup arm @246492139, right after the replay ack:
+///
+/// ```js
+/// if(bi&&!Ma&&!Br) e.onCommandLifecycle?.(dt.uuid,"completed"),Qwt.delete(dt.uuid)
+/// ```
+///
+/// `bi` is `mUo` (the message is already in the session file). Without this the
+/// uuid would get `queued` and nothing else: `on_dequeued` already retired it
+/// from the shadow registry, so teardown's `discarded` sweep can no longer see
+/// it and a host awaiting the terminal hangs. The `!Br` guard (`hUo` = turn
+/// UNANSWERED ⇒ re-execute) has no port surface — this branch skips the turn
+/// unconditionally, so the command is terminal either way.
+fn emit_dedup_skip_terminal(lifecycle: &crate::queued_commands::QueueLifecycle, uuid: &str) {
+    lifecycle.emit(uuid, crate::queued_commands::LIFECYCLE_COMPLETED);
+}
+
+/// msg_lifecycle_v1 terminal for a finished turn's own uuid — the stream-json
+/// call site @240906553:
+///
+/// ```js
+/// if(gt.uuid!==void 0)_r=Fe(gt.uuid, rn!==null?"cancelled":Njo(In,Nn))
+/// ```
+///
+/// `rn` is a THROWN turn error, `In` the turn's terminal reason, `Nn` the
+/// abort-signal state. A turn that threw is `cancelled` outright; otherwise
+/// the reason runs through `Njo`/`mCo`. `Err(_)` is the thrown arm here —
+/// `MaxTurnsReached` never reaches it (conversation.rs folds it into
+/// `Ok(TurnOutcome::MaxTurns)`), which is why `max_turns` keeps `completed`.
+fn emit_turn_terminal_lifecycle(
+    lifecycle: &crate::queued_commands::QueueLifecycle,
+    uuid: Option<&str>,
+    turn_result: &Result<orchestrator::TurnOutcome, orchestrator::OrchestratorError>,
+    aborted: bool,
+) {
+    let Some(uuid) = uuid else { return };
+    let state = match turn_result {
+        Err(_) => crate::queued_commands::LIFECYCLE_CANCELLED,
+        Ok(outcome) => crate::queued_commands::terminal_lifecycle_state(
+            Some(turn_outcome_terminal_reason(outcome)),
+            aborted,
+        ),
+    };
+    lifecycle.emit(uuid, state);
 }
 
 /// Port of the 2.1.219 fast-mode reason resolver `JW()` (binary @227890982),
@@ -1726,19 +1824,88 @@ fn resolve_fast_mode_disabled_reason(
     None
 }
 
-/// `xn()==="firstParty"` for the session model — LingXi multi-provider
-/// divergence: a model served by any non-Anthropic provider profile maps to
-/// `not_first_party` (the oracle only distinguishes bedrock/vertex/etc.).
+/// `xn()==="firstParty"` — the ENV-derived API provider (binary @227682549):
+///
+/// ```js
+/// function xn(){if(C_())return"gateway";
+///   return Z.CLAUDE_CODE_USE_BEDROCK?"bedrock":Z.CLAUDE_CODE_USE_FOUNDRY?"foundry":
+///     Z.CLAUDE_CODE_USE_ANTHROPIC_AWS?"anthropicAws":
+///     Z.CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD?"anthropicGoogleCloud":
+///     Z.CLAUDE_CODE_USE_MANTLE?"mantle":Z.CLAUDE_CODE_USE_VERTEX?"vertex":"firstParty"}
+/// ```
+///
+/// The model id plays NO part: a Claude model under `CLAUDE_CODE_USE_VERTEX=1`
+/// is `vertex`, hence `not_first_party` (live-captured on 2.1.220). `C_()` is
+/// the gateway-auth cell, which has no port surface. Value test is the shared
+/// `isEnvTruthy` allowlist, as everywhere else the port reads these vars.
+const MANAGED_CLOUD_PROVIDER_ENV: [&str; 6] = [
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_FOUNDRY",
+    "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+    "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
+    "CLAUDE_CODE_USE_MANTLE",
+    "CLAUDE_CODE_USE_VERTEX",
+];
+
+/// `xn()==="firstParty"` — see [`MANAGED_CLOUD_PROVIDER_ENV`].
+fn env_api_provider_is_first_party() -> bool {
+    !MANAGED_CLOUD_PROVIDER_ENV
+        .iter()
+        .any(|key| traits::env::is_env_truthy(std::env::var(key).ok().as_deref()))
+}
+
+/// `xn()==="firstParty"` for this session: the env-derived provider
+/// (`env_first_party`, from [`env_api_provider_is_first_party`]) AND — LingXi
+/// multi-provider divergence, which the oracle has no analogue for — a model
+/// actually served by the Anthropic profile. Either half falsy maps to
+/// `not_first_party`.
 fn session_model_is_first_party(
+    env_first_party: bool,
     listings: &[traits::orchestrator::ModelListing],
     model: &str,
 ) -> bool {
+    if !env_first_party {
+        return false;
+    }
     if let Some(listing) = listings.iter().find(|l| l.request_model == model) {
         return listing.provider_id == "anthropic";
     }
     // Not in the live catalog (offline/test builds): bare `claude-*` ids and
     // the `default` pseudo-model route to the first-party Anthropic profile.
     model == "default" || model.to_lowercase().starts_with("claude-")
+}
+
+/// Port of `cK(model, fastModeOptIn)` (binary @227895153) — the
+/// `fast_mode_state` carried by `system/init`, the `initialize`
+/// control_response and every `result` frame:
+///
+/// ```js
+/// function cK(e,t){let r=El()&&QN()&&!!t&&fE(e);
+///   if(r&&z0e())return"cooldown";if(r)return"on";return"off"}
+/// ```
+///
+/// * `QN()` is `El()&&fde(undefined)===null` i.e. `El()&&JW()===null`, so
+///   `El()&&QN()` collapses to "the disabled reason resolved to null" — the
+///   value this function is handed.
+/// * `fE(model)` (@227892311) is the model gate: the registry `fast_mode`
+///   capability, else a name containing `opus-4-7` / `opus-4-8` / `opus-5`.
+///   The port has no registry-capability seam here, and the name rule already
+///   covers every fast-mode entry in the catalog.
+/// * `z0e()` (`"cooldown"`) rides the unported availability prober `mB` — the
+///   same dead arm as `JW`'s `pending` / `disabled` branches.
+fn resolve_fast_mode_state(
+    model: &str,
+    fast_mode_disabled_reason: Option<&str>,
+    sdk_fast_mode_opt_in: bool,
+) -> &'static str {
+    let m = model.to_lowercase();
+    let model_supports_fast_mode =
+        m.contains("opus-4-7") || m.contains("opus-4-8") || m.contains("opus-5");
+    if fast_mode_disabled_reason.is_none() && sdk_fast_mode_opt_in && model_supports_fast_mode {
+        "on"
+    } else {
+        "off"
+    }
 }
 
 /// `Hr("flagSettings")?.fastMode===!0` — the Agent-SDK fast-mode opt-in
@@ -3769,6 +3936,7 @@ mod tests {
             &[],
             &[],
             &json!({}),
+            "off",
             None,
         )
         .await;
@@ -3828,6 +3996,7 @@ mod tests {
             &[],
             &[],
             &json!({}),
+            "off",
             None,
         )
         .await;
@@ -3859,6 +4028,7 @@ mod tests {
             &[],
             &[],
             &json!({}),
+            "off",
             None,
         )
         .await;
@@ -3894,6 +4064,7 @@ mod tests {
             &[],
             &[],
             &json!({}),
+            "off",
             None,
         )
         .await;
@@ -4009,6 +4180,197 @@ mod tests {
         )));
     }
 
+    /// The turn loop's terminal `command_lifecycle` state, driven through the
+    /// same helper the loop calls (`Njo(In,Nn)` @239414857 behind the
+    /// stream-json call site @240906553). Before this, EVERY finished turn —
+    /// including one that died on a hard failure — reported `completed`.
+    #[test]
+    fn turn_terminal_lifecycle_matches_njo_call_site() {
+        use crate::queued_commands::QueueLifecycle;
+        use orchestrator::{OrchestratorError, TurnOutcome};
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let lifecycle = QueueLifecycle::new(std::sync::Arc::new(tx), "sess-term".to_string());
+        let next = |rx: &mut tokio::sync::mpsc::UnboundedReceiver<
+            crate::stream_json::OutboundMsg,
+        >| {
+            serde_json::from_str::<serde_json::Value>(&outbound_line(
+                rx.try_recv().expect("lifecycle frame"),
+            ))
+            .expect("valid command_lifecycle json")
+        };
+
+        // Clean turn → `completed` (reason "completed", not aborted).
+        emit_turn_terminal_lifecycle(&lifecycle, Some("u-ok"), &Ok(TurnOutcome::EndTurn), false);
+        let f = next(&mut rx);
+        assert_eq!(f["type"], "command_lifecycle");
+        assert_eq!(f["command_uuid"], "u-ok");
+        assert_eq!(f["state"], "completed");
+
+        // `max_turns` is one of `Bxs`'s `return!1` arms — still `completed`.
+        emit_turn_terminal_lifecycle(&lifecycle, Some("u-max"), &Ok(TurnOutcome::MaxTurns), false);
+        assert_eq!(next(&mut rx)["state"], "completed");
+
+        // Interrupted turn: `aborted_streaming` (Wpt) AND the abort flag.
+        emit_turn_terminal_lifecycle(
+            &lifecycle,
+            Some("u-int"),
+            &Ok(TurnOutcome::Cancelled),
+            true,
+        );
+        assert_eq!(next(&mut rx)["state"], "cancelled");
+
+        // Abort flag alone (`Njo`'s `t||…`) forces `cancelled` even on a turn
+        // that otherwise ended naturally.
+        emit_turn_terminal_lifecycle(&lifecycle, Some("u-ab"), &Ok(TurnOutcome::EndTurn), true);
+        assert_eq!(next(&mut rx)["state"], "cancelled");
+
+        // Hard failure — the `rn!==null?"cancelled"` arm. STREAM-1: this
+        // reported `completed` while the same run's result frame said
+        // `is_error:true`.
+        for err in [
+            OrchestratorError::MaxBudgetReached {
+                budget_nano_usd: 100,
+            },
+            OrchestratorError::Internal("boom".to_string()),
+        ] {
+            emit_turn_terminal_lifecycle(&lifecycle, Some("u-err"), &Err(err), false);
+            let f = next(&mut rx);
+            assert_eq!(f["command_uuid"], "u-err");
+            assert_eq!(f["state"], "cancelled");
+        }
+
+        // An unstamped frame is not lifecycle-tracked — no frame at all.
+        emit_turn_terminal_lifecycle(&lifecycle, None, &Ok(TurnOutcome::EndTurn), false);
+        assert!(rx.try_recv().is_err(), "no uuid ⇒ no lifecycle frame");
+    }
+
+    /// Every lifecycle-tracked uuid reaches EXACTLY ONE terminal. The resume
+    /// dedup path retires the uuid from the shadow registry (`on_dequeued`)
+    /// before skipping the turn, so teardown's `discarded` sweep can no longer
+    /// cover it — the skip must emit its own terminal (binary @246492139).
+    #[test]
+    fn resume_dedup_skip_emits_its_own_terminal() {
+        use crate::queued_commands::QueueLifecycle;
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let lifecycle = QueueLifecycle::new(std::sync::Arc::new(tx), "sess-dedup".to_string());
+
+        // Router: uuid enters the queue.
+        lifecycle.command_queued("u-dup");
+        let queued: serde_json::Value =
+            serde_json::from_str(&outbound_line(rx.try_recv().expect("queued"))).unwrap();
+        assert_eq!(queued["state"], "queued");
+
+        // Turn loop: dequeue (not cancel-pending), then the dedup skip.
+        assert!(lifecycle.queued.on_dequeued("u-dup"));
+        emit_dedup_skip_terminal(&lifecycle, "u-dup");
+        let terminal: serde_json::Value =
+            serde_json::from_str(&outbound_line(rx.try_recv().expect("terminal"))).unwrap();
+        assert_eq!(terminal["command_uuid"], "u-dup");
+        assert_eq!(terminal["state"], "completed");
+
+        // Teardown cannot make up for a missing terminal: the uuid is gone.
+        // A uuid that never reached the turn loop IS still reachable, and gets
+        // `discarded` (binary `Hkm`) — the contrast that makes the skip's own
+        // terminal load-bearing.
+        lifecycle.command_queued("u-resident");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&outbound_line(
+                rx.try_recv().expect("queued")
+            ))
+            .unwrap()["state"],
+            "queued"
+        );
+        let survivors = lifecycle.queued.drain_for_discard();
+        assert_eq!(
+            survivors,
+            vec!["u-resident"],
+            "a dequeued uuid is unreachable from the teardown discard sweep"
+        );
+        for uuid in &survivors {
+            lifecycle.emit(uuid, crate::queued_commands::LIFECYCLE_DISCARDED);
+        }
+        let discarded: serde_json::Value =
+            serde_json::from_str(&outbound_line(rx.try_recv().expect("discarded"))).unwrap();
+        assert_eq!(discarded["command_uuid"], "u-resident");
+        assert_eq!(discarded["state"], "discarded");
+        assert!(rx.try_recv().is_err(), "exactly one terminal per command");
+    }
+
+    /// `cK(mt,ce.fastMode)` (@227895153): the state rides the SAME inputs as
+    /// `JW()`, so the `-p` surface never emits `off` with no reason.
+    #[test]
+    fn fast_mode_state_tracks_the_disabled_reason() {
+        // Opted in, no reason, fast-mode-capable model → `on`.
+        assert_eq!(resolve_fast_mode_state("claude-opus-5", None, true), "on");
+        assert_eq!(resolve_fast_mode_state("claude-opus-5[1m]", None, true), "on");
+        assert_eq!(resolve_fast_mode_state("claude-opus-4-7", None, true), "on");
+        assert_eq!(resolve_fast_mode_state("claude-opus-4-8", None, true), "on");
+        // `fE(model)` is part of the conjunction: a model with no fast-mode
+        // capability stays `off` even fully opted in.
+        assert_eq!(resolve_fast_mode_state("claude-sonnet-5", None, true), "off");
+        // Any reason ⇒ `El()&&QN()` is false ⇒ `off`.
+        assert_eq!(
+            resolve_fast_mode_state("claude-opus-5", Some("not_first_party"), true),
+            "off"
+        );
+        // No opt-in ⇒ `!!t` false (and `JW` would report sdk_opt_in_required).
+        assert_eq!(
+            resolve_fast_mode_state("claude-opus-5", Some("sdk_opt_in_required"), false),
+            "off"
+        );
+    }
+
+    /// `xn()` (@227682549) is purely env-derived — a first-party Claude model
+    /// under any managed-cloud env var is `not_first_party`. The env read is
+    /// NOT exercised here: `CLAUDE_CODE_USE_*` is process-global and ~840
+    /// sibling tests resolve models off it, so the verdict is a parameter and
+    /// the var LIST is asserted against the binary instead.
+    #[test]
+    fn managed_cloud_env_forces_not_first_party() {
+        assert_eq!(
+            MANAGED_CLOUD_PROVIDER_ENV,
+            [
+                "CLAUDE_CODE_USE_BEDROCK",
+                "CLAUDE_CODE_USE_FOUNDRY",
+                "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+                "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
+                "CLAUDE_CODE_USE_MANTLE",
+                "CLAUDE_CODE_USE_VERTEX",
+            ],
+            "xn()'s provider chain, in binary order"
+        );
+
+        let listings = vec![traits::orchestrator::ModelListing {
+            display_model: "Opus".to_string(),
+            request_model: "claude-opus-4-8".to_string(),
+            provider_id: "anthropic".to_string(),
+            provider_label: "Anthropic".to_string(),
+            description: None,
+            supports_reasoning: true,
+        }];
+        // A first-party Claude model on a managed-cloud provider: the catalog
+        // says `anthropic`, `xn()` says otherwise, and `xn()` wins.
+        assert!(!session_model_is_first_party(
+            false,
+            &listings,
+            "claude-opus-4-8"
+        ));
+        assert_eq!(
+            resolve_fast_mode_disabled_reason(
+                session_model_is_first_party(false, &listings, "claude-opus-4-8"),
+                true,
+            ),
+            Some("not_first_party"),
+        );
+        assert!(session_model_is_first_party(
+            true,
+            &listings,
+            "claude-opus-4-8"
+        ));
+    }
+
     /// First-party detection prefers the live catalog row's provider; unknown
     /// ids fall back to the `claude-*` / `default` family rule.
     #[test]
@@ -4031,12 +4393,12 @@ mod tests {
                 supports_reasoning: false,
             },
         ];
-        assert!(session_model_is_first_party(&listings, "claude-opus-4-8"));
-        assert!(!session_model_is_first_party(&listings, "gpt-4o"));
+        assert!(session_model_is_first_party(true, &listings, "claude-opus-4-8"));
+        assert!(!session_model_is_first_party(true, &listings, "gpt-4o"));
         // Fallback family rule when the model is not in the catalog.
-        assert!(session_model_is_first_party(&listings, "claude-opus-5[1m]"));
-        assert!(session_model_is_first_party(&listings, "default"));
-        assert!(!session_model_is_first_party(&listings, "grok-3"));
+        assert!(session_model_is_first_party(true, &listings, "claude-opus-5[1m]"));
+        assert!(session_model_is_first_party(true, &listings, "default"));
+        assert!(!session_model_is_first_party(true, &listings, "grok-3"));
     }
 
     #[tokio::test]

@@ -2340,14 +2340,21 @@ impl ChatWidget {
             // (still ANDed with agent-view enablement, like `C2t`'s
             // `fleetEnabled: $H()`); the raw value is persisted either way.
             // `defaultToAgentsView` takes effect at the next startup.
-            "leftArrowOpensAgents" => {
+            //
+            // The shorthand resolves keys against the SAME row list the
+            // `/config` screen renders (`rgr` → `xFt(…)` → `ncy` matching
+            // `n.id`), and both rows are spread in conditionally
+            // (`...$H()?[…]:[]` / `...H7e()?[…]:[]`, with `H7e() = $H() && !ba()`
+            // — `ba()` is the remote workspace, which the port has no analogue
+            // for). With agent view disabled the ids simply do not exist, so the
+            // key must fall through to `icy`'s unknown-key answer.
+            "leftArrowOpensAgents" if traits::agent_view::is_enabled() => {
                 let want = parse_bool("leftArrowOpensAgents")?;
-                self.bottom_pane
-                    .set_left_arrow_opens_agents(want && traits::agent_view::is_enabled());
+                self.bottom_pane.set_left_arrow_opens_agents(want);
                 tui_core::theme_persist::save_left_arrow_opens_agents(want);
                 Ok(format!("Set leftArrowOpensAgents to {want}."))
             }
-            "defaultToAgentsView" => {
+            "defaultToAgentsView" if traits::agent_view::is_enabled() => {
                 let want = parse_bool("defaultToAgentsView")?;
                 tui_core::theme_persist::save_default_to_agents_view(want);
                 Ok(format!("Set defaultToAgentsView to {want}."))
@@ -2560,22 +2567,10 @@ impl ChatWidget {
     /// or a missing handle renders a system line instead of an empty picker.
     /// Stopping a task goes off-loop via [`ChatOutcome::TaskAction`].
     pub(crate) fn cmd_tasks(&mut self, _args: &str) -> ChatOutcome {
-        let Some(registry) = self.task_registry.clone() else {
-            return self.show_system_text("/tasks is unavailable (no engine handle wired)", true);
+        let rows = match self.task_snapshot() {
+            Ok(rows) => rows,
+            Err(message) => return self.show_system_text(&message, true),
         };
-        let runtime = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(runtime) => runtime,
-            Err(err) => return self.show_system_text(&format!("/tasks failed: {err}"), true),
-        };
-        let rows: Vec<tui_core::multiagent::TaskRow> = runtime
-            .block_on(registry.list(traits::task_registry::TaskListFilter::default()))
-            .unwrap_or_default()
-            .into_iter()
-            .map(tui_core::multiagent::task_row_from_record)
-            .collect();
         if rows.is_empty() {
             return self.show_system_text("No tasks currently running", false);
         }
@@ -2583,13 +2578,41 @@ impl ChatWidget {
         ChatOutcome::Continue
     }
 
+    /// A live snapshot of the background-task registry, or the system-line text
+    /// for a missing handle / un-buildable runtime. Shared by [`Self::cmd_tasks`]
+    /// and [`Self::open_agents_view`].
+    fn task_snapshot(&self) -> Result<Vec<tui_core::multiagent::TaskRow>, String> {
+        let Some(registry) = self.task_registry.clone() else {
+            return Err("/tasks is unavailable (no engine handle wired)".to_string());
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|err| format!("/tasks failed: {err}"))?;
+        Ok(runtime
+            .block_on(registry.list(traits::task_registry::TaskListFilter::default()))
+            .unwrap_or_default()
+            .into_iter()
+            .map(tui_core::multiagent::task_row_from_record)
+            .collect())
+    }
+
     /// Open the agents view over the current conversation — the ←-on-empty
     /// gesture's handler (claude `kGt`'s open-agents arm) and the
     /// `defaultToAgentsView` startup path. The conversation stays live
     /// underneath (LingXi's agents-view seam is the `/tasks` picker modal),
     /// so Esc returns to the backgrounded conversation via the picker close.
+    ///
+    /// The view OPENS whether or not the registry has rows and never writes to
+    /// the transcript: the oracle mounts the fleet view as the whole UI and
+    /// renders its own in-view empty state there (`!mt ? "No agents yet."`), and
+    /// the `defaultToAgentsView` startup registry is always empty — routing this
+    /// through `/tasks`'s empty-list system line injected a spurious cell at the
+    /// top of every conversation and opened nothing.
     pub(crate) fn open_agents_view(&mut self) -> ChatOutcome {
-        self.cmd_tasks("")
+        self.bottom_pane
+            .show_tasks(self.task_snapshot().unwrap_or_default());
+        ChatOutcome::Continue
     }
 
     /// Apply the `leftArrowOpensAgents` gate to the composer's ←-on-empty
@@ -4715,26 +4738,93 @@ mod tests {
             "workflowSizeGuideline takes one of: unrestricted, small, medium, large"
         );
         assert!(sys.is_error());
+    }
 
-        // parity 2.1.220 agents-view keys: a bad bool reports the exact error
-        // (and persists nothing).
-        let mut w = widget();
-        w.cmd_config("leftArrowOpensAgents=maybe");
-        let sys = cell::<crate::history_cell::system::SystemTextCell>(&w, 0);
-        assert_eq!(
-            sys.body(),
-            "leftArrowOpensAgents takes true or false, not \"maybe\""
-        );
-        assert!(sys.is_error());
+    /// parity 2.1.220: the `/config` shorthand resolves keys against the SAME
+    /// row list the settings screen renders (`rgr` → `xFt` → `ncy`), and the two
+    /// agents-view rows are spread in behind `$H()` / `H7e()`. With agent view
+    /// disabled the ids do not exist, so the shorthand must answer the
+    /// unknown-key line rather than accepting (and persisting) the key.
+    ///
+    /// Only invalid values are used: a valid one would persist to the real
+    /// `~/.lingxi/settings.json`.
+    #[test]
+    fn config_shorthand_agents_view_keys_follow_the_enablement_gate() {
+        // Serialize the shared-process env mutation against itself.
+        static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let var = traits::agent_view::DISABLE_AGENT_VIEW_ENV;
+        std::env::remove_var(var);
 
+        // Enabled (the default): the arms match, so a bad bool reports the
+        // exact type error — and persists nothing.
+        for (token, message) in [
+            (
+                "leftArrowOpensAgents=maybe",
+                "leftArrowOpensAgents takes true or false, not \"maybe\"",
+            ),
+            (
+                "defaultToAgentsView=sometimes",
+                "defaultToAgentsView takes true or false, not \"sometimes\"",
+            ),
+        ] {
+            let mut w = widget();
+            w.cmd_config(token);
+            let sys = cell::<crate::history_cell::system::SystemTextCell>(&w, 0);
+            assert_eq!(sys.body(), message);
+            assert!(sys.is_error());
+        }
+
+        // Disabled: neither id is a `/config` setting at all.
+        std::env::set_var(var, "1");
+        for (token, key) in [
+            ("leftArrowOpensAgents=true", "leftArrowOpensAgents"),
+            ("defaultToAgentsView=true", "defaultToAgentsView"),
+        ] {
+            let mut w = widget();
+            w.cmd_config(token);
+            let sys = cell::<crate::history_cell::system::SystemTextCell>(&w, 0);
+            assert_eq!(
+                sys.body(),
+                format!("{key} isn't a /config setting. Run /config to see what's available.")
+            );
+            assert!(sys.is_error());
+        }
+        std::env::remove_var(var);
+    }
+
+    /// parity 2.1.220 `defaultToAgentsView` / the ←-on-empty gesture: the agents
+    /// view OPENS over an empty registry (the startup registry always is) and
+    /// writes nothing to the transcript. The oracle mounts the fleet view as the
+    /// whole UI and renders its empty state in-view; routing this through
+    /// `/tasks` instead injected "No tasks currently running" at the top of
+    /// every new conversation and opened no view at all.
+    #[test]
+    fn open_agents_view_opens_the_picker_when_empty() {
         let mut w = widget();
-        w.cmd_config("defaultToAgentsView=sometimes");
-        let sys = cell::<crate::history_cell::system::SystemTextCell>(&w, 0);
-        assert_eq!(
-            sys.body(),
-            "defaultToAgentsView takes true or false, not \"sometimes\""
+        assert!(matches!(w.open_agents_view(), ChatOutcome::Continue));
+        let picker = w
+            .bottom_pane()
+            .view_stack()
+            .active()
+            .and_then(|v| {
+                v.as_any()
+                    .downcast_ref::<crate::bottom_pane::tasks_view::TasksView>()
+            })
+            .expect("agents view active");
+        assert!(picker.rows().is_empty());
+        assert!(
+            cells(&w).is_empty(),
+            "the agents view must not push a transcript cell"
         );
-        assert!(sys.is_error());
+
+        // `/tasks` keeps its own empty-list system line (unchanged).
+        let mut w = widget();
+        w.cmd_tasks("");
+        assert_eq!(
+            cell::<crate::history_cell::system::SystemTextCell>(&w, 0).body(),
+            "/tasks is unavailable (no engine handle wired)"
+        );
     }
 
     /// The widget-level `leftArrowOpensAgents` setter reaches the pane's

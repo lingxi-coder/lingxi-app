@@ -223,13 +223,23 @@ pub enum PermissionDecisionSource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PermissionResolution {
     /// Permitted outright (rule/mode allow, or a read-only auto-allow).
-    Allow,
+    Allow {
+        /// Raw `SettingSource` token of the RULE that produced this allow
+        /// (`userSettings`, `localSettings`, `session`, …), or `None` when no
+        /// rule matched (a mode allow, a read-only auto-allow, or a gate with no
+        /// rule layer). Feeds the OTEL decision-source label — claude-code
+        /// `ZX_(decisionReason.rule.source, behavior)`.
+        rule_source: Option<String>,
+    },
     /// Rejected, with the rendered deny reason and its source.
     Deny {
         /// Reason surfaced to the model as the `tool_result`.
         reason: String,
         /// Where the denial came from (gates the `PermissionDenied` hook).
         source: PermissionDecisionSource,
+        /// Raw `SettingSource` token of the matched deny RULE, mirroring
+        /// [`Self::Allow::rule_source`]. `None` for every non-rule denial.
+        rule_source: Option<String>,
         /// GATE-SYSMSG-01: the discriminated reason kind
         /// (`decisionReason?.type` — `rule`/`mode`/`safetyCheck`/…), pre-computed
         /// where the full [`crate`]-external `PermissionDecisionReason` is in scope
@@ -544,10 +554,11 @@ pub trait PermissionGate: Send + Sync {
     /// types.) Additive DEFAULTED (frozen-trait safe).
     async fn resolve_detailed(&self, name: &str, input: &Value) -> PermissionResolution {
         match self.check(name, input).await {
-            PermissionDecision::Allow => PermissionResolution::Allow,
+            PermissionDecision::Allow => PermissionResolution::Allow { rule_source: None },
             PermissionDecision::Deny { reason } => PermissionResolution::Deny {
                 reason,
                 source: PermissionDecisionSource::Unspecified,
+                rule_source: None,
                 // The default has only a rendered String reason (no structured
                 // `PermissionDecisionReason`), so the system-message discriminants
                 // are unavailable here.

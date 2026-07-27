@@ -732,8 +732,10 @@ pub fn run_app(
             && agent_view_enabled,
     );
     // `defaultToAgentsView` ("Open agents view by default" / "Start in agent
-    // view", default OFF): open the agents view over the fresh conversation
-    // at startup. Runs after the task registry is wired so the view has rows.
+    // view", default OFF): open the agents view over the fresh conversation at
+    // startup — the oracle mounts the fleet view as the whole UI here
+    // (`v = y().defaultToAgentsView === !0` … `tengu_fleetview`), empty or not.
+    // Runs after the task registry is wired so the snapshot can see it.
     if tui_core::theme_persist::load_default_to_agents_view().unwrap_or(false) && agent_view_enabled
     {
         app.chat_widget.open_agents_view();

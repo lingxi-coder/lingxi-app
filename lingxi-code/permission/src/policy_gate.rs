@@ -641,13 +641,16 @@ impl PolicyPermissionGate {
         input: &Value,
     ) -> PermissionResolution {
         match result {
-            PermissionResult::Allow { .. } => PermissionResolution::Allow,
+            PermissionResult::Allow { ref reason, .. } => PermissionResolution::Allow {
+                rule_source: rule_settings_source(reason),
+            },
             PermissionResult::Deny {
                 reason,
                 explanation,
                 ..
             } => PermissionResolution::Deny {
                 source: map_decision_source(&reason),
+                rule_source: rule_settings_source(&reason),
                 // GATE-SYSMSG-01: pre-compute the system-message discriminants from
                 // the FULL reason (in scope here) so the turn loop can emit the
                 // `permission_denied` frame on the main-conversation deny path —
@@ -671,8 +674,8 @@ impl PolicyPermissionGate {
                 }
                 if read_only_default_auto_allows(name, reason) {
                     // Read-only / agent-local tool with NO explicit `ask` rule —
-                    // auto-allowed, no prompt.
-                    PermissionResolution::Allow
+                    // auto-allowed, no prompt. No rule matched, so no scope.
+                    PermissionResolution::Allow { rule_source: None }
                 } else {
                     // A would-be prompt (a mutating tool, OR an explicit `ask`
                     // rule on a read-only tool): the turn loop fires
@@ -1578,6 +1581,21 @@ fn map_decision_source(reason: &PermissionDecisionReason) -> PermissionDecisionS
         PermissionDecisionReason::PermissionMode { .. } => PermissionDecisionSource::Mode,
         PermissionDecisionReason::ClassifierRejected { .. } => PermissionDecisionSource::Classifier,
         _ => PermissionDecisionSource::Unspecified,
+    }
+}
+
+/// Raw `SettingSource` token of the rule behind a `decisionReason`, or `None`
+/// when the decision did not come from a rule. Feeds the OTEL decision-source
+/// label the turn loop derives with claude-code `ZX_` — which reads exactly
+/// `decisionReason.rule.source` and only for `decisionReason.type === 'rule'`
+/// (a `subcommandResults` composite maps to `"config"` there, so it is NOT
+/// unwrapped here).
+fn rule_settings_source(reason: &PermissionDecisionReason) -> Option<String> {
+    match reason {
+        PermissionDecisionReason::MatchedRule { rule } => {
+            Some(rule.source.lingxi_settings_source().to_string())
+        }
+        _ => None,
     }
 }
 

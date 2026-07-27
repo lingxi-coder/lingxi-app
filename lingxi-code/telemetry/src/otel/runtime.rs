@@ -540,23 +540,31 @@ const CODE_EDIT_TOOLS: [&str; 3] = ["Edit", "Write", "NotebookEdit"];
 /// bookkeeping site).
 ///
 /// * `decision` — `"accept"` / `"reject"` (CC `c`).
-/// * `source` — CC `f`: `"config"` for a rule/mode decision, else the
-///   `fI_(decisionReason)` label (`classifier` / `hook` / `user_permanent` /
-///   `user_temporary` / `user_abort` / `user_reject` / `unknown`).
+/// * `source` — the `eQ_(decisionReason, behavior)` label: `"config"` for a
+///   mode/classifier/safety-check decision or one with no reason, `"hook"`, the
+///   `ZX_` rule-scope labels (`user_permanent` / `user_temporary` /
+///   `user_reject`), or `"user_abort"` for an aborted permission request.
 /// * `file_path` — the tool's `getPath` result (Edit/Write `file_path`,
 ///   NotebookEdit `notebook_path`); when present the counter carries a
 ///   `language` attribute resolved via the highlight.js registry (`UMt`),
 ///   including the explicit `"unknown"` fallback — only a MISSING path omits
 ///   the attribute (CC `...o&&{language:o}`).
+/// * `is_mcp` — whether the tool came from an MCP server, feeding the log
+///   record's `tool_source` (CC `Jro(mcpInfo)`).
 ///
 /// The counter fires only for [`CODE_EDIT_TOOLS`] (`xCs`); the `tool_decision`
 /// log record fires for every tool. Byte-noop when no runtime is installed.
+///
+/// The counter and the log record DISAGREE on `tool_name` by design: `ICs`
+/// returns the raw `e.name`, while the log record anonymizes it through
+/// [`log_tool_name`].
 pub fn record_tool_permission_decision(
     tool_name: &str,
     tool_use_id: &str,
     file_path: Option<&str>,
     decision: &str,
     source: &str,
+    is_mcp: bool,
 ) {
     with_runtime(|runtime| {
         if CODE_EDIT_TOOLS.contains(&tool_name) {
@@ -571,17 +579,45 @@ pub fn record_tool_permission_decision(
             runtime.record_counter(metrics::CODE_EDIT_TOOL_DECISION, 1.0, &attrs);
         }
         // CC log-record attrs are strings (`vc("tool_decision", {decision:c,
-        // source:f, tool_name:ua(n.name), tool_use_id:a, …})`).
+        // source:f, tool_name:ua(n.name), tool_use_id:a, ...Jro(n.mcpInfo),
+        // …})`). `tool_source` is spread UNCONDITIONALLY — `Jro` always returns
+        // a value, so every record carries it. `sdk_host_builtin_mcp` needs
+        // `Yro` (`serverType === "sdk" && $Me()`), which no port surface
+        // produces, so only builtin/mcp are reachable.
         runtime.emit_log_event(
             "tool_decision",
             &attrs_from_pairs(&[
                 ("decision", AttrValue::from(decision.to_string())),
                 ("source", AttrValue::from(source.to_string())),
-                ("tool_name", AttrValue::from(tool_name.to_string())),
+                ("tool_name", AttrValue::from(log_tool_name(tool_name).to_string())),
                 ("tool_use_id", AttrValue::from(tool_use_id.to_string())),
+                (
+                    "tool_source",
+                    AttrValue::from(if is_mcp { "mcp" } else { "builtin" }.to_string()),
+                ),
             ]),
         );
     });
+}
+
+/// claude-code `ua(name)`: the tool name as it appears in a `claude_code.events`
+/// LOG record — every `mcp__*` tool collapses to the literal `"mcp_tool"` so a
+/// server/tool name never reaches the collector. Non-MCP names pass through.
+///
+/// CC's `JYi` exemption list rescues exactly two names from the collapse —
+/// `mcp__workspace__bash` → `Bash` and `mcp__workspace__web_fetch` →
+/// `WebFetch`, the managed-MCP wire ids of two BUILT-IN tools. LingXi ships
+/// those tools under their plain names and never emits the `mcp__workspace__`
+/// ids, so the exemption is inert here (`rg mcp__workspace__` finds nothing).
+///
+/// The metric counters keep the RAW name (CC `ICs` returns `tool_name: e.name`);
+/// only log records are anonymized.
+fn log_tool_name(tool_name: &str) -> &str {
+    if tool_name.starts_with("mcp__") {
+        "mcp_tool"
+    } else {
+        tool_name
+    }
 }
 
 /// Record the `claude_code.commit.count` / `claude_code.pull_request.count`
@@ -2244,8 +2280,16 @@ mod tests {
         clear_runtime();
         let runtime = install_test_runtime(local_runtime_config());
 
-        record_tool_permission_decision("Edit", "toolu_1", Some("/tmp/main.rs"), "accept", "config");
-        record_tool_permission_decision("Bash", "toolu_2", None, "reject", "user_reject");
+        record_tool_permission_decision(
+            "Edit",
+            "toolu_1",
+            Some("/tmp/main.rs"),
+            "accept",
+            "config",
+            false,
+        );
+        record_tool_permission_decision("Bash", "toolu_2", None, "reject", "user_reject", false);
+        record_tool_permission_decision("mcp__srv__do", "toolu_3", None, "accept", "config", true);
 
         let debug = snapshot(&runtime);
         // Counter fires only for the code-edit tools (`pI_`), with language.
@@ -2267,17 +2311,72 @@ mod tests {
             decisions[0].attributes.get("language"),
             Some(&AttrValue::from("Rust"))
         );
-        // The tool_decision log record fires for BOTH tools.
+        // The tool_decision log record fires for EVERY tool.
         let logs: Vec<_> = debug
             .logs
             .iter()
             .filter(|sample| sample.event_name == "tool_decision")
             .collect();
-        assert_eq!(logs.len(), 2);
+        assert_eq!(logs.len(), 3);
         assert!(logs.iter().any(|sample| {
             sample.attributes.get("tool_use_id") == Some(&AttrValue::from("toolu_2"))
                 && sample.attributes.get("decision") == Some(&AttrValue::from("reject"))
         }));
+        // `...Jro(n.mcpInfo)` is spread unconditionally — builtin tools carry
+        // `tool_source: "builtin"`, MCP tools `"mcp"`.
+        let builtin = logs
+            .iter()
+            .find(|s| s.attributes.get("tool_use_id") == Some(&AttrValue::from("toolu_1")))
+            .expect("Edit record");
+        assert_eq!(
+            builtin.attributes.get("tool_source"),
+            Some(&AttrValue::from("builtin"))
+        );
+        assert_eq!(
+            builtin.attributes.get("tool_name"),
+            Some(&AttrValue::from("Edit"))
+        );
+        // `ua()` collapses every `mcp__*` name to the literal "mcp_tool" in the
+        // LOG record, so no server/tool name reaches the collector.
+        let mcp = logs
+            .iter()
+            .find(|s| s.attributes.get("tool_use_id") == Some(&AttrValue::from("toolu_3")))
+            .expect("MCP record");
+        assert_eq!(
+            mcp.attributes.get("tool_name"),
+            Some(&AttrValue::from("mcp_tool"))
+        );
+        assert_eq!(
+            mcp.attributes.get("tool_source"),
+            Some(&AttrValue::from("mcp"))
+        );
+        clear_runtime();
+    }
+
+    #[test]
+    fn code_edit_decision_counter_keeps_the_raw_tool_name() {
+        // `ICs` returns `tool_name: e.name` RAW — only the log record is
+        // anonymized, so the counter must not be collapsed to "mcp_tool".
+        let _lock = RUNTIME_SLOT_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_runtime();
+        let runtime = install_test_runtime(local_runtime_config());
+
+        record_tool_permission_decision("Edit", "toolu_1", None, "accept", "config", false);
+
+        let debug = snapshot(&runtime);
+        let decisions: Vec<_> = debug
+            .counters
+            .iter()
+            .filter(|sample| sample.instrument == metrics::CODE_EDIT_TOOL_DECISION)
+            .collect();
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(
+            decisions[0].attributes.get("tool_name"),
+            Some(&AttrValue::from("Edit"))
+        );
+        assert_eq!(decisions[0].attributes.get("tool_source"), None);
         clear_runtime();
     }
 

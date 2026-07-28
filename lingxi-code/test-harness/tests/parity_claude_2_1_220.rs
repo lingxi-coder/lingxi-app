@@ -15,9 +15,15 @@ use serde_json::Value;
 
 const BACKLOG_CONTRACTS: &str =
     include_str!("../src/parity/fixtures/claude_2_1_220_backlog_contracts.json");
+const GAP_ORACLE: &str =
+    include_str!("../src/parity/fixtures/claude_2_1_220_gap_oracle.json");
 
 fn backlog_contracts() -> Value {
     serde_json::from_str(BACKLOG_CONTRACTS).expect("2.1.220 backlog fixture must be valid JSON")
+}
+
+fn gap_oracle() -> Value {
+    serde_json::from_str(GAP_ORACLE).expect("2.1.220 gap oracle fixture must be valid JSON")
 }
 
 /// The current parity target is exposed from one source of truth.
@@ -127,5 +133,65 @@ fn stateful_2_1_220_contracts_are_pinned() {
     assert_eq!(
         contracts["accessibility"]["announces_edit_delta_only"],
         true
+    );
+}
+
+/// Wave 0 retains only clean-room observables from the local 2.1.220 binary:
+/// hashes/lengths/section names rather than the private prompt bodies.
+#[test]
+fn gap_oracle_is_pinned_without_private_prompt_text() {
+    let fixture = gap_oracle();
+    assert_eq!(fixture["oracle"]["version"], "2.1.220");
+    assert_eq!(
+        fixture["oracle"]["binary_sha256"],
+        "8addc857f3fe64d5a0368af9ee50321b50afb4a6918ba3ef018ab84f5dbbe081"
+    );
+    assert_eq!(fixture["oracle"]["network"], "loopback-only");
+    assert_eq!(fixture["fast_mode"]["claude-opus-4-7"], "on");
+
+    let prompts = fixture["system_prompt_manifests"]
+        .as_array()
+        .expect("system prompt manifests");
+    assert_eq!(prompts.len(), 4);
+    assert!(prompts.iter().all(|entry| {
+        entry["length_bytes"].as_u64().is_some_and(|len| len > 1_000)
+            && entry["sha256"]
+                .as_str()
+                .is_some_and(|digest| digest.len() == 64)
+            && entry["headings"]
+                .as_array()
+                .is_some_and(|headings| !headings.is_empty())
+    }));
+    assert_ne!(
+        prompts[0]["sha256"], prompts[1]["sha256"],
+        "Claude model families must retain distinct prompt manifests"
+    );
+    assert_ne!(
+        prompts[0]["sha256"], prompts[3]["sha256"],
+        "the lean Opus prompt must not be treated as the Sonnet prompt"
+    );
+
+    let options = fixture["plugin_eval"]["options"]
+        .as_array()
+        .expect("plugin eval options");
+    assert!(options.iter().any(|option| option == "--json"));
+    assert!(options.iter().any(|option| option == "--model"));
+    assert_eq!(fixture["plugin_eval"]["help_exit_code"], 0);
+    assert_eq!(
+        fixture["plugin_eval"]["early_access_gate"],
+        "CLAUDE_CODE_WALNUT_SPIRE"
+    );
+    assert_eq!(
+        fixture["plugin_eval"]["bare_template"]["prompt_frontmatter"]["max_turns"],
+        10
+    );
+    assert_eq!(
+        fixture["plugin_eval"]["bare_template"]["grader_frontmatter"]["type"],
+        "llm"
+    );
+    assert_eq!(fixture["plugin_eval"]["empty_suite"]["exit_code"], 1);
+    assert_eq!(
+        fixture["plugin_eval"]["empty_suite"]["schema_version"],
+        1
     );
 }

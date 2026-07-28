@@ -111,7 +111,7 @@ crossterm = { workspace = true }
 # `wrap_help` + `term_width = 80` reproduce the oracle's 80-column help
 # layout with hanging indents; without the feature `term_width` is inert.
 clap = { version = "=4.5.20", features = ["derive", "env", "wrap_help"] }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "io-std", "io-util", "time", "net"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "io-std", "io-util", "time", "net", "process"] }
 tokio-util = { workspace = true, features = ["rt"] }
 futures = { workspace = true }
 async-trait = { workspace = true }
@@ -121,6 +121,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+serde_yaml = "0.9"
+regex = "1"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }

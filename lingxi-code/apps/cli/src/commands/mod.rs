@@ -35,6 +35,7 @@ pub mod install;
 pub mod mcp;
 pub mod mcp_xaa;
 pub mod plugin;
+pub mod plugin_eval;
 pub mod plugin_init;
 pub mod plugin_install;
 pub mod plugin_marketplace;

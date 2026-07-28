@@ -39,6 +39,12 @@ pub enum Sub {
     /// Enable a disabled plugin
     Enable(EnableArgs),
 
+    /// Run eval cases against a plugin and report scored results
+    #[command(
+        long_about = "Run eval cases (evals/**/case.yaml or evals/**/prompt.md + graders/*.md) against a plugin and report scored results. Target is a path, a plugin name, or a `plugin@marketplace` id — installed and skills-dir plugins both resolve (and add a no-plugin baseline arm)"
+    )]
+    Eval(crate::commands::plugin_eval::Cli),
+
     /// Scaffold a new plugin at ~/.lingxi/skills/<name>/ (auto-loads next
     /// session as <name>@skills-dir)
     #[command(name = "init", visible_alias = "new")]
@@ -352,6 +358,15 @@ pub async fn run(cli: &Cli) -> i32 {
         Sub::List(args) => run_list(args).await,
         Sub::Details(args) => run_details(args).await,
         Sub::Validate(args) => run_validate(args).await,
+        Sub::Eval(args) => {
+            crate::commands::plugin_eval::run(
+                args,
+                &plugins_dir(),
+                &crate::run::lingxi_home_dir(),
+                &scope_cwd(),
+            )
+            .await
+        }
 
         // On-disk `enabledPlugins` allowlist toggle (the CLI seam — settings.json
         // read-modify-write at the chosen scope), 1:1 with claude 2.1.201.

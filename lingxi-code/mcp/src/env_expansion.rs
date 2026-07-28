@@ -54,7 +54,8 @@ pub struct EnvExpansion {
 pub(crate) fn env_ref_regex() -> &'static regex::Regex {
     static RE: OnceLock<regex::Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        regex::Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(:-[^}]*)?\}").expect("static env-ref regex")
+        regex::Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(:-[^}]*)?\}")
+            .expect("static env-ref regex")
     })
 }
 

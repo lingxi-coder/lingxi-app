@@ -204,6 +204,11 @@ pub struct SettingsJson {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub show_thinking_summaries: Option<bool>,
 
+    /// Scalar field (later source wins). When enabled, a literal `ultracode`
+    /// token in a submitted prompt emits the Workflow authorization reminder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_keyword_trigger_enabled: Option<bool>,
+
     /// Scalar field (later source wins). Telemetry on/off toggle.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub telemetry_enabled: Option<bool>,

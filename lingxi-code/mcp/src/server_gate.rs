@@ -26,6 +26,7 @@
 //! server name is a wire/protocol identifier and stays verbatim (not branded).
 
 use crate::connection::{ConfigScope, McpServerConfig};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::path::Path;
 
@@ -33,6 +34,108 @@ use std::path::Path;
 /// `enabledMcpServers` ALLOWLIST rather than the `disabledMcpServers` denylist.
 /// A wire/protocol identifier: kept verbatim (NOT brand-swapped).
 pub const BUILTIN_COMPUTER_USE_SERVER: &str = "computer-use";
+
+/// The stable reason a fully-merged MCP candidate was blocked.
+///
+/// Keeping this structured lets CLI/TUI callers render one consistent warning
+/// without re-implementing the security decision from a boolean `disabled`
+/// flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpServerBlockReason {
+    /// A normal server name is present in `disabledMcpServers`.
+    NameDenied,
+    /// The builtin `computer-use` server was not explicitly allowlisted.
+    BuiltinNotEnabled,
+    /// A project `.mcp.json` entry is awaiting approval.
+    ProjectPendingApproval,
+    /// A project `.mcp.json` entry was explicitly rejected.
+    ProjectRejected,
+}
+
+/// Result of applying the final, scope-aware MCP policy to one candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpServerDecision {
+    /// The candidate is eligible to proceed to enterprise/transport checks.
+    Allow,
+    /// The candidate must remain visible but may not connect.
+    Block(McpServerBlockReason),
+}
+
+/// Immutable project policy snapshot applied after all MCP sources are merged.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct McpPolicyContext {
+    /// Builtin-server allowlist from `enabledMcpServers`.
+    pub enabled_servers: Vec<String>,
+    /// Final name denylist from `disabledMcpServers`.
+    pub disabled_servers: Vec<String>,
+    /// Project `.mcp.json` entries explicitly approved by name.
+    pub approved_project_servers: Vec<String>,
+    /// Project `.mcp.json` entries explicitly rejected by name.
+    pub rejected_project_servers: Vec<String>,
+    /// Whether every non-rejected project `.mcp.json` entry is approved.
+    pub enable_all_project_servers: bool,
+}
+
+impl McpPolicyContext {
+    /// Load one immutable policy snapshot for `cwd`.
+    #[must_use]
+    pub fn load(global_config_path: &Path, cwd: &Path) -> Self {
+        let key = migrations::global_config::project_path_for_config(cwd);
+        let project_cfg = migrations::global_config::get_project_config(global_config_path, &key)
+            .unwrap_or_default();
+        let (enabled_servers, disabled_servers) = read_gate_lists(&project_cfg);
+        Self {
+            enabled_servers,
+            disabled_servers,
+            approved_project_servers: eqn_string_array(project_cfg.get("enabledMcpjsonServers")),
+            rejected_project_servers: read_rejected_mcpjson_servers(&project_cfg),
+            enable_all_project_servers: project_cfg
+                .get("enableAllProjectMcpServers")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        }
+    }
+
+    /// Decide one candidate after all scope/plugin/agent precedence is settled.
+    #[must_use]
+    pub fn decide(&self, server: &McpServerConfig) -> McpServerDecision {
+        if is_builtin_computer_use(&server.name)
+            && !self
+                .enabled_servers
+                .iter()
+                .any(|name| mcp_names_match(name, &server.name))
+        {
+            return McpServerDecision::Block(McpServerBlockReason::BuiltinNotEnabled);
+        }
+        if !is_builtin_computer_use(&server.name)
+            && self
+                .disabled_servers
+                .iter()
+                .any(|name| mcp_names_match(name, &server.name))
+        {
+            return McpServerDecision::Block(McpServerBlockReason::NameDenied);
+        }
+        if server.scope == ConfigScope::Project {
+            if self
+                .rejected_project_servers
+                .iter()
+                .any(|name| mcp_names_match(name, &server.name))
+            {
+                return McpServerDecision::Block(McpServerBlockReason::ProjectRejected);
+            }
+            let approved = self.enable_all_project_servers
+                || self
+                    .approved_project_servers
+                    .iter()
+                    .any(|name| mcp_names_match(name, &server.name));
+            if !approved {
+                return McpServerDecision::Block(McpServerBlockReason::ProjectPendingApproval);
+            }
+        }
+        McpServerDecision::Allow
+    }
+}
 
 /// `rTo(e)`: whether `name` is the builtin `computer-use` server (the only
 /// server governed by the allowlist rather than the denylist).
@@ -162,23 +265,9 @@ pub fn apply_project_server_gate(
     global_config_path: &Path,
     cwd: &Path,
 ) {
-    let key = migrations::global_config::project_path_for_config(cwd);
-    let project_cfg =
-        migrations::global_config::get_project_config(global_config_path, &key).unwrap_or_default();
-    let (enabled, disabled) = read_gate_lists(&project_cfg);
-    let rejected_json = read_rejected_mcpjson_servers(&project_cfg);
+    let policy = McpPolicyContext::load(global_config_path, cwd);
     for server in servers.iter_mut() {
-        if mcp_server_is_disabled(&server.name, &enabled, &disabled) {
-            server.disabled = true;
-        }
-        // `.mcp.json` REJECT list (`h2r` → `"rejected"`): a Project-scoped server
-        // the user disabled via `/mcp disable` is written to
-        // `disabledMcpjsonServers` and must NOT connect on the next launch.
-        if server.scope == ConfigScope::Project
-            && rejected_json
-                .iter()
-                .any(|r| mcp_names_match(r, &server.name))
-        {
+        if matches!(policy.decide(server), McpServerDecision::Block(_)) {
             server.disabled = true;
         }
     }
@@ -318,6 +407,7 @@ mod tests {
             "projects": {
                 key: {
                     "disabledMcpServers": ["sentry"],
+                    "enableAllProjectMcpServers": true,
                     // computer-use NOT in enabledMcpServers ⇒ stays disabled.
                 }
             }
@@ -415,8 +505,8 @@ mod tests {
         assert!(servers[0].disabled);
         // User-scoped same-name server is untouched.
         assert!(!servers[1].disabled);
-        // An un-listed project server stays enabled.
-        assert!(!servers[2].disabled);
+        // An un-listed project server is pending approval and cannot connect.
+        assert!(servers[2].disabled);
     }
 
     #[test]
@@ -445,9 +535,9 @@ mod tests {
         let mut servers = vec![stdio("sentry"), stdio("computer-use")];
         apply_project_server_gate(&mut servers, &global, dir.path());
 
-        // A normal server stays enabled when there is no denylist.
+        // A project server without an approval record is pending and disabled.
         assert!(
-            !servers
+            servers
                 .iter()
                 .find(|s| s.name == "sentry")
                 .unwrap()
@@ -460,6 +550,61 @@ mod tests {
                 .find(|s| s.name == "computer-use")
                 .unwrap()
                 .disabled
+        );
+    }
+
+    #[test]
+    fn final_name_deny_blocks_agent_server() {
+        let policy = McpPolicyContext {
+            disabled_servers: vec!["docs".into()],
+            ..McpPolicyContext::default()
+        };
+        let server = McpServerConfig {
+            name: "docs".into(),
+            spec: traits::McpTransportSpec::Stdio {
+                command: "docs".into(),
+                args: Vec::new(),
+                env: std::collections::HashMap::new(),
+            },
+            scope: ConfigScope::Agent,
+            disabled: false,
+            timeout_ms: None,
+            always_load: false,
+            config_error: None,
+        };
+        assert_eq!(
+            policy.decide(&server),
+            McpServerDecision::Block(McpServerBlockReason::NameDenied)
+        );
+    }
+
+    #[test]
+    fn project_approval_is_scope_aware() {
+        let policy = McpPolicyContext::default();
+        let make = |scope| McpServerConfig {
+            name: "docs".into(),
+            spec: traits::McpTransportSpec::Stdio {
+                command: "docs".into(),
+                args: Vec::new(),
+                env: std::collections::HashMap::new(),
+            },
+            scope,
+            disabled: false,
+            timeout_ms: None,
+            always_load: false,
+            config_error: None,
+        };
+        assert_eq!(
+            policy.decide(&make(ConfigScope::Project)),
+            McpServerDecision::Block(McpServerBlockReason::ProjectPendingApproval)
+        );
+        assert_eq!(
+            policy.decide(&make(ConfigScope::User)),
+            McpServerDecision::Allow
+        );
+        assert_eq!(
+            policy.decide(&make(ConfigScope::Agent)),
+            McpServerDecision::Allow
         );
     }
 }

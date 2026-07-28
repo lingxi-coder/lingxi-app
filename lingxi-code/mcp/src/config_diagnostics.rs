@@ -133,7 +133,8 @@ pub fn collect_mcp_config_warnings(
             );
             continue;
         }
-        if !entry_valid_for_type(entry, ty) {
+        let issues = validation_issues(entry, ty);
+        if !issues.is_empty() {
             // The specific "url but no type" case (claude's dedicated branch).
             if entry.is_object()
                 && entry.get("type").is_none()
@@ -151,7 +152,7 @@ pub fn collect_mcp_config_warnings(
                 name,
                 format!(
                     "Skipped \u{2014} invalid MCP server config for \"{name}\": {}",
-                    invalid_reason(entry, ty)
+                    issues.join("; ")
                 ),
                 None,
             );
@@ -206,37 +207,79 @@ pub fn collect_mcp_config_warnings(
 /// — unlike stdio's `command: E.string().min(1)` — so a present-but-blank
 /// `url` is schema-VALID and the entry loads (it then reports as
 /// `- Not configured`, claude `zar`).
-fn entry_valid_for_type(entry: &Value, ty: &str) -> bool {
-    let has_command = entry
-        .get("command")
-        .and_then(Value::as_str)
-        .is_some_and(|s| !s.trim().is_empty());
-
-    let has_url = entry.get("url").and_then(Value::as_str).is_some();
+/// Complete, stable issue list for one MCP entry. Unlike the old single
+/// best-effort reason, this retains every failing field path so users can fix a
+/// malformed record in one pass.
+fn validation_issues(entry: &Value, ty: &str) -> Vec<String> {
+    let Some(object) = entry.as_object() else {
+        return vec!["<root>: Invalid input: expected object".to_string()];
+    };
+    let mut issues = Vec::new();
+    let require_nonempty_string = |key: &str, issues: &mut Vec<String>| match object.get(key) {
+        Some(Value::String(value)) if !value.trim().is_empty() => {}
+        Some(Value::String(_)) | None => issues.push(format!("{key}: Required")),
+        Some(_) => issues.push(format!("{key}: Invalid input: expected string")),
+    };
     match ty {
-        "stdio" => has_command,
-        _ => has_url,
+        "stdio" => {
+            require_nonempty_string("command", &mut issues);
+            if let Some(args) = object.get("args") {
+                match args {
+                    Value::Array(values) => {
+                        for (index, value) in values.iter().enumerate() {
+                            if !value.is_string() {
+                                issues
+                                    .push(format!("args.{index}: Invalid input: expected string"));
+                            }
+                        }
+                    }
+                    _ => issues.push("args: Invalid input: expected array".to_string()),
+                }
+            }
+            if let Some(env) = object.get("env") {
+                match env {
+                    Value::Object(values) => {
+                        for (key, value) in values {
+                            if !value.is_string() {
+                                issues.push(format!("env.{key}: Invalid input: expected string"));
+                            }
+                        }
+                    }
+                    _ => issues.push("env: Invalid input: expected object".to_string()),
+                }
+            }
+        }
+        _ => match object.get("url") {
+            Some(Value::String(_)) => {}
+            None => issues.push("url: Required".to_string()),
+            Some(_) => issues.push("url: Invalid input: expected string".to_string()),
+        },
     }
-}
-
-/// Best-effort `<issues>` reason for the invalid-config warning (the one
-/// non-byte-reproducible detail — Zod's validator output).
-fn invalid_reason(entry: &Value, ty: &str) -> String {
-    let missing_command = entry
-        .get("command")
-        .and_then(Value::as_str)
-        .map_or(true, |s| s.trim().is_empty());
-    let missing_url = entry
-        .get("url")
-        .and_then(Value::as_str)
-        .map_or(true, |s| s.trim().is_empty());
-    if ty == "stdio" && missing_command {
-        "command: Required".to_string()
-    } else if missing_url {
-        "url: Required".to_string()
-    } else {
-        "invalid entry".to_string()
+    if ty != "stdio" {
+        if let Some(headers) = object.get("headers") {
+            match headers {
+                Value::Object(values) => {
+                    for (key, value) in values {
+                        if !value.is_string() {
+                            issues.push(format!("headers.{key}: Invalid input: expected string"));
+                        }
+                    }
+                }
+                _ => issues.push("headers: Invalid input: expected object".to_string()),
+            }
+        }
     }
+    if let Some(timeout) = object.get("timeout") {
+        if timeout.as_u64().is_none_or(|value| value == 0) {
+            issues.push("timeout: Invalid input: expected positive integer".to_string());
+        }
+    }
+    if let Some(always_load) = object.get("alwaysLoad") {
+        if !always_load.is_boolean() {
+            issues.push("alwaysLoad: Invalid input: expected boolean".to_string());
+        }
+    }
+    issues
 }
 
 /// claude `ty_` (2.1.219) — config fields whose value carries leading or
@@ -474,7 +517,11 @@ mod tests {
         // `- Not configured`). A WHITESPACE-only url is schema-valid too; the
         // only thing said about it is `ty_`'s whitespace notice.
         let w = only(&json!({"mcpServers":{"bad":{"type":"http","url":"   "}}}));
-        assert_eq!(w.len(), 1, "whitespace url is not a schema violation: {w:?}");
+        assert_eq!(
+            w.len(),
+            1,
+            "whitespace url is not a schema violation: {w:?}"
+        );
         assert_eq!(w[0].message, "Leading or trailing whitespace in: url");
         // A truly empty string is valid AND whitespace-clean ⇒ nothing at all.
         assert!(only(&json!({"mcpServers":{"bad":{"type":"http","url":""}}})).is_empty());
@@ -613,6 +660,29 @@ mod tests {
         assert!(only(&json!({"mcpServers":{"web":{"type":"http","url":"https://x"}}})).is_empty());
         // No mcpServers and no "servers" typo → nothing to diagnose.
         assert!(only(&json!({"other":1})).is_empty());
+    }
+
+    #[test]
+    fn invalid_entry_reports_every_issue_with_paths() {
+        let warnings = only(&json!({"mcpServers":{"bad":{
+            "type":"stdio",
+            "args":[1, "ok", false],
+            "env":{"TOKEN":7},
+            "timeout":0,
+            "alwaysLoad":"yes"
+        }}}));
+        assert_eq!(warnings.len(), 1);
+        let message = &warnings[0].message;
+        for issue in [
+            "command: Required",
+            "args.0: Invalid input: expected string",
+            "args.2: Invalid input: expected string",
+            "env.TOKEN: Invalid input: expected string",
+            "timeout: Invalid input: expected positive integer",
+            "alwaysLoad: Invalid input: expected boolean",
+        ] {
+            assert!(message.contains(issue), "missing diagnostic issue: {issue}");
+        }
     }
 
     #[test]

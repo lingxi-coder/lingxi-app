@@ -613,6 +613,15 @@ impl PluginManager {
                     &abs,
                 ) {
                     Ok(mut def) => {
+                        if !def.mcp_servers.is_empty() {
+                            tracing::warn!(
+                                agent = %def.agent_type,
+                                plugin = %manifest.name,
+                                skipped_entries = def.mcp_servers.len(),
+                                "plugin agent MCP entries are ignored; configure plugin MCP servers in the plugin manifest"
+                            );
+                            def.mcp_servers.clear();
+                        }
                         let root = component_root(ap, install_dir.join("agents"));
                         let namespace = abs
                             .parent()
@@ -830,41 +839,39 @@ impl PluginManager {
         //     `.mcp.json` servers (claude-code `getLingXiMcpConfigs`
         //     merges plugin servers into the SAME configs map that the
         //     connection manager dials eagerly at startup — `config.ts:1114`).
-        let mcp_scoped: Vec<McpServerConfig> = if self.strict.is_locked(PluginComponent::McpServers)
-        {
-            Vec::new()
-        } else {
-            manifest
-                .components
-                .mcp_servers
-                .values()
-                .filter_map(|cfg| {
-                    let scoped_name = format!("plugin:{plugin_name}:{}", cfg.name);
-                    // Deferred-substitution-site gate (claude `mcp-config-invalid`):
-                    // a stdio `command` (the shell-executed field) referencing
-                    // `${user_config.*}` would pass the substituted value to a
-                    // shell — reject the server (byte-faithful msg). `args` / `env`
-                    // ARE safe to substitute (discrete argv / env block), so only
-                    // the `command` field is gated.
-                    if let traits::McpTransportSpec::Stdio { command, .. } = &cfg.spec {
-                        if user_config::references_user_config(command) {
-                            tracing::warn!(
-                                "{}",
-                                user_config::mcp_stdio_reference_rejection(&scoped_name)
-                            );
-                            return None;
-                        }
+        // A strict-plugin-only MCP lock rejects non-plugin sources; this code is
+        // the trusted plugin materialization path and therefore remains
+        // eligible under the lock.
+        let mcp_scoped: Vec<McpServerConfig> = manifest
+            .components
+            .mcp_servers
+            .values()
+            .filter_map(|cfg| {
+                let scoped_name = format!("plugin:{plugin_name}:{}", cfg.name);
+                // Deferred-substitution-site gate (claude `mcp-config-invalid`):
+                // a stdio `command` (the shell-executed field) referencing
+                // `${user_config.*}` would pass the substituted value to a
+                // shell — reject the server (byte-faithful msg). `args` / `env`
+                // ARE safe to substitute (discrete argv / env block), so only
+                // the `command` field is gated.
+                if let traits::McpTransportSpec::Stdio { command, .. } = &cfg.spec {
+                    if user_config::references_user_config(command) {
+                        tracing::warn!(
+                            "{}",
+                            user_config::mcp_stdio_reference_rejection(&scoped_name)
+                        );
+                        return None;
                     }
-                    let mut scoped = cfg.clone();
-                    scoped.name = scoped_name;
-                    // Substitute `${user_config.KEY}` references (command / args
-                    // / env, and remote url / headers) with the resolved values
-                    // — the primary consumption path for a plugin's userConfig.
-                    substitute_mcp_config(&mut scoped, &subst_ctx);
-                    Some(scoped)
-                })
-                .collect()
-        };
+                }
+                let mut scoped = cfg.clone();
+                scoped.name = scoped_name;
+                // Substitute `${user_config.KEY}` references (command / args
+                // / env, and remote url / headers) with the resolved values
+                // — the primary consumption path for a plugin's userConfig.
+                substitute_mcp_config(&mut scoped, &subst_ctx);
+                Some(scoped)
+            })
+            .collect();
 
         // ---- All inputs validated; mutate the live registries now. ----
 

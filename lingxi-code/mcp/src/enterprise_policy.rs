@@ -406,6 +406,12 @@ pub fn prime_startup_env() {
 // ────────────────────────────────────────────────────────────────────────────
 
 use indexmap::IndexMap;
+use std::sync::OnceLock;
+
+/// Process-start `--settings` env snapshot. The CLI installs this before the
+/// MCP policy is evaluated; it is set-once because flag settings are immutable
+/// for the lifetime of one CLI process.
+static FLAG_SETTINGS_ENV: OnceLock<IndexMap<String, String>> = OnceLock::new();
 
 /// One settings source's `env` block → string (key, value) pairs — claude
 /// `ELt`: only string values participate and `NO_COLOR`/`FORCE_COLOR` are
@@ -481,14 +487,23 @@ pub struct PolicyExpansionEnv {
     pub fallback_env: IndexMap<String, String>,
 }
 
+/// Install the immutable `flagSettings.env` tier used by deny expansion.
+///
+/// Returns `true` when this call installed the snapshot, `false` when an
+/// earlier boot path already installed it.
+pub fn install_flag_settings_env(env: impl IntoIterator<Item = (String, String)>) -> bool {
+    FLAG_SETTINGS_ENV.set(env.into_iter().collect()).is_ok()
+}
+
 /// Compose the production [`PolicyExpansionEnv`] (claude `U__()`/`cWu()`).
 #[must_use]
 pub fn policy_expansion_env() -> PolicyExpansionEnv {
-    policy_expansion_env_with(
+    policy_expansion_env_with_flag_settings(
         &managed_dir(),
         crate::env_expansion::startup_env_snapshot(),
         &global_config_env(),
         &user_settings_env(),
+        FLAG_SETTINGS_ENV.get().unwrap_or(&IndexMap::new()),
     )
 }
 
@@ -501,6 +516,24 @@ pub fn policy_expansion_env_with(
     global_config: &IndexMap<String, String>,
     user_settings: &IndexMap<String, String>,
 ) -> PolicyExpansionEnv {
+    policy_expansion_env_with_flag_settings(
+        dir,
+        startup_snapshot,
+        global_config,
+        user_settings,
+        &IndexMap::new(),
+    )
+}
+
+/// [`policy_expansion_env_with`] including the CLI `flagSettings.env` tier.
+#[must_use]
+pub fn policy_expansion_env_with_flag_settings(
+    dir: &Path,
+    startup_snapshot: &IndexMap<String, String>,
+    global_config: &IndexMap<String, String>,
+    user_settings: &IndexMap<String, String>,
+    flag_settings: &IndexMap<String, String>,
+) -> PolicyExpansionEnv {
     let managed = managed_sources_env_in(dir);
     // cWu: `{...NQr(), ...e}` — the managed-source env OVERRIDES the snapshot.
     let mut env = startup_snapshot.clone();
@@ -510,7 +543,7 @@ pub fn policy_expansion_env_with(
     // U__: `Object.assign({}, globalConfig, userSettings, flagSettings,
     // policySettings)` — later wins.
     let mut fallback_env = IndexMap::new();
-    for tier in [global_config, user_settings] {
+    for tier in [global_config, user_settings, flag_settings] {
         for (k, v) in tier {
             fallback_env.insert(k.clone(), v.clone());
         }
@@ -1676,9 +1709,40 @@ mod tests {
     }
 
     #[test]
+    fn flag_settings_env_is_between_user_and_policy_for_deny_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("managed-settings.json"),
+            r#"{"env":{"POLICY":"managed","X":"managed"}}"#,
+        )
+        .unwrap();
+        let envs = policy_expansion_env_with_flag_settings(
+            dir.path(),
+            &map(&[]),
+            &map(&[("X", "global")]),
+            &map(&[("X", "user"), ("USER", "user")]),
+            &map(&[("X", "flag"), ("FLAG", "flag")]),
+        );
+        assert_eq!(
+            envs.fallback_env.get("X").map(String::as_str),
+            Some("managed")
+        );
+        assert_eq!(
+            envs.fallback_env.get("FLAG").map(String::as_str),
+            Some("flag")
+        );
+        assert_eq!(
+            envs.fallback_env.get("USER").map(String::as_str),
+            Some("user")
+        );
+    }
+
+    #[test]
     fn deny_expands_against_policy_env_not_live_process_env() {
         let p = McpPolicy {
-            denied: Some(matcher(r#"[{"serverCommand":["${CORP_CMD}","-y","corp"]}]"#)),
+            denied: Some(matcher(
+                r#"[{"serverCommand":["${CORP_CMD}","-y","corp"]}]"#,
+            )),
             allowed: None,
         };
         // The var lives ONLY in the injected policy env (the live process env
@@ -1926,7 +1990,10 @@ mod tests {
         // The FIELD type check precedes the object-level refine (zod reports
         // `issues[0]`, and field issues are collected in shape order).
         assert_eq!(
-            err(r#"{"serverName":true,"serverUrl":"https://x.com"}"#, Allowed),
+            err(
+                r#"{"serverName":true,"serverUrl":"https://x.com"}"#,
+                Allowed
+            ),
             "Invalid input: expected string, received boolean"
         );
         assert_eq!(

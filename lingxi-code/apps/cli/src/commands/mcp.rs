@@ -326,7 +326,7 @@ pub async fn run(cli: &Cli) -> i32 {
         Sub::AddJson(a) => run_add_json(a),
         Sub::Remove(a) => run_remove(a),
         Sub::List => run_list().await,
-        Sub::Get(a) => run_get(a),
+        Sub::Get(a) => run_get(a).await,
         Sub::ResetProjectChoices => run_reset_project_choices(),
         Sub::Serve(a) => run_serve(a).await,
         Sub::Login(a) => run_login(a).await,
@@ -1908,6 +1908,30 @@ fn unconnectable_status(
         .map(|err| (FAILED_TO_CONNECT, Some(err)))
 }
 
+/// Probe one connectable server with the same timeout and cleanup semantics
+/// used by both `mcp list` and `mcp get`.
+async fn probe_server_health(
+    registry: &mcp::McpRegistry,
+    cfg: &mcp::connection::McpServerConfig,
+) -> (String, Option<String>) {
+    match tokio::time::timeout(HEALTH_CHECK_TIMEOUT, registry.connect(cfg.clone())).await {
+        Ok(Ok(_)) => {
+            // A health probe is observational: never leave a child/connection
+            // alive after rendering the status.
+            let _ = registry.disconnect(&cfg.name).await;
+            (CONNECTED.to_string(), None)
+        }
+        Ok(Err(error)) => (FAILED_TO_CONNECT.to_string(), Some(error.to_string())),
+        Err(_) => (
+            FAILED_TO_CONNECT.to_string(),
+            Some(format!(
+                "timed out after {}s",
+                HEALTH_CHECK_TIMEOUT.as_secs()
+            )),
+        ),
+    }
+}
+
 async fn run_list() -> i32 {
     let approval = project_server_approval();
     // Explicitly-rejected project servers are REMOVED before anything else
@@ -1959,20 +1983,10 @@ async fn run_list() -> i32 {
             println!("{}: {summary} - {status}", cfg.name);
             continue;
         }
-        let status =
-            match tokio::time::timeout(HEALTH_CHECK_TIMEOUT, registry.connect(cfg.clone())).await {
-                Ok(Ok(_)) => {
-                    // Tear the probe connection down; `mcp list` must not leave
-                    // a spawned child behind.
-                    let _ = registry.disconnect(&cfg.name).await;
-                    CONNECTED.to_string()
-                }
-                Ok(Err(e)) => format!("{FAILED_TO_CONNECT} \u{2014} {e}"),
-                Err(_) => format!(
-                    "{FAILED_TO_CONNECT} \u{2014} timed out after {}s",
-                    HEALTH_CHECK_TIMEOUT.as_secs()
-                ),
-            };
+        let (status, issue) = probe_server_health(&registry, cfg).await;
+        let status = issue
+            .map(|issue| format!("{status} \u{2014} {issue}"))
+            .unwrap_or(status);
         println!("{}: {summary} - {status}", cfg.name);
     }
     // Config diagnostics footer — the oracle's `vgn` panel rendered under the
@@ -1997,7 +2011,7 @@ fn listed_servers(
 
 /// Implement `mcp get`. Prints one server's details, or the
 /// no-such-server message (exit 0) when absent.
-fn run_get(a: &GetArgs) -> i32 {
+async fn run_get(a: &GetArgs) -> i32 {
     let servers = load_all_servers();
     let Some(cfg) = servers.iter().find(|c| c.name == a.name) else {
         // claude: not-found → stderr + exit 1. `mcp get` uses the LOADED view
@@ -2028,6 +2042,15 @@ fn run_get(a: &GetArgs) -> i32 {
     } else if let Some((status, issue)) = unconnectable_status(cfg) {
         // `hJy` emits the issue on its own line right after the status:
         // `` `  Status: ${a.status}`, ...a.issue ? [`  Issue: ${a.issue}`] : [] ``.
+        println!("  Status: {status}");
+        if let Some(issue) = issue {
+            println!("  Issue: {issue}");
+        }
+    } else {
+        let transport: std::sync::Arc<dyn traits::McpTransport> =
+            std::sync::Arc::new(platform_posix::PosixMcpTransport::new());
+        let registry = mcp::McpRegistry::new(transport);
+        let (status, issue) = probe_server_health(&registry, cfg).await;
         println!("  Status: {status}");
         if let Some(issue) = issue {
             println!("  Issue: {issue}");
@@ -2261,14 +2284,10 @@ fn print_config_diagnostics(suppress_warnings: bool) {
         if !printed_header {
             printed_header = true;
             println!();
-            println!("MCP config diagnostics");
-            println!(
-                "For help configuring MCP servers, see: https://code.claude.com/docs/en/mcp"
-            );
+            println!("\u{26a0} MCP config diagnostics");
+            println!("For help configuring MCP servers, see: https://code.claude.com/docs/en/mcp");
         }
-        let has_fatal = rows
-            .iter()
-            .any(|w| w.severity == McpConfigSeverity::Fatal);
+        let has_fatal = rows.iter().any(|w| w.severity == McpConfigSeverity::Fatal);
         println!();
         println!(
             "[{}] {}",
@@ -2282,7 +2301,8 @@ fn print_config_diagnostics(suppress_warnings: bool) {
         if let Some(f) = rows.iter().find_map(|w| w.file.as_ref()) {
             println!("Location: {f}");
         }
-        for w in rows {
+        let row_count = rows.len();
+        for (index, w) in rows.into_iter().enumerate() {
             let tag = match w.severity {
                 McpConfigSeverity::Fatal => "[Error]",
                 McpConfigSeverity::Warning => "[Warning]",
@@ -2297,7 +2317,12 @@ fn print_config_diagnostics(suppress_warnings: bool) {
             } else {
                 format!("{}: ", w.path)
             };
-            println!("  {tag} {name}{path}{}", w.message);
+            let guide = if index + 1 == row_count {
+                "\u{2514}\u{2500}"
+            } else {
+                "\u{251c}\u{2500}"
+            };
+            println!("  {guide} {tag} {name}{path}{}", w.message);
         }
     }
 }
@@ -2571,9 +2596,6 @@ fn scope_detail(scope: ConfigScope) -> &'static str {
         ConfigScope::Enterprise => "Enterprise managed config",
         ConfigScope::ClaudeAi => "claude.ai connector",
         ConfigScope::Managed => "Managed config",
-        // Oracle `gV`: an agent-frontmatter server is scoped to the applied
-        // agent and lives only as long as it is applied.
-        ConfigScope::Agent => "Agent config (from agent frontmatter)",
     }
 }
 
@@ -2839,7 +2861,10 @@ mod transport_summary_tests {
             headers: Default::default(),
             oauth: None,
         };
-        assert_eq!(super::transport_summary(&http), "https://x.example/mcp (HTTP)");
+        assert_eq!(
+            super::transport_summary(&http),
+            "https://x.example/mcp (HTTP)"
+        );
     }
 }
 

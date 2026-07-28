@@ -74,6 +74,9 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
         show_thinking_summaries: next
             .show_thinking_summaries
             .or(prev.show_thinking_summaries),
+        workflow_keyword_trigger_enabled: next
+            .workflow_keyword_trigger_enabled
+            .or(prev.workflow_keyword_trigger_enabled),
         model: next.model.or(prev.model),
         // Managed model-restriction keys (H-BIN-08). `availableModels` (array)
         // and `enforceAvailableModels` (scalar) are scalar-override — CC's

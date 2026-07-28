@@ -15,9 +15,6 @@ pub enum AgentValidationError {
     /// Frontmatter declares `hooks:`.
     #[error("agent frontmatter cannot declare hooks in plugin context")]
     HooksForbidden,
-    /// Frontmatter declares `mcpServers`.
-    #[error("agent frontmatter cannot declare mcpServers in plugin context")]
-    McpServersForbidden,
 }
 
 /// Validate frontmatter YAML for a plugin agent file.
@@ -32,9 +29,6 @@ pub fn validate_plugin_agent_frontmatter(yaml: &str) -> Result<(), AgentValidati
     }
     if yaml.contains("hooks:") {
         return Err(AgentValidationError::HooksForbidden);
-    }
-    if yaml.contains("mcpServers") {
-        return Err(AgentValidationError::McpServersForbidden);
     }
     Ok(())
 }
@@ -55,6 +49,12 @@ mod tests {
     #[test]
     fn clean_frontmatter_passes() {
         let yaml = "name: x\ndescription: y\ntools: ['Read']\n";
+        assert!(validate_plugin_agent_frontmatter(yaml).is_ok());
+    }
+
+    #[test]
+    fn mcp_servers_do_not_reject_whole_plugin_agent() {
+        let yaml = "name: x\ndescription: y\nmcpServers:\n  - docs:\n      command: docs-mcp\n";
         assert!(validate_plugin_agent_frontmatter(yaml).is_ok());
     }
 }

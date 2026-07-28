@@ -2219,9 +2219,8 @@ fn sanitize_diagnostic(input: &str) -> String {
         // Step 2 (`qU`): control / format chars + U+2028/U+2029, step 3's
         // explicit class, and any other whitespace (step 4's `\s+`) all become
         // collapsing spaces.
-        let is_control_or_format = c.is_control()
-            || matches!(c, '\u{2028}' | '\u{2029}')
-            || is_format_char(c);
+        let is_control_or_format =
+            c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') || is_format_char(c);
         if is_control_or_format || is_stripped(c) || c.is_whitespace() {
             pending_space = true;
             continue;
@@ -2835,7 +2834,10 @@ mod tests {
         let conns = registry.connections.read().await;
         match conns.get("mock") {
             Some(McpConnectionState::Connected { connection_id, .. }) => {
-                assert_eq!(*connection_id, id1, "the live connection id must be preserved");
+                assert_eq!(
+                    *connection_id, id1,
+                    "the live connection id must be preserved"
+                );
             }
             other => panic!("expected the connection to stay Connected, got {other:?}"),
         }
@@ -3313,7 +3315,10 @@ mod snapshot_tests {
             headers: traits::McpHeaders::default(),
             oauth: None,
         };
-        assert!(blank.is_unconfigured(), "blank url + no configError = `zar`");
+        assert!(
+            blank.is_unconfigured(),
+            "blank url + no configError = `zar`"
+        );
         assert_eq!(
             r.connect(blank).await.unwrap_err().to_string(),
             "connection failed: No URL configured for this server"

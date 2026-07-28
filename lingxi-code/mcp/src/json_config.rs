@@ -303,8 +303,7 @@ pub fn build_server_from_json_entry(
                     "'url' {} expanded to an empty string. Set the referenced \
                      environment variable, or update the server's config and \
                      reconnect.",
-                    serde_json::to_string(&raw_url)
-                        .unwrap_or_else(|_| format!("\"{raw_url}\""))
+                    serde_json::to_string(&raw_url).unwrap_or_else(|_| format!("\"{raw_url}\""))
                 ));
                 raw_url
             } else {
@@ -516,8 +515,25 @@ pub fn load_mcp_servers(
     if let Ok(raw) = std::fs::read_to_string(project_mcp_path) {
         match parse_mcp_json_string(&raw, ConfigScope::Project) {
             Ok(cfgs) => {
-                for c in cfgs {
-                    by_name.insert(c.name.clone(), c);
+                // Approval is evaluated before precedence. A pending/rejected
+                // project entry remains visible when it is the only candidate,
+                // but it may not shadow an already-loaded user server.
+                let policy = crate::server_gate::McpPolicyContext::load(global_config_path, cwd);
+                for mut c in cfgs {
+                    let decision = policy.decide(&c);
+                    let project_blocked = matches!(
+                        decision,
+                        crate::server_gate::McpServerDecision::Block(
+                            crate::server_gate::McpServerBlockReason::ProjectPendingApproval
+                                | crate::server_gate::McpServerBlockReason::ProjectRejected
+                        )
+                    );
+                    if project_blocked {
+                        c.disabled = true;
+                        by_name.entry(c.name.clone()).or_insert(c);
+                    } else {
+                        by_name.insert(c.name.clone(), c);
+                    }
                 }
             }
             Err(e) => tracing::warn!(
@@ -986,6 +1002,61 @@ mod tests {
         assert_eq!(by_name["loc"], ConfigScope::Local);
         assert_eq!(by_name["prj"], ConfigScope::Project);
         assert_eq!(by_name["usr"], ConfigScope::User);
+    }
+
+    #[test]
+    fn pending_project_server_does_not_shadow_user_server() {
+        let dir = TempDir::new().unwrap();
+        let cwd = dir.path();
+        let project = cwd.join(".mcp.json");
+        let global = cwd.join(".lingxi.json");
+        fs::write(
+            &global,
+            r#"{"mcpServers":{"docs":{"command":"user-docs"}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            &project,
+            r#"{"mcpServers":{"docs":{"command":"project-docs"}}}"#,
+        )
+        .unwrap();
+
+        let cfgs = load_mcp_servers(&project, &global, cwd);
+        assert_eq!(cfgs.len(), 1);
+        assert_eq!(cfgs[0].scope, ConfigScope::User);
+        assert!(matches!(
+            &cfgs[0].spec,
+            McpTransportSpec::Stdio { command, .. } if command == "user-docs"
+        ));
+    }
+
+    #[test]
+    fn approved_project_server_can_shadow_user_server() {
+        let dir = TempDir::new().unwrap();
+        let cwd = dir.path();
+        let project = cwd.join(".mcp.json");
+        let global = cwd.join(".lingxi.json");
+        let key = migrations::global_config::project_path_for_config(cwd);
+        let global_json = serde_json::json!({
+            "mcpServers": { "docs": { "command": "user-docs" } },
+            "projects": {
+                key: { "enabledMcpjsonServers": ["docs"] }
+            }
+        });
+        fs::write(&global, serde_json::to_vec(&global_json).unwrap()).unwrap();
+        fs::write(
+            &project,
+            r#"{"mcpServers":{"docs":{"command":"project-docs"}}}"#,
+        )
+        .unwrap();
+
+        let cfgs = load_mcp_servers(&project, &global, cwd);
+        assert_eq!(cfgs.len(), 1);
+        assert_eq!(cfgs[0].scope, ConfigScope::Project);
+        assert!(matches!(
+            &cfgs[0].spec,
+            McpTransportSpec::Stdio { command, .. } if command == "project-docs"
+        ));
     }
 
     // ── Per-server `timeout` / `request_timeout_ms` / `alwaysLoad` (parity

@@ -48,4 +48,93 @@ impl StrictPluginOnlyPolicy {
     pub fn is_locked(&self, c: PluginComponent) -> bool {
         self.locked.contains(&c)
     }
+
+    /// Resolve `strictPluginOnlyCustomization` from settings tiers ordered
+    /// lowest to highest priority. A later declaration replaces the earlier
+    /// one, matching the scalar managed-settings merge.
+    #[must_use]
+    pub fn from_settings_tiers<'a>(tiers: impl IntoIterator<Item = &'a str>) -> Self {
+        let mut resolved: Option<HashSet<PluginComponent>> = None;
+        for raw in tiers {
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+                continue;
+            };
+            let Some(setting) = value.get("strictPluginOnlyCustomization") else {
+                continue;
+            };
+            let next = match setting {
+                serde_json::Value::Bool(true) => all_components(),
+                serde_json::Value::Bool(false) | serde_json::Value::Null => HashSet::new(),
+                serde_json::Value::Array(slots) => slots
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .filter_map(component_from_slot)
+                    .collect(),
+                _ => {
+                    tracing::warn!(
+                        "strictPluginOnlyCustomization must be a boolean or component array; ignoring invalid tier"
+                    );
+                    continue;
+                }
+            };
+            resolved = Some(next);
+        }
+        Self {
+            locked: resolved.unwrap_or_default(),
+        }
+    }
+}
+
+fn all_components() -> HashSet<PluginComponent> {
+    [
+        PluginComponent::Commands,
+        PluginComponent::Agents,
+        PluginComponent::Skills,
+        PluginComponent::Hooks,
+        PluginComponent::OutputStyles,
+        PluginComponent::McpServers,
+        PluginComponent::LspServers,
+        PluginComponent::Channels,
+    ]
+    .into_iter()
+    .collect()
+}
+
+fn component_from_slot(slot: &str) -> Option<PluginComponent> {
+    Some(match slot {
+        "commands" => PluginComponent::Commands,
+        "agents" => PluginComponent::Agents,
+        "skills" => PluginComponent::Skills,
+        "hooks" => PluginComponent::Hooks,
+        "outputStyles" => PluginComponent::OutputStyles,
+        "mcp" | "mcpServers" => PluginComponent::McpServers,
+        "lsp" | "lspServers" => PluginComponent::LspServers,
+        "channels" => PluginComponent::Channels,
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn managed_tiers_resolve_mcp_lock_with_last_tier_wins() {
+        let policy = StrictPluginOnlyPolicy::from_settings_tiers([
+            r#"{"strictPluginOnlyCustomization":true}"#,
+            r#"{"strictPluginOnlyCustomization":["mcp","hooks"]}"#,
+        ]);
+        assert!(policy.is_locked(PluginComponent::McpServers));
+        assert!(policy.is_locked(PluginComponent::Hooks));
+        assert!(!policy.is_locked(PluginComponent::Commands));
+    }
+
+    #[test]
+    fn explicit_false_unlocks_previous_tier() {
+        let policy = StrictPluginOnlyPolicy::from_settings_tiers([
+            r#"{"strictPluginOnlyCustomization":["mcp"]}"#,
+            r#"{"strictPluginOnlyCustomization":false}"#,
+        ]);
+        assert!(!policy.is_locked(PluginComponent::McpServers));
+    }
 }

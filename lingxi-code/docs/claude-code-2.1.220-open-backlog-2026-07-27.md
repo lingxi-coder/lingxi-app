@@ -1,8 +1,30 @@
 # LingXi-Next — 对 Claude Code 2.1.220 的未决 backlog
 
-**基线提交** `370946160`（`main`）  
-**整理日期** 2026-07-27  
-**状态** 22 项未决 —— 21 OPEN、1 PARTIAL、**0 已关闭**
+**代码基线** `370946160`（`main`）  
+**原始清单提交** `f0af1f7b3`  
+**复核日期** 2026-07-27  
+**Oracle** Claude Code `2.1.220`（本机二进制 SHA-256 `8addc857f3fe64d5a0368af9ee50321b50afb4a6918ba3ef018ab84f5dbbe081`）  
+**复核后状态** 26 个唯一未决事项 —— 20 OPEN、3 PARTIAL、1 LATENT、2 SCOPE-DECISION；另保留 1 条 DUPLICATE 交叉引用
+
+## 二次独立真实性复核结论
+
+原文的“22 项全部仍然成立”不能按字面保留。22 行并不等于 22 个独立、当前可观察、同等确定的 gap：
+
+- `N-protocol-8` 与 `N-env-3` 是同一条 remote-memory push/mass-delete 管线缺失，属于**重复计数**。
+- `N-protocol-7` 只能裁为 **PARTIAL**：Opus 5 条件下新增的 Bash 描述句确实未移植；但“旧的 dedicated-tool 警告已从 Opus 5 删除”被本机 2.1.220 二进制直接反证，「Agent lead-in 已删除」同样被**直接反证**——本会话即运行于 opus-5 且持有 Agent 工具，其 lead-in 仍在。故本项为**纯新增一句**，无任何删除。
+- `M12-managed-row` 的 gate `tengu_maple_sundial` 默认关闭，因此是 **LATENT** implementation debt，不是默认配置下的当前行为差异。
+- `N-env-3` 是 Anthropic 第一方账号 remote-memory 后端的范围决策；`N-changelog-3` 是 bundled workflow content 的范围决策。两者都应先裁定产品范围，不应伪装成无条件工程 blocker。
+- 其余原条目在 `370946160` 的行为点仍可复现；其中 `FU-disabled-agent-server` 的 High 判定成立。
+
+对 Anthropic 官方 2.1.218–2.1.220 release feed 和本机 2.1.220 binary 做反向覆盖检查后，又确认原清单漏了 5 项：
+
+1. `/code-review` 仍走 inline prompt，没有按 2.1.218 改成 background subagent。
+2. `/context` 读取 session 累计 token，compact 后不会反映新的 live context。
+3. 某些终端把粘贴换行编码成 Ctrl+J 时，composer 没有把它归一化为 newline。
+4. plugin/settings 列表只高亮 selected row，不把真实 terminal cursor 移到焦点行。
+5. microcompact 在启用时没有真实的 last-assistant timestamp，只能退化成 count gate。
+
+因此，原 22 行经合并重复项后是 21 个唯一事项；补入 5 个遗漏后，共 **26 个唯一未决事项**。这里的 OPEN 只表示“证据足够且行为尚未实现”，不把默认关闭的 feature flag 或未获范围批准的私有服务当作 active parity defect。
 
 ## 这份清单是怎么来的
 
@@ -10,13 +32,17 @@
 
 原记录里的 `verify` 证据大多是**二进制侧**采的，而且 §8 的 follow-up 写于 reconciliation 合并（`3905f9f9b`）**之前**。上一轮审计有过教训：32 项标记为 open 的条目重新在 port 侧核查后，**22 项其实已经关闭**。所以每一条都在 `370946160` 上由独立 agent 在**行为点**重新判定过一遍，而不是靠 grep 命中数——一次跨模块的负向 grep 什么都证明不了。
 
-这次的结论是**全部 22 项仍然成立**（1 项降级为 PARTIAL），没有一项已被悄悄关闭。核查同时产生了两项对原记录的修正，见下。
+原始整理曾裁定“全部 22 项仍然成立”。本次二次复核保留其行为点证据，但修正了重复计数、确定性和范围分类，并补入了 5 个遗漏项。原条目的长证据保留在下文，修正结论以本节和汇总表为准。
 
 ### 对原记录的修正
 
 - **`FU-disabled-agent-server` 由 Medium 升为 High。** 核查在 port 侧和 2.1.220 二进制侧双向确认：用户在 `disabledMcpServers` 里明确禁用的 server，可以被一份 agent 定义重新拉起并连上。agent 定义来自 `<cwd>/.lingxi/agents/*.md`（仓库自带、不可信内容），而一个 MCP stdio server 等于任意本地代码执行。**这是一条越权项，不是格式问题。**
 - **三项量级被上调。** `N-changelog-4` M→XL（port 里根本没有 OSC 52 写入器，`/copy` 走的是子进程，不是「加一个 DCS 包裹」那么小）、`N-protocol-8` M→XL、`N-changelog-5` M→L。原估值假定了底座存在。
 - **`N-env-2` 比记录的更严重。** 缺的不只是提醒链：`workflow_description.txt` 是**实际下发**给模型的工具描述，其中三处告诉模型「ultracode 会有 system-reminder 确认」——而 port 永远发不出那条 reminder。功能缺失之外，还留下了一段触发条件永不可能满足的指令。
+- **`N-protocol-7` 降为 PARTIAL。** 本机 2.1.220 binary 同时含有 `Command output is displayed to you, not reliably to the user.` 与 `IMPORTANT: Avoid using this tool ... dedicated tool` 两类句子；只能确认前者缺失，不能继续声称后者已在 Opus 5 路径删除。**两条「删除」子断言现均已反证**（avoid bullet 与 Agent lead-in 在实时 opus-5 会话中都仍然存在），因此本项范围收敛为「只加一句」。
+- **`N-protocol-8` 合并进 `N-env-3`。** 它只作为历史 id 的交叉引用保留，不再进入唯一 gap 计数。
+- **`M12-managed-row` 改为 LATENT。** 缺少 gate-on 行为是真实的，但 gate 默认 OFF，不能写成默认配置下已发生的用户差异。
+- **`N-env-3`、`N-changelog-3` 改为 SCOPE-DECISION。** 前者依赖 Anthropic 第一方 remote-memory 后端，后者属于项目此前明确按 bundled content 处理的 deep-research workflow。
 
 ---
 
@@ -35,35 +61,43 @@
 | 7 | [`M7-plugin-warn-variant`](#m7-plugin-warn-variant) | 🟡 Medium | M | PARTIAL | No warn variant naming WHY agent-frontmatter MCP servers were skipped; the `strictPlugin… | 是 |
 | 8 | [`M12-attach-detach`](#m12-attach-detach) | 🟡 Medium | M | OPEN | ←-on-empty in an attached background session never detaches back to the agents view (the… | — |
 | 9 | [`N-env-2`](#n-env-2) | 🟡 Medium | L | OPEN | Ultracode ultra-effort enter/sparse/exit reminder chain, the EK(model,effort,workflowsOn… | 是 |
-| 10 | [`N-changelog-3`](#n-changelog-3) | 🟡 Medium | L | OPEN | No built-in workflow library: `deep-research` workflow, its `/deep-research` entry point… | 是 |
+| 10 | [`N-changelog-3`](#n-changelog-3) | 🟡 Medium | L | SCOPE-DECISION | No built-in workflow library: `deep-research` workflow, its `/deep-research` entry point… | 产品范围 |
 | 11 | [`H6-remainder`](#h6-remainder) | 🟡 Medium | L | OPEN | H6 remainder = the `register_repo_root` SDK control request (absent entirely), the Direc… | 是 |
 | 12 | [`N-protocol-5`](#n-protocol-5) | 🟡 Medium | XL | OPEN | Agent observer pairing (observer / observerMessage / observeSubagents) is entirely absen… | 是 |
-| 13 | [`N-env-3`](#n-env-3) | 🟡 Medium | XL | OPEN | Memory push/pull sync engine (mass-delete hold + CLAUDE_CODE_DISABLE_MEMORY_MASS_DELETE_… | 是 |
+| 13 | [`N-env-3`](#n-env-3) | 🟡 Medium | XL | SCOPE-DECISION | Memory push/pull sync engine (mass-delete hold + CLAUDE_CODE_DISABLE_MEMORY_MASS_DELETE_… | 私有后端 |
 | 14 | [`M12-midturn-backgrounding`](#m12-midturn-backgrounding) | 🟡 Medium | XL | OPEN | Mid-turn backgrounding state machine absent — ← never backgrounds the live conversation … | 是 |
-| 15 | [`N-protocol-7`](#n-protocol-7) | ⚪ Low | S | OPEN | Lean-model (Opus 5) Bash/Agent tool DESCRIPTION content not ported — the tool-prompt lay… | 是 |
+| 15 | [`N-protocol-7`](#n-protocol-7) | ⚪ Low | S | PARTIAL | Opus 5 Bash description 缺一句；两条「删除」子断言已反证，纯新增 | — |
 | 16 | [`FU-mcpcli-5`](#fu-mcpcli-5) | ⚪ Low | S | OPEN | JSON agent parser rejects an empty `{}` record inside `mcpServers`, dropping the agent (… | — |
-| 17 | [`M12-managed-row`](#m12-managed-row) | ⚪ Low | S | OPEN | `/config` has no `tengu_maple_sundial` collapsed read-only "Agents view" (`managedEnum`)… | — |
+| 17 | [`M12-managed-row`](#m12-managed-row) | ⚪ Low | S | LATENT | `/config` has no `tengu_maple_sundial` collapsed read-only "Agents view" (`managedEnum`)… | gate 默认 OFF |
 | 18 | [`FU-orch-decision-class`](#fu-orch-decision-class) | ⚪ Low | M | OPEN | tool_decision OTEL label ignores the host's explicit decisionClassification, and tool_pa… | — |
 | 19 | [`M5-issue-formatting`](#m5-issue-formatting) | ⚪ Low | M | OPEN | `Skipped — invalid MCP server config for "X": <issues>` renders three canned reasons ins… | — |
 | 20 | [`N-changelog-5`](#n-changelog-5) | ⚪ Low | L | OPEN | Screen-reader input announcements (2.1.218 deleted-text + typed-space echo, 2.1.219 per-… | 是 |
 | 21 | [`N-changelog-4`](#n-changelog-4) | ⚪ Low | XL | OPEN | No OSC 52 clipboard writer and no mouse-selection copy surface — `/copy` is subprocess-o… | 是 |
-| 22 | [`N-protocol-8`](#n-protocol-8) | ⚪ Low | XL | OPEN | Memory-backend push mass-delete hold (and its CLAUDE_CODE_DISABLE_MEMORY_MASS_DELETE_HOL… | 是 |
+| 22 | [`N-protocol-8`](#n-protocol-8) | ⚪ Low | — | DUPLICATE | 与 `N-env-3` 相同的 remote-memory/mass-delete 管线；只保留历史 id 交叉引用 | 合并 |
+| 23 | [`O1-code-review-background`](#o1-code-review-background) | 🟡 Medium | M | OPEN | `/code-review` 仍把完整 review prompt 注入主对话，没有后台 subagent 隔离 | — |
+| 24 | [`O2-context-post-compact`](#o2-context-post-compact) | 🟡 Medium | S | OPEN | `/context` 使用累计 token；compact 后仍显示 pre-compact 量级 | — |
+| 25 | [`O3-ctrl-j-paste-newline`](#o3-ctrl-j-paste-newline) | ⚪ Low | S | OPEN | Ctrl+J 编码的粘贴换行被当作 modified key 丢弃，而不是 newline | — |
+| 26 | [`O4-panel-focus-cursor`](#o4-panel-focus-cursor) | ⚪ Low | M | OPEN | plugin/settings 选中行不拥有 terminal cursor，屏幕阅读器/放大器无法跟随焦点 | — |
+| 27 | [`O5-microcompact-idle-gap`](#o5-microcompact-idle-gap) | 🟡 Medium | M | PARTIAL | microcompact 有清理逻辑，但缺真实 message timestamp，无法执行 exact idle-gap gate | schema |
 
 量级：S = 单点改动；M = 一个模块；L = 跨模块；XL = 子系统级（可能需要先做范围决策）。
+
+表内保留 27 个历史/新增 id；合并第 22 项 duplicate 后是 26 个唯一事项。状态合计：20 OPEN、3 PARTIAL、1 LATENT、2 SCOPE-DECISION。
 
 ## 建议顺序
 
 1. **`FU-disabled-agent-server`** —— 唯一一条有越权后果的，且量级 S。注意它当前的行为被 `apps/engine-desktop/src/lib.rs:9563` 的测试钉住了，那个测试分不出两种 disable 原因，所以修复必然要同时改测试——**改之前先确认新断言表达的是「按名字拒绝」而不是「放行」**。
-2. **`N-protocol-7`** —— 量级 S，且**阻塞已解除**：它记录的前置依赖（sibling 会话的 capability-registry / lean-prompt 基建）已经落在本提交上。
-3. **B 组其余 + C 组碎片** —— 都是 S/M，互相独立，可并行。
-4. **A 组的 L/XL 项** —— `N-env-2`、`N-changelog-3`、`N-protocol-5` 是真正的功能移植。
-5. **`N-env-3` / `N-protocol-8` 先不要写代码** —— 见下。
+2. **新增的 S/M 可观察缺口** —— `O2-context-post-compact`、`O3-ctrl-j-paste-newline`、`O4-panel-focus-cursor` 都有官方 release contract 和明确行为点，适合先补回归测试再修；`O1-code-review-background` 需要复用现有 subagent/runtime，不要再造第二条执行链。
+3. **`N-protocol-7`** —— 只加已证实的那一句 Bash bullet。**不要删除任何现有 Agent/Bash 文本**：两条「删除」子断言均已被实时 opus-5 会话反证，照原记录动手会毁掉正确的 prompt 文本。
+4. **B 组其余 + C 组碎片** —— 都是 S/M，互相独立；`O5-microcompact-idle-gap` 需要先解决 timestamp schema。
+5. **A 组的 L/XL 项** —— `N-env-2`、`N-protocol-5` 是真正的功能移植；`N-changelog-3` 先做 bundled-content 范围裁定。
+6. **`N-env-3` / `N-protocol-8` 先不要写代码** —— 见下。
 
 ### 需要产品判断，而不是工程排期
 
 `N-env-3` 与 `N-protocol-8` 是同一个洞的两个角度：port 里**根本没有后端 memory 同步管线**，所以 mass-delete hold 和它的 escape hatch 都没有消费者。它紧邻已冻结的 team/swarm 功能。
 
-**先决定后端 memory 同步（第一方账号端点）是否在范围内。** 如果不在，正确做法是记一条显式的 Divergence(reason)，把这两项从 backlog 移除——而不是让两个 XL 项无限期挂着。
+**先决定后端 memory 同步（第一方账号端点）是否在范围内。** 如果不在，正确做法是记一条显式的 Divergence(reason)，把这两项从 backlog 移除——而不是让两个 XL 项无限期挂着。同样地，`N-changelog-3` 要先确认项目是否改变“bundled workflow content 不属于 core parity”的既有裁定。
 
 ---
 
@@ -102,7 +136,7 @@ Re-verified port-side at 370946160; the recorded evidence HOLDS and is worse tha
 
 | 级别 | 量级 | 状态 |
 |---|---|---|
-| 🟡 Medium | L | OPEN |
+| 🟡 Medium | L | SCOPE-DECISION |
 
 Oracle 2.1.220 ships a built-in workflow library and bundles a complete `deep-research` workflow — phases Scope/Search/Fetch/Verify/Synthesize driving a generated script with `VOTES_PER_CLAIM=3` and `MAX_FETCH=15` — reachable both as `Workflow({name:"deep-research", args:"<question>"})` and via the `/deep-research` entry point, gated only by a default-enabled kill-switch (`tengu_sorrel_avocet`); 2.1.218 narrowed it to start only when invoked manually, and 2.1.220 added the system-prompt guard sentence "Do not use workflows or deep-research unless the user requested it". The port has no built-in workflow library of any kind: `Workflow`'s `name` argument resolves exclusively against user-saved script files under `.lingxi/workflows/` and `~/.lingxi/workflows/`, so `Workflow({name:"deep-research"})` fails with "no saved workflow named 'deep-research' under …", `/workflows` never lists it, and no `/deep-research` slash command or bundled skill is registered. User-visible consequence: a user who asks for deep research, or who follows Claude Code documentation and invokes the named workflow, gets a hard error and no research pipeline — the multi-source search/fetch/vote/verify behaviour simply does not exist; the model can only hand-author an equivalent script inline each time, with no vote threshold, fetch cap, or phase structure. The guard half is a partial non-issue: the port's Workflow tool description already forbids calling the tool without explicit user opt-in (a superset of the oracle's guard), so behaviourally the port is at least as conservative; only the literal sentence is missing, and its `deep-research` clause is moot until the workflow exists. Note the port's own parity ledger has previously dispositioned a related 2.1.196 `/deep-research` item as a Divergence on the grounds that it is "bundled skill content, not core behavior" — so the real gate here is a product decision on whether to adopt bundled workflow content at all, not a technical blocker.
 
@@ -144,7 +178,7 @@ Re-verified port-side at commit 370946160 in /Users/luolingfeng/Projects/LingXi-
 
 | 级别 | 量级 | 状态 |
 |---|---|---|
-| 🟡 Medium | XL | OPEN |
+| 🟡 Medium | XL | SCOPE-DECISION |
 
 The oracle runs a user+team multistore memory sync engine: a push/pull cycle that reconciles local memory entries against a remote store, logging push_written / push_deleted / conflicts, with a delete policy selected by CLAUDE_CODE_MEMORY_PUSH_DELETE_MODE / the tengu_mem_push_delete_mode gate (corroborate | immediate | never). Guarding that engine is a data-loss hold: Ity(e) returns +Infinity when CLAUDE_CODE_DISABLE_MEMORY_MASS_DELETE_HOLD is set, otherwise max(50, floor(e * 0.1)); a push that would delete at least that many entries is HELD rather than applied, so a corrupted or truncated local store can never wipe a user's or a team's memories remotely. The hold is on by default and the env var is the deliberate escape hatch for the rare legitimate bulk purge. The port has none of this. Its memory subsystem is entirely local-filesystem: a LINGXI.md hierarchy loader, a memdir scanner/ranker, a side-query relevance selector with prefetch, session-memory extraction, surfacing into the prompt, a secret scanner, and a retention sweep. The only team-memory code is TeamMemoryWatcher, a poll-based mtime differ over ~/.lingxi/team-mem that reports changed .md files for hot-reload — and it is not constructed anywhere outside its own unit tests, so even that local half never runs in a shipped binary. There is no remote store, no push, no pull, no conflict record, no delete mode, no hold threshold, and no telemetry event that could report any of it. User-visible consequence today is nil in the sense that no memory data can be lost — nothing is ever pushed anywhere — but the flip side is the whole feature: LingXi users get no cross-machine memory sync and no team memory sharing beyond a directory somebody has to populate by hand, and the CLAUDE_CODE_DISABLE_MEMORY_MASS_DELETE_HOLD env var is silently ignored. The mass-delete hold itself is a roughly 20-line pure function; it is only meaningful once the push side exists, so this item cannot be closed piecemeal — porting the guard without the engine would be dead code of exactly the shape this backlog flags as a defect.
 
@@ -161,15 +195,15 @@ Confirmed port-side, repo root /Users/luolingfeng/Projects/LingXi-Next/.worktree
 
 ### `N-protocol-7`
 
-**Lean-model (Opus 5) Bash/Agent tool DESCRIPTION content not ported — the tool-prompt layer is still model-blind below the Dh gate**
+**Opus 5 Bash 新增 description bullet 未移植（纯新增，两处「删除」子主张均已反证）；tool-prompt layer 本身仍 model-blind**
 
 | 级别 | 量级 | 状态 |
 |---|---|---|
-| ⚪ Low | S | OPEN |
+| ⚪ Low | S | PARTIAL |
 
-The oracle serves tool DESCRIPTIONS that vary by model capability, not just by the coarse `Dh(model)` short/long gate. Running 2.1.220 against claude-opus-5 yields a Bash description carrying an extra bullet, "- Command output is displayed to you, not reliably to the user.", placed with the other usage bullets; the same binary driven with claude-opus-4-8 does not emit it, even though both models take the SHORT (`Dh`-true) branch. The recorded finding also claimed opus-5 loses the `IMPORTANT: Avoid using this tool to run cat/head/tail/sed/awk/echo` bullet and that the Agent tool drops its "Reach for this when the task matches…" lead-in; a live opus-5 session observed during this verification still shows the avoid bullet present alongside the new one, so that half of the claim should be re-confirmed against the binary before any text is deleted.
+The oracle serves tool DESCRIPTIONS that vary by model capability, not just by the coarse `Dh(model)` short/long gate. Running 2.1.220 against claude-opus-5 yields a Bash description carrying an extra bullet, "- Command output is displayed to you, not reliably to the user.", placed with the other usage bullets; the same binary driven with claude-opus-4-8 does not emit it, even though both models take the SHORT (`Dh`-true) branch. The recorded finding also claimed opus-5 loses the `IMPORTANT: Avoid using this tool to run cat/head/tail/sed/awk/echo` bullet and that the Agent tool drops its "Reach for this when the task matches…" lead-in; both of those DELETION subclaims are now refuted first-hand (see evidence): a live opus-5 session shows the avoid bullet still present alongside the new one, and shows the Agent lead-in still present. So this item is a pure ADDITION of one bullet. **Delete nothing.**
 
-The port's tool-prompt layer is model-blind below the `Dh` gate. `simple_prompt_concise` in tools/shell/src/prompt.rs takes only a sandbox config and returns one fixed string, so every lean model — opus-4-8, opus-5, fable-5 — receives byte-identical Bash text; the new bullet appears nowhere in the repository. The Agent tool is worse: its `Tool::prompt` impl binds `PromptOptions` to `_` and its `build_prompt` helper has no model parameter at all, so no model-conditional wording is expressible there without a signature change.
+The port's tool-prompt layer is model-blind below the `Dh` gate. `simple_prompt_concise` in tools/shell/src/prompt.rs takes only a sandbox config and returns one fixed string, so every lean model — opus-4-8, opus-5, fable-5 — receives byte-identical Bash text; the new bullet appears nowhere in the repository. The Agent tool also discards `PromptOptions::model` and cannot currently express model-conditional wording, but that structural limitation alone never proved the recorded Agent lead-in delta — and that subclaim is now refuted, so there is no Agent-side text change to make.
 
 User-visible consequence is confined to prompt drift, not function: an Opus 5 session in LingXi gets a Bash tool description that differs from what real Claude Code sends the same model. The missing bullet is the one telling the model that Bash output is not reliably shown to the user — without it the model is marginally more likely to run a command and assume the user saw the output rather than relaying it, which reads as terser, less helpful answers after shell work. No API contract, schema, or execution path is affected.
 
@@ -184,11 +218,12 @@ PORT-SIDE, at the behaviour site:
 (3) tools/shell/src/bash.rs:1366 is the sole call site: `if tool_api::dh_simple_system_prompt(opts.model.as_deref()) { simple_prompt_concise(...) } else { simple_prompt(...) }`. `dh_simple_system_prompt` is a BINARY gate, and tool-api/src/model_prompt_gate.rs:163 asserts `claude-opus-4-8`, `claude-opus-5` and `claude-fable-5` all land on the SAME arm ⇒ opus-5 and opus-4-8 receive byte-identical Bash descriptions today. The oracle differentiates them; the port cannot.
 (4) Agent tool: tools/agent/src/agent.rs:1311 `async fn prompt(&self, _: &PromptOptions) -> String` DISCARDS the model (bound to `_`), and `fn build_prompt(agents, _mcp_server_names, is_coordinator)` at :592 has no model parameter. The `## When to use` / "Reach for this when the task matches an available agent type, …" lead-in at :688 is suppressed only by a non-empty `pro_block` (plan tier), never by model.
 INFRASTRUCTURE (the recorded blocker) — NOW PRESENT AND WIRED: traits/src/model_capabilities.rs:33-47 defines `ModelCapability::{LeanPrompt, Opus5PromptBundle, …}`; :72 `capabilities_for` carries the verbatim 2.1.220 table; :155 `has_capability` with :136 `normalize_model_id` (handles `[1m]`, `-eap`, provider prefixes). tool-api/src/model_prompt_gate.rs:84 consults the registry inside `uwu_standard_model`, and :119 `dh_simple_system_prompt` is consumed live by tools/shell/src/bash.rs:1366, tools/file/src/{read,edit,write,glob,grep}.rs, tools/web/src/{web_fetch,web_search}.rs and tools/task/src/todo_write.rs:246. orchestrator/src/prompt/body_sections.rs:333 `has_opus_5_prompt_bundle` + :557 already gate SYSTEM-prompt sections on `Opus5PromptBundle`, proving the exact discriminator opus-5-vs-opus-4-8 is available and in production use — it just was never applied to the TOOL description layer.
-CAVEAT ON THE RECORDED ORACLE CLAIM (verify before implementing): this agent is itself running as claude-opus-5, and its live Bash tool description contains BOTH the `- IMPORTANT: Avoid using this tool to run `cat`, `head`, `tail`, `sed`, `awk`, or `echo` commands…` bullet AND `- Command output is displayed to you, not reliably to the user.` (the latter immediately after the former). So the "avoid-list bullet is DROPPED for opus-5" half of the recorded finding looks stale/mis-read; the ADDED bullet is real. The Agent-tool lead-in claim could not be checked from here (no Agent tool in this subagent's toolset).
+CAVEAT ON THE RECORDED ORACLE CLAIM (verify before implementing): this agent is itself running as claude-opus-5, and its live Bash tool description contains BOTH the `- IMPORTANT: Avoid using this tool to run `cat`, `head`, `tail`, `sed`, `awk`, or `echo` commands…` bullet AND `- Command output is displayed to you, not reliably to the user.` (the latter immediately after the former). So the "avoid-list bullet is DROPPED for opus-5" half of the recorded finding is stale/mis-read; the ADDED bullet is real.
+RESOLVED BY THE ORCHESTRATOR SESSION (which the subagent above could not check, having no Agent tool): that session also runs claude-opus-5 (`claude-opus-5[1m]`) AND holds the Agent tool, and its live Agent description still opens `## When to use` with "Reach for this when the task matches an available agent type, when you have independent work to run in parallel, or when answering would mean reading across several files — delegate it and you keep the conclusion, not the file dumps." The recorded "Agent drops its lead-in for opus-5" claim is therefore REFUTED by direct observation, on the same model the claim is about. Net: N-protocol-7 is one bullet to ADD to the Bash SHORT builder; nothing anywhere is to be removed. This matters because both deletion subclaims, if acted on, would have destroyed correct prompt text.
 
 </details>
 
-**阻塞：** DEPENDENCY NOW SATISFIED — this is no longer blocked on the sibling H1/M1/H2 capability-registry work. All three pieces exist on 370946160 and are live: traits/src/model_capabilities.rs (registry + `has_capability` + `normalize_model_id`), the lean predicate (`ModelCapability::LeanPrompt`, plus `is_lean_prompt_model` at orchestrator/src/prompt/body_sections.rs:393), and tool-api/src/model_prompt_gate.rs (`dh_simple_system_prompt`, consumed by eight tool crates). The opus-5-only discriminator `Opus5PromptBundle` is already used in production by body_sections.rs:333/557. Remaining prerequisite is a data question, not an infrastructure one: re-read 2.1.220 to confirm (a) the exact bullet text and its position in the SHORT Bash builder, (b) which capability gates it — `opus_5_prompt_bundle` is the only one that separates opus-5 from opus-4-8, so it is almost certainly that and NOT `lean_prompt`, and (c) whether the avoid-list bullet is genuinely removed for opus-5 (a live opus-5 session still shows it, contradicting the recorded note) and whether the Agent lead-in is genuinely dropped. Do not delete existing text on the strength of the recorded claim alone.
+**阻塞：** DEPENDENCY NOW SATISFIED — this is no longer blocked on the sibling H1/M1/H2 capability-registry work. All three pieces exist on 370946160 and are live: traits/src/model_capabilities.rs (registry + `has_capability` + `normalize_model_id`), the lean predicate (`ModelCapability::LeanPrompt`, plus `is_lean_prompt_model` at orchestrator/src/prompt/body_sections.rs:393), and tool-api/src/model_prompt_gate.rs (`dh_simple_system_prompt`, consumed by eight tool crates). The opus-5-only discriminator `Opus5PromptBundle` is already used in production by body_sections.rs:333/557. Remaining prerequisite is a data question, not an infrastructure one: re-read 2.1.220 to confirm (a) the exact bullet text and its position in the SHORT Bash builder, (b) which capability gates it — `opus_5_prompt_bundle` is the only one that separates opus-5 from opus-4-8, so it is almost certainly that and NOT `lean_prompt`, (c) is CLOSED: both deletion subclaims are refuted by direct observation of live opus-5 sessions — the avoid-list bullet and the Agent lead-in are BOTH still served to opus-5. Scope is therefore add-one-bullet only. Do not delete existing text on the strength of the recorded claim.
 
 **涉及文件：** `tools/shell/src/prompt.rs`, `tools/shell/src/bash.rs`, `tools/agent/src/agent.rs`, `tool-api/src/model_prompt_gate.rs`, `traits/src/model_capabilities.rs`
 
@@ -251,7 +286,7 @@ Port (worktree /Users/luolingfeng/Projects/LingXi-Next/.worktrees/backlog/lingxi
 
 | 级别 | 量级 | 状态 |
 |---|---|---|
-| ⚪ Low | XL | OPEN |
+| ⚪ Low | — | DUPLICATE |
 
 Oracle 2.1.220 runs a user+team multistore memory sync engine that pushes local memory entries to a first-party backend. Before a push it computes a mass-delete threshold (`Ity(e)`): `max(50, floor(entries * 0.1))`, and a push whose delete set reaches that threshold is HELD rather than applied — a data-loss safety net that is ON by default. `CLAUDE_CODE_DISABLE_MEMORY_MASS_DELETE_HOLD` (new in 2.1.218) makes the threshold POSITIVE_INFINITY, disabling the hold. The hold sits alongside the pre-existing push-delete modes corroborate|immediate|never (CLAUDE_CODE_MEMORY_PUSH_DELETE_MODE / tengu_mem_push_delete_mode) and the push_written/push_deleted/conflicts accounting. The port has no backend memory sync at all: the memory crate is purely local-filesystem (LINGXI.md hierarchy loader, memdir scanner/ranker, retention, prefetch, surfacing), and its only team-shaped component, TeamMemoryWatcher, is a read-only mtime poll over ~/.lingxi/team-mem that never writes, never deletes, and is not even constructed outside its own tests. Consequently neither the hold, the threshold constants (50 / 10%), the delete modes, nor the env escape hatch has any consumer to attach to. User-visible consequence today is nil — with no push path there is no mass-delete to hold, so no data can be lost — and it only becomes real if/when backend memory sync is ported; setting CLAUDE_CODE_DISABLE_MEMORY_MASS_DELETE_HOLD in LingXi is silently inert. TRIAGE — this is NOT distinct from N-env-3: both entries describe the identical oracle function (Ity, max(50, 10% of entries)), the identical env var introduced in 2.1.218, the identical corroborate|immediate|never delete modes, and the identical missing prerequisite (the whole push/pull sync engine). N-env-3 found it via an env-var sweep and scoped it as "whole sync engine unported" (Medium/XL); N-protocol-8 found it via a protocol/backend-module sweep and scoped only the hold (Low/M). They are one hole seen from two angles. Recommendation: keep N-env-3 as the canonical item, fold N-protocol-8 into it as a cross-reference, and resolve them with a single product call — either port the backend memory sync subsystem (which drags in first-party account endpoints and is adjacent to the frozen team/swarm surface) or record one explicit Divergence(reason) covering both. Do not implement the hold or the env var on their own: a threshold constant with no push pipeline would be exactly the defined-but-never-wired shape this backlog exists to eliminate.
 
@@ -501,7 +536,7 @@ Repo-wide grep across all `.rs` for `defer-then-fork`, `abort-then-fork`, `idle-
 
 | 级别 | 量级 | 状态 |
 |---|---|---|
-| ⚪ Low | S | OPEN |
+| ⚪ Low | S | LATENT |
 
 With the `tengu_maple_sundial` gate on, the oracle collapses the two per-setting agents-view rows in `/config` into a single row `{id:"agentsView", label:"Agents view"}` of type `managedEnum` whose value is the OR of the two underlying settings rendered as "on"/"off", and whose `onChange` is a no-op — i.e. the row becomes read-only and neither `leftArrowOpensAgents` nor `defaultToAgentsView` can be toggled from `/config`. Because the `/config` shorthand resolves keys against that same row list, `defaultToAgentsView` and `leftArrowOpensAgents` also stop being addressable by shorthand and fall through to the unknown-key answer. LingXi has no `tengu_maple_sundial` gate and no `managedEnum` row concept: `settings_lines()` always renders the two editable boolean rows and the shorthand always accepts both keys, so if Anthropic flips the gate server-side the port shows two toggles where the oracle shows one locked summary row, and lets the user change settings the oracle has made read-only. Gate default is OFF, so today the divergence is latent.
 
@@ -562,8 +597,86 @@ Closed halves re-verified first: the event exists (hooks/src/events.rs:85-86, :5
 
 ---
 
+## E. 二次复核补出的遗漏
+
+以下 5 项不在原 22 行中。前 4 项由 Anthropic 官方 2.1.218 release note 明确描述，并在 2.1.220 本机 oracle/当前 port 行为点上复核；第 5 项由 port 自己的实现注释和调用链直接确认。
+
+### `O1-code-review-background`
+
+**`/code-review` 仍在主线程展开 inline prompt，没有按 Claude Code 2.1.218 改成 background subagent**
+
+| 级别 | 量级 | 状态 |
+|---|---|---|
+| 🟡 Medium | M | OPEN |
+
+Claude Code 2.1.218 把 `/code-review` 改成后台 subagent，目标是避免 review 工作填满主对话，并保留 stacked slash commands 作为 review target。LingXi 的 `commands/core/src/bundled/mod.rs` 仍把它注册成 `SlashCommandKind::Bundled { prompt_fn: CodeReviewPromptFn }`；`commands/core/src/bundled/code_review_skill.rs` 还明确标注这是 `inline plain-text path`。调用后生成的整段 review prompt 继续进入主 conversation，没有 background/fork metadata、subagent launch 或隔离 transcript。
+
+这不是提示词字节差异，而是 conversation ownership、compact 压力、取消和恢复语义的可观察差异。
+
+**涉及文件：** `commands/core/src/bundled/mod.rs`, `commands/core/src/bundled/code_review_skill.rs`, `agent/src/runner.rs`, `orchestrator/src/conversation.rs`
+
+### `O2-context-post-compact`
+
+**`/context` 使用 session 累计 token 计数，compact 后仍显示 compact 前的量级**
+
+| 级别 | 量级 | 状态 |
+|---|---|---|
+| 🟡 Medium | S | OPEN |
+
+Claude Code 2.1.218 明确修复了“从 message picker compact 后 `/context` 仍报告 pre-compact token usage”。LingXi 的 `OrchestratorHandle::context_window_usage()` 读取 `SessionState::usage` 的累计 input + output tokens；该值记录历次请求用量，不是当前 compact 后 history 的 live token estimate。`CompactionCompleted` 只替换 history/写入 boundary 并更新 TUI spinner，没有重算或重置这份累计 usage。`/context` 每次虽然重新调用 handle，但拿到的仍是错误指标，因此不是 UI cache 问题。
+
+验收必须区分两种量：cost/telemetry 的累计 token 不能重置；`/context` 应使用当前送模上下文的估算/准确计数。
+
+**涉及文件：** `orchestrator/src/handle_impl.rs`, `orchestrator/src/conversation.rs`, `commands/core/src/context.rs`, `tui/src/chat_widget.rs`
+
+### `O3-ctrl-j-paste-newline`
+
+**终端把粘贴换行编码成 Ctrl+J 时，composer 没有归一化为 newline**
+
+| 级别 | 量级 | 状态 |
+|---|---|---|
+| ⚪ Low | S | OPEN |
+
+Claude Code 2.1.218 修复了某些终端中 multi-line paste 的换行变成 `j`/被折叠的问题。LingXi 的 paste-burst 层只把“无 Ctrl/Alt modifier 的 `KeyCode::Enter`”认作粘贴换行；`Ctrl+J` 进入 modified-key 分支，先 flush/close burst，后续 composer match 也没有 `Char('j') + CONTROL` 的 newline 分支。全 TUI 没有更早的 key normalization 层。
+
+该项应在 paste classification 边界归一化，并用真实 `KeyEvent(Char('j'), CONTROL)` 回归测试锁定；不能把所有交互式 Ctrl+J 无条件改写而破坏 modal/快捷键语义。
+
+**涉及文件：** `tui/src/app.rs`, `tui/src/chat_widget.rs`, `tui/src/bottom_pane/mod.rs`, `tui/src/bottom_pane/paste_burst.rs`
+
+### `O4-panel-focus-cursor`
+
+**plugin/settings 列表只改变高亮，不把 terminal cursor 移到 focused row**
+
+| 级别 | 量级 | 状态 |
+|---|---|---|
+| ⚪ Low | M | OPEN |
+
+Claude Code 2.1.218 的 accessibility 修复要求 plugin/settings panel 在方向键导航时把 terminal cursor 移到焦点行，使 screen reader 和 magnifier 能跟随。LingXi 的 `PluginsView`/settings `ScreenView` 保存并渲染 `selected`，但没有实现 `Renderable::cursor_pos`；`BottomPane::cursor_pos` 对 list modal 会退回 composer cursor。视觉高亮看似正常，辅助技术收到的实际焦点却仍在输入框。
+
+这与 `N-changelog-5` 的 typed/deleted-text announcements 是不同的 accessibility contract，不能只靠启用 `--ax-screen-reader` 关闭。
+
+**涉及文件：** `tui/src/bottom_pane/plugins_view.rs`, `tui/src/bottom_pane/screen_view.rs`, `tui/src/bottom_pane/view.rs`, `tui/src/bottom_pane/mod.rs`
+
+### `O5-microcompact-idle-gap`
+
+**microcompact 清理逻辑存在，但没有真实 last-assistant timestamp，无法执行 Claude Code 的 idle-gap gate**
+
+| 级别 | 量级 | 状态 |
+|---|---|---|
+| 🟡 Medium | M | PARTIAL |
+
+`compaction/src/microcompact.rs` 已实现 compactable tool 选择、20k 最小节省阈值和 keep-recent 保护，也暴露了可接收 out-of-band timestamp 的 trigger helper；但生产调用点 `compaction/src/orchestrator.rs` 明确承认 `ConversationMessage` 没有 per-message timestamp。启用 microcompact 后，orchestrator 直接按 count gate 执行，而不是先判断 `now - lastAssistant.timestamp >= gapThresholdMinutes`。
+
+默认 `enabled = false` 降低了默认路径风险，但一旦配置启用，清理时机就与 Claude Code 不同，所以应记为 PARTIAL，而不能继续当作 compact parity 已闭合。
+
+**涉及文件：** `protocol/src`, `compaction/src/microcompact.rs`, `compaction/src/orchestrator.rs`
+
+---
+
 ## 出处
 
 - 条目来源：`docs/claude-code-2.1.220-sessionB-wave-2026-07-26.md` §3（猎取 backlog）、§6（deferred 碎片）、§8（ultra-review 相邻 follow-up）、§4（H6 部分裁定）。
-- 状态核查：2026-07-27，13 个只读 agent 在 `370946160` 的独立 checkout 上并行执行，每项在行为点判定，全部 22 项确认未关闭。
+- 原始状态核查：2026-07-27，13 个只读 agent 在 `370946160` 的独立 checkout 上并行执行；其行为点证据继续保留，但“22 个独立 active gap”的汇总结论已被本次复核修正。
+- 二次复核 oracle：本机 Claude Code `2.1.220` binary（SHA-256 见文首）和 Anthropic 官方 [Claude Code release feed](https://github.com/anthropics/claude-code/blob/main/feed.xml)。2.1.220 自身的公开说明只有 “Bug fixes and reliability improvements”，所以具体行为以仍适用于 2.1.220 的 [v2.1.218 release entry](https://github.com/anthropics/claude-code/releases/tag/v2.1.218) 加本机 binary/行为探针为准。
+- port 侧核查：读取 Git object `370946160`，避免当前 checkout 分支差异污染结论；新增遗漏都落到了实际 consumer/dispatch/state 行为点，不以单次负向 grep 作为唯一证据。
 - **不在本册**：已接受的有意分歧（多 provider、WebSearch/Tavily、crossreview、mobile、冻结的 team/swarm、`+500k` 预算、`.lingxi`/`LINGXI_` 命名、`--help` 排版、remote-session client）。这些是 USER-CONFIRMED 的分歧，不是 gap，不要「修」。

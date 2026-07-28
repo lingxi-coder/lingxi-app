@@ -66,6 +66,7 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
         recent_models: Vec::new(),
         fallback_model: None,
         custom_betas: Vec::new(),
+        flag_settings: None,
         provider_profiles: None,
         routing: None,
         mcp_paths: vec![cwd.join(".mcp.json")],

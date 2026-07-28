@@ -114,12 +114,13 @@ pub use notification::{NotificationError, NotificationRequest, NotificationServi
 pub use orchestrator::{
     curated_model_names, is_curated_model, parse_model_ref, provider_default_model,
     provider_fallback_order, provider_has_curated_list, ActiveGoalSnapshot, AgentInfo, CheckStatus,
-    CompactionSummary, ContextPressureBanner, ContextPressureLevel, ContextUsageSnapshot,
-    CostSnapshot, DirectoryAddedHookSummary, DoctorCheck, DoctorReport, DoctorSummary, ForkOutcome,
-    HandleError, HookInfo, McpActionState, McpServerInfo, McpStatus, McpToggleOutcome,
-    MemoryEditorOutcome, ModelListing, ModelUsageRow, OrchestratorHandle, OutputEvent,
-    OutputStream, PlanSnapshot, RateLimitSnapshot, RecapOutcome, RegisterRepoRootOutcome,
-    RegisterRepoRootRequest, ResumeRuntimeSnapshot, RewindRowData, StatusSnapshot, TurnOutcome,
+    CompactionSummary, ContextPressureBanner, ContextPressureLevel, ContextUsageCategory,
+    ContextUsageCategoryKind, ContextUsageSnapshot, CostSnapshot, DirectoryAddedHookSummary,
+    DoctorCheck, DoctorReport, DoctorSummary, ForkOutcome, HandleError, HookInfo, McpActionState,
+    McpServerInfo, McpStatus, McpToggleOutcome, MemoryEditorOutcome, ModelListing, ModelUsageRow,
+    OrchestratorHandle, OutputEvent, OutputStream, PlanSnapshot, RateLimitSnapshot, RecapOutcome,
+    RegisterRepoRootOutcome, RegisterRepoRootRequest, ResumeRuntimeSnapshot, RewindRowData,
+    StatusSnapshot, TurnOutcome,
 };
 pub use permission_gate::{PermissionDecision, PermissionGate};
 pub use platform::Platform;

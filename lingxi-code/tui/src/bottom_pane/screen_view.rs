@@ -272,39 +272,38 @@ impl ScreenView {
     /// window and whose empty cells (`□`, dim) are free space, plus the token
     /// counts and percentages.
     ///
-    /// The reference splits the used cells by category (system prompt, tools,
-    /// MCP, memory, messages). LingXi's engine exposes only the total
-    /// `(used, max)` — there is no per-category token accounting seam — so the
-    /// used cells render as a single "Messages" band rather than the reference's
-    /// multi-color category breakdown. Every number shown is real; the category
-    /// split is honestly absent rather than fabricated.
+    /// Category cells and the legend are projected from the same
+    /// [`traits::ContextUsageSnapshot`] the headless `/context` command uses.
     #[must_use]
-    pub fn context(model: &str, used: u64, max: u64) -> Self {
+    pub fn context(model: &str, usage: &traits::ContextUsageSnapshot) -> Self {
         const GRID_COLS: usize = 20;
         const GRID_ROWS: usize = 5;
         const CELLS: usize = GRID_COLS * GRID_ROWS;
 
-        let pct = if max == 0 {
-            0
+        let used = usage.live_context_tokens;
+        let max = usage.max_context_tokens;
+        let pct = context_percentage(used, max);
+        let fallback;
+        let breakdown = if usage.breakdown.is_empty() {
+            fallback = vec![
+                traits::ContextUsageCategory::new(traits::ContextUsageCategoryKind::Messages, used),
+                traits::ContextUsageCategory::new(
+                    traits::ContextUsageCategoryKind::FreeSpace,
+                    max.saturating_sub(used),
+                ),
+            ];
+            &fallback
         } else {
-            ((used * 100) / max).min(100)
-        };
-        let free = max.saturating_sub(used);
-        let free_pct = 100u64.saturating_sub(pct);
-        // Round the filled-cell count to the nearest cell.
-        let filled = if max == 0 {
-            0
-        } else {
-            usize::try_from((used * CELLS as u64 + max / 2) / max)
-                .unwrap_or(CELLS)
-                .min(CELLS)
+            &usage.breakdown
         };
 
-        let used_style = Style::default().fg(ratatui::style::Color::Cyan);
-        let free_style = Style::default().add_modifier(Modifier::DIM);
         let mut lines: Vec<Line<'static>> = vec![
             Line::from(Span::styled(
-                format!("Model: {model}"),
+                format!(
+                    "Model: {model} · {} / {} tokens ({pct}%)",
+                    fmt_tokens(used),
+                    fmt_tokens(max)
+                ),
                 Style::default().add_modifier(Modifier::DIM),
             )),
             Line::from(""),
@@ -313,31 +312,33 @@ impl ScreenView {
             let mut spans: Vec<Span<'static>> = Vec::with_capacity(GRID_COLS);
             for c in 0..GRID_COLS {
                 let idx = r * GRID_COLS + c;
-                if idx < filled {
-                    spans.push(Span::styled("■ ", used_style));
+                let kind = category_for_cell(breakdown, idx, CELLS, max);
+                let glyph = if kind == traits::ContextUsageCategoryKind::FreeSpace {
+                    "□ "
                 } else {
-                    spans.push(Span::styled("□ ", free_style));
-                }
+                    "■ "
+                };
+                spans.push(Span::styled(glyph, context_category_style(kind)));
             }
             lines.push(Line::from(spans));
         }
         lines.push(Line::from(""));
-        lines.push(Line::from(vec![
-            Span::styled("■ ", used_style),
-            Span::raw(format!("Messages: {} tokens ({pct}%)", fmt_tokens(used))),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled("□ ", free_style),
-            Span::raw(format!(
-                "Free space: {} tokens ({free_pct}%)",
-                fmt_tokens(free)
-            )),
-        ]));
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "Per-category breakdown (system prompt, tools, MCP) is not tracked yet.",
-            Style::default().add_modifier(Modifier::DIM),
-        )));
+        for row in breakdown {
+            let row_pct = context_percentage(row.tokens, max);
+            let glyph = if row.kind == traits::ContextUsageCategoryKind::FreeSpace {
+                "□ "
+            } else {
+                "■ "
+            };
+            lines.push(Line::from(vec![
+                Span::styled(glyph, context_category_style(row.kind)),
+                Span::raw(format!(
+                    "{}: {} tokens ({row_pct}%)",
+                    context_category_label(row.kind),
+                    fmt_tokens(row.tokens)
+                )),
+            ]));
+        }
         Self::new("Context Usage", lines, "esc to close")
     }
 
@@ -561,6 +562,69 @@ fn fmt_tokens(n: u64) -> String {
     n.to_string()
 }
 
+fn context_percentage(tokens: u64, max: u64) -> u64 {
+    if max == 0 {
+        return 0;
+    }
+    tokens
+        .saturating_mul(100)
+        .saturating_add(max / 2)
+        .saturating_div(max)
+        .min(100)
+}
+
+fn category_for_cell(
+    breakdown: &[traits::ContextUsageCategory],
+    cell: usize,
+    cells: usize,
+    max: u64,
+) -> traits::ContextUsageCategoryKind {
+    use traits::ContextUsageCategoryKind as Kind;
+    if max == 0 || cells == 0 {
+        return Kind::FreeSpace;
+    }
+    let cell = u64::try_from(cell).unwrap_or(u64::MAX);
+    let cells = u64::try_from(cells).unwrap_or(u64::MAX);
+    let target = cell.saturating_mul(max) / cells;
+    let mut cumulative = 0u64;
+    for row in breakdown {
+        cumulative = cumulative.saturating_add(row.tokens);
+        if target < cumulative {
+            return row.kind;
+        }
+    }
+    Kind::FreeSpace
+}
+
+fn context_category_label(kind: traits::ContextUsageCategoryKind) -> &'static str {
+    use traits::ContextUsageCategoryKind as Kind;
+    match kind {
+        Kind::SystemPrompt => "System prompt",
+        Kind::SystemTools => "System tools",
+        Kind::McpTools => "MCP tools",
+        Kind::MemoryFiles => "Memory files",
+        Kind::Skills => "Skills",
+        Kind::Messages => "Messages",
+        Kind::AutocompactBuffer => "Autocompact buffer",
+        Kind::FreeSpace => "Free space",
+    }
+}
+
+fn context_category_style(kind: traits::ContextUsageCategoryKind) -> Style {
+    use ratatui::style::Color;
+    use traits::ContextUsageCategoryKind as Kind;
+    match kind {
+        Kind::SystemPrompt => Style::default().fg(Color::Magenta),
+        Kind::SystemTools => Style::default().fg(Color::Blue),
+        Kind::McpTools => Style::default().fg(Color::Yellow),
+        Kind::MemoryFiles => Style::default().fg(Color::Green),
+        Kind::Skills => Style::default().fg(Color::LightGreen),
+        Kind::Messages => Style::default().fg(Color::Cyan),
+        Kind::AutocompactBuffer => Style::default().fg(Color::DarkGray),
+        Kind::FreeSpace => Style::default().add_modifier(Modifier::DIM),
+    }
+}
+
 fn header(text: &str) -> Line<'static> {
     Line::from(Span::styled(
         text.to_string(),
@@ -686,17 +750,16 @@ fn settings_lines(
     lingxi_home: &str,
     cwd: &str,
 ) -> Vec<Line<'static>> {
-    // parity 2.1.207 "Dynamic workflow size" (`workflowSizeGuideline`): the
-    // persisted `/config` enum, shown read-only here (set via
-    // `/config workflowSizeGuideline=…`). Absent ⇒ `unrestricted`.
-    let workflow_size = tui_core::theme_persist::load_workflow_size_guideline()
-        .unwrap_or_else(|| "unrestricted".to_string());
+    // The composition root publishes the effective merged value after applying
+    // user/project/local/flag/managed precedence. Reading the process snapshot
+    // here prevents `/config` from disagreeing with the Workflow tool.
+    let workflow_size = traits::session_flags::workflow_size_guideline();
     let mut out = vec![
         header("Session settings"),
         row("└ Theme", theme.as_wire()),
         row("└ Vim mode", on_off(vim)),
         row("└ Verbose", on_off(verbose)),
-        row("└ Dynamic workflow size", &workflow_size),
+        row("└ Dynamic workflow size", workflow_size),
     ];
     // parity 2.1.220 agents-view rows, oracle order (`defaultToAgentsView`
     // "Open agents view by default" first, then `leftArrowOpensAgents`
@@ -872,6 +935,32 @@ mod tests {
         // Agents-view rows (2.1.220), oracle order and labels.
         assert!(text.contains("Open agents view by default"), "{text}");
         assert!(text.contains("← opens agents"), "{text}");
+    }
+
+    #[test]
+    fn context_screen_uses_shared_category_snapshot() {
+        use traits::{ContextUsageCategory, ContextUsageCategoryKind as Kind};
+        let view = ScreenView::context(
+            "claude-opus-5",
+            &traits::ContextUsageSnapshot {
+                live_context_tokens: 100_000,
+                max_context_tokens: 1_000_000,
+                breakdown: vec![
+                    ContextUsageCategory::new(Kind::SystemPrompt, 20_000),
+                    ContextUsageCategory::new(Kind::SystemTools, 30_000),
+                    ContextUsageCategory::new(Kind::Messages, 50_000),
+                    ContextUsageCategory::new(Kind::AutocompactBuffer, 13_000),
+                    ContextUsageCategory::new(Kind::FreeSpace, 887_000),
+                ],
+                ..Default::default()
+            },
+        );
+        let text = view.body_text();
+        assert!(text.contains("claude-opus-5 · 100k / 1m tokens (10%)"));
+        assert!(text.contains("System prompt: 20k tokens (2%)"));
+        assert!(text.contains("System tools: 30k tokens (3%)"));
+        assert!(text.contains("Autocompact buffer: 13k tokens (1%)"));
+        assert!(text.contains("Free space: 887k tokens (89%)"));
     }
 
     /// With agent view disabled the two agents-view rows disappear entirely,

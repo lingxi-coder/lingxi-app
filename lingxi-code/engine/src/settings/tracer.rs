@@ -78,6 +78,10 @@ fn field_presence(layer: &SettingsJson) -> Vec<(&'static str, bool)> {
             "additionalDirectories",
             layer.additional_directories.is_some(),
         ),
+        (
+            "workflowSizeGuideline",
+            layer.workflow_size_guideline.is_some(),
+        ),
         ("enabledTools", layer.enabled_tools.is_some()),
         ("additionalIncludes", layer.additional_includes.is_some()),
         ("sandbox", layer.sandbox.is_some()),

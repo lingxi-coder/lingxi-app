@@ -15,8 +15,7 @@ use serde_json::Value;
 
 const BACKLOG_CONTRACTS: &str =
     include_str!("../src/parity/fixtures/claude_2_1_220_backlog_contracts.json");
-const GAP_ORACLE: &str =
-    include_str!("../src/parity/fixtures/claude_2_1_220_gap_oracle.json");
+const GAP_ORACLE: &str = include_str!("../src/parity/fixtures/claude_2_1_220_gap_oracle.json");
 
 fn backlog_contracts() -> Value {
     serde_json::from_str(BACKLOG_CONTRACTS).expect("2.1.220 backlog fixture must be valid JSON")
@@ -154,7 +153,9 @@ fn gap_oracle_is_pinned_without_private_prompt_text() {
         .expect("system prompt manifests");
     assert_eq!(prompts.len(), 4);
     assert!(prompts.iter().all(|entry| {
-        entry["length_bytes"].as_u64().is_some_and(|len| len > 1_000)
+        entry["length_bytes"]
+            .as_u64()
+            .is_some_and(|len| len > 1_000)
             && entry["sha256"]
                 .as_str()
                 .is_some_and(|digest| digest.len() == 64)
@@ -190,8 +191,5 @@ fn gap_oracle_is_pinned_without_private_prompt_text() {
         "llm"
     );
     assert_eq!(fixture["plugin_eval"]["empty_suite"]["exit_code"], 1);
-    assert_eq!(
-        fixture["plugin_eval"]["empty_suite"]["schema_version"],
-        1
-    );
+    assert_eq!(fixture["plugin_eval"]["empty_suite"]["schema_version"], 1);
 }

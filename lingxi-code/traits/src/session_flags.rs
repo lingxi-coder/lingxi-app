@@ -9,7 +9,7 @@
 //! prompt-build-time reads: set once by the composition point that knows the
 //! session mode, read by builders such as the `AgentTool` fork gate.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 /// `getIsNonInteractiveSession()` analog. Defaults `false` (interactive); set by
 /// [`ConversationOrchestrator::new`](../../orchestrator) from the session's
@@ -41,6 +41,13 @@ static TOOL_SEARCH_ENABLED: AtomicBool = AtomicBool::new(false);
 /// Session-scoped dynamic Workflow availability, resolved by the composition
 /// root after managed policy and environment gates are known.
 static DYNAMIC_WORKFLOWS_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Effective `workflowSizeGuideline` for the current process/session.
+/// `2` is `medium`, the Claude Code 2.1.219+ default.
+static WORKFLOW_SIZE_GUIDELINE: AtomicU8 = AtomicU8::new(2);
+
+/// Whether the effective workflow-size value is owned by managed policy.
+static WORKFLOW_SIZE_GUIDELINE_MANAGED: AtomicBool = AtomicBool::new(false);
 
 /// Record whether the current process is a non-interactive (`-p`/print/headless)
 /// session. Idempotent; safe to call repeatedly (the value is fixed per process).
@@ -92,6 +99,40 @@ pub fn set_dynamic_workflows_enabled(enabled: bool) {
 #[must_use]
 pub fn dynamic_workflows_enabled() -> bool {
     DYNAMIC_WORKFLOWS_ENABLED.load(Ordering::Relaxed)
+}
+
+/// Publish the effective workflow-size setting and whether policy owns it.
+///
+/// Returns `false` for an unknown wire value and leaves the prior snapshot
+/// untouched.
+pub fn set_workflow_size_guideline(value: &str, managed: bool) -> bool {
+    let encoded = match value {
+        "unrestricted" => 0,
+        "small" => 1,
+        "medium" => 2,
+        "large" => 3,
+        _ => return false,
+    };
+    WORKFLOW_SIZE_GUIDELINE.store(encoded, Ordering::Relaxed);
+    WORKFLOW_SIZE_GUIDELINE_MANAGED.store(managed, Ordering::Relaxed);
+    true
+}
+
+/// Effective workflow-size wire value. Defaults to `medium`.
+#[must_use]
+pub fn workflow_size_guideline() -> &'static str {
+    match WORKFLOW_SIZE_GUIDELINE.load(Ordering::Relaxed) {
+        0 => "unrestricted",
+        1 => "small",
+        3 => "large",
+        _ => "medium",
+    }
+}
+
+/// Whether managed policy owns the effective workflow-size setting.
+#[must_use]
+pub fn workflow_size_guideline_is_managed() -> bool {
+    WORKFLOW_SIZE_GUIDELINE_MANAGED.load(Ordering::Relaxed)
 }
 
 #[cfg(test)]

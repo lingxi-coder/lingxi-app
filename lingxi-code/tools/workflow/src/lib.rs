@@ -474,6 +474,8 @@ impl WorkflowTool {
     #[must_use]
     pub fn with_size_guideline(mut self, size: WorkflowSizeGuideline) -> Self {
         self.size_guideline = size;
+        let managed = traits::session_flags::workflow_size_guideline_is_managed();
+        let _ = traits::session_flags::set_workflow_size_guideline(size.as_wire(), managed);
         self
     }
 
@@ -604,8 +606,11 @@ impl Tool for WorkflowTool {
     async fn prompt(&self, _: &PromptOptions) -> String {
         // Binary: `async prompt(){ return qAs + VAs(St().workflowSizeGuideline) }`
         // — the base description plus the (possibly-empty) size-guideline
-        // appendix for the session-frozen `/config` value.
-        format!("{}{}", *DESCRIPTION, self.size_guideline.prompt_appendix())
+        // appendix. `/config` updates the live session snapshot, so prefer that
+        // value over the construction-time fallback on every prompt build.
+        let live = traits::session_flags::workflow_size_guideline();
+        let size = WorkflowSizeGuideline::from_wire(live);
+        format!("{}{}", *DESCRIPTION, size.prompt_appendix())
     }
 
     async fn validate_input(
@@ -1149,6 +1154,20 @@ mod tests {
         // Explicit unrestricted also yields no appendix.
         let u = WorkflowTool::new(None).with_size_guideline(WorkflowSizeGuideline::Unrestricted);
         assert_eq!(u.prompt(&opts).await, *DESCRIPTION);
+
+        // `/config` updates the session snapshot after construction; the next
+        // prompt must reflect it without rebuilding the tool registry.
+        let live = WorkflowTool::new(None).with_size_guideline(WorkflowSizeGuideline::Medium);
+        let _ = traits::session_flags::set_workflow_size_guideline("small", false);
+        assert_eq!(
+            live.prompt(&opts).await,
+            format!(
+                "{}{}",
+                *DESCRIPTION,
+                WorkflowSizeGuideline::Small.prompt_appendix()
+            )
+        );
+        let _ = traits::session_flags::set_workflow_size_guideline("medium", false);
     }
 
     #[test]

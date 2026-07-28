@@ -1028,14 +1028,64 @@ impl OrchestratorHandle for ConversationOrchestrator {
     }
 
     async fn context_usage_snapshot(&self) -> traits::ContextUsageSnapshot {
-        // `/context` is a LIVE-history measure. Use the exact estimator that
-        // auto-compaction uses so replacing history with a compact summary
-        // immediately lowers this number. Billing remains cumulative in the
-        // separate cost snapshot.
-        let history = self.session.lock().await.history.clone();
+        use traits::{ContextUsageCategory, ContextUsageCategoryKind as Kind};
+
+        // Snapshot the live model and history together. The history component
+        // uses the exact estimator auto-compaction uses, so replacing history
+        // with a compact summary immediately lowers the Messages row.
+        let (model, history) = {
+            let session = self.session.lock().await;
+            (session.model.clone(), session.history.clone())
+        };
+        let active_betas = self.api.active_betas();
+        let max_context_tokens =
+            compaction::context_window::context_window_for_model(&model, &active_betas);
+
+        // The system prompt and tool schemas are the bytes the next main-loop
+        // request will advertise. Keep MCP definitions separate from ordinary
+        // tools so both renderers can expose the same category split.
+        let system_prompt = self.effective_system_prompt().await;
+        let wire_tools = self.build_wire_tools().await;
+        let (mcp_tools, system_tools): (Vec<_>, Vec<_>) =
+            wire_tools.into_iter().partition(is_mcp_wire_tool);
+
+        let cwd = self.session_cwd.cwd();
+        let memory_files = self.memory.load(&cwd).await;
+        let memory_tokens =
+            estimate_bytes_as_tokens(crate::prompt::memory_block::format(&memory_files).len());
+        let system_prompt_tokens = estimate_bytes_as_tokens(system_prompt.len());
+        let system_tool_tokens = estimate_json_tokens(&system_tools);
+        let mcp_tool_tokens = estimate_json_tokens(&mcp_tools);
+        let message_tokens = compaction::grouping::estimate_tokens_for_range(&history);
+
+        // Invoked skill bodies are already represented by their persisted
+        // messages. Keep the explicit Skills row stable without double-counting.
+        let skills_tokens = 0;
+        let live_context_tokens = system_prompt_tokens
+            .saturating_add(system_tool_tokens)
+            .saturating_add(mcp_tool_tokens)
+            .saturating_add(memory_tokens)
+            .saturating_add(skills_tokens)
+            .saturating_add(message_tokens);
+        let autocompact_buffer = compaction::thresholds::AUTOCOMPACT_BUFFER_TOKENS
+            .min(max_context_tokens.saturating_sub(live_context_tokens));
+        let free_tokens = max_context_tokens
+            .saturating_sub(live_context_tokens)
+            .saturating_sub(autocompact_buffer);
+
         traits::ContextUsageSnapshot {
-            live_context_tokens: compaction::grouping::estimate_tokens_for_range(&history),
-            max_context_tokens: CONTEXT_WINDOW_MAX_TOKENS,
+            live_context_tokens,
+            max_context_tokens,
+            breakdown: vec![
+                ContextUsageCategory::new(Kind::SystemPrompt, system_prompt_tokens),
+                ContextUsageCategory::new(Kind::SystemTools, system_tool_tokens),
+                ContextUsageCategory::new(Kind::McpTools, mcp_tool_tokens),
+                ContextUsageCategory::new(Kind::MemoryFiles, memory_tokens),
+                ContextUsageCategory::new(Kind::Skills, skills_tokens),
+                ContextUsageCategory::new(Kind::Messages, message_tokens),
+                ContextUsageCategory::new(Kind::AutocompactBuffer, autocompact_buffer),
+                ContextUsageCategory::new(Kind::FreeSpace, free_tokens),
+            ],
             cumulative_cost: self.snapshot_cost().await,
         }
     }
@@ -1085,11 +1135,32 @@ impl OrchestratorHandle for ConversationOrchestrator {
     }
 }
 
-/// LingXi-locked context-window budget used by [`context_window_usage`].
-/// Matches the 200k-token Claude window referenced in `cost::budget`. The
-/// rich per-model routing budget is deferred (it would require a new struct
-/// on the frozen trait surface). (engine-data-commands)
-const CONTEXT_WINDOW_MAX_TOKENS: u64 = 200_000;
+fn estimate_bytes_as_tokens(bytes: usize) -> u64 {
+    let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
+    bytes.saturating_add(crate::model::count_tokens::APPROX_CHARS_PER_TOKEN - 1)
+        / crate::model::count_tokens::APPROX_CHARS_PER_TOKEN
+}
+
+fn estimate_json_tokens(values: &[serde_json::Value]) -> u64 {
+    values
+        .iter()
+        .map(|value| serde_json::to_vec(value).map_or(0, |bytes| bytes.len()))
+        .map(estimate_bytes_as_tokens)
+        .fold(0, u64::saturating_add)
+}
+
+fn is_mcp_wire_tool(value: &serde_json::Value) -> bool {
+    value
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|name| {
+            name == "MCP"
+                || name == "McpAuth"
+                || name == "ListMcpResources"
+                || name == "ReadMcpResource"
+                || name.starts_with("mcp__")
+        })
+}
 
 /// Stable string label for a `HookEventType`, used by [`list_hooks`] to
 /// populate [`traits::HookInfo::event`]. Avoids `Debug` derive
@@ -1735,10 +1806,10 @@ mod tests {
         assert!(list.is_empty() && aff.is_empty());
     }
 
-    /// `/context` is model-id agnostic and follows live history rather than
-    /// cumulative provider usage (which does not shrink after compaction).
+    /// `/context` follows the live model and history rather than cumulative
+    /// provider usage (which does not shrink after compaction).
     #[tokio::test]
-    async fn context_window_usage_is_model_id_agnostic_bedrock_regression() {
+    async fn context_window_usage_is_live_and_model_aware() {
         use crate::test_support::{
             noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
             StaticMemoryProvider,
@@ -1757,9 +1828,7 @@ mod tests {
         );
         {
             let mut s = orch.session.lock().await;
-            // A Bedrock inference-profile model id — the shape that made the
-            // binary's model-matched usage lookup come up empty.
-            s.model = "us.anthropic.claude-sonnet-4-5-20250929-v1:0".to_string();
+            s.model = "claude-opus-5".to_string();
             s.usage.add(&engine::token::Usage {
                 input_tokens: 1_200,
                 output_tokens: 345,
@@ -1771,14 +1840,26 @@ mod tests {
                 "live context after compact".repeat(100),
             ));
         }
-        let expected = {
+        let expected_messages = {
             let s = orch.session.lock().await;
             compaction::grouping::estimate_tokens_for_range(&s.history)
         };
-        let (used, max) = orch.context_window_usage().await;
-        assert_eq!(used, expected, "usage must come from live history");
+        let snapshot = orch.context_usage_snapshot().await;
+        let used = snapshot.live_context_tokens;
+        let max = snapshot.max_context_tokens;
+        let messages = snapshot
+            .breakdown
+            .iter()
+            .find(|row| row.kind == traits::ContextUsageCategoryKind::Messages)
+            .map_or(0, |row| row.tokens);
+        assert_eq!(messages, expected_messages, "history estimator must match");
         assert_ne!(used, 1_545, "cumulative provider usage must not leak in");
-        assert_eq!(max, CONTEXT_WINDOW_MAX_TOKENS);
+        assert_eq!(max, 1_000_000, "Opus 5 has a native 1M window");
+        assert_eq!(
+            snapshot.breakdown.iter().map(|row| row.tokens).sum::<u64>(),
+            max,
+            "used + reserved buffer + free space must cover the window"
+        );
     }
 
     #[tokio::test]

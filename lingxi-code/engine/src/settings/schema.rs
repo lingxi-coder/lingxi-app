@@ -209,6 +209,13 @@ pub struct SettingsJson {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_keyword_trigger_enabled: Option<bool>,
 
+    /// Scalar field (later source wins). `workflowSizeGuideline` controls the
+    /// advisory fan-out size appended to the Workflow tool prompt. Valid wire
+    /// values are `unrestricted`, `small`, `medium`, and `large`; consumers
+    /// normalize unknown values. Absence resolves to `medium` at the use site.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_size_guideline: Option<String>,
+
     /// Scalar field (later source wins). Telemetry on/off toggle.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub telemetry_enabled: Option<bool>,
@@ -630,6 +637,13 @@ mod tests {
             parsed.trusted_directories.as_deref(),
             Some(&["/foo".to_string()][..])
         );
+    }
+
+    #[test]
+    fn deserializes_workflow_size_guideline() {
+        let parsed: SettingsJson =
+            serde_json::from_str(r#"{"workflowSizeGuideline":"medium"}"#).unwrap();
+        assert_eq!(parsed.workflow_size_guideline.as_deref(), Some("medium"));
     }
 
     #[test]

@@ -104,9 +104,56 @@ pub struct ContextUsageSnapshot {
     /// Context-window capacity for the active model.
     #[serde(default)]
     pub max_context_tokens: u64,
+    /// Stable category rows used by both the headless and interactive
+    /// `/context` renderers. Older hosts omit this field and deserialize to an
+    /// empty list; consumers must then fall back to the aggregate counters.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub breakdown: Vec<ContextUsageCategory>,
     /// Cumulative session usage/cost, unaffected by compaction.
     #[serde(default)]
     pub cumulative_cost: CostSnapshot,
+}
+
+/// One stable category in a [`ContextUsageSnapshot`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextUsageCategory {
+    /// Category identity. The enum serializes to a stable snake-case wire value.
+    #[serde(default)]
+    pub kind: ContextUsageCategoryKind,
+    /// Estimated tokens assigned to this category.
+    #[serde(default)]
+    pub tokens: u64,
+}
+
+impl ContextUsageCategory {
+    /// Construct one category row.
+    #[must_use]
+    pub const fn new(kind: ContextUsageCategoryKind, tokens: u64) -> Self {
+        Self { kind, tokens }
+    }
+}
+
+/// Fixed `/context` category identities.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextUsageCategoryKind {
+    /// Main system prompt, excluding separately-accounted memory files.
+    SystemPrompt,
+    /// Built-in, plugin, and LSP tool definitions.
+    SystemTools,
+    /// MCP tool definitions.
+    McpTools,
+    /// Loaded `LINGXI.md`/memory-file content.
+    MemoryFiles,
+    /// Skill content attached to the active conversation.
+    Skills,
+    /// Persisted conversation messages.
+    #[default]
+    Messages,
+    /// Reserved room used by automatic compaction.
+    AutocompactBuffer,
+    /// Remaining unallocated context capacity.
+    FreeSpace,
 }
 
 /// SDK/stream-json request to register an additional repository root.

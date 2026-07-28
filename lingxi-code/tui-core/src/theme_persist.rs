@@ -257,8 +257,9 @@ pub fn save_editor_mode(vim: bool) {
 /// startup so the Workflow tool's prompt appendix survives restarts.
 const WORKFLOW_SIZE_GUIDELINE_KEY: &str = "workflowSizeGuideline";
 
-/// Read the stored `workflowSizeGuideline` wire string. `None` on any error /
-/// absent key (caller treats absence as `unrestricted`).
+/// Read the user-scope `workflowSizeGuideline` wire string. `None` on any
+/// error / absent key. The canonical settings composition applies the
+/// `medium` default and higher-precedence project/flag/managed layers.
 #[must_use]
 pub fn load_workflow_size_guideline() -> Option<String> {
     load_workflow_size_guideline_from(&settings_path()?)
@@ -477,7 +478,7 @@ mod tests {
         let path = dir.join("settings.json");
         let _ = std::fs::remove_file(&path);
 
-        // Absent → None (treated as unrestricted by the caller).
+        // Absent → None (the canonical settings composition supplies medium).
         assert_eq!(load_workflow_size_guideline_from(&path), None);
 
         // Seed another key, then round-trip the guideline; the earlier key survives.

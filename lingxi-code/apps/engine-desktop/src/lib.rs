@@ -1883,6 +1883,7 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 ///     recent_models: Vec::new(),
 ///     fallback_model: None,
 ///     custom_betas: Vec::new(),
+///     flag_settings: None,
 ///     provider_profiles: Some(BTreeMap::new()),
 ///     routing: None,
 ///     mcp_paths: vec![PathBuf::from("/tmp/project/.mcp.json")],
@@ -2009,6 +2010,9 @@ pub struct DesktopConfig {
     /// Host-validated custom Anthropic beta header additions for this session.
     /// Empty keeps request headers unchanged.
     pub custom_betas: Vec<String>,
+    /// Parsed CLI `--settings` / `flagSettings` layer. The CLI host fills this
+    /// from an inline JSON object or file; non-CLI hosts leave it absent.
+    pub flag_settings: Option<engine::settings::SettingsJson>,
     /// Settings-declared `providers` block as raw JSON, fed verbatim to
     /// `llm_client::ClientConfig` via `build()`. `None` ⟶ built-in profiles only.
     pub provider_profiles: Option<std::collections::BTreeMap<String, serde_json::Value>>,
@@ -2425,6 +2429,7 @@ impl std::fmt::Debug for DesktopConfig {
             .field("lingxi_home", &self.lingxi_home)
             .field("default_model", &self.default_model)
             .field("fallback_model", &self.fallback_model)
+            .field("flag_settings_configured", &self.flag_settings.is_some())
             .field(
                 "provider_profile_count",
                 &self
@@ -2533,6 +2538,7 @@ impl Default for DesktopConfig {
             recent_models: Vec::new(),
             fallback_model: None,
             custom_betas: Vec::new(),
+            flag_settings: None,
             provider_profiles: None,
             routing: None,
             mcp_paths: Vec::new(),
@@ -2585,6 +2591,47 @@ impl Default for DesktopConfig {
             computer_access_tx: None,
         }
     }
+}
+
+fn resolve_workflow_size_guideline(
+    cfg: &DesktopConfig,
+    cwd: &std::path::Path,
+    managed_layers: &[engine::settings::SettingsJson],
+) -> (tool_workflow::WorkflowSizeGuideline, bool) {
+    let defaults = engine::settings::SettingsJson {
+        workflow_size_guideline: Some("medium".to_string()),
+        ..Default::default()
+    };
+    let user_settings_path = cfg.lingxi_home.join("settings.json");
+    let effective = engine::settings::Settings::load_with_layers_from_user_path(
+        engine::settings::LoadInputs {
+            env: &std::collections::BTreeMap::new(),
+            project_dir: cwd,
+            defaults,
+        },
+        engine::settings::FileLayerScope {
+            include_user: cfg.setting_source_scope.0,
+            include_project: cfg.setting_source_scope.1,
+            include_local: cfg.setting_source_scope.1,
+        },
+        engine::settings::SupplementalLayers {
+            cli_layer: cfg.flag_settings.as_ref(),
+            managed_layers,
+        },
+        Some(&user_settings_path),
+    )
+    .ok();
+    let wire = effective
+        .as_ref()
+        .and_then(|settings| settings.settings.workflow_size_guideline.as_deref())
+        .unwrap_or("medium");
+    let guideline = tool_workflow::WorkflowSizeGuideline::from_wire(wire);
+    let managed = effective
+        .as_ref()
+        .and_then(|settings| settings.effective_for("workflowSizeGuideline"))
+        .and_then(|source| source.contributors.last())
+        .is_some_and(|source| *source == engine::settings::tracer::Source::Managed);
+    (guideline, managed)
 }
 
 /// Assemble the desktop slash-command registry.
@@ -7894,39 +7941,22 @@ pub async fn build(
                 lingxi_home: cfg.lingxi_home.clone(),
                 session_uuid: main_session_uuid.clone(),
             });
-        // parity 2.1.207 "Dynamic workflow size": read the persisted
-        // `workflowSizeGuideline` (`/config`) once at construction and freeze it
-        // into the tool for the session — the binary's `St().workflowSizeGuideline`
-        // fed through `Jvd`. It flavors the Workflow tool's prompt appendix.
-        // Absent / unknown ⇒ `unrestricted` (no appendix), via `from_wire`.
-        // `workflowSizeGuideline` may come from ANY settings file (2.1.219),
-        // not just the user one; later tiers win. Absent everywhere ⇒ the
-        // oracle's default `medium` (`_Td`), NOT unrestricted.
-        let workflow_settings_files = [
-            crate::settings_watch::managed_settings_dir().join("managed-settings.json"),
-            cfg.lingxi_home.join("settings.json"),
-            cwd.join(branding::DOT_DIR).join("settings.json"),
-            cwd.join(branding::DOT_DIR).join("settings.local.json"),
-        ];
-        let read_setting = |key: &str| -> Option<serde_json::Value> {
-            let mut found = None;
-            for path in &workflow_settings_files {
-                if let Some(v) = std::fs::read_to_string(path)
-                    .ok()
-                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-                    .and_then(|v| v.get(key).cloned())
-                {
-                    found = Some(v);
-                }
-            }
-            found
-        };
-        let workflow_size_guideline = read_setting("workflowSizeGuideline")
-            .as_ref()
-            .and_then(serde_json::Value::as_str)
-            .map_or_else(tool_workflow::WorkflowSizeGuideline::default, |s| {
-                tool_workflow::WorkflowSizeGuideline::from_wire(s)
-            });
+        // Resolve the workflow-size setting through the canonical settings
+        // composition: default → user → project → local → flag → managed.
+        // `workflowSizeGuideline` has no environment mapping, so managed is the
+        // effective highest source. The default is medium.
+        let managed_workflow_layers: Vec<engine::settings::SettingsJson> =
+            crate::settings_watch::managed_settings_raw_tiers()
+                .await
+                .into_iter()
+                .filter_map(|raw| serde_json::from_str(&raw).ok())
+                .collect();
+        let (workflow_size_guideline, managed_workflow) =
+            resolve_workflow_size_guideline(&cfg, &cwd, &managed_workflow_layers);
+        let _ = traits::session_flags::set_workflow_size_guideline(
+            workflow_size_guideline.as_wire(),
+            managed_workflow,
+        );
         // `disableWorkflows` is an ORG policy, so it is read from MANAGED
         // settings only — a project or user file must not be able to turn the
         // tool off on the org's behalf, nor to turn it back on.
@@ -9206,9 +9236,51 @@ pub async fn build(
 mod tests {
     use super::{
         build, desktop_tool_registry, model_deprecation_warning, parse_worktree_slash_action,
-        CoordinatorWiring, DesktopConfig, WorktreeSlashAction, WORKTREE_SLASH_USAGE,
+        resolve_workflow_size_guideline, CoordinatorWiring, DesktopConfig, WorktreeSlashAction,
+        WORKTREE_SLASH_USAGE,
     };
     use std::sync::Arc;
+
+    #[test]
+    fn workflow_size_uses_custom_home_flag_and_managed_precedence() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().join("project");
+        let lingxi_home = tmp.path().join("custom-home");
+        std::fs::create_dir_all(cwd.join(branding::DOT_DIR)).unwrap();
+        std::fs::create_dir_all(&lingxi_home).unwrap();
+        std::fs::write(
+            lingxi_home.join("settings.json"),
+            r#"{"workflowSizeGuideline":"small"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            cwd.join(branding::DOT_DIR).join("settings.local.json"),
+            r#"{"workflowSizeGuideline":"medium"}"#,
+        )
+        .unwrap();
+        let flag: engine::settings::SettingsJson =
+            serde_json::from_str(r#"{"workflowSizeGuideline":"large"}"#).unwrap();
+        let managed: engine::settings::SettingsJson =
+            serde_json::from_str(r#"{"workflowSizeGuideline":"small"}"#).unwrap();
+        let cfg = DesktopConfig {
+            cwd: cwd.clone(),
+            lingxi_home,
+            flag_settings: Some(flag),
+            ..DesktopConfig::default()
+        };
+
+        let (without_managed, is_managed) = resolve_workflow_size_guideline(&cfg, &cwd, &[]);
+        assert_eq!(
+            without_managed,
+            tool_workflow::WorkflowSizeGuideline::Large,
+            "flag > local > user"
+        );
+        assert!(!is_managed);
+
+        let (with_managed, is_managed) = resolve_workflow_size_guideline(&cfg, &cwd, &[managed]);
+        assert_eq!(with_managed, tool_workflow::WorkflowSizeGuideline::Small);
+        assert!(is_managed);
+    }
 
     #[test]
     fn worktree_slash_parser_covers_lifecycle_and_safe_remove() {
@@ -10187,6 +10259,7 @@ mod tests {
             recent_models: Vec::new(),
             fallback_model: None,
             custom_betas: Vec::new(),
+            flag_settings: None,
             provider_profiles: None,
             routing: None,
             mcp_paths: vec![cwd.join(".mcp.json")],

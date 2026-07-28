@@ -10,11 +10,8 @@
 //! followed by the rich per-category / MCP / agent / memory-file / skill
 //! markdown tables.
 //!
-//! `LingXi` delivers the header + token-usage line (the data available via the
-//! additive [`OrchestratorHandle::context_window_usage`] + model from
-//! [`OrchestratorHandle::get_status_snapshot`]). The rich sub-tables require a
-//! new `ContextData`-shaped struct on the frozen `traits/` surface (forbidden
-//! by the additive-default-methods-only rule for this batch) and are deferred.
+//! `LingXi` delivers the header, token-usage line, and the category rows from
+//! the additive [`OrchestratorHandle::context_usage_snapshot`] surface.
 //!
 //! The percentage matches the TS `Math.round((total / max) * 100)`.
 
@@ -42,9 +39,9 @@ impl ContextHandler {
 impl BuiltinCommandHandler for ContextHandler {
     async fn handle(&self, _args: &ParsedSlashCommand) -> CommandResult {
         let snap = self.handle.get_status_snapshot().await;
-        let (used, max) = self.handle.context_window_usage().await;
+        let usage = self.handle.context_usage_snapshot().await;
         CommandResult::Done {
-            display: Some(render_context(&snap.model, used, max)),
+            display: Some(render_context(&snap.model, &usage)),
         }
     }
     fn name(&self) -> &str {
@@ -61,11 +58,41 @@ impl BuiltinCommandHandler for ContextHandler {
 /// sub-tables are deferred). The `**Model:**` line carries the markdown
 /// hard-break (two trailing spaces) exactly as the TS source does.
 #[must_use]
-fn render_context(model: &str, used: u64, max: u64) -> String {
+fn render_context(model: &str, usage: &traits::ContextUsageSnapshot) -> String {
+    let used = usage.live_context_tokens;
+    let max = usage.max_context_tokens;
     let pct = percentage(used, max);
     let used = format_tokens(used);
     let max = format_tokens(max);
-    format!("## Context Usage\n\n**Model:** {model}  \n**Tokens:** {used} / {max} ({pct}%)\n")
+    let mut out =
+        format!("## Context Usage\n\n**Model:** {model}  \n**Tokens:** {used} / {max} ({pct}%)\n");
+    if !usage.breakdown.is_empty() {
+        out.push_str("\n| Category | Tokens | Percentage |\n");
+        out.push_str("|---|---:|---:|\n");
+        for row in &usage.breakdown {
+            let row_pct = percentage(row.tokens, usage.max_context_tokens);
+            out.push_str(&format!(
+                "| {} | {} | {row_pct}% |\n",
+                category_label(row.kind),
+                format_tokens(row.tokens)
+            ));
+        }
+    }
+    out
+}
+
+fn category_label(kind: traits::ContextUsageCategoryKind) -> &'static str {
+    use traits::ContextUsageCategoryKind as Kind;
+    match kind {
+        Kind::SystemPrompt => "System prompt",
+        Kind::SystemTools => "System tools",
+        Kind::McpTools => "MCP tools",
+        Kind::MemoryFiles => "Memory files",
+        Kind::Skills => "Skills",
+        Kind::Messages => "Messages",
+        Kind::AutocompactBuffer => "Autocompact buffer",
+        Kind::FreeSpace => "Free space",
+    }
 }
 
 /// Compact token count, 1:1 with the TS `formatTokens` → `formatNumber`
@@ -132,7 +159,14 @@ mod tests {
 
     #[test]
     fn renders_header_with_locked_layout() {
-        let s = render_context("claude-opus-4-7", 50_000, 200_000);
+        let s = render_context(
+            "claude-opus-4-7",
+            &traits::ContextUsageSnapshot {
+                live_context_tokens: 50_000,
+                max_context_tokens: 200_000,
+                ..Default::default()
+            },
+        );
         // The `**Model:**` line ends with the markdown hard-break (two
         // trailing spaces) exactly as the TS source emits. Build `expected`
         // by concatenation so the trailing spaces are explicit (and survive
@@ -142,6 +176,29 @@ mod tests {
             + "**Model:** claude-opus-4-7  \n"
             + "**Tokens:** 50k / 200k (25%)\n";
         assert_eq!(s, expected);
+    }
+
+    #[test]
+    fn renders_shared_category_breakdown() {
+        use traits::{ContextUsageCategory, ContextUsageCategoryKind as Kind};
+        let s = render_context(
+            "claude-opus-5",
+            &traits::ContextUsageSnapshot {
+                live_context_tokens: 100_000,
+                max_context_tokens: 1_000_000,
+                breakdown: vec![
+                    ContextUsageCategory::new(Kind::SystemPrompt, 25_000),
+                    ContextUsageCategory::new(Kind::Messages, 75_000),
+                    ContextUsageCategory::new(Kind::AutocompactBuffer, 13_000),
+                    ContextUsageCategory::new(Kind::FreeSpace, 887_000),
+                ],
+                ..Default::default()
+            },
+        );
+        assert!(s.contains("**Tokens:** 100k / 1m (10%)"));
+        assert!(s.contains("| System prompt | 25k | 3% |"));
+        assert!(s.contains("| Autocompact buffer | 13k | 1% |"));
+        assert!(s.contains("| Free space | 887k | 89% |"));
     }
 
     #[test]

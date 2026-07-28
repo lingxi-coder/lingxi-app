@@ -433,9 +433,10 @@ pub struct ChatWidget {
     /// [`Self::set_orchestrator`]). Drives the OrchestratorHandle-backed
     /// read/inject/effect commands (`/context`, `/files`, `/usage`, `/effort`,
     /// `/goal`, `/compact`). The read/inject ones route through the existing
-    /// `run_core_command` `block_on` bridge (proven-safe: every method they
-    /// call is a pure in-memory `session.lock()` + clone); `/compact`'s real
-    /// network effect goes off-loop via [`ChatOutcome::Compact`] instead.
+    /// `run_core_command` `block_on` bridge; they do not call the model.
+    /// `/context` may reassemble local prompt/tool metadata for an accurate
+    /// live snapshot, while `/compact`'s real network effect goes off-loop via
+    /// [`ChatOutcome::Compact`] instead.
     /// `None` (every test widget) makes each of those a graceful
     /// "unavailable" system line rather than a panic.
     orchestrator: Option<std::sync::Arc<dyn traits::OrchestratorHandle>>,
@@ -2445,7 +2446,11 @@ impl ChatWidget {
                         CHOICES.join(", ")
                     ));
                 }
+                if traits::session_flags::workflow_size_guideline_is_managed() {
+                    return Err("workflowSizeGuideline is managed by enterprise policy".to_string());
+                }
                 tui_core::theme_persist::save_workflow_size_guideline(value);
+                let _ = traits::session_flags::set_workflow_size_guideline(value, false);
                 Ok(format!("Set workflowSizeGuideline to {value}."))
             }
             // parity 2.1.220 agents-view settings (the `/config` rows
@@ -3374,17 +3379,15 @@ impl ChatWidget {
     }
 
     // ===== OrchestratorHandle-backed commands. The read/inject ones route
-    // through `run_core_command`'s throwaway-`block_on` bridge — PROVEN safe
-    // because every handle method they call is a pure in-memory `session.lock()`
-    // + clone (no network / reactor / timer). Each is a graceful "unavailable"
-    // system line when no handle is wired (`None`, every test widget). =====
+    // through `run_core_command`'s throwaway-`block_on` bridge and never call
+    // the model. Each is a graceful "unavailable" system line when no handle
+    // is wired (`None`, every test widget). =====
 
     /// `/context`: show the current context-window usage (read-only).
     /// `/context`: open the interactive context-usage grid (claude-code 2.1.205
     /// "Visualize current context usage as a colored grid"). Reads the model +
-    /// `(used, max)` context-window totals via the proven-safe throwaway
-    /// `block_on` (in-memory reads) and renders them as a filled/free square
-    /// grid.
+    /// categorized context-window snapshot via the throwaway `block_on` bridge
+    /// and renders it as a colored square grid.
     pub(crate) fn cmd_context(&mut self, _args: &str) -> ChatOutcome {
         let Some(handle) = self.orchestrator.clone() else {
             return self.show_system_text("/context is unavailable (no engine handle wired)", true);
@@ -3396,13 +3399,13 @@ impl ChatWidget {
             Ok(runtime) => runtime,
             Err(err) => return self.show_system_text(&format!("/context failed: {err}"), true),
         };
-        let (model, used, max) = runtime.block_on(async {
+        let (model, usage) = runtime.block_on(async {
             let snap = handle.get_status_snapshot().await;
-            let (used, max) = handle.context_window_usage().await;
-            (snap.model, used, max)
+            let usage = handle.context_usage_snapshot().await;
+            (snap.model, usage)
         });
         self.bottom_pane
-            .show_view(Box::new(ScreenView::context(&model, used, max)));
+            .show_view(Box::new(ScreenView::context(&model, &usage)));
         ChatOutcome::Continue
     }
 
@@ -4994,6 +4997,10 @@ mod tests {
     /// or a value the key's type rejects.
     #[test]
     fn cmd_config_shorthand_sets_and_reports_errors() {
+        let prior_workflow = traits::session_flags::workflow_size_guideline();
+        let prior_workflow_managed = traits::session_flags::workflow_size_guideline_is_managed();
+        let _ = traits::session_flags::set_workflow_size_guideline("medium", false);
+
         // vim=true applies live and confirms.
         let mut w = widget();
         assert!(!w.bottom_pane().vim_enabled());
@@ -5048,6 +5055,30 @@ mod tests {
             "workflowSizeGuideline takes one of: unrestricted, small, medium, large"
         );
         assert!(sys.is_error());
+
+        let _ = traits::session_flags::set_workflow_size_guideline(
+            prior_workflow,
+            prior_workflow_managed,
+        );
+    }
+
+    #[test]
+    fn managed_workflow_size_cannot_be_overridden_by_config_shorthand() {
+        let prior = traits::session_flags::workflow_size_guideline();
+        let prior_managed = traits::session_flags::workflow_size_guideline_is_managed();
+        let _ = traits::session_flags::set_workflow_size_guideline("large", true);
+
+        let mut w = widget();
+        w.cmd_config("workflowSizeGuideline=small");
+        let sys = cell::<crate::history_cell::system::SystemTextCell>(&w, 0);
+        assert_eq!(
+            sys.body(),
+            "workflowSizeGuideline is managed by enterprise policy"
+        );
+        assert!(sys.is_error());
+        assert_eq!(traits::session_flags::workflow_size_guideline(), "large");
+
+        let _ = traits::session_flags::set_workflow_size_guideline(prior, prior_managed);
     }
 
     /// parity 2.1.220: the `/config` shorthand resolves keys against the SAME

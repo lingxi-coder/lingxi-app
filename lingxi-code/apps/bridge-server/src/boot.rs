@@ -383,6 +383,8 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         fallback_model: None,
         // The Electron host currently exposes no custom beta-header flag.
         custom_betas: Vec::new(),
+        // The Electron host does not expose CLI `--settings` / flagSettings.
+        flag_settings: None,
         provider_profiles,
         routing,
         mcp_paths: if trusted {
@@ -1042,6 +1044,7 @@ mod tests {
             recent_models: Vec::new(),
             fallback_model: None,
             custom_betas: Vec::new(),
+            flag_settings: None,
             provider_profiles: None,
             routing: None,
             mcp_paths: vec![cwd.join(".mcp.json")],

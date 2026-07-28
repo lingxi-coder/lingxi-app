@@ -749,6 +749,7 @@ pub(crate) fn resolve_desktop_config(
         },
         fallback_model,
         custom_betas: argv.betas.clone().unwrap_or_default(),
+        flag_settings: parse_flag_settings(argv.settings.as_deref()),
         provider_profiles: load_provider_profiles(incl_user, incl_project),
         routing: load_routing(incl_user, incl_project),
         mcp_paths: vec![project_mcp_path, global_mcp_path],
@@ -966,6 +967,20 @@ fn flag_settings_env(settings: &str) -> std::collections::BTreeMap<String, Strin
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Parse the CLI `--settings` layer once for the desktop engine's canonical
+/// settings composition. Accepts the same inline-object-or-file shape as the
+/// existing flagSettings consumers. Invalid input remains absent here; the CLI
+/// validation/error surface continues to be owned by argument initialization.
+fn parse_flag_settings(settings: Option<&str>) -> Option<engine::settings::SettingsJson> {
+    let raw = settings?.trim();
+    let text = if raw.starts_with('{') {
+        raw.to_string()
+    } else {
+        std::fs::read_to_string(raw).ok()?
+    };
+    serde_json::from_str(&text).ok()
 }
 
 /// Build the full runtime from parsed argv + the chosen output stream.
@@ -1515,5 +1530,24 @@ mod tests {
         assert!(!env.contains_key("COUNT"));
         assert!(!env.contains_key("NO_COLOR"));
         assert!(!env.contains_key("FORCE_COLOR"));
+    }
+
+    #[test]
+    fn parse_flag_settings_accepts_inline_json_and_file_paths() {
+        let inline = parse_flag_settings(Some(r#"{"workflowSizeGuideline":"large"}"#)).unwrap();
+        assert_eq!(inline.workflow_size_guideline.as_deref(), Some("large"));
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("flag-settings.json");
+        std::fs::write(&path, r#"{"workflowSizeGuideline":"small"}"#).unwrap();
+        let from_file = parse_flag_settings(path.to_str()).unwrap();
+        assert_eq!(from_file.workflow_size_guideline.as_deref(), Some("small"));
+    }
+
+    #[test]
+    fn parse_flag_settings_ignores_missing_or_invalid_input() {
+        assert!(parse_flag_settings(None).is_none());
+        assert!(parse_flag_settings(Some("{not-json")).is_none());
+        assert!(parse_flag_settings(Some("/definitely/not/a/settings/file")).is_none());
     }
 }

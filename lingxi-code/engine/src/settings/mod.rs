@@ -182,6 +182,32 @@ impl Settings {
         file_scope: FileLayerScope,
         supplemental: SupplementalLayers<'_>,
     ) -> Result<EffectiveSettings, SettingsError> {
+        let user_path = loader::user_settings_path();
+        Self::load_with_layers_from_user_path(
+            inputs,
+            file_scope,
+            supplemental,
+            user_path.as_deref(),
+        )
+    }
+
+    /// Load the canonical layer stack while explicitly selecting the user
+    /// settings file. Hosts with a custom config directory use this instead of
+    /// relying on process-global `HOME`/config-directory environment state.
+    ///
+    /// Passing `None` omits the user layer even when `file_scope.include_user`
+    /// is true. All other precedence and provenance semantics are identical to
+    /// [`Settings::load_with_layers`].
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Settings::load`].
+    pub fn load_with_layers_from_user_path(
+        inputs: LoadInputs<'_>,
+        file_scope: FileLayerScope,
+        supplemental: SupplementalLayers<'_>,
+        user_settings_path: Option<&std::path::Path>,
+    ) -> Result<EffectiveSettings, SettingsError> {
         let LoadInputs {
             env,
             project_dir,
@@ -200,8 +226,8 @@ impl Settings {
         // invalid settings" and keeps merging the remaining sources, so one bad
         // user file never discards valid project/local/env layers.
         if file_scope.include_user {
-            if let Some(user_path) = loader::user_settings_path() {
-                if let Some(usr) = read_layer_or_skip(&user_path) {
+            if let Some(user_path) = user_settings_path {
+                if let Some(usr) = read_layer_or_skip(user_path) {
                     trace.record_layer(tracer::Source::User, &usr);
                     acc = merger::merge(acc, usr);
                 }
@@ -693,6 +719,46 @@ mod load_tests {
     }
 
     #[test]
+    fn explicit_user_path_supports_custom_config_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path().join("project");
+        let custom_home = tmp.path().join("custom-config");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::create_dir_all(&custom_home).unwrap();
+        let user_path = custom_home.join("settings.json");
+        std::fs::write(&user_path, r#"{"workflowSizeGuideline":"large"}"#).unwrap();
+
+        let eff = Settings::load_with_layers_from_user_path(
+            LoadInputs {
+                env: &BTreeMap::new(),
+                project_dir: &project_dir,
+                defaults: SettingsJson {
+                    workflow_size_guideline: Some("medium".to_string()),
+                    ..Default::default()
+                },
+            },
+            FileLayerScope {
+                include_user: true,
+                include_project: false,
+                include_local: false,
+            },
+            SupplementalLayers::default(),
+            Some(&user_path),
+        )
+        .unwrap();
+
+        assert_eq!(
+            eff.settings.workflow_size_guideline.as_deref(),
+            Some("large")
+        );
+        assert_eq!(
+            eff.effective_for("workflowSizeGuideline")
+                .and_then(|source| source.contributors.last()),
+            Some(&tracer::Source::User)
+        );
+    }
+
+    #[test]
     fn load_with_layers_gives_managed_precedence_without_dropping_project_provider_extensions() {
         use serde_json::json;
         use std::collections::BTreeMap as Map;
@@ -709,23 +775,24 @@ mod load_tests {
 
         std::fs::write(
             user_dir.join("settings.json"),
-            r#"{"model":"user-model","providers":{"userOnly":{"type":"openai"}}}"#,
+            r#"{"model":"user-model","workflowSizeGuideline":"small","providers":{"userOnly":{"type":"openai"}}}"#,
         )
         .unwrap();
         std::fs::write(
             project_subdir.join("settings.json"),
-            r#"{"model":"project-model","providers":{"projectOnly":{"baseUrl":"https://project.example"},"shared":{"baseUrl":"https://project.example"}}}"#,
+            r#"{"model":"project-model","workflowSizeGuideline":"large","providers":{"projectOnly":{"baseUrl":"https://project.example"},"shared":{"baseUrl":"https://project.example"}}}"#,
         )
         .unwrap();
         std::fs::write(
             project_subdir.join("settings.local.json"),
-            r#"{"model":"local-model","providers":{"localOnly":{"apiKeyEnv":"LOCAL_KEY"},"shared":{"apiKeyEnv":"LOCAL_KEY"}}}"#,
+            r#"{"model":"local-model","workflowSizeGuideline":"small","providers":{"localOnly":{"apiKeyEnv":"LOCAL_KEY"},"shared":{"apiKeyEnv":"LOCAL_KEY"}}}"#,
         )
         .unwrap();
         std::env::set_var("HOME", tmp.path().join("home_layers"));
 
         let cli_layer: SettingsJson = serde_json::from_value(json!({
             "model": "cli-model",
+            "workflowSizeGuideline": "large",
             "providers": {
                 "cliOnly": { "type": "openai" },
                 "shared": { "timeout": 30 }
@@ -734,6 +801,7 @@ mod load_tests {
         .unwrap();
         let managed_layer: SettingsJson = serde_json::from_value(json!({
             "model": "managed-model",
+            "workflowSizeGuideline": "medium",
             "providers": {
                 "managedOnly": { "region": "managed" },
                 "shared": { "region": "managed" }
@@ -755,6 +823,16 @@ mod load_tests {
         )
         .unwrap();
         assert_eq!(eff.settings.model.as_deref(), Some("managed-model"));
+        assert_eq!(
+            eff.settings.workflow_size_guideline.as_deref(),
+            Some("medium"),
+            "managed > flag > local > project > user"
+        );
+        assert_eq!(
+            eff.effective_for("workflowSizeGuideline")
+                .and_then(|source| source.contributors.last()),
+            Some(&tracer::Source::Managed)
+        );
 
         let providers = eff.settings.providers.unwrap_or_else(Map::new);
         assert!(providers.contains_key("userOnly"));

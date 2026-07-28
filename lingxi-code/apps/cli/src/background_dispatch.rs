@@ -45,6 +45,8 @@ pub struct ForkLaunchContext {
     pub system_prompt: Option<String>,
     pub options: Option<BackgroundLaunchOptions>,
     pub transcript_path: Option<String>,
+    /// Mid-turn UI boundary restored by the hidden background TUI.
+    pub handoff: Option<traits::BackgroundingSnapshot>,
     /// Foreground-resolved, safety-checked permission mode. When present this
     /// replaces raw CLI/settings authority in the durable launch options.
     pub resolved_permission_mode: Option<permission::PermissionMode>,
@@ -401,6 +403,7 @@ fn dispatch_background_inner<LP: LockProbe, S: DaemonSpawner>(
             .as_ref()
             .map(|_| uuid::Uuid::new_v4().to_string()),
         initial_prompt: argv.prompt.clone(),
+        handoff: None,
         options,
         env: launch_env(),
         terminal,
@@ -516,6 +519,7 @@ pub fn dispatch_resumed_session_with_context(
 
 /// Testable core of [`dispatch_forked_session`] — the lock-liveness probe and
 /// the daemon spawner are injected.
+#[cfg(test)]
 fn dispatch_forked_session_inner<LP: LockProbe, S: DaemonSpawner>(
     config_home: &Path,
     runtime_dir: &Path,
@@ -630,6 +634,7 @@ fn dispatch_resumed_session_inner<LP: LockProbe, S: DaemonSpawner>(
             .as_ref()
             .map(|_| uuid::Uuid::new_v4().to_string()),
         initial_prompt: seed_prompt.clone(),
+        handoff: context.handoff.clone(),
         options,
         env: launch_env(),
         terminal,
@@ -1207,6 +1212,11 @@ mod tests {
                 system_prompt: Some("captured system".to_string()),
                 ..BackgroundLaunchOptions::default()
             }),
+            handoff: Some(traits::BackgroundingSnapshot::Idle {
+                queued_commands: vec!["/compact".to_string()],
+                draft: "保留这段草稿".to_string(),
+                boundary_id: uuid::Uuid::nil(),
+            }),
             ..ForkLaunchContext::default()
         };
 
@@ -1234,6 +1244,12 @@ mod tests {
             spec.options.system_prompt.as_deref(),
             Some("captured system")
         );
+        let handoff = spec
+            .handoff
+            .as_ref()
+            .expect("mid-turn handoff must survive daemon launch persistence");
+        assert_eq!(handoff.queued_commands(), &["/compact"]);
+        assert_eq!(handoff.draft(), "保留这段草稿");
     }
 
     #[test]

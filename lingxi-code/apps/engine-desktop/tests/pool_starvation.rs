@@ -154,6 +154,7 @@ fn parked_teammate_ctx() -> SubagentContext {
             effort: None,
             initial_prompt: None,
             color: None,
+            observer: None,
         },
         prompt_messages: vec![],
         fork_context_messages: None,
@@ -186,6 +187,7 @@ fn parked_teammate_ctx() -> SubagentContext {
         hook_session_id: protocol::SessionId::nil(),
         hook_cwd: std::path::PathBuf::new(),
         depth: 0,
+        observer: None,
         permission_mode_override: None,
     }
 }
@@ -210,6 +212,7 @@ fn agent_tool_request() -> SubagentSpawnRequest {
     SubagentSpawnRequest {
         subagent_type: "general-purpose".into(),
         prompt: "do one thing".into(),
+        observer: None,
         context_paths: vec![],
         // AgentTool spawn-surface parity params (additive optional).
         description: None,
@@ -235,10 +238,10 @@ fn agent_tool_request() -> SubagentSpawnRequest {
         depth: 0,
         parent_model_override: None,
         forked_skill_name: None,
-            forked_skill_attribution: None,
-            forked_skill_effort: None,
-            frozen_command_denies: Vec::new(),
-            resumed_history: None,
+        forked_skill_attribution: None,
+        forked_skill_effort: None,
+        frozen_command_denies: Vec::new(),
+        resumed_history: None,
     }
 }
 

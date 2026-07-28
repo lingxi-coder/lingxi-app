@@ -82,6 +82,9 @@ pub struct ToolUseContext {
     /// overwrites it from [`crate::SubagentInvocationContext::depth`] for a
     /// subagent's own tool calls.
     pub depth: u32,
+    /// Effective observer inherited from a parent subagent. The Agent tool
+    /// copies this to a child only when the child has no direct observer.
+    pub observer: Option<traits::subagent_spawn::ObserverSpec>,
     /// (`/rewind`) Pre-edit file-history backup hook. The `Edit`/`Write`/
     /// `NotebookEdit` tools call `track_edit(path)` through this BEFORE writing,
     /// so `/rewind` can restore the pre-edit content. `None` (tests / no
@@ -126,6 +129,7 @@ impl ToolUseContext {
             cwd: None,
             // Inert seed; model-only context is never handed to a tool.
             depth: 0,
+            observer: None,
             file_history: None,
         }
     }

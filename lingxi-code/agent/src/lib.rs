@@ -24,6 +24,7 @@ pub mod hooks_trust;
 pub mod mcp_servers;
 pub mod model_resolution;
 pub mod multi_dispatch;
+pub mod observer;
 pub mod permission_mode;
 pub mod pool;
 pub mod runner;
@@ -53,6 +54,10 @@ pub use traits::subagent_spawn::{format_agent_line, should_inject_agent_list_in_
 // `tool-agent` and `agent`); re-export under `agent::` for ergonomic access.
 pub use mcp_servers::agent_mcp_specs_to_scoped_configs;
 pub use model_resolution::resolve_agent_model;
+pub use observer::{
+    build_observer_launch, propagation_for_spawn, validate_observer_graph, ObserverLaunchPlan,
+    ObserverPropagation, ObserverValidationError, DEFAULT_OBSERVER_FANOUT_DEPTH,
+};
 pub use tool_resolver::resolve_subagent_tools;
 pub use traits::fork_subagent::{
     build_child_message, build_forked_messages, build_worktree_notice, is_fork_subagent_enabled,

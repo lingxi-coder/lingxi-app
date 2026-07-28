@@ -10,7 +10,6 @@ pub mod anthropic;
 pub mod auth;
 pub mod aws_auth;
 pub mod catalog;
-pub mod unicode_repair;
 #[allow(missing_docs)]
 pub mod client;
 pub mod cloud_provider_env;
@@ -42,6 +41,7 @@ pub mod strict_schema;
 pub mod transport;
 pub mod transport_bridge;
 pub mod types;
+pub mod unicode_repair;
 
 pub use anthropic::normalize_anthropic_usage;
 pub use auth::{ApiKeyAuthenticator, Authenticator, BearerAuthenticator, ChatGptAuthenticator};

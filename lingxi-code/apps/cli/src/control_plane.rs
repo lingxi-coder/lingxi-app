@@ -147,7 +147,9 @@ impl StdioControlPlane {
         map.insert("session_id".into(), json!(session_id));
         let _ = self
             .outbound_tx
-            .send(OutboundMsg::Line(serialize_ndjson_line(&Value::Object(map))));
+            .send(OutboundMsg::Line(serialize_ndjson_line(&Value::Object(
+                map,
+            ))));
     }
 
     /// Wire the orphaned-permission recovery sink (the run loop's mpsc receiver
@@ -655,9 +657,25 @@ impl StdioControlPermissionGate {
                             Some(Value::Array(arr)) => arr.clone(),
                             _ => Vec::new(),
                         };
+                        let decision_classification = payload
+                            .get("decisionClassification")
+                            .and_then(Value::as_str)
+                            .and_then(|value| match value {
+                                "user_temporary" => Some(
+                                    traits::permission_gate::ToolDecisionClassification::UserTemporary,
+                                ),
+                                "user_permanent" => Some(
+                                    traits::permission_gate::ToolDecisionClassification::UserPermanent,
+                                ),
+                                "user_reject" => Some(
+                                    traits::permission_gate::ToolDecisionClassification::UserReject,
+                                ),
+                                _ => None,
+                            });
                         PermissionOutcome::Allow {
                             updated_input,
                             permission_updates,
+                            decision_classification,
                         }
                     }
                     _ => PermissionOutcome::Deny {
@@ -1862,6 +1880,42 @@ mod tests {
             }
             other => panic!("expected Allow with permission_updates, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn allow_carries_host_decision_classification() {
+        let (plane, mut rx) = plane_with_channel();
+        let gate = StdioControlPermissionGate::new(plane.clone());
+        let input = json!({});
+        let check = tokio::spawn(async move {
+            gate.check_with_context("Bash", &input, &PermissionCheckContext::default())
+                .await
+        });
+        let line = outbound_line(rx.recv().await.unwrap());
+        let request_id = serde_json::from_str::<Value>(&line).unwrap()["request_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        plane
+            .resolve_response(&success_response(
+                &request_id,
+                json!({
+                    "behavior": "allow",
+                    "updatedInput": {},
+                    "decisionClassification": "user_permanent"
+                }),
+            ))
+            .await;
+
+        assert!(matches!(
+            check.await.unwrap(),
+            PermissionOutcome::Allow {
+                decision_classification: Some(
+                    traits::permission_gate::ToolDecisionClassification::UserPermanent
+                ),
+                ..
+            }
+        ));
     }
 
     #[tokio::test]

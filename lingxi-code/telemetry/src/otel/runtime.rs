@@ -546,6 +546,31 @@ pub fn emit_named_log_event(name: &'static str, attrs: &Attributes) {
     with_runtime(|runtime| runtime.emit_log_event(name, attrs));
 }
 
+/// Emit one `claude_code.user_prompt` record at the prompt-submit seam.
+///
+/// The record itself is always emitted while telemetry is active. Prompt text
+/// is the literal `<REDACTED>` unless `OTEL_LOG_USER_PROMPTS` opted in; even
+/// then known token shapes are redacted and the configured content cap applies.
+pub fn emit_user_prompt_log(prompt: &str, prompt_id: &str, message_uuid: &str) {
+    with_runtime(|runtime| {
+        let body = if runtime.config.log_include.user_prompts {
+            redact_and_cap("prompt", prompt, runtime.config.content_max_length)
+        } else {
+            "<REDACTED>".to_string()
+        };
+        let attrs = attrs_from_pairs(&[
+            (
+                "prompt_length",
+                AttrValue::from(prompt.encode_utf16().count().to_string()),
+            ),
+            ("prompt", AttrValue::from(body)),
+            ("prompt.id", AttrValue::from(prompt_id.to_string())),
+            ("message.uuid", AttrValue::from(message_uuid.to_string())),
+        ]);
+        runtime.emit_log_event("user_prompt", &attrs);
+    });
+}
+
 /// The code-editing tools whose permission decisions feed the
 /// `claude_code.code_edit_tool.decision` counter (binary `pI_`).
 const CODE_EDIT_TOOLS: [&str; 3] = ["Edit", "Write", "NotebookEdit"];
@@ -581,6 +606,7 @@ pub fn record_tool_permission_decision(
     decision: &str,
     source: &str,
     is_mcp: bool,
+    tool_input: Option<&serde_json::Value>,
 ) {
     with_runtime(|runtime| {
         if CODE_EDIT_TOOLS.contains(&tool_name) {
@@ -600,20 +626,87 @@ pub fn record_tool_permission_decision(
         // a value, so every record carries it. `sdk_host_builtin_mcp` needs
         // `Yro` (`serverType === "sdk" && $Me()`), which no port surface
         // produces, so only builtin/mcp are reachable.
-        runtime.emit_log_event(
-            "tool_decision",
-            &attrs_from_pairs(&[
-                ("decision", AttrValue::from(decision.to_string())),
-                ("source", AttrValue::from(source.to_string())),
-                ("tool_name", AttrValue::from(log_tool_name(tool_name).to_string())),
-                ("tool_use_id", AttrValue::from(tool_use_id.to_string())),
-                (
-                    "tool_source",
-                    AttrValue::from(if is_mcp { "mcp" } else { "builtin" }.to_string()),
-                ),
-            ]),
-        );
+        let mut log_attrs = attrs_from_pairs(&[
+            ("decision", AttrValue::from(decision.to_string())),
+            ("source", AttrValue::from(source.to_string())),
+            (
+                "tool_name",
+                AttrValue::from(log_tool_name(tool_name).to_string()),
+            ),
+            ("tool_use_id", AttrValue::from(tool_use_id.to_string())),
+            (
+                "tool_source",
+                AttrValue::from(if is_mcp { "mcp" } else { "builtin" }.to_string()),
+            ),
+        ]);
+        if runtime.config.log_include.tool_details {
+            if let Some(parameters) = tool_parameters(tool_name, tool_input) {
+                log_attrs.insert(
+                    "tool_parameters".into(),
+                    AttrValue::from(
+                        truncate_content(&parameters, runtime.config.content_max_length).content,
+                    ),
+                );
+            }
+        }
+        runtime.emit_log_event("tool_decision", &log_attrs);
     });
+}
+
+/// Build the bounded tool-detail object used by `tool_decision`/`tool_result`.
+fn tool_parameters(tool_name: &str, input: Option<&serde_json::Value>) -> Option<String> {
+    let input = input?.as_object()?;
+    let mut out = serde_json::Map::new();
+    let copy_string =
+        |out: &mut serde_json::Map<String, serde_json::Value>, out_key: &str, input_key: &str| {
+            if let Some(value) = input.get(input_key).and_then(serde_json::Value::as_str) {
+                out.insert(
+                    out_key.to_string(),
+                    serde_json::Value::String(redact_secret_value(out_key, value)),
+                );
+            }
+        };
+
+    match tool_name {
+        "Bash" | "PowerShell" => {
+            copy_string(&mut out, "bash_command", "command");
+            copy_string(&mut out, "full_command", "command");
+            copy_string(&mut out, "description", "description");
+            if let Some(timeout) = input.get("timeout").and_then(serde_json::Value::as_u64) {
+                out.insert("timeout".into(), serde_json::Value::from(timeout));
+            }
+            if let Some(disabled) = input
+                .get("dangerouslyDisableSandbox")
+                .and_then(serde_json::Value::as_bool)
+            {
+                out.insert(
+                    "dangerouslyDisableSandbox".into(),
+                    serde_json::Value::Bool(disabled),
+                );
+            }
+        }
+        "Skill" => {
+            copy_string(&mut out, "skill_name", "skill");
+        }
+        "Agent" | "Task" => {
+            copy_string(&mut out, "subagent_type", "subagent_type");
+        }
+        _ => {}
+    }
+    if let Some(rest) = tool_name.strip_prefix("mcp__") {
+        if let Some((server, tool)) = rest.split_once("__") {
+            out.insert(
+                "mcp_server_name".into(),
+                serde_json::Value::String(server.to_string()),
+            );
+            out.insert(
+                "mcp_tool_name".into(),
+                serde_json::Value::String(tool.to_string()),
+            );
+        }
+    }
+
+    (!out.is_empty()).then(|| serde_json::Value::Object(out).to_string())
 }
 
 /// claude-code `ua(name)`: the tool name as it appears in a `claude_code.events`
@@ -651,7 +744,11 @@ pub fn record_git_operation_counters(command: &str, exit_code: i32) {
         }
         let hits = git_counter_hits(command);
         if hits.commits > 0 {
-            runtime.record_counter(metrics::COMMIT_COUNT, f64::from(hits.commits), &Attributes::new());
+            runtime.record_counter(
+                metrics::COMMIT_COUNT,
+                f64::from(hits.commits),
+                &Attributes::new(),
+            );
         }
         if hits.pull_requests > 0 {
             runtime.record_counter(
@@ -740,8 +837,14 @@ fn cc_named_log_for_event(
         "tengu_api_success" => {
             let mut attrs = attrs_from_optional_pairs([
                 ("model", stable_string(metadata, "model")),
-                ("input_tokens", int_value(metadata, "inputTokens").map(AttrValue::from)),
-                ("output_tokens", int_value(metadata, "outputTokens").map(AttrValue::from)),
+                (
+                    "input_tokens",
+                    int_value(metadata, "inputTokens").map(AttrValue::from),
+                ),
+                (
+                    "output_tokens",
+                    int_value(metadata, "outputTokens").map(AttrValue::from),
+                ),
                 (
                     "cache_read_tokens",
                     int_value(metadata, "cachedInputTokens").map(AttrValue::from),
@@ -750,8 +853,14 @@ fn cc_named_log_for_event(
                     "cache_creation_tokens",
                     int_value(metadata, "uncachedInputTokens").map(AttrValue::from),
                 ),
-                ("cost_usd", float_value(metadata, "costUSD").map(AttrValue::from)),
-                ("duration_ms", int_value(metadata, "durationMs").map(AttrValue::from)),
+                (
+                    "cost_usd",
+                    float_value(metadata, "costUSD").map(AttrValue::from),
+                ),
+                (
+                    "duration_ms",
+                    int_value(metadata, "durationMs").map(AttrValue::from),
+                ),
                 ("request_id", stable_string(metadata, "requestId")),
                 ("query_source", stable_string(metadata, "querySource")),
             ]);
@@ -776,7 +885,10 @@ fn cc_named_log_for_event(
                 ("model", stable_string(metadata, "model")),
                 ("error", stable_string(metadata, "error_kind")),
                 ("request_id", stable_string(metadata, "request_id")),
-                ("status_code", int_value(metadata, "status_code").map(AttrValue::from)),
+                (
+                    "status_code",
+                    int_value(metadata, "status_code").map(AttrValue::from),
+                ),
             ]);
             if name == "tengu_api_rate_limited" && !attrs.contains_key("error") {
                 attrs.insert("error".into(), AttrValue::from("rate_limited"));
@@ -784,7 +896,9 @@ fn cc_named_log_for_event(
             Some(("api_error", attrs))
         }
         _ => {
-            if !(name.contains("_completed") || name.contains("_failed") || name.contains("_timeout"))
+            if !(name.contains("_completed")
+                || name.contains("_failed")
+                || name.contains("_timeout"))
             {
                 return None;
             }
@@ -800,7 +914,10 @@ fn cc_named_log_for_event(
             ]);
             if let Some(duration_ms) = int_value(metadata, "duration_ms") {
                 // CC stringifies (`duration_ms: String(se)`).
-                attrs.insert("duration_ms".into(), AttrValue::from(duration_ms.to_string()));
+                attrs.insert(
+                    "duration_ms".into(),
+                    AttrValue::from(duration_ms.to_string()),
+                );
             }
             Some(("tool_result", attrs))
         }
@@ -1818,6 +1935,17 @@ mod tests {
         })
     }
 
+    fn local_runtime_with_tool_details() -> OtelConfig {
+        OtelConfig::from_lookup(|key| match key {
+            super::super::config::ENV_ENABLE_TELEMETRY => Some("1".to_string()),
+            "OTEL_METRICS_EXPORTER" => Some("none".to_string()),
+            "OTEL_LOGS_EXPORTER" => Some("none".to_string()),
+            "OTEL_TRACES_EXPORTER" => Some("none".to_string()),
+            "OTEL_LOG_TOOL_DETAILS" => Some("1".to_string()),
+            _ => None,
+        })
+    }
+
     fn install_test_runtime(config: OtelConfig) -> Arc<OtelRuntime> {
         let runtime = Arc::new(OtelRuntime::new(config, "test-entry", false).expect("runtime"));
         *runtime_slot().write().unwrap() = Some(runtime.clone());
@@ -2150,6 +2278,46 @@ mod tests {
     }
 
     #[test]
+    fn user_prompt_record_is_always_present_but_body_is_opt_in() {
+        let _lock = RUNTIME_SLOT_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_runtime();
+
+        let runtime_off = install_test_runtime(local_runtime_with_logs(false));
+        emit_user_prompt_log("hello sk-secret", "prompt-1", "message-1");
+        let off = snapshot(&runtime_off);
+        let record = off
+            .logs
+            .iter()
+            .find(|sample| sample.event_name == "user_prompt")
+            .expect("record emitted with body disabled");
+        assert_eq!(
+            record.attributes.get("prompt"),
+            Some(&AttrValue::from("<REDACTED>"))
+        );
+        assert_eq!(
+            record.attributes.get("prompt.id"),
+            Some(&AttrValue::from("prompt-1"))
+        );
+        clear_runtime();
+
+        let runtime_on = install_test_runtime(local_runtime_with_logs(true));
+        emit_user_prompt_log("hello sk-secret", "prompt-2", "message-2");
+        let on = snapshot(&runtime_on);
+        let record = on
+            .logs
+            .iter()
+            .find(|sample| sample.event_name == "user_prompt")
+            .expect("opt-in record");
+        assert_eq!(
+            record.attributes.get("prompt"),
+            Some(&AttrValue::from("hello [REDACTED]"))
+        );
+        clear_runtime();
+    }
+
+    #[test]
     fn redaction_covers_hyphenated_and_dotted_api_key_names() {
         for key in ["x-api-key", "provider.api.key", "API_KEY"] {
             assert_eq!(
@@ -2303,9 +2471,26 @@ mod tests {
             "accept",
             "config",
             false,
+            None,
         );
-        record_tool_permission_decision("Bash", "toolu_2", None, "reject", "user_reject", false);
-        record_tool_permission_decision("mcp__srv__do", "toolu_3", None, "accept", "config", true);
+        record_tool_permission_decision(
+            "Bash",
+            "toolu_2",
+            None,
+            "reject",
+            "user_reject",
+            false,
+            None,
+        );
+        record_tool_permission_decision(
+            "mcp__srv__do",
+            "toolu_3",
+            None,
+            "accept",
+            "config",
+            true,
+            None,
+        );
 
         let debug = snapshot(&runtime);
         // Counter fires only for the code-edit tools (`pI_`), with language.
@@ -2370,6 +2555,44 @@ mod tests {
     }
 
     #[test]
+    fn tool_permission_parameters_are_opt_in_bounded_and_redacted() {
+        let _lock = RUNTIME_SLOT_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_runtime();
+        let runtime = install_test_runtime(local_runtime_with_tool_details());
+
+        record_tool_permission_decision(
+            "Bash",
+            "toolu_details",
+            None,
+            "accept",
+            "user_temporary",
+            false,
+            Some(&serde_json::json!({
+                "command": "curl -H 'Authorization: Bearer sk-secret' https://example.invalid",
+                "description": "safe summary",
+                "timeout": 10_000
+            })),
+        );
+
+        let debug = snapshot(&runtime);
+        let parameters = debug
+            .logs
+            .iter()
+            .find(|sample| sample.event_name == "tool_decision")
+            .and_then(|sample| sample.attributes.get("tool_parameters"))
+            .expect("tool details opt-in attaches bounded parameters");
+        let AttrValue::Str(parameters) = parameters else {
+            panic!("tool_parameters must be a string");
+        };
+        assert!(parameters.contains("[REDACTED]"));
+        assert!(!parameters.contains("sk-secret"));
+        assert!(parameters.contains("safe summary"));
+        clear_runtime();
+    }
+
+    #[test]
     fn code_edit_decision_counter_keeps_the_raw_tool_name() {
         // `ICs` returns `tool_name: e.name` RAW — only the log record is
         // anonymized, so the counter must not be collapsed to "mcp_tool".
@@ -2379,7 +2602,7 @@ mod tests {
         clear_runtime();
         let runtime = install_test_runtime(local_runtime_config());
 
-        record_tool_permission_decision("Edit", "toolu_1", None, "accept", "config", false);
+        record_tool_permission_decision("Edit", "toolu_1", None, "accept", "config", false, None);
 
         let debug = snapshot(&runtime);
         let decisions: Vec<_> = debug

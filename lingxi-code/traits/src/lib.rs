@@ -23,6 +23,7 @@ pub const CLAUDE_CODE_VERSION: &str = "2.1.220";
 pub mod agent_name_registry;
 pub mod agent_view;
 pub mod auth;
+pub mod backgrounding;
 pub mod bg_session_forker;
 pub mod bridge;
 pub mod budget;
@@ -50,6 +51,7 @@ pub mod permission_gate;
 pub mod platform;
 pub mod process;
 pub mod prompting_gate;
+pub mod repo_root_reload;
 #[cfg_attr(windows, allow(unsafe_code))]
 pub mod rooted_fs;
 pub mod runtime;
@@ -74,6 +76,10 @@ pub mod web_search;
 pub mod worktree;
 
 pub use auth::{AuthError, AuthHandle, LoginInfo};
+pub use backgrounding::{
+    classify_backgrounding, BackgroundingDecision, BackgroundingSnapshot,
+    DEFAULT_BACKGROUND_DEFER_MS,
+};
 pub use bridge::{BridgeConfig, BridgeConnection, BridgeError, BridgeTransport};
 pub use budget::{BudgetEnforcerHandle, BudgetError};
 pub use camera::{CameraControl, CameraError, CameraPosition, CapturePhotoOpts, CapturedImage};
@@ -100,12 +106,12 @@ pub use notification::{NotificationError, NotificationRequest, NotificationServi
 pub use orchestrator::{
     curated_model_names, is_curated_model, parse_model_ref, provider_default_model,
     provider_fallback_order, provider_has_curated_list, ActiveGoalSnapshot, AgentInfo, CheckStatus,
-    CompactionSummary, ContextPressureBanner, ContextPressureLevel, CostSnapshot, DoctorCheck,
-    DoctorReport, DoctorSummary, ForkOutcome, HandleError, HookInfo, McpActionState, McpServerInfo,
-    McpStatus, McpToggleOutcome, MemoryEditorOutcome, ModelListing, ModelUsageRow,
-    OrchestratorHandle, OutputEvent,
-    OutputStream, PlanSnapshot, RateLimitSnapshot, RecapOutcome, ResumeRuntimeSnapshot,
-    RewindRowData, StatusSnapshot, TurnOutcome,
+    CompactionSummary, ContextPressureBanner, ContextPressureLevel, ContextUsageSnapshot,
+    CostSnapshot, DirectoryAddedHookSummary, DoctorCheck, DoctorReport, DoctorSummary, ForkOutcome,
+    HandleError, HookInfo, McpActionState, McpServerInfo, McpStatus, McpToggleOutcome,
+    MemoryEditorOutcome, ModelListing, ModelUsageRow, OrchestratorHandle, OutputEvent,
+    OutputStream, PlanSnapshot, RateLimitSnapshot, RecapOutcome, RegisterRepoRootOutcome,
+    RegisterRepoRootRequest, ResumeRuntimeSnapshot, RewindRowData, StatusSnapshot, TurnOutcome,
 };
 pub use permission_gate::{PermissionDecision, PermissionGate};
 pub use platform::Platform;
@@ -116,6 +122,7 @@ pub use process::{
 pub use prompting_gate::{
     PermissionRequest, PromptDecision, PromptDefault, PromptError, PromptingGate,
 };
+pub use repo_root_reload::{RepoRootReloadOutcome, RepoRootReloadRequest, RepoRootReloader};
 pub use rooted_fs::{AtomicWriteOptions, RootedFileLock};
 pub use runtime::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
 pub use sandbox::{

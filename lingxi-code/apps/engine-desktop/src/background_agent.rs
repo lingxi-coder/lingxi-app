@@ -418,6 +418,7 @@ mod tests {
         SubagentSpawnRequest {
             subagent_type: "general-purpose".into(),
             prompt: "go".into(),
+            observer: None,
             context_paths: vec![],
             description: Some("a bg agent".into()),
             model: None,

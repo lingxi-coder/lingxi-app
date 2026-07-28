@@ -68,6 +68,24 @@ pub trait BgSessionForker: Send + Sync {
         model: &str,
     ) -> Result<String, BgForkError>;
 
+    /// Move a live conversation boundary into a background session.
+    ///
+    /// The default preserves source compatibility for non-CLI hosts, but only
+    /// the production CLI override can durably carry composer/queue state into
+    /// its PTY launch spec.
+    async fn background_conversation(
+        &self,
+        history: &[protocol::ConversationMessage],
+        system_prompt: Option<Arc<str>>,
+        prompt: &str,
+        model: &str,
+        snapshot: &crate::BackgroundingSnapshot,
+    ) -> Result<String, BgForkError> {
+        let _ = snapshot;
+        self.fork_to_background(history, system_prompt, prompt, model)
+            .await
+    }
+
     /// Resume an EXISTING on-disk session as a NEW background session — the
     /// 2.1.212 `/resume`-as-background behavior (G06). Unlike
     /// [`Self::fork_to_background`], this does NOT snapshot a live conversation:

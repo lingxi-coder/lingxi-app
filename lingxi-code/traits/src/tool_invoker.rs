@@ -73,6 +73,10 @@ pub struct SubagentInvocationContext {
     /// subagent tool-resolver can apply the configured spawn-depth cap. `0` for the main
     /// thread / a top-level dispatch (and every legacy/test call site).
     pub depth: u32,
+    /// Observer declaration inherited from the dispatching agent. Recursive
+    /// Agent calls use it only when the selected child has no declaration of
+    /// its own; `observe_subagents:false` and the depth cap stop propagation.
+    pub observer: Option<crate::subagent_spawn::ObserverSpec>,
     /// The DISPATCHING subagent's OWN resolved main-loop model (claude-code
     /// `runAgent.ts:678` seeds each child's `mainLoopModel: resolvedAgentModel`,
     /// so a NESTED `Agent` call inside a subagent resolves its child's model

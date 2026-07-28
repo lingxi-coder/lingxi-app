@@ -316,7 +316,9 @@ pub async fn read_marker_skill_name(session_jsonl: &Path) -> Option<String> {
     if !meta.is_file() || meta.len() > SIDECAR_MAX_BYTES {
         return None;
     }
-    let text = tokio::fs::read_to_string(&paths.provenance_marker).await.ok()?;
+    let text = tokio::fs::read_to_string(&paths.provenance_marker)
+        .await
+        .ok()?;
     let marker = serde_json::from_str::<ForkedSkillMarker>(&text).ok()?;
     // `De.literal(!0)` — a marker whose flag is not exactly `true` fails the
     // schema, and a failed parse yields `undefined`.
@@ -513,7 +515,10 @@ mod tests {
     #[test]
     fn sidecars_sit_beside_the_agents_real_transcript() {
         let t = agent_transcript_path(Path::new("/h/projects/p/sess/subagents"), "abc");
-        assert_eq!(t, PathBuf::from("/h/projects/p/sess/subagents/agent-abc.jsonl"));
+        assert_eq!(
+            t,
+            PathBuf::from("/h/projects/p/sess/subagents/agent-abc.jsonl")
+        );
         assert_eq!(
             forked_skill_paths(&t).scoping,
             PathBuf::from("/h/projects/p/sess/subagents/agent-abc.forked-skill.json")
@@ -568,15 +573,13 @@ mod tests {
         let dir = tempdir().unwrap();
         let jsonl = dir.path().join("s.jsonl");
         write_fork_records(&jsonl, &scoping("s")).await.unwrap();
-        let text =
-            tokio::fs::read_to_string(forked_skill_paths(&jsonl).scoping)
-                .await
-                .unwrap();
+        let text = tokio::fs::read_to_string(forked_skill_paths(&jsonl).scoping)
+            .await
+            .unwrap();
         assert_eq!(text, r#"{"skillName":"s","attributionName":"s"}"#);
-        let marker =
-            tokio::fs::read_to_string(forked_skill_paths(&jsonl).provenance_marker)
-                .await
-                .unwrap();
+        let marker = tokio::fs::read_to_string(forked_skill_paths(&jsonl).provenance_marker)
+            .await
+            .unwrap();
         assert_eq!(marker, r#"{"forkedSkill":true,"skillName":"s"}"#);
     }
 
@@ -607,16 +610,13 @@ mod tests {
         let dir = tempdir().unwrap();
         for (name, body) in [
             ("a", "not json"),
-            ("b", r#"{"skillName":"s"}"#),               // missing attributionName
+            ("b", r#"{"skillName":"s"}"#), // missing attributionName
             ("c", r#"{"skillName":"","attributionName":"s"}"#), // empty name
             (
                 "d",
                 r#"{"skillName":"s","attributionName":"s","effort":"turbo"}"#,
             ), // effort not in the union
-            (
-                "e",
-                r#"{"skillName":"s","attributionName":"s","effort":0}"#,
-            ), // effort below the min
+            ("e", r#"{"skillName":"s","attributionName":"s","effort":0}"#), // effort below the min
         ] {
             let jsonl = dir.path().join(format!("{name}.jsonl"));
             tokio::fs::write(forked_skill_paths(&jsonl).scoping, body)
@@ -686,7 +686,9 @@ mod tests {
         // The bound is UTF-16 code units (zod measures a JS string's
         // `.length`), so an astral character counts as TWO. Counting chars
         // would accept a name the oracle rejects.
-        assert!(is_valid_skill_name(&"\u{1F600}".repeat(SKILL_NAME_MAX_LEN / 2)));
+        assert!(is_valid_skill_name(
+            &"\u{1F600}".repeat(SKILL_NAME_MAX_LEN / 2)
+        ));
         assert!(!is_valid_skill_name(
             &"\u{1F600}".repeat(SKILL_NAME_MAX_LEN / 2 + 1)
         ));
@@ -745,7 +747,10 @@ mod tests {
     fn a_task_record_naming_a_skill_with_no_scoping_refuses_as_missing() {
         for status in [ScopingStatus::Absent, ScopingStatus::AbsentButMarked] {
             let err = check_scoping_provenance("a1", &status, Some("review"), None).unwrap_err();
-            assert_eq!(err.reason, "forked_skill_resume_scoping_missing", "{status:?}");
+            assert_eq!(
+                err.reason, "forked_skill_resume_scoping_missing",
+                "{status:?}"
+            );
             assert_eq!(
                 err.message,
                 "Agent a1 ran as a forked skill but its scoping record is missing; refusing to resume it without the skill's permission scoping."
@@ -757,8 +762,8 @@ mod tests {
     /// scoping is a refusal instead of an unscoped resume.
     #[test]
     fn a_marker_without_scoping_refuses_on_the_cold_path() {
-        let err =
-            check_scoping_provenance("a1", &ScopingStatus::AbsentButMarked, None, None).unwrap_err();
+        let err = check_scoping_provenance("a1", &ScopingStatus::AbsentButMarked, None, None)
+            .unwrap_err();
         assert_eq!(err.reason, "forked_skill_resume_scoping_missing_cold");
         assert_eq!(
             err.message,
@@ -780,8 +785,8 @@ mod tests {
     /// skill, or the record on disk belongs to a different fork.
     #[test]
     fn a_task_record_naming_a_different_skill_refuses_as_mismatch() {
-        let err = check_scoping_provenance("a1", &valid("review"), Some("deploy"), None)
-            .unwrap_err();
+        let err =
+            check_scoping_provenance("a1", &valid("review"), Some("deploy"), None).unwrap_err();
         assert_eq!(err.reason, "forked_skill_resume_scoping_mismatch");
         assert_eq!(
             err.message,

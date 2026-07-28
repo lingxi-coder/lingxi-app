@@ -255,13 +255,30 @@ pub(crate) async fn run_ratatui_with_initial_prompt(
     resumed_messages: Vec<tui::RenderedMessage>,
     initial_prompt: Option<String>,
 ) -> RunOutcome {
+    run_ratatui_with_initial_state(
+        tui_build,
+        registration,
+        resumed_messages,
+        initial_prompt,
+        None,
+    )
+    .await
+}
+
+/// Mount a TUI while restoring a durable foreground→background boundary.
+pub(crate) async fn run_ratatui_with_initial_state(
+    tui_build: crate::init::TuiBuild,
+    registration: Option<Arc<crate::agents_registry::SessionRegistration>>,
+    resumed_messages: Vec<tui::RenderedMessage>,
+    initial_prompt: Option<String>,
+    handoff: Option<traits::BackgroundingSnapshot>,
+) -> RunOutcome {
     let orchestrator: Arc<dyn OrchestratorHandle> = tui_build.runtime.orchestrator.clone();
     // Boot permission mode + bypass-cycle availability for the indicator (Copy,
     // captured before `tui_build` is partly consumed below).
     let initial_permission_mode = tui_build.initial_permission_mode;
     let bypass_available = tui_build.bypass_available;
-    let (bridge_rx, permission_rx, ask_user_question_rx, computer_access_rx) = match &registration
-    {
+    let (bridge_rx, permission_rx, ask_user_question_rx, computer_access_rx) = match &registration {
         Some(reg) => (
             spawn_status_bridge_forwarder(tui_build.bridge_rx, reg.clone()),
             spawn_status_permission_forwarder(tui_build.permission_rx, reg.clone()),
@@ -348,8 +365,7 @@ pub(crate) async fn run_ratatui_with_initial_prompt(
         None
     } else {
         let history_session_id = orchestrator.current_session_id().await.to_string();
-        let history_cwd =
-            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let history_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         Some(std::sync::Arc::new(
             session::prompt_history::PromptHistoryStore::new(
                 &crate::run::lingxi_home_dir(),
@@ -1043,6 +1059,7 @@ pub(crate) async fn run_ratatui_with_initial_prompt(
         tui::app::run_app(
             initial,
             initial_prompt,
+            handoff,
             session,
             bridge_rx,
             permission_rx,
@@ -1757,7 +1774,7 @@ async fn run_permission_action(
                         // change, alongside the roots notification — an
                         // already-trusted directory is a no-op for both. The
                         // source doubles as the hook matcher query.
-                        orch.fire_directory_added(&path, "add_dir").await;
+                        orch.fire_directory_added(&path, "slash_command").await;
                     }
                     // claude-code 2.1.205 success/already echoes, byte-exact:
                     // `Added ${path} as a working directory and saved to local

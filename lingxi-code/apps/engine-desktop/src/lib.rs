@@ -26,13 +26,13 @@
 
 #![forbid(unsafe_code)]
 
-mod agent_skill_loader;
-mod background_agent;
 pub mod agent_restore;
-pub mod fork_resume;
-mod connect;
+mod agent_skill_loader;
 pub mod auto_mode_propose;
+mod background_agent;
+mod connect;
 pub mod file_changed_watch;
+pub mod fork_resume;
 pub mod settings_watch;
 mod skill_loader;
 
@@ -2132,9 +2132,8 @@ pub struct DesktopConfig {
     /// in the mounted bottom-pane view; non-TUI hosts (and hosts without a
     /// computer-control backend) leave it `None`, which keeps
     /// `request_access` on the fail-closed `DenyAllResolver` default.
-    pub computer_access_tx: Option<
-        tokio::sync::mpsc::Sender<tui_core::computer_access_bridge::ComputerAccessExchange>,
-    >,
+    pub computer_access_tx:
+        Option<tokio::sync::mpsc::Sender<tui_core::computer_access_bridge::ComputerAccessExchange>>,
 }
 
 /// `--safe-mode` / `--bare` reduced-mode customization gates (M3, cc 2.1.198).
@@ -3451,6 +3450,21 @@ fn load_merged_show_thinking_summaries(project_dir: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Load `settings.workflowKeywordTriggerEnabled`. The default remains off,
+/// matching Claude Code's optional setting.
+fn load_merged_workflow_keyword_trigger_enabled(project_dir: &std::path::Path) -> bool {
+    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+    let inputs = engine::settings::LoadInputs {
+        env: &env,
+        project_dir,
+        defaults: engine::settings::schema::SettingsJson::default(),
+    };
+    engine::settings::Settings::load(inputs)
+        .ok()
+        .and_then(|eff| eff.settings.workflow_keyword_trigger_enabled)
+        .unwrap_or(false)
+}
+
 /// Load the merged `settings.skipWebFetchPreflight` (project + user + env layers)
 /// for the given project dir. Mirrors [`load_merged_output_style`] (same
 /// `engine::settings::Settings::load` seam). When true, the `WebFetch` tool skips
@@ -3618,6 +3632,8 @@ struct AgentMcpMergeGates {
     /// claude `T3()` — a managed `managed-mcp.json` takes EXCLUSIVE control of
     /// the MCP server set; agent frontmatter servers never merge.
     enterprise_mcp_active: bool,
+    /// Managed `strictPluginOnlyCustomization` lock for the MCP slot.
+    strict_plugin_only_mcp: bool,
 }
 
 /// (M7 cc2.1.220) claude `FWt(existing, agentDef, opts)` @245974724 — merge the
@@ -3664,11 +3680,7 @@ fn merge_agent_frontmatter_mcp_servers(
     {
         return Vec::new();
     }
-    // `Y0("mcp")` strictPluginOnlyCustomization: the composition root never
-    // populates the strict policy today (`StrictPluginOnlyPolicy::empty()`
-    // above), so the lock is always open — pass `false`; the gate itself lives
-    // inside the conversion for 1:1 structure.
-    let scoped = agent::agent_mcp_specs_to_scoped_configs(def, false);
+    let scoped = agent::agent_mcp_specs_to_scoped_configs(def, gates.strict_plugin_only_mcp);
     let mut blocked = Vec::new();
     for cfg in scoped {
         // `Yee` — enterprise allow/deny per server (sdk short-circuit inside).
@@ -3699,12 +3711,19 @@ fn merge_agent_frontmatter_mcp_servers(
 async fn load_enabled_plugins(
     lingxi_home: &std::path::Path,
     cwd: &std::path::Path,
+    additional_project_roots: &[std::path::PathBuf],
 ) -> std::collections::BTreeMap<String, bool> {
     let mut merged: std::collections::BTreeMap<String, bool> = std::collections::BTreeMap::new();
     let user = lingxi_home.join("settings.json");
     let project = cwd.join(branding::DOT_DIR).join("settings.json");
     // User first, project second → project overrides on identical keys.
-    for path in [user, project] {
+    let mut paths = vec![user, project];
+    paths.extend(
+        additional_project_roots
+            .iter()
+            .map(|root| root.join(branding::DOT_DIR).join("settings.json")),
+    );
+    for path in paths {
         let Ok(raw) = tokio::fs::read_to_string(&path).await else {
             continue;
         };
@@ -3793,13 +3812,14 @@ async fn discover_plugin_set(
     cwd: &std::path::Path,
     plugins_dir: &std::path::Path,
     cli_plugin_dirs: &[std::path::PathBuf],
+    additional_project_roots: &[std::path::PathBuf],
 ) -> Vec<(
     protocol::PluginId,
     plugin::PluginManifest,
     std::path::PathBuf,
 )> {
     let mut discovered = if ambient {
-        let enabled = load_enabled_plugins(lingxi_home, cwd).await;
+        let enabled = load_enabled_plugins(lingxi_home, cwd, additional_project_roots).await;
         let mut d = plugin::discover_enabled_plugins(plugins_dir, &enabled).await;
         // Fallback: no allowlist match ⇒ flat-walk for direct plugin dirs.
         if d.is_empty() {
@@ -3836,6 +3856,112 @@ pub struct PluginRefreshCounts {
     pub errors: usize,
 }
 
+/// Composition-root implementation of the orchestrator's runtime root-refresh
+/// seam. It owns the live command registry and a late-bound plugin runtime
+/// because plugins are materialised after the orchestrator is constructed.
+struct DesktopRepoRootReloader {
+    registry: Arc<RwLock<CommandRegistry>>,
+    cwd: std::path::PathBuf,
+    lingxi_home: std::path::PathBuf,
+    managed_dir: Option<std::path::PathBuf>,
+    home: std::path::PathBuf,
+    safe_mode: bool,
+    registered_roots: Arc<RwLock<Vec<std::path::PathBuf>>>,
+    plugin_runtime: Arc<RwLock<Option<Arc<PluginRuntime>>>>,
+}
+
+impl DesktopRepoRootReloader {
+    fn new(
+        registry: Arc<RwLock<CommandRegistry>>,
+        cwd: std::path::PathBuf,
+        lingxi_home: std::path::PathBuf,
+        safe_mode: bool,
+    ) -> Self {
+        Self {
+            registry,
+            cwd,
+            lingxi_home,
+            managed_dir: Some(crate::settings_watch::managed_settings_dir()),
+            home: dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(".")),
+            safe_mode,
+            registered_roots: Arc::new(RwLock::new(Vec::new())),
+            plugin_runtime: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    fn registered_roots(&self) -> Arc<RwLock<Vec<std::path::PathBuf>>> {
+        self.registered_roots.clone()
+    }
+
+    async fn set_plugin_runtime(&self, runtime: Option<Arc<PluginRuntime>>) {
+        *self.plugin_runtime.write().await = runtime;
+    }
+}
+
+#[async_trait::async_trait]
+impl traits::RepoRootReloader for DesktopRepoRootReloader {
+    async fn reload(
+        &self,
+        request: traits::RepoRootReloadRequest,
+    ) -> traits::RepoRootReloadOutcome {
+        {
+            let mut roots = self.registered_roots.write().await;
+            if !roots.contains(&request.root) {
+                roots.push(request.root.clone());
+            }
+        }
+
+        let mut outcome = traits::RepoRootReloadOutcome::default();
+        if request.reload_skills {
+            let roots = self.registered_roots.read().await.clone();
+            let additional_skill_dirs = roots
+                .iter()
+                .map(|root| root.join(branding::DOT_DIR).join("skills"))
+                .collect();
+            let handler = command_core::ReloadSkillsHandler::with_all_roots(
+                self.registry.clone(),
+                self.cwd.clone(),
+                self.lingxi_home.clone(),
+                self.managed_dir.clone(),
+                self.home.clone(),
+                additional_skill_dirs,
+                self.safe_mode,
+            );
+            match parse_slash_command("/reload-skills") {
+                Some(parsed) => match handler.handle(&parsed).await {
+                    CommandResult::Done { .. } => outcome.skills_reloaded = true,
+                    _ => outcome
+                        .errors
+                        .push("skill catalog returned a non-terminal reload result".to_string()),
+                },
+                None => outcome
+                    .errors
+                    .push("internal /reload-skills command parse failed".to_string()),
+            }
+        }
+
+        if request.reload_plugins {
+            let runtime = self.plugin_runtime.read().await.clone();
+            match runtime {
+                Some(runtime) => {
+                    let counts = runtime.refresh().await;
+                    outcome.plugins_reloaded = true;
+                    if counts.errors > 0 {
+                        outcome.errors.push(format!(
+                            "plugin catalog reloaded with {} component error(s)",
+                            counts.errors
+                        ));
+                    }
+                }
+                None => outcome
+                    .errors
+                    .push("plugin catalog is disabled in this runtime".to_string()),
+            }
+        }
+        outcome
+    }
+}
+
 /// (`/reload-plugins`) The live plugin subsystem, retained past startup so the
 /// interactive `/reload-plugins` command can apply pending enable/disable
 /// changes to the RUNNING session without a restart — claude-code's
@@ -3852,6 +3978,7 @@ pub struct PluginRuntime {
     home: std::path::PathBuf,
     cwd: std::path::PathBuf,
     cli_plugin_dirs: Vec<std::path::PathBuf>,
+    additional_project_roots: Arc<RwLock<Vec<std::path::PathBuf>>>,
     ambient: bool,
     inline: bool,
 }
@@ -3869,6 +3996,7 @@ impl PluginRuntime {
             .replace_blocked_marketplaces(load_blocked_marketplaces().await)
             .await;
         // (1) The fresh target set from disk + settings.
+        let additional_project_roots = self.additional_project_roots.read().await.clone();
         let target = discover_plugin_set(
             self.ambient,
             self.inline,
@@ -3876,6 +4004,7 @@ impl PluginRuntime {
             &self.cwd,
             &self.plugins_dir,
             &self.cli_plugin_dirs,
+            &additional_project_roots,
         )
         .await;
 
@@ -4324,7 +4453,8 @@ pub struct LlmStack {
     /// See [`build`] for the resolution rules behind `default_model_fallback`.
     pub default_model_fallback: Option<DefaultModelFallbackNotice>,
     /// See [`build`] for the resolution rules behind `session_model_restriction`.
-    pub session_model_restriction: Option<(llm_client::model::allowlist::ModelEnforcement, Vec<String>)>,
+    pub session_model_restriction:
+        Option<(llm_client::model::allowlist::ModelEnforcement, Vec<String>)>,
     /// See [`build`] for the resolution rules behind `model_setting_for_spawns`.
     pub model_setting_for_spawns: String,
     /// See [`build`] for the resolution rules behind `session_provider_first_party`.
@@ -4436,35 +4566,34 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
             // below-OAuth sources (settings key / helper / Bedrock) cannot
             // change the outcome once `has_stored_oauth` is true, so their
             // slots stay conservative.
-            let auth_source =
-                llm_client::oauth::anthropic::resolver::resolve(
-                    &llm_client::oauth::anthropic::resolver::ResolverContext {
-                        // The ONLY thing that demotes an env key below the
-                        // stored session is `KWr()` (@228931361), read HERE —
-                        // the credential-resolution point, exactly where
-                        // `zb()` (@228933355) evaluates it — so EVERY
-                        // entrypoint agrees, including the ones that never
-                        // pass through the CLI's `build_runtime_from_config`
-                        // (`mcp serve`, `auto-mode-setup`, bridge-server).
-                        managed_oauth_only: cfg.managed_oauth_only
-                            || llm_client::oauth::anthropic::resolver::host_managed_oauth_only(),
-                        env_auth_token: std::env::var("ANTHROPIC_AUTH_TOKEN")
-                            .ok()
-                            .filter(|v| !v.is_empty()),
-                        env_api_key: (!stored_anthropic_api_key)
-                            .then(|| resolved_anthropic_api_key.clone())
-                            .flatten(),
-                        fd_present: cfg.anthropic_key_fd_present,
-                        has_stored_oauth: true,
-                        has_stored_api_key: stored_anthropic_api_key,
-                        settings_api_key: None,
-                        api_key_helper_script: cfg
-                            .api_key_helper
-                            .as_ref()
-                            .map(std::path::PathBuf::from),
-                        aws_present: false,
-                    },
-                );
+            let auth_source = llm_client::oauth::anthropic::resolver::resolve(
+                &llm_client::oauth::anthropic::resolver::ResolverContext {
+                    // The ONLY thing that demotes an env key below the
+                    // stored session is `KWr()` (@228931361), read HERE —
+                    // the credential-resolution point, exactly where
+                    // `zb()` (@228933355) evaluates it — so EVERY
+                    // entrypoint agrees, including the ones that never
+                    // pass through the CLI's `build_runtime_from_config`
+                    // (`mcp serve`, `auto-mode-setup`, bridge-server).
+                    managed_oauth_only: cfg.managed_oauth_only
+                        || llm_client::oauth::anthropic::resolver::host_managed_oauth_only(),
+                    env_auth_token: std::env::var("ANTHROPIC_AUTH_TOKEN")
+                        .ok()
+                        .filter(|v| !v.is_empty()),
+                    env_api_key: (!stored_anthropic_api_key)
+                        .then(|| resolved_anthropic_api_key.clone())
+                        .flatten(),
+                    fd_present: cfg.anthropic_key_fd_present,
+                    has_stored_oauth: true,
+                    has_stored_api_key: stored_anthropic_api_key,
+                    settings_api_key: None,
+                    api_key_helper_script: cfg
+                        .api_key_helper
+                        .as_ref()
+                        .map(std::path::PathBuf::from),
+                    aws_present: false,
+                },
+            );
             // (M13) The stored credential carries the tier persisted at login
             // (claude-code keeps `subscriptionType`/`rateLimitTier` inside
             // `claudeAiOauth`), so enterprise/tier-gated behaviour is correct
@@ -4806,7 +4935,6 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
         has_api_key,
         has_oauth,
         has_openai_chatgpt,
-    
         // Isolated boots ignore ambient provider env vars too — see the
         // `isolated_credential_storage` doc: the flag means "this boot inherits
         // no machine credentials", and env is the other half of that.
@@ -5444,6 +5572,8 @@ pub async fn build(
     // via `with_initial_effort`). `None` (no `--effort`) omits the field, keeping
     // transcripts byte-identical.
     orch_cfg.effort.clone_from(&cfg.initial_effort);
+    orch_cfg.workflow_keyword_trigger_enabled =
+        load_merged_workflow_keyword_trigger_enabled(&cfg.cwd);
     // CLI `--max-turns` / `--max-budget` caps. Unset leaves the OrchestratorConfig
     // defaults (unbounded turns / no cost cap). USD → nano-USD for the cost cap.
     if let Some(max_turns) = cfg.max_turns {
@@ -5633,7 +5763,7 @@ pub async fn build(
         // Without it `agent_transcript_path` pointed at nothing, and a
         // background agent's conversation existed only in memory.
         .with_transcript_fs(
-            Arc::new(PosixFileSystem::new(cwd.clone())) as Arc<dyn traits::FileSystem>,
+            Arc::new(PosixFileSystem::new(cwd.clone())) as Arc<dyn traits::FileSystem>
         )
         // 2.1.186: append the subagent `<env>` block (`tIm`) after the `Notes:`
         // trailer on every NON-fork spawn. The renderer probes the boot-stable
@@ -5764,6 +5894,12 @@ pub async fn build(
     // project `.mcp.json` (mcp_paths[0]), user + local both inside the global
     // config `~/.lingxi.json` (mcp_paths[1]); local is keyed by the canonical
     // project key for `cwd`.
+    let managed_settings_for_strict = crate::settings_watch::managed_settings_raw_tiers().await;
+    let strict_plugin_policy = Arc::new(plugin::StrictPluginOnlyPolicy::from_settings_tiers(
+        managed_settings_for_strict.iter().map(String::as_str),
+    ));
+    let strict_plugin_only_mcp =
+        strict_plugin_policy.is_locked(plugin::PluginComponent::McpServers);
     let mut mcp_configs = mcp::load_mcp_servers(&project_mcp_path, &global_mcp_path, &cwd);
     // CLI `--mcp-config` servers: highest precedence — override a discovered
     // server of the same name, else append. (With `--strict-mcp-config` the host
@@ -5791,6 +5927,17 @@ pub async fn build(
     // (no server removed) when no managed config/policy is present, so a default
     // deployment is byte-identical.
     mcp::enterprise_policy::apply_enterprise_mcp_policy(&mut mcp_configs);
+    if strict_plugin_only_mcp {
+        // The strict slot accepts plugin and policy-controlled sources only.
+        // Plugin servers materialize later through PluginManager; preserve
+        // managed/enterprise candidates and reject ambient/manual scopes here.
+        mcp_configs.retain(|cfg| {
+            matches!(
+                cfg.scope,
+                mcp::ConfigScope::Enterprise | mcp::ConfigScope::Managed
+            )
+        });
+    }
     // MCP config-load diagnostics (claude-code `F7t`): surface per-entry config
     // problems (unknown type, url-without-type, invalid entry, reserved name,
     // missing env vars, `servers`-vs-`mcpServers`) to stderr at startup, the way
@@ -5904,6 +6051,7 @@ pub async fn build(
             safe_mode: cfg.customization_gates.safe_mode,
             strict_mcp_config: cfg.strict_mcp_config,
             enterprise_mcp_active: mcp::enterprise_policy::enterprise_mcp_active(),
+            strict_plugin_only_mcp,
         },
         &mcp::enterprise_policy::read_managed_mcp_policy(),
     );
@@ -5922,6 +6070,13 @@ pub async fn build(
             agent_mcp_blocked.join(", ")
         );
     }
+    // Apply the immutable project policy snapshot once more after the agent
+    // merge. The earlier pass protects discovered/CLI candidates; this final
+    // pass is the security boundary that prevents a same-named agent
+    // frontmatter server from resurrecting an entry in `disabledMcpServers`.
+    // Project approval remains scope-aware, so agent servers are not
+    // incorrectly treated as `.mcp.json` candidates.
+    mcp::apply_project_server_gate(&mut mcp_configs, &global_mcp_path, &cwd);
     let agent_catalog = Arc::new(tokio::sync::RwLock::new(agents));
 
     // Build one concrete `PosixMcpTransport` and hand it to the registry as
@@ -6157,36 +6312,34 @@ pub async fn build(
         // enforces the escalation at authorize time, so this ordering only keeps
         // the strip stash faithful — but it costs nothing and removes the
         // stale-flag foot-gun.)
-        let mut policy = permission::PermissionPolicy::from_rules(
-            permission::PermissionMode::Default,
-            rules,
-        )
-            .with_roots(roots)
-            .with_working_dirs(additional_working_dirs)
-            .with_sandbox_runtime(sandbox_auto_allow)
-            .with_managed_permission_rules_only(allow_managed_permission_rules_only)
-            // `autoMode.classifyAllShell` escalation (`QOi()`): any tier enabling
-            // it suspends every Bash/PowerShell allow rule in auto mode.
-            .with_classify_all_shell(classify_all_shell)
-            // TS `isBypassPermissionsModeAvailable` (2.1.211 permissionSetup):
-            // `S = (n === "bypassPermissions" || o) && !g && !_` — available when
-            // the session RESOLVED to bypass mode OR the explicit
-            // `--allow-dangerously-skip-permissions` flag was passed, unless the
-            // settings killswitch (`disableBypassPermissionsMode: "disable"`)
-            // vetoes it. (`g`, the Statsig remote killswitch, is a documented
-            // omission here like the other remote gates.)
-            .with_bypass_available(
-                (mode == permission::PermissionMode::BypassPermissions
-                    || cfg.allow_dangerously_skip_permissions)
-                    && !bypass_disabled,
-            )
-            // Enable PowerShell path-containment via a real `pwsh` parse
-            // (claude-code `validatePowerShellCommandPaths`). Inert on hosts
-            // without PowerShell — `SystemPwshParser` returns passthrough when
-            // `pwsh`/`powershell` is not on PATH, exactly like claude-code.
-            .with_pwsh_parser(std::sync::Arc::new(
-                permission::powershell_parse::SystemPwshParser,
-            ));
+        let mut policy =
+            permission::PermissionPolicy::from_rules(permission::PermissionMode::Default, rules)
+                .with_roots(roots)
+                .with_working_dirs(additional_working_dirs)
+                .with_sandbox_runtime(sandbox_auto_allow)
+                .with_managed_permission_rules_only(allow_managed_permission_rules_only)
+                // `autoMode.classifyAllShell` escalation (`QOi()`): any tier enabling
+                // it suspends every Bash/PowerShell allow rule in auto mode.
+                .with_classify_all_shell(classify_all_shell)
+                // TS `isBypassPermissionsModeAvailable` (2.1.211 permissionSetup):
+                // `S = (n === "bypassPermissions" || o) && !g && !_` — available when
+                // the session RESOLVED to bypass mode OR the explicit
+                // `--allow-dangerously-skip-permissions` flag was passed, unless the
+                // settings killswitch (`disableBypassPermissionsMode: "disable"`)
+                // vetoes it. (`g`, the Statsig remote killswitch, is a documented
+                // omission here like the other remote gates.)
+                .with_bypass_available(
+                    (mode == permission::PermissionMode::BypassPermissions
+                        || cfg.allow_dangerously_skip_permissions)
+                        && !bypass_disabled,
+                )
+                // Enable PowerShell path-containment via a real `pwsh` parse
+                // (claude-code `validatePowerShellCommandPaths`). Inert on hosts
+                // without PowerShell — `SystemPwshParser` returns passthrough when
+                // `pwsh`/`powershell` is not on PATH, exactly like claude-code.
+                .with_pwsh_parser(std::sync::Arc::new(
+                    permission::powershell_parse::SystemPwshParser,
+                ));
         policy.bypass_killswitch_active = bypass_disabled;
         // Auto-mode killswitch (`Bpa()`): the live `set_permission_mode` gate
         // refuses `auto` when any tier set `disableAutoMode: "disable"`.
@@ -6802,8 +6955,9 @@ pub async fn build(
             // Refuse to resume a forked skill whose permission scoping cannot
             // be re-established — resuming one unscoped would run it under the
             // parent's (strictly wider) permissions.
-            .with_fork_resume_gate(fork_resume_gate.clone()
-                as Arc<dyn traits::fork_resume_gate::ForkResumeGate>)
+            .with_fork_resume_gate(
+                fork_resume_gate.clone() as Arc<dyn traits::fork_resume_gate::ForkResumeGate>
+            )
             // Record each parked agent so a LATER process can rebuild it; the
             // record is erased the moment it terminates.
             .with_parked_agent_store(Arc::new(agent_restore::DesktopParkedAgentStore {
@@ -7432,6 +7586,12 @@ pub async fn build(
     // `build()` returns, so the loader never reads the empty registry.
     let shared_command_registry: Arc<RwLock<CommandRegistry>> =
         Arc::new(RwLock::new(CommandRegistry::new()));
+    let repo_root_reloader = Arc::new(DesktopRepoRootReloader::new(
+        shared_command_registry.clone(),
+        cfg.cwd.clone(),
+        cfg.lingxi_home.clone(),
+        cfg.customization_gates.safe_mode,
+    ));
     // Bind the forked-skill resume gate's skill resolver to the SAME `Arc` that
     // is filled with the real registry at (6). Binding the slot (not its
     // contents) is what makes the deferral safe: the gate reads through it at
@@ -7610,8 +7770,14 @@ pub async fn build(
         )
         .ok()
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-        .and_then(|v| v.get("disableWorkflows").and_then(serde_json::Value::as_bool))
+        .and_then(|v| {
+            v.get("disableWorkflows")
+                .and_then(serde_json::Value::as_bool)
+        })
         .unwrap_or(false);
+        traits::session_flags::set_dynamic_workflows_enabled(
+            tool_workflow::workflows_enabled(managed_disable_workflows),
+        );
         tools_inner.register_builtin(Arc::new(
             tool_workflow::WorkflowTool::new(Some(workflow_launcher))
                 .with_size_guideline(workflow_size_guideline)
@@ -7669,9 +7835,6 @@ pub async fn build(
     tools_inner.refresh_tool_search_view();
 
     let tools = Arc::new(tools_inner);
-    // Distinct alias: inside the `--agent` apply block below, `tools` is
-    // shadowed by the agent's destructured `AgentToolPolicy`.
-    let tool_registry_for_agent_mcp = tools.clone();
 
     // MCP servers can mutate their tool/prompt/resource catalogs while the
     // session is running. Refresh the registry snapshot on every generation-
@@ -7979,6 +8142,7 @@ pub async fn build(
         .with_mcp_registry(mcp_registry.clone())
         .with_hook_registry(hook_registry)
         .with_agent_catalog(agent_catalog)
+        .with_repo_root_reloader(repo_root_reloader.clone())
         .with_output_style_registry(plugin_output_style_registry.clone())
         .with_compaction(compactor)
         .with_cache_safe_slot(cache_safe_slot)
@@ -8227,12 +8391,12 @@ pub async fn build(
             .read()
             .ok()
             .and_then(|g| g.as_ref().and_then(|s| s.subscription_type.clone()));
-        let transcript_dir = cfg
-            .lingxi_home
-            .join("projects")
-            .join(session::jsonl::path::project_dir_name(
-                &cfg.cwd.to_string_lossy(),
-            ));
+        let transcript_dir =
+            cfg.lingxi_home
+                .join("projects")
+                .join(session::jsonl::path::project_dir_name(
+                    &cfg.cwd.to_string_lossy(),
+                ));
         let propose = std::sync::Arc::new(auto_mode_propose::DesktopProposeRunner::new(
             api_service.clone(),
             default_model_id.clone(),
@@ -8266,9 +8430,9 @@ pub async fn build(
     // without it they existed on the wire and nowhere the user or model could
     // reach. Merged LAST so a same-named local command wins — a remote server
     // must not shadow one of the user's own.
-    for cmd in command_api::mcp_prompts::mcp_prompt_commands(
-        &mcp_registry.connected_prompts().await,
-    ) {
+    for cmd in
+        command_api::mcp_prompts::mcp_prompt_commands(&mcp_registry.connected_prompts().await)
+    {
         if reg.resolve(&cmd.name).is_none() {
             reg.register_command(cmd);
         }
@@ -8337,6 +8501,7 @@ pub async fn build(
             &cwd_for_plugins,
             &plugins_dir,
             &cfg.cli_plugin_dirs,
+            &[],
         )
         .await;
         // Build the manager UNCONDITIONALLY (even when zero plugins resolve on
@@ -8368,7 +8533,7 @@ pub async fn build(
                 Arc::new(PosixRuntime::new()),
                 credentials.clone(),
                 Arc::new(plugin::PluginBlocklist::new(String::new())),
-                Arc::new(plugin::StrictPluginOnlyPolicy::empty()),
+                strict_plugin_policy.clone(),
                 shared_command_registry.clone(),
                 Arc::new(RwLock::new(SkillRegistry::new())),
                 plugin_hook_registry.clone(),
@@ -8404,10 +8569,14 @@ pub async fn build(
             home: cfg.lingxi_home.clone(),
             cwd: cwd_for_plugins.clone(),
             cli_plugin_dirs: cfg.cli_plugin_dirs.clone(),
+            additional_project_roots: repo_root_reloader.registered_roots(),
             ambient: ambient_plugins,
             inline: inline_plugins,
         }));
     }
+    repo_root_reloader
+        .set_plugin_runtime(plugin_runtime.clone())
+        .await;
 
     // (M4 cc2.1.198) `--agent <agent>` — resolve the session agent against the
     // FINAL catalog (dir + `--agents` flag + plugin agents), the binary's `dts`
@@ -8608,7 +8777,6 @@ pub async fn build(
                     orch.replace_main_thread_agent_hooks(&[]).await;
                 }
             }
-
         }
     }
 
@@ -8628,8 +8796,25 @@ pub async fn build(
         *shared_command_registry.write().await = CommandRegistry::new();
     }
     let expansion_ctx_orch = orch.clone();
+    let background_command_orch = orch.clone();
     let dispatcher = RegistrySlashDispatcher::new(shared_command_registry.clone())
         .with_skill_usage_home(cfg.lingxi_home.clone())
+        .with_background_prompt_launcher(Arc::new(move |prompt| {
+            let orch = background_command_orch.clone();
+            Box::pin(async move {
+                orch.fork_conversation(&prompt)
+                    .await
+                    .map(|outcome| {
+                        let tail = &outcome.agent_id
+                            [outcome.agent_id.len().saturating_sub(4)..];
+                        format!(
+                            "\u{2442} started code-review in background as {} ({tail})",
+                            outcome.name
+                        )
+                    })
+                    .map_err(|error| error.to_string())
+            })
+        }))
         .with_expansion_hooks(
             expansion_hook_executor,
             std::sync::Arc::new(move || {
@@ -9497,6 +9682,7 @@ mod tests {
             safe_mode: false,
             strict_mcp_config: false,
             enterprise_mcp_active: false,
+            strict_plugin_only_mcp: false,
         };
         let no_policy = mcp::enterprise_policy::McpPolicy::default();
 
@@ -9596,6 +9782,21 @@ mod tests {
         );
         assert!(configs.is_empty());
 
+        // Managed strict-plugin-only MCP lock blocks project/user/flag agent
+        // frontmatter while preserving the agent definition itself.
+        let mut configs = vec![];
+        super::merge_agent_frontmatter_mcp_servers(
+            &mut configs,
+            NO_DYNAMIC,
+            Some(&def),
+            super::AgentMcpMergeGates {
+                strict_plugin_only_mcp: true,
+                ..open_gates
+            },
+            &no_policy,
+        );
+        assert!(configs.is_empty());
+
         // strictMcpConfig: skipped UNLESS the agent came from `--agents`
         // (`t.source !== "flagSettings"`).
         let strict = super::AgentMcpMergeGates {
@@ -9640,10 +9841,7 @@ mod tests {
         // warning), an allowed sibling still merges.
         let mut two = agent_with_server("docs", agent::AgentSource::Project);
         let mut denied = serde_json::Map::new();
-        denied.insert(
-            "denied".to_string(),
-            serde_json::json!({"command": "evil"}),
-        );
+        denied.insert("denied".to_string(), serde_json::json!({"command": "evil"}));
         two.mcp_servers
             .push(agent::AgentMcpServerSpec::Record(denied));
         let deny_policy = mcp::enterprise_policy::McpPolicy {
@@ -13656,6 +13854,7 @@ mod tests {
             home: home.clone(),
             cwd: cwd.clone(),
             cli_plugin_dirs: Vec::new(),
+            additional_project_roots: Arc::new(RwLock::new(Vec::new())),
             ambient: true,
             inline: false,
         };
@@ -13740,23 +13939,25 @@ mod tests {
             Arc::new(PosixClock::new()),
             Arc::new(PosixHttp::new()),
         ));
-        let manager = Arc::new(PluginManager::new(
-            plugins_dir.to_path_buf(),
-            Arc::new(PosixFileSystem::new(cwd.to_path_buf())),
-            Arc::new(PosixHttp::new()),
-            Arc::new(PosixRuntime::new()),
-            credentials,
-            Arc::new(PluginBlocklist::new(String::new())),
-            Arc::new(StrictPluginOnlyPolicy::empty()),
-            command_registry.clone(),
-            Arc::new(RwLock::new(SkillRegistry::new())),
-            Arc::new(RwLock::new(HookRegistry::new())),
-            Arc::new(RwLock::new(OutputStyleRegistry::new())),
-            Arc::new(McpRegistry::new(Arc::new(PosixMcpTransport::new()))),
-            Arc::new(LspRegistry::new(Arc::new(PosixLspTransport::new()))),
-            Arc::new(RwLock::new(ToolRegistry::new())),
-        )
-        .with_agent_catalog(agent_catalog));
+        let manager = Arc::new(
+            PluginManager::new(
+                plugins_dir.to_path_buf(),
+                Arc::new(PosixFileSystem::new(cwd.to_path_buf())),
+                Arc::new(PosixHttp::new()),
+                Arc::new(PosixRuntime::new()),
+                credentials,
+                Arc::new(PluginBlocklist::new(String::new())),
+                Arc::new(StrictPluginOnlyPolicy::empty()),
+                command_registry.clone(),
+                Arc::new(RwLock::new(SkillRegistry::new())),
+                Arc::new(RwLock::new(HookRegistry::new())),
+                Arc::new(RwLock::new(OutputStyleRegistry::new())),
+                Arc::new(McpRegistry::new(Arc::new(PosixMcpTransport::new()))),
+                Arc::new(LspRegistry::new(Arc::new(PosixLspTransport::new()))),
+                Arc::new(RwLock::new(ToolRegistry::new())),
+            )
+            .with_agent_catalog(agent_catalog),
+        );
         (manager, command_registry)
     }
 
@@ -13819,6 +14020,7 @@ mod tests {
             home: home.clone(),
             cwd: cwd.clone(),
             cli_plugin_dirs: Vec::new(),
+            additional_project_roots: Arc::new(RwLock::new(Vec::new())),
             ambient: true,
             inline: false,
         };
@@ -13892,6 +14094,7 @@ mod tests {
             home: home.clone(),
             cwd: cwd.clone(),
             cli_plugin_dirs: Vec::new(),
+            additional_project_roots: Arc::new(RwLock::new(Vec::new())),
             ambient: true,
             inline: false,
         };
@@ -14220,4 +14423,3 @@ mod connected_fallback_tests {
         assert_eq!(fb.profile, "deepseek");
     }
 }
-

@@ -166,6 +166,34 @@ pub struct MatchedAskRule {
     pub rule_content: Option<String>,
 }
 
+/// Host-provided classification for a resolved interactive tool decision.
+///
+/// This is telemetry metadata only: it never changes whether the tool runs.
+/// Unknown wire values are ignored by transports and therefore fall back to
+/// the existing temporary/reject classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolDecisionClassification {
+    /// Allowed for this invocation/session only.
+    UserTemporary,
+    /// Allowed and persisted by the host.
+    UserPermanent,
+    /// Explicitly rejected by the user.
+    UserReject,
+}
+
+impl ToolDecisionClassification {
+    /// Stable OTEL label used by Claude Code's `tool_decision` event.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::UserTemporary => "user_temporary",
+            Self::UserPermanent => "user_permanent",
+            Self::UserReject => "user_reject",
+        }
+    }
+}
+
 /// Richer outcome of [`PermissionGate::check_with_context`]: an allow may carry
 /// the host/policy-rewritten tool input (`updatedInput`) the dispatcher should
 /// run the tool with instead of the original.
@@ -190,6 +218,8 @@ pub enum PermissionOutcome {
         /// BELOW `lingxi-permission` in the dependency graph and cannot name that
         /// type — the permission-aware consumer parses + applies it.
         permission_updates: Vec<Value>,
+        /// Optional host classification for telemetry attribution.
+        decision_classification: Option<ToolDecisionClassification>,
     },
     /// Rejected, with the reason surfaced to the model as the `tool_result`.
     Deny {
@@ -373,6 +403,7 @@ pub trait PermissionGate: Send + Sync {
             PermissionDecision::Allow => PermissionOutcome::Allow {
                 updated_input: None,
                 permission_updates: Vec::new(),
+                decision_classification: None,
             },
             PermissionDecision::Deny { reason } => PermissionOutcome::Deny { reason },
         }

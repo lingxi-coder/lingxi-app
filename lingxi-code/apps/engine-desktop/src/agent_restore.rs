@@ -137,6 +137,7 @@ mod tests {
         SubagentSpawnRequest {
             subagent_type: "general-purpose".into(),
             prompt: "the original prompt".into(),
+            observer: None,
             context_paths: Vec::new(),
             description: Some("research".into()),
             model: Some("claude-opus-5".into()),

@@ -1655,7 +1655,12 @@ mod canonical_model_tests {
         // (cc 2.1.218) `n.provider=n_(r)` — sibling of canonicalModel, keyed
         // AFTER it (preserve_order map mirrors the oracle's assignment order).
         assert_eq!(row["provider"], "bedrock");
-        let keys: Vec<&str> = row.as_object().unwrap().keys().map(String::as_str).collect();
+        let keys: Vec<&str> = row
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
         let canon_idx = keys.iter().position(|k| *k == "canonicalModel").unwrap();
         assert_eq!(keys.get(canon_idx + 1), Some(&"provider"));
         assert!(row.get("contextWindow").is_some(), "existing keys retained");
@@ -1670,7 +1675,10 @@ mod canonical_model_tests {
             .get("claude-opus-4-7-20251101")
             .expect("aggregate row");
         assert_eq!(row2["canonicalModel"], "claude-opus-4-7");
-        assert!(row2.get("provider").is_none(), "unknown provider is omitted");
+        assert!(
+            row2.get("provider").is_none(),
+            "unknown provider is omitted"
+        );
     }
 }
 
@@ -2008,7 +2016,15 @@ mod tests {
             ..Default::default()
         };
         let frame = stream
-            .build_result_success_frame("pong", "end_turn", &cost, "claude-opus-4-8", "off", None, &[])
+            .build_result_success_frame(
+                "pong",
+                "end_turn",
+                &cost,
+                "claude-opus-4-8",
+                "off",
+                None,
+                &[],
+            )
             .await;
 
         let obj = frame.as_object().unwrap();
@@ -2385,7 +2401,6 @@ mod tests {
     /// WITH `plugins`, WITHOUT `betas`. (The `betas` field the SDK-subprocess
     /// `initialize` payload carries does NOT appear on this streaming frame —
     /// verified live against 2.1.201.)
-    #[test]
     /// `mcp_server_errors` is CONDITIONAL: absent when clean, present between
     /// `plugins` and `analytics_disabled` when a `--mcp-config` entry was
     /// skipped. The oracle spreads it in only when non-empty
@@ -2433,7 +2448,10 @@ mod tests {
             .position(|k| *k == "mcp_server_errors")
             .expect("present when non-empty");
         let plugins = keys.iter().position(|k| *k == "plugins").unwrap();
-        let analytics = keys.iter().position(|k| *k == "analytics_disabled").unwrap();
+        let analytics = keys
+            .iter()
+            .position(|k| *k == "analytics_disabled")
+            .unwrap();
         assert!(
             plugins < at && at < analytics,
             "must sit between plugins and analytics_disabled, got {keys:?}"
@@ -2532,7 +2550,10 @@ mod tests {
             "capability list must match the binary's gPp verbatim"
         );
         assert!(
-            !frame.as_object().unwrap().contains_key("fast_mode_disabled_reason"),
+            !frame
+                .as_object()
+                .unwrap()
+                .contains_key("fast_mode_disabled_reason"),
             "None reason ⇒ key omitted (oracle undefined-assignment semantics)"
         );
 
@@ -2666,7 +2687,15 @@ mod tests {
         // opus-4-8 is natively 1M (2.1.198 registry native_1m:!0, M1b) —
         // contextWindow=1_000_000 with NO suffix; maxOutputTokens=64000.
         let frame = stream
-            .build_result_success_frame("hi", "end_turn", &cost, "claude-opus-4-8", "off", None, &[])
+            .build_result_success_frame(
+                "hi",
+                "end_turn",
+                &cost,
+                "claude-opus-4-8",
+                "off",
+                None,
+                &[],
+            )
             .await;
         let mu = frame["modelUsage"].as_object().unwrap();
         let entry = &mu["claude-opus-4-8"];
@@ -2681,7 +2710,15 @@ mod tests {
 
         // A 200k model (opus-4-6 has NO native_1m) keeps the default window.
         let frame200k = stream
-            .build_result_success_frame("hi", "end_turn", &cost, "claude-opus-4-6", "off", None, &[])
+            .build_result_success_frame(
+                "hi",
+                "end_turn",
+                &cost,
+                "claude-opus-4-6",
+                "off",
+                None,
+                &[],
+            )
             .await;
         let mu200k = frame200k["modelUsage"].as_object().unwrap();
         let entry200k = &mu200k["claude-opus-4-6"];
@@ -2697,7 +2734,15 @@ mod tests {
         // 1M context model (model id carries [1m] suffix):
         // contextWindow=1_000_000, maxOutputTokens=64_000.
         let frame1m = stream
-            .build_result_success_frame("hi", "end_turn", &cost, "claude-opus-4-8[1m]", "off", None, &[])
+            .build_result_success_frame(
+                "hi",
+                "end_turn",
+                &cost,
+                "claude-opus-4-8[1m]",
+                "off",
+                None,
+                &[],
+            )
             .await;
         let mu1m = frame1m["modelUsage"].as_object().unwrap();
         assert!(
@@ -2734,7 +2779,15 @@ mod tests {
             ..Default::default()
         };
         let frame = stream
-            .build_result_success_frame("done", "end_turn", &cost, "claude-opus-4-6", "off", None, &[])
+            .build_result_success_frame(
+                "done",
+                "end_turn",
+                &cost,
+                "claude-opus-4-6",
+                "off",
+                None,
+                &[],
+            )
             .await;
         let usage = frame["modelUsage"].as_object().expect("modelUsage map");
         assert!(!usage.contains_key("claude-opus-4-6"));
@@ -2862,7 +2915,15 @@ mod tests {
             ..Default::default()
         };
         let frame = stream
-            .build_result_success_frame("pong", "end_turn", &cost, "claude-opus-4-8", "off", None, &[])
+            .build_result_success_frame(
+                "pong",
+                "end_turn",
+                &cost,
+                "claude-opus-4-8",
+                "off",
+                None,
+                &[],
+            )
             .await;
 
         // Golden assertions (volatile fields masked by shape, not value).

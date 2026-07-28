@@ -593,6 +593,9 @@ pub(crate) fn resolve_desktop_config(
 ) -> DesktopConfig {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let lingxi_home = crate::run::lingxi_home_dir();
+    if let Some(settings) = argv.settings.as_deref() {
+        let _ = mcp::enterprise_policy::install_flag_settings_env(flag_settings_env(settings));
+    }
     let mut project_mcp_path = cwd.join(".mcp.json");
     // User/global-scope MCP servers live INSIDE `~/.lingxi.json` (top-level
     // `mcpServers`), exactly like claude-code — NOT a standalone file under the
@@ -935,6 +938,36 @@ pub(crate) fn resolve_desktop_config(
     // settings `permissions.additionalDirectories` entry).
 }
 
+/// Read the `env` object from `--settings` (inline JSON or file path) for the
+/// MCP deny-policy fallback tier. Only string values participate; terminal
+/// color controls are intentionally excluded, matching managed/user parsing.
+fn flag_settings_env(settings: &str) -> std::collections::BTreeMap<String, String> {
+    let trimmed = settings.trim();
+    let text = if trimmed.starts_with('{') {
+        trimmed.to_string()
+    } else {
+        match std::fs::read_to_string(trimmed) {
+            Ok(text) => text,
+            Err(_) => return std::collections::BTreeMap::new(),
+        }
+    };
+    serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("env")
+                .and_then(serde_json::Value::as_object)
+                .cloned()
+        })
+        .map(|env| {
+            env.into_iter()
+                .filter(|(key, _)| key != "NO_COLOR" && key != "FORCE_COLOR")
+                .filter_map(|(key, value)| Some((key, value.as_str()?.to_string())))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Build the full runtime from parsed argv + the chosen output stream.
 ///
 /// `output` is the sink the orchestrator will push turn events to (plain
@@ -1084,9 +1117,8 @@ pub async fn build_runtime_for_tui_inner_with_parent(
         tui_core::ask_user_question_bridge::AskUserQuestionExchange,
     >(16);
     cfg.ask_user_question_tx = Some(ask_user_question_tx);
-    let (computer_access_tx, computer_access_rx) = tokio::sync::mpsc::channel::<
-        tui_core::computer_access_bridge::ComputerAccessExchange,
-    >(16);
+    let (computer_access_tx, computer_access_rx) =
+        tokio::sync::mpsc::channel::<tui_core::computer_access_bridge::ComputerAccessExchange>(16);
     cfg.computer_access_tx = Some(computer_access_tx);
     let session_allow_rules = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
     // (/permissions) The interactive editor reuses BOTH the gate's live
@@ -1472,5 +1504,16 @@ mod tests {
         let argv = Argv::from_iter(["lingxi-cli", "hi"]).unwrap();
         let cfg = resolve_desktop_config(&argv, permission::PermissionMode::Default);
         assert!(!cfg.default_model_env_pinned);
+    }
+
+    #[test]
+    fn flag_settings_env_reads_only_string_values_and_filters_color_controls() {
+        let env = flag_settings_env(
+            r#"{"env":{"TOOL":"flag-tool","COUNT":3,"NO_COLOR":"1","FORCE_COLOR":"1"}}"#,
+        );
+        assert_eq!(env.get("TOOL").map(String::as_str), Some("flag-tool"));
+        assert!(!env.contains_key("COUNT"));
+        assert!(!env.contains_key("NO_COLOR"));
+        assert!(!env.contains_key("FORCE_COLOR"));
     }
 }

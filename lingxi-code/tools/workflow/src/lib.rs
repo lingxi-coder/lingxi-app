@@ -17,8 +17,15 @@
 
 #![forbid(unsafe_code)]
 
+mod builtins;
 mod size_guideline;
+mod ultracode;
+pub use builtins::{BuiltinWorkflowDescriptor, BuiltinWorkflowRegistry, BUILTIN_WORKFLOWS};
 pub use size_guideline::{prompt_appendix_for, WorkflowSizeGuideline};
+pub use ultracode::{
+    workflows_enabled, UltracodeAttachment, UltracodeAttachmentKind, UltracodeConfig,
+    UltracodeGate, UltracodeState, DEFAULT_ULTRACODE_CADENCE, ULTRACODE_CADENCE_ENV,
+};
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -28,7 +35,6 @@ use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
-use traits::env::is_env_truthy;
 
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
@@ -169,10 +175,11 @@ fn saved_workflow_dirs_display() -> String {
 /// `scriptPath` over `script` over `name` (the schema marks `scriptPath` as
 /// "Takes precedence over `script` and `name`"). `read` loads a file's contents
 /// (the host provides real I/O); `name` resolution looks first under the
-/// project saved-workflow directory (`.lingxi/workflows/<name>`) and then under
-/// the user config directory (`$LINGXI_CONFIG_DIR/workflows/<name>` or
-/// `~/.lingxi/workflows/<name>`) with common script extensions. (LingXi ships no
-/// built-in workflow library, so a `name` that isn't a saved file is an error.)
+/// immutable built-ins, then the project saved-workflow directory
+/// (`.lingxi/workflows/<name>`), then the user config directory
+/// (`$LINGXI_CONFIG_DIR/workflows/<name>` or `~/.lingxi/workflows/<name>`) with
+/// common script extensions. Built-ins win before filesystem lookup so a
+/// project checkout cannot shadow bundled workflow code.
 pub fn resolve_script<R>(spec: &WorkflowLaunchSpec, read: R) -> Result<String, WorkflowLaunchError>
 where
     R: Fn(&str) -> std::io::Result<String>,
@@ -186,6 +193,9 @@ where
         return Ok(script);
     }
     if let Some(name) = nonempty(&spec.name) {
+        if let Some(descriptor) = BUILTIN_WORKFLOWS.get(&name) {
+            return Ok(descriptor.script.to_string());
+        }
         for candidate in saved_workflow_candidates(&name) {
             if let Ok(src) = read(&path_for_read(&candidate)) {
                 return Ok(src);
@@ -482,8 +492,7 @@ impl WorkflowTool {
 
     /// Is the tool disabled, by env var OR managed setting? Binary `fbn()`.
     fn workflows_disabled(&self) -> bool {
-        self.managed_disable_workflows
-            || is_env_truthy(std::env::var("LINGXI_DISABLE_WORKFLOWS").ok().as_deref())
+        !workflows_enabled(self.managed_disable_workflows)
     }
 
     fn spec_from_input(input: &Value) -> WorkflowLaunchSpec {
@@ -502,7 +511,11 @@ impl WorkflowTool {
     /// directories are ignored.
     fn list_available_workflow_names() -> Option<String> {
         let mut saw_dir = false;
-        let mut names: Vec<String> = Vec::new();
+        let mut names: Vec<String> = BUILTIN_WORKFLOWS
+            .names()
+            .into_iter()
+            .map(str::to_string)
+            .collect();
         for dir in saved_workflow_dirs() {
             let Ok(entries) = std::fs::read_dir(dir) else {
                 continue;
@@ -520,7 +533,7 @@ impl WorkflowTool {
                 Some(fname.into_owned())
             }));
         }
-        if !saw_dir {
+        if !saw_dir && names.is_empty() {
             return None;
         }
         names.sort();
@@ -693,31 +706,41 @@ impl Tool for WorkflowTool {
         } else if let Some(ref inline) = script {
             resolved_script = inline.clone();
         } else if let Some(ref wf_name) = name {
-            // Try to resolve from saved workflows (project first, then user).
-            let mut found: Option<String> = None;
-            for candidate in saved_workflow_candidates(wf_name) {
-                match std::fs::read_to_string(&candidate) {
-                    Ok(src) => {
-                        found = Some(src);
-                        break;
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                    Err(_) => continue,
-                }
-            }
-            if let Some(src) = found {
-                resolved_script = src;
+            // Built-ins are immutable and must win before project/user files.
+            // Keep validation on the same resolver order as the launcher:
+            // otherwise an invalid project file named `deep-research.js` could
+            // reject a launch whose execution would actually use the bundled
+            // script.
+            if let Some(descriptor) = BUILTIN_WORKFLOWS.get(wf_name) {
+                resolved_script = descriptor.script.to_string();
             } else {
-                // 1b — workflow name not found; list available names
-                let available: String = Self::list_available_workflow_names().unwrap_or_default();
-                let list = if available.is_empty() {
-                    "(none)".to_string()
+                // Try to resolve from saved workflows (project first, then user).
+                let mut found: Option<String> = None;
+                for candidate in saved_workflow_candidates(wf_name) {
+                    match std::fs::read_to_string(&candidate) {
+                        Ok(src) => {
+                            found = Some(src);
+                            break;
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                        Err(_) => continue,
+                    }
+                }
+                if let Some(src) = found {
+                    resolved_script = src;
                 } else {
-                    available
-                };
-                return Err(ValidationError(format!(
-                    "Workflow \"{wf_name}\" not found. Available: {list}"
-                )));
+                    // 1b — workflow name not found; list available names
+                    let available: String =
+                        Self::list_available_workflow_names().unwrap_or_default();
+                    let list = if available.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        available
+                    };
+                    return Err(ValidationError(format!(
+                        "Workflow \"{wf_name}\" not found. Available: {list}"
+                    )));
+                }
             }
         } else {
             // 1a — none of script/name/scriptPath provided
@@ -970,6 +993,33 @@ mod tests {
         };
         assert!(resolve_script(&spec, &read).is_err());
         assert!(resolve_script(&WorkflowLaunchSpec::default(), &read).is_err());
+    }
+
+    #[test]
+    fn builtin_name_cannot_be_shadowed_by_project_workflow() {
+        let read = |path: &str| {
+            if path == ".lingxi/workflows/deep-research.js" {
+                Ok("MALICIOUS_PROJECT_OVERRIDE".to_string())
+            } else {
+                Err(std::io::Error::new(std::io::ErrorKind::NotFound, "nope"))
+            }
+        };
+        let resolved = resolve_script(
+            &WorkflowLaunchSpec {
+                name: Some("deep-research".into()),
+                ..Default::default()
+            },
+            read,
+        )
+        .expect("built-in resolves");
+        assert!(resolved.contains("const VOTES_PER_CLAIM = 3"));
+        assert!(!resolved.contains("MALICIOUS_PROJECT_OVERRIDE"));
+    }
+
+    #[test]
+    fn workflow_listing_always_includes_builtin_names() {
+        let names = WorkflowTool::list_available_workflow_names().expect("built-ins");
+        assert!(names.split(", ").any(|name| name == "deep-research"));
     }
 
     #[test]
@@ -1230,6 +1280,31 @@ mod tests {
 
         result
             .expect("name-resolved workflow with Date.now() must NOT be rejected for determinism");
+    }
+
+    #[tokio::test]
+    async fn builtin_validation_cannot_be_blocked_by_project_shadow() {
+        let t = tool(None);
+        let ctx = tool_api::test_support::fresh_ctx();
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("LINGXI_DISABLE_WORKFLOWS");
+
+        let dir = std::path::Path::new(".lingxi/workflows");
+        std::fs::create_dir_all(dir).unwrap();
+        let shadow = dir.join("deep-research.js");
+        let previous = std::fs::read(&shadow).ok();
+        std::fs::write(&shadow, "not a valid workflow").unwrap();
+
+        let result = t
+            .validate_input(&json!({ "name": "deep-research" }), &ctx)
+            .await;
+
+        if let Some(previous) = previous {
+            std::fs::write(&shadow, previous).unwrap();
+        } else {
+            let _ = std::fs::remove_file(&shadow);
+        }
+        result.expect("immutable built-in must validate independently of project shadow");
     }
 
     #[tokio::test]

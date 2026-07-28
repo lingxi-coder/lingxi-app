@@ -60,8 +60,8 @@ pub mod argv;
 pub mod ax_screen_reader;
 pub mod background_dispatch;
 pub mod background_launch;
-pub mod bg_attach_stall;
 pub mod bg_attach;
+pub mod bg_attach_stall;
 pub mod bg_reply_queue;
 pub mod bg_session_forker;
 mod bypass_env;
@@ -1643,7 +1643,8 @@ Options:
     fn a_wrapped_usage_block_moves_whole() {
         // Taking only the first line would strip the wrapped tail onto the
         // wrong side of the description.
-        let input = "Some description\n\nUsage: cli foo [OPTIONS]\n           [EXTRA]\n\nOptions:\n  -h\n";
+        let input =
+            "Some description\n\nUsage: cli foo [OPTIONS]\n           [EXTRA]\n\nOptions:\n  -h\n";
         let out = normalise_preamble(input);
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines[0], "Usage: cli foo [OPTIONS]");
@@ -1660,8 +1661,7 @@ Options:
 
     #[test]
     fn arguments_precede_options() {
-        let input =
-            "Usage: cli x\n\nOptions:\n  -h\n\nArguments:\n  [target]  A target\n";
+        let input = "Usage: cli x\n\nOptions:\n  -h\n\nArguments:\n  [target]  A target\n";
         let out = reorder_help_sections(input);
         let args = out.find("Arguments:").expect("arguments");
         let opts = out.find("Options:").expect("options");

@@ -587,7 +587,16 @@ mod tests {
     /// oracle's.
     #[test]
     fn lean_model_gets_the_harness_body_and_not_the_six_statics() {
-        let p = format(false, true, &["Read".into()], true, false, false, "claude-opus-5", false);
+        let p = format(
+            false,
+            true,
+            &["Read".into()],
+            true,
+            false,
+            false,
+            "claude-opus-5",
+            false,
+        );
         assert!(p.contains("# Harness"), "lean body missing:\n{p}");
         for absent in [
             "# System",
@@ -606,9 +615,23 @@ mod tests {
 
     #[test]
     fn non_lean_model_still_gets_the_six_statics_and_no_harness() {
-        let p = format(false, true, &["Read".into()], true, false, false, "claude-opus-4-7", false);
+        let p = format(
+            false,
+            true,
+            &["Read".into()],
+            true,
+            false,
+            false,
+            "claude-opus-4-7",
+            false,
+        );
         assert!(!p.contains("# Harness"), "long arm must NOT emit # Harness");
-        for present in ["# System", "# Doing tasks", "# Executing actions with care", "# Tone and style"] {
+        for present in [
+            "# System",
+            "# Doing tasks",
+            "# Executing actions with care",
+            "# Tone and style",
+        ] {
             assert!(p.contains(present), "long arm must keep {present}");
         }
     }
@@ -634,7 +657,16 @@ mod tests {
     fn action_caution_is_lean_only_and_replaces_the_dropped_section() {
         let lean = format(false, true, &[], true, false, false, "claude-opus-5", false);
         assert!(lean.contains("For actions that are hard to reverse or outward-facing"));
-        let long = format(false, true, &[], true, false, false, "claude-opus-4-7", false);
+        let long = format(
+            false,
+            true,
+            &[],
+            true,
+            false,
+            false,
+            "claude-opus-4-7",
+            false,
+        );
         assert!(!long.contains("For actions that are hard to reverse or outward-facing"));
         assert!(long.contains("# Executing actions with care"));
     }
@@ -654,7 +686,16 @@ mod tests {
             assert!(!p.contains("# Corrections"), "{m} must NOT get it");
         }
         // ...and not on the long arm either.
-        let long = format(false, true, &[], true, false, false, "claude-opus-4-7", false);
+        let long = format(
+            false,
+            true,
+            &[],
+            true,
+            false,
+            false,
+            "claude-opus-4-7",
+            false,
+        );
         assert!(!long.contains("# Delivering work"));
     }
 
@@ -705,7 +746,10 @@ mod tests {
     fn pronouns_is_emitted_for_both_arms() {
         for m in ["claude-opus-5", "claude-opus-4-7"] {
             let p = format(false, true, &[], true, false, false, m, false);
-            assert!(p.contains("use they/them"), "{m} must carry the pronouns section");
+            assert!(
+                p.contains("use they/them"),
+                "{m} must carry the pronouns section"
+            );
         }
     }
 

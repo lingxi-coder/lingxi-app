@@ -1195,7 +1195,10 @@ unscoped otherwise).\n- `args`: optional arguments to pass through.\n\nOnly name
 the listing (or that the user typed explicitly) are valid. Built-in CLI commands \
 (`/help`, `/clear`, …) aren't skills. If a `<command-name>` block is already present \
 this turn, the skill is loaded — follow it directly rather than calling again.\n";
-        assert_eq!(p, expected, "Skill tool prompt must be byte-exact vs 2.1.220");
+        assert_eq!(
+            p, expected,
+            "Skill tool prompt must be byte-exact vs 2.1.220"
+        );
     }
 
     // P2-12 / `zSr`: a successful skill invocation records the skill in the
@@ -1345,11 +1348,7 @@ mod fork_dispatch_tests {
         ) -> Result<TaskRecord, TaskRegistryError> {
             Err(TaskRegistryError::Internal("unused".into()))
         }
-        async fn set_status(
-            &self,
-            _id: &str,
-            _s: &str,
-        ) -> Result<TaskRecord, TaskRegistryError> {
+        async fn set_status(&self, _id: &str, _s: &str) -> Result<TaskRecord, TaskRegistryError> {
             Err(TaskRegistryError::Internal("unused".into()))
         }
         async fn kill(&self, _id: &str) -> Result<TaskRecord, TaskRegistryError> {
@@ -1568,8 +1567,7 @@ mod fork_dispatch_tests {
         ctx.subagent_spawner = Some(spawner.clone() as Arc<dyn SubagentSpawner>);
         ctx.task_registry = Some(Arc::new(StubRegistry::new(vec![])));
         ctx.budget_enforcer = Some(Arc::new(NoBudget));
-        let tool =
-            SkillTool::with_loader(ctx, Arc::new(Loader(Some(fork_desc("review", None)))));
+        let tool = SkillTool::with_loader(ctx, Arc::new(Loader(Some(fork_desc("review", None)))));
 
         tool.call(json!({"skill": "review"}), ctx_with_registry(), fresh_tx())
             .await
@@ -1582,7 +1580,6 @@ mod fork_dispatch_tests {
             "only command (Bash) denies are frozen"
         );
     }
-
 
     /// `background: false` still FORKS — it runs the subagent to completion
     /// here and returns its answer, under the skill's scoping, with nothing
@@ -1615,7 +1612,10 @@ mod fork_dispatch_tests {
             res.model_content.as_deref(),
             Some("Skill \"review\" completed (forked execution).\n\nResult:\nfirst\nsecond")
         );
-        assert!(res.new_messages.is_empty(), "still a fork: nothing injected");
+        assert!(
+            res.new_messages.is_empty(),
+            "still a fork: nothing injected"
+        );
 
         let req = spawner.seen.lock().unwrap().clone().expect("spawned");
         assert!(!req.run_in_background);
@@ -1642,7 +1642,6 @@ mod fork_dispatch_tests {
         assert_eq!(res.data["result"], json!("Skill execution completed"));
     }
 
-
     /// A fork that declines to launch must RELEASE its spawn reservation —
     /// otherwise every duplicate invocation of a live fork would silently burn
     /// a slot of the session's agent budget.
@@ -1661,10 +1660,7 @@ mod fork_dispatch_tests {
         ctx.subagent_spawner = Some(spawner.clone() as Arc<dyn SubagentSpawner>);
         ctx.task_registry = Some(registry.clone());
         ctx.budget_enforcer = Some(Arc::new(NoBudget));
-        let tool = SkillTool::with_loader(
-            ctx,
-            Arc::new(Loader(Some(fork_desc("review", None)))),
-        );
+        let tool = SkillTool::with_loader(ctx, Arc::new(Loader(Some(fork_desc("review", None)))));
 
         let res = tool
             .call(json!({"skill": "review"}), ctx_with_registry(), fresh_tx())
@@ -1687,15 +1683,11 @@ mod fork_dispatch_tests {
         ctx.subagent_spawner = Some(spawner.clone() as Arc<dyn SubagentSpawner>);
         ctx.task_registry = Some(registry.clone());
         ctx.budget_enforcer = Some(Arc::new(NoBudget));
-        let tool = SkillTool::with_loader(
-            ctx,
-            Arc::new(Loader(Some(fork_desc("review", None)))),
-        );
+        let tool = SkillTool::with_loader(ctx, Arc::new(Loader(Some(fork_desc("review", None)))));
 
         tool.call(json!({"skill": "review"}), ctx_with_registry(), fresh_tx())
             .await
             .expect("fork");
         assert_eq!(registry.get_total_agent_spawns(), 1);
     }
-
 }

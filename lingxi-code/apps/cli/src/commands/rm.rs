@@ -1282,6 +1282,7 @@ mod tests {
             worktree_path: Some(managed.display().to_string()),
             worktree_ownership_token: write_token.then(|| token.clone()),
             initial_prompt: Some("clean up".to_string()),
+            handoff: None,
             options: BackgroundLaunchOptions::default(),
             env: std::collections::BTreeMap::new(),
             terminal: crate::background_launch::TerminalSize::default(),

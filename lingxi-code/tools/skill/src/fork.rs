@@ -21,7 +21,7 @@
 //! from `YCo` and drops into the synchronous path): a skill that cannot fork
 //! still runs, just in this context.
 
-use session::forked_skill::{ForkedSkillScoping, SKILL_NAME_MAX_LEN};
+use session::forked_skill::ForkedSkillScoping;
 use traits::task_registry::TaskRecord;
 
 /// Whether a forking skill should run in the BACKGROUND (claude `KCo`).
@@ -312,6 +312,8 @@ pub fn is_forkable_skill_name(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use session::forked_skill::SKILL_NAME_MAX_LEN;
+
     use super::*;
 
     fn task(status: &str, forked: Option<&str>) -> TaskRecord {
@@ -497,7 +499,12 @@ Do the skill's work directly in this context instead of invoking further skills.
 
     #[test]
     fn background_result_carries_the_background_flag_and_handle_line() {
-        let v = fork_result("review", "agent-7", true, &running_in_background_line("rev"));
+        let v = fork_result(
+            "review",
+            "agent-7",
+            true,
+            &running_in_background_line("rev"),
+        );
         assert_eq!(v["status"], "forked");
         assert_eq!(v["background"], true);
         assert_eq!(v["agentId"], "agent-7");

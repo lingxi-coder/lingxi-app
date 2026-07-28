@@ -178,9 +178,12 @@ mod tests {
     async fn a_corroborated_fork_resumes() {
         let dir = tempfile::tempdir().unwrap();
         let id = protocol::AgentId::new();
-        write_fork_records(&session::forked_skill::agent_transcript_path(dir.path(), &id.to_string()), &scoping("review"))
-            .await
-            .unwrap();
+        write_fork_records(
+            &session::forked_skill::agent_transcript_path(dir.path(), &id.to_string()),
+            &scoping("review"),
+        )
+        .await
+        .unwrap();
         assert!(gate(dir.path(), true)
             .check_resume(id, Some("review"))
             .await
@@ -194,9 +197,10 @@ mod tests {
     async fn deleting_the_scoping_record_refuses_rather_than_widening() {
         let dir = tempfile::tempdir().unwrap();
         let id = protocol::AgentId::new();
-        let jsonl =
-            session::forked_skill::agent_transcript_path(dir.path(), &id.to_string());
-        write_fork_records(&jsonl, &scoping("review")).await.unwrap();
+        let jsonl = session::forked_skill::agent_transcript_path(dir.path(), &id.to_string());
+        write_fork_records(&jsonl, &scoping("review"))
+            .await
+            .unwrap();
         tokio::fs::remove_file(session::forked_skill::forked_skill_paths(&jsonl).scoping)
             .await
             .unwrap();
@@ -217,9 +221,12 @@ mod tests {
     async fn a_mismatched_identity_refuses() {
         let dir = tempfile::tempdir().unwrap();
         let id = protocol::AgentId::new();
-        write_fork_records(&session::forked_skill::agent_transcript_path(dir.path(), &id.to_string()), &scoping("review"))
-            .await
-            .unwrap();
+        write_fork_records(
+            &session::forked_skill::agent_transcript_path(dir.path(), &id.to_string()),
+            &scoping("review"),
+        )
+        .await
+        .unwrap();
         let err = gate(dir.path(), true)
             .check_resume(id, Some("deploy"))
             .await
@@ -233,9 +240,12 @@ mod tests {
     async fn a_skill_that_lost_fork_capability_refuses() {
         let dir = tempfile::tempdir().unwrap();
         let id = protocol::AgentId::new();
-        write_fork_records(&session::forked_skill::agent_transcript_path(dir.path(), &id.to_string()), &scoping("review"))
-            .await
-            .unwrap();
+        write_fork_records(
+            &session::forked_skill::agent_transcript_path(dir.path(), &id.to_string()),
+            &scoping("review"),
+        )
+        .await
+        .unwrap();
         let err = gate(dir.path(), false)
             .check_resume(id, Some("review"))
             .await
@@ -251,16 +261,21 @@ mod tests {
     async fn a_corrupt_record_refuses() {
         let dir = tempfile::tempdir().unwrap();
         let id = protocol::AgentId::new();
-        let jsonl =
-            session::forked_skill::agent_transcript_path(dir.path(), &id.to_string());
+        let jsonl = session::forked_skill::agent_transcript_path(dir.path(), &id.to_string());
         tokio::fs::write(
             session::forked_skill::forked_skill_paths(&jsonl).scoping,
             "{ not json",
         )
         .await
         .unwrap();
-        let err = gate(dir.path(), true).check_resume(id, None).await.unwrap_err();
-        assert!(err.contains("malformed forked-skill scoping record"), "{err}");
+        let err = gate(dir.path(), true)
+            .check_resume(id, None)
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("malformed forked-skill scoping record"),
+            "{err}"
+        );
     }
 
     /// COLD path — no live task record. The provenance marker is the only
@@ -269,8 +284,7 @@ mod tests {
     async fn a_cold_resume_without_a_witness_refuses() {
         let dir = tempfile::tempdir().unwrap();
         let id = protocol::AgentId::new();
-        let jsonl =
-            session::forked_skill::agent_transcript_path(dir.path(), &id.to_string());
+        let jsonl = session::forked_skill::agent_transcript_path(dir.path(), &id.to_string());
         // Write ONLY the scoping record — no marker.
         tokio::fs::write(
             session::forked_skill::forked_skill_paths(&jsonl).scoping,
@@ -278,7 +292,10 @@ mod tests {
         )
         .await
         .unwrap();
-        let err = gate(dir.path(), true).check_resume(id, None).await.unwrap_err();
+        let err = gate(dir.path(), true)
+            .check_resume(id, None)
+            .await
+            .unwrap_err();
         assert!(
             err.contains("no matching provenance-marker witness"),
             "{err}"
@@ -291,9 +308,12 @@ mod tests {
     async fn a_cold_resume_with_a_matching_witness_proceeds() {
         let dir = tempfile::tempdir().unwrap();
         let id = protocol::AgentId::new();
-        write_fork_records(&session::forked_skill::agent_transcript_path(dir.path(), &id.to_string()), &scoping("review"))
-            .await
-            .unwrap();
+        write_fork_records(
+            &session::forked_skill::agent_transcript_path(dir.path(), &id.to_string()),
+            &scoping("review"),
+        )
+        .await
+        .unwrap();
         assert!(gate(dir.path(), true).check_resume(id, None).await.is_ok());
     }
 }

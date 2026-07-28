@@ -1498,13 +1498,14 @@ impl ApiService {
         state.fallen_back = true;
         // Byte template: `[dispatch] ${Nu?`HTTP ${ss}`:"connection error"}
         // with ${S8s}; retrying without it` at level warn.
-        let what = http_5xx.map_or_else(
-            || "connection error".to_string(),
-            |s| format!("HTTP {s}"),
-        );
+        let what = http_5xx.map_or_else(|| "connection error".to_string(), |s| format!("HTTP {s}"));
         tracing::warn!("[dispatch] {what} with {DISPATCH_ID_HEADER}; retrying without it");
         Some((
-            if http_5xx.is_some() { "5xx" } else { "conn_err" },
+            if http_5xx.is_some() {
+                "5xx"
+            } else {
+                "conn_err"
+            },
             http_5xx,
         ))
     }
@@ -3326,8 +3327,15 @@ impl ApiService {
         max_tokens: Option<u32>,
         effort: Option<serde_json::Value>,
     ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
-        let mut req =
-            self.build_request(model, profile, system, messages, Vec::new(), true, max_tokens)?;
+        let mut req = self.build_request(
+            model,
+            profile,
+            system,
+            messages,
+            Vec::new(),
+            true,
+            max_tokens,
+        )?;
         req.effort = effort;
         req.response_format = Some(crate::ResponseFormat::JsonSchema { schema });
         self.drive_stream(req).await

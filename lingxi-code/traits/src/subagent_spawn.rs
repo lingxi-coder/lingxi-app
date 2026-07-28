@@ -17,6 +17,47 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use thiserror::Error;
 
+/// Current persisted observer schema version.
+pub const OBSERVER_SCHEMA_VERSION: u32 = 1;
+
+const fn observer_schema_version() -> u32 {
+    OBSERVER_SCHEMA_VERSION
+}
+
+const fn observer_default_true() -> bool {
+    true
+}
+
+/// Versioned observer declaration carried by agent definitions and spawns.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObserverSpec {
+    /// Persistence schema version. Missing legacy values deserialize as v1.
+    #[serde(default = "observer_schema_version")]
+    pub schema_version: u32,
+    /// Agent type to run as the observer.
+    pub agent: String,
+    /// Optional observer-specific instruction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// Whether the declaration propagates to descendant spawns. Absent means
+    /// true, matching Claude Code's `observeSubagents !== false`.
+    #[serde(default = "observer_default_true")]
+    pub observe_subagents: bool,
+}
+
+impl ObserverSpec {
+    /// Create a v1 observer declaration with descendant propagation enabled.
+    #[must_use]
+    pub fn new(agent: impl Into<String>) -> Self {
+        Self {
+            schema_version: OBSERVER_SCHEMA_VERSION,
+            agent: agent.into(),
+            message: None,
+            observe_subagents: true,
+        }
+    }
+}
+
 /// Locked subagent input passed to [`SubagentSpawner::spawn`].
 ///
 /// Mirrors `AgentToolInput` in `lingxi-tools::builtin::agent` byte-for-byte
@@ -29,6 +70,10 @@ pub struct SubagentSpawnRequest {
     pub subagent_type: String,
     /// Initial prompt seeded into the subagent's first turn.
     pub prompt: String,
+    /// Effective observer inherited or declared for this spawn. The runtime
+    /// validates the agent name and observer chain before launching.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observer: Option<ObserverSpec>,
     /// Optional context-path files injected as system-tagged messages.
     #[serde(default)]
     pub context_paths: Vec<PathBuf>,
@@ -356,6 +401,9 @@ pub enum SubagentSpawnError {
 pub struct SelectedAgentMeta {
     /// Resolved agent type label (claude `selectedAgent.agentType`).
     pub agent_type: String,
+    /// Validated observer declaration attached to the selected definition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observer: Option<ObserverSpec>,
     /// Resolved concrete model id (claude `resolvedAgentModel` =
     /// `getAgentModel(...)`). Empty when no default model is wired.
     pub resolved_model: String,

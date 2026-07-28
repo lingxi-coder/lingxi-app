@@ -34,6 +34,7 @@ fn mk(name: &str, desc: &str, tools: Vec<String>) -> AgentDefinition {
         effort: None,
         initial_prompt: None,
         color: None,
+        observer: None,
     }
 }
 

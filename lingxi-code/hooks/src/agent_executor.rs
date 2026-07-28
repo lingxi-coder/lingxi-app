@@ -112,6 +112,7 @@ impl AgentExecutor {
             resumed_history: None,
             subagent_type: agent_type.to_string(),
             prompt: format!("{prompt_template}\n\n{payload_json}"),
+            observer: None,
             context_paths: Vec::new(),
             // AgentTool spawn-surface parity params — the hook executor sets no
             // teammate/isolation/cwd override, but threads the agent hook's

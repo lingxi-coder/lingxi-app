@@ -167,6 +167,11 @@ async fn execute_job(config_home: PathBuf, job: JobSpec) -> Result<(), String> {
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
     env.insert("LINGXI_BG_PTY_CHILD".to_string(), "1".to_string());
+    let detach_token = uuid::Uuid::new_v4().simple().to_string();
+    env.insert(
+        tui_core::background_detach::DETACH_TOKEN_ENV.to_string(),
+        detach_token.clone(),
+    );
     let mut pty_size = platform_pty::TerminalSize {
         rows: launch.terminal.rows.max(1),
         cols: launch.terminal.cols.max(1),
@@ -217,8 +222,19 @@ async fn execute_job(config_home: PathBuf, job: JobSpec) -> Result<(), String> {
     attach_hub.ready();
     let output_hub = attach_hub.clone();
     let mut output_task = tokio::spawn(async move {
+        let mut filter = tui_core::background_detach::DetachRequestFilter::new(&detach_token);
         while let Some(bytes) = stdout_rx.recv().await {
-            output_hub.broadcast(&bytes);
+            let (output, detach_requests) = filter.push(&bytes);
+            if !output.is_empty() {
+                output_hub.broadcast(&output);
+            }
+            for _ in 0..detach_requests {
+                output_hub.detach_controller();
+            }
+        }
+        let tail = filter.finish();
+        if !tail.is_empty() {
+            output_hub.broadcast(&tail);
         }
     });
     let mut input_rx = attach_hub.take_input_rx();
@@ -408,11 +424,12 @@ pub async fn run_pty_session(cli: &PtySessionCli) -> i32 {
                         return exit_codes::RUNTIME_ERROR;
                     }
                 };
-            crate::mode::run_ratatui_with_initial_prompt(
+            crate::mode::run_ratatui_with_initial_state(
                 tui_build,
                 Some(registration.clone()),
                 Vec::new(),
                 initial_prompt,
+                launch.handoff.clone(),
             )
             .await
         }
@@ -431,6 +448,7 @@ pub async fn run_pty_session(cli: &PtySessionCli) -> i32 {
                 messages,
                 registration.clone(),
                 initial_prompt,
+                launch.handoff.clone(),
             )
             .await
         }
@@ -546,6 +564,7 @@ mod tests {
                 worktree_path: None,
                 worktree_ownership_token: None,
                 initial_prompt: Some(prompt.to_string()),
+                handoff: None,
                 options: crate::background_launch::BackgroundLaunchOptions::default(),
                 env: std::collections::BTreeMap::new(),
                 terminal: crate::background_launch::TerminalSize::default(),

@@ -48,8 +48,8 @@
 //!   `tool_decision` (`record_tool_permission_decision`), and the
 //!   `api_request` / `api_error` / `tool_result` CC-name translations in the
 //!   bridge; large content attrs remain behind the [`super::logs`]
-//!   `OTEL_LOG_*` opt-ins. `user_prompt` still lacks a port emit site (the
-//!   prompt-assembly seam) — the one documented remainder.
+//!   `OTEL_LOG_*` opt-ins. `user_prompt` is emitted once from the shared
+//!   prompt-submit seam before `UserPromptSubmit` hooks run.
 //! - `claude_code.tracing` spans — start/stop lifecycle spans only.
 
 use std::collections::BTreeMap;

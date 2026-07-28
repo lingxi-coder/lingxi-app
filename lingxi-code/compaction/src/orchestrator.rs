@@ -249,10 +249,34 @@ impl CompactionOrchestrator {
     /// seam after executing hooks.
     pub async fn process_iteration_tracked_with_instructions(
         &self,
+        messages: Vec<ConversationMessage>,
+        snip_tokens_freed_already: u64,
+        tracking: &mut AutoCompactTrackingState,
+        custom_instructions: Option<&str>,
+    ) -> Result<IterationCompactionResult, CompactionError> {
+        self.process_iteration_tracked_with_instructions_and_timing(
+            messages,
+            snip_tokens_freed_already,
+            tracking,
+            custom_instructions,
+            None,
+            SystemTime::now(),
+        )
+        .await
+    }
+
+    /// Automatic compaction with the session's out-of-band assistant timing.
+    ///
+    /// A missing timestamp is deliberately fail-safe: legacy transcripts do
+    /// not run time-based microcompact merely because enough tool results exist.
+    pub async fn process_iteration_tracked_with_instructions_and_timing(
+        &self,
         mut messages: Vec<ConversationMessage>,
         snip_tokens_freed_already: u64,
         tracking: &mut AutoCompactTrackingState,
         custom_instructions: Option<&str>,
+        last_assistant_at: Option<SystemTime>,
+        now: SystemTime,
     ) -> Result<IterationCompactionResult, CompactionError> {
         let mut layers = Vec::new();
         let mut freed = snip_tokens_freed_already;
@@ -292,21 +316,25 @@ impl CompactionOrchestrator {
         // default) it is a no-op. The prior code ran `micro.compact`
         // UNCONDITIONALLY, over-clearing tool results on every iteration even
         // when time-based micro is disabled. PARITY-GAP: `ConversationMessage`
-        // carries no per-message timestamp, so when ENABLED we run on the
-        // `keep_recent` count alone (the SPECS-noted fallback) rather than the
-        // exact since-last-assistant idle gap.
-        if self.micro.config.enabled {
+        // carries no per-message timestamp; callers provide the session sidecar.
+        // Missing timing (legacy transcript) is a strict no-op.
+        if crate::microcompact::evaluate_time_based_trigger(
+            &self.micro.config,
+            last_assistant_at,
+            now,
+        )
+        .is_some()
+        {
             let micro_key = (
                 self.micro.config.enabled,
                 self.micro.config.gap_threshold_minutes,
                 self.micro.config.keep_recent,
             );
-            let cached = self.cached_micro.compact_with_key(
-                messages,
-                micro_key,
-                SystemTime::now(),
-                |input, now| self.micro.compact(input, now),
-            );
+            let cached =
+                self.cached_micro
+                    .compact_with_key(messages, micro_key, now, |input, now| {
+                        self.micro.compact(input, now)
+                    });
             cache_hit = cached.cache_hit;
             let micro = cached.result;
             if micro.cleared_count > 0 {
@@ -789,13 +817,29 @@ mod tests {
         let mut orch = order_orchestrator(1_000_000);
         orch.micro.config.enabled = true;
         let msgs = microcompactable_messages();
+        let now = SystemTime::now();
+        let last = now.checked_sub(std::time::Duration::from_secs(60 * 60));
 
         let first = orch
-            .process_iteration_tracked(msgs.clone(), 0, &mut AutoCompactTrackingState::default())
+            .process_iteration_tracked_with_instructions_and_timing(
+                msgs.clone(),
+                0,
+                &mut AutoCompactTrackingState::default(),
+                None,
+                last,
+                now,
+            )
             .await
             .expect("first microcompact pass succeeds");
         let second = orch
-            .process_iteration_tracked(msgs, 0, &mut AutoCompactTrackingState::default())
+            .process_iteration_tracked_with_instructions_and_timing(
+                msgs,
+                0,
+                &mut AutoCompactTrackingState::default(),
+                None,
+                last,
+                now,
+            )
             .await
             .expect("second microcompact pass succeeds");
 
@@ -809,6 +853,23 @@ mod tests {
             "hit returns cached summary"
         );
         assert!(second
+            .layers_applied
+            .contains(&CompactionLayer::Microcompact));
+    }
+
+    #[tokio::test]
+    async fn enabled_microcompact_without_assistant_timestamp_is_fail_safe_noop() {
+        let mut orch = order_orchestrator(1_000_000);
+        orch.micro.config.enabled = true;
+        let msgs = microcompactable_messages();
+
+        let result = orch
+            .process_iteration_tracked(msgs.clone(), 0, &mut AutoCompactTrackingState::default())
+            .await
+            .expect("legacy timing no-op succeeds");
+
+        assert_eq!(result.messages, msgs);
+        assert!(!result
             .layers_applied
             .contains(&CompactionLayer::Microcompact));
     }

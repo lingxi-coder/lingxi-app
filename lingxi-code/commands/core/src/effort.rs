@@ -97,14 +97,8 @@ const EFFORT_ENV_VAR: &str = "LINGXI_EFFORT_LEVEL";
 /// `Ow()` is the dynamic-workflows feature flag and `yve` confirms the model
 /// supports it.
 ///
-/// This port has no `Ow()` seam (no dynamic-workflow-orchestration subsystem),
-/// so this returns `false` — byte-faithful to claude when the flag is off:
-/// `xhigh` is always present, `ultracode` never renders, and the parser never
-/// maps `ultracode → xhigh`. Flipping this on later turns on the `ultracode`
-/// list item / help line / invalid-arg hint / parser alias with no call-site
-/// changes (the precedence is already wired through every consumer).
 fn dynamic_workflows_enabled() -> bool {
-    false
+    traits::session_flags::dynamic_workflows_enabled()
 }
 
 /// The discrete effort levels (`effort.ts` `EFFORT_LEVELS` / `nP =
@@ -530,10 +524,7 @@ impl BuiltinCommandHandler for EffortHandler {
             // `ZVn`: `ultracode` routes to `Pum`, the gated handler. When the
             // dynamic-workflow seam is off it returns the "needs dynamic
             // workflows enabled" guidance (`Pum` L1); when on it maps to `xhigh`
-            // (with the dynamic-orchestration suffix). LingXi's seam is off, so
-            // this renders the gated-off guidance. Falls through to the invalid
-            // path only structurally — kept explicit so flipping the seam wires
-            // the `xhigh` mapping here.
+            // (with the dynamic-orchestration suffix).
             if dynamic_workflows_enabled() {
                 // ultracode → xhigh (Hum/Pum). Session-only orchestration.
                 self.set_effort(EffortLevel::Xhigh).await

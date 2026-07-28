@@ -411,8 +411,7 @@ impl Task for MonitorHandler {
                     .set_exit_code(&worker_id, output.exit_code)
                     .await;
             }
-            let status =
-                MonitorHandler::terminal_status(worker_cancel.is_cancelled(), &result);
+            let status = MonitorHandler::terminal_status(worker_cancel.is_cancelled(), &result);
             status_sink.set_status(&worker_id, status).await;
             flush_cancel.cancel();
             let _ = worker_runtime.cancel(&worker_flush_handle).await;
@@ -875,7 +874,9 @@ mod tests {
         assert_eq!(await_terminal(&sink).await, TaskStatus::Completed);
         let events = sink.events();
         assert!(
-            events.iter().any(|e| e.contains("hello") && e.contains("world")),
+            events
+                .iter()
+                .any(|e| e.contains("hello") && e.contains("world")),
             "batched output must reach the model; got {events:?}"
         );
     }

@@ -144,14 +144,26 @@ async fn unwired_manual_compact_is_an_error_not_fake_success() {
 async fn compacts_50_message_history() {
     let orch = make_orch();
     seed_history(&orch, 50).await;
+    let usage_before = orch.context_usage_snapshot().await;
 
     let summary = orch.force_compact().await.expect("force_compact ok");
+    let usage_after = orch.context_usage_snapshot().await;
 
     assert_eq!(summary.messages_before, 50);
     assert!(
         summary.messages_after < 50,
         "messages_after={} must be <50 to count as compacted",
         summary.messages_after
+    );
+    assert!(
+        usage_after.live_context_tokens < usage_before.live_context_tokens,
+        "live context must fall after compact: before={}, after={}",
+        usage_before.live_context_tokens,
+        usage_after.live_context_tokens
+    );
+    assert_eq!(
+        usage_after.cumulative_cost, usage_before.cumulative_cost,
+        "compaction must not reset cumulative session cost"
     );
 }
 

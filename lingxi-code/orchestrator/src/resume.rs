@@ -71,9 +71,7 @@ impl ReplayedSession {
                 && m.message
                     .get("model")
                     .and_then(serde_json::Value::as_str)
-                    .is_some_and(|s| {
-                        !s.is_empty() && !(s.starts_with('<') && s.ends_with('>'))
-                    })
+                    .is_some_and(|s| !s.is_empty() && !(s.starts_with('<') && s.ends_with('>')))
         });
         traits::ResumeRuntimeSnapshot {
             model: if model_recovered {
@@ -233,6 +231,7 @@ fn build_state_from_jsonl(
         crate::config::DEFAULT_MODEL.to_string(),
     );
     let mut last_uuid: Option<Uuid> = None;
+    let mut ultracode_state = tool_workflow::UltracodeState::default();
     for m in messages {
         let msg_uuid = Uuid::parse_str(&m.uuid).unwrap_or_else(|_| Uuid::nil());
         match m.message_type.as_str() {
@@ -246,6 +245,18 @@ fn build_state_from_jsonl(
                     .get("isMeta")
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false);
+                let replay_text = content_blocks
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                ultracode_state.observe_persisted_user_message(&replay_text, is_meta);
+                state.ultracode_active = ultracode_state.active;
+                state.ultracode_non_meta_turns_since_reminder =
+                    ultracode_state.non_meta_turns_since_reminder;
                 if m.extra
                     .get("isVisibleInTranscriptOnly")
                     .and_then(serde_json::Value::as_bool)
@@ -306,6 +317,19 @@ fn build_state_from_jsonl(
                     content: content_blocks,
                     stop_reason: None,
                 });
+                // Message timing is a session sidecar, not part of the frozen
+                // ConversationMessage wire shape. Legacy or malformed rows
+                // leave it absent, making time-based microcompact a safe no-op.
+                if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(&m.timestamp) {
+                    let committed_at: std::time::SystemTime =
+                        parsed.with_timezone(&chrono::Utc).into();
+                    if match state.message_timing.last_assistant_at {
+                        Some(current) => committed_at > current,
+                        None => true,
+                    } {
+                        state.message_timing.last_assistant_at = Some(committed_at);
+                    }
+                }
                 last_uuid = Some(msg_uuid);
             }
             _ => {

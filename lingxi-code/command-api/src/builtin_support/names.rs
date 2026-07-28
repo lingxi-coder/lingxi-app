@@ -429,8 +429,12 @@ pub const HOST_BOUND_DEFERRED_GAPS: &[(&str, &str)] = &[
 /// `commands.filter(c => !c.isHidden && !$te(c))` (3 confirmed sites:
 /// `!ne.isHidden&&!$te(ne)`, `!S.isHidden&&!$te(S)`, `!Ur.isHidden&&!$te(Ur)`),
 /// so any `isHidden:!0` command is dropped from both surfaces.
-pub const HIDDEN_PALETTE_COMMANDS: &[&str] =
-    &["auto-mode-setup", "extra-usage", "heapdump", "rate-limit-options"];
+pub const HIDDEN_PALETTE_COMMANDS: &[&str] = &[
+    "auto-mode-setup",
+    "extra-usage",
+    "heapdump",
+    "rate-limit-options",
+];
 
 /// **`bnr()`-gated, hidden-by-default named commands** — real, conditionally
 /// enabled builtin command objects whose `isEnabled` resolves to `false` in a

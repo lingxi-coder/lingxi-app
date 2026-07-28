@@ -35,7 +35,6 @@ use tool_api::ToolRegistryView as _;
 use traits::orchestrator::ModelListing;
 use traits::OutputStream;
 
-
 /// Minimal contract the orchestrator needs from the API client.
 ///
 /// Production: [`crate::provider_adapter::ProviderApiAdapter`] (Task 6)
@@ -849,20 +848,19 @@ struct WireToolSchemaCache {
 ///
 /// The oracle keeps two things: `LGe = Vr(wcs)`, the local date memoized when
 /// the session started (the same date the env-context `currentDate` entry was
-/// first built from), and the delivered `date_change` attachment itself, which
-/// `Cop` re-finds by scanning `FT(messages)` — the slice AFTER the last
-/// `compact_boundary`. `clearSessionCaches` clears both. The port's reminders
-/// are outgoing-only, so the delivered date is carried here instead, and the
-/// whole struct is re-seeded whenever the live `SessionId` changes (`/clear`
-/// mints a new one; in-place resume adopts the named one).
+/// first built from), and the delivered `date_change` attachment itself.
+/// Reminders are outgoing-only, so the delivered date is carried here and must
+/// survive compaction; otherwise a long-lived session would receive the same
+/// midnight reminder again after every compact. The whole struct is re-seeded
+/// only when the live `SessionId` changes (`/clear` mints a new one; in-place
+/// resume adopts the named one).
 #[derive(Debug, Default)]
 pub(crate) struct DateChangeState {
     /// Session this state belongs to; `None` until the first producer run.
     session_id: Option<protocol::SessionId>,
     /// `LGe()` — the local date memoized at session start.
     session_date: String,
-    /// `newDate` of the reminder last DELIVERED to the model, within the
-    /// current post-compaction window.
+    /// `newDate` of the reminder last DELIVERED to the model in this session.
     delivered_date: Option<String>,
 }
 
@@ -1179,6 +1177,12 @@ pub struct ConversationOrchestrator {
     /// with a clear `ActionFailed`. Mirrors the `fork_spawner`/`fork_budget`
     /// optional-seam pattern above.
     pub(crate) bg_session_forker: Option<Arc<dyn traits::bg_session_forker::BgSessionForker>>,
+    /// Host-owned live catalog reconciler used by `register_repo_root`.
+    ///
+    /// The orchestrator admits the root into the sandbox and MCP root set
+    /// first; the desktop composition root then refreshes the registries it
+    /// exclusively owns.
+    pub(crate) repo_root_reloader: Option<Arc<dyn traits::RepoRootReloader>>,
     /// `/recap` side-query runner — the SAME single-turn
     /// [`sidequery::ForkedAgentRunner`] the autocompact summarizer uses (cloned
     /// from the composition root's `forked_runner` before it moves into the
@@ -1621,6 +1625,7 @@ impl ConversationOrchestrator {
             fork_spawner: None,
             fork_budget: None,
             bg_session_forker: None,
+            repo_root_reloader: None,
             recap_runner: None,
             file_history: None,
             orphan_forced_decisions: Mutex::new(std::collections::HashMap::new()),
@@ -2277,6 +2282,14 @@ impl ConversationOrchestrator {
         forker: Arc<dyn traits::bg_session_forker::BgSessionForker>,
     ) -> Self {
         self.bg_session_forker = Some(forker);
+        self
+    }
+
+    /// Attach the composition-root catalog reconciler used by
+    /// [`Self::register_repo_root`].
+    #[must_use]
+    pub fn with_repo_root_reloader(mut self, reloader: Arc<dyn traits::RepoRootReloader>) -> Self {
+        self.repo_root_reloader = Some(reloader);
         self
     }
 
@@ -3311,11 +3324,6 @@ impl ConversationOrchestrator {
             metadata.active_goal = s.active_goal.clone();
             s.history = history_after;
         }
-        // The boundary just moved past any delivered `date_change` attachment,
-        // so `Cop`'s `FT(messages)` window no longer contains it and the next
-        // request re-emits the reminder.
-        self.reset_date_change_dedupe();
-
         // P1-05: persist the full compaction transition (claude 2.1.207
         // `insertMessageChain` + the compact flow), so a cold `--resume`
         // reconstructs exactly the post-compact state. Best-effort — a write
@@ -3647,9 +3655,9 @@ impl ConversationOrchestrator {
 
         // Snapshot history + estimate tokens WITHOUT holding the lock across
         // the (possibly networked) compaction call.
-        let snapshot = {
+        let (snapshot, last_assistant_at) = {
             let s = self.session.lock().await;
-            s.history.clone()
+            (s.history.clone(), s.message_timing.last_assistant_at)
         };
         let estimate = compaction::grouping::estimate_tokens_for_range(&snapshot);
 
@@ -3737,11 +3745,13 @@ impl ConversationOrchestrator {
         // pre-hooks) is the boundary durationMs clock.
         let api_started = std::time::Instant::now();
         let result = match compactor
-            .process_iteration_tracked_with_instructions(
+            .process_iteration_tracked_with_instructions_and_timing(
                 snapshot,
                 0,
                 &mut tracking,
                 pre_compact.additional_instructions.as_deref(),
+                last_assistant_at,
+                std::time::SystemTime::now(),
             )
             .await
         {
@@ -4012,7 +4022,11 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // `refusal_fallback_model`, which is exactly a one-element chain — so
         // the default path is byte-identical to before the cascade existed.
         let chain: Vec<String> = if self.config.refusal_fallback_chain.is_empty() {
-            self.config.refusal_fallback_model.clone().into_iter().collect()
+            self.config
+                .refusal_fallback_model
+                .clone()
+                .into_iter()
+                .collect()
         } else {
             self.config.refusal_fallback_chain.clone()
         };
@@ -4067,7 +4081,10 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         {
             return false;
         }
-        self.refusal_tried_models.lock().await.push(fallback.clone());
+        self.refusal_tried_models
+            .lock()
+            .await
+            .push(fallback.clone());
         // Persistently swap the session model to the fallback.
         let original_model = {
             let mut s = self.session.lock().await;
@@ -4748,6 +4765,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             traits::permission_gate::PermissionOutcome::Allow {
                 updated_input,
                 permission_updates,
+                decision_classification: _,
             } => (
                 crate::test_support::PermissionDecision::Allow,
                 updated_input.unwrap_or(input),
@@ -4852,8 +4870,6 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             let mut session = self.session.lock().await;
             session.history.push(marker.clone());
         }
-        // Same `FT(messages)` window reset as the in-process compaction path.
-        self.reset_date_change_dedupe();
         let compact_metadata = camelize_json_keys(sdk_compact_metadata);
         self.persist_compact_boundary_jsonl_value(&marker, compact_metadata)
             .await;
@@ -5156,6 +5172,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         api_error: Option<ApiErrorEnvelope>,
         compact_summary: bool,
     ) {
+        self.note_assistant_commit(msg).await;
         let Some(writer) = self.jsonl_writer.as_ref() else {
             return;
         };
@@ -5257,6 +5274,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // headers) — the line then omits `requestId`, like claude-code.
         request_id: Option<&str>,
     ) -> std::collections::HashMap<protocol::ToolUseId, String> {
+        self.note_assistant_commit(msg).await;
         let mut map: std::collections::HashMap<protocol::ToolUseId, String> =
             std::collections::HashMap::new();
         let ConversationMessage::Assistant {
@@ -5362,6 +5380,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         usage: Option<&llm_client::Usage>,
         request_id: Option<&str>,
     ) {
+        self.note_assistant_commit(msg).await;
         let ConversationMessage::Assistant { id: turn_id, .. } = msg else {
             // Defensive: non-assistant messages take the plain single-line path.
             self.persist_message_to_jsonl(msg).await;
@@ -5410,6 +5429,16 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 self.record_transcript_append_failure(&session_id_str, "assistant_merged", &e)
                     .await;
             }
+        }
+    }
+
+    /// Update the out-of-band assistant timestamp without changing message wire
+    /// shape. Every production assistant commit passes through one of the JSONL
+    /// persistence seams, including writer-less runtimes.
+    async fn note_assistant_commit(&self, msg: &ConversationMessage) {
+        if matches!(msg, ConversationMessage::Assistant { .. }) {
+            self.session.lock().await.message_timing.last_assistant_at =
+                Some(std::time::SystemTime::now());
         }
     }
 
@@ -5722,7 +5751,22 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     ///   is appended. The reason defaults to `"Blocked by hook"` when the hook
     ///   omits one (`e.reason||"Blocked by hook"`). The message is display-only
     ///   (isMeta warning) — the turn still aborts (`shouldQuery:!1`).
-    async fn fire_user_prompt_submit(&self, prompt: &str) -> bool {
+    async fn fire_user_prompt_submit(&self, prompt: &str, message_id: MessageId) -> bool {
+        // The JSONL append immediately before this seam minted the stable
+        // per-turn prompt id. Emit once for all batched/streaming/cancelable
+        // prompt paths before hooks can block the API call.
+        let prompt_id = self
+            .current_prompt_id
+            .lock()
+            .await
+            .clone()
+            .unwrap_or_else(|| message_id.as_uuid().to_string());
+        telemetry::otel::emit_user_prompt_log(
+            prompt,
+            &prompt_id,
+            &message_id.as_uuid().to_string(),
+        );
+        self.append_ultracode_attachments(prompt).await;
         let ctx = self.lifecycle_hook_ctx(false).await;
         let agg = self
             .hooks
@@ -5772,6 +5816,63 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             self.output.emit_text(&warning).await;
         }
         blocked
+    }
+
+    /// Advance the session-scoped Ultracode state at the one prompt-ingress
+    /// seam shared by batched, streaming, and cancelable drivers.
+    async fn append_ultracode_attachments(&self, prompt: &str) {
+        use tool_api::tool_trait::ToolStaticContext;
+        use tool_workflow::{UltracodeConfig, UltracodeGate, UltracodeState};
+
+        let workflows_enabled = self
+            .tools
+            .available_tools(&ToolStaticContext::default())
+            .iter()
+            .any(|tool| tool.name() == tool_workflow::TOOL_NAME);
+        let effort = self
+            .current_effort
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let is_meta_turn = prompt.trim_start().starts_with('/');
+        let attachments = {
+            let mut session = self.session.lock().await;
+            let mut state = UltracodeState {
+                active: session.ultracode_active,
+                non_meta_turns_since_reminder: session
+                    .ultracode_non_meta_turns_since_reminder,
+            };
+            let attachments = state.advance(
+                UltracodeGate {
+                    model: &session.model,
+                    effort: effort.as_deref(),
+                    workflows_enabled,
+                },
+                UltracodeConfig {
+                    feature_flag_cadence: self.config.ultracode_feature_flag_cadence,
+                    product_default_cadence: self.config.ultracode_product_default_cadence,
+                    keyword_trigger_enabled: self.config.workflow_keyword_trigger_enabled,
+                },
+                prompt,
+                is_meta_turn,
+            );
+            session.ultracode_active = state.active;
+            session.ultracode_non_meta_turns_since_reminder =
+                state.non_meta_turns_since_reminder;
+            attachments
+        };
+
+        for attachment in attachments {
+            let message = ConversationMessage::user_meta(
+                MessageId::new(),
+                format!(
+                    "<system-reminder>\n{}\n</system-reminder>",
+                    attachment.text
+                ),
+            );
+            self.session.lock().await.history.push(message.clone());
+            self.persist_message_to_jsonl(&message).await;
+        }
     }
 
     /// Fire the `MessageDisplay` hooks at the BEGIN of an assistant-message
@@ -6583,14 +6684,18 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     ///
     /// `source` is both a payload field and the MATCHER QUERY — claude-code
     /// `a$t` dispatches with `matchQuery: t`, so a hook `matcher` is tested
-    /// against `add_dir` / `register_repo_root`, not against the path. A
+    /// against `slash_command` / `register_repo_root`, not against the path. A
     /// matcher written against the directory would silently never fire.
     ///
     /// Best-effort, like the other lifecycle fires: a failing or absent hook
     /// must not undo a directory the user successfully added.
-    pub async fn fire_directory_added(&self, directory: &str, source: &str) {
+    pub async fn fire_directory_added(
+        &self,
+        directory: &str,
+        source: &str,
+    ) -> traits::DirectoryAddedHookSummary {
         let ctx = self.lifecycle_hook_ctx(false).await;
-        let _ = self
+        let aggregate = self
             .hooks
             .execute(
                 HookEvent::DirectoryAdded {
@@ -6600,6 +6705,177 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 ctx,
             )
             .await;
+
+        let mut failure_count = 0u32;
+        for (hook_id, result) in &aggregate.all_results {
+            if result.outcome != hooks::response::HookOutcome::Success {
+                failure_count = failure_count.saturating_add(1);
+                tracing::error!(
+                    hook_id = %hook_id,
+                    outcome = ?result.outcome,
+                    stdout = %result.stdout,
+                    stderr = %result.stderr,
+                    "DirectoryAdded hook failed"
+                );
+            }
+        }
+
+        const PER_MESSAGE_LIMIT: usize = 4 * 1024;
+        const TOTAL_LIMIT: usize = 16 * 1024;
+        let mut remaining = TOTAL_LIMIT;
+        let mut context_messages = Vec::new();
+        for message in aggregate
+            .system_messages
+            .iter()
+            .chain(aggregate.additional_contexts.iter())
+        {
+            if remaining == 0 {
+                break;
+            }
+            let cap = PER_MESSAGE_LIMIT.min(remaining);
+            let mut used = 0usize;
+            let bounded: String = message
+                .chars()
+                .take_while(|ch| {
+                    let width = ch.len_utf8();
+                    if used.saturating_add(width) > cap {
+                        false
+                    } else {
+                        used += width;
+                        true
+                    }
+                })
+                .collect();
+            remaining = remaining.saturating_sub(bounded.len());
+            if !bounded.is_empty() {
+                context_messages.push(bounded);
+            }
+        }
+        if failure_count > 0 {
+            context_messages.push(format!(
+                "{failure_count} DirectoryAdded hook(s) failed; output is in the debug log, not shown here"
+            ));
+        }
+
+        if !context_messages.is_empty() {
+            let body = context_messages
+                .iter()
+                .map(|message| format!("DirectoryAdded hook: {message}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let message = ConversationMessage::user_meta(
+                MessageId::new(),
+                format!("<system-reminder>\n{body}\n</system-reminder>"),
+            );
+            self.session.lock().await.history.push(message.clone());
+            self.persist_message_to_jsonl(&message).await;
+        }
+
+        traits::DirectoryAddedHookSummary {
+            failure_count,
+            context_messages,
+        }
+    }
+
+    /// Register a canonical additional repository root for the live session.
+    ///
+    /// The trusted-root cell is updated before MCP/sandbox consumers and before
+    /// `DirectoryAdded` hooks, so a hook observing the event cannot race the
+    /// permission boundary it was told had changed.
+    pub async fn register_repo_root(
+        &self,
+        request: traits::RegisterRepoRootRequest,
+    ) -> Result<traits::RegisterRepoRootOutcome, traits::HandleError> {
+        let current = self.session_cwd.cwd();
+        let raw = std::path::PathBuf::from(request.path.trim());
+        let candidate = if raw.is_absolute() {
+            raw
+        } else {
+            current.join(raw)
+        };
+        let canonical = std::fs::canonicalize(&candidate).map_err(|_| {
+            traits::HandleError::ActionFailed(
+                "register_repo_root: target is not a directory".into(),
+            )
+        })?;
+        if !canonical.is_dir() {
+            return Err(traits::HandleError::ActionFailed(
+                "register_repo_root: target is not a directory".into(),
+            ));
+        }
+
+        let current_scope = current
+            .parent()
+            .and_then(|path| std::fs::canonicalize(path).ok())
+            .unwrap_or_else(|| current.clone());
+        let home_scope = dirs::home_dir().and_then(|path| std::fs::canonicalize(path).ok());
+        if !canonical.starts_with(&current_scope)
+            && !home_scope
+                .as_ref()
+                .is_some_and(|home| canonical.starts_with(home))
+        {
+            return Err(traits::HandleError::ActionFailed(
+                "register_repo_root: target is outside the allowed registration scope".into(),
+            ));
+        }
+
+        // Sandbox/file permission refresh FIRST.
+        if !self.session_cwd.add_trusted_dir(canonical.clone()) {
+            return Err(traits::HandleError::ActionFailed(
+                "register_repo_root: target is already a registered working directory".into(),
+            ));
+        }
+        // Then refresh MCP roots; hooks run only after both live consumers see
+        // the new directory.
+        if let Some(registry) = &self.mcp_registry {
+            registry.add_root(canonical.clone());
+            registry.notify_roots_list_changed_all().await;
+        }
+
+        let directory = canonical.to_string_lossy().into_owned();
+        let hooks = self
+            .fire_directory_added(&directory, "register_repo_root")
+            .await;
+
+        if request.reload_claude_md {
+            self.fire_instructions_loaded_with_reason(
+                hooks::events::InstructionsLoadReason::NestedTraversal,
+            )
+            .await;
+        }
+        let reload = if request.reload_skills || request.reload_plugins {
+            if let Some(reloader) = &self.repo_root_reloader {
+                reloader
+                    .reload(traits::RepoRootReloadRequest {
+                        root: canonical.clone(),
+                        reload_skills: request.reload_skills,
+                        reload_plugins: request.reload_plugins,
+                    })
+                    .await
+            } else {
+                traits::RepoRootReloadOutcome {
+                    errors: vec![
+                        "catalog reload unavailable in this runtime; repository root was registered"
+                            .to_string(),
+                    ],
+                    ..traits::RepoRootReloadOutcome::default()
+                }
+            }
+        } else {
+            traits::RepoRootReloadOutcome::default()
+        };
+        for error in &reload.errors {
+            tracing::warn!(%error, root = %canonical.display(), "register_repo_root reload failed");
+        }
+
+        Ok(traits::RegisterRepoRootOutcome {
+            directory: canonical,
+            added: true,
+            hooks,
+            skills_reloaded: reload.skills_reloaded,
+            plugins_reloaded: reload.plugins_reloaded,
+            reload_errors: reload.errors,
+        })
     }
 
     /// Append a Stop hook's blocking reason as a *meta* user message so the
@@ -6655,7 +6931,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
 
         // hooks B4: fire UserPromptSubmit. A Block decision aborts the turn
         // BEFORE any API call (TS prompt-ingress hook). No-op when unregistered.
-        if self.fire_user_prompt_submit(prompt).await {
+        if self.fire_user_prompt_submit(prompt, user_msg.id()).await {
             return Ok(ConversationOutcome::StopHookPrevented {
                 turn_count: 0,
                 final_message_id: user_msg.id(),
@@ -6882,7 +7158,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
 
         // hooks B4: UserPromptSubmit (streaming twin). A Block aborts before the
         // first stream is opened. No-op when unregistered.
-        if self.fire_user_prompt_submit(prompt).await {
+        if self.fire_user_prompt_submit(prompt, user_msg.id()).await {
             return Ok(ConversationOutcome::StopHookPrevented {
                 turn_count: 0,
                 final_message_id: user_msg.id(),
@@ -7199,8 +7475,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // (the overwhelmingly common same-date case) keeps the locked
             // streaming fixtures byte-identical. See
             // [`Self::date_change_reminder_message`].
-            let date_change_reminder = self
-                .date_change_reminder_message(self.session.lock().await.session_id);
+            let date_change_reminder =
+                self.date_change_reminder_message(self.session.lock().await.session_id);
             if let Some(reminder) = date_change_reminder.clone() {
                 snapshot.insert(0, reminder);
             }
@@ -8679,7 +8955,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
 
         // hooks B4: UserPromptSubmit (cancelable REPL twin). A Block aborts the
         // turn before any API call. No-op when unregistered.
-        if self.fire_user_prompt_submit(prompt).await {
+        if self.fire_user_prompt_submit(prompt, user_msg.id()).await {
             return Ok(TurnOutcome::EndTurn);
         }
 
@@ -9536,11 +9812,12 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         {
             entries.push(format!("# userEmail\nThe user's email address is {email}."));
         }
-        // `currentDate` is unconditional in claude-code (`currentDate: WNi(bRe())`).
-        entries.push(format!(
-            "# currentDate\nToday's date is {}.",
-            crate::prompt::env_meta::current_date_string()
-        ));
+        // `currentDate` is unconditional, but its date is session-memoized.
+        // Midnight rollover is communicated exclusively by `date_change`; the
+        // leading cacheable context entry must stay byte-stable.
+        let session_id = self.session.lock().await.session_id;
+        let session_date = self.session_start_date(session_id);
+        entries.push(format!("# currentDate\nToday's date is {}.", session_date));
 
         // `A6n` returns the messages unchanged when the context object is empty.
         // `currentDate` is always present, so `entries` is never empty — but keep
@@ -9969,23 +10246,12 @@ As you answer the user's questions, you can use the following context:\n\
         session_id: protocol::SessionId,
     ) -> Option<ConversationMessage> {
         let today = crate::prompt::env_meta::current_date_string();
-        let mut state = self
+        let session_date = self.session_start_date(session_id);
+        let state = self
             .date_change
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // `LGe = Vr(wcs)` — first producer run of a session seeds the memo, so
-        // the turn that creates (or `/clear`s, or resumes) the session can never
-        // fire. `clearSessionCaches` clears BOTH `LGe`'s memo and the emitted
-        // date; keying on the live session id reproduces that, because `/clear`
-        // mints a fresh `SessionId` and in-place resume adopts the named one.
-        if state.session_id != Some(session_id) {
-            *state = DateChangeState {
-                session_id: Some(session_id),
-                session_date: today.clone(),
-                delivered_date: None,
-            };
-        }
-        if state.session_date == today || state.delivered_date.as_deref() == Some(today.as_str()) {
+        if session_date == today || state.delivered_date.as_deref() == Some(today.as_str()) {
             return None;
         }
         drop(state);
@@ -9998,6 +10264,26 @@ DO NOT mention this to the user explicitly because they are already aware.\n</sy
         Some(ConversationMessage::user_meta(MessageId::new(), content))
     }
 
+    /// Return the local date memoized for `session_id`, seeding it exactly once.
+    ///
+    /// Both the leading `# currentDate` context and the midnight reminder use
+    /// this producer, so call order cannot create two independent date memos.
+    fn session_start_date(&self, session_id: protocol::SessionId) -> String {
+        let today = crate::prompt::env_meta::current_date_string();
+        let mut state = self
+            .date_change
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.session_id != Some(session_id) {
+            *state = DateChangeState {
+                session_id: Some(session_id),
+                session_date: today,
+                delivered_date: None,
+            };
+        }
+        state.session_date.clone()
+    }
+
     /// Mark the current local date's `date_change` reminder as DELIVERED — the
     /// commit half of [`Self::date_change_reminder_message`]. Called once the
     /// request carrying this turn's outgoing snapshot has actually been issued.
@@ -10006,17 +10292,6 @@ DO NOT mention this to the user explicitly because they are already aware.\n</sy
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .delivered_date = Some(crate::prompt::env_meta::current_date_string());
-    }
-
-    /// Drop the `date_change` dedupe at a compaction boundary. `Cop` scans only
-    /// `FT(messages)` — the slice AFTER the last `compact_boundary` — so a
-    /// compaction that drops the delivered attachment out of that window makes
-    /// the oracle re-emit the reminder on the next request.
-    pub(crate) fn reset_date_change_dedupe(&self) {
-        self.date_change
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .delivered_date = None;
     }
 
     /// Finding #73: increment BOTH reminder counters by one assistant turn.
@@ -13044,6 +13319,25 @@ DO NOT mention this to the user explicitly because they are already aware.\n</sy
         )
     }
 
+    #[tokio::test]
+    async fn additional_context_keeps_the_session_start_date_after_rollover() {
+        let orch = orch_with(Arc::new(StaticMemoryProvider::empty()), None);
+        let sid = orch.session.lock().await.session_id;
+        seed_stale_session_date(&orch, sid);
+
+        let body = text(
+            &orch
+                .additional_context_message()
+                .await
+                .expect("date context"),
+        );
+        assert!(body.contains("# currentDate\nToday's date is 2000-01-01."));
+        assert!(
+            orch.date_change_reminder_message(sid).is_some(),
+            "rollover is announced only by date_change"
+        );
+    }
+
     #[test]
     fn date_change_none_when_date_unchanged() {
         // First producer run seeds the session-start memo (`LGe = Vr(wcs)`), so
@@ -13078,22 +13372,17 @@ DO NOT mention this to the user explicitly because they are already aware.\n</sy
     }
 
     #[test]
-    fn date_change_re_emits_after_a_compact_boundary() {
-        // `Cop` scans only `FT(messages)` — the slice AFTER the last
-        // `compact_boundary` — so a compaction that drops the delivered
-        // attachment out of that window makes the next request re-emit.
+    fn date_change_stays_deduped_after_a_compact_boundary() {
+        // Compaction must not reset the session-level reminder. The leading
+        // `currentDate` remains the session-start memo and the changed date was
+        // already delivered once.
         let orch = orch_with(Arc::new(StaticMemoryProvider::empty()), None);
         let sid = protocol::SessionId::new();
         seed_stale_session_date(&orch, sid);
         assert!(orch.date_change_reminder_message(sid).is_some());
         orch.commit_date_change_reminder();
         assert!(orch.date_change_reminder_message(sid).is_none());
-
-        orch.reset_date_change_dedupe();
-        assert_eq!(
-            orch.date_change_reminder_message(sid).map(|m| text(&m)),
-            Some(expected_date_change_body())
-        );
+        assert!(orch.date_change_reminder_message(sid).is_none());
     }
 
     #[test]
@@ -14527,6 +14816,7 @@ mod agent_listing_reminder_tests {
             effort: None,
             initial_prompt: None,
             color: None,
+            observer: None,
         }
     }
 

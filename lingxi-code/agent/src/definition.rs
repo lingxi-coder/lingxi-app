@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+pub use traits::subagent_spawn::ObserverSpec;
 
 /// Self-contained description of an agent type used by
 /// [`crate::context::SubagentContext`] and [`crate::pool::StateMachinePool`].
@@ -94,6 +95,12 @@ pub struct AgentDefinition {
     /// Stored distinct from the `icon` emoji field.
     #[serde(default)]
     pub color: Option<String>,
+    /// Optional companion agent that observes this agent's run.
+    ///
+    /// The schema is versioned so persisted snapshots can evolve without
+    /// invalidating older transcripts. `None` is the legacy/default behavior.
+    #[serde(default)]
+    pub observer: Option<ObserverSpec>,
 }
 
 /// Strategy the [`crate::tool_resolver::AgentToolResolver`] uses to project

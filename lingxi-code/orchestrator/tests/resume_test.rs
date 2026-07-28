@@ -229,6 +229,39 @@ fn resume_without_goal_metadata_defaults_to_none() {
     );
 }
 
+#[test]
+fn resume_restores_last_assistant_timestamp_sidecar() {
+    let sid = Uuid::new_v4();
+    let messages = vec![
+        serde_json::from_value(json!({
+            "type":"assistant", "uuid":Uuid::new_v4().to_string(), "parentUuid":null,
+            "sessionId":sid.to_string(), "timestamp":"2026-07-19T00:00:01.000Z",
+            "cwd":"/tmp", "version":"0.12.0", "isSidechain":false,
+            "message":{"role":"assistant","content":"one"}
+        }))
+        .unwrap(),
+        serde_json::from_value(json!({
+            "type":"assistant", "uuid":Uuid::new_v4().to_string(), "parentUuid":null,
+            "sessionId":sid.to_string(), "timestamp":"2026-07-19T00:00:03.000Z",
+            "cwd":"/tmp", "version":"0.12.0", "isSidechain":false,
+            "message":{"role":"assistant","content":"two"}
+        }))
+        .unwrap(),
+    ];
+
+    let state = state_from_messages(sid, &messages);
+    let restored = state
+        .message_timing
+        .last_assistant_at
+        .expect("assistant timestamp restored");
+    let expected: std::time::SystemTime =
+        chrono::DateTime::parse_from_rfc3339("2026-07-19T00:00:03.000Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+            .into();
+    assert_eq!(restored, expected);
+}
+
 #[tokio::test]
 async fn resume_recovers_the_saved_model_from_the_last_assistant_line() {
     // Regression (reported): a resumed session showed the launch-default model

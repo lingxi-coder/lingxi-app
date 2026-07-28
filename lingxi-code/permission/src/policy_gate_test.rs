@@ -515,10 +515,9 @@ mod tests {
             .check_after_hook_allow_rewritten("Bash", &serde_json::json!({}))
             .await;
         match decision {
-            PermissionDecision::Deny { reason } => assert!(
-                !reason.is_empty(),
-                "the deny carries the ask's own message"
-            ),
+            PermissionDecision::Deny { reason } => {
+                assert!(!reason.is_empty(), "the deny carries the ask's own message")
+            }
             other => panic!("expected a hard Deny, got {other:?}"),
         }
         assert_eq!(
@@ -548,8 +547,7 @@ mod tests {
         let gate = PolicyPermissionGate::new(policy, inner.clone());
 
         assert_eq!(
-            gate.honour_hook_allow("Bash", &serde_json::json!({}))
-                .await,
+            gate.honour_hook_allow("Bash", &serde_json::json!({})).await,
             PermissionDecision::Allow,
             "the standing PermissionRequest-hook allow stands over an ask rule"
         );
@@ -660,10 +658,7 @@ mod tests {
 
         // `$IFS` trips the bash-safety guard ask (`Other`-tagged) on the NORMAL
         // path; under a hook allow it must be ignored.
-        for cmd in [
-            "cat${IFS}/etc/passwd",
-            "echo x > /etc/foo",
-        ] {
+        for cmd in ["cat${IFS}/etc/passwd", "echo x > /etc/foo"] {
             let input = serde_json::json!({ "command": cmd });
             assert_eq!(
                 gate.check_after_hook_allow("Bash", &input).await,
@@ -869,7 +864,9 @@ mod tests {
             PolicyPermissionGate::new(policy, RecordingInner::new(PermissionDecision::Allow));
         match gate.resolve_detailed("Bash", &serde_json::json!({})).await {
             PermissionResolution::Deny {
-                source, rule_source, ..
+                source,
+                rule_source,
+                ..
             } => {
                 assert_eq!(source, PermissionDecisionSource::Mode);
                 assert_eq!(rule_source, None, "a mode deny matched no rule");
@@ -1100,6 +1097,7 @@ mod tests {
             PermissionOutcome::Allow {
                 updated_input: None,
                 permission_updates: Vec::new(),
+                decision_classification: None,
             }
         }
     }
@@ -1127,7 +1125,8 @@ mod tests {
             outcome,
             PermissionOutcome::Allow {
                 updated_input: None,
-                permission_updates: Vec::new()
+                permission_updates: Vec::new(),
+                decision_classification: None,
             }
         );
         let seen = inner.ctx.lock().unwrap().clone().expect("inner consulted");
@@ -1150,7 +1149,10 @@ mod tests {
     /// reason — so the stdio `can_use_tool` is byte-faithful, matching `lin`.
     #[tokio::test]
     async fn hook_allow_ask_delegation_carries_tool_use_id_and_reason() {
-        let policy = policy_with(r#"{ "permissions": { "ask": ["Bash"] } }"#, PermissionMode::Default);
+        let policy = policy_with(
+            r#"{ "permissions": { "ask": ["Bash"] } }"#,
+            PermissionMode::Default,
+        );
         let inner = Arc::new(ContextRecordingInner {
             ctx: std::sync::Mutex::new(None),
         });
@@ -1198,6 +1200,7 @@ mod tests {
             PermissionOutcome::Allow {
                 updated_input: None,
                 permission_updates: Vec::new(),
+                decision_classification: None,
             }
         );
         assert!(

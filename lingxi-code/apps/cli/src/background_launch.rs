@@ -287,6 +287,10 @@ pub struct BackgroundLaunchSpec {
     pub worktree_ownership_token: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub initial_prompt: Option<String>,
+    /// Live TUI boundary state for a mid-turn foreground→background handoff.
+    /// Older launch specs omit it and resume with an empty composer/queue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff: Option<traits::BackgroundingSnapshot>,
     pub options: BackgroundLaunchOptions,
     /// Allowlisted environment inherited by the PTY child. `launch.json` is
     /// owner-only because this map may contain provider credentials.
@@ -584,6 +588,7 @@ fn from_legacy_dispatch(
             .initial_prompt
             .clone()
             .filter(|prompt| !prompt.trim().is_empty()),
+        handoff: None,
         options,
         env: dispatch.env.clone(),
         terminal: TerminalSize {
@@ -694,6 +699,7 @@ mod tests {
             worktree_path: None,
             worktree_ownership_token: None,
             initial_prompt: Some("hello".to_string()),
+            handoff: None,
             options: BackgroundLaunchOptions {
                 model: Some("test-model".to_string()),
                 allowed_tools: Some(vec!["Read".to_string()]),
@@ -712,7 +718,12 @@ mod tests {
     #[test]
     fn launch_spec_round_trips_atomically_and_tui_argv_is_promptless() {
         let home = tmpdir();
-        let spec = sample("abcd1234", BackgroundLaunchKind::Fresh);
+        let mut spec = sample("abcd1234", BackgroundLaunchKind::Fresh);
+        spec.handoff = Some(traits::BackgroundingSnapshot::Idle {
+            queued_commands: vec!["/compact keep tests".into()],
+            draft: "draft 🦀".into(),
+            boundary_id: uuid::Uuid::new_v4(),
+        });
         write_launch_spec(&home, "abcd1234", &spec).unwrap();
         let read = read_launch_spec(&home, "abcd1234").unwrap();
         assert_eq!(read, spec);

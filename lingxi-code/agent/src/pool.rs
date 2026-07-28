@@ -249,6 +249,7 @@ mod tests {
                 effort: None,
                 initial_prompt: None,
                 color: None,
+                observer: None,
             },
             prompt_messages: vec![],
             fork_context_messages: None,
@@ -261,7 +262,7 @@ mod tests {
             mcp_clients: vec![],
             transcript_subdir: "/tmp".into(),
             transcript_fs: None,
-        resumed_history: None,
+            resumed_history: None,
             rendered_system_prompt: None,
             content_replacement_state: None,
             agent_memory: None,
@@ -280,6 +281,7 @@ mod tests {
             hook_session_id: protocol::SessionId::nil(),
             hook_cwd: std::path::PathBuf::new(),
             depth: 0,
+            observer: None,
             permission_mode_override: None,
         }
     }

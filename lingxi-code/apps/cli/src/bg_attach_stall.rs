@@ -245,12 +245,7 @@ impl StallDriver {
     /// and is handed to the watchdog as one oversized tick so its reset applies
     /// — feeding it as many small ticks instead would fire on wake, which is
     /// exactly the bug the reset exists to prevent.
-    pub fn advance(
-        &mut self,
-        elapsed_ms: u64,
-        gates: StallGates,
-        respawns: i64,
-    ) -> StallDecision {
+    pub fn advance(&mut self, elapsed_ms: u64, gates: StallGates, respawns: i64) -> StallDecision {
         if !self.is_armed() {
             return StallDecision::Wait;
         }
@@ -324,22 +319,12 @@ pub fn take_stall_request(jobs_dir: &std::path::Path, short: &str) -> bool {
 
 /// `tengu_bg_attach_stall_respawn` — a stalled worker is being restarted.
 pub fn emit_stall_respawn(state: &str, via: &str, attempt: i64) {
-    tracing::info!(
-        event = "tengu_bg_attach_stall_respawn",
-        state,
-        via,
-        attempt,
-    );
+    tracing::info!(event = "tengu_bg_attach_stall_respawn", state, via, attempt,);
 }
 
 /// `tengu_bg_attach_stall_gave_up` — the respawn budget is spent.
 pub fn emit_stall_gave_up(state: &str, via: &str, attempt: i64) {
-    tracing::info!(
-        event = "tengu_bg_attach_stall_gave_up",
-        state,
-        via,
-        attempt,
-    );
+    tracing::info!(event = "tengu_bg_attach_stall_gave_up", state, via, attempt,);
 }
 
 /// `job_attach_stalled` — the job-level record of a stall.

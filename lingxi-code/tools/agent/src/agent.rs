@@ -1058,6 +1058,12 @@ Reach for this when the task matches an available agent type, when you have inde
         let request = SubagentSpawnRequest {
             subagent_type: effective_type.to_string(),
             prompt: parsed.prompt.clone(),
+            observer: selected.observer.clone().or_else(|| {
+                ctx.observer
+                    .as_ref()
+                    .filter(|observer| observer.agent != effective_type)
+                    .cloned()
+            }),
             context_paths: parsed.context_paths.clone(),
             description: Some(parsed.description.clone()),
             model: if is_fork { None } else { parsed.model.clone() },
@@ -1956,6 +1962,12 @@ Use /mcp to configure and authenticate the required MCP servers.",
             // general-purpose; explicit-validated otherwise), not the raw input.
             subagent_type: effective_type.clone(),
             prompt: parsed.prompt.clone(),
+            observer: selected.observer.clone().or_else(|| {
+                ctx.observer
+                    .as_ref()
+                    .filter(|observer| observer.agent != effective_type)
+                    .cloned()
+            }),
             context_paths: parsed.context_paths.clone(),
             // AgentTool spawn-surface parity: thread the new params through.
             // `model` is mapped to the agent model override by the spawner; the

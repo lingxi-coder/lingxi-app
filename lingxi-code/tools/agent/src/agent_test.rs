@@ -175,6 +175,7 @@ mod tests {
             fork_parent_system_prompt: None,
             cwd: None,
             depth: 0,
+            observer: None,
             file_history: None,
         }
     }
@@ -2714,6 +2715,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             is_built_in: true,
             background: false,
             isolation: None,
+            observer: None,
         });
         spawner.script_completed_full(
             protocol::AgentId::new(),

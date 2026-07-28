@@ -615,6 +615,7 @@ mod tests {
             tool_use_id: None,
             agent_id: None,
             agent_name: None,
+            observer: None,
             team_name: None,
             content_replacement_state: None,
             session: None,

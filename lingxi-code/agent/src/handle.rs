@@ -684,6 +684,7 @@ impl PoolSubagentSpawner {
             effort: None,
             initial_prompt: None,
             color: None,
+            observer: None,
         }
     }
 
@@ -840,7 +841,7 @@ impl PoolSubagentSpawner {
             mcp_clients: vec![],
             transcript_subdir: "/tmp".into(),
             transcript_fs: None,
-        resumed_history: None,
+            resumed_history: None,
             rendered_system_prompt,
             content_replacement_state: None,
             agent_memory: None,
@@ -869,6 +870,7 @@ impl PoolSubagentSpawner {
             hook_cwd: std::path::PathBuf::new(),
             // Default 0; `build_subagent_context` overwrites it with `request.depth`.
             depth: 0,
+            observer: None,
             // Set by `build_subagent_context` from the clamped spawn `mode` /
             // definition permission mode (non-fork only). `None` = inherit the
             // live/boot gate mode.
@@ -1057,6 +1059,7 @@ impl PoolSubagentSpawner {
         // stamped it as parent.depth + 1. Drives the resolver's `Agent` depth-gate
         // and is threaded by the runner into the child's dispatched tools.
         ctx.depth = request.depth;
+        ctx.observer.clone_from(&request.observer);
         let (tool_schemas, allowed_tools) = self
             .resolve_tools(&ctx.agent_definition, request.depth)
             .await?;
@@ -1298,6 +1301,9 @@ impl SubagentSpawner for PoolSubagentSpawner {
         // the subagent's work under its Task cell. `None` drops them.
         progress: Option<tokio::sync::mpsc::Sender<String>>,
     ) -> Result<SubagentResult, SubagentSpawnError> {
+        let observer_spec = request.observer.clone();
+        let observed_agent_type = request.subagent_type.clone();
+        let observer_inherit = inherit.clone();
         // Resolve the REAL definition for this subagent_type (file catalog
         // overrides built-ins; unknown → general-purpose). Its tools policy /
         // model / max_turns / system prompt flow into the runner, and its
@@ -1327,7 +1333,7 @@ impl SubagentSpawner for PoolSubagentSpawner {
         // Pump the slot until terminal. The runner emits Progress/Message
         // events as it streams turns; we ignore those here and surface only
         // the terminal Completed/Failed/Killed.
-        let result = loop {
+        let mut result = loop {
             match rx.recv().await {
                 Some(SubagentEvent::Completed {
                     agent_id: child_id,
@@ -1439,6 +1445,100 @@ impl SubagentSpawner for PoolSubagentSpawner {
         // Best-effort deallocate; failures here don't change the surfaced
         // result.
         let _ = self.pool.deallocate(&agent_id).await;
+
+        if let (Some(spec), SubagentResult::Completed { content, .. }) =
+            (observer_spec, &mut result)
+        {
+            let valid_target = spec.schema_version
+                == traits::subagent_spawn::OBSERVER_SCHEMA_VERSION
+                && spec.agent != observed_agent_type
+                && self
+                    .listing_entries()
+                    .await
+                    .iter()
+                    .any(|entry| entry.agent_type == spec.agent);
+            if valid_target {
+                let propagation = crate::observer::ObserverPropagation {
+                    spec,
+                    origin_agent: observed_agent_type.clone(),
+                    chain: vec![observed_agent_type.clone()],
+                    fanout_depth: 0,
+                };
+                let plan = crate::observer::build_observer_launch(
+                    agent_id,
+                    &observed_agent_type,
+                    content,
+                    &propagation,
+                );
+                let mut observer_request = request.clone();
+                observer_request.subagent_type = plan.observer_agent.clone();
+                observer_request.prompt = plan.prompt;
+                observer_request.observer = None;
+                observer_request.description =
+                    Some(format!("Observe {observed_agent_type}"));
+                observer_request.run_in_background = false;
+                observer_request.name = None;
+                observer_request.team_name = None;
+                observer_request.creator_teammate_name = None;
+                observer_request.creator_team_name = None;
+                observer_request.fork_context_messages = None;
+                observer_request.fork_parent_system_prompt = None;
+                observer_request.forked_skill_name = None;
+                observer_request.forked_skill_attribution = None;
+                observer_request.resumed_history = None;
+
+                let observer_result = Box::pin(self.spawn_with_progress(
+                    observer_request,
+                    observer_inherit,
+                    progress,
+                ))
+                .await;
+                let observer_value = match observer_result {
+                    Ok(SubagentResult::Completed {
+                        agent_id,
+                        content,
+                        ..
+                    }) => serde_json::json!({
+                        "status": "completed",
+                        "agentId": agent_id.to_string(),
+                        "content": content,
+                    }),
+                    Ok(SubagentResult::Failed { agent_id, reason }) => serde_json::json!({
+                        "status": "failed",
+                        "agentId": agent_id.to_string(),
+                        "reason": reason,
+                    }),
+                    Ok(SubagentResult::Killed { agent_id }) => serde_json::json!({
+                        "status": "killed",
+                        "agentId": agent_id.to_string(),
+                    }),
+                    Err(error) => serde_json::json!({
+                        "status": "failed",
+                        "reason": error.to_string(),
+                    }),
+                };
+                let association = serde_json::json!({
+                    "observedAgentId": agent_id.to_string(),
+                    "observerAgent": plan.observer_agent,
+                    "result": observer_value,
+                });
+                if let Some(object) = content.as_object_mut() {
+                    object.insert("observer".to_string(), association);
+                } else {
+                    let observed = std::mem::take(content);
+                    *content = serde_json::json!({
+                        "observedResult": observed,
+                        "observer": association,
+                    });
+                }
+            } else {
+                tracing::warn!(
+                    "[agentObserver] refusing invalid observer '{}' for agent '{}'",
+                    spec.agent,
+                    observed_agent_type
+                );
+            }
+        }
         Ok(result)
     }
 
@@ -1477,6 +1577,38 @@ impl SubagentSpawner for PoolSubagentSpawner {
         model: Option<&str>,
     ) -> traits::subagent_spawn::SelectedAgentMeta {
         let def = self.lookup_definition(subagent_type).await;
+        let observer = if def.observer.is_some() {
+            let mut definitions = vec![def.clone()];
+            definitions.extend(
+                self.builtins
+                    .values()
+                    .filter(|candidate| candidate.agent_type != def.agent_type)
+                    .cloned(),
+            );
+            if let Some(catalog) = self.agent_catalog.get() {
+                definitions.extend(
+                    catalog
+                        .read()
+                        .await
+                        .iter()
+                        .filter(|candidate| candidate.agent_type != def.agent_type)
+                        .cloned(),
+                );
+            }
+            match crate::observer::validate_observer_for(&definitions, &def.agent_type) {
+                Ok(()) => def.observer.clone(),
+                Err(error) => {
+                    tracing::warn!(
+                        "[agentObserver] refusing observer for agent {}: {}",
+                        def.agent_type,
+                        error
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
         // claude `getAgentModel(selectedAgent.model, mainLoopModel, model,
         // permissionMode)` (AgentTool.tsx:418): the caller's `model` override
         // takes precedence over the definition's model frontmatter. Resolve to a
@@ -1509,6 +1641,7 @@ impl SubagentSpawner for PoolSubagentSpawner {
         };
         traits::subagent_spawn::SelectedAgentMeta {
             agent_type: def.agent_type.clone(),
+            observer,
             resolved_model,
             source: agent_source_to_claude_str(def.source).to_string(),
             color: def.color.clone(),
@@ -1631,7 +1764,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use serde_json::Value;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, VecDeque};
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -1672,6 +1805,107 @@ mod tests {
         async fn snapshot_total_nano_usd(&self) -> u64 {
             0
         }
+    }
+
+    struct QueueApi {
+        responses: Mutex<VecDeque<llm_client::LlmResponse>>,
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl crate::api::SubagentApiClient for QueueApi {
+        async fn messages_create(
+            &self,
+            _model: &str,
+            _system: Option<&str>,
+            _messages: Vec<protocol::ConversationMessage>,
+            _tools: Vec<serde_json::Value>,
+        ) -> Result<llm_client::LlmResponse, llm_client::LlmError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.responses.lock().unwrap().pop_front().unwrap())
+        }
+    }
+
+    fn text_response(text: &str) -> llm_client::LlmResponse {
+        llm_client::LlmResponse {
+            id: "mock".into(),
+            model: "mock".into(),
+            content: vec![llm_client::ContentBlock::Text {
+                text: text.into(),
+                cache_control: None,
+            }],
+            stop_reason: Some("end_turn".into()),
+            stop_details: None,
+            usage: llm_client::Usage::default(),
+            cost: None,
+            provider_metadata: serde_json::Value::Null,
+        }
+    }
+
+    #[tokio::test]
+    async fn completed_spawn_launches_and_associates_observer_companion() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let api = Arc::new(QueueApi {
+            responses: Mutex::new(VecDeque::from([
+                text_response("worker result"),
+                text_response("observer result"),
+            ])),
+            calls: AtomicUsize::new(0),
+        });
+        let spawner = PoolSubagentSpawner::new(pool).with_api_client(api.clone());
+        let request = SubagentSpawnRequest {
+            subagent_type: "general-purpose".into(),
+            prompt: "do work".into(),
+            observer: Some(traits::subagent_spawn::ObserverSpec::new("Explore")),
+            context_paths: Vec::new(),
+            description: None,
+            model: None,
+            model_profile: None,
+            run_in_background: false,
+            name: None,
+            team_name: None,
+            creator_teammate_name: None,
+            creator_team_name: None,
+            mode: None,
+            isolation: None,
+            cwd: None,
+            worktree: None,
+            fork_context_messages: None,
+            fork_parent_system_prompt: None,
+            schema: None,
+            effort: None,
+            tool_use_id: None,
+            system_prompt_override: None,
+            system_prompt_addendum: None,
+            additional_disallowed_tools: Vec::new(),
+            depth: 1,
+            parent_model_override: None,
+            forked_skill_name: None,
+            forked_skill_attribution: None,
+            forked_skill_effort: None,
+            frozen_command_denies: Vec::new(),
+            resumed_history: None,
+        };
+        let result = spawner
+            .spawn(
+                request,
+                SubagentInheritance {
+                    tool_invoker: Arc::new(DummyInvoker),
+                    budget: Arc::new(DummyBudget),
+                },
+            )
+            .await
+            .expect("spawn");
+        let SubagentResult::Completed { content, .. } = result else {
+            panic!("expected completed result");
+        };
+        assert_eq!(api.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(content["observer"]["observerAgent"], "Explore");
+        assert_eq!(
+            content["observer"]["result"]["content"]["content"][0]["text"],
+            "observer result"
+        );
     }
 
     /// Runtime used to prove pool-level cancellation cleanup: it records
@@ -1828,6 +2062,7 @@ mod tests {
             effort: None,
             initial_prompt: None,
             color: None,
+            observer: None,
         }
     }
 
@@ -2473,6 +2708,7 @@ mod tests {
         let req = SubagentSpawnRequest {
             subagent_type: "general-purpose".to_string(),
             prompt: "go".to_string(),
+            observer: None,
             context_paths: vec![],
             description: None,
             model: None,
@@ -2527,6 +2763,7 @@ mod tests {
         let mut req = SubagentSpawnRequest {
             subagent_type: "general-purpose".to_string(),
             prompt: String::new(),
+            observer: None,
             context_paths: vec![],
             description: None,
             model: None,
@@ -2872,6 +3109,7 @@ mod tests {
         let mut req = SubagentSpawnRequest {
             subagent_type: "general-purpose".to_string(),
             prompt: "go".to_string(),
+            observer: None,
             context_paths: vec![],
             description: None,
             model: Some("haiku".to_string()),
@@ -2990,6 +3228,7 @@ mod tests {
         let base_req = || SubagentSpawnRequest {
             subagent_type: "general-purpose".to_string(),
             prompt: "go".to_string(),
+            observer: None,
             context_paths: vec![],
             description: None,
             model: None,
@@ -3096,6 +3335,7 @@ mod tests {
         let req = SubagentSpawnRequest {
             subagent_type: "general-purpose".to_string(),
             prompt: "go".to_string(),
+            observer: None,
             context_paths: vec![],
             description: None,
             model: None,
@@ -3162,6 +3402,7 @@ mod tests {
         let req = SubagentSpawnRequest {
             subagent_type: "general-purpose".to_string(),
             prompt: "go".to_string(),
+            observer: None,
             context_paths: vec![],
             description: None,
             model: None,
@@ -3220,6 +3461,7 @@ mod tests {
         let req = SubagentSpawnRequest {
             subagent_type: "general-purpose".to_string(),
             prompt: "go".to_string(),
+            observer: None,
             context_paths: vec![],
             description: None,
             model: None,
@@ -3292,6 +3534,7 @@ mod tests {
         let req = SubagentSpawnRequest {
             subagent_type: "general-purpose".to_string(),
             prompt: "go".to_string(),
+            observer: None,
             context_paths: vec![],
             description: None,
             model: None,
@@ -3393,6 +3636,7 @@ mod tests {
         let mut req = SubagentSpawnRequest {
             subagent_type: "general-purpose".to_string(),
             prompt: "go".to_string(),
+            observer: None,
             context_paths: vec![],
             description: None,
             model: None,
@@ -3477,6 +3721,7 @@ mod tests {
         let request = SubagentSpawnRequest {
             subagent_type: "general-purpose".to_string(),
             prompt: "go".to_string(),
+            observer: None,
             context_paths: vec![],
             description: None,
             model: None,
@@ -3652,6 +3897,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resolve_selection_surfaces_only_valid_observer_specs() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+
+        let mut reviewer = agent_def(AgentToolPolicy::All {
+            use_exact_tools: false,
+        });
+        reviewer.agent_type = "reviewer".into();
+
+        let mut worker = agent_def(AgentToolPolicy::All {
+            use_exact_tools: false,
+        });
+        worker.agent_type = "worker".into();
+        worker.observer = Some(traits::subagent_spawn::ObserverSpec::new("reviewer"));
+
+        let mut invalid = agent_def(AgentToolPolicy::All {
+            use_exact_tools: false,
+        });
+        invalid.agent_type = "invalid".into();
+        invalid.observer = Some(traits::subagent_spawn::ObserverSpec::new("missing"));
+
+        let catalog = Arc::new(RwLock::new(vec![reviewer, worker, invalid]));
+        let spawner = PoolSubagentSpawner::new(pool).with_agent_catalog(catalog);
+
+        let valid = spawner.resolve_selection("worker", None).await;
+        assert_eq!(
+            valid.observer.as_ref().map(|spec| spec.agent.as_str()),
+            Some("reviewer")
+        );
+
+        let invalid = spawner.resolve_selection("invalid", None).await;
+        assert!(
+            invalid.observer.is_none(),
+            "invalid observer graphs must fail closed before spawn metadata"
+        );
+    }
+
+    #[tokio::test]
     async fn resolve_selection_surfaces_definition_isolation() {
         let runtime = Arc::new(MockRuntimeSpawner::default());
         let pool = Arc::new(StateMachinePool::new(runtime, 4));
@@ -3693,6 +3976,7 @@ mod tests {
         let req = SubagentSpawnRequest {
             subagent_type: "general-purpose".into(),
             prompt: "go".into(),
+            observer: None,
             context_paths: vec![],
             description: None,
             model: None,

@@ -67,16 +67,14 @@ impl CliBgSessionForker {
             ..crate::background_dispatch::ForkLaunchContext::default()
         }
     }
-}
 
-#[async_trait]
-impl BgSessionForker for CliBgSessionForker {
-    async fn fork_to_background(
+    async fn fork_with_handoff(
         &self,
         history: &[protocol::ConversationMessage],
         system_prompt: Option<Arc<str>>,
         prompt: &str,
         model: &str,
+        handoff: Option<&traits::BackgroundingSnapshot>,
     ) -> Result<String, BgForkError> {
         // Resolve the LIVE cwd at fork time (a Bash `cd` may have moved it since
         // boot) so the snapshot path and the recorded job cwd agree.
@@ -109,6 +107,7 @@ impl BgSessionForker for CliBgSessionForker {
         // 3. Dispatch a detached daemon worker that resumes the copied session.
         let mut launch_context = self.launch_context();
         launch_context.model = Some(model.to_string());
+        launch_context.handoff = handoff.cloned();
         if let Some(system_prompt) = system_prompt {
             launch_context.system_prompt = Some(system_prompt.to_string());
         }
@@ -129,6 +128,32 @@ impl BgSessionForker for CliBgSessionForker {
         Ok(format!(
             "Copied conversation into a new background session ({short})."
         ))
+    }
+}
+
+#[async_trait]
+impl BgSessionForker for CliBgSessionForker {
+    async fn fork_to_background(
+        &self,
+        history: &[protocol::ConversationMessage],
+        system_prompt: Option<Arc<str>>,
+        prompt: &str,
+        model: &str,
+    ) -> Result<String, BgForkError> {
+        self.fork_with_handoff(history, system_prompt, prompt, model, None)
+            .await
+    }
+
+    async fn background_conversation(
+        &self,
+        history: &[protocol::ConversationMessage],
+        system_prompt: Option<Arc<str>>,
+        prompt: &str,
+        model: &str,
+        snapshot: &traits::BackgroundingSnapshot,
+    ) -> Result<String, BgForkError> {
+        self.fork_with_handoff(history, system_prompt, prompt, model, Some(snapshot))
+            .await
     }
 
     async fn resume_to_background(&self, session_id: &str) -> Result<String, BgForkError> {

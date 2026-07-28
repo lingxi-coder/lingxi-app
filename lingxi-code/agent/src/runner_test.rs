@@ -383,6 +383,7 @@ fn fresh_subagent_ctx() -> SubagentContext {
             effort: None,
             initial_prompt: None,
             color: None,
+            observer: None,
         },
         prompt_messages: vec![],
         fork_context_messages: None,
@@ -414,6 +415,7 @@ fn fresh_subagent_ctx() -> SubagentContext {
         hook_session_id: protocol::SessionId::nil(),
         hook_cwd: std::path::PathBuf::new(),
         depth: 0,
+        observer: None,
         permission_mode_override: None,
     }
 }
@@ -2838,10 +2840,9 @@ async fn run_subagent_persists_its_conversation_to_the_agent_transcript() {
     let api = MockSubagentApiClient::new(vec![Ok(text_response("the answer", Some("end_turn")))]);
     let mut ctx = loop_ctx(api, None, 4);
     ctx.transcript_subdir = dir.path().to_path_buf();
-    ctx.transcript_fs = Some(
-        Arc::new(platform_posix::PosixFileSystem::new(dir.path().to_path_buf()))
-            as Arc<dyn traits::FileSystem>,
-    );
+    ctx.transcript_fs = Some(Arc::new(platform_posix::PosixFileSystem::new(
+        dir.path().to_path_buf(),
+    )) as Arc<dyn traits::FileSystem>);
     ctx.prompt_messages = vec![protocol::ConversationMessage::user(
         MessageId::new(),
         "do the thing".to_string(),
@@ -2869,7 +2870,10 @@ async fn run_subagent_persists_its_conversation_to_the_agent_transcript() {
         body.contains("do the thing"),
         "the seeded prompt is persisted: {body}"
     );
-    assert!(body.contains("the answer"), "the reply is persisted: {body}");
+    assert!(
+        body.contains("the answer"),
+        "the reply is persisted: {body}"
+    );
 }
 
 /// A host that wires no transcript filesystem persists nothing and behaves
@@ -2919,7 +2923,10 @@ async fn a_resumed_history_replaces_the_seed_rather_than_prefixing_it() {
 
     let sent = api.last_messages();
     let rendered = format!("{sent:?}");
-    assert!(rendered.contains("RECOVERED"), "resumed history is sent: {rendered}");
+    assert!(
+        rendered.contains("RECOVERED"),
+        "resumed history is sent: {rendered}"
+    );
     assert!(
         !rendered.contains("ORIGINAL PROMPT"),
         "the prompt is NOT re-sent: {rendered}"
@@ -2939,10 +2946,9 @@ async fn a_restored_run_appends_only_new_messages_to_its_transcript() {
     let api = MockSubagentApiClient::new(vec![Ok(text_response("fresh reply", Some("end_turn")))]);
     let mut ctx = loop_ctx(api, None, 4);
     ctx.transcript_subdir = dir.path().to_path_buf();
-    ctx.transcript_fs = Some(
-        Arc::new(platform_posix::PosixFileSystem::new(dir.path().to_path_buf()))
-            as Arc<dyn traits::FileSystem>,
-    );
+    ctx.transcript_fs = Some(Arc::new(platform_posix::PosixFileSystem::new(
+        dir.path().to_path_buf(),
+    )) as Arc<dyn traits::FileSystem>);
     ctx.resumed_history = Some(vec![protocol::ConversationMessage::user(
         MessageId::new(),
         "ALREADY ON DISK".to_string(),
@@ -2954,11 +2960,13 @@ async fn a_restored_run_appends_only_new_messages_to_its_transcript() {
     run_subagent(ctx, event_rx, out_tx).await;
     let _ = drain(out_rx).await;
 
-    let body =
-        std::fs::read_to_string(dir.path().join(format!("agent-{agent_id}.jsonl"))).unwrap();
+    let body = std::fs::read_to_string(dir.path().join(format!("agent-{agent_id}.jsonl"))).unwrap();
     assert!(
         !body.contains("ALREADY ON DISK"),
         "the recovered conversation is not written a second time: {body}"
     );
-    assert!(body.contains("fresh reply"), "new turns are appended: {body}");
+    assert!(
+        body.contains("fresh reply"),
+        "new turns are appended: {body}"
+    );
 }

@@ -148,8 +148,12 @@ pub async fn run_subagent(
                 .clone()
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
             if crate::hooks_trust::agent_hooks_origin_trusted(&ctx.agent_definition, &cwd) {
-                he.register_agent_hooks(ctx.agent_id, &ctx.agent_definition.frontmatter_hooks, true)
-                    .await;
+                he.register_agent_hooks(
+                    ctx.agent_id,
+                    &ctx.agent_definition.frontmatter_hooks,
+                    true,
+                )
+                .await;
                 Some((he.clone(), ctx.agent_id))
             } else {
                 crate::hooks_trust::report_untrusted_hooks(
@@ -1306,6 +1310,15 @@ async fn run_subagent_loop(
                         // nested `Agent` call computes the grandchild's depth (`depth+1`)
                         // and the resolver applies the configured spawn-depth cap.
                         depth: ctx.depth,
+                        observer: ctx
+                            .observer
+                            .as_ref()
+                            .filter(|observer| {
+                                observer.observe_subagents
+                                    && ctx.depth
+                                        < crate::observer::DEFAULT_OBSERVER_FANOUT_DEPTH
+                            })
+                            .cloned(),
                         // This subagent's OWN resolved main-loop model — so a NESTED
                         // `Agent` tool call resolves its child's model against THIS
                         // subagent's model (claude-code `runAgent.ts:678` seeds each

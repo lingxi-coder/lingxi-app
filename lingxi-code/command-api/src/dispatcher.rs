@@ -37,6 +37,17 @@ pub type ExpansionHookContextProvider = Arc<
         + Sync,
 >;
 
+/// Launches a fork-context bundled command without growing the foreground
+/// conversation. The composition root supplies the actual subagent runtime.
+pub type BackgroundPromptLauncher = Arc<
+    dyn Fn(
+            String,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+        + Send
+        + Sync,
+>;
+
 /// The `UserPromptExpansion` firing dependencies threaded into a
 /// [`RegistrySlashDispatcher`]: the engine's hook executor plus the
 /// context-provider. Both are present together or the feature is off.
@@ -124,6 +135,9 @@ pub struct RegistrySlashDispatcher {
     /// Explicit config-home for persistent user/project skill usage counters.
     /// `None` keeps embedders and tests side-effect free.
     skill_usage_home: Option<PathBuf>,
+    /// Host-owned background launcher for bundled commands declaring
+    /// `context: fork`. `None` fails closed instead of executing inline.
+    background_prompt_launcher: Option<BackgroundPromptLauncher>,
 }
 
 impl RegistrySlashDispatcher {
@@ -135,6 +149,7 @@ impl RegistrySlashDispatcher {
             expansion_hooks: None,
             shell_expansion: None,
             skill_usage_home: None,
+            background_prompt_launcher: None,
         }
     }
 
@@ -157,6 +172,17 @@ impl RegistrySlashDispatcher {
     #[must_use]
     pub fn with_skill_usage_home(mut self, config_home: PathBuf) -> Self {
         self.skill_usage_home = Some(config_home);
+        self
+    }
+
+    /// Wire the background subagent launcher used by fork-context bundled
+    /// commands such as `/code-review`.
+    #[must_use]
+    pub fn with_background_prompt_launcher(
+        mut self,
+        launcher: BackgroundPromptLauncher,
+    ) -> Self {
+        self.background_prompt_launcher = Some(launcher);
         self
     }
 
@@ -250,6 +276,7 @@ impl RegistrySlashDispatcher {
             // identically.
             shell_expansion: self.shell_expansion.clone(),
             skill_usage_home: self.skill_usage_home.clone(),
+            background_prompt_launcher: self.background_prompt_launcher.clone(),
         }
     }
 
@@ -321,7 +348,11 @@ impl SlashCommandDispatcher for RegistrySlashDispatcher {
         // rather than resolving to Unknown (the bundled kind is not a registered
         // handler). Same display contract + `UserPromptExpansion` firing as the
         // markdown path below.
-        if let SlashCommandKind::Bundled { prompt_fn, .. } = &command.kind {
+        if let SlashCommandKind::Bundled {
+            frontmatter,
+            prompt_fn,
+        } = &command.kind
+        {
             // The boot-registered instance always carries `prompt_fn`; a
             // deserialized one is inert by design (`#[serde(skip)]`). Clone the
             // builder so the registry lock can be dropped before building.
@@ -336,6 +367,27 @@ impl SlashCommandDispatcher for RegistrySlashDispatcher {
                         command.source,
                     )
                     .await;
+                    if frontmatter.context.as_deref() == Some("fork")
+                        && frontmatter.background.unwrap_or(true)
+                    {
+                        return match self.background_prompt_launcher.as_ref() {
+                            Some(launcher) => match launcher(content).await {
+                                Ok(display) => SlashDispatchResult::Handled { display },
+                                Err(error) => SlashDispatchResult::Handled {
+                                    display: format!(
+                                        "Could not start /{} in the background: {error}",
+                                        command.name
+                                    ),
+                                },
+                            },
+                            None => SlashDispatchResult::Handled {
+                                display: format!(
+                                    "Could not start /{} in the background: no background launcher is wired",
+                                    command.name
+                                ),
+                            },
+                        };
+                    }
                     // claude-code bundled skills are `type: "prompt"` /
                     // `userInvocable: true` (cc_all.txt:480599): the expanded
                     // prompt becomes the user TURN, not display text. A typed
@@ -623,6 +675,88 @@ mod tests {
         match d.dispatch("/loop").await {
             SlashDispatchResult::RunAsTurn { prompt } => assert_eq!(prompt, "USAGE"),
             other => panic!("expected usage run-as-turn, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fork_context_bundled_skill_uses_background_launcher_not_main_turn() {
+        struct ReviewPrompt;
+        impl crate::model::BundledPromptFn for ReviewPrompt {
+            fn build(&self, args: &str) -> String {
+                format!("REVIEW[{}]", args.trim())
+            }
+        }
+
+        let mut reg = CommandRegistry::new();
+        reg.register_command(SlashCommand {
+            name: "code-review".to_string(),
+            description: "Review".to_string(),
+            source: CommandSource::Bundled,
+            kind: SlashCommandKind::Bundled {
+                frontmatter: CommandFrontmatter {
+                    context: Some("fork".to_string()),
+                    background: Some(true),
+                    ..CommandFrontmatter::default()
+                },
+                prompt_fn: Some(Arc::new(ReviewPrompt)),
+            },
+            loaded_from: Some("bundled".to_string()),
+            user_invocable: Some(true),
+            ..SlashCommand::default()
+        });
+        let launched = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let captured = launched.clone();
+        let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)))
+            .with_background_prompt_launcher(Arc::new(move |prompt| {
+                let captured = captured.clone();
+                Box::pin(async move {
+                    captured.lock().await.push(prompt);
+                    Ok("started review agent".to_string())
+                })
+            }));
+
+        assert_eq!(
+            d.dispatch("/code-review high --fix src").await,
+            SlashDispatchResult::Handled {
+                display: "started review agent".to_string()
+            }
+        );
+        assert_eq!(
+            launched.lock().await.as_slice(),
+            ["REVIEW[high --fix src]"]
+        );
+    }
+
+    #[tokio::test]
+    async fn fork_context_bundled_skill_fails_closed_without_launcher() {
+        struct ReviewPrompt;
+        impl crate::model::BundledPromptFn for ReviewPrompt {
+            fn build(&self, _: &str) -> String {
+                "review".to_string()
+            }
+        }
+        let mut reg = CommandRegistry::new();
+        reg.register_command(SlashCommand {
+            name: "code-review".to_string(),
+            description: "Review".to_string(),
+            source: CommandSource::Bundled,
+            kind: SlashCommandKind::Bundled {
+                frontmatter: CommandFrontmatter {
+                    context: Some("fork".to_string()),
+                    background: Some(true),
+                    ..CommandFrontmatter::default()
+                },
+                prompt_fn: Some(Arc::new(ReviewPrompt)),
+            },
+            ..SlashCommand::default()
+        });
+        let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)));
+
+        match d.dispatch("/code-review").await {
+            SlashDispatchResult::Handled { display } => {
+                assert!(display.contains("no background launcher is wired"));
+            }
+            other => panic!("fork-context command must never run inline: {other:?}"),
         }
     }
 

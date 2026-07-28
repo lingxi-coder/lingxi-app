@@ -1129,6 +1129,13 @@ impl OrchestratorHandle for MockOrchestratorHandle {
         Ok("Copied conversation into a new background session (mock-bg-abcd).".to_string())
     }
 
+    async fn background_conversation(
+        &self,
+        _snapshot: traits::BackgroundingSnapshot,
+    ) -> Result<String, HandleError> {
+        Ok("Moved conversation into a background session (mock-bg-abcd).".to_string())
+    }
+
     /// Deterministic recap text so wired-success tests can assert real output.
     /// (`/recap`'s handler gates on a qualifying transcript turn before calling.)
     async fn generate_recap(&self) -> Result<traits::RecapOutcome, HandleError> {

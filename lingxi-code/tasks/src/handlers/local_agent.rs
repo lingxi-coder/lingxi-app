@@ -330,6 +330,7 @@ impl Task for LocalAgentHandler {
         let request = spawn_request.unwrap_or_else(|| SubagentSpawnRequest {
             subagent_type,
             prompt,
+            observer: None,
             context_paths: Vec::new(),
             description: None,
             model: None,
@@ -1120,6 +1121,7 @@ mod tests {
         SubagentSpawnRequest {
             subagent_type: "general-purpose".into(),
             prompt: prompt.into(),
+            observer: None,
             context_paths: Vec::new(),
             description: None,
             model: None,
@@ -1799,7 +1801,10 @@ mod tests {
         let outcome = sink.outcome();
         assert_eq!(outcome.error.as_deref(), Some("model refused"));
         assert!(outcome.result.is_none(), "a failed run has no final text");
-        assert!(outcome.usage.is_none(), "no usage rollup on the failed path");
+        assert!(
+            outcome.usage.is_none(),
+            "no usage rollup on the failed path"
+        );
     }
 
     /// The payload must land BEFORE the terminal status: the registry's drain
@@ -2322,6 +2327,7 @@ mod tests {
         let expected = SubagentSpawnRequest {
             subagent_type: "code-reviewer".into(),
             prompt: "inspect the background request".into(),
+            observer: None,
             context_paths: vec![PathBuf::from("/workspace/CONTEXT.md")],
             description: Some("review request".into()),
             model: Some("opus".into()),
@@ -2481,7 +2487,11 @@ mod tests {
         sink: Arc<RecordingSink>,
         gate: Arc<dyn traits::fork_resume_gate::ForkResumeGate>,
         fork_name: Option<&str>,
-    ) -> (LocalAgentHandler, String, Arc<std::sync::atomic::AtomicUsize>) {
+    ) -> (
+        LocalAgentHandler,
+        String,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
         let tx_slot: Arc<StdMutex<Option<tokio::sync::mpsc::Sender<SubagentEvent>>>> =
             Arc::new(StdMutex::new(None));
         let resume_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -2612,5 +2622,4 @@ mod tests {
             .expect("no gate ⇒ resume proceeds");
         assert_eq!(resume_count.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
-
 }

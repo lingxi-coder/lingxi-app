@@ -127,7 +127,10 @@ impl QueuedCommands {
 
     /// Record a uuid entering the input queue (stdin router, pre-send).
     pub fn on_queued(&self, uuid: &str) {
-        let mut inner = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         inner.queued.push(uuid.to_string());
     }
 
@@ -136,7 +139,10 @@ impl QueuedCommands {
     /// caller must skip the frame — its terminal lifecycle already went out).
     #[must_use]
     pub fn on_dequeued(&self, uuid: &str) -> bool {
-        let mut inner = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         inner.queued.retain(|u| u != uuid);
         !inner.cancelled.remove(uuid)
     }
@@ -145,7 +151,10 @@ impl QueuedCommands {
     /// already cancel-pending — the binary's `G.filter((jt)=>!HRu(jt))`).
     #[must_use]
     pub fn still_queued(&self) -> Vec<String> {
-        let inner = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         inner
             .queued
             .iter()
@@ -159,7 +168,10 @@ impl QueuedCommands {
     /// interrupt yields an empty receipt (idempotent).
     #[must_use]
     pub fn cancel_all_queued(&self) -> Vec<String> {
-        let mut inner = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let swept: Vec<String> = inner
             .queued
             .iter()
@@ -176,7 +188,10 @@ impl QueuedCommands {
     /// `discarded` lifecycle. Clears the registry.
     #[must_use]
     pub fn drain_for_discard(&self) -> Vec<String> {
-        let mut inner = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let survivors: Vec<String> = inner
             .queued
             .iter()
@@ -347,8 +362,14 @@ mod tests {
     fn terminal_state_honours_abort_flag_and_absent_reason() {
         assert_eq!(terminal_lifecycle_state(None, false), "completed");
         assert_eq!(terminal_lifecycle_state(None, true), "cancelled");
-        assert_eq!(terminal_lifecycle_state(Some("max_turns"), true), "cancelled");
-        assert_eq!(terminal_lifecycle_state(Some("completed"), false), "completed");
+        assert_eq!(
+            terminal_lifecycle_state(Some("max_turns"), true),
+            "cancelled"
+        );
+        assert_eq!(
+            terminal_lifecycle_state(Some("completed"), false),
+            "completed"
+        );
     }
 
     #[test]

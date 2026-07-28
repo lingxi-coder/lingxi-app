@@ -1323,7 +1323,8 @@ mod tests {
             directory: "/work/extra".into(),
             source: "add_dir".into(),
         };
-        let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
         assert_eq!(v["hook_event_name"], "DirectoryAdded");
         assert_eq!(v["directory"], "/work/extra");
         assert_eq!(v["source"], "add_dir");

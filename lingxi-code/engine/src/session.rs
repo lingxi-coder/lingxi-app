@@ -70,6 +70,18 @@ pub struct ActiveGoalState {
     pub last_reason: Option<String>,
 }
 
+/// Timestamp sidecar for timing-sensitive history policies.
+///
+/// Kept outside [`ConversationMessage`] so its frozen provider/wire shape is
+/// unchanged. Legacy persisted state defaults to no timestamp, which makes
+/// time-based microcompaction fail safe (no cleanup).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MessageTimingState {
+    /// Commit time of the newest assistant message known to this session.
+    #[serde(default)]
+    pub last_assistant_at: Option<SystemTime>,
+}
+
 /// In-memory model of a conversation session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionState {
@@ -92,6 +104,18 @@ pub struct SessionState {
     /// Active session-scoped `/goal`. Defaults to `None` on deserialize.
     #[serde(default)]
     pub active_goal: Option<ActiveGoalState>,
+    /// Timing state adjacent to history; never inferred from message count.
+    #[serde(default)]
+    pub message_timing: MessageTimingState,
+    /// Persisted Ultracode reminder state. The transcript replay path
+    /// reconstructs these fields from the meta reminder messages, so cold
+    /// resume and in-process resume continue the same sparse cadence.
+    #[serde(default)]
+    pub ultracode_active: bool,
+    /// Number of non-meta user turns since the last Ultracode enter/sparse
+    /// reminder.
+    #[serde(default)]
+    pub ultracode_non_meta_turns_since_reminder: u32,
     /// Plan-mode flag (M4-04). Flipped by `EnterPlanModeTool` /
     /// `ExitPlanModeTool`. Defaults to `false` on deserialize.
     #[serde(default)]
@@ -167,6 +191,9 @@ impl SessionState {
             model_profile: None,
             todos: Vec::new(),
             active_goal: None,
+            message_timing: MessageTimingState::default(),
+            ultracode_active: false,
+            ultracode_non_meta_turns_since_reminder: 0,
             plan_mode: false,
             plan_reminder_shown: false,
             turns_since_last_todo_write: 0,

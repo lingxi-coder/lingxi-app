@@ -38,6 +38,10 @@ static SHOW_THINKING_SUMMARIES: AtomicBool = AtomicBool::new(false);
 /// the orchestrator at session init and refreshed as the model/profile resolve.
 static TOOL_SEARCH_ENABLED: AtomicBool = AtomicBool::new(false);
 
+/// Session-scoped dynamic Workflow availability, resolved by the composition
+/// root after managed policy and environment gates are known.
+static DYNAMIC_WORKFLOWS_ENABLED: AtomicBool = AtomicBool::new(false);
+
 /// Record whether the current process is a non-interactive (`-p`/print/headless)
 /// session. Idempotent; safe to call repeatedly (the value is fixed per process).
 pub fn set_non_interactive_session(non_interactive: bool) {
@@ -77,6 +81,17 @@ pub fn set_tool_search_enabled(enabled: bool) {
 #[must_use]
 pub fn tool_search_enabled() -> bool {
     TOOL_SEARCH_ENABLED.load(Ordering::Relaxed)
+}
+
+/// Publish whether dynamic workflows are available for this session.
+pub fn set_dynamic_workflows_enabled(enabled: bool) {
+    DYNAMIC_WORKFLOWS_ENABLED.store(enabled, Ordering::Relaxed);
+}
+
+/// Whether `/effort ultracode` may activate the xhigh Workflow mode.
+#[must_use]
+pub fn dynamic_workflows_enabled() -> bool {
+    DYNAMIC_WORKFLOWS_ENABLED.load(Ordering::Relaxed)
 }
 
 #[cfg(test)]

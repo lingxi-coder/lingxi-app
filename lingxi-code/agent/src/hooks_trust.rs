@@ -212,8 +212,10 @@ pub fn report_untrusted_hooks(
     // raw dir would hand the user a `projects[...]` path that doesn't match.
     let dir = trust_dir_for(def, cwd);
     let trust_key = migrations::global_config::project_path_for_config(&dir);
-    let config = migrations::global_config::global_config_path()
-        .map_or_else(|| "<no global config>".to_string(), |p| p.display().to_string());
+    let config = migrations::global_config::global_config_path().map_or_else(
+        || "<no global config>".to_string(),
+        |p| p.display().to_string(),
+    );
     tracing::error!(
         "Skipping frontmatter hooks for {} '{}': the folder its definition file came from is not \
          trusted (source: {}, trust key: {trust_key}). Run Claude Code there once and accept the \
@@ -399,7 +401,11 @@ mod tests {
         std::fs::create_dir_all(&proj).unwrap();
         let missing = tmp.path().join("does-not-exist.json");
         assert!(
-            !agent_hooks_origin_trusted_with_config(&def_at(&proj, AgentSource::Project), &proj, &missing),
+            !agent_hooks_origin_trusted_with_config(
+                &def_at(&proj, AgentSource::Project),
+                &proj,
+                &missing
+            ),
             "an absent config must not imply trust"
         );
     }

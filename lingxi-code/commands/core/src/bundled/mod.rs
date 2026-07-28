@@ -11,6 +11,7 @@ use command_api::{
 
 pub mod batch_skill;
 pub mod code_review_skill;
+pub mod deep_research_skill;
 pub mod fewer_permission_prompts_skill;
 pub mod loop_skill;
 pub mod run_skill;
@@ -33,7 +34,33 @@ pub fn register_bundled_skills(reg: &mut CommandRegistry, cron_enabled: bool) {
     register_run_skill_generator_skill(reg);
     register_fewer_permission_prompts_skill(reg);
     register_code_review_skill(reg);
+    register_deep_research_skill(reg);
     register_batch_skill(reg);
+}
+
+/// Register the manual-only `/deep-research` launcher. The short prompt invokes
+/// the immutable built-in through the ordinary Workflow tool, so slash and tool
+/// entry points share one launch/runtime path.
+fn register_deep_research_skill(reg: &mut CommandRegistry) {
+    reg.register_command(SlashCommand {
+        name: "deep-research".into(),
+        description: deep_research_skill::DESCRIPTION.into(),
+        menu_description: Some("Research a question across verified sources".into()),
+        source: CommandSource::Bundled,
+        kind: SlashCommandKind::Bundled {
+            frontmatter: CommandFrontmatter {
+                allowed_tools: Some(vec!["Workflow".into()]),
+                ..CommandFrontmatter::default()
+            },
+            prompt_fn: Some(Arc::new(deep_research_skill::DeepResearchPromptFn)),
+        },
+        loaded_from: Some("bundled".into()),
+        user_invocable: Some(true),
+        disable_model_invocation: true,
+        has_user_specified_description: true,
+        argument_hint: Some(deep_research_skill::ARGUMENT_HINT.into()),
+        ..SlashCommand::default()
+    });
 }
 
 /// Register the `/batch` bundled skill — parallel-work orchestration
@@ -67,13 +94,19 @@ fn register_batch_skill(reg: &mut CommandRegistry) {
 /// `argumentHint:"[low|medium|high|xhigh|max] [--fix] [--comment] [<target>]"`).
 /// Distinct from the builtin `/review` (GitHub PRs); see [`code_review_skill`].
 fn register_code_review_skill(reg: &mut CommandRegistry) {
+    let frontmatter = CommandFrontmatter {
+        context: Some("fork".into()),
+        background: Some(true),
+        agent: Some("general-purpose".into()),
+        ..CommandFrontmatter::default()
+    };
     reg.register_command(SlashCommand {
         name: "code-review".into(),
         description: code_review_skill::CODE_REVIEW_DESCRIPTION.into(),
         menu_description: Some("Review the current diff for bugs and cleanups".into()),
         source: CommandSource::Bundled,
         kind: SlashCommandKind::Bundled {
-            frontmatter: CommandFrontmatter::default(),
+            frontmatter,
             prompt_fn: Some(Arc::new(code_review_skill::CodeReviewPromptFn)),
         },
         loaded_from: Some("bundled".into()),
@@ -414,6 +447,31 @@ mod tests {
                 assert!(f.build("high").starts_with("`high effort"));
             }
             other => panic!("expected Bundled kind, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deep_research_is_manual_only_and_uses_workflow_name_launcher() {
+        let mut reg = CommandRegistry::new();
+        register_bundled_skills(&mut reg, false);
+        let cmd = reg.resolve("deep-research").expect("registered");
+        assert_eq!(cmd.user_invocable, Some(true));
+        assert!(cmd.disable_model_invocation);
+        assert_eq!(cmd.argument_hint.as_deref(), Some("<question>"));
+        match &cmd.kind {
+            SlashCommandKind::Bundled {
+                frontmatter,
+                prompt_fn,
+            } => {
+                assert_eq!(
+                    frontmatter.allowed_tools.as_deref(),
+                    Some(["Workflow".to_string()].as_slice())
+                );
+                let prompt = prompt_fn.as_ref().expect("prompt").build("why?");
+                assert!(prompt.contains("\"name\":\"deep-research\""));
+                assert!(prompt.contains("\"args\":\"why?\""));
+            }
+            other => panic!("expected bundled command, got {other:?}"),
         }
     }
 

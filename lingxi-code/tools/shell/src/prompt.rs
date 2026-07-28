@@ -653,7 +653,7 @@ fn concise_git_section() -> String {
 ///
 /// Em-dash is U+2014 (the binary stores it as the JS escape `—`).
 #[must_use]
-pub fn simple_prompt_concise(sandbox: &SandboxRuntimeConfig) -> String {
+pub fn simple_prompt_concise(sandbox: &SandboxRuntimeConfig, model: Option<&str>) -> String {
     // CONCISE avoid-list — the Dh-true (SHORT) branch DROPS `find`/`grep` vs the
     // LONG prompt (verified against the v2.1.183 binary's qUp builder + the
     // rendered opus-4-8 output: the SHORT list starts at `cat`). NOT config-gated.
@@ -665,12 +665,20 @@ pub fn simple_prompt_concise(sandbox: &SandboxRuntimeConfig) -> String {
         String::new(),
         "- Working directory persists between calls, but prefer absolute paths \u{2014} `cd` in a compound command can trigger a permission prompt. Shell state (env vars, functions) does not persist; the shell is initialized from the user's profile.".into(),
         format!("- IMPORTANT: Avoid using this tool to run {avoid_commands} commands, unless explicitly instructed or after you have verified that a dedicated tool cannot accomplish your task. Instead, use the appropriate dedicated tool as this will provide a much better experience for the user."),
-        format!(
-            "- `timeout` is in milliseconds: default {}, max {}.",
-            bash_default_timeout_ms(),
-            bash_max_timeout_ms()
-        ),
     ];
+    if model.is_some_and(|model| {
+        traits::model_capabilities::has_capability(
+            model,
+            traits::model_capabilities::ModelCapability::Opus5PromptBundle,
+        )
+    }) {
+        lines.push("- Command output is displayed to you, not reliably to the user.".into());
+    }
+    lines.push(format!(
+        "- `timeout` is in milliseconds: default {}, max {}.",
+        bash_default_timeout_ms(),
+        bash_max_timeout_ms()
+    ));
 
     // `s` — the detached-run bullet, present iff the background note exists.
     // `sq()` (Monitor / amber sentinel) is default-false ⇒ no Monitor clause.
@@ -862,6 +870,20 @@ mod tests {
         assert!(
             !p.contains("## Command sandbox"),
             "sandbox section should be absent when sandbox disabled"
+        );
+    }
+
+    #[test]
+    fn concise_prompt_adds_only_the_opus_5_output_visibility_bullet() {
+        let opus_5 = simple_prompt_concise(&disabled_sandbox(), Some("claude-opus-5[1m]"));
+        let opus_48 = simple_prompt_concise(&disabled_sandbox(), Some("claude-opus-4-8"));
+        let added = "- Command output is displayed to you, not reliably to the user.";
+
+        assert!(opus_5.contains(added));
+        assert!(!opus_48.contains(added));
+        assert!(
+            opus_5.contains("IMPORTANT: Avoid using this tool"),
+            "the confirmed existing warning must not be deleted"
         );
     }
 

@@ -124,6 +124,26 @@ impl CommandRegistry {
             self.aliases.retain(|_, target| !names.contains(target));
         }
     }
+
+    /// Remove every command attributed to `loaded_from`, including aliases
+    /// pointing at those commands.
+    ///
+    /// Catalog refreshers use this before a full disk re-scan so deleted skill
+    /// files disappear from the live registry instead of surviving forever as
+    /// stale entries.
+    pub fn unregister_loaded_from(&mut self, loaded_from: &str) -> usize {
+        let names: Vec<String> = self
+            .commands
+            .iter()
+            .filter(|(_, command)| command.loaded_from.as_deref() == Some(loaded_from))
+            .map(|(name, _)| name.clone())
+            .collect();
+        for name in &names {
+            self.commands.remove(name);
+        }
+        self.aliases.retain(|_, target| !names.contains(target));
+        names.len()
+    }
 }
 
 impl Default for CommandRegistry {
@@ -214,6 +234,21 @@ mod tests {
         assert!(c.skill_root.is_none());
         assert!(c.user_invocable.is_none());
         assert!(c.content_length.is_none());
+    }
+
+    #[test]
+    fn unregister_loaded_from_removes_commands_and_aliases() {
+        let mut reg = CommandRegistry::new();
+        let mut skill = markdown_cmd("review", vec!["rv".to_string()]);
+        skill.loaded_from = Some("skills".to_string());
+        reg.register_command(skill);
+        reg.register_command(markdown_cmd("keep", vec!["k".to_string()]));
+
+        assert_eq!(reg.unregister_loaded_from("skills"), 1);
+        assert!(reg.resolve("review").is_none());
+        assert!(reg.resolve("rv").is_none());
+        assert!(reg.resolve("keep").is_some());
+        assert!(reg.resolve("k").is_some());
     }
 
     /// `get_handler` canonicalizes through the aliases map (mirroring `resolve`),

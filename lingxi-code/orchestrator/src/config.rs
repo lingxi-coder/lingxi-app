@@ -290,6 +290,20 @@ pub struct OrchestratorConfig {
     #[serde(default)]
     pub effort: Option<String>,
 
+    /// Remote feature-flag cadence for Ultracode maintenance reminders.
+    /// The environment override is resolved inside `tool-workflow` and wins.
+    #[serde(default)]
+    pub ultracode_feature_flag_cadence: Option<u32>,
+
+    /// Product-default Ultracode cadence. `None` falls back to the oracle's
+    /// hardcoded ten non-meta turns.
+    #[serde(default)]
+    pub ultracode_product_default_cadence: Option<u32>,
+
+    /// `settings.workflowKeywordTriggerEnabled`.
+    #[serde(default)]
+    pub workflow_keyword_trigger_enabled: bool,
+
     /// (gap218 #43) Whether an IN-PLACE resume (`resume_session`, the bridge /
     /// desktop hot-resume surface) may adopt the resumed agent's frontmatter
     /// `model` — the hot-path twin of claude-code `NQe`'s
@@ -335,6 +349,9 @@ impl Default for OrchestratorConfig {
             plan_mode_instructions: None,
             plans_directory: None,
             effort: None,
+            ultracode_feature_flag_cadence: None,
+            ultracode_product_default_cadence: None,
+            workflow_keyword_trigger_enabled: false,
             apply_resumed_agent_model: false,
         }
     }
@@ -389,6 +406,9 @@ mod tests {
             plan_mode_instructions: Some("MY BODY".into()),
             plans_directory: Some("docs/plans".into()),
             effort: Some("high".into()),
+            ultracode_feature_flag_cadence: Some(12),
+            ultracode_product_default_cadence: Some(10),
+            workflow_keyword_trigger_enabled: true,
             apply_resumed_agent_model: true,
         };
         let s = serde_json::to_string(&cfg).unwrap();
@@ -418,6 +438,9 @@ mod tests {
         assert_eq!(back.user_email.as_deref(), Some("u@example.com"));
         assert_eq!(back.plan_mode_instructions.as_deref(), Some("MY BODY"));
         assert_eq!(back.plans_directory.as_deref(), Some("docs/plans"));
+        assert_eq!(back.ultracode_feature_flag_cadence, Some(12));
+        assert_eq!(back.ultracode_product_default_cadence, Some(10));
+        assert!(back.workflow_keyword_trigger_enabled);
         assert!(back.apply_resumed_agent_model);
     }
 

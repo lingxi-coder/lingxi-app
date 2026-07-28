@@ -537,6 +537,7 @@ mod read_file_state_tests {
                 traits::permission_gate::PermissionOutcome::Allow {
                     updated_input: Some(json!({"file_path":"real.txt"})),
                     permission_updates: vec![],
+                    decision_classification: None,
                 },
             )
             .await
@@ -600,6 +601,7 @@ mod read_file_state_tests {
                 traits::permission_gate::PermissionOutcome::Allow {
                     updated_input: None,
                     permission_updates: vec![update.clone()],
+                    decision_classification: None,
                 },
             )
             .await
@@ -703,6 +705,7 @@ mod read_file_state_tests {
                 traits::permission_gate::PermissionOutcome::Allow {
                     updated_input: None,
                     permission_updates: vec![],
+                    decision_classification: None,
                 },
             )
             .await
@@ -729,6 +732,7 @@ mod read_file_state_tests {
                 traits::permission_gate::PermissionOutcome::Allow {
                     updated_input: None,
                     permission_updates: vec![],
+                    decision_classification: None,
                 },
             )
             .await
@@ -763,6 +767,7 @@ mod read_file_state_tests {
                 traits::permission_gate::PermissionOutcome::Allow {
                     updated_input: None,
                     permission_updates: vec![],
+                    decision_classification: None,
                 },
             )
             .await
@@ -811,6 +816,7 @@ mod read_file_state_tests {
         let allow = || traits::permission_gate::PermissionOutcome::Allow {
             updated_input: None,
             permission_updates: vec![],
+            decision_classification: None,
         };
         assert!(orch.run_orphaned_permission(&id1, allow()).await.unwrap());
         assert!(orch.run_orphaned_permission(&id2, allow()).await.unwrap());
@@ -864,6 +870,7 @@ mod read_file_state_tests {
         let allow = || traits::permission_gate::PermissionOutcome::Allow {
             updated_input: None,
             permission_updates: vec![],
+            decision_classification: None,
         };
         assert!(orch.run_orphaned_permission(&tuid, allow()).await.unwrap());
         assert!(

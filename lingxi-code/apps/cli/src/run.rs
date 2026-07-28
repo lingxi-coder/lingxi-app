@@ -318,11 +318,7 @@ pub async fn run_stream_json_print(
     let fast_mode_disabled_reason = {
         let listings = runtime.orchestrator.list_model_listings().await;
         resolve_fast_mode_disabled_reason(
-            session_model_is_first_party(
-                env_api_provider_is_first_party(),
-                &listings,
-                &model_str,
-            ),
+            session_model_is_first_party(env_api_provider_is_first_party(), &listings, &model_str),
             sdk_fast_mode_opt_in,
         )
     };
@@ -393,13 +389,29 @@ pub async fn run_stream_json_print(
         let err_msg = err.to_string();
         let subtype = stream_json_error_subtype(&err);
         stream
-            .emit_result_error(subtype, vec![err_msg], &cost, &model, fast_mode_state, fast_mode_disabled_reason, &betas)
+            .emit_result_error(
+                subtype,
+                vec![err_msg],
+                &cost,
+                &model,
+                fast_mode_state,
+                fast_mode_disabled_reason,
+                &betas,
+            )
             .await;
         stream.flush().await;
         exit_codes::RUNTIME_ERROR
     } else {
         stream
-            .emit_result_success(&result_text, "end_turn", &cost, &model, fast_mode_state, fast_mode_disabled_reason, &betas)
+            .emit_result_success(
+                &result_text,
+                "end_turn",
+                &cost,
+                &model,
+                fast_mode_state,
+                fast_mode_disabled_reason,
+                &betas,
+            )
             .await;
         stream.flush().await;
         exit_codes::SUCCESS
@@ -628,6 +640,32 @@ async fn dispatch_control_request(
                 let _ = task_registry.kill_with_reason(task_id, "user").await;
             }
             writer.reply_success(request_id, Some(json!({})));
+        }
+        "register_repo_root" => {
+            let request_value = frame.get("request").cloned().unwrap_or_else(|| json!({}));
+            match serde_json::from_value::<traits::RegisterRepoRootRequest>(request_value) {
+                Ok(request) if !request.path.trim().is_empty() => {
+                    match orchestrator.register_repo_root(request).await {
+                        Ok(outcome) => match serde_json::to_value(outcome) {
+                            Ok(value) => writer.reply_success(request_id, Some(value)),
+                            Err(error) => writer.reply_error(
+                                request_id,
+                                &format!("register_repo_root: failed to encode response: {error}"),
+                            ),
+                        },
+                        Err(error) => {
+                            writer.reply_error(request_id, &format!("register_repo_root: {error}"));
+                        }
+                    }
+                }
+                Ok(_) => {
+                    writer.reply_error(request_id, "register_repo_root: path must not be empty")
+                }
+                Err(error) => writer.reply_error(
+                    request_id,
+                    &format!("register_repo_root: invalid request: {error}"),
+                ),
+            }
         }
         "set_cwd" => {
             // Move the live session to another directory. This crosses the
@@ -1026,9 +1064,25 @@ fn orphan_decision_from_payload(
                 .and_then(serde_json::Value::as_array)
                 .cloned()
                 .unwrap_or_default();
+            let decision_classification = payload
+                .get("decisionClassification")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|value| match value {
+                    "user_temporary" => {
+                        Some(traits::permission_gate::ToolDecisionClassification::UserTemporary)
+                    }
+                    "user_permanent" => {
+                        Some(traits::permission_gate::ToolDecisionClassification::UserPermanent)
+                    }
+                    "user_reject" => {
+                        Some(traits::permission_gate::ToolDecisionClassification::UserReject)
+                    }
+                    _ => None,
+                });
             PermissionOutcome::Allow {
                 updated_input,
                 permission_updates,
+                decision_classification,
             }
         }
         Some("deny") => PermissionOutcome::Deny {
@@ -1189,11 +1243,7 @@ pub async fn run_stream_json_input_loop(
     let fast_mode_disabled_reason = {
         let listings = runtime.orchestrator.list_model_listings().await;
         resolve_fast_mode_disabled_reason(
-            session_model_is_first_party(
-                env_api_provider_is_first_party(),
-                &listings,
-                &model_str,
-            ),
+            session_model_is_first_party(env_api_provider_is_first_party(), &listings, &model_str),
             sdk_fast_mode_opt_in,
         )
     };
@@ -1689,7 +1739,15 @@ pub async fn run_stream_json_input_loop(
         // No user turns received — emit an empty-result envelope.
         let cost = runtime.orchestrator.snapshot_cost().await;
         stream
-            .emit_result_success("", "end_turn", &cost, &model_str, fast_mode_state, fast_mode_disabled_reason, &betas)
+            .emit_result_success(
+                "",
+                "end_turn",
+                &cost,
+                &model_str,
+                fast_mode_state,
+                fast_mode_disabled_reason,
+                &betas,
+            )
             .await;
         stream.flush().await;
         return exit_codes::SUCCESS;
@@ -1708,13 +1766,29 @@ pub async fn run_stream_json_input_loop(
         let err_msg = err.to_string();
         let subtype = stream_json_error_subtype(&err);
         stream
-            .emit_result_error(subtype, vec![err_msg], &cost, &model, fast_mode_state, fast_mode_disabled_reason, &betas)
+            .emit_result_error(
+                subtype,
+                vec![err_msg],
+                &cost,
+                &model,
+                fast_mode_state,
+                fast_mode_disabled_reason,
+                &betas,
+            )
             .await;
         stream.flush().await;
         exit_codes::RUNTIME_ERROR
     } else {
         stream
-            .emit_result_success(&result_text, "end_turn", &cost, &model, fast_mode_state, fast_mode_disabled_reason, &betas)
+            .emit_result_success(
+                &result_text,
+                "end_turn",
+                &cost,
+                &model,
+                fast_mode_state,
+                fast_mode_disabled_reason,
+                &betas,
+            )
             .await;
         stream.flush().await;
         exit_codes::SUCCESS
@@ -2367,7 +2441,7 @@ async fn mount_resumed_tui(
     messages: Vec<JsonlMessage>,
     carried_state: Option<crate::mode::RemountState>,
 ) -> crate::mode::RunOutcome {
-    mount_resumed_tui_inner(argv, session_id, messages, carried_state, None, None).await
+    mount_resumed_tui_inner(argv, session_id, messages, carried_state, None, None, None).await
 }
 
 /// Mount a resumed conversation inside a background worker's real PTY.
@@ -2380,6 +2454,7 @@ pub(crate) async fn mount_background_resumed_tui(
     messages: Vec<JsonlMessage>,
     registration: std::sync::Arc<crate::agents_registry::SessionRegistration>,
     initial_prompt: Option<String>,
+    handoff: Option<traits::BackgroundingSnapshot>,
 ) -> crate::mode::RunOutcome {
     mount_resumed_tui_inner(
         argv,
@@ -2388,6 +2463,7 @@ pub(crate) async fn mount_background_resumed_tui(
         None,
         Some(registration),
         initial_prompt,
+        handoff,
     )
     .await
 }
@@ -2399,6 +2475,7 @@ async fn mount_resumed_tui_inner(
     carried_state: Option<crate::mode::RemountState>,
     registration: Option<std::sync::Arc<crate::agents_registry::SessionRegistration>>,
     initial_prompt: Option<String>,
+    handoff: Option<traits::BackgroundingSnapshot>,
 ) -> crate::mode::RunOutcome {
     // A cold resume inherits the last persisted assistant effort unless the
     // caller explicitly supplied a new `--effort`. Resolve this before build:
@@ -2488,11 +2565,12 @@ async fn mount_resumed_tui_inner(
             is_error: false,
         });
     }
-    crate::mode::run_ratatui_with_initial_prompt(
+    crate::mode::run_ratatui_with_initial_state(
         tui_build,
         registration,
         resumed_messages,
         initial_prompt,
+        handoff,
     )
     .await
 }
@@ -2561,7 +2639,7 @@ async fn remount_tui(
     state: Option<crate::mode::RemountState>,
     registration: Option<std::sync::Arc<crate::agents_registry::SessionRegistration>>,
 ) -> crate::mode::RunOutcome {
-    mount_resumed_tui_inner(argv, session_id, messages, state, registration, None).await
+    mount_resumed_tui_inner(argv, session_id, messages, state, registration, None, None).await
 }
 
 async fn drive_tui_switch_loop_inner(
@@ -3255,6 +3333,7 @@ mod tests {
             permission::gate::PermissionOutcome::Allow {
                 updated_input: None,
                 permission_updates: vec![update],
+                decision_classification: None,
             }
         );
     }
@@ -3961,8 +4040,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let out_tx = std::sync::Arc::new(tx);
         let writer = ControlPlaneWriter::new(out_tx.clone());
-        let lifecycle =
-            crate::queued_commands::QueueLifecycle::new(out_tx, "sess-int".to_string());
+        let lifecycle = crate::queued_commands::QueueLifecycle::new(out_tx, "sess-int".to_string());
         // Seed: u1 dequeued for the in-flight turn; u2/u3 queue-resident.
         lifecycle.queued.on_queued("u1");
         lifecycle.queued.on_queued("u2");
@@ -4164,7 +4242,9 @@ mod tests {
     /// accepted as inline JSON or a settings-file path.
     #[test]
     fn flag_settings_fast_mode_opt_in_parses_inline_and_file() {
-        assert!(flag_settings_fast_mode_opt_in(Some(r#"{"fastMode": true}"#)));
+        assert!(flag_settings_fast_mode_opt_in(Some(
+            r#"{"fastMode": true}"#
+        )));
         assert!(!flag_settings_fast_mode_opt_in(Some(
             r#"{"fastMode": "true"}"#
         )));
@@ -4191,14 +4271,13 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let lifecycle = QueueLifecycle::new(std::sync::Arc::new(tx), "sess-term".to_string());
-        let next = |rx: &mut tokio::sync::mpsc::UnboundedReceiver<
-            crate::stream_json::OutboundMsg,
-        >| {
-            serde_json::from_str::<serde_json::Value>(&outbound_line(
-                rx.try_recv().expect("lifecycle frame"),
-            ))
-            .expect("valid command_lifecycle json")
-        };
+        let next =
+            |rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::stream_json::OutboundMsg>| {
+                serde_json::from_str::<serde_json::Value>(&outbound_line(
+                    rx.try_recv().expect("lifecycle frame"),
+                ))
+                .expect("valid command_lifecycle json")
+            };
 
         // Clean turn → `completed` (reason "completed", not aborted).
         emit_turn_terminal_lifecycle(&lifecycle, Some("u-ok"), &Ok(TurnOutcome::EndTurn), false);
@@ -4212,12 +4291,7 @@ mod tests {
         assert_eq!(next(&mut rx)["state"], "completed");
 
         // Interrupted turn: `aborted_streaming` (Wpt) AND the abort flag.
-        emit_turn_terminal_lifecycle(
-            &lifecycle,
-            Some("u-int"),
-            &Ok(TurnOutcome::Cancelled),
-            true,
-        );
+        emit_turn_terminal_lifecycle(&lifecycle, Some("u-int"), &Ok(TurnOutcome::Cancelled), true);
         assert_eq!(next(&mut rx)["state"], "cancelled");
 
         // Abort flag alone (`Njo`'s `t||…`) forces `cancelled` even on a turn
@@ -4304,12 +4378,18 @@ mod tests {
     fn fast_mode_state_tracks_the_disabled_reason() {
         // Opted in, no reason, fast-mode-capable model → `on`.
         assert_eq!(resolve_fast_mode_state("claude-opus-5", None, true), "on");
-        assert_eq!(resolve_fast_mode_state("claude-opus-5[1m]", None, true), "on");
+        assert_eq!(
+            resolve_fast_mode_state("claude-opus-5[1m]", None, true),
+            "on"
+        );
         assert_eq!(resolve_fast_mode_state("claude-opus-4-7", None, true), "on");
         assert_eq!(resolve_fast_mode_state("claude-opus-4-8", None, true), "on");
         // `fE(model)` is part of the conjunction: a model with no fast-mode
         // capability stays `off` even fully opted in.
-        assert_eq!(resolve_fast_mode_state("claude-sonnet-5", None, true), "off");
+        assert_eq!(
+            resolve_fast_mode_state("claude-sonnet-5", None, true),
+            "off"
+        );
         // Any reason ⇒ `El()&&QN()` is false ⇒ `off`.
         assert_eq!(
             resolve_fast_mode_state("claude-opus-5", Some("not_first_party"), true),
@@ -4393,10 +4473,18 @@ mod tests {
                 supports_reasoning: false,
             },
         ];
-        assert!(session_model_is_first_party(true, &listings, "claude-opus-4-8"));
+        assert!(session_model_is_first_party(
+            true,
+            &listings,
+            "claude-opus-4-8"
+        ));
         assert!(!session_model_is_first_party(true, &listings, "gpt-4o"));
         // Fallback family rule when the model is not in the catalog.
-        assert!(session_model_is_first_party(true, &listings, "claude-opus-5[1m]"));
+        assert!(session_model_is_first_party(
+            true,
+            &listings,
+            "claude-opus-5[1m]"
+        ));
         assert!(session_model_is_first_party(true, &listings, "default"));
         assert!(!session_model_is_first_party(true, &listings, "grok-3"));
     }
@@ -4663,7 +4751,10 @@ mod tests {
         .await;
         assert_eq!(first["response"]["subtype"], "success");
         let body = &first["response"]["response"];
-        assert_eq!(body["status"], "needs_trust", "an untrusted target asks first");
+        assert_eq!(
+            body["status"], "needs_trust",
+            "an untrusted target asks first"
+        );
         let shown = body["directory"].as_str().expect("directory").to_string();
 
         let second = dispatch_and_capture_in(
@@ -4729,9 +4820,13 @@ mod tests {
         let tasks = &build.runtime.task_registry;
         let home = tempfile::tempdir().unwrap();
 
-        let blank =
-            dispatch_and_capture_in(orch, tasks, req("set_cwd", json!({ "path": "  " })), home.path())
-                .await;
+        let blank = dispatch_and_capture_in(
+            orch,
+            tasks,
+            req("set_cwd", json!({ "path": "  " })),
+            home.path(),
+        )
+        .await;
         assert_eq!(blank["response"]["subtype"], "error");
         assert!(blank["response"]["error"]
             .as_str()
@@ -4741,7 +4836,10 @@ mod tests {
         let missing = dispatch_and_capture_in(
             orch,
             tasks,
-            req("set_cwd", json!({ "path": home.path().join("nope").to_string_lossy() })),
+            req(
+                "set_cwd",
+                json!({ "path": home.path().join("nope").to_string_lossy() }),
+            ),
             home.path(),
         )
         .await;
@@ -4782,5 +4880,4 @@ mod tests {
         assert_eq!(body["status"], "ok");
         assert_eq!(body["changed"], false);
     }
-
 }

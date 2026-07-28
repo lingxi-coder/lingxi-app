@@ -51,22 +51,9 @@
 //! 4. `added = |after − before|`, `removed = |before − after|`.
 //! 5. Render the locked message via [`format_reload_message`].
 //!
-//! ### Known gap: `removed` undercounts today
-//!
-//! [`command_api::CommandRegistry`] exposes no "unregister a single command by
-//! name" primitive (only `unregister_plugin`, keyed by `PluginId`) — adding one
-//! would mean editing the shared `command-api` registry, out of scope for this
-//! port. `load_and_register_skill_commands_with_roots` is upsert-only, so a
-//! skill file deleted from disk since the registry was last populated leaves
-//! its stale entry in place; it is still `Some("skills")`-tagged in `after`, so
-//! `removed` will read `0` for that case in practice. The counting formula
-//! itself (and the message it feeds) is byte-faithful to `Jtf` and will report
-//! correctly the moment the registry grows a by-name removal primitive — no
-//! call-site change needed here.
-//!
-//! Both counts are otherwise real: a skill file *added* on disk since the last
-//! load is correctly detected (`added`), and re-running with no on-disk
-//! changes correctly reports `(no changes)`.
+//! The registry's skill partition is cleared before the re-scan. This is what
+//! makes removals observable and keeps completion/model snapshots from
+//! retaining deleted skill files.
 
 use async_trait::async_trait;
 use command_api::model::{BuiltinCommandHandler, CommandResult};
@@ -230,10 +217,11 @@ impl BuiltinCommandHandler for ReloadSkillsHandler {
             skill_loaded_names(&reg)
         };
 
-        // `GI(); Bj();` — re-walk disk and re-register. Idempotent upsert; the
-        // loader never caches, so no explicit "clear" step precedes this call.
+        // `GI(); Bj();` — invalidate the live skill partition, then re-walk
+        // disk and repopulate it.
         {
             let mut reg = self.registry.write().await;
+            reg.unregister_loaded_from("skills");
             crate::custom_commands::load_and_register_skill_commands_with_roots(
                 &mut reg,
                 &self.roots.cwd,
@@ -443,6 +431,40 @@ mod tests {
             run(&h).await,
             "Reloaded skills: 1 skill available (no changes)"
         );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn deleted_skill_is_removed_from_live_registry() {
+        let root = tmp_root("removed");
+        let cwd = root.join("repo");
+        let home = root.join("home");
+        let lingxi_home = home.join(".lingxi");
+        let skills = cwd.join(".lingxi").join("skills");
+        fs::create_dir_all(cwd.join(".git")).expect("git marker");
+        fs::create_dir_all(&lingxi_home).expect("lingxi home");
+        write_skill(&skills, "demo", "Demo skill");
+
+        let registry = Arc::new(RwLock::new(CommandRegistry::new()));
+        let h = ReloadSkillsHandler::with_all_roots(
+            registry.clone(),
+            cwd,
+            lingxi_home,
+            None,
+            home,
+            Vec::new(),
+            false,
+        );
+        assert_eq!(
+            run(&h).await,
+            "Reloaded skills: 1 skill available (1 added)"
+        );
+        fs::remove_dir_all(skills.join("demo")).expect("remove skill");
+        assert_eq!(
+            run(&h).await,
+            "Reloaded skills: 0 skills available (1 removed)"
+        );
+        assert!(registry.read().await.resolve("demo").is_none());
         fs::remove_dir_all(root).ok();
     }
 

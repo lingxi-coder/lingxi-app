@@ -37,7 +37,7 @@ pub fn agent_mcp_specs_to_scoped_configs(
         return Vec::new();
     }
     if strict_plugin_only_mcp && !plugin_trusted_source(def.source) {
-        tracing::debug!(
+        tracing::warn!(
             "[Agent: {}] Skipping frontmatter MCP servers: strictPluginOnlyCustomization locks MCP to plugin-only (agent source: {})",
             def.agent_type,
             source_label(def.source)
@@ -196,10 +196,7 @@ mod tests {
         let mut map = serde_json::Map::new();
         map.insert("a".into(), serde_json::json!({"command": "x"}));
         map.insert("b".into(), serde_json::json!({"command": "y"}));
-        let def = def_with_specs(
-            vec![AgentMcpServerSpec::Record(map)],
-            AgentSource::Project,
-        );
+        let def = def_with_specs(vec![AgentMcpServerSpec::Record(map)], AgentSource::Project);
         assert!(agent_mcp_specs_to_scoped_configs(&def, false).is_empty());
     }
 

@@ -91,6 +91,73 @@ pub struct CostSnapshot {
     pub unknown_models: bool,
 }
 
+/// Live context-window usage paired with the cumulative billing snapshot.
+///
+/// `live_context_tokens` is allowed to decrease after compaction.
+/// `cumulative_cost` is monotonic for the session and is intentionally kept
+/// separate so `/context` cannot accidentally reset `/cost`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ContextUsageSnapshot {
+    /// Estimated tokens in the history that would be sent on the next request.
+    #[serde(default)]
+    pub live_context_tokens: u64,
+    /// Context-window capacity for the active model.
+    #[serde(default)]
+    pub max_context_tokens: u64,
+    /// Cumulative session usage/cost, unaffected by compaction.
+    #[serde(default)]
+    pub cumulative_cost: CostSnapshot,
+}
+
+/// SDK/stream-json request to register an additional repository root.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegisterRepoRootRequest {
+    /// Directory to register (absolute or relative to the live session cwd).
+    pub path: String,
+    /// Reload instruction files after registration.
+    #[serde(default)]
+    pub reload_claude_md: bool,
+    /// Reconcile the live skill/command catalog after registration.
+    #[serde(default)]
+    pub reload_skills: bool,
+    /// Reconcile plugins and their MCP servers after registration.
+    #[serde(default)]
+    pub reload_plugins: bool,
+}
+
+/// Folded result of a `DirectoryAdded` hook dispatch.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectoryAddedHookSummary {
+    /// Number of hooks that errored, timed out, or were cancelled.
+    #[serde(default)]
+    pub failure_count: u32,
+    /// Bounded messages injected into session context.
+    #[serde(default)]
+    pub context_messages: Vec<String>,
+}
+
+/// Result of registering an additional repository root.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegisterRepoRootOutcome {
+    /// Canonical directory registered in the session.
+    pub directory: PathBuf,
+    /// `true` when the trusted-root/sandbox set changed.
+    #[serde(default)]
+    pub added: bool,
+    /// DirectoryAdded hook outcome.
+    #[serde(default)]
+    pub hooks: DirectoryAddedHookSummary,
+    /// The skill catalog completed a live reconciliation.
+    #[serde(default)]
+    pub skills_reloaded: bool,
+    /// The plugin catalog completed a live reconciliation.
+    #[serde(default)]
+    pub plugins_reloaded: bool,
+    /// Non-fatal catalog reconciliation failures.
+    #[serde(default)]
+    pub reload_errors: Vec<String>,
+}
+
 /// Session-scoped `/goal` state surfaced through [`OrchestratorHandle`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActiveGoalSnapshot {
@@ -1146,14 +1213,28 @@ pub trait OrchestratorHandle: Send + Sync {
     /// added mid-session via `/add-dir` or the SDK `register_repo_root`.
     ///
     /// `source` is both a payload field and the hook MATCHER QUERY, so a
-    /// matcher is tested against `add_dir` / `register_repo_root` rather than
+    /// matcher is tested against `slash_command` / `register_repo_root` rather than
     /// against the path.
     ///
     /// DEFAULTED to a no-op so the many existing implementations of this trait
     /// (test doubles, the mobile engine) compile unchanged — the frozen-trait
     /// idiom this codebase uses for additive surface. Only the desktop
     /// orchestrator overrides it.
-    async fn fire_directory_added(&self, _directory: &str, _source: &str) {}
+    async fn fire_directory_added(
+        &self,
+        _directory: &str,
+        _source: &str,
+    ) -> DirectoryAddedHookSummary {
+        DirectoryAddedHookSummary::default()
+    }
+
+    /// Validate and register a repository root for this live session.
+    async fn register_repo_root(
+        &self,
+        _request: RegisterRepoRootRequest,
+    ) -> Result<RegisterRepoRootOutcome, HandleError> {
+        Err(HandleError::Unimplemented("register_repo_root".into()))
+    }
 
     /// Enumerate registered subagents (markdown-defined + built-in). Used
     /// by `/agents` and `/status`.
@@ -1312,6 +1393,22 @@ pub trait OrchestratorHandle: Send + Sync {
         ))
     }
 
+    /// Move the current foreground conversation into a durable background
+    /// session at the supplied live boundary.
+    ///
+    /// Unlike [`Self::fork_to_background_session`], this seam carries the
+    /// partial assistant reply and in-flight classification needed by a
+    /// mid-turn ← handoff. Implementations must preserve the snapshot before
+    /// returning success; the UI cancels foreground work only for an
+    /// `AbortThenFork` decision.
+    async fn background_conversation(
+        &self,
+        snapshot: crate::BackgroundingSnapshot,
+    ) -> Result<String, HandleError> {
+        let _ = snapshot;
+        Err(HandleError::Unimplemented("background_conversation".into()))
+    }
+
     /// `/resume`-as-background (2.1.212, G06) — launch an EXISTING session (one
     /// from [`Self::list_resumable_sessions`]) as a NEW background session,
     /// rather than resuming it in the foreground. Reuses the same
@@ -1393,17 +1490,31 @@ pub trait OrchestratorHandle: Send + Sync {
         Vec::new()
     }
 
+    /// Snapshot the live context separately from cumulative session cost.
+    ///
+    /// Compaction replaces the live history but must never reset billing/cost
+    /// counters. The default keeps lightweight handles source-compatible while
+    /// production handles project the current history through the same
+    /// estimator used by auto-compaction.
+    async fn context_usage_snapshot(&self) -> ContextUsageSnapshot {
+        ContextUsageSnapshot {
+            cumulative_cost: self.snapshot_cost().await,
+            ..ContextUsageSnapshot::default()
+        }
+    }
+
     /// `(used_tokens, max_tokens)` for the current context window.
     ///
     /// Minimal primitive-tuple accessor backing the `/context` flat panel
     /// (`**Tokens:** {used} / {max} ({pct}%)`). `used_tokens` comes from the
-    /// session's cumulative usage; `max_tokens` from the active model's
+    /// live session history estimate; `max_tokens` from the active model's
     /// context budget. The model name itself already comes from
     /// [`Self::get_status_snapshot`], so no new struct is needed.
     ///
     /// Default returns `(0, 0)` when no usage is recorded.
     async fn context_window_usage(&self) -> (u64, u64) {
-        (0, 0)
+        let snapshot = self.context_usage_snapshot().await;
+        (snapshot.live_context_tokens, snapshot.max_context_tokens)
     }
 
     /// `Vec<(session_id, label)>` of prior on-disk sessions, newest-first.

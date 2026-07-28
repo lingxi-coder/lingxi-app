@@ -602,6 +602,9 @@ impl HookRegistry {
             HookEvent::FileChanged { path, .. } => {
                 path.file_name().map(|n| n.to_string_lossy().into_owned())
             }
+            // 2.1.220: DirectoryAdded matchers select the entry-point source,
+            // never the directory path.
+            HookEvent::DirectoryAdded { source, .. } => Some(source.clone()),
             // Events with no claude query (TeammateIdle/TaskCreated/
             // TaskCompleted, WorktreeCreate/Remove, CwdChanged, …) derive no
             // match query and fire regardless of any declared matcher.
@@ -1468,6 +1471,29 @@ mod match_event_matcher_tests {
         };
         assert_eq!(matched_names(&reg, &maint), vec!["on-maint"]);
         assert!(matched_names(&reg, &init).is_empty());
+    }
+
+    #[test]
+    fn directory_added_matcher_filters_on_source_not_path() {
+        let mut reg = HookRegistry::new();
+        reg.register(hook_with(
+            "sdk-only",
+            HookEventType::DirectoryAdded,
+            Some("register_repo_root"),
+        ));
+        let sdk = HookEvent::DirectoryAdded {
+            directory: "/work/other".into(),
+            source: "register_repo_root".into(),
+        };
+        let slash = HookEvent::DirectoryAdded {
+            directory: "register_repo_root".into(),
+            source: "slash_command".into(),
+        };
+        assert_eq!(matched_names(&reg, &sdk), vec!["sdk-only"]);
+        assert!(
+            matched_names(&reg, &slash).is_empty(),
+            "directory text must not satisfy a source matcher"
+        );
     }
 
     #[test]

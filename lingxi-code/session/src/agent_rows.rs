@@ -126,10 +126,8 @@ pub async fn list_restorable(subagents_dir: &Path) -> Vec<ParkedAgentRow> {
         let Some(row) = read_row_at(&path).await else {
             continue;
         };
-        let transcript = crate::forked_skill::agent_transcript_path(
-            subagents_dir,
-            &row.agent_id.to_string(),
-        );
+        let transcript =
+            crate::forked_skill::agent_transcript_path(subagents_dir, &row.agent_id.to_string());
         if tokio::fs::symlink_metadata(&transcript).await.is_err() {
             continue;
         }
@@ -174,6 +172,7 @@ mod tests {
         SubagentSpawnRequest {
             subagent_type: subagent_type.into(),
             prompt: "do the thing".into(),
+            observer: None,
             context_paths: Vec::new(),
             description: Some("research".into()),
             model: Some("claude-opus-5".into()),
@@ -219,10 +218,8 @@ mod tests {
         let path = crate::forked_skill::agent_transcript_path(dir, agent_id);
         let mut body = String::new();
         for t in texts {
-            let msg = protocol::ConversationMessage::user(
-                protocol::MessageId::new(),
-                (*t).to_string(),
-            );
+            let msg =
+                protocol::ConversationMessage::user(protocol::MessageId::new(), (*t).to_string());
             let entry = serde_json::json!({
                 "agent_id": agent_id,
                 "timestamp": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
@@ -290,9 +287,12 @@ mod tests {
         assert!(read_row(dir.path(), &id).await.is_none());
         assert!(list_restorable(dir.path()).await.is_empty());
 
-        tokio::fs::write(row_path(dir.path(), &id), "x".repeat(ROW_MAX_BYTES as usize + 1))
-            .await
-            .unwrap();
+        tokio::fs::write(
+            row_path(dir.path(), &id),
+            "x".repeat(ROW_MAX_BYTES as usize + 1),
+        )
+        .await
+        .unwrap();
         assert!(read_row(dir.path(), &id).await.is_none());
     }
 

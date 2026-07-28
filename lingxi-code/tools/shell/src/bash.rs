@@ -1364,7 +1364,7 @@ impl Tool for BashTool {
         // toggle (the frozen config until `/sandbox` flips the shared cell).
         let sandbox_runtime = self.ctx.effective_sandbox_runtime();
         if tool_api::dh_simple_system_prompt(opts.model.as_deref()) {
-            crate::prompt::simple_prompt_concise(&sandbox_runtime)
+            crate::prompt::simple_prompt_concise(&sandbox_runtime, opts.model.as_deref())
         } else {
             crate::prompt::simple_prompt(&sandbox_runtime)
         }
@@ -2138,7 +2138,11 @@ mod tests {
     fn ephemeral_id_is_unique_across_a_tight_loop() {
         let ids: std::collections::HashSet<String> =
             (0..10_000).map(|_| ephemeral_id("bash")).collect();
-        assert_eq!(ids.len(), 10_000, "ephemeral_id collided within one process");
+        assert_eq!(
+            ids.len(),
+            10_000,
+            "ephemeral_id collided within one process"
+        );
     }
 
     #[test]
@@ -2530,10 +2534,7 @@ mod tests {
             Some(r"C:\Custom\Git\bin\bash.exe")
         );
         // 5) Nothing anywhere -> None.
-        assert_eq!(
-            resolve_git_bash_path_with(None, &|_| false, &|| None),
-            None
-        );
+        assert_eq!(resolve_git_bash_path_with(None, &|_| false, &|| None), None);
     }
 
     /// `WMe.join` is `path/win32`'s (@226607353), which normalizes. The result

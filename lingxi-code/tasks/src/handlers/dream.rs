@@ -299,6 +299,7 @@ impl Task for DreamHandler {
         let request = SubagentSpawnRequest {
             subagent_type: DREAM_SUBAGENT_TYPE.to_string(),
             prompt: build_consolidation_prompt(&prompt),
+            observer: None,
             context_paths: Vec::new(),
             // AgentTool spawn-surface parity params — the dream consolidation
             // path sets no model/teammate/isolation/cwd override.

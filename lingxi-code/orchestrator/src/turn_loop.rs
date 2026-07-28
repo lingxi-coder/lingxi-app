@@ -1277,9 +1277,9 @@ pub(crate) async fn call_api_with_ptl_recovery(
 
     // (4) Reactive-compact fallback: one full compact, then retry once more.
     if let Some(compactor) = orch.compaction.clone() {
-        let snapshot = {
+        let (snapshot, last_assistant_at) = {
             let s = orch.session.lock().await;
-            s.history.clone()
+            (s.history.clone(), s.message_timing.last_assistant_at)
         };
         let messages_before = u32::try_from(snapshot.len()).unwrap_or(u32::MAX);
         let bytes_before: u64 = snapshot.iter().map(protocol::text_byte_size).sum();
@@ -1308,11 +1308,13 @@ pub(crate) async fn call_api_with_ptl_recovery(
         let compact_result = {
             let mut tracking = orch.compaction_tracking.lock().await;
             compactor
-                .process_iteration_tracked_with_instructions(
+                .process_iteration_tracked_with_instructions_and_timing(
                     snapshot,
                     0,
                     &mut tracking,
                     pre_compact.additional_instructions.as_deref(),
+                    last_assistant_at,
+                    std::time::SystemTime::now(),
                 )
                 .await
         };
@@ -2387,6 +2389,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             // cwd override); only an isolated subagent sets this.
             cwd: None,
             depth: 0,
+            observer: None,
             // (/rewind) Hand each write tool the file-history sink (a trait view
             // of the shared checkpoint store) so pre-edit content is backed up.
             file_history: orch
@@ -3013,9 +3016,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                                 // allow directly, keeping the auto-mode non-deny
                                 // bookkeeping every allow arm records — mode-less, no
                                 // rule re-check, no backstop.
-                                orch.perms
-                                    .honour_hook_allow(name, &effective_input)
-                                    .await
+                                orch.perms.honour_hook_allow(name, &effective_input).await
                             };
                             // `handleHookAllow` logs `source:{type:"hook"}`, but the
                             // `updatedInput` re-check that DENIES logs
@@ -3063,19 +3064,16 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                                     // inside the stdio gate itself, which holds the
                                     // settings paths.
                                     permission_updates: _,
+                                    decision_classification,
                                 } => {
-                                    // "user_temporary", NOT an `updatedPermissions`
-                                    // heuristic: `eQ_`'s `permissionPromptTool` arm
-                                    // reads the HOST's `decisionClassification` off
-                                    // the `can_use_tool` response and, when it is
-                                    // absent or invalid, falls back to "temporary for
-                                    // allow, reject for deny" (`fAm`'s own describe()).
-                                    // `updatedPermissions` has no bearing on the label.
-                                    // DEFERRED: the port does not yet parse
-                                    // `decisionClassification` (it would have to come
-                                    // up through `PermissionOutcome::Allow`), so a host
-                                    // that sets it explicitly still gets the fallback.
-                                    decision_otel_source = "user_temporary";
+                                    // The host's explicit classification wins when
+                                    // valid; absent/unknown values were normalized to
+                                    // `None` by the transport and use Claude's
+                                    // temporary-allow fallback.
+                                    decision_otel_source = decision_classification.map_or(
+                                        "user_temporary",
+                                        traits::permission_gate::ToolDecisionClassification::as_str,
+                                    );
                                     if let Some(u) = updated_input {
                                         effective_input = u;
                                     }
@@ -3125,6 +3123,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             },
             decision_otel_source,
             tool_handle.is_mcp(),
+            Some(&effective_input),
         );
         match decision {
             PermissionDecision::Allow => {}
@@ -4154,8 +4153,16 @@ mod decision_otel_source_tests {
             "toolsNarrowing",
             "mcpServerPolicy",
         ] {
-            assert_eq!(rule_decision_otel_source(Some(scope), true), "config", "{scope}");
-            assert_eq!(rule_decision_otel_source(Some(scope), false), "config", "{scope}");
+            assert_eq!(
+                rule_decision_otel_source(Some(scope), true),
+                "config",
+                "{scope}"
+            );
+            assert_eq!(
+                rule_decision_otel_source(Some(scope), false),
+                "config",
+                "{scope}"
+            );
         }
     }
 

@@ -22,7 +22,8 @@
 
 use crate::definition::{
     parse_effort_value, AgentDefinition, AgentEffort, AgentIsolation, AgentMcpServerSpec,
-    AgentMemoryScope, AgentModel, AgentPermissionMode, AgentSource, AgentToolPolicy, EFFORT_LEVELS,
+    AgentMemoryScope, AgentModel, AgentPermissionMode, AgentSource, AgentToolPolicy, ObserverSpec,
+    EFFORT_LEVELS,
 };
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
@@ -128,6 +129,12 @@ struct Frontmatter {
     color: Option<serde_yaml::Value>,
     #[serde(default, rename = "initialPrompt")]
     initial_prompt: Option<serde_yaml::Value>,
+    #[serde(default)]
+    observer: Option<serde_yaml::Value>,
+    #[serde(default, rename = "observerMessage")]
+    observer_message: Option<serde_yaml::Value>,
+    #[serde(default, rename = "observeSubagents")]
+    observe_subagents: Option<serde_yaml::Value>,
 }
 
 /// claude 2.1.220 `UVe`: sanitize a path/name for log display — replace
@@ -400,6 +407,12 @@ pub fn parse_agent_markdown(
 
     // (17) hooks: parse via the hooks crate (HookSource::FrontMatter).
     let frontmatter_hooks = parse_hooks_from_frontmatter(fm.hooks.as_ref(), &agent_type);
+    let observer = parse_observer_frontmatter(
+        fm.observer.as_ref(),
+        fm.observer_message.as_ref(),
+        fm.observe_subagents.as_ref(),
+        &agent_type,
+    );
 
     let system_prompt = body.trim().to_string();
 
@@ -432,6 +445,59 @@ pub fn parse_agent_markdown(
         effort,
         initial_prompt,
         color,
+        observer,
+    })
+}
+
+fn parse_observer_frontmatter(
+    observer: Option<&serde_yaml::Value>,
+    message: Option<&serde_yaml::Value>,
+    observe_subagents: Option<&serde_yaml::Value>,
+    owner: &str,
+) -> Option<ObserverSpec> {
+    let Some(agent) = observer
+        .and_then(yaml_as_string)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        if observer.is_some() {
+            tracing::warn!(
+                "[agentObserver] Agent {owner} has invalid observer; expected a non-empty agent name"
+            );
+        }
+        return None;
+    };
+    let message = match message {
+        None | Some(serde_yaml::Value::Null) => None,
+        Some(value) => match yaml_as_string(value) {
+            Some(raw) if !raw.trim().is_empty() => Some(raw),
+            Some(_) => None,
+            None => {
+                tracing::warn!(
+                    "[agentObserver] Agent {owner} has invalid observerMessage; ignoring it"
+                );
+                None
+            }
+        },
+    };
+    let observe_subagents = match observe_subagents {
+        None | Some(serde_yaml::Value::Null) => true,
+        Some(serde_yaml::Value::Bool(value)) => *value,
+        Some(_) => {
+            tracing::warn!(
+                "[agentObserver] Agent {owner} has invalid observeSubagents; defaulting to true"
+            );
+            true
+        }
+    };
+    tracing::debug!(
+        "[agentObserver] Agent {owner} declares observer {agent} (observeSubagents={observe_subagents})"
+    );
+    Some(ObserverSpec {
+        schema_version: traits::subagent_spawn::OBSERVER_SCHEMA_VERSION,
+        agent,
+        message,
+        observe_subagents,
     })
 }
 
@@ -1047,6 +1113,55 @@ pub fn parse_agent_from_json(
         }
     };
 
+    // observer / observerMessage / observeSubagents are a single declaration.
+    // JSON agents use the throwing schema: present fields with the wrong type
+    // drop the whole definition.
+    let observer = match obj.get("observer") {
+        None | Some(serde_json::Value::Null) => {
+            if obj.get("observerMessage").is_some() || obj.get("observeSubagents").is_some() {
+                tracing::debug!(
+                    "Error parsing agent '{name}' from JSON: observerMessage/observeSubagents require observer"
+                );
+                return None;
+            }
+            None
+        }
+        Some(serde_json::Value::String(agent)) if !agent.trim().is_empty() => {
+            let message = match obj.get("observerMessage") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(serde_json::Value::String(value)) => {
+                    (!value.trim().is_empty()).then(|| value.clone())
+                }
+                Some(_) => {
+                    tracing::debug!(
+                        "Error parsing agent '{name}' from JSON: invalid observerMessage"
+                    );
+                    return None;
+                }
+            };
+            let observe_subagents = match obj.get("observeSubagents") {
+                None | Some(serde_json::Value::Null) => true,
+                Some(serde_json::Value::Bool(value)) => *value,
+                Some(_) => {
+                    tracing::debug!(
+                        "Error parsing agent '{name}' from JSON: invalid observeSubagents"
+                    );
+                    return None;
+                }
+            };
+            Some(ObserverSpec {
+                schema_version: traits::subagent_spawn::OBSERVER_SCHEMA_VERSION,
+                agent: agent.trim().to_string(),
+                message,
+                observe_subagents,
+            })
+        }
+        Some(_) => {
+            tracing::debug!("Error parsing agent '{name}' from JSON: invalid observer");
+            return None;
+        }
+    };
+
     Some(AgentDefinition {
         agent_type: name.to_string(),
         when_to_use,
@@ -1071,6 +1186,7 @@ pub fn parse_agent_from_json(
         effort,
         initial_prompt,
         color: None,
+        observer,
     })
 }
 
@@ -1178,9 +1294,10 @@ fn json_string_array_to_yaml(arr: Vec<String>) -> serde_yaml::Value {
 }
 
 /// Strictly validate `z.array(AgentMcpServerSpecSchema()).optional()` for JSON
-/// agents: `None`/`null` -> `Ok([])`; an array where EVERY item is a valid spec
-/// (a string, or a record of name -> server-config body) -> `Ok(specs)`;
-/// a non-array OR any invalid item -> `Err(())` (zod throw -> drop the agent).
+/// agents: `None`/`null` -> `Ok([])`; strings and record entries are retained
+/// for the conversion layer to validate independently. This is intentionally
+/// entry-tolerant: 2.1.220 keeps a JSON agent containing `mcpServers:[{}]`,
+/// warns for that entry, and skips only the entry.
 ///
 /// A multi-key record `{ a: cfgA, b: cfgB }` is valid for zod's
 /// `z.record(...)` and is kept as ONE [`AgentMcpServerSpec::Record`] — claude
@@ -1198,17 +1315,10 @@ fn parse_mcp_servers_json_strict(
     for item in arr {
         match item {
             serde_json::Value::String(s) => out.push(AgentMcpServerSpec::ByName(s.clone())),
-            serde_json::Value::Object(map) if !map.is_empty() => {
-                // zod validates each record VALUE against the server-config
-                // union; any invalid body throws → drop the whole agent. The
-                // record itself is kept RAW (multi-key included) — the
-                // exactly-one-key rule is enforced later by claude `obs`
-                // (`crate::mcp_servers::agent_mcp_specs_to_scoped_configs`).
-                for v in map.values() {
-                    if !mcp::server_entry_shape_is_valid(v) {
-                        return Err(());
-                    }
-                }
+            serde_json::Value::Object(map) => {
+                // Keep the raw record. Empty/multi-key/invalid bodies are
+                // diagnosed and skipped by `agent_mcp_specs_to_scoped_configs`
+                // / `build_server_from_json_entry`, preserving the agent.
                 out.push(AgentMcpServerSpec::Record(map.clone()));
             }
             _ => return Err(()),
@@ -1386,6 +1496,64 @@ mod tests {
         assert_eq!(def.agent_type, "reviewer");
         assert_eq!(def.when_to_use, "review code");
         assert_eq!(def.system_prompt.as_deref(), Some("Body"));
+    }
+
+    #[test]
+    fn markdown_observer_defaults_to_fanout_and_preserves_message() {
+        let raw = "---\nname: worker\ndescription: work\nobserver: reviewer\nobserverMessage: watch for unsupported claims\n---\nBody";
+        let def = parse_agent_markdown(
+            raw,
+            AgentSource::UserDefined,
+            PathBuf::from("/tmp"),
+            Path::new("worker.md"),
+        )
+        .unwrap();
+        let observer = def.observer.expect("observer");
+        assert_eq!(observer.schema_version, 1);
+        assert_eq!(observer.agent, "reviewer");
+        assert_eq!(
+            observer.message.as_deref(),
+            Some("watch for unsupported claims")
+        );
+        assert!(observer.observe_subagents);
+    }
+
+    #[test]
+    fn markdown_observer_can_stop_descendant_fanout() {
+        let raw = "---\nname: worker\ndescription: work\nobserver: reviewer\nobserveSubagents: false\n---\nBody";
+        let def = parse_agent_markdown(
+            raw,
+            AgentSource::UserDefined,
+            PathBuf::from("/tmp"),
+            Path::new("worker.md"),
+        )
+        .unwrap();
+        assert!(!def.observer.expect("observer").observe_subagents);
+    }
+
+    #[test]
+    fn json_observer_schema_is_strict() {
+        let valid = serde_json::json!({
+            "description": "work",
+            "prompt": "body",
+            "observer": "reviewer",
+            "observerMessage": "watch",
+            "observeSubagents": false
+        });
+        let def = parse_agent_from_json("worker", &valid, AgentSource::Flag).unwrap();
+        let observer = def.observer.expect("observer");
+        assert_eq!(observer.agent, "reviewer");
+        assert_eq!(observer.message.as_deref(), Some("watch"));
+        assert!(!observer.observe_subagents);
+
+        for invalid in [
+            serde_json::json!({"description":"d","prompt":"p","observer":true}),
+            serde_json::json!({"description":"d","prompt":"p","observer":"x","observerMessage":3}),
+            serde_json::json!({"description":"d","prompt":"p","observer":"x","observeSubagents":"yes"}),
+            serde_json::json!({"description":"d","prompt":"p","observeSubagents":false}),
+        ] {
+            assert!(parse_agent_from_json("worker", &invalid, AgentSource::Flag).is_none());
+        }
     }
 
     #[test]
@@ -2063,6 +2231,19 @@ mod tests {
             AgentSource::Flag
         )
         .is_none());
+    }
+
+    #[test]
+    fn json_agent_invalid_mcp_entry_keeps_agent() {
+        let json = serde_json::json!({
+            "description": "d",
+            "prompt": "p",
+            "mcpServers": [{}]
+        });
+        let def = parse_agent_from_json("a", &json, AgentSource::Flag)
+            .expect("invalid MCP entry must not drop the agent");
+        assert_eq!(def.mcp_servers.len(), 1);
+        assert!(crate::mcp_servers::agent_mcp_specs_to_scoped_configs(&def, false).is_empty());
     }
 
     #[test]

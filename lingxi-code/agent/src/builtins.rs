@@ -400,6 +400,7 @@ pub fn workflow_subagent_definition() -> AgentDefinition {
         effort: None,
         initial_prompt: None,
         color: None,
+        observer: None,
     }
 }
 
@@ -585,6 +586,7 @@ fn def(
         effort: None,
         initial_prompt: None,
         color: None,
+        observer: None,
     }
 }
 
@@ -727,6 +729,7 @@ pub fn fork_agent_definition() -> AgentDefinition {
         effort: None,
         initial_prompt: None,
         color: None,
+        observer: None,
     }
 }
 

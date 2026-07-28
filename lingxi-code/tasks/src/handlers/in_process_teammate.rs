@@ -107,6 +107,7 @@ impl TeammateDefinitionResolver for DefaultTeammateDefinition {
             effort: None,
             initial_prompt: None,
             color: None,
+            observer: None,
         })
     }
 }
@@ -461,7 +462,7 @@ impl InProcessTeammateHandler {
             mcp_clients: vec![],
             transcript_subdir: "/tmp".into(),
             transcript_fs: None,
-        resumed_history: None,
+            resumed_history: None,
             rendered_system_prompt: None,
             content_replacement_state: None,
             agent_memory: None,
@@ -488,6 +489,7 @@ impl InProcessTeammateHandler {
             hook_session_id: self.hook_session_id,
             hook_cwd: self.hook_cwd.clone(),
             depth: 0,
+            observer: None,
             permission_mode_override: None,
         })
     }

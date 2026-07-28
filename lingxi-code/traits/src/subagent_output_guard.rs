@@ -346,9 +346,7 @@ fn count_matches(c: &[char], matcher: fn(&[char], usize) -> Option<usize>) -> u6
 /// instructions and docs, and a hostile subagent gets to choose which it writes.
 fn match_settings_json(c: &[char], i: usize) -> Option<usize> {
     // alt A: `\.(claude|lingxi)[\\/]+settings(?:\.local)?\.json`
-    if let Some(a) =
-        match_ci(c, i, ".claude").or_else(|| match_ci(c, i, branding::DOT_DIR))
-    {
+    if let Some(a) = match_ci(c, i, ".claude").or_else(|| match_ci(c, i, branding::DOT_DIR)) {
         let mut j = i + a;
         let mut slashes = 0;
         while j < c.len() && (c[j] == '\\' || c[j] == '/') {
@@ -372,8 +370,8 @@ fn match_settings_json(c: &[char], i: usize) -> Option<usize> {
     }
     // alt B: `(?<!\w)\.(claude|lingxi)\.json\b`
     if i == 0 || !is_word(c[i - 1]) {
-        if let Some(l) = match_ci(c, i, ".claude.json")
-            .or_else(|| match_ci(c, i, branding::GLOBAL_CONFIG_FILE))
+        if let Some(l) =
+            match_ci(c, i, ".claude.json").or_else(|| match_ci(c, i, branding::GLOBAL_CONFIG_FILE))
         {
             if !is_word_at(c, i + l) {
                 return Some(l);
@@ -843,10 +841,7 @@ mod tests {
         }
         // Still no false positive on an unrelated dotfile.
         let r = sanitize_one("see .lingxi/agents/reviewer.md");
-        assert!(!r
-            .findings
-            .iter()
-            .any(|f| f.pattern == "settings-json"));
+        assert!(!r.findings.iter().any(|f| f.pattern == "settings-json"));
     }
 
     #[test]

@@ -174,6 +174,7 @@ impl ToolInvoker for RegistryToolInvoker {
             // → so a recursive `Agent` call inside this tool computes the child's
             // depth and the resolver can gate `Agent` at `depth < 5`.
             depth: ctx.depth,
+            observer: ctx.observer,
             // Subagent tool edits are not checkpointed in v1 (the main-loop
             // turn wires `file_history`; subagent contexts do not carry it).
             file_history: None,
@@ -550,6 +551,7 @@ mod tests {
                     cwd: None,
                     tool_use_id: None,
                     depth: 0,
+                    observer: None,
                     parent_model: None,
                     mode_override: None,
                 },
@@ -701,6 +703,7 @@ mod tests {
             cwd: None,
             tool_use_id: None,
             depth: 0,
+            observer: None,
             parent_model: None,
             mode_override: None,
         }
@@ -790,6 +793,7 @@ mod tests {
             cwd: None,
             tool_use_id: None,
             depth: 0,
+            observer: None,
             parent_model: None,
             mode_override: None,
         }
@@ -874,6 +878,7 @@ mod tests {
             cwd: None,
             tool_use_id: Some(id.to_string()),
             depth: 0,
+            observer: None,
             parent_model: None,
             mode_override: None,
         }
@@ -891,6 +896,7 @@ mod tests {
             outcome: traits::permission_gate::PermissionOutcome::Allow {
                 updated_input: None,
                 permission_updates: Vec::new(),
+                decision_classification: None,
             },
         });
         let invoker = RegistryToolInvoker::new(registry_with_echo()).with_gate(gate);
@@ -929,6 +935,7 @@ mod tests {
             outcome: traits::permission_gate::PermissionOutcome::Allow {
                 updated_input: None,
                 permission_updates: Vec::new(),
+                decision_classification: None,
             },
         });
         RegistryToolInvoker::new(registry_with_interactive_echo())
@@ -956,6 +963,7 @@ mod tests {
             outcome: traits::permission_gate::PermissionOutcome::Allow {
                 updated_input: None,
                 permission_updates: Vec::new(),
+                decision_classification: None,
             },
         });
         let invoker = RegistryToolInvoker::new(registry_with_echo()).with_gate(gate);
@@ -987,6 +995,7 @@ mod tests {
             outcome: traits::permission_gate::PermissionOutcome::Allow {
                 updated_input: None,
                 permission_updates: Vec::new(),
+                decision_classification: None,
             },
         });
         let invoker = RegistryToolInvoker::new(registry_with_echo()).with_gate(gate);
@@ -1013,6 +1022,7 @@ mod tests {
             outcome: traits::permission_gate::PermissionOutcome::Allow {
                 updated_input: Some(json!({ "rewritten": true })),
                 permission_updates: Vec::new(),
+                decision_classification: None,
             },
         });
         let invoker = RegistryToolInvoker::new(registry_with_echo()).with_gate(gate);
@@ -1039,6 +1049,7 @@ mod tests {
             outcome: traits::permission_gate::PermissionOutcome::Allow {
                 updated_input: None,
                 permission_updates: Vec::new(),
+                decision_classification: None,
             },
         });
         let invoker = RegistryToolInvoker::new(registry_with_echo()).with_gate(gate);

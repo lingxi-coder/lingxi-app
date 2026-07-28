@@ -103,6 +103,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
         s.transcript_only_messages.clear();
         s.compact_summary_messages.clear();
         s.active_goal = None;
+        s.message_timing = engine::session::MessageTimingState::default();
         s.session_id = protocol::SessionId::new();
         self.compaction_cumulative_dropped_tokens
             .store(0, std::sync::atomic::Ordering::Relaxed);
@@ -352,6 +353,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
             // `fork_context_messages` is still threaded below so a future
             // spawner that replays the cache-identical prefix works unchanged.
             prompt: directive.to_string(),
+            observer: None,
             context_paths: Vec::new(),
             description: Some(directive.to_string()),
             model: None,
@@ -435,6 +437,47 @@ impl OrchestratorHandle for ConversationOrchestrator {
             .fork_to_background(&history, system_prompt, prompt, &model)
             .await
             .map_err(|e| HandleError::ActionFailed(e.to_string()))
+    }
+
+    async fn background_conversation(
+        &self,
+        snapshot: traits::BackgroundingSnapshot,
+    ) -> Result<String, HandleError> {
+        let forker = self.bg_session_forker.as_ref().ok_or_else(|| {
+            HandleError::ActionFailed(
+                "Cannot open agents — session persistence is disabled, so this conversation cannot be backgrounded."
+                    .into(),
+            )
+        })?;
+
+        let (mut history, model) = {
+            let session = self.session.lock().await;
+            (session.history.clone(), session.model.clone())
+        };
+        let partial = snapshot.partial_text();
+        if !partial.is_empty() {
+            history.push(protocol::ConversationMessage::Assistant {
+                id: protocol::MessageId::new(),
+                content: vec![protocol::ContentBlock::Text {
+                    text: partial.to_string(),
+                }],
+                stop_reason: Some("background_requested".to_string()),
+            });
+        }
+
+        let system_prompt = self
+            .current_turn_system_prompt()
+            .await
+            .map(|prompt| Arc::from(prompt.as_str()));
+        let continuation = if matches!(snapshot, traits::BackgroundingSnapshot::Idle { .. }) {
+            ""
+        } else {
+            "Continue the interrupted turn from the backgrounding boundary. Preserve the user's intent and safely restart any interrupted work."
+        };
+        forker
+            .background_conversation(&history, system_prompt, continuation, &model, &snapshot)
+            .await
+            .map_err(|error| HandleError::ActionFailed(error.to_string()))
     }
 
     /// `/resume`-as-background (2.1.212, G06) — launch an EXISTING on-disk
@@ -752,8 +795,19 @@ impl OrchestratorHandle for ConversationOrchestrator {
         Ok(outcomes)
     }
 
-    async fn fire_directory_added(&self, directory: &str, source: &str) {
-        ConversationOrchestrator::fire_directory_added(self, directory, source).await;
+    async fn fire_directory_added(
+        &self,
+        directory: &str,
+        source: &str,
+    ) -> traits::DirectoryAddedHookSummary {
+        ConversationOrchestrator::fire_directory_added(self, directory, source).await
+    }
+
+    async fn register_repo_root(
+        &self,
+        request: traits::RegisterRepoRootRequest,
+    ) -> Result<traits::RegisterRepoRootOutcome, traits::HandleError> {
+        ConversationOrchestrator::register_repo_root(self, request).await
     }
 
     async fn list_hooks(&self) -> Vec<HookInfo> {
@@ -973,15 +1027,22 @@ impl OrchestratorHandle for ConversationOrchestrator {
             .keys()
     }
 
+    async fn context_usage_snapshot(&self) -> traits::ContextUsageSnapshot {
+        // `/context` is a LIVE-history measure. Use the exact estimator that
+        // auto-compaction uses so replacing history with a compact summary
+        // immediately lowers this number. Billing remains cumulative in the
+        // separate cost snapshot.
+        let history = self.session.lock().await.history.clone();
+        traits::ContextUsageSnapshot {
+            live_context_tokens: compaction::grouping::estimate_tokens_for_range(&history),
+            max_context_tokens: CONTEXT_WINDOW_MAX_TOKENS,
+            cumulative_cost: self.snapshot_cost().await,
+        }
+    }
+
     async fn context_window_usage(&self) -> (u64, u64) {
-        // `used_tokens` is the session's cumulative input+output token count
-        // (engine::SessionState::usage). `max_tokens` is the active model's
-        // context budget; LingXi locks the 200k Claude window (matching
-        // cost::budget). Falls back to (0, 0) when nothing has been counted.
-        let s = self.session.lock().await;
-        let usage = &s.usage.0;
-        let used = usage.input_tokens.saturating_add(usage.output_tokens);
-        (used, CONTEXT_WINDOW_MAX_TOKENS)
+        let snapshot = self.context_usage_snapshot().await;
+        (snapshot.live_context_tokens, snapshot.max_context_tokens)
     }
 
     async fn list_resumable_sessions(&self) -> Vec<(String, String)> {
@@ -1463,6 +1524,7 @@ mod tests {
             effort: None,
             initial_prompt: None,
             color: None,
+            observer: None,
         };
 
         traits::OrchestratorHandle::resume_session(
@@ -1534,6 +1596,7 @@ mod tests {
             effort: None,
             initial_prompt: None,
             color: None,
+            observer: None,
         }
     }
 
@@ -1672,11 +1735,8 @@ mod tests {
         assert!(list.is_empty() && aff.is_empty());
     }
 
-    /// cc 2.1.196 "/context shows 0 tokens on Bedrock" regression lock:
-    /// LingXi's `context_window_usage` sums the session's CUMULATIVE usage
-    /// (`SessionState::usage`) with no model-id / provider filter, so a
-    /// Bedrock-style model id (ARN / inference-profile form, which broke the
-    /// binary's per-model lookup) can never zero the count.
+    /// `/context` is model-id agnostic and follows live history rather than
+    /// cumulative provider usage (which does not shrink after compaction).
     #[tokio::test]
     async fn context_window_usage_is_model_id_agnostic_bedrock_regression() {
         use crate::test_support::{
@@ -1706,12 +1766,18 @@ mod tests {
                 cache_creation_input_tokens: 0,
                 cache_read_input_tokens: 0,
             });
+            s.history.push(protocol::ConversationMessage::user(
+                protocol::MessageId::new(),
+                "live context after compact".repeat(100),
+            ));
         }
+        let expected = {
+            let s = orch.session.lock().await;
+            compaction::grouping::estimate_tokens_for_range(&s.history)
+        };
         let (used, max) = orch.context_window_usage().await;
-        assert_eq!(
-            used, 1_545,
-            "usage must come from session totals, not a model-id lookup"
-        );
+        assert_eq!(used, expected, "usage must come from live history");
+        assert_ne!(used, 1_545, "cumulative provider usage must not leak in");
         assert_eq!(max, CONTEXT_WINDOW_MAX_TOKENS);
     }
 

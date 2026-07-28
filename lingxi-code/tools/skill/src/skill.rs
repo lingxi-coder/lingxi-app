@@ -339,6 +339,7 @@ impl SkillTool {
                 .clone()
                 .unwrap_or_else(|| "general-purpose".to_string()),
             prompt: prompt.to_string(),
+            observer: None,
             description: Some(format!("/{command_name}")),
             model: desc.model.clone(),
             run_in_background: true,
@@ -408,12 +409,7 @@ impl SkillTool {
             command_name,
         ) {
             registry.release_total_agent_spawn_reservation();
-            emit_failed(
-                bus,
-                crate::fork::InlineFallback::LiveDuplicate.reason(),
-                0,
-            )
-            .await;
+            emit_failed(bus, crate::fork::InlineFallback::LiveDuplicate.reason(), 0).await;
             return Ok(None);
         }
 
@@ -470,12 +466,7 @@ impl SkillTool {
                 }
             };
             return Ok(Some(ToolCallResult {
-                data: crate::fork::fork_result(
-                    command_name,
-                    &agent_id.to_string(),
-                    false,
-                    &result,
-                ),
+                data: crate::fork::fork_result(command_name, &agent_id.to_string(), false, &result),
                 model_content: Some(crate::fork::fork_tool_result_text(
                     command_name,
                     false,
@@ -983,9 +974,7 @@ present this turn, the skill is loaded — follow it directly rather than callin
             // claude-code building a fresh `toolPermissionContext` before
             // `executeShellCommandsInPrompt`. The `shell` selector drives both the
             // gate's tool-name choice and the runner's routing.
-            let shell_ctx = self
-                .prompt_shell
-                .build(&desc.allowed_tools, desc.shell);
+            let shell_ctx = self.prompt_shell.build(&desc.allowed_tools, desc.shell);
             match command_api::execute_shell_commands_in_prompt(
                 &expanded_prompt,
                 &shell_ctx,

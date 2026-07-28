@@ -555,6 +555,7 @@ fn make_request(
     SubagentSpawnRequest {
         subagent_type,
         prompt: prompt.to_string(),
+        observer: None,
         context_paths: Vec::new(),
         description: None,
         model: opt_str("model"),
@@ -590,10 +591,10 @@ fn make_request(
         // Workflow-spawned agents are top-level ⇒ the spawner's default anchors.
         parent_model_override: None,
         forked_skill_name: None,
-            forked_skill_attribution: None,
-            forked_skill_effort: None,
-            frozen_command_denies: Vec::new(),
-            resumed_history: None,
+        forked_skill_attribution: None,
+        forked_skill_effort: None,
+        frozen_command_denies: Vec::new(),
+        resumed_history: None,
     }
 }
 

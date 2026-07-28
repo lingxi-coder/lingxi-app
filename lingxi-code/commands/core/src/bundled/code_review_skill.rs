@@ -15,9 +15,12 @@
 //! - the **report_findings tool** path (`Srb`: needs the tool + a flag) —
 //!   default false ⇒ the plain-text findings output (`ICd`).
 //!
-//! So this replicates the **inline plain-text path**, which is byte-exact for
-//! the reachable cases. Three pieces of `wrb` depend on runtime context that
-//! `build(args)` does not receive, and are handled as documented below:
+//! The builder replicates the **plain-text review body**, which is byte-exact
+//! for the reachable cases. The command descriptor wraps that body in the
+//! normal `context: fork` + background skill path, so the review executes in
+//! an independent child transcript instead of growing the main transcript.
+//! Three pieces of `wrb` depend on runtime context that `build(args)` does not
+//! receive, and are handled as documented below:
 //! - **effort default** — `wrb` uses the session reasoning effort
 //!   (`Zy(ctx)`); when unset it falls back to `"medium"`. `build` has no session
 //!   context, so a `/code-review` with no explicit level uses `"medium"` (the
@@ -141,7 +144,7 @@ fn parse_args(raw: &str) -> Parsed {
     }
 }
 
-/// Dynamic prompt builder for `/code-review` (reference `wrb`, inline path).
+/// Dynamic prompt builder for `/code-review` (reference `wrb`, child body).
 pub struct CodeReviewPromptFn;
 
 impl BundledPromptFn for CodeReviewPromptFn {

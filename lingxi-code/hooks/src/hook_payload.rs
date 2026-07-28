@@ -756,7 +756,7 @@ pub struct CwdChangedPayload {
 /// claude-code `a$t` (BIN off 237753662):
 /// `{...Kf(void 0),hook_event_name:"DirectoryAdded",directory:e,source:t}`,
 /// dispatched with `matchQuery: t` — a hook `matcher` is therefore tested
-/// against the SOURCE (`add_dir`, `register_repo_root`), not the path.
+/// against the SOURCE (`slash_command`, `register_repo_root`), not the path.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirectoryAddedPayload {
     pub hook_event_name: HookEventNameDirectoryAdded,

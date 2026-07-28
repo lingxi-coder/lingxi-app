@@ -294,6 +294,12 @@ mod unix {
             !matches!(*self.inner.controller.lock().unwrap(), Controller::Vacant)
         }
 
+        /// Release the current controller through the same explicit-detach
+        /// path as Ctrl-Z, without stopping the PTY child.
+        pub fn detach_controller(&self) -> bool {
+            self.inner.detach_active_controller()
+        }
+
         /// Send raw PTY output to the controller, if attached.
         pub fn broadcast(&self, bytes: &[u8]) {
             for chunk in bytes.chunks(OUTPUT_CHUNK_BYTES) {
@@ -377,6 +383,15 @@ mod unix {
             {
                 *controller = Controller::Vacant;
             }
+        }
+
+        fn detach_active_controller(&self) -> bool {
+            let id = match &*self.controller.lock().unwrap() {
+                Controller::Active(client) => client.id,
+                Controller::Vacant | Controller::Reserved { .. } => return false,
+            };
+            self.remove_controller(id, true);
+            true
         }
 
         fn enqueue_frame(&self, kind: u8, payload: Vec<u8>, close_after: bool) -> bool {
@@ -1066,14 +1081,13 @@ mod unix {
         // FRAME_OUTPUT arrives inside the threshold we ask the daemon to
         // restart it (twice) and then give up with a diagnostic.
         let jobs_dir = crate::agents_registry::jobs_dir(&crate::run::daemon_runtime_dir());
-        let mut stall = crate::bg_attach_stall::StallDriver::new(
-            crate::bg_attach_stall::stall_threshold_ms(
+        let mut stall =
+            crate::bg_attach_stall::StallDriver::new(crate::bg_attach_stall::stall_threshold_ms(
                 crate::bg_attach_stall::STALL_DEFAULT_MS,
                 // The attach target was dispatched with argv, so it gets the
                 // slower floor (a prompt to load or a session to resume).
                 true,
-            ),
-        );
+            ));
         let mut last_poll = std::time::Instant::now();
         let mut stall_respawns: i64 = 0;
 
@@ -1146,10 +1160,7 @@ mod unix {
                                 crate::bg_attach_stall::NOT_RESPONDING_BANNER
                             );
                             let _ = stdout.flush();
-                            crate::bg_attach_stall::request_stall_respawn(
-                                &jobs_dir,
-                                session_label,
-                            );
+                            crate::bg_attach_stall::request_stall_respawn(&jobs_dir, session_label);
                             stall_respawns += 1;
                             // Re-arm for the restarted worker's own first frame.
                             stall = crate::bg_attach_stall::StallDriver::new(
@@ -1590,6 +1601,20 @@ mod windows {
                 .controller
                 .lock()
                 .is_ok_and(|controller| controller.is_some())
+        }
+
+        pub fn detach_controller(&self) -> bool {
+            let id = self
+                .inner
+                .controller
+                .lock()
+                .ok()
+                .and_then(|controller| controller.as_ref().map(|active| active.id));
+            let Some(id) = id else {
+                return false;
+            };
+            self.inner.remove_controller(id, true);
+            true
         }
 
         pub fn broadcast(&self, bytes: &[u8]) {
@@ -2299,6 +2324,10 @@ mod non_unix {
 
         #[must_use]
         pub fn has_clients(&self) -> bool {
+            false
+        }
+
+        pub fn detach_controller(&self) -> bool {
             false
         }
 

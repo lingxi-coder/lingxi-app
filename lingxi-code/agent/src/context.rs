@@ -209,6 +209,9 @@ pub struct SubagentContext {
     /// [`crate::tool_resolver::AgentToolResolver`] to gate the `Agent` tool at
     /// `depth < CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` (default 1).
     pub depth: u32,
+    /// Observer declaration whose companion watches this agent and, when
+    /// enabled, propagates to recursive children.
+    pub observer: Option<traits::subagent_spawn::ObserverSpec>,
     /// The child's EFFECTIVE permission-context mode as a WIRE string
     /// (`"plan"`/`"acceptEdits"`/…), computed by [`crate::handle`] from the Agent
     /// tool `mode` clamped against the parent's live mode (claude-code 2.1.207

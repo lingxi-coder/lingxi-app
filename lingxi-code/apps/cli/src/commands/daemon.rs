@@ -1033,7 +1033,6 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-
     /// Serializes every test that drives `run_supervisor`.
     ///
     /// `tracing` caches per-callsite INTEREST process-globally, and
@@ -1464,6 +1463,7 @@ mod tests {
             worktree_path: Some(worktree.display().to_string()),
             worktree_ownership_token: Some("token-123".to_string()),
             initial_prompt: Some("continue in the worktree".to_string()),
+            handoff: None,
             options: BackgroundLaunchOptions::default(),
             env: BTreeMap::new(),
             terminal: TerminalSize {
@@ -2073,7 +2073,9 @@ mod tests {
         service_stall_requests(root, &mut roster, &stall_probe(), &mut claimed);
 
         // The request is consumed, so the next heartbeat does not restart again.
-        assert!(!crate::bg_attach_stall::take_stall_request(&jobs, "cafe0001"));
+        assert!(!crate::bg_attach_stall::take_stall_request(
+            &jobs, "cafe0001"
+        ));
         // The record and claim are dropped so `spawn_pending_workers` treats the
         // job as pending IN THE SAME heartbeat.
         assert!(!roster.workers.contains_key("cafe0001"));
@@ -2086,7 +2088,11 @@ mod tests {
     fn the_budget_gives_up_instead_of_respawning_forever() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        write_respawn_count(root, "cafe0002", crate::bg_attach_stall::STALL_RESPAWN_BUDGET);
+        write_respawn_count(
+            root,
+            "cafe0002",
+            crate::bg_attach_stall::STALL_RESPAWN_BUDGET,
+        );
         let mut roster = empty_roster(1);
         roster.workers.insert("cafe0002".to_string(), worker(4243));
         let jobs = agents_registry::jobs_dir(root);

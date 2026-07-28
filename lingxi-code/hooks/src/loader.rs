@@ -650,7 +650,11 @@ mod tests {
             ("MessageDisplay", HookEventType::MessageDisplay),
             ("DirectoryAdded", HookEventType::DirectoryAdded),
         ];
-        assert_eq!(cases.len(), 31, "claude-code 2.1.220 HOOK_EVENTS has 31 names");
+        assert_eq!(
+            cases.len(),
+            31,
+            "claude-code 2.1.220 HOOK_EVENTS has 31 names"
+        );
         for (name, expected) in cases {
             let raw = one_command(name);
             let hooks = parse_hooks_from_settings_json(&raw, HookSource::User).unwrap();

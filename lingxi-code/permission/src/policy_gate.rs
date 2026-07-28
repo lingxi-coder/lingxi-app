@@ -529,6 +529,7 @@ impl PolicyPermissionGate {
                 PermissionOutcome::Allow {
                     updated_input,
                     permission_updates: Vec::new(),
+                    decision_classification: None,
                 }
             }
             PermissionResult::Deny {
@@ -576,6 +577,7 @@ impl PolicyPermissionGate {
                     PermissionOutcome::Allow {
                         updated_input: None,
                         permission_updates: Vec::new(),
+                        decision_classification: None,
                     }
                 } else {
                     // Delegate to the inner transport WITH the context so a stdio
@@ -789,6 +791,7 @@ impl PolicyPermissionGate {
             PermissionResult::Allow { updated_input, .. } => PermissionOutcome::Allow {
                 updated_input,
                 permission_updates: Vec::new(),
+                decision_classification: None,
             },
             PermissionResult::Deny {
                 reason,
@@ -1660,7 +1663,17 @@ mod gate_sysmsg_test {
 
     #[derive(Default)]
     struct RecordingGate {
-        denied: Arc<StdMutex<Vec<(String, Option<String>, Option<String>, Option<String>, String)>>>,
+        denied: Arc<
+            StdMutex<
+                Vec<(
+                    String,
+                    Option<String>,
+                    Option<String>,
+                    Option<String>,
+                    String,
+                )>,
+            >,
+        >,
     }
 
     #[async_trait::async_trait]
@@ -1697,7 +1710,10 @@ mod gate_sysmsg_test {
             behavior: PermissionBehavior::Deny,
             source: PermissionRuleSource::UserSettings,
         };
-        let policy = Arc::new(PermissionPolicy::from_rules(PermissionMode::Default, vec![deny]));
+        let policy = Arc::new(PermissionPolicy::from_rules(
+            PermissionMode::Default,
+            vec![deny],
+        ));
         let recorder = Arc::new(RecordingGate::default());
         let calls = recorder.denied.clone();
         let gate = PolicyPermissionGate::new(policy, recorder);

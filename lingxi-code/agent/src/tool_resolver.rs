@@ -499,6 +499,7 @@ mod tests {
             effort: None,
             initial_prompt: None,
             color: None,
+            observer: None,
         }
     }
 

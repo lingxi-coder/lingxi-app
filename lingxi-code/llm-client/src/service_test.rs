@@ -1442,19 +1442,59 @@ mod tests {
         // The encoder emits a computed top-level `speed` from request.speed
         // (fast mode). claude-code spreads the extra body (`...Vs`) BEFORE the
         // computed `...{speed:ze}`, so the computed speed wins over any extra one.
-        let mut request = LlmRequest::new("claude-sonnet-4-20250514").with_user_text("hi");
-        request.speed = Some("fast".to_string());
+        let request = LlmRequest::new("claude-sonnet-4-20250514").with_user_text("hi");
+        let mut prepared = adapter.client.prepare(&request).await.expect("prepare");
+        prepared
+            .provider_request
+            .body_json
+            .as_object_mut()
+            .expect("object body")
+            .insert("speed".to_string(), serde_json::json!("fast"));
 
         std::env::set_var("CLAUDE_CODE_EXTRA_BODY", r#"{"speed":"slow"}"#);
-        let body = body_after_inject(&adapter, &request).await;
+        ApiService::merge_extra_body(&mut prepared);
+        let body = prepared.provider_request.body_json;
         assert_eq!(
             body["speed"],
             serde_json::json!("fast"),
             "computed speed wins over the extra body's speed"
         );
+        prepared.provider_request.body_json = body;
+        ApiService::enforce_fast_route(&mut prepared);
+        assert!(
+            prepared.provider_request.body_json.get("speed").is_none(),
+            "the final capability gate strips speed from unsupported models"
+        );
 
         std::env::remove_var("CLAUDE_CODE_EXTRA_BODY");
         clear_thinking_env();
+    }
+
+    #[tokio::test]
+    async fn extra_body_cannot_reintroduce_fast_mode_on_a_custom_route() {
+        let _g = THINKING_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("CLAUDE_CODE_EXTRA_BODY", r#"{"speed":"fast"}"#);
+        let adapter = make_adapter_for_protocol(
+            ProtocolFamily::AnthropicMessages,
+            ProviderId::AnthropicFirstParty,
+            "https://gateway.example",
+        );
+        let request = LlmRequest::new("model").with_user_text("hi");
+        let body = body_after_inject(&adapter, &request).await;
+        assert!(body.get("speed").is_none());
+        std::env::remove_var("CLAUDE_CODE_EXTRA_BODY");
+    }
+
+    #[tokio::test]
+    async fn insecure_anthropic_host_is_not_a_first_party_fast_route() {
+        let adapter = make_adapter_for_protocol(
+            ProtocolFamily::AnthropicMessages,
+            ProviderId::AnthropicFirstParty,
+            "http://api.anthropic.com",
+        );
+        let request = LlmRequest::new("model").with_user_text("hi");
+        let prepared = adapter.client.prepare(&request).await.expect("prepare");
+        assert!(!ApiService::direct_anthropic_api_route(&prepared));
     }
 
     #[test]
@@ -2230,6 +2270,17 @@ mod tests {
         .await;
         assert!(anthropic_headers.contains_key("anthropic-beta"));
 
+        let compatible_headers = headers_after_inject_for_protocol(
+            ProtocolFamily::AnthropicMessages,
+            ProviderId::AnthropicFirstParty,
+            "https://gateway.example",
+        )
+        .await;
+        assert!(
+            !compatible_headers.contains_key("anthropic-beta"),
+            "an Anthropic-wire custom endpoint must not inherit first-party betas"
+        );
+
         for (protocol, base_url, name) in [
             (
                 ProtocolFamily::FoundryClaude,
@@ -2257,6 +2308,11 @@ mod tests {
         }
 
         let routes = [
+            (
+                ProtocolFamily::AnthropicMessages,
+                "https://gateway.example",
+                "anthropic-compatible",
+            ),
             (
                 ProtocolFamily::OpenAiChat,
                 "https://api.openai.com/v1",

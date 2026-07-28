@@ -31,6 +31,14 @@
 /// later is a lookup, not another archaeology pass over the binary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelCapability {
+    /// Model accepts `output_config.effort`.
+    Effort,
+    /// Model accepts the `max` effort level.
+    MaxEffort,
+    /// Model accepts the `xhigh` effort level.
+    XHighEffort,
+    /// Model supports adaptive thinking.
+    AdaptiveThinking,
     /// Model takes the LEAN (short) system prompt — the 2.1.219+ "new rules of
     /// context engineering" path.
     LeanPrompt,
@@ -51,6 +59,10 @@ impl ModelCapability {
     #[must_use]
     pub const fn as_wire(self) -> &'static str {
         match self {
+            Self::Effort => "effort",
+            Self::MaxEffort => "max_effort",
+            Self::XHighEffort => "xhigh_effort",
+            Self::AdaptiveThinking => "adaptive_thinking",
             Self::LeanPrompt => "lean_prompt",
             Self::MidConvSystem => "mid_conv_system",
             Self::RefusalFallback => "refusal_fallback",
@@ -71,6 +83,20 @@ impl ModelCapability {
 #[must_use]
 pub fn capabilities_for(model_id: &str) -> &'static [&'static str] {
     match model_id {
+        "claude-sonnet-4-6" => &[
+            "effort",
+            "max_effort",
+            "adaptive_thinking",
+            "context_management",
+        ],
+        "claude-sonnet-5" => &[
+            "effort",
+            "max_effort",
+            "xhigh_effort",
+            "adaptive_thinking",
+            "mid_conv_system",
+            "context_management",
+        ],
         "claude-opus-4-5" => &["context_management"],
         "claude-opus-4-6" => &[
             "effort",
@@ -129,17 +155,59 @@ pub fn capabilities_for(model_id: &str) -> &'static [&'static str] {
     }
 }
 
+const KNOWN_MODEL_IDS: &[&str] = &[
+    "claude-sonnet-4-6",
+    "claude-sonnet-5",
+    "claude-opus-4-5",
+    "claude-opus-4-6",
+    "claude-opus-4-7",
+    "claude-opus-4-8",
+    "claude-opus-5",
+    "claude-fable-5",
+    "claude-mythos-5",
+];
+
+fn known_wrapper_suffix(suffix: &str) -> bool {
+    if suffix.is_empty() || suffix == "-eap" {
+        return true;
+    }
+    if let Some(version) = suffix.strip_prefix("-v") {
+        let mut parts = version.split(':');
+        return parts
+            .next()
+            .is_some_and(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+            && parts
+                .next()
+                .is_some_and(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+            && parts.next().is_none();
+    }
+    if let Some(date) = suffix.strip_prefix('-') {
+        return date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit());
+    }
+    false
+}
+
 /// Strip the decorations a model id can carry before a registry lookup:
 /// a provider/profile prefix (`openrouter/anthropic/…`), a `[1m]` context
-/// suffix, and an `-eap` early-access suffix.
+/// suffix, an `-eap` early-access suffix, and the standard dated/cloud
+/// transport wrappers around a canonical Claude id.
 #[must_use]
 pub fn normalize_model_id(model_id: &str) -> String {
     let bare = model_id.rsplit('/').next().unwrap_or(model_id);
     let bare = bare.split('[').next().unwrap_or(bare);
     let lower = bare.trim().to_ascii_lowercase();
-    lower
-        .strip_suffix("-eap")
-        .map_or(lower.clone(), str::to_string)
+    let candidate = lower
+        .find("claude-")
+        .map_or(lower.as_str(), |start| &lower[start..]);
+    let without_eap = candidate.strip_suffix("-eap").unwrap_or(candidate);
+    KNOWN_MODEL_IDS
+        .iter()
+        .find(|known| {
+            without_eap
+                .strip_prefix(**known)
+                .is_some_and(known_wrapper_suffix)
+        })
+        .map_or_else(|| without_eap.to_string(), |known| (*known).to_string())
 }
 
 /// [`capabilities_for`] after [`normalize_model_id`].
@@ -154,6 +222,91 @@ pub fn capabilities_for_loose(model_id: &str) -> &'static [&'static str] {
 #[must_use]
 pub fn has_capability(model_id: &str, capability: ModelCapability) -> bool {
     capabilities_for_loose(model_id).contains(&capability.as_wire())
+}
+
+/// Model-selected system-prompt family.
+///
+/// Claude transports share Claude's model-specific prompt behavior. Every
+/// non-Claude provider/model stays on LingXi's complete harness; a future
+/// third-party model can never inherit a short Claude prompt merely because it
+/// is absent from the registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptProfile {
+    /// Claude's capability-gated short prompt.
+    ClaudeLean,
+    /// Claude's standard prompt.
+    ClaudeStandard,
+    /// LingXi's complete multi-provider prompt.
+    FullHarness,
+}
+
+/// Resolve the prompt family for a model id, including provider/cloud wrappers.
+#[must_use]
+pub fn prompt_profile_for(model_id: &str) -> PromptProfile {
+    let canonical = normalize_model_id(model_id);
+    if !canonical.starts_with("claude-") {
+        return PromptProfile::FullHarness;
+    }
+    if has_capability(&canonical, ModelCapability::LeanPrompt) || canonical == "claude-mythos-5" {
+        PromptProfile::ClaudeLean
+    } else {
+        PromptProfile::ClaudeStandard
+    }
+}
+
+/// Initialize-response capability projection derived from the same registry
+/// used by request and prompt gates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelInitializationCapabilities {
+    /// Whether the model accepts an explicit effort level.
+    pub supports_effort: bool,
+    /// Ordered effort values advertised to SDK clients.
+    pub supported_effort_levels: &'static [&'static str],
+    /// Whether the model supports adaptive thinking.
+    pub supports_adaptive_thinking: bool,
+    /// Whether the model supports the first-party fast tier.
+    pub supports_fast_mode: bool,
+    /// Whether the model supports Claude Code's automatic mode.
+    pub supports_auto_mode: bool,
+}
+
+/// Build the public initialize-model capability row from the canonical table.
+#[must_use]
+pub fn initialization_capabilities_for(model_id: &str) -> ModelInitializationCapabilities {
+    const NONE: &[&str] = &[];
+    const STANDARD: &[&str] = &["low", "medium", "high"];
+    const WITH_MAX: &[&str] = &["low", "medium", "high", "max"];
+    const WITH_XHIGH_AND_MAX: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+
+    let canonical = normalize_model_id(model_id);
+    let supports_effort = has_capability(&canonical, ModelCapability::Effort);
+    let supported_effort_levels = if !supports_effort {
+        NONE
+    } else if has_capability(&canonical, ModelCapability::XHighEffort) {
+        WITH_XHIGH_AND_MAX
+    } else if has_capability(&canonical, ModelCapability::MaxEffort) {
+        WITH_MAX
+    } else {
+        STANDARD
+    };
+    let supports_auto_mode = matches!(
+        canonical.as_str(),
+        "claude-sonnet-4-6"
+            | "claude-sonnet-5"
+            | "claude-opus-4-6"
+            | "claude-opus-4-7"
+            | "claude-opus-4-8"
+            | "claude-opus-5"
+            | "claude-fable-5"
+            | "claude-mythos-5"
+    );
+    ModelInitializationCapabilities {
+        supports_effort,
+        supported_effort_levels,
+        supports_adaptive_thinking: has_capability(&canonical, ModelCapability::AdaptiveThinking),
+        supports_fast_mode: has_capability(&canonical, ModelCapability::FastMode),
+        supports_auto_mode,
+    }
 }
 
 #[cfg(test)]
@@ -247,5 +400,57 @@ mod tests {
         assert!(has_capability("claude-opus-5", ModelCapability::FastMode));
         // fable-5's list deliberately omits fast_mode.
         assert!(!has_capability("claude-fable-5", ModelCapability::FastMode));
+    }
+
+    #[test]
+    fn prompt_profile_keeps_non_claude_models_on_the_full_harness() {
+        for id in [
+            "gpt-5.5",
+            "deepseek-v4-flash",
+            "gemini-3.5-flash",
+            "glm-5.1",
+            "openrouter/qwen/qwen3-coder",
+        ] {
+            assert_eq!(prompt_profile_for(id), PromptProfile::FullHarness, "{id}");
+        }
+    }
+
+    #[test]
+    fn prompt_profile_distinguishes_claude_standard_and_lean_models() {
+        assert_eq!(
+            prompt_profile_for("claude-opus-4-7"),
+            PromptProfile::ClaudeStandard
+        );
+        assert_eq!(
+            prompt_profile_for("claude-opus-5"),
+            PromptProfile::ClaudeLean
+        );
+        assert_eq!(
+            prompt_profile_for("us.anthropic.claude-opus-5-v1:0"),
+            PromptProfile::ClaudeLean
+        );
+    }
+
+    #[test]
+    fn initialize_projection_and_request_gate_share_fast_capability() {
+        for id in [
+            "claude-opus-4-7",
+            "claude-opus-4-8",
+            "claude-opus-5",
+            "us.anthropic.claude-opus-5-v1:0",
+        ] {
+            assert!(
+                initialization_capabilities_for(id).supports_fast_mode,
+                "{id}"
+            );
+            assert!(has_capability(id, ModelCapability::FastMode), "{id}");
+        }
+        for id in ["claude-sonnet-5", "claude-fable-5", "gpt-5.5"] {
+            assert!(
+                !initialization_capabilities_for(id).supports_fast_mode,
+                "{id}"
+            );
+            assert!(!has_capability(id, ModelCapability::FastMode), "{id}");
+        }
     }
 }

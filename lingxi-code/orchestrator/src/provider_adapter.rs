@@ -32,18 +32,20 @@ pub struct ProviderApiAdapter {
     initial_effort: std::sync::RwLock<Option<serde_json::Value>>,
     /// (`/fast`) Session-scoped fast-mode toggle, shared (same `Arc`) with the
     /// [`ConversationOrchestrator`] so the handle's `set_fast_mode` flip is seen
-    /// here on the next turn. When set AND the active model supports fast mode
-    /// (opus-4-7 / opus-4-8), the MAIN-loop stream sends `speed:"fast"`. The
+    /// here on the next turn. When set AND the active model carries the
+    /// canonical `fast_mode` capability, the MAIN-loop stream sends
+    /// `speed:"fast"`. The
     /// default flag is always `false`, so bodies stay byte-identical until a
     /// live `/fast` toggle flips it.
     fast_mode: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
-/// Whether `model` is a fast-mode-capable Opus tier (mirrors the
-/// `supports_fast_mode` column of `run.rs::model_capabilities`).
+/// Whether `model` carries the canonical registry's `fast_mode` capability.
 fn model_supports_fast_mode(model: &str) -> bool {
-    let m = model.to_lowercase();
-    m.contains("opus-4-7") || m.contains("opus-4-8")
+    traits::model_capabilities::has_capability(
+        model,
+        traits::model_capabilities::ModelCapability::FastMode,
+    )
 }
 
 impl ProviderApiAdapter {
@@ -628,7 +630,7 @@ impl StreamingApiClient for ProviderApiAdapter {
         // (CLI `--effort` → `output_config.effort`); `None` (no flag) keeps
         // the pre-M4 body byte-identical.
         // (/fast) When the shared fast-mode flag is set AND the active model
-        // supports fast mode (opus-4-7 / opus-4-8), send `speed:"fast"` — the
+        // carries the canonical fast-mode capability, send `speed:"fast"` — the
         // service's `beta_context` reads it back to add the fast-mode beta.
         // `None` (flag off, or an unsupported model) keeps the body unchanged.
         let speed = if self.fast_mode.load(std::sync::atomic::Ordering::SeqCst)
@@ -1317,11 +1319,12 @@ mod tests {
 
     #[test]
     fn model_supports_fast_mode_gates_on_opus_fast_tier() {
-        // Only the opus-4-7 / opus-4-8 fast tier supports fast mode (mirrors
-        // run.rs::model_capabilities). Case-insensitive.
+        // The 2.1.220 registry marks opus-4-7 / opus-4-8 / opus-5 as fast.
         assert!(model_supports_fast_mode("claude-opus-4-8"));
         assert!(model_supports_fast_mode("claude-opus-4-7"));
+        assert!(model_supports_fast_mode("claude-opus-5"));
         assert!(model_supports_fast_mode("CLAUDE-OPUS-4-8"));
+        assert!(model_supports_fast_mode("us.anthropic.claude-opus-5-v1:0"));
         assert!(!model_supports_fast_mode("claude-sonnet-4-20250514"));
         assert!(!model_supports_fast_mode("claude-opus-4-1"));
         assert!(!model_supports_fast_mode("gpt-5.2"));

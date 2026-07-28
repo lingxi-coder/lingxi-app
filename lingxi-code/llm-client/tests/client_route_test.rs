@@ -83,6 +83,80 @@ async fn prepare_returns_route_identity_and_encodes_resolved_request_model() {
     assert_eq!(prepared.provider_request.body_json["model"], "gpt-4o");
 }
 
+fn anthropic_fast_profile(profile_name: &str, base_url: &str) -> ProviderProfile {
+    ProviderProfile {
+        provider_id: ProviderId::AnthropicFirstParty,
+        profile_name: profile_name.to_string(),
+        base_url: base_url.to_string(),
+        protocol: ProtocolFamily::AnthropicMessages,
+        auth: AuthStrategy::ApiKey,
+        credential: CredentialConfig::None,
+        models: vec![ModelProfile {
+            display_model: "claude-opus-5".to_string(),
+            request_model: "claude-opus-5".to_string(),
+            billing_model: "claude-opus-5".to_string(),
+            aliases: vec![],
+            description: None,
+            capabilities: Capabilities {
+                streaming: true,
+                tools: true,
+                reasoning: true,
+                ..Default::default()
+            },
+        }],
+        pricing: PricingConfig::default(),
+        signing: None,
+        azure: None,
+        supports_websockets: false,
+        supports_websocket_compression: false,
+        websocket_connect_timeout_ms: None,
+    }
+}
+
+#[tokio::test]
+async fn fast_speed_survives_only_on_the_builtin_anthropic_route() {
+    let direct = DefaultLlmClient::from_config(ClientConfig {
+        providers: vec![anthropic_fast_profile(
+            "anthropic",
+            "https://api.anthropic.com",
+        )],
+    })
+    .unwrap();
+    let mut request = LlmRequest::new("claude-opus-5");
+    request.speed = Some("fast".to_string());
+    let prepared = direct.prepare(&request).await.unwrap();
+    assert_eq!(prepared.provider_request.body_json["speed"], "fast");
+
+    let custom = DefaultLlmClient::from_config(ClientConfig {
+        providers: vec![anthropic_fast_profile(
+            "anthropic-compatible",
+            "https://gateway.example",
+        )],
+    })
+    .unwrap();
+    let prepared = custom.prepare(&request).await.unwrap();
+    assert!(
+        prepared.provider_request.body_json.get("speed").is_none(),
+        "custom Anthropic-compatible routes must not inherit first-party fast mode"
+    );
+}
+
+#[tokio::test]
+async fn fast_speed_is_removed_for_models_without_the_registry_capability() {
+    let mut profile = anthropic_fast_profile("anthropic", "https://api.anthropic.com");
+    profile.models[0].display_model = "claude-sonnet-5".to_string();
+    profile.models[0].request_model = "claude-sonnet-5".to_string();
+    profile.models[0].billing_model = "claude-sonnet-5".to_string();
+    let client = DefaultLlmClient::from_config(ClientConfig {
+        providers: vec![profile],
+    })
+    .unwrap();
+    let mut request = LlmRequest::new("claude-sonnet-5");
+    request.speed = Some("fast".to_string());
+    let prepared = client.prepare(&request).await.unwrap();
+    assert!(prepared.provider_request.body_json.get("speed").is_none());
+}
+
 #[tokio::test]
 async fn github_copilot_gpt5_and_codex_route_to_responses_endpoint() {
     // GitHub Copilot serves GPT-5.x / codex models ONLY via `/responses`, but

@@ -1961,10 +1961,9 @@ fn session_model_is_first_party(
 /// * `QN()` is `El()&&fde(undefined)===null` i.e. `El()&&JW()===null`, so
 ///   `El()&&QN()` collapses to "the disabled reason resolved to null" — the
 ///   value this function is handed.
-/// * `fE(model)` (@227892311) is the model gate: the registry `fast_mode`
-///   capability, else a name containing `opus-4-7` / `opus-4-8` / `opus-5`.
-///   The port has no registry-capability seam here, and the name rule already
-///   covers every fast-mode entry in the catalog.
+/// * `fE(model)` (@227892311) is the canonical registry's `fast_mode`
+///   capability. The UI state, initialize response, and request path all
+///   consume the same table.
 /// * `z0e()` (`"cooldown"`) rides the unported availability prober `mB` — the
 ///   same dead arm as `JW`'s `pending` / `disabled` branches.
 fn resolve_fast_mode_state(
@@ -1972,9 +1971,10 @@ fn resolve_fast_mode_state(
     fast_mode_disabled_reason: Option<&str>,
     sdk_fast_mode_opt_in: bool,
 ) -> &'static str {
-    let m = model.to_lowercase();
-    let model_supports_fast_mode =
-        m.contains("opus-4-7") || m.contains("opus-4-8") || m.contains("opus-5");
+    let model_supports_fast_mode = traits::model_capabilities::has_capability(
+        model,
+        traits::model_capabilities::ModelCapability::FastMode,
+    );
     if fast_mode_disabled_reason.is_none() && sdk_fast_mode_opt_in && model_supports_fast_mode {
         "on"
     } else {
@@ -2007,7 +2007,7 @@ fn flag_settings_fast_mode_opt_in(settings: Option<&str>) -> bool {
 /// Returns `(supportsEffort, supportedEffortLevels, supportsAdaptiveThinking,
 ///           supportsFastMode, supportsAutoMode)`.
 ///
-/// Refreshed to the 2.1.198 registry truth. The binary's initialize models
+/// Refreshed to the 2.1.220 registry truth. The binary's initialize models
 /// builder (print.ts @223434963) computes per-row: effort = `iw` (registry
 /// "effort" capability), levels = `UR = [low,medium,high,xhigh,max]` filtered
 /// by `BIe` ("max_effort") and `Zne` ("xhigh_effort", which additionally
@@ -2021,39 +2021,20 @@ fn flag_settings_fast_mode_opt_in(settings: Option<&str>) -> bool {
 /// non-Anthropic models keep all-false / empty defaults (multi-provider
 /// divergence: the binary's `RN(Fh(e))` non-1P fallback has no lingxi seam).
 fn model_capabilities(request_model: &str) -> (bool, Vec<&'static str>, bool, bool, bool) {
-    /// `UR` — the full effort ladder (binary: `UR=["low","medium","high",
-    /// "xhigh","max"]`).
-    const LEVELS_WITH_XHIGH: &[&str] = &["low", "medium", "high", "xhigh", "max"];
-    /// `UR` minus `xhigh` (`Zne` excludes opus-4-6 / sonnet-4-6 by name).
-    const LEVELS_NO_XHIGH: &[&str] = &["low", "medium", "high", "max"];
-
-    let rm = request_model.to_lowercase();
-
     // The "default" pseudo-model: the binary computes capabilities on the
     // RESOLVED model (`r = R_()` for the Default row); lingxi's default
     // resolves to claude-sonnet-5 (2.1.197/198, M1).
-    if rm == "default" {
+    if request_model.eq_ignore_ascii_case("default") {
         return model_capabilities("claude-sonnet-5");
     }
-
-    // opus-4-7 / opus-4-8: full ladder incl. xhigh, adaptive thinking, and
-    // the ONLY two fast-mode models (`_h`: registry "fast_mode" / name pair).
-    if rm.contains("opus-4-7") || rm.contains("opus-4-8") {
-        return (true, LEVELS_WITH_XHIGH.to_vec(), true, true, true);
-    }
-    // sonnet-5 / fable-5 / mythos-5: full ladder + adaptive + auto, NO fast
-    // mode (their registry entries carry no "fast_mode"). NB the substring
-    // hazard is safe: "claude-sonnet-4-5" does NOT contain "sonnet-5".
-    if rm.contains("sonnet-5") || rm.contains("fable-5") || rm.contains("mythos-5") {
-        return (true, LEVELS_WITH_XHIGH.to_vec(), true, false, true);
-    }
-    // sonnet-4-6 / opus-4-6: effort WITHOUT xhigh (`Zne` name-excludes them;
-    // registry has "max_effort" but no "xhigh_effort"), adaptive, auto.
-    if rm.contains("sonnet-4-6") || rm.contains("opus-4-6") {
-        return (true, LEVELS_NO_XHIGH.to_vec(), true, false, true);
-    }
-    // Legacy Claude exclusions + unknown / non-Anthropic ids: all-false.
-    (false, vec![], false, false, false)
+    let capabilities = traits::model_capabilities::initialization_capabilities_for(request_model);
+    (
+        capabilities.supports_effort,
+        capabilities.supported_effort_levels.to_vec(),
+        capabilities.supports_adaptive_thinking,
+        capabilities.supports_fast_mode,
+        capabilities.supports_auto_mode,
+    )
 }
 
 /// Drive a one-shot `--output-format json` / `--json` conversation.
@@ -3852,23 +3833,33 @@ mod tests {
         let all = vec!["low", "medium", "high", "xhigh", "max"];
         let no_xhigh = vec!["low", "medium", "high", "max"];
 
-        // opus-4-7 / opus-4-8: full ladder + adaptive + FAST + auto (the only
-        // two fast-mode models in the 2.1.198 registry).
-        for m in ["claude-opus-4-7", "claude-opus-4-8-20260115"] {
+        // opus-4-7 / opus-4-8 / opus-5: full ladder + adaptive + FAST + auto.
+        for m in [
+            "claude-opus-4-7",
+            "claude-opus-4-8-20260115",
+            "claude-opus-5",
+            "us.anthropic.claude-opus-5-v1:0",
+        ] {
             assert_eq!(
                 model_capabilities(m),
                 (true, all.clone(), true, true, true),
                 "{m}"
             );
         }
-        // sonnet-5 / fable-5 / mythos-5: full ladder + adaptive + auto, no fast.
-        for m in ["claude-sonnet-5", "claude-fable-5", "claude-mythos-5"] {
+        // sonnet-5 / fable-5: full ladder + adaptive + auto, no fast.
+        for m in ["claude-sonnet-5", "claude-fable-5"] {
             assert_eq!(
                 model_capabilities(m),
                 (true, all.clone(), true, false, true),
                 "{m}"
             );
         }
+        // Mythos 5 is present in the 2.1.220 table with no registry
+        // capabilities; auto mode is derived separately for modern Claude.
+        assert_eq!(
+            model_capabilities("claude-mythos-5"),
+            (false, vec![], false, false, true)
+        );
         // sonnet-4-6 / opus-4-6: no xhigh (binary `Zne` excludes them by name).
         for m in ["claude-sonnet-4-6", "claude-opus-4-6-20260101"] {
             assert_eq!(

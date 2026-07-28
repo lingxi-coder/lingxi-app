@@ -122,6 +122,14 @@ pub fn dh_simple_system_prompt(model: Option<&str>) -> bool {
     let Some(model) = model.filter(|m| !m.is_empty()) else {
         return false;
     };
+    // LingXi's multi-provider harness is intentionally more explicit than the
+    // model-specific Claude prompt. A non-Claude model must never inherit the
+    // short prompt from Claude's unknown-model fallthrough.
+    if traits::model_capabilities::prompt_profile_for(model)
+        == traits::model_capabilities::PromptProfile::FullHarness
+    {
+        return false;
+    }
     let env = std::env::var("LINGXI_SIMPLE_SYSTEM_PROMPT").ok();
     if traits::env::is_env_truthy(env.as_deref()) {
         return true;
@@ -173,6 +181,21 @@ mod tests {
         assert!(dh_simple_system_prompt(Some("claude-opus-4-8")));
         assert!(dh_simple_system_prompt(Some("claude-fable-5")));
         assert!(dh_simple_system_prompt(Some("claude-mythos-5")));
+    }
+
+    #[test]
+    fn non_claude_models_keep_long_tool_prompts() {
+        for model in [
+            "gpt-5.5",
+            "deepseek-v4-flash",
+            "gemini-3.5-flash",
+            "glm-5.1",
+        ] {
+            assert!(
+                !dh_simple_system_prompt(Some(model)),
+                "{model} must keep the full harness/tool prompt"
+            );
+        }
     }
 
     #[test]

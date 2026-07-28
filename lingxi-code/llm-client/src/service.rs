@@ -13,7 +13,7 @@ use crate::convert::{
 };
 use crate::model::betas::{
     apply_beta_header_with_auth_and_custom, bedrock_extra_body_betas, BetaContext, Endpoint,
-    Provider,
+    Provider, FAST_MODE,
 };
 use crate::model::rate_limit::{
     formatted_reset_times_from_headers, parse_retry_after, parse_unified_reset,
@@ -1219,10 +1219,69 @@ impl ApiService {
     /// route. Custom providers may share the Anthropic wire protocol, but must
     /// never inherit a first-party experimental header by accident.
     fn custom_cli_betas(&self, prepared: &crate::PreparedLlmCall) -> Vec<String> {
-        if prepared.route.resolved_route.provider_id != crate::ProviderId::AnthropicFirstParty {
+        if !Self::direct_anthropic_api_route(prepared) {
             return Vec::new();
         }
         self.custom_cli_betas.clone()
+    }
+
+    /// A direct first-party Anthropic API route, resolved after profile/model
+    /// selection. Custom Anthropic-wire gateways are deliberately excluded:
+    /// they may understand the stable Messages schema, but must not inherit
+    /// Claude Code's private first-party betas or fast tier.
+    fn direct_anthropic_api_route(prepared: &crate::PreparedLlmCall) -> bool {
+        if prepared.route.resolved_route.provider_id != crate::ProviderId::AnthropicFirstParty
+            || prepared.route.protocol != crate::ProtocolFamily::AnthropicMessages
+        {
+            return false;
+        }
+        url::Url::parse(&prepared.provider_request.url).is_ok_and(|url| {
+            url.scheme() == "https"
+                && url.host_str() == Some(FIRST_PARTY_API_HOST)
+                && url.port().is_none()
+        })
+    }
+
+    fn enforce_fast_route(prepared: &mut crate::PreparedLlmCall) {
+        let model = prepared
+            .provider_request
+            .body_json
+            .get("model")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(&prepared.route.resolved_route.request_model);
+        let allowed = Self::direct_anthropic_api_route(prepared)
+            && traits::model_capabilities::has_capability(
+                model,
+                traits::model_capabilities::ModelCapability::FastMode,
+            );
+        if allowed {
+            return;
+        }
+        if let Some(body) = prepared.provider_request.body_json.as_object_mut() {
+            body.remove("speed");
+        }
+        let Some(header) = prepared
+            .provider_request
+            .headers
+            .get("anthropic-beta")
+            .cloned()
+        else {
+            return;
+        };
+        let retained = header
+            .split(',')
+            .map(str::trim)
+            .filter(|part| !part.is_empty() && *part != FAST_MODE)
+            .collect::<Vec<_>>()
+            .join(",");
+        if retained.is_empty() {
+            prepared.provider_request.headers.remove("anthropic-beta");
+        } else {
+            prepared
+                .provider_request
+                .headers
+                .insert("anthropic-beta".to_string(), retained);
+        }
     }
 
     /// `true` for protocols that speak to Anthropic models (first-party or via
@@ -1557,9 +1616,12 @@ impl ApiService {
         // advanced-tool-use, Vertex uses tool-search-tool, and Bedrock carries
         // tool-search-tool in the request body's anthropic_beta array.
         let beta_provider = match prepared.route.protocol {
-            crate::ProtocolFamily::AnthropicMessages | crate::ProtocolFamily::FoundryClaude => {
+            crate::ProtocolFamily::AnthropicMessages
+                if Self::direct_anthropic_api_route(prepared) =>
+            {
                 Some(Provider::Anthropic)
             }
+            crate::ProtocolFamily::FoundryClaude => Some(Provider::Anthropic),
             crate::ProtocolFamily::VertexClaude => Some(Provider::Vertex),
             _ => None,
         };
@@ -1587,6 +1649,10 @@ impl ApiService {
         // CLAUDE_CODE_EXTRA_BODY merge — after the beta header is computed from the
         // pre-merge body (claude-code `B0t` spread; 2.1.207).
         Self::merge_extra_body(prepared);
+        // Final resolved-route guard. `CLAUDE_CODE_EXTRA_BODY` is merged above,
+        // so this must run last to prevent it from reintroducing first-party
+        // speed/beta fields on custom or unsupported routes.
+        Self::enforce_fast_route(prepared);
     }
 
     /// Same as [`inject_headers`] but for the streaming endpoint.
@@ -1597,9 +1663,12 @@ impl ApiService {
         dispatch: DispatchHeaderState,
     ) {
         let beta_provider = match prepared.route.protocol {
-            crate::ProtocolFamily::AnthropicMessages | crate::ProtocolFamily::FoundryClaude => {
+            crate::ProtocolFamily::AnthropicMessages
+                if Self::direct_anthropic_api_route(prepared) =>
+            {
                 Some(Provider::Anthropic)
             }
+            crate::ProtocolFamily::FoundryClaude => Some(Provider::Anthropic),
             crate::ProtocolFamily::VertexClaude => Some(Provider::Vertex),
             _ => None,
         };
@@ -1625,6 +1694,7 @@ impl ApiService {
         // CLAUDE_CODE_EXTRA_BODY merge — after the beta header is computed from the
         // pre-merge body (claude-code `B0t` spread; 2.1.207).
         Self::merge_extra_body(prepared);
+        Self::enforce_fast_route(prepared);
     }
 
     // ── 429 retry-after resolution (reset ladder) ─────────────────────────────

@@ -330,8 +330,20 @@ impl DefaultLlmClient {
                 .iter()
                 .any(|m| m.content.iter().any(is_image_block));
 
+        let entry = self
+            .routes
+            .get(&resolved_route.profile_name)
+            .ok_or(LlmError::ModelUnavailable)?;
+        // Fast mode is a first-party Anthropic request property, not a generic
+        // Anthropic-wire feature. Resolve the route before encoding and strip
+        // it for custom compatible endpoints, cloud transports, and models
+        // without the canonical capability. Doing this before authentication
+        // is essential for signed Bedrock/Vertex requests.
+        let needs_speed_degrade =
+            request.speed.is_some() && !route_allows_first_party_fast_mode(&resolved_route, entry);
+
         let mut owned: Option<LlmRequest> = None;
-        if needs_reasoning_degrade || needs_vision_degrade {
+        if needs_reasoning_degrade || needs_vision_degrade || needs_speed_degrade {
             let mut r = request.clone();
             if needs_reasoning_degrade {
                 r.reasoning = None;
@@ -344,16 +356,14 @@ impl DefaultLlmClient {
                     m.content.retain(|b| !is_image_block(b));
                 }
             }
+            if needs_speed_degrade {
+                r.speed = None;
+            }
             owned = Some(r);
         }
         let request = owned.as_ref().unwrap_or(request);
 
         validate_capabilities(request, resolved_route.capabilities)?;
-
-        let entry = self
-            .routes
-            .get(&resolved_route.profile_name)
-            .ok_or(LlmError::ModelUnavailable)?;
 
         // Per-model wire override: GitHub Copilot serves its GPT-5.x / codex
         // models ONLY via the Responses endpoint, though the provider declares a
@@ -1214,6 +1224,16 @@ impl DefaultLlmClient {
             }),
         }
     }
+}
+
+fn route_allows_first_party_fast_mode(route: &crate::ResolvedRoute, entry: &RouteEntry) -> bool {
+    route.provider_id == ProviderId::AnthropicFirstParty
+        && entry.protocol == ProtocolFamily::AnthropicMessages
+        && entry.base_url.trim_end_matches('/') == "https://api.anthropic.com"
+        && traits::model_capabilities::has_capability(
+            &route.request_model,
+            traits::model_capabilities::ModelCapability::FastMode,
+        )
 }
 
 /// Convert Unix epoch seconds to `(year, month, day, hour, minute, second)`.

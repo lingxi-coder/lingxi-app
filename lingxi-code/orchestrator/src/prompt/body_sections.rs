@@ -391,7 +391,8 @@ fn lean_body(output_style_active: bool) -> String {
 /// routes through the model CAPABILITY registry (`LN(t,"lean_prompt")`), not a
 /// model-name pattern.
 fn is_lean_prompt_model(model: &str) -> bool {
-    tool_api::model_prompt_gate::dh_simple_system_prompt(Some(model))
+    traits::model_capabilities::prompt_profile_for(model)
+        == traits::model_capabilities::PromptProfile::ClaudeLean
 }
 
 fn opening_paragraph(output_style_active: bool) -> String {
@@ -633,6 +634,33 @@ mod tests {
             "# Tone and style",
         ] {
             assert!(p.contains(present), "long arm must keep {present}");
+        }
+    }
+
+    #[test]
+    fn non_claude_models_always_keep_the_full_harness() {
+        for model in [
+            "gpt-5.5",
+            "deepseek-v4-flash",
+            "gemini-3.5-flash",
+            "glm-5.1",
+        ] {
+            let prompt = format(
+                false,
+                true,
+                &["Read".into()],
+                true,
+                false,
+                false,
+                model,
+                false,
+            );
+            assert!(!prompt.contains("# Harness"), "{model} must stay full");
+            assert!(prompt.contains("# System"), "{model} must keep # System");
+            assert!(
+                prompt.contains("# Executing actions with care"),
+                "{model} must keep the full safety harness"
+            );
         }
     }
 

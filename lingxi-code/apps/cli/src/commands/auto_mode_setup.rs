@@ -45,7 +45,6 @@ use crate::exit_codes::{RUNTIME_ERROR, SUCCESS};
 // and its tests are unchanged.
 pub use permission::auto_mode_argv::*;
 
-
 // ── CLI dispatch (`lingxi-cli auto-mode-setup`) ──────────────────────────────
 
 /// `auto-mode-setup` payload. The flags are parsed by the hand-rolled grammar
@@ -133,8 +132,6 @@ pub async fn run(cli: &Cli) -> i32 {
         Err(e) => apply_disposition(dispose_grammar(&e)),
     }
 }
-
-
 
 /// Run `--wizard … --propose`: gather the recon, ask the model, print the
 /// result JSON.
@@ -236,11 +233,9 @@ async fn propose_outcome(
         root: cwd.to_path_buf(),
         user_config_dir: crate::run::lingxi_home_dir(),
         // `getProjectDir(cwd)` — where this project's session transcripts live.
-        transcript_dir: crate::run::lingxi_home_dir()
-            .join("projects")
-            .join(session::jsonl::path::project_dir_name(
-                &cwd.to_string_lossy(),
-            )),
+        transcript_dir: crate::run::lingxi_home_dir().join("projects").join(
+            session::jsonl::path::project_dir_name(&cwd.to_string_lossy()),
+        ),
         // `autoMode.classifyAllShell` has no settings key in this build, so the
         // recon reports the conservative (off) state rather than claiming a
         // setting it never read.
@@ -297,7 +292,9 @@ async fn run_apply_file(inv: &ApplyFileInvocation) -> i32 {
 fn print_usage() {
     eprintln!("Apply a reviewed auto-mode proposal to your settings.");
     eprintln!();
-    eprintln!("Usage: lingxi-cli auto-mode-setup [--request-id <id>] [--apply-target user|project] \\");
+    eprintln!(
+        "Usage: lingxi-cli auto-mode-setup [--request-id <id>] [--apply-target user|project] \\"
+    );
     eprintln!("           --expect-sha256 <64-hex> --apply-file <path>");
 }
 
@@ -314,7 +311,10 @@ mod tests {
     #[test]
     fn messages_are_byte_exact() {
         // Spot-check the unicode-bearing messages (em-dash U+2014, curly ’ U+2019).
-        assert_eq!(APPLY_TARGET_BAD_VALUE, "--apply-target must be \"user\" or \"project\".");
+        assert_eq!(
+            APPLY_TARGET_BAD_VALUE,
+            "--apply-target must be \"user\" or \"project\"."
+        );
         assert!(APPLY_TARGET_TWICE.contains('\u{2014}'));
         assert!(EXPECT_NEEDS_VALUE.contains('\u{2019}'));
         assert!(ONE_SHOT_APPLY.contains('\u{2019}'));
@@ -323,8 +323,9 @@ mod tests {
 
     #[test]
     fn happy_path_minimal() {
-        let got = parse_apply_file_args(&v(&["--expect-sha256", HEX, "--apply-file", "/tmp/p.json"]))
-            .unwrap();
+        let got =
+            parse_apply_file_args(&v(&["--expect-sha256", HEX, "--apply-file", "/tmp/p.json"]))
+                .unwrap();
         assert_eq!(
             got,
             AutoModeSetupInvocation::ApplyFile(ApplyFileInvocation {
@@ -390,12 +391,18 @@ mod tests {
 
     #[test]
     fn bad_apply_target_value() {
-        assert_eq!(err(&["--apply-target", "global", "--apply-file", "/p"]).message, APPLY_TARGET_BAD_VALUE);
+        assert_eq!(
+            err(&["--apply-target", "global", "--apply-file", "/p"]).message,
+            APPLY_TARGET_BAD_VALUE
+        );
     }
 
     #[test]
     fn expect_eq_form_rejected() {
-        assert_eq!(err(&["--expect-sha256=abc", "--apply-file", "/p"]).message, EXPECT_EQ_FORM);
+        assert_eq!(
+            err(&["--expect-sha256=abc", "--apply-file", "/p"]).message,
+            EXPECT_EQ_FORM
+        );
     }
 
     #[test]
@@ -407,11 +414,22 @@ mod tests {
     fn expect_not_directly_before_apply_file() {
         // --expect-sha256 followed by --apply-target, not --apply-file.
         assert_eq!(
-            err(&["--expect-sha256", HEX, "--apply-target", "user", "--apply-file", "/p"]).message,
+            err(&[
+                "--expect-sha256",
+                HEX,
+                "--apply-target",
+                "user",
+                "--apply-file",
+                "/p"
+            ])
+            .message,
             EXPECT_ONLY_APPLY_FILE
         );
         // --expect-sha256 with no --apply-file at all.
-        assert_eq!(err(&["--expect-sha256", HEX]).message, EXPECT_ONLY_APPLY_FILE);
+        assert_eq!(
+            err(&["--expect-sha256", HEX]).message,
+            EXPECT_ONLY_APPLY_FILE
+        );
     }
 
     #[test]
@@ -424,17 +442,36 @@ mod tests {
 
     #[test]
     fn apply_file_needs_path() {
-        assert_eq!(err(&["--expect-sha256", HEX, "--apply-file"]).message, APPLY_FILE_NEEDS_PATH);
+        assert_eq!(
+            err(&["--expect-sha256", HEX, "--apply-file"]).message,
+            APPLY_FILE_NEEDS_PATH
+        );
     }
 
     #[test]
     fn request_id_ordering() {
         assert_eq!(
-            err(&["--request-id", UUID, "--request-id", UUID, "--apply-file", "/p"]).message,
+            err(&[
+                "--request-id",
+                UUID,
+                "--request-id",
+                UUID,
+                "--apply-file",
+                "/p"
+            ])
+            .message,
             REQUEST_ID_TWICE
         );
         assert_eq!(
-            err(&["--apply-target", "user", "--request-id", UUID, "--apply-file", "/p"]).message,
+            err(&[
+                "--apply-target",
+                "user",
+                "--request-id",
+                UUID,
+                "--apply-file",
+                "/p"
+            ])
+            .message,
             REQUEST_ID_MUST_COME_FIRST
         );
         assert_eq!(
@@ -446,7 +483,15 @@ mod tests {
     #[test]
     fn apply_target_ordering() {
         assert_eq!(
-            err(&["--apply-target", "user", "--apply-target", "project", "--apply-file", "/p"]).message,
+            err(&[
+                "--apply-target",
+                "user",
+                "--apply-target",
+                "project",
+                "--apply-file",
+                "/p"
+            ])
+            .message,
             APPLY_TARGET_TWICE
         );
         assert_eq!(
@@ -454,7 +499,10 @@ mod tests {
             APPLY_TARGET_AFTER_APPLY_FILE
         );
         // --apply-target with no --apply-file.
-        assert_eq!(err(&["--apply-target", "user"]).message, APPLY_TARGET_ONLY_APPLY_FILE);
+        assert_eq!(
+            err(&["--apply-target", "user"]).message,
+            APPLY_TARGET_ONLY_APPLY_FILE
+        );
     }
 
     #[test]
@@ -481,11 +529,11 @@ mod tests {
         assert!(is_canonical_uuid(&UUID.to_uppercase()));
         for bad in [
             "req-42",
-            "3f2504e04f8911d39a0c0305e82c3301",          // no dashes
-            "3f2504e0-4f89-11d3-9a0c-0305e82c330",       // too short
-            "3f2504e0-4f89-11d3-9a0c-0305e82c33011",     // too long
-            "3f2504e0_4f89_11d3_9a0c_0305e82c3301",      // wrong separators
-            "3f2504e0-4f89-11d3-9a0c-0305e82c330g",      // non-hex
+            "3f2504e04f8911d39a0c0305e82c3301",      // no dashes
+            "3f2504e0-4f89-11d3-9a0c-0305e82c330",   // too short
+            "3f2504e0-4f89-11d3-9a0c-0305e82c33011", // too long
+            "3f2504e0_4f89_11d3_9a0c_0305e82c3301",  // wrong separators
+            "3f2504e0-4f89-11d3-9a0c-0305e82c330g",  // non-hex
         ] {
             assert!(!is_canonical_uuid(bad), "should be rejected: {bad}");
             assert_eq!(
@@ -518,7 +566,8 @@ mod tests {
         );
         assert_eq!(err(&["--expect-sha256"]).message, EXPECT_NEEDS_VALUE);
         // A real digest still parses.
-        let got = parse_apply_file_args(&v(&["--expect-sha256", HEX, "--apply-file", "/p"])).unwrap();
+        let got =
+            parse_apply_file_args(&v(&["--expect-sha256", HEX, "--apply-file", "/p"])).unwrap();
         let AutoModeSetupInvocation::ApplyFile(inv) = got else {
             panic!("expected ApplyFile");
         };
@@ -574,10 +623,34 @@ mod tests {
         // These answers authorise how far the recon reaches, so an unoffered
         // value must fail rather than pass through.
         for args in [
-            ["--wizard", "posture=root", "scope=all", "depth=both", "--propose"],
-            ["--wizard", "posture=mixed", "scope=everything", "depth=both", "--propose"],
-            ["--wizard", "posture=mixed", "scope=all", "depth=everywhere", "--propose"],
-            ["--wizard", "posture=", "scope=all", "depth=both", "--propose"],
+            [
+                "--wizard",
+                "posture=root",
+                "scope=all",
+                "depth=both",
+                "--propose",
+            ],
+            [
+                "--wizard",
+                "posture=mixed",
+                "scope=everything",
+                "depth=both",
+                "--propose",
+            ],
+            [
+                "--wizard",
+                "posture=mixed",
+                "scope=all",
+                "depth=everywhere",
+                "--propose",
+            ],
+            [
+                "--wizard",
+                "posture=",
+                "scope=all",
+                "depth=both",
+                "--propose",
+            ],
         ] {
             let e = err(&args);
             assert_eq!(e.code, CODE_USAGE);
@@ -590,9 +663,22 @@ mod tests {
         // Wrong order, missing --propose, or extra tokens: not the propose form,
         // so it falls through to the apply-path walk and is refused there.
         for args in [
-            &["--wizard", "scope=all", "posture=mixed", "depth=both", "--propose"][..],
+            &[
+                "--wizard",
+                "scope=all",
+                "posture=mixed",
+                "depth=both",
+                "--propose",
+            ][..],
             &["--wizard", "posture=mixed", "scope=all", "depth=both"][..],
-            &["--wizard", "posture=mixed", "scope=all", "depth=both", "--propose", "x"][..],
+            &[
+                "--wizard",
+                "posture=mixed",
+                "scope=all",
+                "depth=both",
+                "--propose",
+                "x",
+            ][..],
             &["--propose"][..],
         ] {
             assert!(parse_apply_file_args(&v(args)).is_err());
@@ -822,9 +908,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(got, ApplyResult::Wrote { removed_count: 0 });
-        let settings = std::fs::read_to_string(dir.path().join("home/.lingxi/settings.json")).unwrap();
+        let settings =
+            std::fs::read_to_string(dir.path().join("home/.lingxi/settings.json")).unwrap();
         let v: Value = serde_json::from_str(&settings).unwrap();
-        assert_eq!(v["autoMode"]["environment"], json!(["Solo dev on a laptop"]));
+        assert_eq!(
+            v["autoMode"]["environment"],
+            json!(["Solo dev on a laptop"])
+        );
         // The rule array is merged, so `$defaults` leads it.
         assert_eq!(v["autoMode"]["allow"], json!(["$defaults", "Bash(ls:*)"]));
     }
@@ -862,7 +952,11 @@ mod tests {
         // The prior environment bullet survives, and the new one joins its section.
         assert_eq!(
             v["autoMode"]["environment"],
-            json!(["### Org-wide", "**Source control**: github", "**Organization**: acme"])
+            json!([
+                "### Org-wide",
+                "**Source control**: github",
+                "**Organization**: acme"
+            ])
         );
         // The prior hard_deny entry survives alongside the proposed one...
         assert_eq!(
@@ -906,7 +1000,10 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
 
         // environment replaced wholesale...
-        assert_eq!(v["autoMode"]["environment"], json!(["**Organization**: acme"]));
+        assert_eq!(
+            v["autoMode"]["environment"],
+            json!(["**Organization**: acme"])
+        );
         // ...but the rule arrays still merge, per the wizard's own answer label
         // ("replaces the environment section").
         assert_eq!(
@@ -1012,9 +1109,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(got, ApplyResult::Wrote { removed_count: 1 });
-        let v: Value =
-            serde_json::from_str(&std::fs::read_to_string(dir.path().join("home/.lingxi/settings.json")).unwrap())
-                .unwrap();
+        let v: Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("home/.lingxi/settings.json")).unwrap(),
+        )
+        .unwrap();
         assert_eq!(v["permissions"]["allow"], json!(["Read"]));
     }
 

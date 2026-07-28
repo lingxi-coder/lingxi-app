@@ -592,9 +592,8 @@ pub async fn assemble_with_provider_keys(
     // `BridgeComputerAccessBroker`, which lowers each exchange into a
     // `Frame::ComputerAccessRequest` push and parks the reply channel keyed by
     // a fresh `request_id`, exactly mirroring the permission gate's shape.
-    let (computer_access_tx, computer_access_rx) = tokio::sync::mpsc::channel::<
-        tui_core::computer_access_bridge::ComputerAccessExchange,
-    >(8);
+    let (computer_access_tx, computer_access_rx) =
+        tokio::sync::mpsc::channel::<tui_core::computer_access_bridge::ComputerAccessExchange>(8);
     cfg.computer_access_tx = Some(computer_access_tx);
     let computer_access_broker = Arc::new(client_adapter::BridgeComputerAccessBroker::new(
         connection.computer_access_sink(),

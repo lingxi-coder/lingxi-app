@@ -30,9 +30,9 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::auto_mode_producers::{
-    DocSource, LocalSettingsSource, RepoFactsSource, SettingsReconSource, DOC_GLOB_LIMIT,
-    DOC_GLOB_MAX_DEPTH, DOC_READ_CAP_LINGXI_MD, GIT_HARDENING_FLAGS, SUBPROCESS_TIMEOUT_MS,
-    WalkLimit,
+    DocSource, LocalSettingsSource, RepoFactsSource, SettingsReconSource, WalkLimit,
+    DOC_GLOB_LIMIT, DOC_GLOB_MAX_DEPTH, DOC_READ_CAP_LINGXI_MD, GIT_HARDENING_FLAGS,
+    SUBPROCESS_TIMEOUT_MS,
 };
 
 /// `s$s` — the longest path `eNd` will keep.
@@ -150,10 +150,7 @@ fn run_capped(cmd: Command, timeout: Duration) -> Option<(i32, String, bool)> {
 }
 
 /// As [`run_capped`], but also returns stderr — `gh`'s availability check reads it.
-fn run_capped_full(
-    mut cmd: Command,
-    timeout: Duration,
-) -> Option<(i32, String, String, bool)> {
+fn run_capped_full(mut cmd: Command, timeout: Duration) -> Option<(i32, String, String, bool)> {
     let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -171,10 +168,14 @@ fn run_capped_full(
             buf
         })
     };
-    let stdout: Option<Box<dyn std::io::Read + Send>> =
-        child.stdout.take().map(|s| Box::new(s) as Box<dyn std::io::Read + Send>);
-    let stderr: Option<Box<dyn std::io::Read + Send>> =
-        child.stderr.take().map(|s| Box::new(s) as Box<dyn std::io::Read + Send>);
+    let stdout: Option<Box<dyn std::io::Read + Send>> = child
+        .stdout
+        .take()
+        .map(|s| Box::new(s) as Box<dyn std::io::Read + Send>);
+    let stderr: Option<Box<dyn std::io::Read + Send>> = child
+        .stderr
+        .take()
+        .map(|s| Box::new(s) as Box<dyn std::io::Read + Send>);
     let reader = drain(stdout);
     let err_reader = drain(stderr);
 
@@ -716,8 +717,7 @@ impl FsDocSource {
             root: root.into(),
             user_config_dir: user_config_dir.into(),
             // `^\.lingxi\/(skills|rules|agents)\/`
-            doc_glob: regex::Regex::new(r"^\.lingxi/(skills|rules|agents)/")
-                .expect("static regex"),
+            doc_glob: regex::Regex::new(r"^\.lingxi/(skills|rules|agents)/").expect("static regex"),
         }
     }
 }
@@ -1317,7 +1317,9 @@ pub fn walk_home_repos(home: &Path) -> (Vec<crate::auto_mode_producers::HomeRepo
             if !meta.is_dir() {
                 continue;
             }
-            let Ok(link) = entry.file_type() else { continue };
+            let Ok(link) = entry.file_type() else {
+                continue;
+            };
             if link.is_symlink() {
                 continue;
             }
@@ -1368,10 +1370,7 @@ fn read_repo_remotes(
         let resolved = if Path::new(&pointer).is_absolute() {
             PathBuf::from(&pointer)
         } else {
-            git_marker
-                .parent()
-                .unwrap_or(Path::new("."))
-                .join(&pointer)
+            git_marker.parent().unwrap_or(Path::new(".")).join(&pointer)
         };
         let canonical = std::fs::canonicalize(&resolved).unwrap_or(resolved);
         if !is_strictly_under(&canonical.to_string_lossy(), home, windows) {
@@ -1647,7 +1646,10 @@ mod tests {
         assert!(got.starts_with(&"x".repeat(10)));
         assert!(got.contains("\u{2026}[truncated at 10 chars of 100 bytes]"));
         // Under the cap, no marker.
-        assert_eq!(secure_read_capped(&p, 1000, false).unwrap(), "x".repeat(100));
+        assert_eq!(
+            secure_read_capped(&p, 1000, false).unwrap(),
+            "x".repeat(100)
+        );
     }
 
     #[test]
@@ -1689,7 +1691,10 @@ mod tests {
         std::fs::hard_link(&real, &alias).unwrap();
         assert_eq!(secure_read_capped(&alias, 100, true), None);
         // ...but allowed when the caller does not require it.
-        assert_eq!(secure_read_capped(&alias, 100, false).as_deref(), Some("secret"));
+        assert_eq!(
+            secure_read_capped(&alias, 100, false).as_deref(),
+            Some("secret")
+        );
     }
 
     #[test]
@@ -1802,7 +1807,11 @@ mod tests {
 
         write(&root, "LINGXI.md", "project rules");
         write(&root, ".gitignore", "target/\n.env\nMY_TOKEN\n");
-        write(&root, "Makefile", "build:\n\tcargo build\ndeploy:\n\techo go\n");
+        write(
+            &root,
+            "Makefile",
+            "build:\n\tcargo build\ndeploy:\n\techo go\n",
+        );
         write(
             &root,
             "package.json",
@@ -1888,7 +1897,9 @@ mod tests {
         assert!(block.text.contains("- acme-logs"));
         assert!(block.text.contains("- acme-data"));
         // ...and the transcript miner reported NAMES ONLY.
-        assert!(block.text.contains("Transcripts scanned: 1; Bash commands seen: 2"));
+        assert!(block
+            .text
+            .contains("Transcripts scanned: 1; Bash commands seen: 2"));
         assert!(block.text.contains("- terraform (1\u{d7})"));
         assert!(block.text.contains("- api.acme.io (1\u{d7})"));
         assert!(
@@ -1963,7 +1974,10 @@ mod tests {
             TailRead::Absent
         );
         // A directory is not a readable history file.
-        assert_eq!(secure_read_tail(dir.path(), 100, false), TailRead::Unreadable);
+        assert_eq!(
+            secure_read_tail(dir.path(), 100, false),
+            TailRead::Unreadable
+        );
         // A symlink is refused, and that is UNREADABLE rather than absent --
         // the caller must mark the gather partial, not assume nothing was there.
         #[cfg(unix)]
@@ -1987,9 +2001,15 @@ mod tests {
             Some("/mnt/data/u")
         );
         // Not under `from` at all.
-        assert_eq!(rebase_path("/etc/passwd", "/home/u", "/mnt/data/u", false), None);
+        assert_eq!(
+            rebase_path("/etc/passwd", "/home/u", "/mnt/data/u", false),
+            None
+        );
         // A sibling whose name merely starts the same is NOT under it.
-        assert_eq!(rebase_path("/home/user2/x", "/home/u", "/mnt/u", false), None);
+        assert_eq!(
+            rebase_path("/home/user2/x", "/home/u", "/mnt/u", false),
+            None
+        );
         // Windows compares case-insensitively.
         assert_eq!(
             rebase_path(r"C:\Users\U\x", r"c:\users\u", r"D:\alt", true).as_deref(),
@@ -2069,7 +2089,11 @@ mod tests {
         assert_eq!(src.lingxi_dir(), Some(true));
         assert_eq!(src.local_file(), None);
 
-        write(dir.path(), ".lingxi/settings.local.json", "{\"autoMode\":{}}");
+        write(
+            dir.path(),
+            ".lingxi/settings.local.json",
+            "{\"autoMode\":{}}",
+        );
         let (is_file, nlink, size) = src.local_file().unwrap();
         assert!(is_file);
         assert_eq!(nlink, 1);
@@ -2101,7 +2125,10 @@ mod tests {
     #[test]
     fn the_walk_finds_repos_and_reduces_their_remotes() {
         let home = tempfile::tempdir().unwrap();
-        make_repo(&home.path().join("code/app"), Some("https://github.com/acme/app"));
+        make_repo(
+            &home.path().join("code/app"),
+            Some("https://github.com/acme/app"),
+        );
         make_repo(&home.path().join("code/lib"), None);
 
         let (repos, limit) = walk_home_repos(home.path());
@@ -2119,7 +2146,10 @@ mod tests {
     #[test]
     fn the_walk_does_not_descend_into_a_repo() {
         let home = tempfile::tempdir().unwrap();
-        make_repo(&home.path().join("outer"), Some("https://github.com/acme/outer"));
+        make_repo(
+            &home.path().join("outer"),
+            Some("https://github.com/acme/outer"),
+        );
         // A vendored checkout inside the working tree is not a separate repo
         // worth reporting, and descending would burn the budget on node_modules.
         make_repo(
@@ -2203,7 +2233,11 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let mine = root.path().join("-this-project");
         write_transcript(&mine, "a.jsonl", &["terraform apply"]);
-        write_transcript(&root.path().join("-other"), "b.jsonl", &["helm upgrade api", "ls -la"]);
+        write_transcript(
+            &root.path().join("-other"),
+            "b.jsonl",
+            &["helm upgrade api", "ls -la"],
+        );
 
         let source = FsAllProjectsSource::new(root.path(), Some(mine.clone()));
         let scan = crate::auto_mode_producers::AllProjectsSource::scan(&source).unwrap();
@@ -2264,9 +2298,8 @@ mod tests {
             home_dir: home.path().to_string_lossy().into_owned(),
             ..Default::default()
         };
-        let body = crate::auto_mode_producers::shell_history_section(&FsShellHistorySource::new(
-            env,
-        ));
+        let body =
+            crate::auto_mode_producers::shell_history_section(&FsShellHistorySource::new(env));
         assert!(body.contains("curl"));
         assert!(body.contains("terraform"));
         // The arguments are where the secrets are; they never leave the module.
@@ -2282,9 +2315,8 @@ mod tests {
             home_dir: home.path().to_string_lossy().into_owned(),
             ..Default::default()
         };
-        let body = crate::auto_mode_producers::shell_history_section(&FsShellHistorySource::new(
-            env,
-        ));
+        let body =
+            crate::auto_mode_producers::shell_history_section(&FsShellHistorySource::new(env));
         assert!(body.contains("complete"), "got: {body}");
     }
 
@@ -2297,8 +2329,7 @@ mod tests {
         let producers = FsReconProducers::new("/tmp", "/tmp", "/tmp/projects/x", false)
             .with_nonessential_traffic(false)
             .with_org_split(true);
-        let body =
-            crate::auto_mode_pregather::ReconProducers::repo_visibility(&producers).unwrap();
+        let body = crate::auto_mode_pregather::ReconProducers::repo_visibility(&producers).unwrap();
         assert!(body.contains("nonessential traffic disabled or policy-restricted"));
         assert!(body.contains(crate::auto_mode_producers::INFER_VISIBILITY_HINT));
     }

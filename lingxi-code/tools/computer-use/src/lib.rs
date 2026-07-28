@@ -51,7 +51,9 @@ mod lock;
 mod permission_model;
 mod validate;
 
-pub use access_resolver::{AutoGrantResolver, ComputerAccessResolver, DenyAllResolver, TuiBridgeResolver};
+pub use access_resolver::{
+    AutoGrantResolver, ComputerAccessResolver, DenyAllResolver, TuiBridgeResolver,
+};
 use permission_model::{AppTier, GrantFlags, SessionState};
 
 /// Tool name byte-lock.
@@ -502,8 +504,7 @@ impl Tool for ComputerTool {
         // real answer, not here.
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
-                reason: "computer tool — OS screen-recording/accessibility prompt gates use"
-                    .into(),
+                reason: "computer tool — OS screen-recording/accessibility prompt gates use".into(),
             },
             updated_input: None,
             update_destination: None,
@@ -586,7 +587,11 @@ impl ComputerTool {
         installed
             .iter()
             .find(|a| a.bundle_id == name)
-            .or_else(|| installed.iter().find(|a| a.display_name.eq_ignore_ascii_case(name)))
+            .or_else(|| {
+                installed
+                    .iter()
+                    .find(|a| a.display_name.eq_ignore_ascii_case(name))
+            })
             .map_or_else(|| name.to_string(), |a| a.bundle_id.clone())
     }
 
@@ -681,7 +686,10 @@ impl ComputerTool {
     }
 
     fn handle_list_granted(&self) -> ToolCallResult {
-        let state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let apps: Vec<Value> = state
             .allowed_apps
             .iter()
@@ -736,7 +744,10 @@ impl ComputerTool {
             ));
         };
         let displays = cc.list_displays().await.map_err(|e| map_err(&e))?;
-        let Some(matched) = displays.iter().find(|d| d.name.eq_ignore_ascii_case(display)) else {
+        let Some(matched) = displays
+            .iter()
+            .find(|d| d.name.eq_ignore_ascii_case(display))
+        else {
             let available = if displays.is_empty() {
                 "none detected".to_string()
             } else {
@@ -927,7 +938,8 @@ impl ComputerTool {
         // the seam check so it succeeds even when no ComputerControl is
         // wired, and before the tier gate since it never touches an app.
         if action == "wait" {
-            return validate::wait_duration(input).map(|secs| json!({ "ok": true, "waited_seconds": secs }));
+            return validate::wait_duration(input)
+                .map(|secs| json!({ "ok": true, "waited_seconds": secs }));
         }
 
         self.enforce_tier(action).await?;
@@ -1098,7 +1110,9 @@ impl ComputerTool {
                         "\"{name}\" is not granted for this session. Call request_access first."
                     )));
                 }
-                cc.open_application(resolved).await.map_err(|e| map_err(&e))?;
+                cc.open_application(resolved)
+                    .await
+                    .map_err(|e| map_err(&e))?;
                 Ok(json!({ "ok": true, "opened": name }))
             }
             other => Err(ToolError::InvalidInput(format!("unknown action: {other}"))),
@@ -1295,7 +1309,10 @@ mod tests {
 
     #[test]
     fn scroll_falls_back_to_flat_delta() {
-        assert_eq!(scroll_delta(&json!({ "dx": 3, "dy": -2 })).unwrap(), (3, -2));
+        assert_eq!(
+            scroll_delta(&json!({ "dx": 3, "dy": -2 })).unwrap(),
+            (3, -2)
+        );
         assert_eq!(scroll_delta(&json!({})).unwrap(), (0, 0));
     }
 
@@ -1394,7 +1411,9 @@ mod tests {
 mod integration_tests {
     use super::*;
     use std::sync::Mutex as StdMutex;
-    use traits::computer_control::{AppInfo, ComputerControl, ComputerError, DisplayInfo, Screenshot};
+    use traits::computer_control::{
+        AppInfo, ComputerControl, ComputerError, DisplayInfo, Screenshot,
+    };
 
     /// Configurable stand-in for a real backend. Every method not
     /// explicitly exercised by a test returns a cheap default rather than
@@ -1587,9 +1606,12 @@ mod integration_tests {
     #[tokio::test]
     async fn enforce_tier_denies_when_allowlist_is_empty() {
         let tool = tool_with(MockCc::default());
-        let err = call(&tool, json!({ "action": "left_click", "coordinate": [1, 2] }))
-            .await
-            .unwrap_err();
+        let err = call(
+            &tool,
+            json!({ "action": "left_click", "coordinate": [1, 2] }),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(
             err.to_string(),
             "permission denied: No applications are granted for this session. Call request_access first."
@@ -1603,12 +1625,18 @@ mod integration_tests {
         let tool = tool_with(mock);
         // Grant something so the allowlist isn't empty — isolates the
         // "can't tell what's frontmost" branch specifically.
-        call(&tool, json!({ "action": "request_access", "apps": ["Anything"] }))
-            .await
-            .unwrap();
-        let err = call(&tool, json!({ "action": "left_click", "coordinate": [1, 2] }))
-            .await
-            .unwrap_err();
+        call(
+            &tool,
+            json!({ "action": "request_access", "apps": ["Anything"] }),
+        )
+        .await
+        .unwrap();
+        let err = call(
+            &tool,
+            json!({ "action": "left_click", "coordinate": [1, 2] }),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(
             err.to_string(),
             "permission denied: Could not determine the frontmost application. Take a fresh screenshot and try again."
@@ -1620,12 +1648,18 @@ mod integration_tests {
         let mut mock = MockCc::default();
         *mock.frontmost.get_mut().unwrap() = Ok(Some(app("com.other.app", "Other")));
         let tool = tool_with(mock);
-        call(&tool, json!({ "action": "request_access", "apps": ["com.granted.app"] }))
-            .await
-            .unwrap();
-        let err = call(&tool, json!({ "action": "left_click", "coordinate": [1, 2] }))
-            .await
-            .unwrap_err();
+        call(
+            &tool,
+            json!({ "action": "request_access", "apps": ["com.granted.app"] }),
+        )
+        .await
+        .unwrap();
+        let err = call(
+            &tool,
+            json!({ "action": "left_click", "coordinate": [1, 2] }),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(
             err.to_string(),
             "permission denied: \"Other\" is not in the allowed applications. Call request_access to add it."
@@ -1658,12 +1692,18 @@ mod integration_tests {
         let mut mock = MockCc::default();
         *mock.frontmost.get_mut().unwrap() = Ok(Some(app("com.granted.app", "Granted")));
         let tool = tool_with(mock);
-        call(&tool, json!({ "action": "request_access", "apps": ["com.granted.app"] }))
-            .await
-            .unwrap();
-        let result = call(&tool, json!({ "action": "left_click", "coordinate": [1, 2] }))
-            .await
-            .unwrap();
+        call(
+            &tool,
+            json!({ "action": "request_access", "apps": ["com.granted.app"] }),
+        )
+        .await
+        .unwrap();
+        let result = call(
+            &tool,
+            json!({ "action": "left_click", "coordinate": [1, 2] }),
+        )
+        .await
+        .unwrap();
         assert_eq!(result.data["ok"], true);
     }
 
@@ -1678,21 +1718,30 @@ mod integration_tests {
         };
         *mock.frontmost.lock().unwrap() = Ok(Some(app("com.tinyspeck.slackmacgap", "Slack")));
         let tool = tool_with(mock);
-        call(&tool, json!({ "action": "request_access", "apps": ["Slack"] }))
-            .await
-            .unwrap();
-        let result = call(&tool, json!({ "action": "left_click", "coordinate": [1, 2] }))
-            .await
-            .unwrap();
+        call(
+            &tool,
+            json!({ "action": "request_access", "apps": ["Slack"] }),
+        )
+        .await
+        .unwrap();
+        let result = call(
+            &tool,
+            json!({ "action": "left_click", "coordinate": [1, 2] }),
+        )
+        .await
+        .unwrap();
         assert_eq!(result.data["ok"], true);
     }
 
     #[tokio::test]
     async fn open_application_is_denied_without_a_grant() {
         let tool = tool_with(MockCc::default());
-        let err = call(&tool, json!({ "action": "open_application", "bundle_id": "com.foo.bar" }))
-            .await
-            .unwrap_err();
+        let err = call(
+            &tool,
+            json!({ "action": "open_application", "bundle_id": "com.foo.bar" }),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(
             err.to_string(),
             "permission denied: \"com.foo.bar\" is not granted for this session. Call request_access first."
@@ -1707,13 +1756,18 @@ mod integration_tests {
         };
         *mock.frontmost.lock().unwrap() = Ok(Some(app("com.granted.app", "Granted")));
         let tool = tool_with(mock);
-        call(&tool, json!({ "action": "request_access", "apps": ["com.granted.app"] }))
-            .await
-            .unwrap();
+        call(
+            &tool,
+            json!({ "action": "request_access", "apps": ["com.granted.app"] }),
+        )
+        .await
+        .unwrap();
         // The failed press must not leave `mouse_button_held` stuck `true` —
         // otherwise every later left_mouse_down would wrongly report
         // "already held" even though nothing is really held.
-        assert!(call(&tool, json!({ "action": "left_mouse_down" })).await.is_err());
+        assert!(call(&tool, json!({ "action": "left_mouse_down" }))
+            .await
+            .is_err());
         assert!(
             !tool.state.lock().unwrap().mouse_button_held,
             "a failed mouse_down() must not flag the button as held"
@@ -1725,18 +1779,29 @@ mod integration_tests {
         let mut mock = MockCc::default();
         *mock.frontmost.get_mut().unwrap() = Ok(Some(app("com.granted.app", "Granted")));
         let tool = tool_with(mock);
-        call(&tool, json!({ "action": "request_access", "apps": ["com.granted.app"] }))
+        call(
+            &tool,
+            json!({ "action": "request_access", "apps": ["com.granted.app"] }),
+        )
+        .await
+        .unwrap();
+        call(&tool, json!({ "action": "left_mouse_down" }))
             .await
             .unwrap();
-        call(&tool, json!({ "action": "left_mouse_down" })).await.unwrap();
-        let err = call(&tool, json!({ "action": "left_mouse_down" })).await.unwrap_err();
+        let err = call(&tool, json!({ "action": "left_mouse_down" }))
+            .await
+            .unwrap_err();
         assert_eq!(
             err.to_string(),
             "invalid input: mouse button already held, call left_mouse_up first"
         );
-        call(&tool, json!({ "action": "left_mouse_up" })).await.unwrap();
+        call(&tool, json!({ "action": "left_mouse_up" }))
+            .await
+            .unwrap();
         // Released — a second down is allowed again.
-        assert!(call(&tool, json!({ "action": "left_mouse_down" })).await.is_ok());
+        assert!(call(&tool, json!({ "action": "left_mouse_down" }))
+            .await
+            .is_ok());
     }
 
     #[tokio::test]
@@ -1747,11 +1812,18 @@ mod integration_tests {
         };
         *mock.frontmost.lock().unwrap() = Ok(Some(app("com.granted.app", "Granted")));
         let tool = tool_with(mock);
-        call(&tool, json!({ "action": "request_access", "apps": ["com.granted.app"] }))
+        call(
+            &tool,
+            json!({ "action": "request_access", "apps": ["com.granted.app"] }),
+        )
+        .await
+        .unwrap();
+        call(&tool, json!({ "action": "left_mouse_down" }))
             .await
             .unwrap();
-        call(&tool, json!({ "action": "left_mouse_down" })).await.unwrap();
-        assert!(call(&tool, json!({ "action": "left_mouse_up" })).await.is_err());
+        assert!(call(&tool, json!({ "action": "left_mouse_up" }))
+            .await
+            .is_err());
         assert!(
             tool.state.lock().unwrap().mouse_button_held,
             "a failed mouse_up() must not falsely clear the held flag"
@@ -1835,13 +1907,19 @@ mod integration_tests {
         *mock.frontmost.get_mut().unwrap() = Ok(Some(app("com.granted.app", "Granted")));
         ctx.computer_control = Some(std::sync::Arc::new(mock));
         let tool = ComputerTool::new(ctx).with_lock_home(test_lock_home());
-        let result = call(&tool, json!({ "action": "request_access", "apps": ["Granted"] }))
-            .await
-            .unwrap();
+        let result = call(
+            &tool,
+            json!({ "action": "request_access", "apps": ["Granted"] }),
+        )
+        .await
+        .unwrap();
         assert_eq!(result.data["granted"].as_array().map(Vec::len), Some(0));
-        let err = call(&tool, json!({ "action": "left_click", "coordinate": [1, 2] }))
-            .await
-            .unwrap_err();
+        let err = call(
+            &tool,
+            json!({ "action": "left_click", "coordinate": [1, 2] }),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(
             err.to_string(),
             "permission denied: No applications are granted for this session. Call request_access first."
@@ -1861,12 +1939,7 @@ mod integration_tests {
             ) -> tui_core::computer_access_bridge::ComputerAccessResponse {
                 tui_core::computer_access_bridge::ComputerAccessResponse {
                     // Grant only the first requested app.
-                    granted_apps: request
-                        .apps
-                        .into_iter()
-                        .take(1)
-                        .map(|a| a.label)
-                        .collect(),
+                    granted_apps: request.apps.into_iter().take(1).map(|a| a.label).collect(),
                     clipboard_read: false,
                     clipboard_write: false,
                     system_key_combos: false,
@@ -1877,8 +1950,9 @@ mod integration_tests {
         let fs = tool_api::test_support::make_dummy_fs();
         let mut ctx = tool_api::test_support::ctx_for_file_tools(fs, bus, vec![]);
         ctx.computer_control = Some(std::sync::Arc::new(MockCc::default()));
-        let tool = ComputerTool::with_access_resolver(ctx, std::sync::Arc::new(PartialGrantResolver))
-            .with_lock_home(test_lock_home());
+        let tool =
+            ComputerTool::with_access_resolver(ctx, std::sync::Arc::new(PartialGrantResolver))
+                .with_lock_home(test_lock_home());
         let result = call(
             &tool,
             json!({ "action": "request_access", "apps": ["com.a.app", "com.b.app"] }),
@@ -1946,9 +2020,12 @@ mod integration_tests {
             .await
             .unwrap();
         assert_eq!(*cc.selected_display.lock().unwrap(), Some(2));
-        let result = call(&tool, json!({ "action": "switch_display", "display": "auto" }))
-            .await
-            .unwrap();
+        let result = call(
+            &tool,
+            json!({ "action": "switch_display", "display": "auto" }),
+        )
+        .await
+        .unwrap();
         assert_eq!(result.data["ok"], true);
         assert_eq!(*cc.selected_display.lock().unwrap(), None);
     }
@@ -1985,7 +2062,13 @@ mod integration_tests {
             async fn key(&self, _key: String) -> Result<(), ComputerError> {
                 Ok(())
             }
-            async fn scroll(&self, _x: u32, _y: u32, _dx: i32, _dy: i32) -> Result<(), ComputerError> {
+            async fn scroll(
+                &self,
+                _x: u32,
+                _y: u32,
+                _dx: i32,
+                _dy: i32,
+            ) -> Result<(), ComputerError> {
                 Ok(())
             }
         }
@@ -1995,9 +2078,12 @@ mod integration_tests {
         ctx.computer_control = Some(std::sync::Arc::new(NoDisplaySupport));
         let tool = ComputerTool::with_access_resolver(ctx, std::sync::Arc::new(AutoGrantResolver))
             .with_lock_home(test_lock_home());
-        let result = call(&tool, json!({ "action": "switch_display", "display": "auto" }))
-            .await
-            .unwrap();
+        let result = call(
+            &tool,
+            json!({ "action": "switch_display", "display": "auto" }),
+        )
+        .await
+        .unwrap();
         assert_eq!(result.data["ok"], true);
     }
 
@@ -2012,7 +2098,9 @@ mod integration_tests {
             ..Default::default()
         };
         let tool = tool_with(mock);
-        let result = call(&tool, json!({ "action": "screenshot" })).await.unwrap();
+        let result = call(&tool, json!({ "action": "screenshot" }))
+            .await
+            .unwrap();
         let note = result.data["note"]
             .as_str()
             .expect("note present for multi-display");
@@ -2028,7 +2116,9 @@ mod integration_tests {
             ..Default::default()
         };
         let tool = tool_with(mock);
-        let result = call(&tool, json!({ "action": "screenshot" })).await.unwrap();
+        let result = call(&tool, json!({ "action": "screenshot" }))
+            .await
+            .unwrap();
         assert!(result.data.get("note").is_none(), "{:?}", result.data);
     }
 
@@ -2053,8 +2143,13 @@ mod integration_tests {
         lock::claim(&home, other.id() as i32);
 
         let tool = tool_with(MockCc::default()).with_lock_home(home);
-        let err = call(&tool, json!({ "action": "screenshot" })).await.unwrap_err();
-        assert_eq!(err.to_string(), format!("permission denied: {LOCK_HELD_AT_CALL}"));
+        let err = call(&tool, json!({ "action": "screenshot" }))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!("permission denied: {LOCK_HELD_AT_CALL}")
+        );
 
         let _ = other.kill();
         let _ = other.wait();
@@ -2069,9 +2164,12 @@ mod integration_tests {
         let tool = tool_with(MockCc::default()).with_lock_home(home);
         // Neither of these touches the shared physical machine, so they must
         // succeed even while a different live session holds the lock.
-        call(&tool, json!({ "action": "request_access", "apps": ["Slack"] }))
-            .await
-            .expect("request_access is exempt from the cross-session lock");
+        call(
+            &tool,
+            json!({ "action": "request_access", "apps": ["Slack"] }),
+        )
+        .await
+        .expect("request_access is exempt from the cross-session lock");
         call(&tool, json!({ "action": "list_granted_applications" }))
             .await
             .expect("list_granted_applications is exempt from the cross-session lock");

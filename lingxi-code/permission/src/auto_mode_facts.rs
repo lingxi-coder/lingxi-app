@@ -76,7 +76,8 @@ pub const TRANSCRIPT_SELECTION_CAVEAT: &str = r" transcripts were considered; th
 pub const PROJECTS_PARTIAL_COVERAGE: &str = r" could not be enumerated (unreadable, transient error, or past the enumeration cap) — coverage is partial; treat missing projects as unknown, not empty._";
 
 /// Transcripts vanished or were refused as symlink/hardlink aliases.
-pub const TRANSCRIPTS_UNREADABLE: &str = r" could not be read (removed mid-gather, or refused as a symlink/hardlink alias)._";
+pub const TRANSCRIPTS_UNREADABLE: &str =
+    r" could not be read (removed mid-gather, or refused as a symlink/hardlink alias)._";
 
 /// Transcripts skipped by permissions.deny, an untrusted network path, or a
 /// resolution outside the projects directory.
@@ -97,7 +98,8 @@ _Aggregate byte cap reached (";
 pub const AGGREGATE_BYTE_CAP_INFIX: &str = r" MiB) — remaining ";
 
 /// Only the most recent part of each oversized file was scanned.
-pub const PER_FILE_CAP_SUFFIX: &str = r" MiB per-file cap — only the most recent part of each was scanned._";
+pub const PER_FILE_CAP_SUFFIX: &str =
+    r" MiB per-file cap — only the most recent part of each was scanned._";
 
 /// The gather deadline stopped the scan.
 pub const DEADLINE_REACHED_PREFIX: &str = r"
@@ -157,7 +159,8 @@ pub const AUTOMODE_BLOCK_FAILED_VALIDATION_PREFIX: &str = r"autoMode block faile
 pub const EXISTING_AUTOMODE_IS_ARRAY: &str = r"the existing autoMode value in the settings file is an array — remove or fix it, then re-run setup.";
 
 /// Suffix for a skipped project-local settings file.
-pub const LOCAL_SETTINGS_SKIPPED_SUFFIX: &str = r" — skipped. Tell the user; do not read or rewrite this file.";
+pub const LOCAL_SETTINGS_SKIPPED_SUFFIX: &str =
+    r" — skipped. Tell the user; do not read or rewrite this file.";
 
 /// The local settings file is tracked in git, so it is repo-authored.
 pub const TRACKED_IN_GIT_YES: &str = r"yes — repo-authored";
@@ -190,7 +193,8 @@ pub const NO_REMOTE_CONFIGURED: &str = r"(no remote configured)";
 pub const REMOTE_NOT_KNOWN_HOST: &str = r"(remote not on a known VCS host; not shown)";
 
 /// The gitdir escapes the home directory, so remotes are not read.
-pub const GITDIR_OUTSIDE_HOME: &str = r"(gitdir points outside the home directory — remotes not read)";
+pub const GITDIR_OUTSIDE_HOME: &str =
+    r"(gitdir points outside the home directory — remotes not read)";
 
 /// Header for the home-walk results. It records the redaction contract:
 /// userinfo and any path beyond `owner/repo` are stripped when the remote is
@@ -208,11 +212,13 @@ pub const DOC_CONTRIBUTING_HEAD_LABEL: &str = r"CONTRIBUTING.md (head)";
 pub const GH_OUTPUT_UNPARSEABLE_SUFFIX: &str = r" (gh output unparseable)._";
 
 /// gh is unavailable, unauthenticated, or lacks org scope.
-pub const GH_NO_ORG_SCOPE_SUFFIX: &str = r" (gh unavailable, unauthenticated, or token lacks org scope)._";
+pub const GH_NO_ORG_SCOPE_SUFFIX: &str =
+    r" (gh unavailable, unauthenticated, or token lacks org scope)._";
 
 /// The org could not be derived, or the token was unsafe, so sibling docs
 /// were not gathered.
-pub const ORG_NOT_DERIVABLE: &str = r"_Org not derivable from origin remote (or unsafe token) — sibling docs not gathered._";
+pub const ORG_NOT_DERIVABLE: &str =
+    r"_Org not derivable from origin remote (or unsafe token) — sibling docs not gathered._";
 
 /// Listing truncation suffix.
 pub const FIRST_100_ONLY_SUFFIX: &str = r" (first 100 only — more may exist)";
@@ -231,13 +237,15 @@ pub const RESULT_CAP_REACHED: &str = r"
 _Result cap reached — the walk stopped at the repo cap; more may exist._";
 
 /// Pattern matching secrets-manager markers.
-pub const SECRETS_MANAGER_PATTERN: &str = r"(VAULT_ADDR|SOPS_[A-Z_]*|op read|aws secretsmanager|gcloud secrets)";
+pub const SECRETS_MANAGER_PATTERN: &str =
+    r"(VAULT_ADDR|SOPS_[A-Z_]*|op read|aws secretsmanager|gcloud secrets)";
 
 /// Strips `sudo`/`timeout` prefixes before extracting a command word.
 pub const COMMAND_PREFIX_STRIP_PATTERN: &str = r"^(sudo |timeout [0-9]+[smh]? )+";
 
 /// Appended to the shipped-defaults section.
-pub const DEFAULT_LABELS_GUIDANCE: &str = r"Carve-out suggestions must not duplicate coverage the defaults already have.";
+pub const DEFAULT_LABELS_GUIDANCE: &str =
+    r"Carve-out suggestions must not duplicate coverage the defaults already have.";
 
 /// Appended to a rejection that a fresh proposal would fix.
 pub const REGENERATE_WITH_PROPOSE: &str = r"Regenerate the proposal with --propose.";
@@ -277,12 +285,14 @@ mod tests {
         // Without this, a short flagged list reads as "these few rules are the
         // problem" when in fact NO shell allow rule applies in auto mode.
         assert!(CLASSIFY_ALL_SHELL_NOTE.contains("classifyAllShell is active"));
-        assert!(CLASSIFY_ALL_SHELL_NOTE
-            .contains("auto mode ignores every Bash/PowerShell allow rule"));
+        assert!(
+            CLASSIFY_ALL_SHELL_NOTE.contains("auto mode ignores every Bash/PowerShell allow rule")
+        );
         assert!(CLASSIFY_ALL_SHELL_NOTE.contains("a superset of the entries flagged here"));
         // ...and that removing them is not a no-op elsewhere.
-        assert!(CLASSIFY_ALL_SHELL_NOTE
-            .contains("outside auto mode all of these rules still apply"));
+        assert!(
+            CLASSIFY_ALL_SHELL_NOTE.contains("outside auto mode all of these rules still apply")
+        );
     }
 
     #[test]
@@ -329,8 +339,7 @@ mod tests {
 
     #[test]
     fn partial_coverage_is_unknown_not_empty() {
-        assert!(PROJECTS_PARTIAL_COVERAGE
-            .contains("treat missing projects as unknown, not empty"));
+        assert!(PROJECTS_PARTIAL_COVERAGE.contains("treat missing projects as unknown, not empty"));
     }
 
     #[test]
@@ -356,7 +365,10 @@ mod tests {
         assert_eq!(REPO_DEFAULT_BRANCH_PREFIX, "Default branch: ");
         assert_eq!(REPO_POSTURE_SIGNALS_PREFIX, "Posture signals present: ");
         assert_eq!(REPO_TRACKED_FILE_COUNT_PREFIX, "Tracked file count: ");
-        assert_eq!(UNKNOWN_DEFAULT_BRANCH, "(unknown \u{2014} origin/HEAD unset)");
+        assert_eq!(
+            UNKNOWN_DEFAULT_BRANCH,
+            "(unknown \u{2014} origin/HEAD unset)"
+        );
         assert_eq!(NO_REMOTE_CONFIGURED, "(no remote configured)");
         assert_eq!(
             REMOTE_NOT_KNOWN_HOST,
@@ -375,7 +387,10 @@ mod tests {
             SECRETS_MANAGER_PATTERN,
             r"(VAULT_ADDR|SOPS_[A-Z_]*|op read|aws secretsmanager|gcloud secrets)"
         );
-        assert_eq!(COMMAND_PREFIX_STRIP_PATTERN, r"^(sudo |timeout [0-9]+[smh]? )+");
+        assert_eq!(
+            COMMAND_PREFIX_STRIP_PATTERN,
+            r"^(sudo |timeout [0-9]+[smh]? )+"
+        );
         assert_eq!(GH_RULESETS_JQ, r"[.[] | {name, enforcement}]");
         assert_eq!(RERUN_SUFFIX_PATTERN, r"Re-run to try again\.?$");
         assert_eq!(
@@ -402,7 +417,10 @@ mod tests {
             DEFAULT_LABELS_GUIDANCE,
             "Carve-out suggestions must not duplicate coverage the defaults already have."
         );
-        assert_eq!(REGENERATE_WITH_PROPOSE, "Regenerate the proposal with --propose.");
+        assert_eq!(
+            REGENERATE_WITH_PROPOSE,
+            "Regenerate the proposal with --propose."
+        );
         assert_eq!(FLAGGED_ALLOW_EVENT, "auto_mode_flagged_allow");
     }
 }

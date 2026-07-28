@@ -159,7 +159,6 @@ fn deny_computer_access_matches_exact_wire_shape() {
     let cmd = ClientCommand::DenyComputerAccess { request_id: 42 };
     let json = serde_json::to_string(&cmd).expect("serialize DenyComputerAccess");
     assert_eq!(json, r#"{"type":"deny_computer_access","request_id":42}"#);
-    let back: ClientCommand =
-        serde_json::from_str(&json).expect("deserialize DenyComputerAccess");
+    let back: ClientCommand = serde_json::from_str(&json).expect("deserialize DenyComputerAccess");
     assert_eq!(back, cmd);
 }

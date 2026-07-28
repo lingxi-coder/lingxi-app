@@ -488,7 +488,9 @@ mod tests {
         assert!(!classify_all_shell_from_settings_json(
             r#"{"autoMode": {"classifyAllShell": "true"}}"#
         ));
-        assert!(!classify_all_shell_from_settings_json(r#"{"autoMode": {}}"#));
+        assert!(!classify_all_shell_from_settings_json(
+            r#"{"autoMode": {}}"#
+        ));
         // The key lives at the TOP LEVEL `autoMode`, NOT under `permissions`.
         assert!(!classify_all_shell_from_settings_json(
             r#"{"permissions": {"autoMode": {"classifyAllShell": true}}}"#

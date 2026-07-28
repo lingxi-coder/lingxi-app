@@ -218,8 +218,7 @@ impl SendMessageTool {
         }
         if trimmed.contains('@') {
             return Err(ToolError::InvalidInput(
-                "to must be a bare teammate name — there is only one team per session"
-                    .into(),
+                "to must be a bare teammate name — there is only one team per session".into(),
             ));
         }
         if trimmed == "*" {
@@ -681,7 +680,8 @@ impl Tool for SendMessageTool {
         // not granted a fan-out capability the oracle denies.
         if to == "*" {
             return Err(ValidationError(
-                "broadcast (to: \"*\") is no longer supported — send a message per recipient".into(),
+                "broadcast (to: \"*\") is no longer supported — send a message per recipient"
+                    .into(),
             ));
         }
         if to.trim().is_empty() {
@@ -689,8 +689,7 @@ impl Tool for SendMessageTool {
         }
         if to.contains('@') {
             return Err(ValidationError(
-                "to must be a bare teammate name — there is only one team per session"
-                    .into(),
+                "to must be a bare teammate name — there is only one team per session".into(),
             ));
         }
 
@@ -1640,5 +1639,4 @@ mod tests {
         let tool = SendMessageTool::new(ctx);
         assert!(!tool.is_enabled(&ToolStaticContext::default()));
     }
-
 }

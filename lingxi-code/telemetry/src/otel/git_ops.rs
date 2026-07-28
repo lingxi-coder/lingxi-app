@@ -218,7 +218,12 @@ fn has_space_d_space(command: &str) -> bool {
     for c in command.chars() {
         chars.push(c);
         let n = chars.len();
-        if n >= 4 && is_js_ws(chars[n - 4]) && chars[n - 3] == '-' && chars[n - 2] == 'd' && is_js_ws(chars[n - 1]) {
+        if n >= 4
+            && is_js_ws(chars[n - 4])
+            && chars[n - 3] == '-'
+            && chars[n - 2] == 'd'
+            && is_js_ws(chars[n - 1])
+        {
             return true;
         }
     }
@@ -232,7 +237,12 @@ fn has_space_d_space(command: &str) -> bool {
 /// within an unbroken `[^\s'"]` run — by `https?://`.
 fn has_pr_api_url(lower: &str) -> bool {
     let bytes = lower.as_bytes();
-    for segment in ["/pulls", "/pull-requests", "/merge_requests", "/merge-requests"] {
+    for segment in [
+        "/pulls",
+        "/pull-requests",
+        "/merge_requests",
+        "/merge-requests",
+    ] {
         let mut search = 0;
         while let Some(rel) = lower[search..].find(segment) {
             let seg_start = search + rel;
@@ -335,7 +345,12 @@ mod tests {
     /// `gh issue create`, which is a different noun entirely.
     #[test]
     fn non_creating_gh_verbs_do_not_count() {
-        for cmd in ["gh pr view 1", "gh pr list", "gh issue create", "gh pr merge"] {
+        for cmd in [
+            "gh pr view 1",
+            "gh pr list",
+            "gh issue create",
+            "gh pr merge",
+        ] {
             assert_eq!(hits(cmd), (0, 0), "{cmd} must not count as a PR create");
         }
     }

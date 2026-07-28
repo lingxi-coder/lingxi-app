@@ -219,7 +219,11 @@ mod tests {
         let mut s = SessionState::default();
         s.grant_app("com.b".into(), AppTier::Full);
         s.grant_app("com.a".into(), AppTier::Click);
-        let ids: Vec<_> = s.allowed_apps.iter().map(|a| a.bundle_id.as_str()).collect();
+        let ids: Vec<_> = s
+            .allowed_apps
+            .iter()
+            .map(|a| a.bundle_id.as_str())
+            .collect();
         assert_eq!(ids, vec!["com.b", "com.a"]);
     }
 }

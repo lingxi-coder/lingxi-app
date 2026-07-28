@@ -183,7 +183,9 @@ pub async fn filter_network_request_with_ask(
         yo(&format!("No matching config rule, denying: {host}:{port}"));
         return false;
     };
-    yo(&format!("No matching config rule, asking user: {host}:{port}"));
+    yo(&format!(
+        "No matching config rule, asking user: {host}:{port}"
+    ));
     match cb(host, port).await {
         Ok(true) => {
             yo(&format!("User allowed: {host}:{port}"));
@@ -246,9 +248,7 @@ mod tests {
     #[tokio::test]
     async fn error_level_branches_still_route_through_the_gated_port() {
         let _ = drain_yo();
-        assert!(
-            !filter_network_request_with_ask(443, "bad host", &allow_example(), None).await
-        );
+        assert!(!filter_network_request_with_ask(443, "bad host", &allow_example(), None).await);
         assert_eq!(
             drain_yo(),
             vec![r#"Denying malformed host: "bad host":443"#.to_string()]
@@ -256,7 +256,10 @@ mod tests {
 
         let ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let ask = ask_err(std::sync::Arc::clone(&ran));
-        assert!(!filter_network_request_with_ask(443, "unknown.com", &allow_example(), Some(&ask)).await);
+        assert!(
+            !filter_network_request_with_ask(443, "unknown.com", &allow_example(), Some(&ask))
+                .await
+        );
         assert_eq!(
             drain_yo(),
             vec![

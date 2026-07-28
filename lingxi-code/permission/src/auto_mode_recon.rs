@@ -178,7 +178,10 @@ mod tests {
 
     #[test]
     fn vocabulary_is_byte_exact() {
-        assert_eq!(RECON_SCAN_DESCRIPTION, "environment scan for /auto-mode-setup");
+        assert_eq!(
+            RECON_SCAN_DESCRIPTION,
+            "environment scan for /auto-mode-setup"
+        );
         assert_eq!(RECON_FAILED_CODE, "recon_failed");
         assert_eq!(PARSE_FAILED_CODE, "parse_failed");
         assert_eq!(PARSE_REPAIRED_CODE, "parse_repaired");
@@ -200,10 +203,16 @@ mod tests {
 
     #[test]
     fn no_automode_block_is_zero() {
-        let r = scan_settings_tier(&json!({"model": "opus"}), PermissionRuleSource::UserSettings);
+        let r = scan_settings_tier(
+            &json!({"model": "opus"}),
+            PermissionRuleSource::UserSettings,
+        );
         assert_eq!(r.auto_mode_entry_count, 0);
         // A non-object autoMode also counts as zero (nothing to observe).
-        let r2 = scan_settings_tier(&json!({"autoMode": "nope"}), PermissionRuleSource::UserSettings);
+        let r2 = scan_settings_tier(
+            &json!({"autoMode": "nope"}),
+            PermissionRuleSource::UserSettings,
+        );
         assert_eq!(r2.auto_mode_entry_count, 0);
     }
 
@@ -213,7 +222,11 @@ mod tests {
             "permissions": { "allow": ["Bash(*)", "Read", "Bash(rm:*)", "Edit(src/**)"] }
         });
         let r = scan_settings_tier(&settings, PermissionRuleSource::UserSettings);
-        let displays: Vec<&str> = r.dangerous_allow.iter().map(|d| d.rule_display.as_str()).collect();
+        let displays: Vec<&str> = r
+            .dangerous_allow
+            .iter()
+            .map(|d| d.rule_display.as_str())
+            .collect();
         // The wildcard Bash rules are destructive; Read / scoped Edit are not.
         assert!(displays.contains(&"Bash(*)"), "got {displays:?}");
         assert!(displays.iter().all(|d| d.starts_with("Bash")));
@@ -295,7 +308,10 @@ mod tests {
         ];
         let r = reconcile_unsafe_allow_removal(&model, &recon_dangerous);
         // Bash(*) once (recon-first), then the model's dangerous Shell(*); Read dropped.
-        assert_eq!(r.removal, vec!["Bash(*)".to_string(), "Shell(*)".to_string()]);
+        assert_eq!(
+            r.removal,
+            vec!["Bash(*)".to_string(), "Shell(*)".to_string()]
+        );
         assert_eq!(r.dropped_count, 2);
     }
 }

@@ -53,7 +53,9 @@ impl Drop for FileEnvGuard {
 pub(crate) fn guard_file_env() -> FileEnvGuard {
     // Recover from a poisoned lock: a panicking test must not wedge every other
     // test in the binary behind it.
-    let _lock = lock().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _lock = lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let saved = GUARDED
         .iter()
         .map(|k| (*k, std::env::var(k).ok()))

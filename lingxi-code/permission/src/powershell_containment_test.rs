@@ -1613,7 +1613,12 @@ fn zls_passthrough_on_compound_cd_plus_write() {
         &["./f.txt", "x"],
         &["StringConstant", "StringConstant", "StringConstant"],
     );
-    let cd = zc("Set-Location", "cmdlet", &["sub"], &["StringConstant", "StringConstant"]);
+    let cd = zc(
+        "Set-Location",
+        "cmdlet",
+        &["sub"],
+        &["StringConstant", "StringConstant"],
+    );
     let stmts = [
         zstmt(vec![PsElement::Command(write)]),
         zstmt(vec![PsElement::Command(cd)]),
@@ -1632,7 +1637,10 @@ fn zls_passthrough_on_non_write_and_unknown_cmdlets() {
     let c = zc("Get-Process", "cmdlet", &[], &["StringConstant"]);
     match ae(&[zstmt(vec![PsElement::Command(c)])]) {
         PsAcceptEditsResult::Passthrough(r) => {
-            assert!(r.contains("No mode-specific handling for 'Get-Process'"), "{r}");
+            assert!(
+                r.contains("No mode-specific handling for 'Get-Process'"),
+                "{r}"
+            );
         }
         other => panic!("expected passthrough, got {other:?}"),
     }
@@ -1769,10 +1777,7 @@ fn shadow_predicate_flags_a_write_that_precedes_the_command() {
         bstmt(vec![cmd("git", &["status"])]),
     ];
     let u = battery_u_list(&stmts);
-    assert_eq!(
-        battery_shadowed_command(&stmts, &u).as_deref(),
-        Some("git")
-    );
+    assert_eq!(battery_shadowed_command(&stmts, &u).as_deref(), Some("git"));
 }
 
 /// ORDER is the whole point: a file written AFTER a command runs cannot shadow
@@ -1795,10 +1800,7 @@ fn shadow_predicate_seeds_from_line_level_redirections() {
     writer.redirections = vec![bredir("./git.cmd")];
     let stmts = vec![writer, bstmt(vec![cmd("git", &["status"])])];
     let u = battery_u_list(&stmts);
-    assert_eq!(
-        battery_shadowed_command(&stmts, &u).as_deref(),
-        Some("git")
-    );
+    assert_eq!(battery_shadowed_command(&stmts, &u).as_deref(), Some("git"));
 }
 
 /// Only a PATHEXT extension makes a file executable-by-shadowing. `git.notes`
@@ -1831,10 +1833,7 @@ fn shadow_predicate_matches_on_the_basename() {
         bstmt(vec![cmd("git", &["status"])]),
     ];
     let u = battery_u_list(&stmts);
-    assert_eq!(
-        battery_shadowed_command(&stmts, &u).as_deref(),
-        Some("git")
-    );
+    assert_eq!(battery_shadowed_command(&stmts, &u).as_deref(), Some("git"));
 }
 
 /// A `-Flag:` prefix is stripped before the argument is read as a path, so
@@ -1846,10 +1845,7 @@ fn shadow_predicate_strips_a_leading_parameter_flag() {
         bstmt(vec![cmd("git", &["status"])]),
     ];
     let u = battery_u_list(&stmts);
-    assert_eq!(
-        battery_shadowed_command(&stmts, &u).as_deref(),
-        Some("git")
-    );
+    assert_eq!(battery_shadowed_command(&stmts, &u).as_deref(), Some("git"));
 }
 
 /// An invocation that carries its OWN extension is shadowed by a write whose
@@ -1892,9 +1888,15 @@ fn shadow_message_is_byte_exact() {
 /// suffix — is stripped for the stem.
 #[test]
 fn ldo_splits_basename_and_pathext_stem() {
-    assert_eq!(battery_ldo("C:\\tools\\GIT.EXE"), ("git.exe".into(), "git".into()));
+    assert_eq!(
+        battery_ldo("C:\\tools\\GIT.EXE"),
+        ("git.exe".into(), "git".into())
+    );
     assert_eq!(battery_ldo("./git.bat"), ("git.bat".into(), "git".into()));
-    assert_eq!(battery_ldo("notes.md"), ("notes.md".into(), "notes.md".into()));
+    assert_eq!(
+        battery_ldo("notes.md"),
+        ("notes.md".into(), "notes.md".into())
+    );
     // Drive-relative `C:foo` drops the prefix; `..` resolves.
     assert_eq!(battery_ldo("C:git.cmd").1, "git");
     assert_eq!(battery_ldo("a/../git.com").1, "git");

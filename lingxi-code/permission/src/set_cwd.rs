@@ -459,7 +459,9 @@ mod tests {
         c.trusted = false;
         assert_eq!(
             decide_set_cwd(&req("/here"), &c),
-            SetCwdDecision::Respond(SetCwdResponse::AlreadyThere { cwd: "/here".into() })
+            SetCwdDecision::Respond(SetCwdResponse::AlreadyThere {
+                cwd: "/here".into()
+            })
         );
     }
 

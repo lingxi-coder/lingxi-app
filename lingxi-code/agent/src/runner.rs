@@ -1315,8 +1315,7 @@ async fn run_subagent_loop(
                             .as_ref()
                             .filter(|observer| {
                                 observer.observe_subagents
-                                    && ctx.depth
-                                        < crate::observer::DEFAULT_OBSERVER_FANOUT_DEPTH
+                                    && ctx.depth < crate::observer::DEFAULT_OBSERVER_FANOUT_DEPTH
                             })
                             .cloned(),
                         // This subagent's OWN resolved main-loop model — so a NESTED

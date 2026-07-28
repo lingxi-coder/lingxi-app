@@ -61,8 +61,7 @@ async fn register_root_refreshes_security_boundary_before_catalogs() {
         cwd: session_cwd.clone(),
         requests: tokio::sync::Mutex::new(Vec::new()),
     });
-    let orch =
-        build_orchestrator(cwd, session_cwd).with_repo_root_reloader(reloader.clone());
+    let orch = build_orchestrator(cwd, session_cwd).with_repo_root_reloader(reloader.clone());
 
     let outcome = orch
         .register_repo_root(RegisterRepoRootRequest {

@@ -193,11 +193,7 @@ impl OAuthHandle {
                 }
             } else {
                 break (
-                    accept
-                        .as_mut()
-                        .await
-                        .map_err(callback_to_auth_err)?
-                        .code,
+                    accept.as_mut().await.map_err(callback_to_auth_err)?.code,
                     false,
                 );
             }
@@ -289,12 +285,13 @@ impl OAuthHandle {
         // Best-effort + scope-gated (`hasProfileScope`): a token without
         // `user:profile`, or any fetch failure, leaves both unchanged.
         let transport = self.client.http();
-        if let Some(snapshot) = crate::oauth::anthropic::subscription::resolve_subscription_snapshot(
-            tokens.access_token.expose_secret(),
-            &tokens.scopes,
-            &transport,
-        )
-        .await
+        if let Some(snapshot) =
+            crate::oauth::anthropic::subscription::resolve_subscription_snapshot(
+                tokens.access_token.expose_secret(),
+                &tokens.scopes,
+                &transport,
+            )
+            .await
         {
             if let Err(error) = self
                 .client
@@ -712,7 +709,9 @@ mod tests {
         // The sink got the MANUAL URL variant (hosted code page redirect).
         let url = seen_url.lock().unwrap().clone();
         assert!(
-            url.contains("redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback"),
+            url.contains(
+                "redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback"
+            ),
             "sink got the manual variant, was: {url}"
         );
 
@@ -745,7 +744,10 @@ mod tests {
         }"#;
         let (handle, _storage, opened, http) = handle_with_token_body(body);
         handle.login().await.expect("login ok");
-        assert!(opened.load(Ordering::SeqCst), "loopback opener drove the flow");
+        assert!(
+            opened.load(Ordering::SeqCst),
+            "loopback opener drove the flow"
+        );
 
         let redirect = exchange_redirect_uri(&http);
         let port = redirect
@@ -753,7 +755,10 @@ mod tests {
             .and_then(|rest| rest.strip_suffix("/callback"))
             .and_then(|p| p.parse::<u16>().ok())
             .unwrap_or_else(|| panic!("expected a loopback redirect, was: {redirect}"));
-        assert!(port > 0, "redirect must carry the bound port, was: {redirect}");
+        assert!(
+            port > 0,
+            "redirect must carry the bound port, was: {redirect}"
+        );
     }
 
     /// M13: a login whose token carries `user:profile` resolves the profile

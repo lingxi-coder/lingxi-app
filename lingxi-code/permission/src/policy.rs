@@ -515,7 +515,10 @@ impl PermissionPolicy {
         // would to Bash. A `ws`-monitor (the `NU_` branch) is left untouched.
         let tool_name = if tool_name == "Monitor"
             && input.get("ws").is_none()
-            && input.get("command").and_then(serde_json::Value::as_str).is_some()
+            && input
+                .get("command")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
         {
             "Bash"
         } else {
@@ -2963,17 +2966,15 @@ mod classify_all_shell_policy_test {
     #[test]
     fn strip_honors_classify_all_shell_flag() {
         // flag OFF: a SAFE `Bash(ls:*)` allow survives the auto-mode strip.
-        let mut p =
-            PermissionPolicy::from_rules(PermissionMode::Default, vec![bash_allow("ls:*")]);
+        let mut p = PermissionPolicy::from_rules(PermissionMode::Default, vec![bash_allow("ls:*")]);
         p.set_mode(PermissionMode::Auto);
         assert!(p.stripped_dangerous.is_empty());
         assert!(p.allow_rules.values().any(|v| !v.is_empty()));
 
         // flag ON (set BEFORE the Default→Auto transition, matching the boot
         // ordering fix): the same safe shell allow is stripped into the stash.
-        let mut p =
-            PermissionPolicy::from_rules(PermissionMode::Default, vec![bash_allow("ls:*")])
-                .with_classify_all_shell(true);
+        let mut p = PermissionPolicy::from_rules(PermissionMode::Default, vec![bash_allow("ls:*")])
+            .with_classify_all_shell(true);
         p.set_mode(PermissionMode::Auto);
         assert_eq!(p.stripped_dangerous.len(), 1);
         assert_eq!(p.stripped_dangerous[0].value.tool_name, "Bash");
@@ -3103,11 +3104,8 @@ mod ps_acceptedits_policy_test {
         // exactly as before this feature (no acceptEdits Allow ever appears).
         for mode in [PermissionMode::Default, PermissionMode::Plan] {
             let p = policy_with(set_content("/proj/work/f.txt"));
-            let r = p.check_powershell_containment(
-                "Set-Content /proj/work/f.txt x",
-                &roots(),
-                mode,
-            );
+            let r =
+                p.check_powershell_containment("Set-Content /proj/work/f.txt x", &roots(), mode);
             assert!(
                 !matches!(r, Some(PermissionResult::Allow { .. })),
                 "{mode:?}: must not auto-allow a PowerShell write"

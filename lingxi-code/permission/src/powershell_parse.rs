@@ -439,7 +439,10 @@ fn transform_variables(raw: Option<&Value>) -> Vec<PsVariable> {
         .iter()
         .map(|v| PsVariable {
             path: str_field(v, "path").unwrap_or("").to_string(),
-            is_splatted: v.get("isSplatted").and_then(Value::as_bool).unwrap_or(false),
+            is_splatted: v
+                .get("isSplatted")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
         })
         .collect()
 }

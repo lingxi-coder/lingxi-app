@@ -128,7 +128,10 @@ pub fn head_body_looks_real(text: &str) -> bool {
         }
     }
     let oid = text.trim_end_matches([' ', '\t', '\n', '\r']);
-    (oid.len() == 40 || oid.len() == 64) && oid.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    (oid.len() == 40 || oid.len() == 64)
+        && oid
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
 }
 
 /// Is `dir` a STANDALONE git directory (as opposed to a linked worktree's)?

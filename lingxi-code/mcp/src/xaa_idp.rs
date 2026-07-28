@@ -823,7 +823,8 @@ mod tests {
     fn mem() -> (Arc<dyn SecureStorage>, Arc<dyn Clock>) {
         let storage: Arc<dyn SecureStorage> = Arc::new(MemStorage::default());
         // 2026-01-01T00:00:00Z, so "now" is well before the 2030 test expiry.
-        let clock: Arc<dyn Clock> = Arc::new(TestClock(UNIX_EPOCH + Duration::from_secs(1_767_225_600)));
+        let clock: Arc<dyn Clock> =
+            Arc::new(TestClock(UNIX_EPOCH + Duration::from_secs(1_767_225_600)));
         (storage, clock)
     }
 
@@ -867,9 +868,10 @@ mod tests {
         // minimal tokens. The token is cached, not trusted; the resource server
         // is what verifies it.
         let (storage, clock) = mem();
-        let expires_at = save_id_token_from_jwt(&storage, &clock, "https://idp.example", "not-a-jwt")
-            .await
-            .expect("save");
+        let expires_at =
+            save_id_token_from_jwt(&storage, &clock, "https://idp.example", "not-a-jwt")
+                .await
+                .expect("save");
         assert_eq!(expires_at, clock.now() + Duration::from_secs(3600));
     }
 
@@ -914,19 +916,27 @@ mod tests {
     async fn client_secret_round_trips_and_clears() {
         let (storage, clock) = mem();
         assert_eq!(
-            get_idp_client_secret(&storage, "https://idp.example").await.expect("read"),
+            get_idp_client_secret(&storage, "https://idp.example")
+                .await
+                .expect("read"),
             None
         );
         save_idp_client_secret(&storage, &clock, "https://idp.example", "s3cret")
             .await
             .expect("save");
         assert_eq!(
-            get_idp_client_secret(&storage, "https://idp.example").await.expect("read"),
+            get_idp_client_secret(&storage, "https://idp.example")
+                .await
+                .expect("read"),
             Some("s3cret".to_string())
         );
-        clear_idp_client_secret(&storage, "https://idp.example").await.expect("clear");
+        clear_idp_client_secret(&storage, "https://idp.example")
+            .await
+            .expect("clear");
         assert_eq!(
-            get_idp_client_secret(&storage, "https://idp.example").await.expect("read"),
+            get_idp_client_secret(&storage, "https://idp.example")
+                .await
+                .expect("read"),
             None
         );
     }
@@ -956,12 +966,20 @@ mod tests {
         // other, or `setup --client-secret` would silently log the user out.
         let (storage, clock) = mem();
         let jwt = jwt_with_claims(r#"{"exp":1893456000}"#);
-        save_id_token_from_jwt(&storage, &clock, "https://idp.example", &jwt).await.expect("save");
-        save_idp_client_secret(&storage, &clock, "https://idp.example", "s3cret").await.expect("save");
+        save_id_token_from_jwt(&storage, &clock, "https://idp.example", &jwt)
+            .await
+            .expect("save");
+        save_idp_client_secret(&storage, &clock, "https://idp.example", "s3cret")
+            .await
+            .expect("save");
 
-        clear_cached_id_token(&storage, "https://idp.example").await.expect("clear");
+        clear_cached_id_token(&storage, "https://idp.example")
+            .await
+            .expect("clear");
         assert_eq!(
-            get_idp_client_secret(&storage, "https://idp.example").await.expect("read"),
+            get_idp_client_secret(&storage, "https://idp.example")
+                .await
+                .expect("read"),
             Some("s3cret".to_string()),
             "clearing the id_token must not clear the client secret"
         );

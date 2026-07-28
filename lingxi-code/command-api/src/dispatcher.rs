@@ -178,10 +178,7 @@ impl RegistrySlashDispatcher {
     /// Wire the background subagent launcher used by fork-context bundled
     /// commands such as `/code-review`.
     #[must_use]
-    pub fn with_background_prompt_launcher(
-        mut self,
-        launcher: BackgroundPromptLauncher,
-    ) -> Self {
+    pub fn with_background_prompt_launcher(mut self, launcher: BackgroundPromptLauncher) -> Self {
         self.background_prompt_launcher = Some(launcher);
         self
     }
@@ -721,10 +718,7 @@ mod tests {
                 display: "started review agent".to_string()
             }
         );
-        assert_eq!(
-            launched.lock().await.as_slice(),
-            ["REVIEW[high --fix src]"]
-        );
+        assert_eq!(launched.lock().await.as_slice(), ["REVIEW[high --fix src]"]);
     }
 
     #[tokio::test]

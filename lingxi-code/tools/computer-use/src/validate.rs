@@ -228,7 +228,11 @@ fn canonical_modifier(part: &str) -> Option<&'static str> {
 /// system shortcut (`esc`/`escape`, `enter`/`return`). Returns `None` for an
 /// empty chord (nothing to protect).
 fn canonicalize_chord(chord: &str) -> Option<(Vec<&'static str>, String)> {
-    let mut parts: Vec<&str> = chord.split('+').map(str::trim).filter(|p| !p.is_empty()).collect();
+    let mut parts: Vec<&str> = chord
+        .split('+')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .collect();
     let last = parts.pop()?;
     let main = match last.to_ascii_lowercase().as_str() {
         "esc" => "escape".to_string(),

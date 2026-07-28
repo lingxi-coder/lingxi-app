@@ -12,8 +12,8 @@ use crate::auto_mode_defaults::{
     default_rule_label, DEFAULT_ALLOW_LABELS, DEFAULT_SOFT_DENY_LABELS,
 };
 use crate::auto_mode_facts::DEFAULT_LABELS_GUIDANCE;
-use serde_json::Value;
 use crate::auto_mode_sections::{HEADING_DEFAULT_ALLOW_LABELS, HEADING_DEFAULT_SOFT_DENY_LABELS};
+use serde_json::Value;
 
 // ── producer read caps ───────────────────────────────────────────────────────
 
@@ -91,13 +91,14 @@ pub fn strip_url_userinfo(s: &str) -> String {
 #[must_use]
 pub fn display_name(name: &str) -> &str {
     let t = name.trim();
-    let structural = t.starts_with('#')
-        || t.starts_with('-')
-        || t.starts_with('>')
-        || t.starts_with("<<<");
-    let has_break = name
-        .chars()
-        .any(|c| matches!(c, '\r' | '\n' | '\u{b}' | '\u{c}' | '\u{85}' | '\u{2028}' | '\u{2029}'));
+    let structural =
+        t.starts_with('#') || t.starts_with('-') || t.starts_with('>') || t.starts_with("<<<");
+    let has_break = name.chars().any(|c| {
+        matches!(
+            c,
+            '\r' | '\n' | '\u{b}' | '\u{c}' | '\u{85}' | '\u{2028}' | '\u{2029}'
+        )
+    });
     if !t.is_empty() && t.chars().count() <= 120 && !has_break && !name.contains('`') && !structural
     {
         name
@@ -170,7 +171,11 @@ pub const DOC_ENV_SAMPLE_LABEL: &str = "./.env.sample";
 
 /// The project files read for the docs section, as `(label, relative path, cap)`.
 pub const PROJECT_DOC_FILES: [(&str, &str, usize); 4] = [
-    (DOC_PROJECT_LINGXI_MD_LABEL, "LINGXI.md", DOC_READ_CAP_LINGXI_MD),
+    (
+        DOC_PROJECT_LINGXI_MD_LABEL,
+        "LINGXI.md",
+        DOC_READ_CAP_LINGXI_MD,
+    ),
     (
         crate::auto_mode_facts::DOC_README_HEAD_LABEL,
         "README.md",
@@ -332,16 +337,9 @@ pub fn redact_remote_url(url: &str) -> String {
         let shape_ok = {
             let mut chars = rest.chars();
             match chars.next() {
-                Some(f)
-                    if f.is_alphanumeric()
-                        || f == '_'
-                        || f == '.'
-                        || f == '~'
-                        || f == '/' =>
-                {
+                Some(f) if f.is_alphanumeric() || f == '_' || f == '.' || f == '~' || f == '/' => {
                     chars.all(|c| {
-                        c.is_alphanumeric()
-                            || matches!(c, '_' | '.' | ':' | '/' | '~' | '-')
+                        c.is_alphanumeric() || matches!(c, '_' | '.' | ':' | '/' | '~' | '-')
                     })
                 }
                 _ => false,
@@ -373,12 +371,17 @@ pub fn redact_remote_url(url: &str) -> String {
     let authority = &rest[..split];
     let path = &rest[split..];
     // `URL.host` excludes userinfo.
-    let host = authority.rsplit('@').next().unwrap_or(authority).to_lowercase();
+    let host = authority
+        .rsplit('@')
+        .next()
+        .unwrap_or(authority)
+        .to_lowercase();
     if !{
         let mut chars = host.chars();
         match chars.next() {
-            Some(f) if f.is_alphanumeric() || f == '_' || f == '.' || f == '[' => chars
-                .all(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | ':' | '[' | ']' | '-')),
+            Some(f) if f.is_alphanumeric() || f == '_' || f == '.' || f == '[' => {
+                chars.all(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | ':' | '[' | ']' | '-'))
+            }
             _ => false,
         }
     } {
@@ -493,7 +496,12 @@ pub fn repo_facts_section(source: &dyn RepoFactsSource) -> RepoFacts {
             .map(redact_remote_url)
             .collect();
         let pushurls: Vec<String> = source
-            .git(&["config", "-z", "--get-all", &format!("remote.{name}.pushurl")])
+            .git(&[
+                "config",
+                "-z",
+                "--get-all",
+                &format!("remote.{name}.pushurl"),
+            ])
             .split('\0')
             .filter(|s| !s.is_empty())
             .map(redact_remote_url)
@@ -502,7 +510,11 @@ pub fn repo_facts_section(source: &dyn RepoFactsSource) -> RepoFacts {
         for u in &urls {
             remote_lines.push(format!("{label}\t{u} (fetch)"));
         }
-        let push_from = if pushurls.is_empty() { &urls } else { &pushurls };
+        let push_from = if pushurls.is_empty() {
+            &urls
+        } else {
+            &pushurls
+        };
         for u in push_from {
             remote_lines.push(format!("{label}\t{u} (push)"));
         }
@@ -529,22 +541,35 @@ pub fn repo_facts_section(source: &dyn RepoFactsSource) -> RepoFacts {
         .collect();
 
     let contributing = source.read_file("CONTRIBUTING.md", CONTRIBUTING_READ_CAP);
-    let gitignore = source.read_file(".gitignore", DOC_READ_CAP).unwrap_or_default();
+    let gitignore = source
+        .read_file(".gitignore", DOC_READ_CAP)
+        .unwrap_or_default();
     let sensitive: Vec<&str> = gitignore
         .split('\n')
         .map(|l| l.strip_suffix('\r').unwrap_or(l))
         .filter(|l| {
             let low = l.to_lowercase();
-            ["secret", "credential", ".env", "key", "token", "pii", "private"]
-                .iter()
-                .any(|n| low.contains(n))
+            [
+                "secret",
+                "credential",
+                ".env",
+                "key",
+                "token",
+                "pii",
+                "private",
+            ]
+            .iter()
+            .any(|n| low.contains(n))
         })
         .take(FLAGGED_LIST_CAP)
         .collect();
 
     let repo_path = source.repo_path();
     let shown_path = if repo_path.chars().any(|c| {
-        matches!(c, '\r' | '\n' | '\u{b}' | '\u{c}' | '\u{85}' | '\u{2028}' | '\u{2029}' | '`')
+        matches!(
+            c,
+            '\r' | '\n' | '\u{b}' | '\u{c}' | '\u{85}' | '\u{2028}' | '\u{2029}' | '`'
+        )
     }) {
         sections::REDACTED_UNUSUAL_REPO_PATH.to_string()
     } else {
@@ -685,9 +710,7 @@ pub fn gh_is_unavailable(res: &GhResult) -> bool {
 /// Returns the variables to OVERRIDE, with `None` meaning "remove".
 #[must_use]
 pub fn gh_env_overrides(current_gh_host: Option<&str>) -> Vec<(&'static str, Option<String>)> {
-    let points_elsewhere = current_gh_host
-        .map(|h| !is_github_host(h))
-        .unwrap_or(false);
+    let points_elsewhere = current_gh_host.map(|h| !is_github_host(h)).unwrap_or(false);
     let mut out: Vec<(&'static str, Option<String>)> = vec![
         ("GH_HOST", Some("github.com".to_string())),
         ("GH_ENTERPRISE_TOKEN", None),
@@ -708,7 +731,10 @@ pub fn gh_env_overrides(current_gh_host: Option<&str>) -> Vec<(&'static str, Opt
 /// would send a query about somebody else's repository.
 #[must_use]
 pub fn remote_to_host_org_repo(url: &str, this_repo_host: Option<&str>) -> Option<String> {
-    if url.chars().any(|c| c <= ' ' || c > '~' || c == '\\' || c == '%') {
+    if url
+        .chars()
+        .any(|c| c <= ' ' || c > '~' || c == '\\' || c == '%')
+    {
         return None;
     }
     let mut hosts: Vec<String> = KNOWN_VCS_HOSTS.iter().map(|h| (*h).to_string()).collect();
@@ -816,7 +842,10 @@ pub fn render_protected_branches(res: &GhResult) -> String {
         .collect();
     let redacted = names.len() - shown.len();
     let redacted_note = if redacted > 0 {
-        format!("{redacted}{}", crate::auto_mode_sections::REDACTED_NAMES_OUTSIDE_CHARSET_SUFFIX)
+        format!(
+            "{redacted}{}",
+            crate::auto_mode_sections::REDACTED_NAMES_OUTSIDE_CHARSET_SUFFIX
+        )
     } else {
         String::new()
     };
@@ -859,12 +888,7 @@ pub fn render_rulesets(res: &GhResult) -> String {
     };
     let typed: Vec<(&str, &str)> = items
         .iter()
-        .filter_map(|i| {
-            Some((
-                i.get("name")?.as_str()?,
-                i.get("enforcement")?.as_str()?,
-            ))
-        })
+        .filter_map(|i| Some((i.get("name")?.as_str()?, i.get("enforcement")?.as_str()?)))
         .collect();
     let mut redacted = items.len() - typed.len();
     let total = typed.len() + redacted;
@@ -983,9 +1007,7 @@ pub fn render_org_repo_list(res: &GhResult) -> (String, bool) {
         std::collections::BTreeMap::new();
     for (name, visibility, _) in &visible {
         groups
-            .entry(
-                parse_visibility(visibility).unwrap_or_else(|| (*visibility).to_lowercase()),
-            )
+            .entry(parse_visibility(visibility).unwrap_or_else(|| (*visibility).to_lowercase()))
             .or_default()
             .push((*name).to_string());
     }
@@ -1012,7 +1034,9 @@ pub fn render_org_repo_list(res: &GhResult) -> (String, bool) {
     }
     let lines: Vec<String> = groups
         .into_iter()
-        .map(|(visibility, names)| format!("- {visibility}: {}", join_gh_names(&names, GH_LIST_SHOWN)))
+        .map(|(visibility, names)| {
+            format!("- {visibility}: {}", join_gh_names(&names, GH_LIST_SHOWN))
+        })
         .collect();
     let body = if redacted > 0 {
         format!("{}\n_{note}_", lines.join("\n"))
@@ -1181,10 +1205,7 @@ pub fn repo_visibility_section(
             render_protected_branches(&branches)
         ),
         String::new(),
-        format!(
-            "#### {}",
-            crate::auto_mode_propose::ORG_REPO_SPLIT_HEADING
-        ),
+        format!("#### {}", crate::auto_mode_propose::ORG_REPO_SPLIT_HEADING),
         org_body,
     ]
     .join("\n");
@@ -1275,7 +1296,11 @@ pub fn is_strictly_under(path: &str, root: &str, windows: bool) -> bool {
         return false;
     };
     let rel = rel.trim_start_matches(if windows { '\\' } else { '/' });
-    let cmp = if windows { rel.to_lowercase() } else { rel.to_string() };
+    let cmp = if windows {
+        rel.to_lowercase()
+    } else {
+        rel.to_string()
+    };
     !cmp.is_empty()
         && cmp != ".."
         && !cmp.starts_with("../")
@@ -1306,7 +1331,11 @@ pub fn home_relative(path: &str, home: &str, windows: bool) -> String {
         return path.to_string();
     }
     let rel = &path[prefix.len()..];
-    let rel = if windows { rel.replace('\\', "/") } else { rel.to_string() };
+    let rel = if windows {
+        rel.replace('\\', "/")
+    } else {
+        rel.to_string()
+    };
     format!("~/{rel}")
 }
 
@@ -1617,11 +1646,15 @@ pub fn home_repos_body(repos: &[HomeRepo], limit: WalkLimit) -> String {
         format!("{}{}", facts::REPOS_FOUND_HEADER, lines.join("\n"))
     };
 
-    [head, walk_limit_note(limit).to_string(), facts::HOME_REPOS_CANDIDATE_NOTE.to_string()]
-        .into_iter()
-        .filter(|p| !p.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n")
+    [
+        head,
+        walk_limit_note(limit).to_string(),
+        facts::HOME_REPOS_CANDIDATE_NOTE.to_string(),
+    ]
+    .into_iter()
+    .filter(|p| !p.is_empty())
+    .collect::<Vec<_>>()
+    .join("\n")
 }
 
 // ── `Xsy` — sibling repo docs (via gh) ───────────────────────────────────────
@@ -1647,8 +1680,7 @@ pub fn is_valid_repo_name(name: &str) -> bool {
         return false;
     };
     let ok_first = first.is_ascii_alphanumeric() || first == '_' || first == '.';
-    ok_first
-        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+    ok_first && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
 }
 
 /// The sibling repos worth fetching: most recently pushed first, excluding this
@@ -2080,7 +2112,11 @@ pub fn history_sources(env: &ShellHistoryEnv) -> Vec<HistorySource> {
     if let Some(hist) = env.hist_file.as_deref().map(str::trim) {
         if !hist.is_empty() && is_absolute_for(env.windows, hist) {
             let base = hist.rsplit(['/', '\\']).next().unwrap_or(hist);
-            push("$HISTFILE", hist.to_string(), HistoryFormat::from_basename(base));
+            push(
+                "$HISTFILE",
+                hist.to_string(),
+                HistoryFormat::from_basename(base),
+            );
         }
     }
     if !env.windows {
@@ -2117,7 +2153,10 @@ pub fn history_sources(env: &ShellHistoryEnv) -> Vec<HistorySource> {
         let data = data_home(env);
         push(
             "~/.local/share/powershell/PSReadLine/ConsoleHost_history.txt",
-            join_path(false, &[&data, "powershell", "PSReadLine", "ConsoleHost_history.txt"]),
+            join_path(
+                false,
+                &[&data, "powershell", "PSReadLine", "ConsoleHost_history.txt"],
+            ),
             HistoryFormat::PsReadline,
         );
         push(
@@ -2537,9 +2576,7 @@ pub fn mine_transcript_text(
             };
             for block in blocks {
                 let kind = block.get("type").and_then(Value::as_str).unwrap_or("");
-                if kind == "tool_use"
-                    && block.get("name").and_then(Value::as_str) == Some("Bash")
-                {
+                if kind == "tool_use" && block.get("name").and_then(Value::as_str) == Some("Bash") {
                     if let Some(cmd) = block
                         .get("input")
                         .and_then(|i| i.get("command"))
@@ -2918,18 +2955,17 @@ pub fn extract_bucket_names(text: &str) -> Vec<String> {
         let mut from = 0usize;
         while let Some(rel) = text[from..].find(scheme) {
             let at = from + rel;
-            let preceded = at > 0
-                && {
-                    let p = bytes[at - 1];
-                    p.is_ascii_lowercase()
-                        || p.is_ascii_digit()
-                        || matches!(p, b'.' | b'+' | b'-')
-                };
+            let preceded = at > 0 && {
+                let p = bytes[at - 1];
+                p.is_ascii_lowercase() || p.is_ascii_digit() || matches!(p, b'.' | b'+' | b'-')
+            };
             if !preceded {
                 let rest = &text[at + scheme.len()..];
                 let name: String = rest
                     .chars()
-                    .take_while(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'))
+                    .take_while(|c| {
+                        c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-')
+                    })
                     .collect();
                 let first_ok = name
                     .chars()
@@ -2986,9 +3022,8 @@ pub fn render_bucket_section(scan: Option<&BucketScan>) -> String {
             String::new()
         };
     }
-    let mut parts: Vec<String> = vec![
-        crate::auto_mode_sections::HEADING_BUCKET_NAMES_BY_COUNT.to_string(),
-    ];
+    let mut parts: Vec<String> =
+        vec![crate::auto_mode_sections::HEADING_BUCKET_NAMES_BY_COUNT.to_string()];
     for (name, count) in &scan.top {
         let files = if count.files == 1 { "file" } else { "files" };
         parts.push(format!(
@@ -3063,11 +3098,12 @@ pub fn config_scans_section(source: &dyn ConfigScanSource) -> String {
 
     let is_public = |h: &String| PUBLIC_REGISTRIES.contains(&h.as_str());
 
-    let registries: Vec<String> = scan_for(source, &REGISTRY_GLOBS, &registry_url_regex(), 10, None)
-        .iter()
-        .filter_map(|u| registry_host(u))
-        .filter(|h| !is_public(h))
-        .collect();
+    let registries: Vec<String> =
+        scan_for(source, &REGISTRY_GLOBS, &registry_url_regex(), 10, None)
+            .iter()
+            .filter_map(|u| registry_host(u))
+            .filter(|h| !is_public(h))
+            .collect();
     let images: Vec<String> = scan_for(source, &IMAGE_GLOBS, &image_from_regex(), 10, None)
         .into_iter()
         .filter(|h| !is_public(h))
@@ -3080,8 +3116,20 @@ pub fn config_scans_section(source: &dyn ConfigScanSource) -> String {
         FLAGGED_LIST_CAP,
         Some(&ci_path_regex()),
     );
-    let make_targets = scan_for(source, &MAKE_GLOBS, &make_target_regex(), FLAGGED_LIST_CAP, None);
-    let markers = scan_for(source, &SECRETS_MARKER_GLOBS, &secrets_marker_regex(), 10, None);
+    let make_targets = scan_for(
+        source,
+        &MAKE_GLOBS,
+        &make_target_regex(),
+        FLAGGED_LIST_CAP,
+        None,
+    );
+    let markers = scan_for(
+        source,
+        &SECRETS_MARKER_GLOBS,
+        &secrets_marker_regex(),
+        10,
+        None,
+    );
 
     // Sensitive paths: name matches first, then up to two examples per
     // sensitive DIRECTORY, so a big `prod/` tree cannot crowd out everything.
@@ -3090,8 +3138,12 @@ pub fn config_scans_section(source: &dyn ConfigScanSource) -> String {
     let mut per_dir: Vec<String> = Vec::new();
     {
         let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-        for path in source.list_paths(&SENSITIVE_DIR_GLOBS, 1000, DOC_GLOB_MAX_DEPTH, Some(&dir_re))
-        {
+        for path in source.list_paths(
+            &SENSITIVE_DIR_GLOBS,
+            1000,
+            DOC_GLOB_MAX_DEPTH,
+            Some(&dir_re),
+        ) {
             let Some(kind) = dir_re
                 .captures(&path)
                 .and_then(|c| c.get(2).map(|m| m.as_str().to_string()))
@@ -3251,7 +3303,10 @@ pub fn local_settings_block(source: &dyn LocalSettingsSource) -> (String, Option
 
     let skipped = |what: &str, code: &'static str| {
         (
-            format!("{HEAD}\nPresent but {what}{}", facts::LOCAL_SETTINGS_SKIPPED_SUFFIX),
+            format!(
+                "{HEAD}\nPresent but {what}{}",
+                facts::LOCAL_SETTINGS_SKIPPED_SUFFIX
+            ),
             Some(code),
         )
     };
@@ -3270,7 +3325,10 @@ pub fn local_settings_block(source: &dyn LocalSettingsSource) -> (String, Option
     };
     if !is_file || nlink != 1 {
         return (
-            format!("{HEAD}\n{}", sections::LOCAL_SETTINGS_INDIRECTION_GATE_FAILED),
+            format!(
+                "{HEAD}\n{}",
+                sections::LOCAL_SETTINGS_INDIRECTION_GATE_FAILED
+            ),
             Some(pregather::PREGATHER_CODE_LOCAL_SETTINGS_INDIRECTION_GATE),
         );
     }
@@ -3311,7 +3369,10 @@ pub fn local_settings_block(source: &dyn LocalSettingsSource) -> (String, Option
         facts::TRACKED_IN_GIT_NO
     };
     (
-        format!("{HEAD}\n{rendered}\n{}{tracked}", sections::TRACKED_IN_GIT_PREFIX),
+        format!(
+            "{HEAD}\n{rendered}\n{}{tracked}",
+            sections::TRACKED_IN_GIT_PREFIX
+        ),
         None,
     )
 }
@@ -3339,7 +3400,8 @@ pub fn existing_settings_section(source: &dyn SettingsReconSource) -> Result<Str
     let mut auto_mode_rendered = facts::NO_SETTINGS_FILE.to_string();
     let mut bypassing: Vec<String> = Vec::new();
     let mut destructive: Vec<String> = Vec::new();
-    let (mut bypass_overflow, mut destructive_overflow, mut unrenderable) = (0usize, 0usize, 0usize);
+    let (mut bypass_overflow, mut destructive_overflow, mut unrenderable) =
+        (0usize, 0usize, 0usize);
 
     if let Some(raw) = source.user_settings()? {
         let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::json!({}));
@@ -3419,7 +3481,10 @@ pub fn existing_settings_section(source: &dyn SettingsReconSource) -> Result<Str
         source.local_block()
     ));
     parts.push(if bypassing.is_empty() {
-        format!("\n{}{classify_note}", sections::NO_CLASSIFIER_BYPASSING_ENTRIES.trim_start_matches('\n'))
+        format!(
+            "\n{}{classify_note}",
+            sections::NO_CLASSIFIER_BYPASSING_ENTRIES.trim_start_matches('\n')
+        )
     } else {
         format!(
             "\n{}\n{}{}{classify_note}",
@@ -3429,7 +3494,10 @@ pub fn existing_settings_section(source: &dyn SettingsReconSource) -> Result<Str
         )
     });
     parts.push(if destructive.is_empty() {
-        format!("\n{}", sections::NO_DESTRUCTIVE_ENTRIES.trim_start_matches('\n'))
+        format!(
+            "\n{}",
+            sections::NO_DESTRUCTIVE_ENTRIES.trim_start_matches('\n')
+        )
     } else {
         format!(
             "\n{}\n{}{}",
@@ -3480,7 +3548,10 @@ mod tests {
         assert!(body.contains("\n\n#### Default allow labels\n- Security Discussion\n"));
         assert!(body.contains("\n\n#### Default soft-deny labels\n- Git Destructive\n"));
         // Every shipped label appears exactly once as a bullet.
-        for label in DEFAULT_ALLOW_LABELS.iter().chain(DEFAULT_SOFT_DENY_LABELS.iter()) {
+        for label in DEFAULT_ALLOW_LABELS
+            .iter()
+            .chain(DEFAULT_SOFT_DENY_LABELS.iter())
+        {
             assert_eq!(
                 body.matches(&format!("- {label}\n")).count()
                     + usize::from(body.ends_with(&format!("- {label}"))),
@@ -3595,7 +3666,10 @@ mod tests {
         files.insert("LINGXI.md".to_string(), "project rules".to_string());
         files.insert(
             "README.md".to_string(),
-            (1..=60).map(|i| format!("line{i}")).collect::<Vec<_>>().join("\n"),
+            (1..=60)
+                .map(|i| format!("line{i}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
         );
         files.insert(
             ".lingxi/skills/x/SKILL.md".to_string(),
@@ -3657,13 +3731,16 @@ mod tests {
             "https://github.com/deep/path"
         );
         // scp-style: the `user@` is stripped.
-        assert_eq!(redact_remote_url("git@github.com:acme/app.git"), "github.com:acme/app.git");
+        assert_eq!(
+            redact_remote_url("git@github.com:acme/app.git"),
+            "github.com:acme/app.git"
+        );
         // Anything that will not parse is replaced WHOLESALE, never partially.
         for bad in [
-            "https://git hub.com/a/b",       // space
-            "https://gith%75b.com/a/b",      // percent
-            "https://git\\hub.com/a/b",      // backslash
-            "a@b@c:x",                       // two `@`
+            "https://git hub.com/a/b",  // space
+            "https://gith%75b.com/a/b", // percent
+            "https://git\\hub.com/a/b", // backslash
+            "a@b@c:x",                  // two `@`
             "not a url at all!",
         ] {
             assert_eq!(
@@ -3747,9 +3824,15 @@ mod tests {
     fn repo_facts_renders_the_core_lines() {
         let mut repo = repo_with(&[
             ("remote", "origin"),
-            ("symbolic-ref --short refs/remotes/origin/HEAD", "origin/main"),
+            (
+                "symbolic-ref --short refs/remotes/origin/HEAD",
+                "origin/main",
+            ),
             ("remote get-url origin", "https://github.com/acme/app.git"),
-            ("config -z --get-all remote.origin.url", "https://github.com/acme/app.git"),
+            (
+                "config -z --get-all remote.origin.url",
+                "https://github.com/acme/app.git",
+            ),
         ]);
         repo.counts = 1234;
         repo.present = vec![".github/workflows", "LINGXI.md"];
@@ -3762,8 +3845,12 @@ mod tests {
             .body
             .contains("Posture signals present: .github/workflows, LINGXI.md"));
         // Both a fetch and a push line, the push falling back to the fetch URL.
-        assert!(facts.body.contains("origin\thttps://github.com/acme/app.git (fetch)"));
-        assert!(facts.body.contains("origin\thttps://github.com/acme/app.git (push)"));
+        assert!(facts
+            .body
+            .contains("origin\thttps://github.com/acme/app.git (fetch)"));
+        assert!(facts
+            .body
+            .contains("origin\thttps://github.com/acme/app.git (push)"));
         assert_eq!(facts.this_repo_host, Some("github.com".to_string()));
         // The gh explainer always trails the section.
         assert!(facts.body.contains("do not fetch those yourself"));
@@ -3783,7 +3870,9 @@ mod tests {
     #[test]
     fn missing_origin_head_and_no_remotes_have_their_own_wording() {
         let facts = repo_facts_section(&FakeRepo::default());
-        assert!(facts.body.contains("Default branch: (unknown \u{2014} origin/HEAD unset)"));
+        assert!(facts
+            .body
+            .contains("Default branch: (unknown \u{2014} origin/HEAD unset)"));
         assert!(facts.body.contains("(no remotes)"));
         assert!(facts.body.contains("Posture signals present: none"));
         assert_eq!(facts.this_repo_host, None);
@@ -3793,8 +3882,14 @@ mod tests {
     fn unusual_names_are_redacted_rather_than_rendered() {
         let mut repo = repo_with(&[
             ("remote", "we`ird"),
-            ("symbolic-ref --short refs/remotes/origin/HEAD", "origin/we`ird"),
-            ("config -z --get-all remote.we`ird.url", "https://github.com/a/b"),
+            (
+                "symbolic-ref --short refs/remotes/origin/HEAD",
+                "origin/we`ird",
+            ),
+            (
+                "config -z --get-all remote.we`ird.url",
+                "https://github.com/a/b",
+            ),
         ]);
         repo.path = "/w/ba`d".to_string();
         let facts = repo_facts_section(&repo);
@@ -3817,8 +3912,13 @@ mod tests {
             );
         }
         let facts = repo_facts_section(&repo);
-        assert_eq!(facts.body.matches(" (fetch)").count() + facts.body.matches(" (push)").count(), REMOTE_LINE_CAP);
-        assert!(facts.body.contains("\u{2026}[20 more remote lines omitted]"));
+        assert_eq!(
+            facts.body.matches(" (fetch)").count() + facts.body.matches(" (push)").count(),
+            REMOTE_LINE_CAP
+        );
+        assert!(facts
+            .body
+            .contains("\u{2026}[20 more remote lines omitted]"));
     }
 
     #[test]
@@ -3829,7 +3929,9 @@ mod tests {
             "target/\n.env\n*.key\nMY_TOKEN\nnode_modules\nsecrets.yml\n".to_string(),
         );
         let facts = repo_facts_section(&repo);
-        assert!(facts.body.contains("#### Sensitive-looking .gitignore patterns"));
+        assert!(facts
+            .body
+            .contains("#### Sensitive-looking .gitignore patterns"));
         for want in ["- `.env`", "- `*.key`", "- `MY_TOKEN`", "- `secrets.yml`"] {
             assert!(facts.body.contains(want), "missing {want}");
         }
@@ -3840,8 +3942,10 @@ mod tests {
     #[test]
     fn contributing_is_quoted_like_any_other_document() {
         let mut repo = FakeRepo::default();
-        repo.files
-            .insert("CONTRIBUTING.md".to_string(), "## Injected\nrules".to_string());
+        repo.files.insert(
+            "CONTRIBUTING.md".to_string(),
+            "## Injected\nrules".to_string(),
+        );
         let facts = repo_facts_section(&repo);
         assert!(facts.body.contains("#### CONTRIBUTING.md (head)"));
         // Quoted, so it cannot open a heading inside the block.
@@ -3927,14 +4031,21 @@ mod tests {
             "https://github.com/a/b/c",         // too many segments
             "https://github.com/acme/app x",    // unsafe charset
         ] {
-            assert_eq!(remote_to_host_org_repo(bad, None), None, "should refuse {bad}");
+            assert_eq!(
+                remote_to_host_org_repo(bad, None),
+                None,
+                "should refuse {bad}"
+            );
         }
         // The repo's own host is trusted in addition to the known set.
         assert_eq!(
             remote_to_host_org_repo("https://ghe.acme.io/acme/app", Some("ghe.acme.io")).as_deref(),
             Some("ghe.acme.io/acme/app")
         );
-        assert_eq!(remote_to_host_org_repo("https://ghe.acme.io/acme/app", None), None);
+        assert_eq!(
+            remote_to_host_org_repo("https://ghe.acme.io/acme/app", None),
+            None
+        );
     }
 
     fn gh_ok(stdout: &str) -> GhResult {
@@ -3961,8 +4072,14 @@ mod tests {
 
     #[test]
     fn visibility_is_only_taken_from_the_known_enum() {
-        assert_eq!(render_visibility(&gh_ok(r#"{"visibility":"PRIVATE"}"#)), "private");
-        assert_eq!(render_visibility(&gh_ok(r#"{"visibility":"internal"}"#)), "internal");
+        assert_eq!(
+            render_visibility(&gh_ok(r#"{"visibility":"PRIVATE"}"#)),
+            "private"
+        );
+        assert_eq!(
+            render_visibility(&gh_ok(r#"{"visibility":"internal"}"#)),
+            "internal"
+        );
         // Anything unrecognised is not guessed at.
         assert_eq!(
             render_visibility(&gh_ok(r#"{"visibility":"weird"}"#)),
@@ -4102,8 +4219,10 @@ mod tests {
         assert!(out.body.contains("_NOT GATHERED"));
         let calls = gh.calls.borrow();
         assert!(
-            !calls.iter().any(|c| c.first().map(String::as_str) == Some("repo")
-                && c.get(1).map(String::as_str) == Some("list")),
+            !calls
+                .iter()
+                .any(|c| c.first().map(String::as_str) == Some("repo")
+                    && c.get(1).map(String::as_str) == Some("list")),
             "the org list must not be fetched when Q2 is closed"
         );
     }
@@ -4113,9 +4232,11 @@ mod tests {
         let gh = fake_gh(Some("https://github.com/acme/app"));
         let _ = repo_visibility_section(&gh, true, true);
         let calls = gh.calls.borrow();
-        assert!(calls.iter().any(|c| c.first().map(String::as_str) == Some("repo")
-            && c.get(1).map(String::as_str) == Some("list")
-            && c.get(2).map(String::as_str) == Some("acme")));
+        assert!(calls
+            .iter()
+            .any(|c| c.first().map(String::as_str) == Some("repo")
+                && c.get(1).map(String::as_str) == Some("list")
+                && c.get(2).map(String::as_str) == Some("acme")));
     }
 
     #[test]
@@ -4128,7 +4249,10 @@ mod tests {
         ] {
             let gh = fake_gh(origin);
             let out = repo_visibility_section(&gh, true, true);
-            assert!(out.body.starts_with("_Not queryable here ("), "origin={origin:?}");
+            assert!(
+                out.body.starts_with("_Not queryable here ("),
+                "origin={origin:?}"
+            );
             assert!(out.body.contains(INFER_VISIBILITY_HINT));
             // Refusing means asking GitHub NOTHING — a guessed org would send
             // somebody else's repository name to the API.
@@ -4140,7 +4264,9 @@ mod tests {
     fn disabled_nonessential_traffic_makes_no_calls_at_all() {
         let gh = fake_gh(Some("https://github.com/acme/app"));
         let out = repo_visibility_section(&gh, true, false);
-        assert!(out.body.contains("nonessential traffic disabled or policy-restricted"));
+        assert!(out
+            .body
+            .contains("nonessential traffic disabled or policy-restricted"));
         assert!(gh.calls.borrow().is_empty());
     }
 
@@ -4184,7 +4310,12 @@ mod tests {
     fn the_walk_refuses_cloud_sync_roots_and_tool_caches() {
         // Descending into a synced folder can wake a sync client or pull
         // content down from the network.
-        for name in ["OneDrive", "Dropbox", "Google Drive", "OneDrive - Acme Corp"] {
+        for name in [
+            "OneDrive",
+            "Dropbox",
+            "Google Drive",
+            "OneDrive - Acme Corp",
+        ] {
             assert!(is_skipped_walk_dir(name, false, true), "{name}");
         }
         // ...but a merely similar name is not skipped.
@@ -4272,7 +4403,10 @@ mod tests {
         assert!(is_strictly_under("/home/u/work/app", "/home/u", false));
         assert!(!is_strictly_under("/home/u", "/home/u", false));
         assert!(!is_strictly_under("/home/other/app", "/home/u", false));
-        assert_eq!(home_relative("/home/u/work/app", "/home/u", false), "~/work/app");
+        assert_eq!(
+            home_relative("/home/u/work/app", "/home/u", false),
+            "~/work/app"
+        );
         assert_eq!(home_relative("/home/u", "/home/u", false), "~");
         // Outside the home directory is shown as-is rather than mislabelled.
         assert_eq!(home_relative("/opt/app", "/home/u", false), "/opt/app");
@@ -4318,7 +4452,11 @@ mod tests {
         // "We found none" and "we stopped before finding any" are different
         // claims, and only the first is evidence.
         assert!(home_repos_body(&[], WalkLimit::None).contains("No other git repos found"));
-        for limit in [WalkLimit::Timeout, WalkLimit::VisitBudget, WalkLimit::RepoCap] {
+        for limit in [
+            WalkLimit::Timeout,
+            WalkLimit::VisitBudget,
+            WalkLimit::RepoCap,
+        ] {
             let body = home_repos_body(&[], limit);
             assert!(
                 body.contains("treat this as unknown, not as none"),
@@ -4384,7 +4522,9 @@ mod tests {
             vec!["newest", "mid", "old"]
         );
         // Case-insensitive self-exclusion.
-        assert!(!select_sibling_repos(json, "APP").unwrap().contains(&"app".to_string()));
+        assert!(!select_sibling_repos(json, "APP")
+            .unwrap()
+            .contains(&"app".to_string()));
         // A traversal name never survives selection.
         let json = r#"[{"name":"..","pushedAt":"2026-01-01T00:00:00Z"}]"#;
         assert!(select_sibling_repos(json, "app").unwrap().is_empty());
@@ -4396,7 +4536,10 @@ mod tests {
     #[test]
     fn sibling_docs_are_trimmed_and_announce_the_cut() {
         // README is cut to 40 lines...
-        let readme = (1..=60).map(|i| format!("l{i}")).collect::<Vec<_>>().join("\n");
+        let readme = (1..=60)
+            .map(|i| format!("l{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let out = trim_sibling_doc("README.md", &readme);
         assert!(out.contains("l40"));
         assert!(!out.contains("l41"));
@@ -4461,7 +4604,9 @@ mod tests {
             list: None,
             docs: std::collections::HashMap::new(),
         };
-        assert!(sibling_docs_body("acme", "app", &src).contains("gh unavailable or unauthenticated"));
+        assert!(
+            sibling_docs_body("acme", "app", &src).contains("gh unavailable or unauthenticated")
+        );
     }
 
     #[test]
@@ -4505,7 +4650,9 @@ mod tests {
             ..AllProjectsScan::default()
         };
         let body = render_all_projects_usage(&scan);
-        assert!(body.contains("Transcripts scanned: 3 of 3 selected (from 3 enumerated); Bash commands seen: 5"));
+        assert!(body.contains(
+            "Transcripts scanned: 3 of 3 selected (from 3 enumerated); Bash commands seen: 5"
+        ));
         assert!(body.contains("#### Tools run in other projects"));
         assert!(body.contains("- terraform (2\u{d7})"));
         assert!(body.contains("- helm (1\u{d7})"));
@@ -4543,13 +4690,17 @@ mod tests {
             words_incomplete: true,
         };
         let body = render_all_projects_usage(&scan);
-        assert!(body.contains("_Enumeration cap reached \u{2014} the 2000 first-enumerated of 5000 transcripts"));
+        assert!(body.contains(
+            "_Enumeration cap reached \u{2014} the 2000 first-enumerated of 5000 transcripts"
+        ));
         assert!(body.contains("_2 transcripts and 1 project directory could not be enumerated"));
         assert!(body.contains("treat missing projects as unknown, not empty"));
         assert!(body.contains("_Skipped by the read-deny gate: 3 transcripts not read"));
         assert!(body.contains("_4 transcripts could not be read"));
         assert!(body.contains("_1 transcript exceeded the 4 MiB per-file cap"));
-        assert!(body.contains("_Aggregate byte cap reached (100 MiB) \u{2014} remaining 7 transcripts not scanned._"));
+        assert!(body.contains(
+            "_Aggregate byte cap reached (100 MiB) \u{2014} remaining 7 transcripts not scanned._"
+        ));
         assert!(body.contains("_Deadline reached \u{2014} remaining 9 transcripts not scanned._"));
         assert!(body.contains("_Command-word extraction hit its line cap or deadline"));
     }
@@ -4710,10 +4861,7 @@ mod tests {
             self.network
         }
         fn read_tail(&self, source: &HistorySource) -> Result<Option<(String, bool)>, ()> {
-            self.files
-                .get(&source.label)
-                .cloned()
-                .unwrap_or(Ok(None))
+            self.files.get(&source.label).cloned().unwrap_or(Ok(None))
         }
     }
 
@@ -4765,7 +4913,9 @@ mod tests {
             network: false,
             files,
         };
-        assert!(shell_history_section(&src).contains("Status: partial \u{2014} 0 file(s) read: none"));
+        assert!(
+            shell_history_section(&src).contains("Status: partial \u{2014} 0 file(s) read: none")
+        );
 
         // A truncated tail is also partial, even though it was read.
         let mut files = std::collections::HashMap::new();
@@ -4831,7 +4981,10 @@ mod tests {
             files: None,
             bodies: std::collections::HashMap::new(),
         };
-        assert_eq!(project_usage_section(&src), "_no transcript history for this project_");
+        assert_eq!(
+            project_usage_section(&src),
+            "_no transcript history for this project_"
+        );
     }
 
     #[test]
@@ -4892,7 +5045,10 @@ mod tests {
         bodies.insert("/t/small.jsonl".to_string(), bash_line("terraform apply"));
         let src = FakeTranscripts {
             files: Some(vec![
-                TranscriptFile { path: "/t/small.jsonl".into(), size: 10 },
+                TranscriptFile {
+                    path: "/t/small.jsonl".into(),
+                    size: 10,
+                },
                 TranscriptFile {
                     path: "/t/huge.jsonl".into(),
                     size: TRANSCRIPT_OVERSIZE_BYTES + 1,
@@ -4902,7 +5058,9 @@ mod tests {
         };
         let body = project_usage_section(&src);
         // The skip is REPORTED, so a partial scan cannot pass for a full one.
-        assert!(body.contains("Transcripts scanned: 1 (1 skipped as oversized); Bash commands seen: 1"));
+        assert!(
+            body.contains("Transcripts scanned: 1 (1 skipped as oversized); Bash commands seen: 1")
+        );
     }
 
     #[test]
@@ -4961,8 +5119,14 @@ mod tests {
 
     #[test]
     fn registry_hosts_drop_credentials_and_ambiguous_shapes() {
-        assert_eq!(registry_host("https://npm.acme.io/x"), Some("npm.acme.io".into()));
-        assert_eq!(registry_host("https://npm.acme.io"), Some("npm.acme.io".into()));
+        assert_eq!(
+            registry_host("https://npm.acme.io/x"),
+            Some("npm.acme.io".into())
+        );
+        assert_eq!(
+            registry_host("https://npm.acme.io"),
+            Some("npm.acme.io".into())
+        );
         // Credentialed but unambiguous: the host survives, the credentials do not.
         assert_eq!(
             registry_host("https://user:tok@npm.acme.io/x"),
@@ -5000,7 +5164,12 @@ mod tests {
     #[test]
     fn bucket_clusters_need_several_names_to_count() {
         let names: Vec<String> = [
-            "acme-logs", "acme-data", "acme-backup", "other-x", "other-y", "nodash",
+            "acme-logs",
+            "acme-data",
+            "acme-backup",
+            "other-x",
+            "other-y",
+            "nodash",
         ]
         .iter()
         .map(|s| (*s).to_string())
@@ -5040,11 +5209,17 @@ mod tests {
             top: vec![
                 (
                     "acme-logs".to_string(),
-                    BucketCount { occurrences: 30, files: 1 },
+                    BucketCount {
+                        occurrences: 30,
+                        files: 1,
+                    },
                 ),
                 (
                     "acme-data".to_string(),
-                    BucketCount { occurrences: 4, files: 4 },
+                    BucketCount {
+                        occurrences: 4,
+                        files: 4,
+                    },
                 ),
             ],
             distinct: 9,
@@ -5144,7 +5319,10 @@ mod tests {
         let body = config_scans_section(&s);
         assert!(body.contains("- prod/a.yml"));
         assert!(body.contains("- prod/b.yml"));
-        assert!(!body.contains("prod/c.yml"), "third example must be dropped");
+        assert!(
+            !body.contains("prod/c.yml"),
+            "third example must be dropped"
+        );
         assert!(body.contains("- iam/x.tf"));
     }
 
@@ -5198,7 +5376,9 @@ mod tests {
         })
         .unwrap();
         assert!(body.contains("(no settings file)"));
-        assert!(body.contains("No classifier-bypassing entries in user-settings permissions.allow."));
+        assert!(
+            body.contains("No classifier-bypassing entries in user-settings permissions.allow.")
+        );
         assert!(body.contains("No destructive entries in user-settings permissions.allow."));
     }
 
@@ -5209,7 +5389,10 @@ mod tests {
             local: String::new(),
             classify_all_shell: false,
         });
-        assert!(err.is_err(), "must surface as a failed section, not as empty");
+        assert!(
+            err.is_err(),
+            "must surface as a failed section, not as empty"
+        );
     }
 
     #[test]
@@ -5223,7 +5406,9 @@ mod tests {
         })))
         .unwrap();
         // Bypassing list holds only the tool-wide grant...
-        let bypass_idx = body.find("classifier-bypassing, in your user settings").unwrap();
+        let bypass_idx = body
+            .find("classifier-bypassing, in your user settings")
+            .unwrap();
         let dest_idx = body.find("Destructive permissions.allow entries").unwrap();
         let bypass_section = &body[bypass_idx..dest_idx];
         assert!(bypass_section.contains("- `Bash(*)`"));
@@ -5363,8 +5548,18 @@ mod tests {
     #[test]
     fn an_absent_local_settings_file_renders_nothing() {
         for probe in [
-            FakeLocal { dir: None, file: None, content: None, tracked: false },
-            FakeLocal { dir: Some(true), file: None, content: None, tracked: false },
+            FakeLocal {
+                dir: None,
+                file: None,
+                content: None,
+                tracked: false,
+            },
+            FakeLocal {
+                dir: Some(true),
+                file: None,
+                content: None,
+                tracked: false,
+            },
         ] {
             assert_eq!(local_settings_block(&probe), (String::new(), None));
         }
@@ -5449,7 +5644,10 @@ mod tests {
 
     #[test]
     fn rule_label_cuts_at_the_first_colon_or_bracket() {
-        assert_eq!(default_rule_label("Read-Only Operations: GET requests"), "Read-Only Operations");
+        assert_eq!(
+            default_rule_label("Read-Only Operations: GET requests"),
+            "Read-Only Operations"
+        );
         assert_eq!(
             default_rule_label("Git Destructive [named+specifics]: force push"),
             "Git Destructive"

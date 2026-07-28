@@ -44,10 +44,12 @@ pub const Q2_SCOPE_PROMPT: &str = r"Set this up for all your projects, or just t
 
 /// Q2 answer: all projects. The label discloses the gh org lookup this
 /// enables -- the consent the org-repo-split and sibling-docs gathers rely on.
-pub const Q2_SCOPE_ALL: &str = r"All projects (recommended — also checks sibling repos in your GitHub org via gh)";
+pub const Q2_SCOPE_ALL: &str =
+    r"All projects (recommended — also checks sibling repos in your GitHub org via gh)";
 
 /// Q2 answer: just this project.
-pub const Q2_SCOPE_PROJECT: &str = r"Just this project (entries scoped to this repo's remotes and paths)";
+pub const Q2_SCOPE_PROJECT: &str =
+    r"Just this project (entries scoped to this repo's remotes and paths)";
 
 /// Q3 asks whether to look beyond the repo. The prompt names both data
 /// sources it would read: shell history and other home-directory checkouts.
@@ -66,7 +68,8 @@ pub const Q3_DEPTH_REPOS: &str = r"Just other checkouts";
 pub const Q3_DEPTH_HERE: &str = r"No, just here";
 
 /// Asked first when the user already has auto-mode entries.
-pub const EXISTING_ENTRIES_PROMPT: &str = r"You already have auto-mode entries — add to them, or start fresh?";
+pub const EXISTING_ENTRIES_PROMPT: &str =
+    r"You already have auto-mode entries — add to them, or start fresh?";
 
 /// Keep the existing entries and add to them.
 pub const EXISTING_ENTRIES_APPEND: &str = r"Add to them (keeps your existing entries)";
@@ -95,7 +98,8 @@ pub const SCANNING_WITH_ORG: &str = r"Scanning your repo, recent sessions, and y
 pub const SCANNING_LOCAL_ONLY: &str = r"Scanning your repo and recent sessions…";
 
 /// Second line of the scan status.
-pub const SCANNING_SUFFIX: &str = r"then drafting a proposal — this can take a moment (Esc to cancel)";
+pub const SCANNING_SUFFIX: &str =
+    r"then drafting a proposal — this can take a moment (Esc to cancel)";
 
 /// Shown while the settings write is in flight.
 pub const SAVING_STATUS: &str = r"Saving…";
@@ -107,13 +111,16 @@ pub const GENERIC_ERROR: &str = r"Something went wrong.";
 pub const CLOSE_LABEL: &str = r"Close";
 
 /// Shown when the scan moves to the background.
-pub const BACKGROUND_START_NOTICE: &str = r"Gathering data and drafting your auto-mode setup; back soon";
+pub const BACKGROUND_START_NOTICE: &str =
+    r"Gathering data and drafting your auto-mode setup; back soon";
 
 /// Appended to the background notice when the org scan is included.
-pub const BACKGROUND_START_ORG_SUFFIX: &str = r" (also scanning your GitHub org — stoppable from the background tasks list)";
+pub const BACKGROUND_START_ORG_SUFFIX: &str =
+    r" (also scanning your GitHub org — stoppable from the background tasks list)";
 
 /// Shown when the user declines the proposal.
-pub const DISCARDED_NOTICE: &str = r"Discarded — nothing was saved. Re-run /auto-mode-setup anytime.";
+pub const DISCARDED_NOTICE: &str =
+    r"Discarded — nothing was saved. Re-run /auto-mode-setup anytime.";
 
 /// Prefix of the unexpected-error notice.
 pub const UNEXPECTED_ERROR_PREFIX: &str = r"Auto-mode setup hit an unexpected error and stopped: ";
@@ -148,10 +155,7 @@ pub const POSTURE_VALUES: [(&str, &str); 4] = [
 ];
 
 /// Q2 answer values, paired with their labels.
-pub const SCOPE_VALUES: [(&str, &str); 2] = [
-    ("all", Q2_SCOPE_ALL),
-    ("project", Q2_SCOPE_PROJECT),
-];
+pub const SCOPE_VALUES: [(&str, &str); 2] = [("all", Q2_SCOPE_ALL), ("project", Q2_SCOPE_PROJECT)];
 
 /// Q3 answer values, paired with their labels.
 pub const DEPTH_VALUES: [(&str, &str); 4] = [

@@ -38,8 +38,8 @@ use async_trait::async_trait;
 use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
 use permission::auto_mode_argv::{
-    parse_apply_file_args, propose_result_json, ApplyFileInvocation,
-    ApplyResult, AutoModeSetupInvocation, GrammarError, ProposeInvocation, USAGE,
+    parse_apply_file_args, propose_result_json, ApplyFileInvocation, ApplyResult,
+    AutoModeSetupInvocation, GrammarError, ProposeInvocation, USAGE,
 };
 use serde_json::json;
 
@@ -280,9 +280,15 @@ mod tests {
     async fn the_slash_surface_shares_the_cli_grammar() {
         // Same rejection the CLI surface produces for the same tokens: the
         // point of hosting the grammar below both.
-        let v = run("--request-id not-a-uuid --wizard posture=personal scope=project depth=here --propose").await;
+        let v = run(
+            "--request-id not-a-uuid --wizard posture=personal scope=project depth=here --propose",
+        )
+        .await;
         assert_eq!(v["code"], "usage");
-        assert!(v["reason"].as_str().unwrap().contains("canonical 8-4-4-4-12"));
+        assert!(v["reason"]
+            .as_str()
+            .unwrap()
+            .contains("canonical 8-4-4-4-12"));
         // The rejected token must not be echoed back into the output.
         assert!(!v["reason"].as_str().unwrap().contains("not-a-uuid"));
     }
@@ -328,7 +334,9 @@ mod tests {
         assert_eq!(v["proposal"]["scope"], "all");
         assert_eq!(v["requestId"], UUID);
         // `requestId` is merged LAST, as `zay` does.
-        assert!(s.trim_end().ends_with(&format!("\"requestId\": \"{UUID}\"\n}}")));
+        assert!(s
+            .trim_end()
+            .ends_with(&format!("\"requestId\": \"{UUID}\"\n}}")));
     }
 
     struct StubApply;
@@ -342,7 +350,10 @@ mod tests {
     #[tokio::test]
     async fn a_wired_apply_runner_reports_what_was_written() {
         let h = AutoModeSetupHandler::new().with_apply(std::sync::Arc::new(StubApply));
-        let raw = format!("--expect-sha256 {} --apply-file /tmp/p.json", "a".repeat(64));
+        let raw = format!(
+            "--expect-sha256 {} --apply-file /tmp/p.json",
+            "a".repeat(64)
+        );
         let CommandResult::Done { display: Some(s) } = h.handle(&cmd(&raw)).await else {
             panic!("expected Done");
         };

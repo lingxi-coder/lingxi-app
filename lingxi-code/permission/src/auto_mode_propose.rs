@@ -289,8 +289,7 @@ pub const SUBSCRIPTION_SIGNAL_PERSONAL: &str = " \u{2192} lean personal/hobby";
 /// Suffix for the organizational plans (`team`, `enterprise`).
 pub const SUBSCRIPTION_SIGNAL_ENTERPRISE: &str = " \u{2192} lean enterprise";
 /// Used when the plan could not be determined.
-pub const SUBSCRIPTION_SIGNAL_UNKNOWN: &str =
-    "Claude subscription plan unknown \u{2014} no signal";
+pub const SUBSCRIPTION_SIGNAL_UNKNOWN: &str = "Claude subscription plan unknown \u{2014} no signal";
 
 /// Scope answer rendered when the user chose to scope to the current project.
 pub const SCOPE_LABEL_PROJECT: &str = "just this project";
@@ -917,7 +916,10 @@ pub fn check_unknown_removal(removals: &[String], gathered: &str) -> Option<Prop
         if sections.iter().any(|s| s.contains(&bullet)) {
             continue;
         }
-        return Some(failed(PROPOSE_CODE_UNKNOWN_REMOVAL, UNKNOWN_REMOVAL_MESSAGE));
+        return Some(failed(
+            PROPOSE_CODE_UNKNOWN_REMOVAL,
+            UNKNOWN_REMOVAL_MESSAGE,
+        ));
     }
     None
 }
@@ -1200,7 +1202,10 @@ mod tests {
     #[test]
     fn a_failed_gather_never_reaches_the_model() {
         let (outcome, calls) = run(Err("boom".into()), vec![QueryOutcome::Text(good_reply())]);
-        assert_eq!(calls, 0, "the model must not be called without a recon block");
+        assert_eq!(
+            calls, 0,
+            "the model must not be called without a recon block"
+        );
         assert!(matches!(
             outcome,
             ProposeOutcome::Failed { code, ref reason, emit_telemetry: true }
@@ -1298,7 +1303,10 @@ mod tests {
     fn an_empty_reply_is_not_retried() {
         let (outcome, calls) = run(
             Ok("RECON".into()),
-            vec![QueryOutcome::Text("   ".into()), QueryOutcome::Text(good_reply())],
+            vec![
+                QueryOutcome::Text("   ".into()),
+                QueryOutcome::Text(good_reply()),
+            ],
         );
         assert_eq!(calls, 1, "an empty reply has nothing to repair");
         assert!(matches!(outcome, ProposeOutcome::Failed { code, .. } if code == "parse_failed"));
@@ -1455,7 +1463,10 @@ mod tests {
         assert_eq!(schema["additionalProperties"], json!(false));
         assert_eq!(schema["required"], json!(PROPOSAL_KEYS));
         for key in PROPOSAL_KEYS {
-            assert_eq!(schema["properties"][key], json!({"type":"array","items":{"type":"string"}}));
+            assert_eq!(
+                schema["properties"][key],
+                json!({"type":"array","items":{"type":"string"}})
+            );
         }
         assert_eq!(propose_max_tokens(true), 4096);
         assert_eq!(propose_max_tokens(false), 32_768);

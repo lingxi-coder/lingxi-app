@@ -482,7 +482,9 @@ pub fn normalize_auto_mode_block(block: &Value) -> Value {
         .collect();
     out.insert("environment".to_string(), Value::Array(environment));
     for key in AUTO_MODE_RULE_KEYS {
-        let Some(value) = block.get(key) else { continue };
+        let Some(value) = block.get(key) else {
+            continue;
+        };
         let entries: Vec<Value> = string_array_of(Some(value))
             .iter()
             .map(|s| Value::String(normalize_entry(s)))
@@ -636,7 +638,9 @@ fn validate_merged_auto_mode_block(block: &Value) -> Option<String> {
         return Some(e);
     }
     for key in AUTO_MODE_RULE_KEYS {
-        let Some(value) = block.get(key) else { continue };
+        let Some(value) = block.get(key) else {
+            continue;
+        };
         let entries = string_array_of(Some(value));
         let refs: Vec<&str> = entries.iter().map(String::as_str).collect();
         if let Some(e) = validate_save_array(key, &refs) {
@@ -717,7 +721,12 @@ pub fn apply_auto_mode_save_to_settings_json(
         };
         merged.insert(
             "environment".to_string(),
-            Value::Array(environment.iter().map(|s| Value::String(s.clone())).collect()),
+            Value::Array(
+                environment
+                    .iter()
+                    .map(|s| Value::String(s.clone()))
+                    .collect(),
+            ),
         );
         // Rule arrays merge in BOTH modes -- `replace` replaces the environment
         // section only, per the wizard's own answer label.
@@ -750,8 +759,9 @@ pub fn apply_auto_mode_save_to_settings_json(
             .get("environment")
             .and_then(Value::as_array)
             .map_or(0, Vec::len);
-        let env_bytes = serde_json::to_string(full_value.get("environment").unwrap_or(&Value::Null))
-            .map_or(0, |s| s.len());
+        let env_bytes =
+            serde_json::to_string(full_value.get("environment").unwrap_or(&Value::Null))
+                .map_or(0, |s| s.len());
         if env_len > ENVIRONMENT_ADVISORY_MAX_ENTRIES || env_bytes > ENVIRONMENT_ADVISORY_MAX_BYTES
         {
             warnings.push(environment_growth_advisory(
@@ -981,7 +991,10 @@ fn string_array<'a>(v: Option<&'a Value>) -> Option<Vec<&'a str>> {
 /// port has no standalone autoMode-block schema); a non-array `environment`/rule
 /// key is treated as absent, matching the "empty/omit" guidance.
 #[must_use]
-pub fn validate_auto_mode_save(auto_mode: Option<&Value>, remove: Option<&Value>) -> Option<String> {
+pub fn validate_auto_mode_save(
+    auto_mode: Option<&Value>,
+    remove: Option<&Value>,
+) -> Option<String> {
     let remove_empty = match remove {
         None | Some(Value::Null) => true,
         Some(v) => v.as_array().is_some_and(|a| a.is_empty()),
@@ -1285,11 +1298,7 @@ pub fn read_proposal_file_capped(path: &std::path::Path, cap: usize) -> Proposal
     }
     // Read one byte past the cap to detect truncation.
     let mut bytes = Vec::new();
-    if file
-        .take(cap as u64 + 1)
-        .read_to_end(&mut bytes)
-        .is_err()
-    {
+    if file.take(cap as u64 + 1).read_to_end(&mut bytes).is_err() {
         return ProposalRead::Failed;
     }
     if bytes.len() > cap {
@@ -1466,7 +1475,10 @@ mod tests {
         // path == root is NOT "under".
         assert!(!path_under_containment_root(Path::new("/tmp/rev"), &roots));
         // Not under any root.
-        assert!(!path_under_containment_root(Path::new("/etc/passwd"), &roots));
+        assert!(!path_under_containment_root(
+            Path::new("/etc/passwd"),
+            &roots
+        ));
         // SECURITY: a mid-path `..` escape must NOT lexically match a root.
         assert!(!path_under_containment_root(
             Path::new("/tmp/rev/a/../../etc/passwd"),
@@ -1559,7 +1571,10 @@ mod tests {
             ProposalRead::Failed
         ));
         // A directory (not a regular file) → Failed.
-        assert!(matches!(read_proposal_file(dir.path()), ProposalRead::Failed));
+        assert!(matches!(
+            read_proposal_file(dir.path()),
+            ProposalRead::Failed
+        ));
     }
 
     #[cfg(unix)]
@@ -1714,11 +1729,25 @@ mod tests {
         ));
         // Proceed — scope matches, and (separately) no target.
         assert!(matches!(
-            run(g, Some(&digest), Some("user"), Some("user-scope"), false, ok(json!({"scope": "user-scope", "autoMode": {"environment": ["x"]}}))),
+            run(
+                g,
+                Some(&digest),
+                Some("user"),
+                Some("user-scope"),
+                false,
+                ok(json!({"scope": "user-scope", "autoMode": {"environment": ["x"]}}))
+            ),
             ApplyFilePipeline::Proceed { .. }
         ));
         assert!(matches!(
-            run(g, Some(&digest), None, None, false, ok(json!({"autoMode": {}}))),
+            run(
+                g,
+                Some(&digest),
+                None,
+                None,
+                false,
+                ok(json!({"autoMode": {}}))
+            ),
             ApplyFilePipeline::Proceed { .. }
         ));
     }
@@ -1742,11 +1771,11 @@ mod tests {
         );
         // a rule category present but empty.
         assert_eq!(
-            validate_auto_mode_save(
-                Some(&json!({"environment": ["ctx"], "allow": []})),
-                None
-            ),
-            Some("autoMode.allow is empty \u{2014} omit the key when nothing was accepted for it.".to_string())
+            validate_auto_mode_save(Some(&json!({"environment": ["ctx"], "allow": []})), None),
+            Some(
+                "autoMode.allow is empty \u{2014} omit the key when nothing was accepted for it."
+                    .to_string()
+            )
         );
         // a rule category missing the $defaults sentinel.
         assert_eq!(
@@ -1797,8 +1826,7 @@ mod tests {
         assert_eq!(kept, vec!["Bash(rm:*)".to_string(), "Edit".to_string()]);
         assert_eq!(removed, 2);
         // A removal entry not present in allow is a no-op (exact match only).
-        let (kept, removed) =
-            remove_rules_from_permissions_allow(&allow, &["Bash(ls:*)".into()]);
+        let (kept, removed) = remove_rules_from_permissions_allow(&allow, &["Bash(ls:*)".into()]);
         assert_eq!(kept.len(), 4);
         assert_eq!(removed, 0);
     }
@@ -1923,10 +1951,11 @@ mod tests {
             AutoModeSaveMode::Append,
         )
         .unwrap()
-            .unwrap();
+        .unwrap();
         std::fs::write(&path, &result.json).unwrap();
 
-        let reloaded: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let reloaded: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(
             reloaded["autoMode"],
             json!({ "environment": ["laptop"], "hard_deny": ["$defaults", "Bash(rm:*)"] })
@@ -1994,7 +2023,10 @@ mod tests {
     fn environment_merge_drops_a_heading_that_gained_nothing() {
         // A heading whose every bullet was already present must not be left
         // dangling in the rendered block.
-        let existing = vec!["### Org-wide".to_string(), "**Organization**: acme".to_string()];
+        let existing = vec![
+            "### Org-wide".to_string(),
+            "**Organization**: acme".to_string(),
+        ];
         let incoming = vec![
             "### Org-wide".to_string(),
             "**Organization**: acme".to_string(),
@@ -2020,7 +2052,11 @@ mod tests {
     #[test]
     fn rule_merge_keeps_defaults_and_preserves_prior_entries() {
         assert_eq!(
-            merge_rule_array("hard_deny", &["$defaults".into(), "Bash(dd:*)".into()], &["Bash(rm:*)".into()]),
+            merge_rule_array(
+                "hard_deny",
+                &["$defaults".into(), "Bash(dd:*)".into()],
+                &["Bash(rm:*)".into()]
+            ),
             vec!["$defaults", "Bash(dd:*)", "Bash(rm:*)"]
         );
         // A fresh array gets `$defaults` prepended.
@@ -2070,7 +2106,10 @@ mod tests {
                 AutoModeSaveMode::Append
             );
         }
-        assert_eq!(AutoModeSaveMode::from_proposal(None), AutoModeSaveMode::Append);
+        assert_eq!(
+            AutoModeSaveMode::from_proposal(None),
+            AutoModeSaveMode::Append
+        );
         assert_eq!(AutoModeSaveMode::default(), AutoModeSaveMode::Append);
     }
 
@@ -2193,7 +2232,10 @@ mod tests {
             "environmentEntriesPreserved"
         );
         assert_eq!(FIELD_PERMISSIONS_ALLOW_REMOVED, "permissionsAllowRemoved");
-        assert_eq!(FIELD_PERMISSIONS_ALLOW_NOT_FOUND, "permissionsAllowNotFound");
+        assert_eq!(
+            FIELD_PERMISSIONS_ALLOW_NOT_FOUND,
+            "permissionsAllowNotFound"
+        );
         assert_eq!(FIELD_PERMISSIONS_ALLOW_SKIPPED, "permissionsAllowSkipped");
         assert_eq!(WRITE_LOG_PREFIX, "auto-mode setup: ");
         assert_eq!(

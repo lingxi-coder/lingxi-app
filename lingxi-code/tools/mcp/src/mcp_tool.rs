@@ -669,9 +669,7 @@ async fn process_mcp_call_result(
                         .await
                     {
                         // The active route returned an exact count.
-                        Ok(Some(count)) => {
-                            crate::large_output::ExactCountOutcome::Counted(count)
-                        }
+                        Ok(Some(count)) => crate::large_output::ExactCountOutcome::Counted(count),
                         // The route has NO exact-count endpoint (a non-Anthropic
                         // multi-provider route): stay conservative (accepted
                         // divergence — the oracle is always Anthropic).

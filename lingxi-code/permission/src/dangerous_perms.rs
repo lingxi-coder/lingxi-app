@@ -781,7 +781,11 @@ mod tests {
     fn find_with_flag_escalates_safe_shell_allows() {
         let rules = vec![
             allow("Bash", Some("ls:*"), PermissionRuleSource::UserSettings),
-            allow("PowerShell", Some("gci:*"), PermissionRuleSource::UserSettings),
+            allow(
+                "PowerShell",
+                Some("gci:*"),
+                PermissionRuleSource::UserSettings,
+            ),
             allow("Read", None, PermissionRuleSource::UserSettings),
         ];
         // flag OFF: none of these safe shell allows is dangerous.

@@ -65,7 +65,19 @@ const LXY: &[&str] = &["ansi_c_string", "translated_string"];
 /// `BJd`: the redirect OPERATOR / heredoc-structural node types that do NOT count
 /// as a "swallowed" destination argument.
 const BJD: &[&str] = &[
-    "<", ">", ">>", "<<", "<<-", "<<<", "<&", ">&", "&>", "&>>", ">|", ">&-", "<&-",
+    "<",
+    ">",
+    ">>",
+    "<<",
+    "<<-",
+    "<<<",
+    "<&",
+    ">&",
+    "&>",
+    "&>>",
+    ">|",
+    ">&-",
+    "<&-",
     "file_descriptor",
     "heredoc_start",
     "heredoc_body",
@@ -207,7 +219,11 @@ fn x6s(node: Node, src: &[u8]) -> bool {
         let n = !r
             && kids.iter().any(|i| i.kind() == ">&" || i.kind() == "<&")
             && t.iter().any(|i| wun(*i, src).starts_with('-'));
-        let o = if k == "heredoc_redirect" || r || n { 0 } else { 1 };
+        let o = if k == "heredoc_redirect" || r || n {
+            0
+        } else {
+            1
+        };
         if t.len() > o {
             return true;
         }
@@ -387,9 +403,9 @@ fn redirect_is_risky(s: Node, src: &[u8]) -> bool {
         if dollar_jd(node_text(s, src)) {
             return true;
         }
-        let all_simple = children(s).iter().all(|a| {
-            in_set(BJD, a.kind()) || z6s(*a, src, has_whitespace(node_text(*a, src)))
-        });
+        let all_simple = children(s)
+            .iter()
+            .all(|a| in_set(BJD, a.kind()) || z6s(*a, src, has_whitespace(node_text(*a, src))));
         if !all_simple {
             return true;
         }
@@ -882,7 +898,9 @@ fn d_dollar(e: &str) -> Option<String> {
         return sed_or_null(hpr(e));
     }
     let o = v0e(root, None)?;
-    let i = children(o).into_iter().find(|a| a.kind() == "command_name")?;
+    let i = children(o)
+        .into_iter()
+        .find(|a| a.kind() == "command_name")?;
     let start = i.start_byte();
     let s = &e[start..];
     sed_or_null(hpr(s))

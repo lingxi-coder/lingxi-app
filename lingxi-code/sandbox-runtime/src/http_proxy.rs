@@ -684,9 +684,7 @@ mod tests {
                 ran.store(true, std::sync::atomic::Ordering::SeqCst);
                 Ok(true)
             })
-                as std::pin::Pin<
-                    Box<dyn std::future::Future<Output = Result<bool, _>> + Send>,
-                >
+                as std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, _>> + Send>>
         });
         let cfg = NetworkConfig {
             allowed_domains: vec!["allowed.example".into()],

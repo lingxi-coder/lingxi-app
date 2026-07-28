@@ -27,12 +27,9 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::auto_mode_setup as pipeline;
-use crate::{
-    persist_auto_mode_save, PermissionPaths, PermissionUpdateDestination, PersistError,
-};
+use crate::{persist_auto_mode_save, PermissionPaths, PermissionUpdateDestination, PersistError};
 
 // ── telemetry codes (auto_mode_setup_write) ──────────────────────────────────
-
 
 /// The oracle's `Nj` usage block, printed by every `usage` outcome.
 ///
@@ -467,10 +464,7 @@ pub fn parse_apply_file_args(args: &[String]) -> Result<AutoModeSetupInvocation,
                 // taken as the digest. Without this the flag is consumed as the
                 // hash and the walk reports a misleading ordering error instead
                 // of "needs a value".
-                if i + 1 >= args.len()
-                    || args[i + 1].is_empty()
-                    || args[i + 1].starts_with("--")
-                {
+                if i + 1 >= args.len() || args[i + 1].is_empty() || args[i + 1].starts_with("--") {
                     return Err(grammar(EXPECT_NEEDS_VALUE));
                 }
                 expect_sha256 = Some(args[i + 1].clone());
@@ -672,16 +666,17 @@ pub fn propose_result_json(body: Value, request_id: Option<&str>) -> String {
 /// `{ok:true, proposal}` on success, `{ok:false, code, reason}` otherwise).
 #[must_use]
 pub fn propose_result_body(outcome: &crate::auto_mode_propose::ProposeOutcome) -> Value {
-    
     match outcome {
         crate::auto_mode_propose::ProposeOutcome::Ok(success) => serde_json::json!({
             "ok": true,
             "proposal": success.proposal.to_json(),
         }),
-        crate::auto_mode_propose::ProposeOutcome::Failed { code, reason, .. } => serde_json::json!({
-            "ok": false,
-            "code": code,
-            "reason": reason,
-        }),
+        crate::auto_mode_propose::ProposeOutcome::Failed { code, reason, .. } => {
+            serde_json::json!({
+                "ok": false,
+                "code": code,
+                "reason": reason,
+            })
+        }
     }
 }

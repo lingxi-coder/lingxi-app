@@ -781,7 +781,10 @@ mod tests {
             ExactCountOutcome::Unsupported,
         );
 
-        assert!(out.as_str().is_some(), "unsupported route persists/truncates");
+        assert!(
+            out.as_str().is_some(),
+            "unsupported route persists/truncates"
+        );
         assert!(dir.path().join("mcp-srv-tool-1700.txt").exists());
     }
 

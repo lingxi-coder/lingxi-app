@@ -178,7 +178,10 @@ async fn run_login(args: &LoginArgs) -> i32 {
             match parse_manual_auth_code(&line) {
                 Some(pair) => {
                     telemetry::AnalyticsBus::new()
-                        .log_event("tengu_oauth_manual_entry", telemetry::LogEventMetadata::new())
+                        .log_event(
+                            "tengu_oauth_manual_entry",
+                            telemetry::LogEventMetadata::new(),
+                        )
                         .await;
                     if manual_tx.send(pair).await.is_err() {
                         break;

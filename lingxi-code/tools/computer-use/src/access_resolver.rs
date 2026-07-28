@@ -8,7 +8,9 @@
 //! three independent capability flags, or a TCC missing-permissions panel.
 
 use async_trait::async_trait;
-use tui_core::computer_access_bridge::{ComputerAccessExchange, ComputerAccessRequest, ComputerAccessResponse};
+use tui_core::computer_access_bridge::{
+    ComputerAccessExchange, ComputerAccessRequest, ComputerAccessResponse,
+};
 
 /// Resolves one `request_access` call to the user's actual decision.
 #[async_trait]

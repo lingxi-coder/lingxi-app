@@ -7775,9 +7775,9 @@ pub async fn build(
                 .and_then(serde_json::Value::as_bool)
         })
         .unwrap_or(false);
-        traits::session_flags::set_dynamic_workflows_enabled(
-            tool_workflow::workflows_enabled(managed_disable_workflows),
-        );
+        traits::session_flags::set_dynamic_workflows_enabled(tool_workflow::workflows_enabled(
+            managed_disable_workflows,
+        ));
         tools_inner.register_builtin(Arc::new(
             tool_workflow::WorkflowTool::new(Some(workflow_launcher))
                 .with_size_guideline(workflow_size_guideline)
@@ -8805,8 +8805,7 @@ pub async fn build(
                 orch.fork_conversation(&prompt)
                     .await
                     .map(|outcome| {
-                        let tail = &outcome.agent_id
-                            [outcome.agent_id.len().saturating_sub(4)..];
+                        let tail = &outcome.agent_id[outcome.agent_id.len().saturating_sub(4)..];
                         format!(
                             "\u{2442} started code-review in background as {} ({tail})",
                             outcome.name

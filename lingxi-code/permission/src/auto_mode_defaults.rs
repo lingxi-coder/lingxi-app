@@ -130,9 +130,7 @@ pub const DEFAULT_SOFT_DENY_LABELS: [&str; 65] = [
 ];
 
 /// Labels of the shipped `hard_deny` rules.
-pub const DEFAULT_HARD_DENY_LABELS: [&str; 1] = [
-    r"Data Exfiltration",
-];
+pub const DEFAULT_HARD_DENY_LABELS: [&str; 1] = [r"Data Exfiltration"];
 
 /// `fPo(e)` — a rule's label: everything before the first `:` or `[`, trimmed.
 #[must_use]

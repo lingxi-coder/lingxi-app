@@ -1474,8 +1474,7 @@ impl SubagentSpawner for PoolSubagentSpawner {
                 observer_request.subagent_type = plan.observer_agent.clone();
                 observer_request.prompt = plan.prompt;
                 observer_request.observer = None;
-                observer_request.description =
-                    Some(format!("Observe {observed_agent_type}"));
+                observer_request.description = Some(format!("Observe {observed_agent_type}"));
                 observer_request.run_in_background = false;
                 observer_request.name = None;
                 observer_request.team_name = None;
@@ -1495,9 +1494,7 @@ impl SubagentSpawner for PoolSubagentSpawner {
                 .await;
                 let observer_value = match observer_result {
                     Ok(SubagentResult::Completed {
-                        agent_id,
-                        content,
-                        ..
+                        agent_id, content, ..
                     }) => serde_json::json!({
                         "status": "completed",
                         "agentId": agent_id.to_string(),

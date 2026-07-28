@@ -52,9 +52,15 @@ fn apply_file_writes_automode_settings_end_to_end() {
 
     let written = std::fs::read_to_string(home.path().join("settings.json")).unwrap();
     let v: serde_json::Value = serde_json::from_str(&written).unwrap();
-    assert_eq!(v["autoMode"]["environment"], serde_json::json!(["Solo dev on a laptop"]));
+    assert_eq!(
+        v["autoMode"]["environment"],
+        serde_json::json!(["Solo dev on a laptop"])
+    );
     // Rule arrays are MERGED with what is on disk, so `$defaults` leads.
-    assert_eq!(v["autoMode"]["allow"], serde_json::json!(["$defaults", "Bash(ls:*)"]));
+    assert_eq!(
+        v["autoMode"]["allow"],
+        serde_json::json!(["$defaults", "Bash(ls:*)"])
+    );
 }
 
 /// A tampered digest is refused (`hash_mismatch`) and NOTHING is written.
@@ -75,9 +81,7 @@ fn apply_file_rejects_hash_mismatch_and_writes_nothing() {
         ])
         .assert()
         .code(1)
-        .stderr(predicate::str::contains(
-            "do not match the reviewed digest",
-        ));
+        .stderr(predicate::str::contains("do not match the reviewed digest"));
 
     assert!(!home.path().join("settings.json").exists());
 }
@@ -87,7 +91,12 @@ fn apply_file_rejects_hash_mismatch_and_writes_nothing() {
 fn apply_file_missing_path_is_grammar_error() {
     Command::cargo_bin("lingxi-cli")
         .unwrap()
-        .args(["auto-mode-setup", "--expect-sha256", &"0".repeat(64), "--apply-file"])
+        .args([
+            "auto-mode-setup",
+            "--expect-sha256",
+            &"0".repeat(64),
+            "--apply-file",
+        ])
         .assert()
         .code(1)
         .stderr(predicate::eq(

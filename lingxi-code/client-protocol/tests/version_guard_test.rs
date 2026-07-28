@@ -559,10 +559,7 @@ fn current_contract_index() -> ContractIndex {
     put("ComputerAccessRequestDto.clipboard_read", "bool");
     put("ComputerAccessRequestDto.clipboard_write", "bool");
     put("ComputerAccessRequestDto.system_key_combos", "bool");
-    put(
-        "ComputerAccessRequestDto.tcc_state",
-        "Option<TccStateDto>",
-    );
+    put("ComputerAccessRequestDto.tcc_state", "Option<TccStateDto>");
 
     put("RequestedAppDto.label", "String");
 

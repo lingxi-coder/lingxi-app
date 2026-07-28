@@ -63,10 +63,8 @@ pub fn check_os_permissions() -> (bool, bool) {
     // constant), so building it by value here needs no extra linkage.
     let key = CFString::from_static_string("AXTrustedCheckOptionPrompt");
     let value = CFBoolean::true_value();
-    let options: CFDictionary<CFType, CFType> = CFDictionary::from_CFType_pairs(&[(
-        key.as_CFType(),
-        value.as_CFType(),
-    )]);
+    let options: CFDictionary<CFType, CFType> =
+        CFDictionary::from_CFType_pairs(&[(key.as_CFType(), value.as_CFType())]);
 
     // Safety: both functions take no arguments beyond a validly-constructed
     // (non-null, well-formed) CFDictionaryRef for the first, return a plain

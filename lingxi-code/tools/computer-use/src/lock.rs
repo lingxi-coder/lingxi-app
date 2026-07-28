@@ -172,7 +172,9 @@ mod tests {
         claim(&dir, other.id() as i32);
         assert_eq!(
             check(&dir, std::process::id() as i32),
-            Holder::Other { pid: other.id() as i32 }
+            Holder::Other {
+                pid: other.id() as i32
+            }
         );
         let _ = other.kill();
         let _ = other.wait();

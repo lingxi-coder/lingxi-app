@@ -224,8 +224,10 @@ pub fn process_line(
             // object of string values`) if `variables` is not an object of
             // strings; allowlisted keys are applied, non-allowlisted keys are
             // collected and refused with a log.
-            const ALLOWLIST: [&str; 2] =
-                ["CLAUDE_CODE_SESSION_ACCESS_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"];
+            const ALLOWLIST: [&str; 2] = [
+                "CLAUDE_CODE_SESSION_ACCESS_TOKEN",
+                "CLAUDE_CODE_OAUTH_TOKEN",
+            ];
             let Some(env_vars) = frame.get("variables").and_then(Value::as_object) else {
                 eprintln!(
                     "[structuredIO] dropped update_environment_variables: variables must be an object of string values"

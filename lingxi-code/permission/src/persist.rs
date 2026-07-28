@@ -264,7 +264,10 @@ fn excludes_path_from(configured: Option<&str>, home: &str, xdg: Option<&str>) -
             return p.join("git").join("ignore");
         }
     }
-    PathBuf::from(home).join(".config").join("git").join("ignore")
+    PathBuf::from(home)
+        .join(".config")
+        .join("git")
+        .join("ignore")
 }
 
 fn mutate_settings_file<F>(
@@ -683,7 +686,10 @@ pub async fn persist_permission_mode(
     if mode == "bypassPermissions" {
         return Ok(false);
     }
-    if !matches!(mode, "default" | "acceptEdits" | "plan" | "dontAsk" | "auto") {
+    if !matches!(
+        mode,
+        "default" | "acceptEdits" | "plan" | "dontAsk" | "auto"
+    ) {
         return Ok(false);
     }
     mutate_settings_file(paths, destination, true, |raw| {
@@ -1343,10 +1349,15 @@ mod tests {
 
         let block =
             json!({ "environment": ["Solo laptop"], "hard_deny": ["Bash(curl:*)", "$defaults"] });
-        let outcome =
-            persist_auto_mode_save(Some(&block), &["Bash(rm:*)".to_string()], destination, &paths, crate::auto_mode_setup::AutoModeSaveMode::Append)
-                .await
-                .unwrap();
+        let outcome = persist_auto_mode_save(
+            Some(&block),
+            &["Bash(rm:*)".to_string()],
+            destination,
+            &paths,
+            crate::auto_mode_setup::AutoModeSaveMode::Append,
+        )
+        .await
+        .unwrap();
         assert!(outcome.wrote);
         assert_eq!(outcome.removed_count, 1);
 
@@ -1363,18 +1374,29 @@ mod tests {
         );
 
         // Re-applying the identical block with no fresh removal is a no-op.
-        let again = persist_auto_mode_save(Some(&block), &[], destination, &paths, crate::auto_mode_setup::AutoModeSaveMode::Append)
-            .await
-            .unwrap();
+        let again = persist_auto_mode_save(
+            Some(&block),
+            &[],
+            destination,
+            &paths,
+            crate::auto_mode_setup::AutoModeSaveMode::Append,
+        )
+        .await
+        .unwrap();
         assert!(!again.wrote, "unchanged block + no removal writes nothing");
         assert_eq!(again.removed_count, 0);
 
         // A requested removal that no longer matches → wrote:false, removed_count:0
         // (the oracle's permissions_allow_skipped telemetry branch).
-        let skipped =
-            persist_auto_mode_save(Some(&block), &["Bash(rm:*)".to_string()], destination, &paths, crate::auto_mode_setup::AutoModeSaveMode::Append)
-                .await
-                .unwrap();
+        let skipped = persist_auto_mode_save(
+            Some(&block),
+            &["Bash(rm:*)".to_string()],
+            destination,
+            &paths,
+            crate::auto_mode_setup::AutoModeSaveMode::Append,
+        )
+        .await
+        .unwrap();
         assert!(!skipped.wrote);
         assert_eq!(skipped.removed_count, 0);
 

@@ -2290,7 +2290,6 @@ fn check_redirections(
 //   * PS5.1 cwd-first shadowing (`qt()==="windows" && …`): Windows-only.
 // ===========================================================================
 
-
 // ───────────────────────────────────────────────────────────────────────────
 // PS-CALLER-06-5 — PowerShell 5.1 cwd-first command resolution (2.1.220
 // `Lt()==="windows" && u.length>1` inside `NTU`).
@@ -2879,8 +2878,6 @@ fn battery_deo_dotgit(e: &str, ctx: &PsCtx) -> bool {
     matches!(battery_qbu(&t, ctx), Some(n) if battery_kbu(&n))
 }
 
-
-
 /// Whether the host resolves commands cwd-first (2.1.220 `Lt()==="windows"`).
 ///
 /// `cfg!(windows)` rather than `#[cfg(windows)]` so the shadowing check is
@@ -2904,7 +2901,9 @@ thread_local! {
 
 #[cfg(test)]
 fn battery_host_is_windows() -> bool {
-    FORCE_WINDOWS_HOST.with(|c| c.get()).unwrap_or(cfg!(windows))
+    FORCE_WINDOWS_HOST
+        .with(|c| c.get())
+        .unwrap_or(cfg!(windows))
 }
 
 /// Run `f` as though the host were (or were not) Windows. Thread-local, so
@@ -2948,7 +2947,8 @@ fn battery_shadowed_command(statements: &[PsStatement], u: &[BatteryUEntry<'_>])
         // `git` shadowed by a written `git.bat` (stem match), or `git.exe`
         // shadowed by a written `git.exe.bat` (base match — only meaningful
         // when the invocation carried its own extension).
-        if (!stem.is_empty() && written.contains(&stem)) || (base != stem && written.contains(&base))
+        if (!stem.is_empty() && written.contains(&stem))
+            || (base != stem && written.contains(&base))
         {
             return Some(cmd.name.clone());
         }
@@ -3535,7 +3535,9 @@ fn vls_is_symlink_new_item(cmd: &PsCommand) -> bool {
         let decoded = battery_backtick_decode(&c);
         let u = strip_surrounding_quotes(strip_comments_and_leading_ws(&decoded)).to_lowercase();
         // A glob / expression value cannot be validated → treat as a link.
-        if u.chars().any(|ch| matches!(ch, '?' | '*' | '[' | ']' | '(' | '$')) {
+        if u.chars()
+            .any(|ch| matches!(ch, '?' | '*' | '[' | ']' | '(' | '$'))
+        {
             return true;
         }
         // A (prefix of a) link item-type → a link.
@@ -3590,7 +3592,11 @@ fn voe_scan(cmd: &PsCommand, t: &mut VoeFeatures) {
 }
 
 /// `Voe(t)` — aggregate the dangerous features across all statements + variables.
-fn voe(statements: &[PsStatement], variables: &[PsVariable], has_stop_parsing: bool) -> VoeFeatures {
+fn voe(
+    statements: &[PsStatement],
+    variables: &[PsVariable],
+    has_stop_parsing: bool,
+) -> VoeFeatures {
     let mut t = VoeFeatures {
         has_sub_expressions: false,
         has_script_blocks: false,

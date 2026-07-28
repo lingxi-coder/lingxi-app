@@ -130,13 +130,14 @@ fn is_js_whitespace(c: char) -> bool {
             | '\u{0020}'
             | '\u{00A0}'
             | '\u{1680}'
-            | '\u{2000}'..='\u{200A}'
-            | '\u{2028}'
-            | '\u{2029}'
-            | '\u{202F}'
-            | '\u{205F}'
-            | '\u{3000}'
-            | '\u{FEFF}'
+            | '\u{2000}'
+            ..='\u{200A}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{202F}'
+                | '\u{205F}'
+                | '\u{3000}'
+                | '\u{FEFF}'
     )
 }
 
@@ -187,9 +188,9 @@ fn repair_str(s: &str, stats: &mut RepairStats) -> String {
             continue;
         }
 
-        let single = caps.get(3).map_or(0u32, |g| {
-            u32::from_str_radix(g.as_str(), 16).unwrap_or(0)
-        });
+        let single = caps
+            .get(3)
+            .map_or(0u32, |g| u32::from_str_radix(g.as_str(), 16).unwrap_or(0));
         // `if(c>=55296&&c<=57343) return n;` — a LONE surrogate stays literal.
         if (0xD800..=0xDFFF).contains(&single) {
             out.push_str(m.as_str());
@@ -307,7 +308,10 @@ mod tests {
         assert_eq!(st.repaired_strings, 1);
         // ONE (odd) preceding backslash => the `\u` is itself escaped => untouched.
         let (out, st) = repair("\\\\u0041");
-        assert_eq!(out, "\\\\u0041", "an escaped backslash must not be unescaped");
+        assert_eq!(
+            out, "\\\\u0041",
+            "an escaped backslash must not be unescaped"
+        );
         assert_eq!(st.repaired_strings, 0);
     }
 
@@ -386,8 +390,8 @@ mod tests {
 
         // The full JS `\s` set behaves as a boundary…
         for ws in [
-            '\u{b}', '\u{1680}', '\u{2000}', '\u{200a}', '\u{2028}', '\u{2029}',
-            '\u{202f}', '\u{205f}', '\u{3000}', '\u{feff}',
+            '\u{b}', '\u{1680}', '\u{2000}', '\u{200a}', '\u{2028}', '\u{2029}', '\u{202f}',
+            '\u{205f}', '\u{3000}', '\u{feff}',
         ] {
             let s = format!("{ws}\\\\host\\share\\u0041");
             assert!(
@@ -413,7 +417,11 @@ mod tests {
     fn workflow_restore_only_applies_to_a_string_script() {
         let arr = json!({"script": ["\\u0041"]});
         let (out, _) = repair_tool_input("Workflow", &arr);
-        assert_eq!(out["script"], json!(["A"]), "a non-string script is repaired");
+        assert_eq!(
+            out["script"],
+            json!(["A"]),
+            "a non-string script is repaired"
+        );
 
         let obj = json!({"script": {"k": "\\u0041"}});
         let (out, _) = repair_tool_input("Workflow", &obj);

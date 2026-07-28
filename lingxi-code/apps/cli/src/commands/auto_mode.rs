@@ -543,7 +543,9 @@ mod tests {
         assert!(!super::has_custom_rules(&serde_json::json!({})));
         assert!(!super::has_custom_rules(&serde_json::json!("nonsense")));
         // A non-array section is not a rule list.
-        assert!(!super::has_custom_rules(&serde_json::json!({ "allow": "x" })));
+        assert!(!super::has_custom_rules(
+            &serde_json::json!({ "allow": "x" })
+        ));
     }
 
     use super::*;
@@ -713,5 +715,4 @@ mod tests {
             "a section with no match becomes empty, not absent"
         );
     }
-
 }

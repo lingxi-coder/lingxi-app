@@ -151,7 +151,11 @@ async fn read_all_jobs(
                         .is_none_or(|owner| task.owner.as_deref() == Some(owner))
                 })
                 .collect();
-            session.sort_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.id.cmp(&b.id)));
+            session.sort_by(|a, b| {
+                a.created_at
+                    .cmp(&b.created_at)
+                    .then_with(|| a.id.cmp(&b.id))
+            });
             jobs.extend(session.into_iter().map(|task| {
                 let mut obj = Map::new();
                 obj.insert("id".into(), json!(task.id));

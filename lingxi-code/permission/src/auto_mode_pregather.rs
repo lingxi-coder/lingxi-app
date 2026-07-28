@@ -39,8 +39,7 @@ pub const PREGATHER_CODE_SIBLING_GH_LIST_FAILED: &str = "sibling_gh_list_failed"
 /// The sibling-docs `gh` reply could not be parsed.
 pub const PREGATHER_CODE_SIBLING_GH_PARSE_FAILED: &str = "sibling_gh_parse_failed";
 /// `.lingxi/settings.local.json` was present but failed the indirection gate.
-pub const PREGATHER_CODE_LOCAL_SETTINGS_INDIRECTION_GATE: &str =
-    "local_settings_indirection_gate";
+pub const PREGATHER_CODE_LOCAL_SETTINGS_INDIRECTION_GATE: &str = "local_settings_indirection_gate";
 /// `.lingxi/settings.local.json` exceeded the read cap.
 pub const PREGATHER_CODE_LOCAL_SETTINGS_OVERSIZED: &str = "local_settings_oversized";
 /// `.lingxi/settings.local.json` could not be read.
@@ -527,10 +526,7 @@ mod tests {
             render_section("Repo facts", "   \n "),
             format!("### Repo facts\n\n{NOTHING_FOUND_MARKER}\n")
         );
-        assert_eq!(
-            render_subsection_heading("git remotes"),
-            "#### git remotes"
-        );
+        assert_eq!(render_subsection_heading("git remotes"), "#### git remotes");
     }
 
     #[test]
@@ -541,7 +537,10 @@ mod tests {
             rendered,
             "### Config scans (names only)\n\n_This recon step FAILED \u{2014} data unavailable. Treat every reference to this section as \"not queryable here\"._\n"
         );
-        assert_ne!(rendered, render_section(ReconSection::ConfigScans.title(), NOTHING_FOUND_MARKER));
+        assert_ne!(
+            rendered,
+            render_section(ReconSection::ConfigScans.title(), NOTHING_FOUND_MARKER)
+        );
     }
 
     #[test]
@@ -677,9 +676,7 @@ mod tests {
             "Shell history (command words only)",
             crate::auto_mode_gates::SHELL_HISTORY_NOT_GATHERED,
         )));
-        assert!(block
-            .text
-            .contains("Do not read history files yourself"));
+        assert!(block.text.contains("Do not read history files yourself"));
         // Every one of the eleven sections is present.
         for title in SECTION_TITLES {
             assert!(block.text.contains(title), "missing section: {title}");
@@ -841,8 +838,14 @@ mod branding_guard {
 
     /// Every WIZARD-06 module whose strings reach the model or the filesystem.
     const SOURCES: [(&str, &str); 7] = [
-        ("auto_mode_pregather", include_str!("auto_mode_pregather.rs")),
-        ("auto_mode_producers", include_str!("auto_mode_producers.rs")),
+        (
+            "auto_mode_pregather",
+            include_str!("auto_mode_pregather.rs"),
+        ),
+        (
+            "auto_mode_producers",
+            include_str!("auto_mode_producers.rs"),
+        ),
         ("auto_mode_sections", include_str!("auto_mode_sections.rs")),
         ("auto_mode_gates", include_str!("auto_mode_gates.rs")),
         ("auto_mode_defaults", include_str!("auto_mode_defaults.rs")),

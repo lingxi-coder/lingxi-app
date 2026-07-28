@@ -5839,8 +5839,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             let mut session = self.session.lock().await;
             let mut state = UltracodeState {
                 active: session.ultracode_active,
-                non_meta_turns_since_reminder: session
-                    .ultracode_non_meta_turns_since_reminder,
+                non_meta_turns_since_reminder: session.ultracode_non_meta_turns_since_reminder,
             };
             let attachments = state.advance(
                 UltracodeGate {
@@ -5857,18 +5856,14 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 is_meta_turn,
             );
             session.ultracode_active = state.active;
-            session.ultracode_non_meta_turns_since_reminder =
-                state.non_meta_turns_since_reminder;
+            session.ultracode_non_meta_turns_since_reminder = state.non_meta_turns_since_reminder;
             attachments
         };
 
         for attachment in attachments {
             let message = ConversationMessage::user_meta(
                 MessageId::new(),
-                format!(
-                    "<system-reminder>\n{}\n</system-reminder>",
-                    attachment.text
-                ),
+                format!("<system-reminder>\n{}\n</system-reminder>", attachment.text),
             );
             self.session.lock().await.history.push(message.clone());
             self.persist_message_to_jsonl(&message).await;

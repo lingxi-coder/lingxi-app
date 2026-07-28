@@ -312,8 +312,7 @@ mod tests {
         seed(dir.path(), id, &["first", "second"]).await;
 
         let spawner = RecordingSpawner::default();
-        let outcomes =
-            restore_parked_agents(dir.path(), &spawner, &Gate(None), &inherit()).await;
+        let outcomes = restore_parked_agents(dir.path(), &spawner, &Gate(None), &inherit()).await;
 
         assert_eq!(outcomes.len(), 1);
         assert!(matches!(outcomes[0].1, RestoreOutcome::Restored(_)));
@@ -353,7 +352,9 @@ mod tests {
         let outcomes = restore_parked_agents(
             dir.path(),
             &spawner,
-            &Gate(Some("refusing to resume it without the skill's permission scoping.")),
+            &Gate(Some(
+                "refusing to resume it without the skill's permission scoping.",
+            )),
             &inherit(),
         )
         .await;
@@ -379,8 +380,7 @@ mod tests {
         seed(dir.path(), id, &[]).await;
 
         let spawner = RecordingSpawner::default();
-        let outcomes =
-            restore_parked_agents(dir.path(), &spawner, &Gate(None), &inherit()).await;
+        let outcomes = restore_parked_agents(dir.path(), &spawner, &Gate(None), &inherit()).await;
         assert_eq!(outcomes[0].1, RestoreOutcome::EmptyTranscript);
         assert!(spawner.seen.lock().unwrap().is_empty());
     }
@@ -393,8 +393,7 @@ mod tests {
             fail: true,
             ..Default::default()
         };
-        let outcomes =
-            restore_parked_agents(dir.path(), &spawner, &Gate(None), &inherit()).await;
+        let outcomes = restore_parked_agents(dir.path(), &spawner, &Gate(None), &inherit()).await;
         assert!(matches!(outcomes[0].1, RestoreOutcome::Failed(_)));
     }
 

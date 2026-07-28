@@ -70,34 +70,41 @@ pub const OTHER_PROJECT_TRANSCRIPTS_UNAVAILABLE: &str = r"_Not queryable here �
 
 /// A `gh`-backed lookup was skipped because nonessential traffic is disabled
 /// or policy-restricted.
-pub const NOT_QUERYABLE_NONESSENTIAL_TRAFFIC: &str = r"_Not queryable here (nonessential traffic disabled or policy-restricted)._";
+pub const NOT_QUERYABLE_NONESSENTIAL_TRAFFIC: &str =
+    r"_Not queryable here (nonessential traffic disabled or policy-restricted)._";
 
 /// As [`NOT_QUERYABLE_NONESSENTIAL_TRAFFIC`] but left open for a suffix (note
 /// the trailing space and the missing closing `_`).
-pub const NOT_QUERYABLE_NONESSENTIAL_TRAFFIC_PREFIX: &str = r"_Not queryable here (nonessential traffic disabled or policy-restricted). ";
+pub const NOT_QUERYABLE_NONESSENTIAL_TRAFFIC_PREFIX: &str =
+    r"_Not queryable here (nonessential traffic disabled or policy-restricted). ";
 
 /// `gh` was unavailable or unauthenticated.
-pub const NOT_QUERYABLE_GH_UNAVAILABLE: &str = r"_Not queryable here (gh unavailable or unauthenticated)._";
+pub const NOT_QUERYABLE_GH_UNAVAILABLE: &str =
+    r"_Not queryable here (gh unavailable or unauthenticated)._";
 
 /// The origin remote is not github.com.
-pub const NOT_QUERYABLE_NOT_GITHUB: &str = r"_Not queryable here (origin remote is not github.com — GHE/other hosts not yet supported)._";
+pub const NOT_QUERYABLE_NOT_GITHUB: &str =
+    r"_Not queryable here (origin remote is not github.com — GHE/other hosts not yet supported)._";
 
 /// As [`NOT_QUERYABLE_NOT_GITHUB`] but left open for a suffix.
-pub const NOT_QUERYABLE_NOT_GITHUB_PREFIX: &str = r"_Not queryable here (origin remote is not github.com — GHE/other hosts not yet supported). ";
+pub const NOT_QUERYABLE_NOT_GITHUB_PREFIX: &str =
+    r"_Not queryable here (origin remote is not github.com — GHE/other hosts not yet supported). ";
 
 /// The org/repo pair could not be derived from the origin remote. Left open
 /// for a suffix.
 pub const NOT_QUERYABLE_ORG_REPO_UNDERIVABLE_PREFIX: &str = r"_Not queryable here (org/repo not derivable from origin remote — missing, an unsupported or GHE host, or not a plain owner/repo URL shape). ";
 
 /// The sibling-docs lookup ran and found nothing.
-pub const NO_SIBLING_DOCS_FOUND: &str = r"_No sibling docs found (org repos have no LINGXI.md/README, or none listed)._";
+pub const NO_SIBLING_DOCS_FOUND: &str =
+    r"_No sibling docs found (org repos have no LINGXI.md/README, or none listed)._";
 
 /// The home walk ran to completion and found no other repos.
 pub const NO_OTHER_REPOS_FOUND: &str = r"_No other git repos found under the home directory._";
 
 /// The home walk was cut short before finding anything -- explicitly NOT the
 /// same as finding none.
-pub const NO_REPOS_FOUND_WALK_CUT_SHORT: &str = r"_No repos found before the walk was cut short — treat this as unknown, not as none._";
+pub const NO_REPOS_FOUND_WALK_CUT_SHORT: &str =
+    r"_No repos found before the walk was cut short — treat this as unknown, not as none._";
 
 /// The home walk hit its time budget; the list is incomplete.
 pub const WALK_HIT_TIME_BUDGET: &str = r"
@@ -176,7 +183,10 @@ mod tests {
     fn withheld_is_never_spelled_the_same_as_empty() {
         // The whole point of the two vocabularies: a proposal that conflates
         // them draws conclusions from evidence that was never collected.
-        for withheld in CONSENT_GATED_MARKERS.iter().chain(UNAVAILABLE_MARKERS.iter()) {
+        for withheld in CONSENT_GATED_MARKERS
+            .iter()
+            .chain(UNAVAILABLE_MARKERS.iter())
+        {
             for empty in EMPTY_RESULT_MARKERS {
                 assert_ne!(*withheld, empty);
             }

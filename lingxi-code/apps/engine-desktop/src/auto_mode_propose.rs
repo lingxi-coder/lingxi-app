@@ -439,7 +439,9 @@ mod tests {
         use protocol::{ContentBlock, ConversationMessage};
         let out = propose_messages_to_conversation(&[msg("user", "hello recon")]);
         match &out[0] {
-            ConversationMessage::User { content, is_meta, .. } => {
+            ConversationMessage::User {
+                content, is_meta, ..
+            } => {
                 assert!(!is_meta, "a propose turn is a real user turn, not meta");
                 assert_eq!(
                     content.as_slice(),
@@ -502,10 +504,7 @@ impl DesktopProposeRunner {
 
 #[async_trait::async_trait]
 impl command_core::ProposeRunner for DesktopProposeRunner {
-    async fn run(
-        &self,
-        inv: &permission::auto_mode_argv::ProposeInvocation,
-    ) -> serde_json::Value {
+    async fn run(&self, inv: &permission::auto_mode_argv::ProposeInvocation) -> serde_json::Value {
         let answers = ProposeAnswers {
             posture: inv.posture.clone(),
             scope: inv.scope.clone(),

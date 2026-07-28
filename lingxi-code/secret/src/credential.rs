@@ -471,9 +471,10 @@ impl CredentialManager {
 
         // Read the prior session blob (best-effort) BEFORE the meta entry is
         // overwritten below, to preserve its subscription fields.
-        let prior_subscription = self.read_oauth_session_meta().await.map(|m| {
-            (m.subscription_type, m.rate_limit_tier)
-        });
+        let prior_subscription = self
+            .read_oauth_session_meta()
+            .await
+            .map(|m| (m.subscription_type, m.rate_limit_tier));
 
         let access_meta = SecureStorageMetadata {
             created_at: now,
@@ -546,9 +547,7 @@ impl CredentialManager {
         meta.subscription_type = subscription_type
             .map(str::to_string)
             .or(meta.subscription_type);
-        meta.rate_limit_tier = rate_limit_tier
-            .map(str::to_string)
-            .or(meta.rate_limit_tier);
+        meta.rate_limit_tier = rate_limit_tier.map(str::to_string).or(meta.rate_limit_tier);
         self.write_oauth_session_meta(&meta, self.clock.now()).await
     }
 
@@ -958,7 +957,10 @@ mod oauth_tests {
             .expect("update");
         let got = cm.get_oauth_tokens().await.expect("get").expect("present");
         assert_eq!(got.subscription_type.as_deref(), Some("max"));
-        assert_eq!(got.rate_limit_tier.as_deref(), Some("default_claude_max_20x"));
+        assert_eq!(
+            got.rate_limit_tier.as_deref(),
+            Some("default_claude_max_20x")
+        );
 
         // Refresh-driver rotation (store with no tier inputs) PRESERVES it.
         cm.store_oauth_tokens("a2", None, expires, vec![], "e@x", "o")
@@ -967,7 +969,10 @@ mod oauth_tests {
         let got = cm.get_oauth_tokens().await.expect("get").expect("present");
         assert_eq!(got.access_token.expose_secret(), "a2");
         assert_eq!(got.subscription_type.as_deref(), Some("max"));
-        assert_eq!(got.rate_limit_tier.as_deref(), Some("default_claude_max_20x"));
+        assert_eq!(
+            got.rate_limit_tier.as_deref(),
+            Some("default_claude_max_20x")
+        );
 
         // Partial update: `None` keeps the old value, `Some` replaces.
         cm.update_oauth_subscription(Some("enterprise"), None)
@@ -975,7 +980,10 @@ mod oauth_tests {
             .expect("partial update");
         let got = cm.get_oauth_tokens().await.expect("get").expect("present");
         assert_eq!(got.subscription_type.as_deref(), Some("enterprise"));
-        assert_eq!(got.rate_limit_tier.as_deref(), Some("default_claude_max_20x"));
+        assert_eq!(
+            got.rate_limit_tier.as_deref(),
+            Some("default_claude_max_20x")
+        );
 
         // Logout clears the blob → a later update is a no-op (not an error).
         cm.delete_oauth_tokens().await.expect("delete");

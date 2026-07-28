@@ -33,13 +33,7 @@ pub fn mock_stdio_mcp_bin() -> PathBuf {
     command
         .current_dir(&workspace)
         .env("CARGO_TARGET_DIR", &fixture_target)
-        .args([
-            "build",
-            "-p",
-            "mock_stdio_mcp",
-            "--bin",
-            "mock_stdio_mcp",
-        ]);
+        .args(["build", "-p", "mock_stdio_mcp", "--bin", "mock_stdio_mcp"]);
     if !cfg!(debug_assertions) {
         command.arg("--release");
     }

@@ -127,14 +127,15 @@ struct ParsedIssuer {
 /// invalid, which is the only distinction the caller draws.
 fn parse_issuer(raw: &str) -> Option<ParsedIssuer> {
     let (scheme, rest) = raw.split_once("://")?;
-    if scheme.is_empty() || !scheme.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.') {
+    if scheme.is_empty()
+        || !scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.')
+    {
         return None;
     }
     // Authority ends at the first `/`, `?` or `#`.
-    let authority = rest
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or_default();
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
     if authority.is_empty() {
         return None;
     }
@@ -649,9 +650,7 @@ mod tests {
         for raw in ["0", "65536", "abc", "-1", "1.5", ""] {
             assert_eq!(
                 check_setup("https://i.example", Some(raw), false, None),
-                SetupCheck::Err(
-                    "Error: --callback-port must be an integer in [1, 65535]".into()
-                ),
+                SetupCheck::Err("Error: --callback-port must be an integer in [1, 65535]".into()),
                 "{raw:?} must be rejected"
             );
         }
@@ -696,25 +695,41 @@ mod tests {
     #[test]
     fn same_issuer_and_client_keeps_credentials() {
         let prev = settings("https://idp.example/", "client-a");
-        assert!(!credentials_invalidated(&prev, "https://idp.example", "client-a"));
+        assert!(!credentials_invalidated(
+            &prev,
+            "https://idp.example",
+            "client-a"
+        ));
     }
 
     #[test]
     fn changed_client_id_invalidates_credentials() {
         let prev = settings("https://idp.example", "client-a");
-        assert!(credentials_invalidated(&prev, "https://idp.example", "client-b"));
+        assert!(credentials_invalidated(
+            &prev,
+            "https://idp.example",
+            "client-b"
+        ));
     }
 
     #[test]
     fn changed_issuer_invalidates_credentials() {
         let prev = settings("https://idp.example", "client-a");
-        assert!(credentials_invalidated(&prev, "https://other.example", "client-a"));
+        assert!(credentials_invalidated(
+            &prev,
+            "https://other.example",
+            "client-a"
+        ));
     }
 
     #[test]
     fn host_case_alone_is_not_a_change() {
         let prev = settings("https://IdP.Example", "client-a");
-        assert!(!credentials_invalidated(&prev, "https://idp.example", "client-a"));
+        assert!(!credentials_invalidated(
+            &prev,
+            "https://idp.example",
+            "client-a"
+        ));
     }
 
     // ---- settings read-modify-write --------------------------------------
@@ -744,8 +759,8 @@ mod tests {
 
     #[test]
     fn absent_settings_file_starts_from_an_empty_object() {
-        let after = apply_xaa_to_settings(None, Some(serde_json::json!({"issuer":"x"})))
-            .expect("write");
+        let after =
+            apply_xaa_to_settings(None, Some(serde_json::json!({"issuer":"x"}))).expect("write");
         let v: serde_json::Value = serde_json::from_str(&after).unwrap();
         assert_eq!(v["xaaIdp"]["issuer"], "x");
     }
@@ -768,9 +783,16 @@ mod tests {
 
     #[test]
     fn show_omits_callback_port_when_unset() {
-        let out = render_show(&settings("https://i.example", "cid"), Some(false), Some(false));
+        let out = render_show(
+            &settings("https://i.example", "cid"),
+            Some(false),
+            Some(false),
+        );
         assert!(!out.contains("Callback port"), "{out}");
-        assert!(out.contains("Client secret: (not set \u{2014} PKCE-only)"), "{out}");
+        assert!(
+            out.contains("Client secret: (not set \u{2014} PKCE-only)"),
+            "{out}"
+        );
         assert!(
             out.contains("Logged in:     no \u{2014} run 'lingxi-cli mcp xaa login'"),
             "{out}"
@@ -784,7 +806,10 @@ mod tests {
         let out = render_show(&cfg, Some(true), Some(true));
         assert!(out.contains("Callback port: 9000\n"), "{out}");
         assert!(out.contains("Client secret: (stored in keychain)"), "{out}");
-        assert!(out.contains("Logged in:     yes (id_token cached)"), "{out}");
+        assert!(
+            out.contains("Logged in:     yes (id_token cached)"),
+            "{out}"
+        );
     }
 
     #[test]
@@ -800,12 +825,19 @@ mod tests {
             out.contains("Logged in:     unknown \u{2014} credential storage unavailable"),
             "{out}"
         );
-        assert!(!out.contains("PKCE-only"), "must not claim a state it cannot read: {out}");
+        assert!(
+            !out.contains("PKCE-only"),
+            "must not claim a state it cannot read: {out}"
+        );
     }
 
     #[test]
     fn show_ends_with_a_blank_line() {
-        let out = render_show(&settings("https://i.example", "cid"), Some(false), Some(false));
+        let out = render_show(
+            &settings("https://i.example", "cid"),
+            Some(false),
+            Some(false),
+        );
         assert!(out.ends_with("\n\n"), "{out:?}");
     }
 }

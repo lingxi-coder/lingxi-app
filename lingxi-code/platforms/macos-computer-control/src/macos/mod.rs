@@ -21,7 +21,10 @@ fn encode_png(img: image::RgbaImage) -> Result<Vec<u8>, ComputerError> {
     let (width, height) = (img.width(), img.height());
     let mut bytes = Vec::new();
     image::DynamicImage::ImageRgba8(img)
-        .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+        .write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
         .map_err(|e| ComputerError::Other(format!("png encode failed: {e}")))?;
     let _ = (width, height); // dims are read back from the encoded image by callers via Screenshot fields
     Ok(bytes)
@@ -185,7 +188,8 @@ fn running_app_by_bundle_id(bundle_id: &str) -> Option<objc2::rc::Retained<NSRun
 fn app_info_from(app: &NSRunningApplication) -> Option<AppInfo> {
     let bundle_id = app.bundleIdentifier()?.to_string();
     let display_name = app
-        .localizedName().map_or_else(|| bundle_id.clone(), |s| s.to_string());
+        .localizedName()
+        .map_or_else(|| bundle_id.clone(), |s| s.to_string());
     Some(AppInfo {
         bundle_id,
         display_name,

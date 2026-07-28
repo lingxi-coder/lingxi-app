@@ -134,9 +134,12 @@ impl PromptHistoryStore {
     /// set, so `=2` / `=y` / `=enabled` keep recording.
     #[must_use]
     pub fn disabled_by_env() -> bool {
-        ["LINGXI_SKIP_PROMPT_HISTORY", "CLAUDE_CODE_SKIP_PROMPT_HISTORY"]
-            .iter()
-            .any(|var| traits::env::is_env_truthy(std::env::var(var).ok().as_deref()))
+        [
+            "LINGXI_SKIP_PROMPT_HISTORY",
+            "CLAUDE_CODE_SKIP_PROMPT_HISTORY",
+        ]
+        .iter()
+        .any(|var| traits::env::is_env_truthy(std::env::var(var).ok().as_deref()))
     }
 
     /// Queue one typed prompt (`cuy`). Applies the consecutive-duplicate
@@ -148,7 +151,10 @@ impl PromptHistoryStore {
         if display.trim().is_empty() {
             return;
         }
-        let mut pending = self.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(last) = &pending.last {
             // `luy`: prev.display === next.display, same project+session, and
             // neither side has pastedContents (the port never populates them).
@@ -183,7 +189,10 @@ impl PromptHistoryStore {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let batch: Vec<PromptHistoryEntry> = {
-            let pending = self.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let pending = self
+                .pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if pending.queue.is_empty() {
                 return true;
             }
@@ -229,8 +238,10 @@ impl PromptHistoryStore {
                 // only appends, so dropping the first `batch.len()` entries is
                 // the identity-equivalent: entries enqueued DURING the write
                 // stay queued for the next flush.
-                let mut pending =
-                    self.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut pending = self
+                    .pending
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let written = batch.len().min(pending.queue.len());
                 pending.queue.drain(..written);
                 pending.queue.is_empty()
@@ -255,7 +266,10 @@ impl PromptHistoryStore {
         let mut queued: HashSet<String> = HashSet::new();
         let mut out = Vec::new();
         {
-            let pending = self.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let pending = self
+                .pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             for entry in pending.queue.iter().rev() {
                 queued.insert(entry.dedupe_key());
                 out.push(entry.clone());
@@ -466,13 +480,18 @@ mod tests {
         assert_eq!(raw.lines().count(), 2);
         // Key order locked to CC's object literal.
         let first = raw.lines().next().unwrap();
-        assert!(first.starts_with("{\"display\":\"first prompt\",\"pastedContents\":{},\"timestamp\":"));
+        assert!(
+            first.starts_with("{\"display\":\"first prompt\",\"pastedContents\":{},\"timestamp\":")
+        );
         assert!(first.contains("\"project\":\"/proj/a\""));
         assert!(first.contains("\"sessionId\":\"s-1\""));
 
         // A fresh store (new session) recalls the project entries newest-first.
         let fresh = store_in(dir.path(), "s-2");
-        assert_eq!(fresh.recall_displays(), vec!["second prompt", "first prompt"]);
+        assert_eq!(
+            fresh.recall_displays(),
+            vec!["second prompt", "first prompt"]
+        );
     }
 
     #[test]
@@ -485,7 +504,11 @@ mod tests {
         store.enqueue("same");
         assert!(store.flush());
         let raw = fs::read_to_string(dir.path().join("history.jsonl")).unwrap();
-        assert_eq!(raw.lines().count(), 3, "only the CONSECUTIVE dupe is dropped");
+        assert_eq!(
+            raw.lines().count(),
+            3,
+            "only the CONSECUTIVE dupe is dropped"
+        );
     }
 
     #[test]
@@ -502,7 +525,10 @@ mod tests {
         }
         let merged = store.read_merged();
         assert_eq!(
-            merged.iter().filter(|e| e.display == "raced prompt").count(),
+            merged
+                .iter()
+                .filter(|e| e.display == "raced prompt")
+                .count(),
             1,
             "queued + on-disk copy must merge to ONE entry"
         );
@@ -540,7 +566,10 @@ mod tests {
             0,
         );
         filetime::set_file_mtime(&lock_dir, old).unwrap();
-        assert!(store.flush(), "stale lock must be broken and the write proceed");
+        assert!(
+            store.flush(),
+            "stale lock must be broken and the write proceed"
+        );
     }
 
     /// A lock entry the process cannot remove must FAIL the acquisition, not
@@ -630,7 +659,9 @@ mod tests {
     #[test]
     fn skip_env_uses_the_oracle_truthy_set() {
         static SERIAL: Mutex<()> = Mutex::new(());
-        let _guard = SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let var = "CLAUDE_CODE_SKIP_PROMPT_HISTORY";
         std::env::remove_var(var);
         assert!(!PromptHistoryStore::disabled_by_env());

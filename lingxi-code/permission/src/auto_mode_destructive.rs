@@ -183,14 +183,13 @@ fn grants_world_write(s: &str) -> bool {
             .take(4)
             .collect();
         if (3..=4).contains(&digits.len())
-            && digits[..digits.len() - 1].iter().all(|d| (b'0'..=b'7').contains(d))
+            && digits[..digits.len() - 1]
+                .iter()
+                .all(|d| (b'0'..=b'7').contains(d))
             && matches!(digits[digits.len() - 1], b'2' | b'3' | b'6' | b'7')
         {
             let end = i + digits.len();
-            if end >= s.len()
-                || bytes[end].is_ascii_whitespace()
-                || bytes[end] == b':'
-            {
+            if end >= s.len() || bytes[end].is_ascii_whitespace() || bytes[end] == b':' {
                 return true;
             }
         }
@@ -343,18 +342,17 @@ pub fn bash_content_is_destructive(content: &str) -> bool {
                 a.starts_with('-')
                     && !a.starts_with("--")
                     && a.trim_end_matches(':').chars().skip(1).any(|c| c == 'f')
-                    && a.chars().skip(1).all(|c| c.is_ascii_lowercase() || c == ':')
+                    && a.chars()
+                        .skip(1)
+                        .all(|c| c.is_ascii_lowercase() || c == ':')
             })
-            || t.split_whitespace().any(|a| a.starts_with('+') && a.len() > 1);
+            || t.split_whitespace()
+                .any(|a| a.starts_with('+') && a.len() > 1);
         if forced {
             return true;
         }
     }
-    if wild
-        && (DISK_AND_POWER.contains(&cmd)
-            || cmd == "mkfs"
-            || cmd.starts_with("mkfs."))
-    {
+    if wild && (DISK_AND_POWER.contains(&cmd) || cmd == "mkfs" || cmd.starts_with("mkfs.")) {
         return true;
     }
     if wild && is_cloud_delete(&w) {
@@ -469,7 +467,14 @@ mod tests {
 
     #[test]
     fn disk_power_and_cloud_deletes_need_a_wildcard() {
-        for cmd in ["dd", "fdisk", "shutdown", "poweroff", "wipefs", "blkdiscard"] {
+        for cmd in [
+            "dd",
+            "fdisk",
+            "shutdown",
+            "poweroff",
+            "wipefs",
+            "blkdiscard",
+        ] {
             assert!(bash(&format!("{cmd} *")), "{cmd} wildcarded");
             assert!(!bash(&format!("{cmd} /dev/sda1")), "{cmd} specific");
         }
@@ -550,7 +555,10 @@ mod tests {
             &value.tool_name,
             &value.rule_content
         ));
-        assert!(is_destructive_permission(&value.tool_name, &value.rule_content));
+        assert!(is_destructive_permission(
+            &value.tool_name,
+            &value.rule_content
+        ));
 
         // Tool-wide: IS a bypass, and this list leaves it alone.
         let value = crate::PermissionRuleValue::from_rule_string("Bash(*)");
@@ -558,6 +566,9 @@ mod tests {
             &value.tool_name,
             &value.rule_content
         ));
-        assert!(!is_destructive_permission(&value.tool_name, &value.rule_content));
+        assert!(!is_destructive_permission(
+            &value.tool_name,
+            &value.rule_content
+        ));
     }
 }

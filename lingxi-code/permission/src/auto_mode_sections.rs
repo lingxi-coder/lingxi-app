@@ -160,13 +160,16 @@ pub const REDACTED_UNUSUAL_REPO_PATH: &str = r"(unusual repo path redacted)";
 pub const REDACTED_UNUSUAL_REMOTE_NAME: &str = r"(unusual remote name redacted)";
 
 /// Count suffix for partially-redacted name lists.
-pub const REDACTED_NAMES_OUTSIDE_CHARSET_SUFFIX: &str = r" names outside the display charset, redacted)";
+pub const REDACTED_NAMES_OUTSIDE_CHARSET_SUFFIX: &str =
+    r" names outside the display charset, redacted)";
 
 /// Suffix used when every name in a list was redacted.
-pub const REDACTED_ALL_NAMES_OUTSIDE_CHARSET: &str = r" listed, all names outside the display charset, redacted";
+pub const REDACTED_ALL_NAMES_OUTSIDE_CHARSET: &str =
+    r" listed, all names outside the display charset, redacted";
 
 /// Suffix for org repo entries dropped on charset or visibility-enum grounds.
-pub const REDACTED_OUTSIDE_CHARSET_OR_VISIBILITY: &str = r" outside the display charset or visibility enum, redacted)";
+pub const REDACTED_OUTSIDE_CHARSET_OR_VISIBILITY: &str =
+    r" outside the display charset or visibility enum, redacted)";
 
 /// `xsy` — the org list could not be fetched at all.
 ///
@@ -327,10 +330,8 @@ mod tests {
         assert!(LOCAL_SETTINGS_INDIRECTION_GATE_FAILED.contains("Present but SKIPPED"));
         assert!(LOCAL_SETTINGS_INDIRECTION_GATE_FAILED
             .contains("requires a regular non-symlink file with link count 1"));
-        assert!(LOCAL_SETTINGS_INDIRECTION_GATE_FAILED
-            .contains("do not read or rewrite this file"));
-        assert!(LINGXI_DIR_INDIRECTION_GATE_FAILED
-            .contains("deliberately not probed"));
+        assert!(LOCAL_SETTINGS_INDIRECTION_GATE_FAILED.contains("do not read or rewrite this file"));
+        assert!(LINGXI_DIR_INDIRECTION_GATE_FAILED.contains("deliberately not probed"));
         assert!(LINGXI_DIR_INDIRECTION_GATE_FAILED
             .contains("do not read, resolve, or rewrite anything under this path"));
     }
@@ -345,9 +346,15 @@ mod tests {
             assert!(!marker.contains("{}"));
         }
         assert_eq!(REDACTED_UNUSUAL_NAME, "(unusual name redacted)");
-        assert_eq!(REDACTED_UNUSUAL_BRANCH_NAME, "(unusual branch name redacted)");
+        assert_eq!(
+            REDACTED_UNUSUAL_BRANCH_NAME,
+            "(unusual branch name redacted)"
+        );
         assert_eq!(REDACTED_UNUSUAL_REPO_PATH, "(unusual repo path redacted)");
-        assert_eq!(REDACTED_UNUSUAL_REMOTE_NAME, "(unusual remote name redacted)");
+        assert_eq!(
+            REDACTED_UNUSUAL_REMOTE_NAME,
+            "(unusual remote name redacted)"
+        );
     }
 
     #[test]

@@ -983,7 +983,10 @@ mod tests {
 
         assert!(check_read_only("git status", false).is_read_only());
         let gated = check_read_only_in("git status", false, Some(d.path()));
-        assert!(!gated.is_read_only(), "must not auto-allow in a planted dir");
+        assert!(
+            !gated.is_read_only(),
+            "must not auto-allow in a planted dir"
+        );
         assert!(gated
             .message
             .as_deref()

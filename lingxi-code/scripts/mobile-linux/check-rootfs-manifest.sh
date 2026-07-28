@@ -45,6 +45,7 @@ required = {
     "archive",
     "packages",
     "executable_allowlist",
+    "immutable_files",
     "writable_paths",
 }
 missing = required - data.keys()
@@ -56,8 +57,8 @@ if unknown:
     print(f"unknown manifest keys: {sorted(unknown)}", file=sys.stderr)
     sys.exit(1)
 
-if data["schema_version"] != 1:
-    print("schema_version must be 1", file=sys.stderr)
+if data["schema_version"] != 2:
+    print("schema_version must be 2", file=sys.stderr)
     sys.exit(1)
 if data["runtime"] not in {"android-proot", "ios-ish"}:
     print("runtime must be android-proot or ios-ish", file=sys.stderr)
@@ -109,11 +110,13 @@ package_names = set()
 for package in packages:
     if (
         not isinstance(package, dict)
-        or set(package) != {"name", "version"}
-        or not package.get("name")
-        or not package.get("version")
+        or set(package) != {"name", "version", "license", "architecture", "origin"}
+        or any(
+            not isinstance(package.get(field), str) or not package[field]
+            for field in {"name", "version", "license", "architecture", "origin"}
+        )
     ):
-        print("each package must include name and version", file=sys.stderr)
+        print("each package must include complete package identity", file=sys.stderr)
         sys.exit(1)
     if package["name"] in package_names:
         print(f"duplicate package: {package['name']}", file=sys.stderr)
@@ -181,6 +184,69 @@ missing_allowlist = sorted(required_allowlist_paths - allowlist_paths)
 if missing_allowlist:
     print(f"required allowlist paths missing: {missing_allowlist}", file=sys.stderr)
     sys.exit(1)
+
+immutable_files = data["immutable_files"]
+if not isinstance(immutable_files, list) or not immutable_files:
+    print("immutable_files must be a non-empty list", file=sys.stderr)
+    sys.exit(1)
+immutable_by_path = {}
+for entry in immutable_files:
+    if not isinstance(entry, dict) or set(entry) != {
+        "path",
+        "sha256",
+        "kind",
+        "size_bytes",
+    }:
+        print("immutable file entries must contain path, sha256, kind, and size_bytes", file=sys.stderr)
+        sys.exit(1)
+    path = entry.get("path")
+    parts = path.split("/") if isinstance(path, str) else []
+    if (
+        not isinstance(path, str)
+        or not path.startswith("/")
+        or path == "/"
+        or any(part in {"", ".", ".."} for part in parts[1:])
+    ):
+        print(f"invalid immutable file path: {path!r}", file=sys.stderr)
+        sys.exit(1)
+    if path in immutable_by_path:
+        print(f"duplicate immutable file path: {path}", file=sys.stderr)
+        sys.exit(1)
+    if any(path == root or path.startswith(root + "/") for root in {
+        "/root",
+        "/tmp",
+        "/var/tmp",
+        "/workspace",
+    }):
+        print(f"writable path is forbidden in immutable inventory: {path}", file=sys.stderr)
+        sys.exit(1)
+    if not re.fullmatch(r"[a-f0-9]{64}", str(entry.get("sha256", ""))):
+        print(f"invalid immutable file sha256: {path}", file=sys.stderr)
+        sys.exit(1)
+    if entry.get("kind") not in {"regular-file", "symlink"}:
+        print(f"invalid immutable file kind: {path}", file=sys.stderr)
+        sys.exit(1)
+    if not isinstance(entry.get("size_bytes"), int) or entry["size_bytes"] < 0:
+        print(f"invalid immutable file size: {path}", file=sys.stderr)
+        sys.exit(1)
+    immutable_by_path[path] = entry
+
+for executable in allowlist:
+    immutable = immutable_by_path.get(executable["path"])
+    if (
+        immutable is None
+        or immutable["kind"] != "regular-file"
+        or immutable["sha256"] != executable["sha256"]
+        or (
+            "size_bytes" in executable
+            and immutable["size_bytes"] != executable["size_bytes"]
+        )
+    ):
+        print(
+            f"executable allowlist entry is not bound to immutable inventory: {executable['path']}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 writable_paths = data["writable_paths"]
 if not isinstance(writable_paths, list) or not writable_paths:

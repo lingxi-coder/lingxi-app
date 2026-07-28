@@ -37,6 +37,34 @@
       "license": "REPLACE_WITH_REAL_LICENSE",
       "architecture": "arm64",
       "origin": "busybox"
+    },
+    {
+      "name": "git",
+      "version": "REPLACE_WITH_REAL_VERSION",
+      "license": "REPLACE_WITH_REAL_LICENSE",
+      "architecture": "arm64",
+      "origin": "git"
+    },
+    {
+      "name": "openssh-client",
+      "version": "REPLACE_WITH_REAL_VERSION",
+      "license": "REPLACE_WITH_REAL_LICENSE",
+      "architecture": "arm64",
+      "origin": "openssh"
+    },
+    {
+      "name": "python3",
+      "version": "REPLACE_WITH_REAL_VERSION",
+      "license": "REPLACE_WITH_REAL_LICENSE",
+      "architecture": "arm64",
+      "origin": "python3"
+    },
+    {
+      "name": "ca-certificates",
+      "version": "REPLACE_WITH_REAL_VERSION",
+      "license": "REPLACE_WITH_REAL_LICENSE",
+      "architecture": "arm64",
+      "origin": "ca-certificates"
     }
   ]
 }

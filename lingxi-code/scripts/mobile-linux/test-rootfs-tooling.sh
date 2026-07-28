@@ -4,6 +4,7 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 tool="${script_dir}/rootfs_tool.py"
 packager="${script_dir}/package-rootfs-release.sh"
+manifest_validator="${script_dir}/check-rootfs-manifest.sh"
 tmp_root="$(mktemp -d)"
 trap 'rm -rf "${tmp_root}"' EXIT
 export SOURCE_DATE_EPOCH=0
@@ -30,6 +31,11 @@ write_elf(root / "usr" / "bin" / "git", b"git")
 write_elf(root / "usr" / "bin" / "ssh", b"ssh")
 write_elf(root / "usr" / "bin" / "python3", b"python3")
 write_elf(root / "usr" / "lib" / "libpython3.12.so.1.0", b"libpython")
+(root / "usr" / "lib" / "python3.12").mkdir(parents=True, exist_ok=True)
+(root / "usr" / "lib" / "python3.12" / "site.py").write_text(
+    "# immutable stdlib fixture\n",
+    encoding="utf-8",
+)
 (root / "lib" / "apk" / "db" / "installed").write_text(
     "P:busybox\nV:1.0-r0\nA:arm64\nL:GPL-2.0-only\n\n"
     "P:git\nV:2.0-r0\nA:arm64\nL:GPL-2.0-only\n\n"
@@ -61,6 +67,25 @@ python3 "${tool}" generate-manifest \
 python3 "${tool}" generate-spdx --root "${fixture_root}" --name test-rootfs --output "${spdx_path}"
 python3 "${tool}" snapshot-allowlist --manifest "${manifest_path}" --output "${allowlist_path}"
 python3 "${tool}" validate-lock --lock "${lock_path}" --manifest "${manifest_path}"
+
+cp "${manifest_path}" "${tmp_root}/mismatched-manifest.json"
+python3 - <<'PY' "${tmp_root}/mismatched-manifest.json"
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+manifest = json.loads(path.read_text(encoding="utf-8"))
+manifest["packages"][0]["version"] = "9999-r0"
+path.write_text(json.dumps(manifest), encoding="utf-8")
+PY
+if python3 "${tool}" validate-lock \
+  --lock "${lock_path}" \
+  --manifest "${tmp_root}/mismatched-manifest.json"
+then
+  echo "expected lock validation to reject package-version drift" >&2
+  exit 1
+fi
 
 tar_archive="${tmp_root}/rootfs.tar"
 python3 "${tool}" build-archive --root "${fixture_root}" --output "${tar_archive}" --source-date-epoch "${SOURCE_DATE_EPOCH}"
@@ -113,6 +138,8 @@ archive2="${tmp_root}/release-2/rootfs.tar.zst"
 
 bash "${packager}" "${fixture_root}" android-proot android arm64 1.0.0 "${archive1}" "${release1}"
 bash "${packager}" "${fixture_root}" android-proot android arm64 1.0.0 "${archive2}" "${release2}"
+python3 "${tool}" verify-archive --archive "${archive1}"
+bash "${manifest_validator}" "${release1}/rootfs-manifest.json"
 
 python3 - <<'PY' "${archive1}" "${archive2}" "${release1}" "${release2}"
 import hashlib

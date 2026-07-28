@@ -2,7 +2,6 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd "${script_dir}/../../.." && pwd)"
 tool="${script_dir}/rootfs_tool.py"
 
 if [[ $# -ne 7 ]]; then

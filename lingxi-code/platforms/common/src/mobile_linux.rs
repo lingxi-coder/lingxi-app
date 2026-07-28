@@ -12,10 +12,10 @@ use std::sync::{Arc, Mutex};
 use thiserror::Error;
 use traits::{
     BackendPlanHandle, LinuxCommandRequest, LinuxProcessHandle, MobileLinuxError,
-    MobileLinuxRuntime, MobileLinuxRuntimeMode, MobileLinuxSandboxPlan, MountSpec, ProcessCommand,
-    ProcessError, ProcessHandle, ProcessOutput, ProcessRunner, ProcessStreamSink, RootfsState,
-    RootfsStatus, Sandbox, SandboxBackend, SandboxCapability, SandboxError, SandboxFeatures,
-    SandboxPolicy, SandboxedCommand, SandboxedTag,
+    MobileLinuxRuntime, MobileLinuxRuntimeMode, MobileLinuxSandboxPlan, MobileLinuxTaskStatus,
+    MountSpec, ProcessCommand, ProcessError, ProcessHandle, ProcessOutput, ProcessRunner,
+    ProcessStreamSink, RootfsState, RootfsStatus, Sandbox, SandboxBackend, SandboxCapability,
+    SandboxError, SandboxFeatures, SandboxPolicy, SandboxedCommand, SandboxedTag,
 };
 
 const ALLOWED_WRITABLE_GUEST_PATHS: &[&str] = &["/root", "/tmp", "/var/tmp", "/workspace"];
@@ -102,6 +102,16 @@ fn normalize_mounts(mounts: &[MountSpec]) -> Result<Vec<MountSpec>, MobileLinuxE
             )));
         }
         for existing in &normalized {
+            if canonical_host_path == existing.host_path
+                || canonical_host_path.starts_with(&existing.host_path)
+                || existing.host_path.starts_with(&canonical_host_path)
+            {
+                return Err(MobileLinuxError::InvalidRequest(format!(
+                    "overlapping host mount sources are not allowed: {} vs {}",
+                    canonical_host_path.display(),
+                    existing.host_path.display()
+                )));
+            }
             if path_is_within_guest_path(&mount.guest_path, &existing.guest_path)
                 || path_is_within_guest_path(&existing.guest_path, &mount.guest_path)
             {
@@ -500,7 +510,7 @@ impl Sandbox for MobileLinuxSandbox {
 pub struct MobileLinuxProcessRunner {
     runtime: Arc<dyn MobileLinuxRuntime>,
     backend: SandboxBackend,
-    background_handles: Mutex<HashMap<String, LinuxProcessHandle>>,
+    background_handles: Arc<Mutex<HashMap<String, LinuxProcessHandle>>>,
 }
 
 impl MobileLinuxProcessRunner {
@@ -509,8 +519,51 @@ impl MobileLinuxProcessRunner {
         Self {
             backend: runtime.backend(),
             runtime,
-            background_handles: Mutex::new(HashMap::new()),
+            background_handles: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    fn spawn_background_reaper(&self, task_id: String) {
+        let runtime = self.runtime.clone();
+        let handles = self.background_handles.clone();
+        tokio::spawn(async move {
+            let mut consecutive_missing = 0_u8;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                if !handles
+                    .lock()
+                    .expect("mobile-linux background handle map poisoned")
+                    .contains_key(&task_id)
+                {
+                    break;
+                }
+                match runtime.task_status(&task_id).await {
+                    Ok(Some(snapshot)) if task_status_is_terminal(snapshot.status) => {
+                        handles
+                            .lock()
+                            .expect("mobile-linux background handle map poisoned")
+                            .remove(&task_id);
+                        break;
+                    }
+                    Ok(Some(_)) => consecutive_missing = 0,
+                    Ok(None) => {
+                        consecutive_missing += 1;
+                        if consecutive_missing >= 4 {
+                            handles
+                                .lock()
+                                .expect("mobile-linux background handle map poisoned")
+                                .remove(&task_id);
+                            break;
+                        }
+                    }
+                    Err(_) => {
+                        // Preserve ownership on transient status failures so a
+                        // later explicit kill can still terminate the task.
+                        consecutive_missing = 0;
+                    }
+                }
+            }
+        });
     }
 
     fn admitted_plan(
@@ -591,6 +644,7 @@ impl ProcessRunner for MobileLinuxProcessRunner {
             .lock()
             .expect("mobile-linux background handle map poisoned")
             .insert(handle.id.clone(), handle.clone());
+        self.spawn_background_reaper(handle.id.clone());
         Ok(ProcessHandle {
             task_id: handle.id,
             pid: 0,
@@ -598,23 +652,42 @@ impl ProcessRunner for MobileLinuxProcessRunner {
     }
 
     async fn kill(&self, handle: &ProcessHandle) -> Result<(), ProcessError> {
-        let linux_handle = self
+        let Some(linux_handle) = self
             .background_handles
             .lock()
             .expect("mobile-linux background handle map poisoned")
-            .remove(&handle.task_id)
-            .unwrap_or(LinuxProcessHandle {
-                id: handle.task_id.clone(),
-            });
+            .get(&handle.task_id)
+            .cloned()
+        else {
+            return Err(ProcessError::Io(format!(
+                "unknown background process handle: {}",
+                handle.task_id
+            )));
+        };
         self.runtime
             .kill(&linux_handle)
             .await
-            .map_err(to_process_error)
+            .map_err(to_process_error)?;
+        self.background_handles
+            .lock()
+            .expect("mobile-linux background handle map poisoned")
+            .remove(&handle.task_id);
+        Ok(())
     }
 
     fn is_available(&self) -> bool {
         true
     }
+}
+
+fn task_status_is_terminal(status: MobileLinuxTaskStatus) -> bool {
+    matches!(
+        status,
+        MobileLinuxTaskStatus::Completed
+            | MobileLinuxTaskStatus::Failed
+            | MobileLinuxTaskStatus::Cancelled
+            | MobileLinuxTaskStatus::TimedOut
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -628,12 +701,13 @@ pub struct RootfsManifest {
     pub archive: RootfsArchive,
     pub packages: Vec<RootfsPackage>,
     pub executable_allowlist: Vec<RootfsManifestEntry>,
+    pub immutable_files: Vec<RootfsImmutableEntry>,
     pub writable_paths: Vec<String>,
 }
 
 impl RootfsManifest {
     pub fn validate(&self) -> Result<(), RootfsManifestError> {
-        if self.schema_version != 1 {
+        if self.schema_version != 2 {
             return Err(RootfsManifestError::InvalidSchemaVersion);
         }
         if self.runtime.trim().is_empty()
@@ -662,7 +736,10 @@ impl RootfsManifest {
         {
             return Err(RootfsManifestError::UnsafeArtifactName);
         }
-        if self.packages.is_empty() || self.executable_allowlist.is_empty() {
+        if self.packages.is_empty()
+            || self.executable_allowlist.is_empty()
+            || self.immutable_files.is_empty()
+        {
             return Err(RootfsManifestError::MissingRequiredField);
         }
         if self.archive.size_bytes == 0 || !is_lowercase_sha256(&self.archive.sha256) {
@@ -675,6 +752,9 @@ impl RootfsManifest {
         for package in &self.packages {
             if package.name.trim().is_empty()
                 || package.version.trim().is_empty()
+                || package.license.trim().is_empty()
+                || package.architecture.trim().is_empty()
+                || package.origin.trim().is_empty()
                 || !package_names.insert(package.name.as_str())
             {
                 return Err(RootfsManifestError::InvalidPackage(package.name.clone()));
@@ -717,12 +797,53 @@ impl RootfsManifest {
             }
         }
 
+        self.validate_integrity_inventory()
+    }
+
+    fn validate_integrity_inventory(&self) -> Result<(), RootfsManifestError> {
+        let mut immutable_by_path = BTreeMap::new();
+        for entry in &self.immutable_files {
+            validate_guest_path(&entry.path)?;
+            if immutable_by_path
+                .insert(entry.path.as_str(), entry)
+                .is_some()
+            {
+                return Err(RootfsManifestError::DuplicatePath(entry.path.clone()));
+            }
+            if !is_lowercase_sha256(&entry.sha256) {
+                return Err(RootfsManifestError::InvalidSha256(entry.sha256.clone()));
+            }
+            if ALLOWED_WRITABLE_GUEST_PATHS
+                .iter()
+                .any(|writable| path_is_within_guest_path(&entry.path, writable))
+            {
+                return Err(RootfsManifestError::ImmutableFileInWritablePath(
+                    entry.path.clone(),
+                ));
+            }
+        }
+
         for entry in &self.executable_allowlist {
             if ALLOWED_WRITABLE_GUEST_PATHS
                 .iter()
                 .any(|writable| path_is_within_guest_path(&entry.path, writable))
             {
                 return Err(RootfsManifestError::ExecutableInWritablePath(
+                    entry.path.clone(),
+                ));
+            }
+            let Some(immutable) = immutable_by_path.get(entry.path.as_str()) else {
+                return Err(RootfsManifestError::ExecutableInventoryMismatch(
+                    entry.path.clone(),
+                ));
+            };
+            if immutable.kind != RootfsImmutableKind::RegularFile
+                || immutable.sha256 != entry.sha256
+                || entry
+                    .size_bytes
+                    .is_some_and(|size| size != immutable.size_bytes)
+            {
+                return Err(RootfsManifestError::ExecutableInventoryMismatch(
                     entry.path.clone(),
                 ));
             }
@@ -745,6 +866,9 @@ pub struct RootfsArchive {
 pub struct RootfsPackage {
     pub name: String,
     pub version: String,
+    pub license: String,
+    pub architecture: String,
+    pub origin: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -763,6 +887,22 @@ pub enum RootfsEntryKind {
     Elf,
     SharedLibrary,
     Interpreter,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RootfsImmutableEntry {
+    pub path: String,
+    pub sha256: String,
+    pub kind: RootfsImmutableKind,
+    pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RootfsImmutableKind {
+    RegularFile,
+    Symlink,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -950,79 +1090,41 @@ impl RootfsStore {
         let mut issues = Vec::new();
         let mut verified_files = 0usize;
         let mut verified_bytes = 0u64;
-        for entry in &manifest.executable_allowlist {
-            let host_path =
-                match secure_guest_host_path_with_real_parents(&active_root, &entry.path) {
-                    Ok(path) => path,
-                    Err(RootfsStoreError::UnsafeManagedPath(path)) => {
-                        issues.push(RootfsVerificationIssue {
-                            path: entry.path.clone(),
-                            reason: format!(
-                                "symlinked or invalid ancestor blocks verification ({})",
-                                path.display()
-                            ),
-                        });
-                        continue;
-                    }
-                    Err(error) => {
-                        issues.push(RootfsVerificationIssue {
-                            path: entry.path.clone(),
-                            reason: error.to_string(),
-                        });
-                        continue;
-                    }
-                };
-            match fs::symlink_metadata(&host_path) {
-                Ok(metadata) => {
-                    if metadata.file_type().is_symlink() {
-                        issues.push(RootfsVerificationIssue {
-                            path: entry.path.clone(),
-                            reason: "symlink targets are not permitted for verified files"
-                                .to_string(),
-                        });
-                        continue;
-                    }
-                    if !metadata.is_file() {
-                        issues.push(RootfsVerificationIssue {
-                            path: entry.path.clone(),
-                            reason: "verified path is not a regular file".to_string(),
-                        });
-                        continue;
-                    }
-                    if let Some(expected_size) = entry.size_bytes {
-                        if metadata.len() != expected_size {
-                            issues.push(RootfsVerificationIssue {
-                                path: entry.path.clone(),
-                                reason: format!(
-                                    "size mismatch (expected {}, got {})",
-                                    expected_size,
-                                    metadata.len()
-                                ),
-                            });
-                            continue;
-                        }
-                    }
+        for writable_path in &manifest.writable_paths {
+            if let Some(reason) = verify_writable_root(&active_root, writable_path) {
+                issues.push(RootfsVerificationIssue {
+                    path: writable_path.clone(),
+                    reason,
+                });
+            }
+        }
+        for entry in &manifest.immutable_files {
+            match verify_immutable_entry(&active_root, entry)? {
+                ImmutableEntryVerification::Verified(bytes) => {
+                    verified_files += 1;
+                    verified_bytes += bytes;
                 }
-                Err(err) => {
+                ImmutableEntryVerification::Failed(reason) => {
                     issues.push(RootfsVerificationIssue {
                         path: entry.path.clone(),
-                        reason: format!("missing: {err}"),
+                        reason,
                     });
-                    continue;
                 }
             }
+        }
 
-            let actual = sha256_file(&host_path)?;
-            if actual != entry.sha256 {
+        let expected_paths = manifest
+            .immutable_files
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect::<BTreeSet<_>>();
+        for actual_path in collect_immutable_rootfs_paths(&active_root, &manifest.writable_paths)? {
+            if !expected_paths.contains(actual_path.as_str()) {
                 issues.push(RootfsVerificationIssue {
-                    path: entry.path.clone(),
-                    reason: format!("hash mismatch (expected {}, got {})", entry.sha256, actual),
+                    path: actual_path,
+                    reason: "file is absent from immutable inventory".to_string(),
                 });
-                continue;
             }
-
-            verified_files += 1;
-            verified_bytes += entry.size_bytes.unwrap_or(0);
         }
 
         Ok(RootfsVerificationReport {
@@ -1334,7 +1436,7 @@ impl RootfsStore {
 
 #[derive(Debug, Error)]
 pub enum RootfsManifestError {
-    #[error("rootfs manifest schema_version must be exactly 1")]
+    #[error("rootfs manifest schema_version must be exactly 2")]
     InvalidSchemaVersion,
     #[error("rootfs manifest is missing a required field")]
     MissingRequiredField,
@@ -1362,6 +1464,10 @@ pub enum RootfsManifestError {
     MissingWritablePath(String),
     #[error("verified executable or dynamic library lives in a writable guest path: {0}")]
     ExecutableInWritablePath(String),
+    #[error("immutable rootfs file lives in a writable guest path: {0}")]
+    ImmutableFileInWritablePath(String),
+    #[error("executable allowlist entry does not match immutable inventory: {0}")]
+    ExecutableInventoryMismatch(String),
 }
 
 #[derive(Debug, Error)]
@@ -1536,6 +1642,204 @@ fn verification_failure_message(report: &RootfsVerificationReport) -> String {
     format!("rootfs verification failed: {}", reasons.join("; "))
 }
 
+enum ImmutableEntryVerification {
+    Verified(u64),
+    Failed(String),
+}
+
+fn verify_writable_root(root: &Path, guest_path: &str) -> Option<String> {
+    let host_path = match secure_guest_host_path_with_real_parents(root, guest_path) {
+        Ok(path) => path,
+        Err(RootfsStoreError::UnsafeManagedPath(path)) => {
+            return Some(format!(
+                "writable root has a symlinked or invalid ancestor ({})",
+                path.display()
+            ));
+        }
+        Err(error) => return Some(error.to_string()),
+    };
+    match fs::symlink_metadata(&host_path) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => None,
+        Ok(_) => Some("writable root must be a real directory, not a symlink or file".to_string()),
+        Err(error) => Some(format!("writable root is missing: {error}")),
+    }
+}
+
+fn verify_immutable_entry(
+    root: &Path,
+    entry: &RootfsImmutableEntry,
+) -> Result<ImmutableEntryVerification, RootfsStoreError> {
+    let host_path = match secure_guest_host_path_with_real_parents(root, &entry.path) {
+        Ok(path) => path,
+        Err(RootfsStoreError::UnsafeManagedPath(path)) => {
+            return Ok(ImmutableEntryVerification::Failed(format!(
+                "symlinked or invalid ancestor blocks verification ({})",
+                path.display()
+            )));
+        }
+        Err(error) => return Ok(ImmutableEntryVerification::Failed(error.to_string())),
+    };
+    let metadata = match fs::symlink_metadata(&host_path) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            return Ok(ImmutableEntryVerification::Failed(format!(
+                "missing: {error}"
+            )));
+        }
+    };
+    match entry.kind {
+        RootfsImmutableKind::RegularFile => verify_immutable_regular(&host_path, &metadata, entry),
+        RootfsImmutableKind::Symlink => verify_immutable_symlink(&host_path, &metadata, entry),
+    }
+}
+
+fn verify_immutable_regular(
+    host_path: &Path,
+    metadata: &fs::Metadata,
+    entry: &RootfsImmutableEntry,
+) -> Result<ImmutableEntryVerification, RootfsStoreError> {
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Ok(ImmutableEntryVerification::Failed(
+            "immutable regular-file path is a symlink or has the wrong file type".to_string(),
+        ));
+    }
+    if metadata.len() != entry.size_bytes {
+        return Ok(ImmutableEntryVerification::Failed(format!(
+            "size mismatch (expected {}, got {})",
+            entry.size_bytes,
+            metadata.len()
+        )));
+    }
+    let actual = sha256_file(host_path)?;
+    if actual != entry.sha256 {
+        return Ok(ImmutableEntryVerification::Failed(format!(
+            "hash mismatch (expected {}, got {})",
+            entry.sha256, actual
+        )));
+    }
+    Ok(ImmutableEntryVerification::Verified(entry.size_bytes))
+}
+
+fn verify_immutable_symlink(
+    host_path: &Path,
+    metadata: &fs::Metadata,
+    entry: &RootfsImmutableEntry,
+) -> Result<ImmutableEntryVerification, RootfsStoreError> {
+    if !metadata.file_type().is_symlink() {
+        return Ok(ImmutableEntryVerification::Failed(
+            "immutable symlink path has the wrong file type".to_string(),
+        ));
+    }
+    let target = fs::read_link(host_path).map_err(|err| RootfsStoreError::Io {
+        path: host_path.to_path_buf(),
+        message: err.to_string(),
+    })?;
+    if !symlink_target_stays_within_root(&entry.path, &target) {
+        return Ok(ImmutableEntryVerification::Failed(format!(
+            "symlink target escapes the rootfs: {}",
+            target.display()
+        )));
+    }
+    let target_bytes = target.as_os_str().as_encoded_bytes();
+    if target_bytes.len() as u64 != entry.size_bytes {
+        return Ok(ImmutableEntryVerification::Failed(format!(
+            "symlink target size mismatch (expected {}, got {})",
+            entry.size_bytes,
+            target_bytes.len()
+        )));
+    }
+    let actual = sha256_bytes(target_bytes);
+    if actual != entry.sha256 {
+        return Ok(ImmutableEntryVerification::Failed(format!(
+            "hash mismatch (expected {}, got {})",
+            entry.sha256, actual
+        )));
+    }
+    Ok(ImmutableEntryVerification::Verified(entry.size_bytes))
+}
+
+fn symlink_target_stays_within_root(guest_path: &str, target: &Path) -> bool {
+    if target.is_absolute() {
+        return false;
+    }
+    let mut depth = Path::new(guest_path)
+        .parent()
+        .map_or(0, |parent| parent.components().count().saturating_sub(1));
+    for component in target.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(_) => depth += 1,
+            Component::ParentDir if depth > 0 => depth -= 1,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return false,
+        }
+    }
+    true
+}
+
+fn collect_immutable_rootfs_paths(
+    root: &Path,
+    writable_paths: &[String],
+) -> Result<Vec<String>, RootfsStoreError> {
+    fn visit(
+        root: &Path,
+        directory: &Path,
+        writable_paths: &[String],
+        paths: &mut Vec<String>,
+    ) -> Result<(), RootfsStoreError> {
+        for entry in fs::read_dir(directory).map_err(|err| RootfsStoreError::Io {
+            path: directory.to_path_buf(),
+            message: err.to_string(),
+        })? {
+            let entry = entry.map_err(|err| RootfsStoreError::Io {
+                path: directory.to_path_buf(),
+                message: err.to_string(),
+            })?;
+            let path = entry.path();
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|_| RootfsStoreError::UnsafeManagedPath(path.clone()))?;
+            let guest_path = format!(
+                "/{}",
+                relative
+                    .components()
+                    .filter_map(|component| match component {
+                        Component::Normal(segment) => Some(segment.to_string_lossy()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("/")
+            );
+            if writable_paths
+                .iter()
+                .any(|writable| path_is_within_guest_path(&guest_path, writable))
+            {
+                continue;
+            }
+            let metadata = fs::symlink_metadata(&path).map_err(|err| RootfsStoreError::Io {
+                path: path.clone(),
+                message: err.to_string(),
+            })?;
+            if metadata.is_dir() {
+                visit(root, &path, writable_paths, paths)?;
+            } else {
+                paths.push(guest_path);
+            }
+        }
+        Ok(())
+    }
+
+    let mut paths = Vec::new();
+    visit(root, root, writable_paths, &mut paths)?;
+    paths.sort();
+    Ok(paths)
+}
+
+fn sha256_bytes(value: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(value);
+    format!("{:x}", hasher.finalize())
+}
+
 fn sha256_file(path: &Path) -> Result<String, RootfsStoreError> {
     let mut file = fs::File::open(path).map_err(|err| RootfsStoreError::Io {
         path: path.to_path_buf(),
@@ -1626,12 +1930,13 @@ fn remove_path(path: PathBuf) -> Result<(), RootfsStoreError> {
 mod tests {
     use super::*;
     use traits::{
-        LinuxCommandResult, MobileLinuxCapability, PtyOpenRequest, PtySessionHandle, ResourceLimits,
+        LinuxCommandResult, MobileLinuxCapability, MobileLinuxTaskSnapshot, MobileLinuxTaskStatus,
+        PtyOpenRequest, PtySessionHandle, ResourceLimits,
     };
 
     fn manifest() -> RootfsManifest {
         RootfsManifest {
-            schema_version: 1,
+            schema_version: 2,
             runtime: "android-proot".to_string(),
             platform: "android".to_string(),
             abi: "arm64".to_string(),
@@ -1647,6 +1952,9 @@ mod tests {
                 .map(|name| RootfsPackage {
                     name: (*name).to_string(),
                     version: "1.0-r0".to_string(),
+                    license: "MIT".to_string(),
+                    architecture: "arm64".to_string(),
+                    origin: (*name).to_string(),
                 })
                 .collect(),
             executable_allowlist: vec![RootfsManifestEntry {
@@ -1655,6 +1963,13 @@ mod tests {
                     .to_string(),
                 kind: RootfsEntryKind::Interpreter,
                 size_bytes: Some(0),
+            }],
+            immutable_files: vec![RootfsImmutableEntry {
+                path: "/usr/bin/python3".to_string(),
+                sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                    .to_string(),
+                kind: RootfsImmutableKind::RegularFile,
+                size_bytes: 0,
             }],
             writable_paths: ALLOWED_WRITABLE_GUEST_PATHS
                 .iter()
@@ -1667,6 +1982,10 @@ mod tests {
         let executable = path.join("usr/bin/python3");
         fs::create_dir_all(executable.parent().expect("parent")).expect("rootfs dirs");
         fs::write(executable, b"").expect("rootfs executable");
+        for writable in ALLOWED_WRITABLE_GUEST_PATHS {
+            fs::create_dir_all(path.join(writable.trim_start_matches('/')))
+                .expect("writable rootfs dir");
+        }
     }
 
     #[test]
@@ -1685,7 +2004,13 @@ mod tests {
     #[test]
     fn manifest_rejects_unknown_schema_versions() {
         let mut manifest = manifest();
-        manifest.schema_version = 2;
+        manifest.schema_version = 3;
+        assert!(matches!(
+            manifest.validate(),
+            Err(RootfsManifestError::InvalidSchemaVersion)
+        ));
+
+        manifest.schema_version = 1;
         assert!(matches!(
             manifest.validate(),
             Err(RootfsManifestError::InvalidSchemaVersion)
@@ -1887,6 +2212,63 @@ mod tests {
     }
 
     #[test]
+    fn verify_active_root_detects_non_executable_tampering_and_unlisted_files() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = RootfsStore::new(
+            temp.path().join("managed"),
+            SandboxBackend::AndroidProot,
+            MobileLinuxRuntimeMode::MobileLinux,
+            "android",
+            "arm64-v8a",
+        );
+        write_valid_root(&store.active_root());
+        let stdlib = store.active_root().join("usr/lib/python3.12/site.py");
+        fs::create_dir_all(stdlib.parent().expect("stdlib parent")).expect("stdlib dirs");
+        fs::write(&stdlib, b"trusted").expect("stdlib fixture");
+
+        let mut expected = manifest();
+        expected.immutable_files.push(RootfsImmutableEntry {
+            path: "/usr/lib/python3.12/site.py".to_string(),
+            sha256: "a9a089195c68d2adeee23beaa2c3a93b1d4cdf09046e7a9e520b3b166dff3e6a".to_string(),
+            kind: RootfsImmutableKind::RegularFile,
+            size_bytes: 7,
+        });
+        assert!(
+            store
+                .verify_active_root(&expected)
+                .expect("trusted root")
+                .ok
+        );
+
+        fs::write(&stdlib, b"hostile").expect("tamper stdlib");
+        let tampered = store
+            .verify_active_root(&expected)
+            .expect("tampered report");
+        assert!(!tampered.ok);
+        assert!(tampered
+            .issues
+            .iter()
+            .any(|issue| issue.path == "/usr/lib/python3.12/site.py"
+                && issue.reason.contains("hash mismatch")));
+
+        fs::write(&stdlib, b"trusted").expect("restore stdlib");
+        fs::write(
+            store.active_root().join("usr/lib/python3.12/injected.py"),
+            b"payload",
+        )
+        .expect("unlisted stdlib file");
+        let unlisted = store
+            .verify_active_root(&expected)
+            .expect("unlisted report");
+        assert!(!unlisted.ok);
+        assert!(unlisted
+            .issues
+            .iter()
+            .any(|issue| issue.path == "/usr/lib/python3.12/injected.py"
+                && issue.reason.contains("absent from immutable inventory")));
+    }
+
+    #[test]
     fn staged_activation_and_interruption_recovery_are_bounded() {
         let temp = tempfile::tempdir().expect("tempdir");
         let managed = temp.path().join("managed");
@@ -2023,6 +2405,9 @@ mod tests {
         manifest.executable_allowlist[0].size_bytes = Some(7);
         manifest.executable_allowlist[0].sha256 =
             "239f59ed55e737c77147cf55ad0c1b03b8c4fa0193f6c82b53f6ba356b4a8044".to_string();
+        manifest.immutable_files[0].size_bytes = 7;
+        manifest.immutable_files[0].sha256 =
+            "239f59ed55e737c77147cf55ad0c1b03b8c4fa0193f6c82b53f6ba356b4a8044".to_string();
         let report = store.verify_active_root(&manifest).expect("report");
         assert!(!report.ok);
         assert!(report
@@ -2148,6 +2533,8 @@ mod tests {
         last_run: Mutex<Vec<LinuxCommandRequest>>,
         last_background: Mutex<Vec<LinuxCommandRequest>>,
         killed: Mutex<Vec<String>>,
+        kill_error: Mutex<Option<MobileLinuxError>>,
+        task_statuses: Mutex<HashMap<String, MobileLinuxTaskStatus>>,
     }
 
     impl MockRuntime {
@@ -2169,7 +2556,16 @@ mod tests {
                 last_run: Mutex::new(Vec::new()),
                 last_background: Mutex::new(Vec::new()),
                 killed: Mutex::new(Vec::new()),
+                kill_error: Mutex::new(None),
+                task_statuses: Mutex::new(HashMap::new()),
             }
+        }
+
+        fn set_task_status(&self, task_id: &str, status: MobileLinuxTaskStatus) {
+            self.task_statuses
+                .lock()
+                .expect("task status mutex")
+                .insert(task_id.to_string(), status);
         }
     }
 
@@ -2238,6 +2634,7 @@ mod tests {
                 .lock()
                 .expect("background mutex")
                 .push(request);
+            self.set_task_status("bg-task", MobileLinuxTaskStatus::Backgrounded);
             Ok(LinuxProcessHandle {
                 id: "bg-task".to_string(),
             })
@@ -2248,6 +2645,9 @@ mod tests {
                 .lock()
                 .expect("kill mutex")
                 .push(handle.id.clone());
+            if let Some(error) = self.kill_error.lock().expect("kill error mutex").take() {
+                return Err(error);
+            }
             Ok(())
         }
 
@@ -2296,6 +2696,34 @@ mod tests {
 
         async fn configure_mounts(&self, _mounts: Vec<MountSpec>) -> Result<(), MobileLinuxError> {
             Ok(())
+        }
+
+        async fn task_status(
+            &self,
+            task_id: &str,
+        ) -> Result<Option<MobileLinuxTaskSnapshot>, MobileLinuxError> {
+            Ok(self
+                .task_statuses
+                .lock()
+                .expect("task status mutex")
+                .get(task_id)
+                .copied()
+                .map(|status| MobileLinuxTaskSnapshot {
+                    task_id: task_id.to_string(),
+                    status,
+                    command: "test".to_string(),
+                    started_at_ms: Some(1),
+                    finished_at_ms: matches!(
+                        status,
+                        MobileLinuxTaskStatus::Completed
+                            | MobileLinuxTaskStatus::Failed
+                            | MobileLinuxTaskStatus::Cancelled
+                            | MobileLinuxTaskStatus::TimedOut
+                    )
+                    .then_some(2),
+                    exit_code: None,
+                    detail: None,
+                }))
         }
     }
 
@@ -2461,6 +2889,53 @@ mod tests {
             .expect("explicit host-approved external write mount should be accepted");
     }
 
+    #[test]
+    fn mobile_linux_sandbox_rejects_overlapping_host_mount_aliases() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime: Arc<dyn MobileLinuxRuntime> =
+            Arc::new(MockRuntime::new(SandboxBackend::AndroidProot));
+        let host = temp.path().join("workspace");
+        fs::create_dir_all(host.join("nested")).expect("host fixture");
+
+        let aliases = vec![
+            MountSpec {
+                host_path: host.clone(),
+                guest_path: "/root/readonly".to_string(),
+                read_only: true,
+                purpose: traits::MountPurpose::Shared,
+            },
+            MountSpec {
+                host_path: host.clone(),
+                guest_path: "/workspace/writable-alias".to_string(),
+                read_only: false,
+                purpose: traits::MountPurpose::Workspace,
+            },
+        ];
+        assert!(matches!(
+            MobileLinuxSandbox::new(runtime.clone(), aliases),
+            Err(SandboxError::Unavailable(_))
+        ));
+
+        let nested_alias = vec![
+            MountSpec {
+                host_path: host.clone(),
+                guest_path: "/workspace/project".to_string(),
+                read_only: false,
+                purpose: traits::MountPurpose::Workspace,
+            },
+            MountSpec {
+                host_path: host.join("nested"),
+                guest_path: "/root/nested".to_string(),
+                read_only: true,
+                purpose: traits::MountPurpose::Shared,
+            },
+        ];
+        assert!(matches!(
+            MobileLinuxSandbox::new(runtime, nested_alias),
+            Err(SandboxError::Unavailable(_))
+        ));
+    }
+
     #[cfg(unix)]
     #[test]
     fn mobile_linux_sandbox_rejects_symlink_mount_roots() {
@@ -2543,6 +3018,97 @@ mod tests {
             runtime_impl.killed.lock().expect("kill mutex").as_slice(),
             &["bg-task".to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn mobile_linux_process_runner_rejects_unknown_background_handles() {
+        let runtime_impl = Arc::new(MockRuntime::new(SandboxBackend::AndroidProot));
+        let runtime: Arc<dyn MobileLinuxRuntime> = runtime_impl.clone();
+        let runner = MobileLinuxProcessRunner::new(runtime);
+        let foreign = ProcessHandle {
+            task_id: "foreign-task".to_string(),
+            pid: 0,
+        };
+
+        let error = runner
+            .kill(&foreign)
+            .await
+            .expect_err("unknown handles must fail closed");
+        assert!(error
+            .to_string()
+            .contains("unknown background process handle"));
+        assert!(runtime_impl.killed.lock().expect("kill mutex").is_empty());
+    }
+
+    #[tokio::test]
+    async fn mobile_linux_process_runner_preserves_handle_when_kill_fails() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join("workspace")).expect("workspace");
+        fs::create_dir_all(temp.path().join("readonly")).expect("readonly");
+        let runtime_impl = Arc::new(MockRuntime::new(SandboxBackend::AndroidProot));
+        let runtime: Arc<dyn MobileLinuxRuntime> = runtime_impl.clone();
+        let sandbox =
+            MobileLinuxSandbox::new(runtime.clone(), sample_mounts(&temp)).expect("sandbox");
+        let prepared = sandbox
+            .prepare(sample_command(&temp), &sample_policy(&temp))
+            .expect("prepare");
+        let runner = MobileLinuxProcessRunner::new(runtime);
+        let handle = runner
+            .spawn_background(&prepared)
+            .await
+            .expect("spawn background");
+        *runtime_impl.kill_error.lock().expect("kill error mutex") =
+            Some(MobileLinuxError::Io("transient".to_string()));
+
+        runner
+            .kill(&handle)
+            .await
+            .expect_err("first kill should surface the runtime failure");
+        assert!(
+            runner
+                .background_handles
+                .lock()
+                .expect("background handles")
+                .contains_key(&handle.task_id),
+            "a transient kill failure must not discard task ownership"
+        );
+        runner.kill(&handle).await.expect("retry kill");
+    }
+
+    #[tokio::test]
+    async fn mobile_linux_process_runner_reaps_completed_background_handles() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join("workspace")).expect("workspace");
+        fs::create_dir_all(temp.path().join("readonly")).expect("readonly");
+        let runtime_impl = Arc::new(MockRuntime::new(SandboxBackend::AndroidProot));
+        let runtime: Arc<dyn MobileLinuxRuntime> = runtime_impl.clone();
+        let sandbox =
+            MobileLinuxSandbox::new(runtime.clone(), sample_mounts(&temp)).expect("sandbox");
+        let prepared = sandbox
+            .prepare(sample_command(&temp), &sample_policy(&temp))
+            .expect("prepare");
+        let runner = MobileLinuxProcessRunner::new(runtime);
+
+        let handle = runner
+            .spawn_background(&prepared)
+            .await
+            .expect("spawn background");
+        runtime_impl.set_task_status("bg-task", MobileLinuxTaskStatus::Completed);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if !runner
+                    .background_handles
+                    .lock()
+                    .expect("background handles")
+                    .contains_key(&handle.task_id)
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("completed handles should be reaped");
     }
 
     #[tokio::test]

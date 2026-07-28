@@ -6,8 +6,11 @@ import json
 import os
 import pathlib
 import stat
+import subprocess
 import sys
 import tarfile
+import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
@@ -42,6 +45,7 @@ BINARY_SYMLINK_FORBIDDEN_PREFIXES = [
 ]
 
 WORLD_WRITABLE_ALLOWED = {"/tmp", "/var/tmp"}
+WRITABLE_ROOTS = {"/root", "/tmp", "/var/tmp", "/workspace"}
 DEFAULT_SOURCE_DATE_EPOCH = 0
 
 
@@ -110,6 +114,10 @@ def read_sha256(path: pathlib.Path) -> str:
                 break
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def read_sha256_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
 
 
 def stable_json_dumps(data: object) -> str:
@@ -316,12 +324,68 @@ def collect_allowlist(root: pathlib.Path) -> List[dict]:
     return sorted(entries, key=lambda entry: entry["path"])
 
 
+def is_writable_inventory_path(path: str) -> bool:
+    return any(path == root or path.startswith(root + "/") for root in WRITABLE_ROOTS)
+
+
+def immutable_entry(path: pathlib.Path, root: pathlib.Path) -> dict:
+    rel = root_rel(path, root)
+    st = os.lstat(path)
+    if stat.S_ISLNK(st.st_mode):
+        target = os.readlink(path)
+        try:
+            payload = target.encode("utf-8")
+        except UnicodeEncodeError:
+            fail(f"rootfs symlink target must be UTF-8: {rel}")
+        return {
+            "path": rel,
+            "sha256": read_sha256_bytes(payload),
+            "kind": "symlink",
+            "size_bytes": len(payload),
+        }
+    if not stat.S_ISREG(st.st_mode):
+        fail(f"immutable inventory supports only regular files and symlinks: {rel}")
+    return {
+        "path": rel,
+        "sha256": read_sha256(path),
+        "kind": "regular-file",
+        "size_bytes": st.st_size,
+    }
+
+
+def collect_immutable_files(root: pathlib.Path) -> List[dict]:
+    entries: List[dict] = []
+    for current_root, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
+        current_dir = pathlib.Path(current_root)
+        dirnames.sort()
+        filenames.sort()
+
+        for dirname in list(dirnames):
+            path = current_dir / dirname
+            rel = root_rel(path, root)
+            if is_writable_inventory_path(rel):
+                dirnames.remove(dirname)
+                continue
+            if path.is_symlink():
+                entries.append(immutable_entry(path, root))
+                dirnames.remove(dirname)
+
+        for filename in filenames:
+            path = current_dir / filename
+            rel = root_rel(path, root)
+            if not is_writable_inventory_path(rel):
+                entries.append(immutable_entry(path, root))
+
+    return sorted(entries, key=lambda entry: entry["path"])
+
+
 def generate_manifest(args: argparse.Namespace) -> None:
     root = pathlib.Path(args.root).resolve()
     packages = validate_rootfs_tree(root)
     allowlist = collect_allowlist(root)
+    immutable_files = collect_immutable_files(root)
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "runtime": args.runtime,
         "platform": args.platform,
         "abi": args.abi,
@@ -332,11 +396,18 @@ def generate_manifest(args: argparse.Namespace) -> None:
             "size_bytes": args.archive_size,
         },
         "packages": [
-            {"name": package.name, "version": package.version}
+            {
+                "name": package.name,
+                "version": package.version,
+                "license": package.license,
+                "architecture": package.architecture,
+                "origin": package.origin,
+            }
             for package in packages
         ],
         "executable_allowlist": allowlist,
-        "writable_paths": ["/root", "/tmp", "/var/tmp", "/workspace"],
+        "immutable_files": immutable_files,
+        "writable_paths": sorted(WRITABLE_ROOTS),
     }
     output = pathlib.Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -440,6 +511,8 @@ def snapshot_allowlist(args: argparse.Namespace) -> None:
 def validate_lock(args: argparse.Namespace) -> None:
     lock = json.loads(pathlib.Path(args.lock).read_text(encoding="utf-8"))
     manifest = json.loads(pathlib.Path(args.manifest).read_text(encoding="utf-8"))
+    if manifest.get("schema_version") != 2:
+        fail("rootfs manifest schema_version must be 2")
     if lock.get("schema_version") != 1:
         fail("rootfs lock schema_version must be 1")
     alpine = lock.get("alpine")
@@ -463,22 +536,83 @@ def validate_lock(args: argparse.Namespace) -> None:
     resolved = lock.get("resolved_packages")
     if not isinstance(resolved, list) or not resolved:
         fail("rootfs lock must contain resolved_packages[]")
-    resolved_names = {
-        entry.get("name")
-        for entry in resolved
-        if isinstance(entry, dict) and isinstance(entry.get("name"), str)
-    }
-    manifest_names = {
-        entry.get("name")
-        for entry in manifest.get("packages", [])
-        if isinstance(entry, dict) and isinstance(entry.get("name"), str)
-    }
-    if manifest_names - resolved_names:
+    identity_fields = ("name", "version", "license", "architecture", "origin")
+    resolved_identities: set[Tuple[str, str, str, str, str]] = set()
+    resolved_names: set[str] = set()
+    for entry in resolved:
+        if not isinstance(entry, dict):
+            fail("rootfs lock resolved_packages entries must be objects")
+        required_fields = set(identity_fields)
+        if set(entry) != required_fields or any(
+            not isinstance(entry.get(field), str) or not entry[field]
+            for field in required_fields
+        ):
+            fail("rootfs lock resolved_packages entries must contain complete package identity")
+        if entry["name"] in resolved_names:
+            fail(f"rootfs lock contains duplicate package: {entry['name']}")
+        resolved_names.add(entry["name"])
+        resolved_identities.add(tuple(entry[field] for field in identity_fields))
+
+    manifest_packages = manifest.get("packages")
+    if not isinstance(manifest_packages, list) or not manifest_packages:
+        fail("rootfs manifest must contain packages[]")
+    manifest_identities: set[Tuple[str, str, str, str, str]] = set()
+    manifest_names: set[str] = set()
+    for entry in manifest_packages:
+        if (
+            not isinstance(entry, dict)
+            or set(entry) != set(identity_fields)
+            or any(
+                not isinstance(entry.get(field), str) or not entry[field]
+                for field in identity_fields
+            )
+        ):
+            fail("rootfs manifest package entries must contain complete package identity")
+        if entry["name"] in manifest_names:
+            fail(f"rootfs manifest contains duplicate package: {entry['name']}")
+        manifest_names.add(entry["name"])
+        manifest_identities.add(tuple(entry[field] for field in identity_fields))
+
+    if manifest_identities != resolved_identities:
+        missing = sorted(manifest_identities - resolved_identities)
+        extra = sorted(resolved_identities - manifest_identities)
         fail(
-            "rootfs lock missing manifest package entries: "
-            f"{sorted(manifest_names - resolved_names)}"
+            "rootfs lock package identities diverged from manifest "
+            f"(missing={missing}, extra={extra})"
         )
     print(f"rootfs build lock verified: {args.lock}")
+
+
+@contextmanager
+def open_tar_archive(archive: pathlib.Path):
+    decoded_archive = None
+    try:
+        if archive.name.endswith(".tar.zst") or archive.suffix == ".zst":
+            decoded_archive = tempfile.TemporaryFile()
+            try:
+                result = subprocess.run(
+                    ["zstd", "-dc", "--", str(archive)],
+                    stdout=decoded_archive,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
+            except FileNotFoundError:
+                fail("zstd is required to verify .tar.zst archives")
+            if result.returncode != 0:
+                detail = result.stderr.decode("utf-8", errors="replace").strip()
+                fail(f"failed to decompress rootfs archive: {detail or result.returncode}")
+            decoded_archive.flush()
+            decoded_archive.seek(0)
+
+        with tarfile.open(
+            fileobj=decoded_archive,
+            name=None if decoded_archive is not None else archive,
+            mode="r:" if decoded_archive is not None else "r:*",
+        ) as tar:
+            yield tar
+    finally:
+        if decoded_archive is not None:
+            decoded_archive.close()
 
 
 def verify_archive(args: argparse.Namespace) -> None:
@@ -487,7 +621,7 @@ def verify_archive(args: argparse.Namespace) -> None:
         fail(f"archive not found or unsafe: {archive}")
     seen_paths: set[str] = set()
     hardlinks: List[Tuple[str, str]] = []
-    with tarfile.open(archive, mode="r:*") as tar:
+    with open_tar_archive(archive) as tar:
         members = tar.getmembers()
         for member in members:
             path = safe_member_path(member.name).as_posix()

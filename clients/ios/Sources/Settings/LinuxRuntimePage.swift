@@ -1,3 +1,4 @@
+import CryptoKit
 import SwiftUI
 
 private struct LinuxRuntimeCommandFailure: Error {
@@ -8,11 +9,42 @@ private enum LinuxRuntimeBridge {
     private static let workspaceIDDefaultsKey = "lingxi.mobile-linux.workspace.default.id"
 
     actor HandleCache {
+        private struct Key: Equatable {
+            let mode: String
+            let managedRoot: String
+            let workspaceHostPath: String
+            let stableWorkspaceID: String
+            let abi: String
+            let rootfsVersion: String
+            let archiveSha256: String?
+            let authorizationFile: String?
+            let authorizationDigest: String?
+
+            init(_ config: IosMobileLinuxConfigFfi) {
+                mode = String(describing: config.mode)
+                managedRoot = config.managedRoot
+                workspaceHostPath = config.workspaceHostPath
+                stableWorkspaceID = config.stableWorkspaceId
+                abi = config.abi
+                rootfsVersion = config.rootfsVersion
+                archiveSha256 = config.archiveSha256
+                authorizationFile = config.authorizationFile
+                authorizationDigest = config.authorizationFile.flatMap { path in
+                    guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else {
+                        return "<missing>"
+                    }
+                    return SHA256.hash(data: data)
+                        .map { String(format: "%02x", $0) }
+                        .joined()
+                }
+            }
+        }
+
         private var handle: IosMobileLinuxRuntimeHandle?
-        private var key: String?
+        private var key: Key?
 
         func handle(for config: IosMobileLinuxConfigFfi) async throws -> IosMobileLinuxRuntimeHandle {
-            let nextKey = "\(config.mode)|\(config.managedRoot)|\(config.workspaceHostPath)|\(config.stableWorkspaceId)|\(config.abi)|\(config.rootfsVersion)"
+            let nextKey = Key(config)
             if let handle, key == nextKey {
                 return handle
             }

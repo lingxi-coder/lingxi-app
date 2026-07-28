@@ -33,6 +33,8 @@ Policy decisions:
   interpreter, and shared library that remains in the release archive.
 - The release evidence set must include:
   - `rootfs-manifest.json`
+    - schema v2 includes a complete immutable regular-file/symlink inventory;
+      writable roots are excluded and verified separately
   - `rootfs-build.lock.json`
   - `rootfs.spdx.json`
   - `executable-allowlist.json`
@@ -50,6 +52,9 @@ Recommended build flow:
    `docs/mobile-linux/sbom/current/`.
 6. Enable `LINGXI_MOBILE_LINUX_ENABLED=1` only after the authorization gate and
    CI policy gates pass.
+
+Schema v1 manifests are intentionally rejected: they lack the immutable file
+inventory required to detect non-ELF runtime tampering.
 
 Tooling:
 

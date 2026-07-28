@@ -66,6 +66,8 @@ mod tests {
         let m = ConversationMessage::System {
             id: MessageId::new(),
             content: "abc".into(),
+            subtype: None,
+            compact_metadata: None,
         };
         assert_eq!(text_byte_size(&m), 3);
     }
@@ -81,6 +83,8 @@ mod tests {
                 },
             }],
             is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
         };
         assert_eq!(text_byte_size(&m), 4); // "YWJj".len()
     }

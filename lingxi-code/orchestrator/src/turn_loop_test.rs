@@ -696,6 +696,8 @@ mod read_file_state_tests {
                     content_blocks: None,
                 }],
                 is_meta: false,
+                is_compact_summary: false,
+                is_visible_in_transcript_only: false,
             });
         }
         let before = orch.session().lock().await.history.len();
@@ -2436,6 +2438,8 @@ mod malformed_and_thinking_only_tests {
                 content_blocks: None,
             }],
             is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
         }
     }
 
@@ -2444,6 +2448,8 @@ mod malformed_and_thinking_only_tests {
             id: MessageId::new(),
             content: vec![ContentBlock::Text { text: text.into() }],
             is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
         }
     }
 

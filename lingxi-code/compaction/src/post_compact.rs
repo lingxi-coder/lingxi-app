@@ -524,10 +524,10 @@ impl PostCompactBuilder {
         skill_candidates: Vec<SkillRestoreCandidate>,
     ) -> PostCompactMessages {
         PostCompactMessages {
-            summary_messages: vec![ConversationMessage::System {
-                id: protocol::MessageId::new(),
-                content: summary_text.to_string(),
-            }],
+            summary_messages: vec![ConversationMessage::compact_summary(
+                protocol::MessageId::new(),
+                summary_text.to_string(),
+            )],
             files: restore_post_compact_files(file_candidates, already_attached),
             // Skill dedup has no boundary context in the pure builder shape
             // (`already_attached = &[]`); the production path threads it in
@@ -892,11 +892,21 @@ mod tests {
         // Summary message is the verbatim summary text — NO "Compact boundary:"
         // prefix.
         match &msgs.summary_messages[0] {
-            ConversationMessage::System { content, .. } => {
-                assert_eq!(content, "the summary text");
-                assert!(!content.starts_with("Compact boundary:"));
+            ConversationMessage::User {
+                content,
+                is_compact_summary,
+                is_visible_in_transcript_only,
+                ..
+            } => {
+                assert!(*is_compact_summary);
+                assert!(*is_visible_in_transcript_only);
+                assert_eq!(msgs.summary_messages[0].text_content(), "the summary text");
+                assert!(!msgs.summary_messages[0]
+                    .text_content()
+                    .starts_with("Compact boundary:"));
+                assert_eq!(content.len(), 1);
             }
-            _ => panic!("expected System summary"),
+            _ => panic!("expected typed User summary"),
         }
         assert_eq!(msgs.files.len(), 1);
         assert_eq!(msgs.skills.len(), 1);

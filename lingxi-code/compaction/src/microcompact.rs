@@ -271,6 +271,8 @@ impl Microcompactor {
                     id,
                     content,
                     is_meta,
+                    is_compact_summary,
+                    is_visible_in_transcript_only,
                 } = m
                 {
                     let new_content: Vec<ContentBlock> = content
@@ -304,6 +306,8 @@ impl Microcompactor {
                         id,
                         content: new_content,
                         is_meta,
+                        is_compact_summary,
+                        is_visible_in_transcript_only,
                     }
                 } else {
                     m
@@ -358,6 +362,8 @@ mod tests {
                 content_blocks: None,
             }],
             is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
         }
     }
 

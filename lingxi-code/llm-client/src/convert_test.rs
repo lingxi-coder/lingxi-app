@@ -17,6 +17,8 @@ mod tests {
                 text: "hello".to_string(),
             }],
             is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
         };
         let result = to_llm_messages(vec![msg]).unwrap();
         assert_eq!(result.len(), 1);
@@ -84,6 +86,8 @@ mod tests {
                 content_blocks: None,
             }],
             is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
         };
         let result = to_llm_messages(vec![msg]).unwrap();
         assert!(matches!(
@@ -106,6 +110,8 @@ mod tests {
                 content_blocks: None,
             }],
             is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
         };
         let result = to_llm_messages(vec![msg]).unwrap();
         assert!(matches!(
@@ -127,6 +133,8 @@ mod tests {
                 content_blocks: None,
             }],
             is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
         };
         let result = to_llm_messages(vec![msg]).unwrap();
         assert!(matches!(
@@ -167,6 +175,8 @@ mod tests {
                 },
             }],
             is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
         };
         let result = to_llm_messages(vec![msg]).unwrap();
         assert!(matches!(
@@ -186,6 +196,8 @@ mod tests {
                 },
             }],
             is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
         };
         let result = to_llm_messages(vec![msg]).unwrap();
         assert!(matches!(
@@ -308,6 +320,8 @@ mod tests {
                 },
             }],
             is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
         };
         let result = to_llm_messages(vec![msg]).unwrap();
         assert!(matches!(
@@ -322,6 +336,8 @@ mod tests {
         let msg = ConversationMessage::System {
             id: MessageId::new(),
             content: "you are a helpful assistant".to_string(),
+            subtype: None,
+            compact_metadata: None,
         };
         let err = to_llm_messages(vec![msg]).unwrap_err();
         assert!(matches!(err, LlmError::InvalidRequest { .. }));
@@ -335,6 +351,8 @@ mod tests {
                 text: "hi".to_string(),
             }],
             is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
         };
         let assistant = ConversationMessage::Assistant {
             id: MessageId::new(),
@@ -422,6 +440,8 @@ mod tests {
                 },
             }],
             is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
         };
         let err = to_llm_messages(vec![msg]).unwrap_err();
         assert!(matches!(err, LlmError::InvalidRequest { message } if message.contains("base64")));
@@ -436,6 +456,8 @@ mod tests {
                 text: text.to_string(),
             }],
             is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
         }
     }
 
@@ -496,6 +518,8 @@ mod tests {
             ConversationMessage::System {
                 id: MessageId::new(),
                 content: "Conversation compacted".to_string(),
+                subtype: None,
+                compact_metadata: None,
             },
             user(post_boundary_id, "summary"),
         ]);
@@ -510,17 +534,47 @@ mod tests {
     }
 
     #[test]
+    fn typed_compact_boundary_and_summary_metadata_never_reach_provider_wire() {
+        let metadata: protocol::CompactBoundaryMetadata =
+            serde_json::from_value(serde_json::json!({"trigger":"manual","preTokens":42})).unwrap();
+        let summary =
+            ConversationMessage::compact_summary(MessageId::new(), "typed summary".to_string());
+        let normalized = normalize_messages_for_api(vec![
+            user(MessageId::new(), "old"),
+            ConversationMessage::compact_boundary(
+                MessageId::new(),
+                "localized boundary text".to_string(),
+                metadata,
+            ),
+            summary,
+        ]);
+        assert_eq!(normalized.len(), 1);
+        assert!(normalized[0].is_compact_summary());
+        let provider_messages = to_llm_messages(normalized).unwrap();
+        let wire = serde_json::to_string(&provider_messages).unwrap();
+        assert!(wire.contains("typed summary"));
+        assert!(!wire.contains("compact_boundary"));
+        assert!(!wire.contains("compactMetadata"));
+        assert!(!wire.contains("isCompactSummary"));
+        assert!(!wire.contains("isVisibleInTranscriptOnly"));
+    }
+
+    #[test]
     fn most_recent_compact_boundary_wins() {
         let out = normalize_messages_for_api(vec![
             user(MessageId::new(), "old"),
             ConversationMessage::System {
                 id: MessageId::new(),
                 content: "Conversation compacted".to_string(),
+                subtype: None,
+                compact_metadata: None,
             },
             user(MessageId::new(), "first summary"),
             ConversationMessage::System {
                 id: MessageId::new(),
                 content: "Conversation compacted".to_string(),
+                subtype: None,
+                compact_metadata: None,
             },
             user(MessageId::new(), "latest summary"),
         ]);
@@ -594,6 +648,8 @@ mod tests {
             id,
             content,
             is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
         }
     }
 
@@ -795,6 +851,8 @@ mod tests {
             id: MessageId::new(),
             content: blocks,
             is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
         }
     }
 

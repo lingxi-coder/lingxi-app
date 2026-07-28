@@ -811,6 +811,8 @@ mod tests {
             ConversationMessage::System {
                 id: MessageId::new(),
                 content: "Conversation compacted".to_string(),
+                subtype: None,
+                compact_metadata: None,
             },
             ConversationMessage::user(MessageId::new(), "existing context".into()),
             ConversationMessage::user(MessageId::new(), "compact prompt".into()),

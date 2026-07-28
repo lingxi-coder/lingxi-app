@@ -1538,20 +1538,10 @@ pub async fn run_stream_json_input_loop(
             recv = input_rx.recv() => match recv {
                 Some(StreamInput::User(t)) => t,
                 Some(StreamInput::History(history)) => {
-                    if let Some(compact_metadata) = history.compact_metadata {
-                        runtime
-                            .orchestrator
-                            .append_external_compact_boundary(
-                                history.message,
-                                compact_metadata,
-                            )
-                            .await;
-                    } else {
-                        runtime
-                            .orchestrator
-                            .append_external_history_message(history.message)
-                            .await;
-                    }
+                    runtime
+                        .orchestrator
+                        .append_external_history_message(history.message)
+                        .await;
                     if argv.replay_user_messages {
                         if let Some(frame) = history.replay_frame {
                             emit_raw_frame_queued(&outbound_tx, &frame);

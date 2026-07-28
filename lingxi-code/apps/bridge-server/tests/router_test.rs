@@ -1368,7 +1368,15 @@ async fn resume_session_replays_adopts_and_emits_full_transcript() {
         .clone()
         .expect("resume_session must adopt replayed state");
     assert_eq!(adopted.0.as_uuid().to_string(), session_id);
-    assert_eq!(adopted.1.len(), 2);
+    assert_eq!(adopted.1.len(), 3);
+    assert!(matches!(
+        &adopted.1[0],
+        protocol::ConversationMessage::System {
+            subtype: Some(subtype),
+            compact_metadata: Some(metadata),
+            ..
+        } if subtype == "compact_boundary" && metadata.cumulative_dropped_tokens == Some(4_321)
+    ));
     assert_eq!(
         adopted.2.as_deref(),
         Some("cccccccc-3333-4333-8333-cccccccccccc")
@@ -1383,7 +1391,7 @@ async fn resume_session_replays_adopts_and_emits_full_transcript() {
     assert!(matches!(
         sink.events().await.as_slice(),
         [ClientEvent::SessionResumed { session_id: emitted_id, messages }]
-            if emitted_id == &session_id && messages.len() == 2
+            if emitted_id == &session_id && messages.len() == 3
     ));
 }
 

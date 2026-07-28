@@ -727,6 +727,8 @@ mod tests {
                     text: "resume me".to_string(),
                 }],
                 is_meta: false,
+                is_compact_summary: false,
+                is_visible_in_transcript_only: false,
             },
             ConversationMessage::Assistant {
                 id: MessageId::new(),
@@ -788,6 +790,8 @@ mod tests {
         let msg = ConversationMessage::System {
             id: MessageId::new(),
             content: "you are a helpful assistant".to_string(),
+            subtype: None,
+            compact_metadata: None,
         };
         let dto = lower_conversation_message(&msg);
         assert_eq!(dto.role, "system");
@@ -817,6 +821,8 @@ mod tests {
                 },
             ],
             is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
         };
         let dto = lower_conversation_message(&msg);
         assert_eq!(

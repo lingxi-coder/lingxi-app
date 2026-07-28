@@ -119,8 +119,17 @@ pub fn normalize_messages_for_api_with_tool_search(
     let boundary_index = messages.iter().rposition(|message| {
         matches!(
             message,
-            ConversationMessage::System { content, .. }
-                if content == "Conversation compacted"
+            ConversationMessage::System {
+                subtype: Some(subtype),
+                ..
+            } if subtype == "compact_boundary"
+        ) || matches!(
+            message,
+            ConversationMessage::System {
+                subtype: None,
+                content,
+                ..
+            } if content == "Conversation compacted"
         )
     });
     let start = boundary_index.unwrap_or(0);
@@ -359,6 +368,8 @@ pub fn ensure_tool_result_pairing(messages: Vec<ConversationMessage>) -> Vec<Con
                 id,
                 content,
                 is_meta,
+                is_compact_summary,
+                is_visible_in_transcript_only,
             } = msg
             {
                 let prev_is_assistant =
@@ -374,6 +385,8 @@ pub fn ensure_tool_result_pairing(messages: Vec<ConversationMessage>) -> Vec<Con
                             id: *id,
                             content: stripped,
                             is_meta: *is_meta,
+                            is_compact_summary: *is_compact_summary,
+                            is_visible_in_transcript_only: *is_visible_in_transcript_only,
                         });
                     } else if result.is_empty() {
                         result.push(ConversationMessage::user(
@@ -472,6 +485,8 @@ pub fn ensure_tool_result_pairing(messages: Vec<ConversationMessage>) -> Vec<Con
             id: uid,
             content,
             is_meta,
+            is_compact_summary,
+            is_visible_in_transcript_only,
         }) = next
         {
             let mut c = content.clone();
@@ -495,6 +510,8 @@ pub fn ensure_tool_result_pairing(messages: Vec<ConversationMessage>) -> Vec<Con
                     id: *uid,
                     content: patched,
                     is_meta: *is_meta,
+                    is_compact_summary: *is_compact_summary,
+                    is_visible_in_transcript_only: *is_visible_in_transcript_only,
                 });
             } else {
                 // Role-alternation placeholder (claude-code `NO_CONTENT_MESSAGE`,
@@ -505,6 +522,8 @@ pub fn ensure_tool_result_pairing(messages: Vec<ConversationMessage>) -> Vec<Con
                         text: NO_CONTENT.to_string(),
                     }],
                     is_meta: true,
+                    is_compact_summary: false,
+                    is_visible_in_transcript_only: false,
                 });
             }
             i += 2;
@@ -516,6 +535,8 @@ pub fn ensure_tool_result_pairing(messages: Vec<ConversationMessage>) -> Vec<Con
                     id: protocol::MessageId::new(),
                     content: synth,
                     is_meta: true,
+                    is_compact_summary: false,
+                    is_visible_in_transcript_only: false,
                 });
             }
             i += 1;

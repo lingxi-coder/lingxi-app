@@ -686,6 +686,8 @@ mod tests {
                 content_blocks: None,
             }],
             is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
         }
     }
 

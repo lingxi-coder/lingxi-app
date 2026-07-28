@@ -219,9 +219,9 @@ pub fn post_compact_skill_attachments_from_messages(
 
 /// Convert the replayed JSONL into a fresh [`SessionState`] + the UUID of
 /// the tail message. `type: "user" | "assistant"` lines are appended to
-/// `history`; `type: "system"` / `compact_boundary` / sidechain entries
-/// are reconstructed at runtime from settings + memory and are NOT
-/// replayed.
+/// `history`; compact-boundary system lines are rebuilt as typed protocol
+/// messages, while other system / sidechain / agent-internal entries are
+/// reconstructed from settings + memory and are not replayed.
 fn build_state_from_jsonl(
     session_id: Uuid,
     messages: &[JsonlMessage],
@@ -257,20 +257,22 @@ fn build_state_from_jsonl(
                 state.ultracode_active = ultracode_state.active;
                 state.ultracode_non_meta_turns_since_reminder =
                     ultracode_state.non_meta_turns_since_reminder;
-                if m.extra
+                let is_visible_in_transcript_only = m
+                    .extra
                     .get("isVisibleInTranscriptOnly")
                     .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(false)
-                {
+                    .unwrap_or(false);
+                if is_visible_in_transcript_only {
                     state
                         .transcript_only_messages
                         .insert(MessageId::from_uuid(msg_uuid));
                 }
-                if m.extra
+                let is_compact_summary = m
+                    .extra
                     .get("isCompactSummary")
                     .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(false)
-                {
+                    .unwrap_or(false);
+                if is_compact_summary {
                     state
                         .compact_summary_messages
                         .insert(MessageId::from_uuid(msg_uuid));
@@ -279,6 +281,8 @@ fn build_state_from_jsonl(
                     id: MessageId::from_uuid(msg_uuid),
                     content: content_blocks,
                     is_meta,
+                    is_compact_summary,
+                    is_visible_in_transcript_only,
                 });
                 last_uuid = Some(msg_uuid);
             }
@@ -333,14 +337,38 @@ fn build_state_from_jsonl(
                 last_uuid = Some(msg_uuid);
             }
             _ => {
+                if is_compact_boundary(m) {
+                    let content = m
+                        .extra
+                        .get("content")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or(compaction::BOUNDARY_CONTENT)
+                        .to_string();
+                    let compact_metadata = m
+                        .extra
+                        .get("compactMetadata")
+                        .cloned()
+                        .and_then(|value| {
+                            serde_json::from_value::<protocol::CompactBoundaryMetadata>(value).ok()
+                        })
+                        .map(|mut metadata| {
+                            metadata.logical_parent_uuid = m.logical_parent_uuid.clone();
+                            metadata
+                        });
+                    state.history.push(ConversationMessage::System {
+                        id: MessageId::from_uuid(msg_uuid),
+                        content,
+                        subtype: Some("compact_boundary".to_string()),
+                        compact_metadata,
+                    });
+                }
                 if let Some(active_goal) = goal_state_from_message(m) {
                     state.active_goal = active_goal;
                 }
-                // system / compact_boundary / sidechain / agent-internal — skip
-                // for history replay, but still advance the chain pointer so
-                // the next append's parent_uuid is anchored to the last
-                // *persisted* line in the file (matching claude-code's
-                // chain semantics).
+                // Other system / sidechain / agent-internal entries are
+                // skipped for history replay. Every persisted line still
+                // advances the chain pointer so the next append is anchored to
+                // the file tail (matching claude-code's chain semantics).
                 if !m.uuid.is_empty() {
                     last_uuid = Some(msg_uuid);
                 }

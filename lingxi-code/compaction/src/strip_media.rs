@@ -33,6 +33,8 @@ fn strip_one(message: ConversationMessage) -> ConversationMessage {
         id,
         content,
         is_meta,
+        is_compact_summary,
+        is_visible_in_transcript_only,
     } = message
     else {
         return message;
@@ -53,6 +55,8 @@ fn strip_one(message: ConversationMessage) -> ConversationMessage {
         id,
         content: new_content,
         is_meta,
+        is_compact_summary,
+        is_visible_in_transcript_only,
     }
 }
 
@@ -83,6 +87,8 @@ mod tests {
                 },
             ],
             is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
         };
         let out = strip_images_from_messages(vec![msg]);
         let ConversationMessage::User { content, .. } = &out[0] else {

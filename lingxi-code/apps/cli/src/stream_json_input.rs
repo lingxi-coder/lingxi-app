@@ -38,7 +38,7 @@
 #![forbid(unsafe_code)]
 
 use crate::stream_json::{serialize_ndjson_line, OutboundMsg, OutboundTx};
-use protocol::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
+use protocol::{CompactBoundaryMetadata, ContentBlock, ConversationMessage, MessageId, ToolUseId};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 #[cfg(test)]
@@ -116,10 +116,6 @@ pub struct HistoryInput {
     pub message: ConversationMessage,
     /// Original normalized assistant frame for `--replay-user-messages`.
     pub replay_frame: Option<Value>,
-    /// SDK `compact_metadata` payload for a compact-boundary system frame.
-    /// `None` for assistant history. The orchestrator converts this SDK
-    /// snake_case shape into the canonical JSONL compact boundary.
-    pub compact_metadata: Option<Value>,
 }
 
 /// Legacy SDK `bash_command` input.
@@ -376,7 +372,6 @@ fn parse_history_frame(frame: &Value) -> Option<HistoryInput> {
                         .map(str::to_string),
                 },
                 replay_frame: Some(frame.clone()),
-                compact_metadata: None,
             })
         }
         "system" => {
@@ -386,17 +381,48 @@ fn parse_history_frame(frame: &Value) -> Option<HistoryInput> {
             if frame.get("subtype").and_then(Value::as_str) != Some("compact_boundary") {
                 return None;
             }
-            let compact_metadata = frame.get("compact_metadata")?.clone();
+            let compact_metadata: CompactBoundaryMetadata =
+                serde_json::from_value(camelize_json_keys(frame.get("compact_metadata")?.clone()))
+                    .ok()?;
             Some(HistoryInput {
-                message: ConversationMessage::System {
-                    id: message_id,
-                    content: "Conversation compacted".to_string(),
-                },
+                message: ConversationMessage::compact_boundary(
+                    message_id,
+                    "Conversation compacted".to_string(),
+                    compact_metadata,
+                ),
                 replay_frame: None,
-                compact_metadata: Some(compact_metadata),
             })
         }
         _ => None,
+    }
+}
+
+fn camelize_json_keys(value: Value) -> Value {
+    match value {
+        Value::Object(object) => Value::Object(
+            object
+                .into_iter()
+                .map(|(key, value)| {
+                    let mut parts = key.split('_');
+                    let mut camel = parts.next().unwrap_or_default().to_string();
+                    for part in parts {
+                        let mut chars = part.chars();
+                        if let Some(first) = chars.next() {
+                            camel.extend(first.to_uppercase());
+                            camel.extend(chars);
+                        }
+                    }
+                    (camel, camelize_json_keys(value))
+                })
+                .collect(),
+        ),
+        Value::Array(values) => Value::Array(
+            values
+                .into_iter()
+                .map(camelize_json_keys)
+                .collect::<Vec<_>>(),
+        ),
+        scalar => scalar,
     }
 }
 
@@ -1046,12 +1072,17 @@ mod tests {
         assert!(matches!(
             system,
             FrameAction::History(HistoryInput {
-                message: ConversationMessage::System { content, .. },
+                message: ConversationMessage::System {
+                    content,
+                    subtype: Some(subtype),
+                    compact_metadata: Some(metadata),
+                    ..
+                },
                 replay_frame: None,
-                compact_metadata: Some(metadata),
             }) if content == "Conversation compacted"
-                && metadata["trigger"] == "manual"
-                && metadata["pre_tokens"] == 42
+                && subtype == "compact_boundary"
+                && metadata.trigger == protocol::CompactTrigger::Manual
+                && metadata.pre_tokens == 42
         ));
 
         let bash = process_line(

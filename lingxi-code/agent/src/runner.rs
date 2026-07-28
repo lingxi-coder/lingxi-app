@@ -630,6 +630,8 @@ async fn build_preload_messages(ctx: &SubagentContext) -> Vec<protocol::Conversa
                         id: MessageId::new(),
                         content: blocks,
                         is_meta: false,
+                        is_compact_summary: false,
+                        is_visible_in_transcript_only: false,
                     });
                 }
             }
@@ -1371,6 +1373,8 @@ async fn run_subagent_loop(
                     id: MessageId::new(),
                     content: tool_results,
                     is_meta: false,
+                    is_compact_summary: false,
+                    is_visible_in_transcript_only: false,
                 };
                 history.push(tool_results_msg.clone());
                 emit_message(&out_tx, agent_id, &tool_results_msg).await;

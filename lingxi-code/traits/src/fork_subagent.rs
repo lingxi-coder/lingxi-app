@@ -201,6 +201,8 @@ pub fn build_forked_messages(
                 text: build_child_message(directive),
             }],
             is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
         }];
     }
 
@@ -226,6 +228,8 @@ pub fn build_forked_messages(
             id: MessageId::new(),
             content,
             is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
         },
     ]
 }
@@ -342,6 +346,8 @@ Your directive: Fix the bug in foo.rs";
                 text: build_child_message("do it"),
             }],
             is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
         };
         assert!(is_in_fork_child(&[child]));
 

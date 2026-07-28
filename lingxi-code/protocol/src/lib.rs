@@ -33,8 +33,9 @@ pub use ids::{
 pub use mcp_name::normalize_name_for_mcp;
 pub use message_size::text_byte_size;
 pub use messages::{
-    ContentBlock, ConversationMessage, DocumentSource, ImageSource, MemoryEntry, MemoryEntryTier,
-    MessageRole,
+    CompactActiveGoalState, CompactBoundaryMetadata, CompactTrigger, ContentBlock,
+    ConversationMessage, DocumentSource, ImageSource, MemoryEntry, MemoryEntryTier, MessageRole,
+    PreservedMessages, PreservedSegment,
 };
 pub use secret::{
     RedactableContent, Secret, SecretKindDto, SecureStorageData, SecureStorageMetadata,

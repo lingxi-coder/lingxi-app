@@ -856,6 +856,8 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
             id: user_id,
             content: tool_results,
             is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
         };
         {
             let mut s = orch.session.lock().await;

@@ -173,6 +173,112 @@ pub enum DocumentSource {
     },
 }
 
+/// Whether a compaction was user-initiated or triggered automatically.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CompactTrigger {
+    /// User ran `/compact`.
+    Manual,
+    /// The token threshold triggered compaction.
+    #[default]
+    Auto,
+}
+
+impl CompactTrigger {
+    /// The compact-metadata wire value for this trigger.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Auto => "auto",
+        }
+    }
+}
+
+/// Relink metadata for a preserved compacted-history segment.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreservedSegment {
+    /// UUID of the first preserved message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head_uuid: Option<String>,
+    /// UUID of the message the preserved segment follows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor_uuid: Option<String>,
+    /// UUID of the last preserved message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tail_uuid: Option<String>,
+}
+
+/// Re-parenting list used to splice a preserved tail back into history.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreservedMessages {
+    /// UUID of the message the preserved tail follows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor_uuid: Option<String>,
+    /// UUIDs participating in the reconstructed chain.
+    pub uuids: Vec<String>,
+    /// UUIDs of all preserved messages.
+    pub all_uuids: Vec<String>,
+}
+
+/// Protocol-owned snapshot of an active session goal carried through compact
+/// metadata. It mirrors the engine state without introducing a dependency
+/// from `protocol` back to `engine`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompactActiveGoalState {
+    /// User-supplied goal condition.
+    pub condition: String,
+    /// When the goal became active.
+    pub set_at: std::time::SystemTime,
+    /// Most recent stop-time evaluation reason, when available.
+    #[serde(default)]
+    pub last_reason: Option<String>,
+}
+
+/// Typed metadata carried by a compact-boundary system message.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompactBoundaryMetadata {
+    /// `'manual' | 'auto'`.
+    #[serde(default)]
+    pub trigger: CompactTrigger,
+    /// Token count immediately before compaction.
+    #[serde(default)]
+    pub pre_tokens: u64,
+    /// Token count after the rebuilt history is assembled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub post_tokens: Option<u64>,
+    /// Cumulative discarded tokens across compactions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cumulative_dropped_tokens: Option<u64>,
+    /// Time spent compacting, in milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    /// User-context snapshot taken at compaction time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_context: Option<String>,
+    /// Number of messages replaced by the summary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub messages_summarized: Option<u32>,
+    /// Deferred tools discovered before compaction.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pre_compact_discovered_tools: Vec<String>,
+    /// Relink metadata for a preserved tail.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preserved_segment: Option<PreservedSegment>,
+    /// Complete re-splice list for a preserved tail.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preserved_messages: Option<PreservedMessages>,
+    /// Active `/goal` snapshot at compaction time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_goal: Option<CompactActiveGoalState>,
+    /// UUID of the last pre-compact message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logical_parent_uuid: Option<String>,
+}
+
 /// A single message in a conversation, role-tagged for serde.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "lowercase")]
@@ -192,6 +298,21 @@ pub enum ConversationMessage {
         /// user messages.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         is_meta: bool,
+        /// `true` when this user message contains a compacted-history summary.
+        #[serde(
+            default,
+            rename = "isCompactSummary",
+            skip_serializing_if = "std::ops::Not::not"
+        )]
+        is_compact_summary: bool,
+        /// `true` when the message belongs in transcript history but not normal
+        /// user-facing rendering.
+        #[serde(
+            default,
+            rename = "isVisibleInTranscriptOnly",
+            skip_serializing_if = "std::ops::Not::not"
+        )]
+        is_visible_in_transcript_only: bool,
     },
     /// Assistant-authored message — may include tool-use blocks.
     Assistant {
@@ -208,6 +329,16 @@ pub enum ConversationMessage {
         id: MessageId,
         /// The system prompt body.
         content: String,
+        /// Structured system-message subtype, when present.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subtype: Option<String>,
+        /// Typed compact-boundary metadata.
+        #[serde(
+            default,
+            rename = "compactMetadata",
+            skip_serializing_if = "Option::is_none"
+        )]
+        compact_metadata: Option<CompactBoundaryMetadata>,
     },
 }
 
@@ -219,6 +350,8 @@ impl ConversationMessage {
             id,
             content: vec![ContentBlock::Text { text }],
             is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
         }
     }
 
@@ -232,6 +365,52 @@ impl ConversationMessage {
             id,
             content: vec![ContentBlock::Text { text }],
             is_meta: true,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+        }
+    }
+
+    /// Construct a compact-summary user message.
+    #[must_use]
+    pub fn compact_summary(id: MessageId, text: String) -> Self {
+        Self::User {
+            id,
+            content: vec![ContentBlock::Text { text }],
+            is_meta: false,
+            is_compact_summary: true,
+            is_visible_in_transcript_only: true,
+        }
+    }
+
+    /// Construct a typed compact-boundary system message.
+    #[must_use]
+    pub fn compact_boundary(
+        id: MessageId,
+        content: String,
+        metadata: CompactBoundaryMetadata,
+    ) -> Self {
+        Self::System {
+            id,
+            content,
+            subtype: Some("compact_boundary".to_string()),
+            compact_metadata: Some(metadata),
+        }
+    }
+
+    /// Replace the typed metadata on a compact-boundary system message.
+    ///
+    /// Returns `false` for non-boundary messages and leaves them unchanged.
+    pub fn set_compact_metadata(&mut self, metadata: CompactBoundaryMetadata) -> bool {
+        match self {
+            Self::System {
+                subtype: Some(subtype),
+                compact_metadata,
+                ..
+            } if subtype == "compact_boundary" => {
+                *compact_metadata = Some(metadata);
+                true
+            }
+            _ => false,
         }
     }
 
@@ -252,6 +431,8 @@ impl ConversationMessage {
             id,
             content,
             is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
         }
     }
 
@@ -273,6 +454,8 @@ impl ConversationMessage {
             id,
             content,
             is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
         }
     }
 
@@ -291,6 +474,30 @@ impl ConversationMessage {
     #[must_use]
     pub fn is_meta(&self) -> bool {
         matches!(self, Self::User { is_meta: true, .. })
+    }
+
+    /// Return `true` when this is a compact-summary user message.
+    #[must_use]
+    pub fn is_compact_summary(&self) -> bool {
+        matches!(
+            self,
+            Self::User {
+                is_compact_summary: true,
+                ..
+            }
+        )
+    }
+
+    /// Return `true` when this message is transcript-only.
+    #[must_use]
+    pub fn is_visible_in_transcript_only(&self) -> bool {
+        matches!(
+            self,
+            Self::User {
+                is_visible_in_transcript_only: true,
+                ..
+            }
+        )
     }
 
     /// Return the stable identifier of this message.
@@ -504,6 +711,8 @@ mod tests {
                 },
             }],
             is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
         };
         let line = serde_json::to_string(&m).unwrap();
         // A non-meta user message must NOT serialize an `is_meta` field
@@ -532,6 +741,68 @@ mod tests {
         let back: ConversationMessage = serde_json::from_str(&line).unwrap();
         assert_eq!(back, m);
         assert!(back.is_meta());
+    }
+
+    #[test]
+    fn additive_compact_fields_leave_plain_user_wire_unchanged() {
+        let id = MessageId::from_uuid(
+            uuid::Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap(),
+        );
+        let message = ConversationMessage::user(id, "hello".to_string());
+        assert_eq!(
+            serde_json::to_string(&message).unwrap(),
+            r#"{"role":"user","id":"11111111-1111-1111-1111-111111111111","content":[{"type":"text","text":"hello"}]}"#
+        );
+    }
+
+    #[test]
+    fn additive_compact_fields_leave_plain_system_wire_unchanged() {
+        let id = MessageId::from_uuid(
+            uuid::Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap(),
+        );
+        let message = ConversationMessage::System {
+            id,
+            content: "notice".to_string(),
+            subtype: None,
+            compact_metadata: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&message).unwrap(),
+            r#"{"role":"system","id":"22222222-2222-2222-2222-222222222222","content":"notice"}"#
+        );
+    }
+
+    #[test]
+    fn compact_summary_constructor_sets_flags_and_roundtrips() {
+        let message = ConversationMessage::compact_summary(MessageId::new(), "summary".to_string());
+        assert!(message.is_compact_summary());
+        assert!(message.is_visible_in_transcript_only());
+        let value = serde_json::to_value(&message).unwrap();
+        assert_eq!(
+            value.get("isCompactSummary"),
+            Some(&serde_json::json!(true))
+        );
+        assert_eq!(
+            value.get("isVisibleInTranscriptOnly"),
+            Some(&serde_json::json!(true))
+        );
+        assert_eq!(
+            serde_json::from_value::<ConversationMessage>(value).unwrap(),
+            message
+        );
+    }
+
+    #[test]
+    fn legacy_partial_compact_metadata_deserializes_with_safe_defaults() {
+        let metadata: CompactBoundaryMetadata = serde_json::from_value(serde_json::json!({
+            "cumulativeDroppedTokens": 4_321,
+            "preCompactDiscoveredTools": ["DeferredTool"]
+        }))
+        .unwrap();
+        assert_eq!(metadata.trigger, CompactTrigger::Auto);
+        assert_eq!(metadata.pre_tokens, 0);
+        assert_eq!(metadata.cumulative_dropped_tokens, Some(4_321));
+        assert_eq!(metadata.pre_compact_discovered_tools, vec!["DeferredTool"]);
     }
 
     #[test]

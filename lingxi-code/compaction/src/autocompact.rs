@@ -143,14 +143,9 @@ impl Autocompactor {
     /// `suppress_follow_up_questions = true`, `transcript_path = None`) — the
     /// TS `compact.ts` summary-request path.
     ///
-    /// **Divergence — summary message role.** TS builds the summary as a
-    /// *user* message carrying the `isCompactSummary` /
-    /// `isVisibleInTranscriptOnly` metadata flags. The Rust `protocol`
-    /// `ConversationMessage` has no such flag, so the summary is emitted as a
-    /// [`ConversationMessage::User`] (role-faithful, matching TS
-    /// `createUserMessage(getCompactUserSummaryMessage(...))`); the metadata
-    /// flags have no protocol equivalent and are dropped. The user-facing text
-    /// is byte-for-byte the TS string.
+    /// The summary is a user message carrying `isCompactSummary` and
+    /// `isVisibleInTranscriptOnly`, matching Claude Code's compact-history
+    /// representation. The user-facing text is byte-for-byte the TS string.
     ///
     /// **Fallback (no runner/slot).** Without a runner there is no model to
     /// call, so the layer cannot produce a real summary. Rather than ship a
@@ -382,9 +377,7 @@ impl Autocompactor {
                 true_post_compact_token_count: result.usage.tokens.input,
                 compaction_usage: Some(result.usage),
                 summary_model,
-                // Divergence: TS uses a user message with isCompactSummary;
-                // protocol lacks the flag, so we emit a plain User message.
-                summary_messages: vec![ConversationMessage::user(
+                summary_messages: vec![ConversationMessage::compact_summary(
                     protocol::MessageId::new(),
                     summary_text,
                 )],
@@ -421,7 +414,7 @@ impl Autocompactor {
             true_post_compact_token_count: (summary_text.len() as u64) / 4,
             compaction_usage: Some(Usage::default()),
             summary_model: self.config.summary_model.clone(),
-            summary_messages: vec![ConversationMessage::user(
+            summary_messages: vec![ConversationMessage::compact_summary(
                 protocol::MessageId::new(),
                 summary_text,
             )],
@@ -589,6 +582,8 @@ mod tests {
                 content_blocks: None,
             }],
             is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
         }
     }
 

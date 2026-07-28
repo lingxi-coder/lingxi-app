@@ -70,11 +70,37 @@ pub fn history_to_jsonl_lines(
     let mut lines = Vec::with_capacity(history.len());
     let mut parent_uuid: Option<String> = None;
     for msg in history {
+        let mut extra = serde_json::Map::new();
+        let mut logical_parent_uuid = None;
+        let mut resets_chain = false;
         let (kind, inner) = match msg {
-            ConversationMessage::User { content, .. } => (
-                "user",
-                serde_json::json!({ "role": "user", "content": content }),
-            ),
+            ConversationMessage::User {
+                content,
+                is_meta,
+                is_compact_summary,
+                is_visible_in_transcript_only,
+                ..
+            } => {
+                if *is_meta {
+                    extra.insert("isMeta".to_string(), serde_json::Value::Bool(true));
+                }
+                if *is_visible_in_transcript_only {
+                    extra.insert(
+                        "isVisibleInTranscriptOnly".to_string(),
+                        serde_json::Value::Bool(true),
+                    );
+                }
+                if *is_compact_summary {
+                    extra.insert(
+                        "isCompactSummary".to_string(),
+                        serde_json::Value::Bool(true),
+                    );
+                }
+                (
+                    "user",
+                    serde_json::json!({ "role": "user", "content": content }),
+                )
+            }
             ConversationMessage::Assistant { content, .. } => {
                 let mut inner = serde_json::json!({ "role": "assistant", "content": content });
                 // Stamp the parent's active model so `state_from_messages`
@@ -87,6 +113,37 @@ pub fn history_to_jsonl_lines(
                 }
                 ("assistant", inner)
             }
+            ConversationMessage::System {
+                content,
+                subtype: Some(subtype),
+                compact_metadata: Some(metadata),
+                ..
+            } if subtype == "compact_boundary" => {
+                resets_chain = true;
+                logical_parent_uuid = metadata
+                    .logical_parent_uuid
+                    .clone()
+                    .or_else(|| parent_uuid.clone());
+                let mut compact_metadata =
+                    serde_json::to_value(metadata).unwrap_or_else(|_| serde_json::json!({}));
+                if let Some(object) = compact_metadata.as_object_mut() {
+                    object.remove("logicalParentUuid");
+                }
+                extra.insert(
+                    "subtype".to_string(),
+                    serde_json::Value::String(subtype.clone()),
+                );
+                extra.insert(
+                    "content".to_string(),
+                    serde_json::Value::String(content.clone()),
+                );
+                extra.insert(
+                    "level".to_string(),
+                    serde_json::Value::String("info".to_string()),
+                );
+                extra.insert("compactMetadata".to_string(), compact_metadata);
+                ("system", serde_json::Value::Null)
+            }
             ConversationMessage::System { content, .. } => (
                 "system",
                 serde_json::json!({ "role": "system", "content": content }),
@@ -95,14 +152,15 @@ pub fn history_to_jsonl_lines(
         // Bare 8-4-4-4-12 lowercase uuid (NOT the `msg:`-prefixed display form)
         // — the JSONL schema + `validate_uuid` regex require the raw uuid.
         let uuid = msg.id().as_uuid().to_string();
-        let mut extra = serde_json::Map::new();
-        if msg.is_meta() {
-            extra.insert("isMeta".to_string(), serde_json::Value::Bool(true));
-        }
+        let line_parent_uuid = if resets_chain {
+            None
+        } else {
+            parent_uuid.take()
+        };
         let line = JsonlMessage {
             message_type: kind.to_string(),
             uuid: uuid.clone(),
-            parent_uuid: parent_uuid.take(),
+            parent_uuid: line_parent_uuid,
             session_id: session_uuid.to_string(),
             timestamp: ts.clone(),
             cwd: cwd.to_string(),
@@ -114,7 +172,7 @@ pub fn history_to_jsonl_lines(
             entrypoint: Some("cli".to_string()),
             slug: None,
             prompt_id: None,
-            logical_parent_uuid: None,
+            logical_parent_uuid,
             extra,
         };
         parent_uuid = Some(uuid);
@@ -135,6 +193,8 @@ mod tests {
                 text: text.to_string(),
             }],
             is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
         }
     }
 
@@ -183,6 +243,46 @@ mod tests {
         let lines = history_to_jsonl_lines(&[user("hi")], "s", "/c", "1", "");
         assert_eq!(lines[0].message["role"], "user");
         assert!(lines[0].message["content"].is_array());
+    }
+
+    #[test]
+    fn compact_types_survive_background_snapshot_and_resume() {
+        let old = user("old");
+        let (boundary, _) = compaction::create_compact_boundary(
+            compaction::CompactTrigger::Manual,
+            42,
+            Some(old.id()),
+            None,
+            None,
+            &[],
+        );
+        let summary = ConversationMessage::compact_summary(
+            protocol::MessageId::new(),
+            "Summary:\nS".to_string(),
+        );
+        let history = vec![old, boundary.clone(), summary.clone()];
+        let lines = history_to_jsonl_lines(&history, "s", "/c", "1", "");
+
+        assert_eq!(lines[1].parent_uuid, None);
+        assert_eq!(
+            lines[1]
+                .extra
+                .get("subtype")
+                .and_then(|value| value.as_str()),
+            Some("compact_boundary")
+        );
+        assert_eq!(
+            lines[2].extra.get("isCompactSummary"),
+            Some(&serde_json::Value::Bool(true))
+        );
+        assert_eq!(
+            lines[2].extra.get("isVisibleInTranscriptOnly"),
+            Some(&serde_json::Value::Bool(true))
+        );
+
+        let state = crate::resume::state_from_messages(uuid::Uuid::nil(), &lines);
+        assert_eq!(state.history[1], boundary);
+        assert_eq!(state.history[2], summary);
     }
 
     /// Regression (BGF-1): the parent's active model is stamped onto assistant

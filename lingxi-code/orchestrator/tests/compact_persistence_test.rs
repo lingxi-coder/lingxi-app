@@ -123,6 +123,23 @@ async fn cold_resume_reconstructs_post_compact_state() {
         boundary_pos, 0,
         "boundary marker leads the compacted history"
     );
+    let hot_boundary_metadata = match &hot_history[boundary_pos] {
+        ConversationMessage::System {
+            subtype: Some(subtype),
+            compact_metadata: Some(metadata),
+            ..
+        } => {
+            assert_eq!(subtype, "compact_boundary");
+            metadata.clone()
+        }
+        other => panic!("expected typed compact boundary, got {other:?}"),
+    };
+    assert!(
+        hot_history
+            .iter()
+            .any(ConversationMessage::is_compact_summary),
+        "hot history carries the typed compact-summary flag"
+    );
 
     // ---- On-disk shape (claude 2.1.207) ---------------------------------- //
     let reader = JsonlReader::new(session_path.clone(), fs.clone());
@@ -157,6 +174,16 @@ async fn cold_resume_reconstructs_post_compact_state() {
         .extra
         .get("compactMetadata")
         .expect("compactMetadata persisted");
+    let mut expected_cm =
+        serde_json::to_value(&hot_boundary_metadata).expect("hot compact metadata serializes");
+    expected_cm
+        .as_object_mut()
+        .expect("compact metadata object")
+        .remove("logicalParentUuid");
+    assert_eq!(
+        cm, &expected_cm,
+        "hot typed metadata and persisted compactMetadata stay identical"
+    );
     assert_eq!(cm.get("trigger").and_then(Value::as_str), Some("auto"));
     assert!(
         cm.get("postTokens").and_then(Value::as_u64).is_some(),
@@ -234,20 +261,23 @@ async fn cold_resume_reconstructs_post_compact_state() {
     let session_uuid = uuid::Uuid::new_v4();
     let cold_state = state_from_messages(session_uuid, &chain);
 
-    // The boundary system line is skipped on replay (reconstructed at runtime);
-    // everything else must match the hot post-compact history exactly — the
-    // summary, the re-spliced preserved tail, and the post-compact reply. No
-    // summarized pre-compact message may re-enter.
-    let hot_minus_marker: Vec<ConversationMessage> = hot_history
-        .iter()
-        .filter(|m| !compaction::is_compact_boundary(m))
-        .cloned()
-        .collect();
+    // The boundary, summary flags, re-spliced preserved tail, and
+    // post-compact reply all use the same typed representation after a cold
+    // resume. No summarized pre-compact message may re-enter.
     assert_eq!(
         shape(&cold_state.history),
-        shape(&hot_minus_marker),
+        shape(&hot_history),
         "cold-resume history must equal the hot post-compact history"
     );
+    assert!(compaction::is_compact_boundary(&cold_state.history[0]));
+    assert_eq!(
+        cold_state.history[0], hot_history[0],
+        "cold-resume boundary retains the hot typed metadata"
+    );
+    assert!(cold_state
+        .history
+        .iter()
+        .any(ConversationMessage::is_compact_summary));
     for (_, text) in shape(&cold_state.history) {
         assert!(
             !text.contains("small one") || text.contains("Summary"),
@@ -396,8 +426,15 @@ fn compact_summary_line_replays_as_user_history() {
     let state = state_from_messages(uuid::Uuid::new_v4(), &[summary]);
     assert_eq!(state.history.len(), 1, "summary line replays into history");
     match &state.history[0] {
-        ConversationMessage::User { is_meta, .. } => {
+        ConversationMessage::User {
+            is_meta,
+            is_compact_summary,
+            is_visible_in_transcript_only,
+            ..
+        } => {
             assert!(!is_meta, "summary replays as a NORMAL user message");
+            assert!(*is_compact_summary);
+            assert!(*is_visible_in_transcript_only);
         }
         other => panic!("expected a user message, got {other:?}"),
     }

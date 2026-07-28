@@ -3231,7 +3231,7 @@ impl ConversationOrchestrator {
         // `preCompactDiscoveredTools` carries the ToolSearch-loaded set so a cold
         // `--resume` re-marks them loaded (empty ⇒ field omitted on the wire).
         let discovered_tools = self.tools.deferral().loaded_tool_names();
-        let (marker, mut metadata) = compaction::create_compact_boundary_with_preserved_tail(
+        let (mut marker, mut metadata) = compaction::create_compact_boundary_with_preserved_tail(
             trigger,
             pre_tokens_estimate,
             None,
@@ -3313,6 +3313,8 @@ impl ConversationOrchestrator {
             .fetch_add(dropped_this_pass, std::sync::atomic::Ordering::Relaxed);
         metadata.cumulative_dropped_tokens =
             Some(previous_dropped.saturating_add(dropped_this_pass));
+        let pre_boundary_last_uuid = self.last_jsonl_uuid.lock().await.clone();
+        metadata.logical_parent_uuid = pre_boundary_last_uuid.clone();
 
         let messages_after = u32::try_from(history_after.len()).unwrap_or(u32::MAX);
         let bytes_after: u64 = history_after.iter().map(protocol::text_byte_size).sum();
@@ -3321,7 +3323,12 @@ impl ConversationOrchestrator {
         // Swap history under the same lock.
         {
             let mut s = self.session.lock().await;
-            metadata.active_goal = s.active_goal.clone();
+            metadata.active_goal = s
+                .active_goal
+                .as_ref()
+                .map(compaction::compact_active_goal_from_engine);
+            debug_assert!(marker.set_compact_metadata(metadata.clone()));
+            history_after[0] = marker.clone();
             s.history = history_after;
         }
         // P1-05: persist the full compaction transition (claude 2.1.207
@@ -3345,7 +3352,6 @@ impl ConversationOrchestrator {
         //    already-persisted members).
         // 4. Restored file attachments, chained after the tail (the
         //    `attachments` slot of `buildPostCompactMessages`).
-        let pre_boundary_last_uuid = self.last_jsonl_uuid.lock().await.clone();
         self.persist_compact_boundary_to_jsonl(&marker, &metadata)
             .await;
         for m in &result.messages {
@@ -4814,6 +4820,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             id: MessageId::new(),
             content: tool_results,
             is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
         };
         {
             let mut s = self.session.lock().await;
@@ -4847,11 +4855,24 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     /// through a model turn: the next user message observes the seeded history
     /// exactly once and input ordering remains owned by the caller.
     pub async fn append_external_history_message(&self, msg: ConversationMessage) {
+        let compact_metadata = match &msg {
+            ConversationMessage::System {
+                subtype: Some(subtype),
+                compact_metadata: Some(metadata),
+                ..
+            } if subtype == "compact_boundary" => Some(metadata.clone()),
+            _ => None,
+        };
         {
             let mut session = self.session.lock().await;
             session.history.push(msg.clone());
         }
-        self.persist_message_to_jsonl(&msg).await;
+        if let Some(metadata) = compact_metadata {
+            self.persist_compact_boundary_to_jsonl(&msg, &metadata)
+                .await;
+        } else {
+            self.persist_message_to_jsonl(&msg).await;
+        }
     }
 
     /// Append an SDK/stream-json compact boundary with its structured metadata.
@@ -4863,14 +4884,19 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     /// resume semantics for externally replayed compacted sessions.
     pub async fn append_external_compact_boundary(
         &self,
-        marker: ConversationMessage,
+        mut marker: ConversationMessage,
         sdk_compact_metadata: serde_json::Value,
     ) {
+        let compact_metadata = camelize_json_keys(sdk_compact_metadata);
+        if let Ok(typed_metadata) =
+            serde_json::from_value::<protocol::CompactBoundaryMetadata>(compact_metadata.clone())
+        {
+            let _ = marker.set_compact_metadata(typed_metadata);
+        }
         {
             let mut session = self.session.lock().await;
             session.history.push(marker.clone());
         }
-        let compact_metadata = camelize_json_keys(sdk_compact_metadata);
         self.persist_compact_boundary_jsonl_value(&marker, compact_metadata)
             .await;
     }
@@ -4953,8 +4979,16 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // claude's camelCase keys; `logicalParentUuid` is a TOP-LEVEL line
         // field (`x9r` spreads it as a message-level sibling), never a
         // `compactMetadata` member — strip it defensively.
+        let marker_metadata = match marker {
+            ConversationMessage::System {
+                compact_metadata: Some(compact_metadata),
+                ..
+            } => compact_metadata,
+            _ => metadata,
+        };
+        debug_assert_eq!(marker_metadata, metadata);
         let mut compact_metadata =
-            serde_json::to_value(metadata).unwrap_or_else(|_| serde_json::json!({}));
+            serde_json::to_value(marker_metadata).unwrap_or_else(|_| serde_json::json!({}));
         if let Some(obj) = compact_metadata.as_object_mut() {
             obj.remove("logicalParentUuid");
         }
@@ -5212,11 +5246,13 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // claude's on-disk order (`isVisibleInTranscriptOnly` before
         // `isCompactSummary`, between `message` and `uuid` — the schema's user
         // arm emits them there).
-        if compact_summary {
+        if msg.is_visible_in_transcript_only() || compact_summary {
             jmsg.extra.insert(
                 "isVisibleInTranscriptOnly".to_string(),
                 serde_json::Value::Bool(true),
             );
+        }
+        if msg.is_compact_summary() || compact_summary {
             jmsg.extra.insert(
                 "isCompactSummary".to_string(),
                 serde_json::Value::Bool(true),
@@ -8434,6 +8470,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                             id: MessageId::new(),
                             content: vec![drained.block],
                             is_meta: false,
+                            is_compact_summary: false,
+                            is_visible_in_transcript_only: false,
                         };
                         {
                             let mut s = self.session.lock().await;
@@ -16978,6 +17016,8 @@ mod persist_with_parent_tests {
                 content_blocks: None,
             }],
             is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
         };
         orch.persist_message_to_jsonl_with_parent(&tr_a, Some(a_uuid.clone()))
             .await;
@@ -16991,6 +17031,8 @@ mod persist_with_parent_tests {
                 content_blocks: None,
             }],
             is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
         };
         orch.persist_message_to_jsonl_with_parent(&tr_b, Some(b_uuid.clone()))
             .await;
@@ -17087,6 +17129,8 @@ mod prefix_overflow_block_count_tests {
                     document_block(),
                 ],
                 is_meta: false,
+                is_compact_summary: false,
+                is_visible_in_transcript_only: false,
             },
             ConversationMessage::Assistant {
                 id: MessageId::new(),
@@ -17097,6 +17141,8 @@ mod prefix_overflow_block_count_tests {
             ConversationMessage::System {
                 id: MessageId::new(),
                 content: "system".into(),
+                subtype: None,
+                compact_metadata: None,
             },
         ];
         let (docs, imgs) = count_document_and_image_blocks(&msgs);

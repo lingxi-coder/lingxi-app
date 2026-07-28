@@ -273,6 +273,8 @@ mod tests {
             id: MessageId::new(),
             content: vec![ContentBlock::Text { text: text.into() }],
             is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
         }
     }
 
@@ -332,6 +334,8 @@ mod tests {
                     content_blocks: None,
                 }],
                 is_meta: false,
+                is_compact_summary: false,
+                is_visible_in_transcript_only: false,
             },
         ];
         let out = rebuild_messages(&h);
@@ -380,6 +384,8 @@ mod tests {
                 content_blocks: None,
             }],
             is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
         }];
         let out = rebuild_messages(&h);
         assert_eq!(out.len(), 1);
@@ -448,6 +454,8 @@ mod tests {
                 data: "opaque".into(),
             }],
             is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
         }];
         let out = rebuild_messages(&h);
         assert_eq!(out.len(), 1);
@@ -463,6 +471,8 @@ mod tests {
             ConversationMessage::System {
                 id: MessageId::new(),
                 content: "you are a helpful assistant".into(),
+                subtype: None,
+                compact_metadata: None,
             },
             ConversationMessage::User {
                 id: MessageId::new(),
@@ -472,6 +482,8 @@ mod tests {
                     },
                 }],
                 is_meta: false,
+                is_compact_summary: false,
+                is_visible_in_transcript_only: false,
             },
         ];
         assert!(rebuild_messages(&h).is_empty());

@@ -14,6 +14,8 @@ async fn over_threshold_triggers_autocompact() {
                 ),
             }],
             is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
         });
     }
     let r = orch.process_iteration(messages, 0).await.unwrap();

@@ -7,155 +7,46 @@
 //! (`annotateBoundaryWithPreservedSegment`), `:600-611` / `:330-338`
 //! (`preCompactDiscoveredTools`, `buildPostCompactMessages`).
 //!
-//! Wire-shape note (divergence — flagged BLOCKED in the batch report):
-//! TS represents the boundary as `{ type:'system', subtype:'compact_boundary',
-//! content:'Conversation compacted', compactMetadata:{…} }`. Rust's
-//! [`protocol::ConversationMessage::System`] currently carries only `{ id,
-//! content }` with no `subtype` discriminant, and `protocol/` is frozen for
-//! this batch (additive variant/field must be raised with the user). So the
-//! in-history marker is a `System` message whose `content` equals the exact TS
-//! sentinel string [`BOUNDARY_CONTENT`] (`"Conversation compacted"`), and the
-//! rich [`CompactBoundaryMetadata`] is carried alongside as a typed value (the
-//! TUI already renders the boundary from a `CompactionCompleted` event, not by
-//! re-reading message content, so the metadata does not need to round-trip
-//! through `protocol` to render today). When `protocol` gains a
-//! `compact_boundary` subtype the sentinel-string detection in
-//! [`is_compact_boundary`] should switch to the subtype check.
+//! The in-memory marker now carries the same typed `subtype` and
+//! `compactMetadata` fields as the persisted boundary. Exact-content matching
+//! remains only as a compatibility fallback for legacy in-memory snapshots.
 
-use engine::session::ActiveGoalState;
+pub use protocol::{
+    CompactActiveGoalState, CompactBoundaryMetadata, CompactTrigger, PreservedMessages,
+    PreservedSegment,
+};
 use protocol::{ConversationMessage, MessageId};
-use serde::{Deserialize, Serialize};
 
 /// Exact content string TS stamps on every compact-boundary system message
 /// (`createCompactBoundaryMessage` sets `content` to `Conversation compacted`).
-/// Also the sentinel [`is_compact_boundary`] matches on until `protocol`
-/// grows a real `subtype` discriminant.
+/// Legacy markers without a subtype are still recognized by this sentinel.
 pub const BOUNDARY_CONTENT: &str = "Conversation compacted";
 
-/// Whether a compaction was user-initiated (`/compact`) or fired
-/// automatically by the token-threshold autocompactor.
+/// Convert the engine-owned active-goal state into its compact wire snapshot.
 ///
-/// TS: the `trigger` field of `compactMetadata` — `'manual' | 'auto'`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum CompactTrigger {
-    /// User ran `/compact`.
-    Manual,
-    /// Token threshold tripped the autocompactor.
-    Auto,
-}
-
-impl CompactTrigger {
-    /// The exact TS string for this trigger (`"manual"` / `"auto"`).
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Manual => "manual",
-            Self::Auto => "auto",
-        }
+/// Keeping this conversion explicit prevents arbitrary JSON from entering the
+/// typed compact metadata while avoiding a protocol→engine dependency cycle.
+#[must_use]
+pub fn compact_active_goal_from_engine(
+    goal: &engine::session::ActiveGoalState,
+) -> CompactActiveGoalState {
+    CompactActiveGoalState {
+        condition: goal.condition.clone(),
+        set_at: goal.set_at,
+        last_reason: goal.last_reason.clone(),
     }
 }
 
-/// Relink metadata for preserved (`messagesToKeep`) segments — used by the
-/// session loader to patch head→anchor and anchor's-other-children→tail when
-/// a partial/directional compaction keeps a tail of original messages.
-///
-/// TS: `compactMetadata.preservedSegment` (`{ headUuid?, anchorUuid?,
-/// tailUuid? }`). The Batch 5 `annotate_boundary_with_preserved_segment`
-/// fills this in; Batch 4 only carries the field.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PreservedSegment {
-    /// `uuid` of the first preserved (kept) message.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub head_uuid: Option<String>,
-    /// `uuid` of whatever sits immediately before keep[0] in the desired chain
-    /// (last summary message for suffix-preserving, the boundary for prefix).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub anchor_uuid: Option<String>,
-    /// `uuid` of the last preserved (kept) message.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tail_uuid: Option<String>,
-}
-
-/// Re-parenting list for a preserved (`messagesToKeep`) tail — the loader's
-/// cold-load re-splice (`E$_`) re-parents each of `uuids` onto `anchor_uuid`
-/// in sequence, splicing the verbatim tail back in AFTER the summary.
-///
-/// TS: `compactMetadata.preservedMessages` (`{anchorUuid, uuids, allUuids}`,
-/// on-disk key order verified against real 2.1.207 transcripts).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PreservedMessages {
-    /// `uuid` of the message the preserved tail splices AFTER (the last
-    /// summary message for suffix-preserving compaction).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub anchor_uuid: Option<String>,
-    /// `uuid`s of the preserved chain-participant messages, in order.
-    pub uuids: Vec<String>,
-    /// `uuid`s of EVERY preserved message (TS keeps non-chain participants
-    /// here too; this port preserves only chain participants, so the two
-    /// lists coincide).
-    pub all_uuids: Vec<String>,
-}
-
-/// Rich metadata stamped onto a compact-boundary marker.
-///
-/// TS: `SystemCompactBoundaryMessage.compactMetadata` plus the
-/// `preCompactDiscoveredTools` carry (`compact.ts:608`/`:1025`) and the
-/// `logicalParentUuid` relink (`createCompactBoundaryMessage`).
-/// Serialization is the CC `compactMetadata` wire shape (camelCase keys, in
-/// CC's on-disk key order for the fields this port emits) — the JSONL writer
-/// persists `serde_json::to_value(&metadata)` (minus `logicalParentUuid`,
-/// which is a TOP-LEVEL line field, not a `compactMetadata` member) on the
-/// `subtype:"compact_boundary"` system line.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CompactBoundaryMetadata {
-    /// `'manual' | 'auto'`.
-    pub trigger: CompactTrigger,
-    /// Token count of the conversation just before compaction
-    /// (`preTokens`). TS passes `preCompactTokenCount ?? 0`.
-    pub pre_tokens: u64,
-    /// Token count of the rebuilt post-compact conversation (`postTokens`).
-    /// Filled after the summary, preserved tail, attachments, and hook results
-    /// have been assembled.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub post_tokens: Option<u64>,
-    /// Cumulative tokens discarded across compactions in the live session
-    /// (`cumulativeDroppedTokens`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cumulative_dropped_tokens: Option<u64>,
-    /// Wall time spent producing the compact result (`durationMs`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub duration_ms: Option<u64>,
-    /// User-context string snapshot at compaction time (`userContext`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub user_context: Option<String>,
-    /// How many messages the summary replaced (`messagesSummarized`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub messages_summarized: Option<u32>,
-    /// Already-loaded deferred-tool names at compaction time, **sorted**
-    /// (`preCompactDiscoveredTools`). Empty when none were discovered (TS only
-    /// sets the field when the set is non-empty; the empty `Vec` is the same
-    /// observable state).
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub pre_compact_discovered_tools: Vec<String>,
-    /// Relink metadata for a preserved tail (Batch 5).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub preserved_segment: Option<PreservedSegment>,
-    /// The loader's re-splice list for a preserved tail (`preservedMessages`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub preserved_messages: Option<PreservedMessages>,
-    /// Active session-scoped `/goal` snapshot at compaction time. This keeps
-    /// an unmet goal resumable even when the original goal-update line is
-    /// summarized away behind a later compact boundary.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub active_goal: Option<ActiveGoalState>,
-    /// `uuid` of the last pre-compact message, used to relink the boundary into
-    /// the on-disk chain (`logicalParentUuid`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub logical_parent_uuid: Option<String>,
+/// Convert a compact goal snapshot back into the engine session type.
+#[must_use]
+pub fn compact_active_goal_into_engine(
+    goal: CompactActiveGoalState,
+) -> engine::session::ActiveGoalState {
+    engine::session::ActiveGoalState {
+        condition: goal.condition,
+        set_at: goal.set_at,
+        last_reason: goal.last_reason,
+    }
 }
 
 /// Construct a compact-boundary system message plus its typed metadata.
@@ -169,8 +60,7 @@ pub struct CompactBoundaryMetadata {
 ///    `[...preCompactDiscovered].sort()` carry (`compact.ts:608`).
 ///
 /// Returns the in-history [`ConversationMessage`] marker and the rich
-/// [`CompactBoundaryMetadata`] (the latter cannot ride inside the frozen
-/// `protocol::System` variant — see the module docs).
+/// [`CompactBoundaryMetadata`].
 #[must_use]
 pub fn create_compact_boundary(
     trigger: CompactTrigger,
@@ -203,10 +93,11 @@ pub fn create_compact_boundary(
         logical_parent_uuid: last_pre_compact_message_uuid.map(|u| u.as_uuid().to_string()),
     };
 
-    let marker = ConversationMessage::System {
-        id: MessageId::new(),
-        content: BOUNDARY_CONTENT.to_string(),
-    };
+    let marker = ConversationMessage::compact_boundary(
+        MessageId::new(),
+        BOUNDARY_CONTENT.to_string(),
+        metadata.clone(),
+    );
 
     (marker, metadata)
 }
@@ -291,7 +182,7 @@ pub fn create_compact_boundary_with_preserved_tail(
     kept_tail: &[ConversationMessage],
     anchor_uuid: Option<&MessageId>,
 ) -> (ConversationMessage, CompactBoundaryMetadata) {
-    let (marker, mut metadata) = create_compact_boundary(
+    let (mut marker, mut metadata) = create_compact_boundary(
         trigger,
         pre_tokens,
         last_pre_compact_message_uuid,
@@ -301,19 +192,30 @@ pub fn create_compact_boundary_with_preserved_tail(
     );
     metadata.preserved_segment = preserved_segment_for_tail(kept_tail, anchor_uuid);
     metadata.preserved_messages = preserved_messages_for_tail(kept_tail, anchor_uuid);
+    debug_assert!(marker.set_compact_metadata(metadata.clone()));
     (marker, metadata)
 }
 
 /// Whether `message` is a compact-boundary marker.
 ///
 /// TS `isCompactBoundaryMessage`: `type === 'system' && subtype ===
-/// 'compact_boundary'`. Until `protocol` grows a `subtype`, we match a
-/// `System` message whose content is the exact [`BOUNDARY_CONTENT`] sentinel.
+/// 'compact_boundary'`. Exact-content matching is retained only for legacy
+/// markers serialized before the typed subtype was available.
 #[must_use]
 pub fn is_compact_boundary(message: &ConversationMessage) -> bool {
     matches!(
         message,
-        ConversationMessage::System { content, .. } if content == BOUNDARY_CONTENT
+        ConversationMessage::System {
+            subtype: Some(subtype),
+            ..
+        } if subtype == "compact_boundary"
+    ) || matches!(
+        message,
+        ConversationMessage::System {
+            subtype: None,
+            content,
+            ..
+        } if content == BOUNDARY_CONTENT
     )
 }
 
@@ -440,9 +342,36 @@ mod tests {
         let plain = ConversationMessage::System {
             id: MessageId::new(),
             content: "some other system text".to_string(),
+            subtype: None,
+            compact_metadata: None,
         };
         assert!(!is_compact_boundary(&plain));
         assert!(!is_compact_boundary(&user("hi")));
+    }
+
+    #[test]
+    fn legacy_sentinel_without_subtype_remains_a_boundary() {
+        let legacy = ConversationMessage::System {
+            id: MessageId::new(),
+            content: BOUNDARY_CONTENT.to_string(),
+            subtype: None,
+            compact_metadata: None,
+        };
+        assert!(is_compact_boundary(&legacy));
+    }
+
+    #[test]
+    fn active_goal_conversion_is_typed_and_roundtrips() {
+        let goal = engine::session::ActiveGoalState {
+            condition: "ship only when tests pass".to_string(),
+            set_at: std::time::SystemTime::UNIX_EPOCH
+                + std::time::Duration::from_secs(1_700_000_000),
+            last_reason: Some("tests still running".to_string()),
+        };
+        let wire = compact_active_goal_from_engine(&goal);
+        let json = serde_json::to_value(&wire).unwrap();
+        let decoded: CompactActiveGoalState = serde_json::from_value(json).unwrap();
+        assert_eq!(compact_active_goal_into_engine(decoded), goal);
     }
 
     #[test]
@@ -543,6 +472,13 @@ mod tests {
             Some(&anchor),
         );
         assert!(is_compact_boundary(&marker));
+        match &marker {
+            ConversationMessage::System {
+                compact_metadata: Some(marker_metadata),
+                ..
+            } => assert_eq!(marker_metadata, &meta),
+            other => panic!("expected typed compact boundary, got {other:?}"),
+        }
         let seg = meta.preserved_segment.expect("preserved segment set");
         assert_eq!(
             seg.anchor_uuid.as_deref(),

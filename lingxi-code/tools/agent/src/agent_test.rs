@@ -1674,6 +1674,8 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                 text: traits::fork_subagent::build_child_message("prior directive"),
             }],
             is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
         };
         let ctx = ctx_with_messages(Arc::new(ToolRegistry::new()), vec![boilerplate]);
         let input = serde_json::json!({ "description": "fork again", "prompt": "nested" });

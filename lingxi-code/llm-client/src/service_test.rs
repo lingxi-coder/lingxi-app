@@ -311,6 +311,8 @@ mod tests {
                 text: s.to_string(),
             }],
             is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
         }
     }
 
@@ -439,6 +441,8 @@ mod tests {
                         })]),
                     }],
                     is_meta: false,
+                    is_compact_summary: false,
+                    is_visible_in_transcript_only: false,
                 },
             ]
         };
@@ -714,6 +718,8 @@ mod tests {
                     content_blocks: None,
                 }],
                 is_meta: false,
+                is_compact_summary: false,
+                is_visible_in_transcript_only: false,
             },
             CM::Assistant {
                 id: MessageId::new(),
@@ -1728,6 +1734,8 @@ mod tests {
                 },
             }],
             is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
         }];
         // The capability check is in DefaultLlmClient.validate_capabilities; since
         // FakeTransport doesn't inspect the body, this exercises the whole path.
@@ -2582,6 +2590,8 @@ mod tests {
             id: protocol::MessageId::new(),
             content,
             is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
         }
     }
 
@@ -2625,6 +2635,8 @@ mod tests {
                 img(0),
             ],
             is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
         }];
         assert_eq!(count_media(&msgs), 1);
     }
@@ -2648,6 +2660,8 @@ mod tests {
                 ]),
             }],
             is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
         }];
         assert_eq!(count_media(&msgs), 2, "two nested image blocks must count");
     }
@@ -2671,6 +2685,8 @@ mod tests {
                 ]),
             }],
             is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
         }];
         let stripped = strip_excess_media(msgs, 1);
         assert_eq!(
@@ -2736,6 +2752,8 @@ mod tests {
                 text: "no media here".to_string(),
             }],
             is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
         }];
         let before = msgs.clone();
         let out = strip_excess_media(msgs, MAX_MEDIA_PER_REQUEST);

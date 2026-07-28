@@ -137,6 +137,8 @@ impl tool_api::McpTokenCounter for ProviderApiAdapter {
             id: protocol::MessageId::new(),
             content: blocks,
             is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
         };
         self.service
             .count_tokens_exact(model, None, None, vec![message], Vec::new())

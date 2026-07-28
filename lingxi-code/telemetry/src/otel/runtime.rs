@@ -1442,6 +1442,10 @@ fn build_tracer_provider(
     config: &OtelConfig,
     resource: Resource,
 ) -> Result<Option<SdkTracerProvider>, String> {
+    if !config.enabled || !config.enhanced_telemetry {
+        return Ok(None);
+    }
+
     let provider = match &config.traces.kind {
         ExporterKind::None => return Ok(None),
         ExporterKind::Prometheus => {
@@ -1903,6 +1907,7 @@ mod tests {
     fn enabled_lookup(port: u16) -> OtelConfig {
         OtelConfig::from_lookup(|key| match key {
             super::super::config::ENV_ENABLE_TELEMETRY => Some("1".to_string()),
+            super::super::config::ENV_ENHANCED_TELEMETRY_BETA => Some("1".to_string()),
             "OTEL_EXPORTER_OTLP_ENDPOINT" => Some(format!("http://127.0.0.1:{port}")),
             "OTEL_EXPORTER_OTLP_HEADERS" => Some("authorization=Bearer test".to_string()),
             "OTEL_METRICS_EXPORTER" => Some("otlp".to_string()),
@@ -2049,6 +2054,52 @@ mod tests {
     }
 
     #[test]
+    fn traces_require_enhanced_beta_and_do_not_connect_when_disabled() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test collector");
+        listener.set_nonblocking(true).expect("set nonblocking");
+        let endpoint = format!("http://{}", listener.local_addr().expect("local address"));
+        let config = OtelConfig::from_lookup(|key| match key {
+            super::super::config::ENV_ENABLE_TELEMETRY => Some("1".to_string()),
+            "OTEL_METRICS_EXPORTER" | "OTEL_LOGS_EXPORTER" => Some("none".to_string()),
+            "OTEL_TRACES_EXPORTER" => Some("otlp".to_string()),
+            "OTEL_EXPORTER_OTLP_ENDPOINT" => Some(endpoint.clone()),
+            _ => None,
+        });
+
+        let runtime = OtelRuntime::new(config, "test-entry", false).expect("runtime");
+        assert!(
+            runtime.traces.is_none(),
+            "master telemetry alone must not construct a trace provider"
+        );
+        runtime.emit_span("test.span", Vec::new());
+        runtime.shutdown();
+        std::thread::sleep(Duration::from_millis(25));
+        assert!(
+            matches!(
+                listener.accept(),
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock
+            ),
+            "disabled enhanced tracing must not open a collector connection"
+        );
+    }
+
+    #[test]
+    fn enhanced_gate_does_not_disable_metrics_or_logs() {
+        let config = OtelConfig::from_lookup(|key| match key {
+            super::super::config::ENV_ENABLE_TELEMETRY => Some("1".to_string()),
+            "OTEL_METRICS_EXPORTER" => Some("prometheus".to_string()),
+            "OTEL_LOGS_EXPORTER" | "OTEL_TRACES_EXPORTER" => Some("console".to_string()),
+            _ => None,
+        });
+
+        let runtime = OtelRuntime::new(config, "test-entry", false).expect("runtime");
+        assert!(runtime.metrics.is_some());
+        assert!(runtime.logs.is_some());
+        assert!(runtime.traces.is_none());
+        runtime.shutdown();
+    }
+
+    #[test]
     fn managed_generic_endpoint_keeps_all_signals_on_managed_collector() {
         let (port, captured, handle) = spawn_http_collector();
         let config = OtelConfig::from_lookup_with_source(|key| match key {
@@ -2056,6 +2107,12 @@ mod tests {
                 value: "1".to_string(),
                 source: super::super::config::ConfigValueSource::Runtime,
             }),
+            super::super::config::ENV_ENHANCED_TELEMETRY_BETA => {
+                Some(super::super::config::ConfigValue {
+                    value: "1".to_string(),
+                    source: super::super::config::ConfigValueSource::Runtime,
+                })
+            }
             "OTEL_EXPORTER_OTLP_ENDPOINT" => Some(super::super::config::ConfigValue {
                 value: format!("http://127.0.0.1:{port}"),
                 source: super::super::config::ConfigValueSource::Managed,

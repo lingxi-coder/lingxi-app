@@ -40,6 +40,13 @@ pub struct ConfigValue {
 /// `o7u(){return ct(process.env.CLAUDE_CODE_ENABLE_TELEMETRY)}`).
 pub const ENV_ENABLE_TELEMETRY: &str = "LINGXI_ENABLE_TELEMETRY";
 
+/// Explicit opt-in required before detailed OpenTelemetry traces are exported.
+///
+/// Unlike the rebranded LingXi gate family, this keeps Claude Code's canonical
+/// spelling because managed enterprise settings and deployment templates use
+/// this beta-contract name directly.
+pub const ENV_ENHANCED_TELEMETRY_BETA: &str = "CLAUDE_CODE_ENHANCED_TELEMETRY_BETA";
+
 /// Force-flush deadline in ms (rebrand of CC `CLAUDE_CODE_OTEL_FLUSH_TIMEOUT_MS`,
 /// binary default `vde(...,5000)`).
 pub const ENV_FLUSH_TIMEOUT_MS: &str = "LINGXI_OTEL_FLUSH_TIMEOUT_MS";
@@ -639,6 +646,8 @@ pub fn parse_otlp_headers(raw: Option<&str>) -> BTreeMap<String, String> {
 pub struct OtelConfig {
     /// Master gate ([`ENV_ENABLE_TELEMETRY`] truthy).
     pub enabled: bool,
+    /// Additional explicit opt-in required for trace export.
+    pub enhanced_telemetry: bool,
     /// Metrics exporter transport config.
     pub metrics: OtlpExporterConfig,
     /// Logs exporter transport config.
@@ -710,6 +719,12 @@ impl OtelConfig {
         OtelConfig {
             enabled: bool_env(
                 get(ENV_ENABLE_TELEMETRY).as_ref().map(|v| v.value.as_str()),
+                false,
+            ),
+            enhanced_telemetry: bool_env(
+                get(ENV_ENHANCED_TELEMETRY_BETA)
+                    .as_ref()
+                    .map(|v| v.value.as_str()),
                 false,
             ),
             metrics: OtlpExporterConfig::from_lookup_with_source(Signal::Metrics, &get),
@@ -798,6 +813,24 @@ mod tests {
     fn gate_on_via_lingxi_var() {
         let cfg = OtelConfig::from_lookup(lookup(&[(ENV_ENABLE_TELEMETRY, "1")]));
         assert!(cfg.enabled);
+    }
+
+    #[test]
+    fn enhanced_telemetry_requires_explicit_truthy_beta_gate() {
+        let unset = OtelConfig::from_lookup(lookup(&[(ENV_ENABLE_TELEMETRY, "1")]));
+        assert!(!unset.enhanced_telemetry);
+
+        let disabled = OtelConfig::from_lookup(lookup(&[
+            (ENV_ENABLE_TELEMETRY, "1"),
+            (ENV_ENHANCED_TELEMETRY_BETA, "0"),
+        ]));
+        assert!(!disabled.enhanced_telemetry);
+
+        let enabled = OtelConfig::from_lookup(lookup(&[
+            (ENV_ENABLE_TELEMETRY, "1"),
+            (ENV_ENHANCED_TELEMETRY_BETA, " yes "),
+        ]));
+        assert!(enabled.enhanced_telemetry);
     }
 
     #[test]

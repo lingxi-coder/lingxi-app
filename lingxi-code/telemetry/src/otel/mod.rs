@@ -7,6 +7,8 @@
 //! exporters (OTLP/console/prometheus) driven entirely by the standard `OTEL_*`
 //! env surface plus a small `CLAUDE_CODE_OTEL_*` gate family and an
 //! `otelHeadersHelper` settings hook for dynamic export headers.
+//! Detailed traces additionally require the explicit
+//! `CLAUDE_CODE_ENHANCED_TELEMETRY_BETA` opt-in; metrics and logs do not.
 //!
 //! ## What this module ports (the load-bearing parity)
 //!
@@ -67,7 +69,7 @@ pub use config::{
     bool_env, compute_content_max_length, env_truthy, int_env, js_number, ConfigValue,
     ConfigValueSource, ExporterKind, GateTimeouts, LogIncludeFlags, MetricsInclude, OtelConfig,
     OtlpExporterConfig, OtlpProtocol, Signal, DEFAULT_CONTENT_MAX_LENGTH, ENV_CONTENT_MAX_LENGTH,
-    ENV_ENABLE_TELEMETRY,
+    ENV_ENABLE_TELEMETRY, ENV_ENHANCED_TELEMETRY_BETA,
 };
 pub use headers_helper::{validate_helper_output, ExecOutcome, HeadersHelperState, ResolveOutcome};
 pub use record::{

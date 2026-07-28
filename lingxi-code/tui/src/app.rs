@@ -17,8 +17,11 @@ use std::io;
 use std::io::Write;
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyEvent, KeyEventKind};
+use crossterm::event::{
+    self, Event, KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind,
+};
 use ratatui::backend::{Backend, CrosstermBackend};
+use ratatui::layout::{Position, Rect};
 use tokio::sync::mpsc::{Receiver, UnboundedReceiver};
 use tokio_util::sync::CancellationToken;
 use tui_core::ask_user_question_bridge::AskUserQuestionExchange;
@@ -181,6 +184,15 @@ pub struct RataApp<'cb> {
     /// thread and drains its result here each tick.
     paste_tx: std::sync::mpsc::Sender<Result<String, String>>,
     paste_rx: std::sync::mpsc::Receiver<Result<String, String>>,
+    /// Off-thread full-screen copy-on-select result.  Only failures are
+    /// surfaced and each session shows at most one failure notice.
+    copy_tx: std::sync::mpsc::Sender<Result<crate::copy::ClipboardTransport, String>>,
+    copy_rx: std::sync::mpsc::Receiver<Result<crate::copy::ClipboardTransport, String>>,
+    copy_error_shown: bool,
+    /// Alternate-screen renderer state (`/tui`).
+    fullscreen: bool,
+    copy_on_select: bool,
+    selection: crate::selection::SelectionState,
     /// Embedder callbacks executed for app-level widget outcomes.
     callbacks: AppCallbacks<'cb>,
     /// Redraw cadence: the input-poll timeout, i.e. how long a tick waits for
@@ -203,6 +215,7 @@ impl<'cb> RataApp<'cb> {
         callbacks: AppCallbacks<'cb>,
     ) -> Self {
         let (paste_tx, paste_rx) = std::sync::mpsc::channel();
+        let (copy_tx, copy_rx) = std::sync::mpsc::channel();
         Self {
             chat_widget: ChatWidget::new(messages, session),
             events_rx,
@@ -211,6 +224,12 @@ impl<'cb> RataApp<'cb> {
             computer_access_rx,
             paste_tx,
             paste_rx,
+            copy_tx,
+            copy_rx,
+            copy_error_shown: false,
+            fullscreen: false,
+            copy_on_select: true,
+            selection: crate::selection::SelectionState::default(),
             callbacks,
             redraw_interval: Duration::from_millis(50),
         }
@@ -226,6 +245,25 @@ impl<'cb> RataApp<'cb> {
     /// # Errors
     /// Propagates the first terminal IO error.
     pub fn run(&mut self, terminal: &mut RataTerminal) -> io::Result<AppExit> {
+        self.run_inner(terminal, None)
+    }
+
+    /// Production loop with access to the terminal RAII guard, allowing
+    /// `/tui` to enter/leave alternate-screen + mouse capture without leaking
+    /// modes on errors or panic.
+    pub fn run_with_session(
+        &mut self,
+        terminal: &mut RataTerminal,
+        session: &mut TerminalSession,
+    ) -> io::Result<AppExit> {
+        self.run_inner(terminal, Some(session))
+    }
+
+    fn run_inner(
+        &mut self,
+        terminal: &mut RataTerminal,
+        mut session: Option<&mut TerminalSession>,
+    ) -> io::Result<AppExit> {
         loop {
             while let Ok(event) = self.events_rx.try_recv() {
                 self.apply_turn_event(event);
@@ -246,6 +284,17 @@ impl<'cb> RataApp<'cb> {
             while let Ok(result) = self.paste_rx.try_recv() {
                 self.chat_widget.clipboard_image_result(result);
             }
+            while let Ok(result) = self.copy_rx.try_recv() {
+                if let Err(error) = result {
+                    if !self.copy_error_shown {
+                        self.copy_error_shown = true;
+                        self.apply_turn_event(TurnEvent::SystemNotice {
+                            body: format!("Clipboard copy failed: {error}"),
+                            is_error: true,
+                        });
+                    }
+                }
+            }
             // Flush a due non-bracketed paste burst (held first char renders
             // as typing; a completed burst lands as one paste). The pump
             // never submits, so the outcome needs no callback dispatch.
@@ -254,6 +303,9 @@ impl<'cb> RataApp<'cb> {
             // idle. This runs before drawing so an expired questionnaire is
             // popped and its queued successor can render on the same tick.
             self.chat_widget.pump_view_timeout();
+            // A ← handoff may be waiting for the active tool boundary or its
+            // 10-second defer cap. Advance it on the same redraw clock.
+            self.chat_widget.pump_backgrounding();
             // Hook-returned terminal escapes (`TurnEvent::TerminalSequence`,
             // already validated + BEL-normalized) write through to the tty
             // BEFORE the draw so the diff pass never interleaves with them.
@@ -271,11 +323,38 @@ impl<'cb> RataApp<'cb> {
                 let outcome = match event::read()? {
                     Event::Key(key) if key.kind == KeyEventKind::Press => self.on_key(key),
                     Event::Paste(text) => self.on_paste(&text),
+                    Event::Mouse(mouse) if self.fullscreen => {
+                        self.on_mouse(mouse, terminal);
+                        ChatOutcome::Continue
+                    }
                     _ => ChatOutcome::Continue,
                 };
                 match outcome {
                     ChatOutcome::Quit => return Ok(AppExit::Quit),
+                    ChatOutcome::Detach => {
+                        if let Ok(token) =
+                            std::env::var(tui_core::background_detach::DETACH_TOKEN_ENV)
+                        {
+                            let sequence =
+                                tui_core::background_detach::detach_request_sequence(&token);
+                            terminal.backend_mut().write_all(&sequence)?;
+                            Write::flush(terminal.backend_mut())?;
+                        }
+                    }
                     ChatOutcome::ForceRedraw => {
+                        self.chat_widget.reset_terminal_commit();
+                        terminal.reset_for_replay()?;
+                    }
+                    ChatOutcome::ToggleFullscreen => {
+                        let Some(session) = session.as_deref_mut() else {
+                            continue;
+                        };
+                        let enabled = !self.fullscreen;
+                        session.set_fullscreen(enabled)?;
+                        self.fullscreen = enabled;
+                        self.selection.clear();
+                        // Entering clears the alternate screen; leaving must
+                        // rebuild native scrollback from structured cells.
                         self.chat_widget.reset_terminal_commit();
                         terminal.reset_for_replay()?;
                     }
@@ -467,6 +546,39 @@ impl<'cb> RataApp<'cb> {
         self.chat_widget.handle_paste(text)
     }
 
+    /// Seed the terminal surface from startup settings/environment.
+    pub fn configure_fullscreen(&mut self, enabled: bool, copy_on_select: bool) {
+        self.fullscreen = enabled;
+        self.copy_on_select = copy_on_select;
+        self.selection.clear();
+    }
+
+    fn on_mouse(&mut self, mouse: MouseEvent, terminal: &RataTerminal) {
+        let position = Position::new(mouse.column, mouse.row);
+        let area = terminal.current_buffer().area;
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => self.selection.begin(position, area),
+            MouseEventKind::Drag(MouseButton::Left) => self.selection.update(position, area),
+            MouseEventKind::Up(MouseButton::Left) => {
+                let Some(text) =
+                    self.selection
+                        .finish_at(position, area, terminal.current_buffer())
+                else {
+                    return;
+                };
+                if !self.copy_on_select {
+                    return;
+                }
+                let tx = self.copy_tx.clone();
+                std::thread::spawn(move || {
+                    let result = crate::copy::copy_to_clipboard(&text).map_err(|e| e.to_string());
+                    let _ = tx.send(result);
+                });
+            }
+            _ => {}
+        }
+    }
+
     /// Desired inline-viewport height at `width` columns: the widget reports
     /// its own height ([`ChatWidget::desired_height`]); the 4/20 clamp is
     /// deliberately app-side viewport policy.
@@ -513,7 +625,11 @@ impl<'cb> RataApp<'cb> {
         terminal: &mut crate::terminal::Terminal<B>,
     ) -> io::Result<()> {
         let chat_widget = &mut self.chat_widget;
-        terminal.draw(|frame| chat_widget.render_frame(frame))
+        if self.fullscreen {
+            terminal.draw(|frame| chat_widget.render_fullscreen_frame(frame))
+        } else {
+            terminal.draw(|frame| chat_widget.render_frame(frame))
+        }
     }
 
     /// One frame: viewport sizing, history flush, and the widget draw, all
@@ -528,8 +644,18 @@ impl<'cb> RataApp<'cb> {
         let result = (|| {
             let size = terminal.size()?;
             self.chat_widget.set_terminal_rows(size.height);
-            terminal.set_bottom_viewport_height(self.viewport_height(size.width))?;
-            self.flush_scrollback(terminal)?;
+            if self.fullscreen {
+                terminal.resize(size);
+                let full = Rect::new(0, 0, size.width, size.height);
+                if terminal.viewport_area != full {
+                    terminal.set_viewport_area(full);
+                    terminal.invalidate_viewport();
+                    self.selection.clear();
+                }
+            } else {
+                terminal.set_bottom_viewport_height(self.viewport_height(size.width))?;
+                self.flush_scrollback(terminal)?;
+            }
             self.draw(terminal)
         })();
         let end = terminal.end_sync_update();
@@ -568,6 +694,7 @@ impl<'cb> RataApp<'cb> {
 pub fn run_app(
     messages: Vec<RenderedMessage>,
     initial_prompt: Option<String>,
+    background_handoff: Option<traits::BackgroundingSnapshot>,
     session: SessionInfo,
     events_rx: UnboundedReceiver<TurnEvent>,
     permission_rx: Receiver<PermissionExchange>,
@@ -624,12 +751,19 @@ pub fn run_app(
     }
     let startup_theme = tui_core::theme_persist::load_theme_setting()
         .unwrap_or(tui_core::theme::ThemeSetting::Auto);
+    let fullscreen = std::env::var("LINGXI_TUI_FULLSCREEN")
+        .ok()
+        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "on"));
     // Guard first, terminal second: locals drop in reverse order, so the
     // terminal resets the cursor while raw mode is still active, then the
     // guard restores cooked mode + bracketed paste.
-    let _session_guard = TerminalSession::new()?;
+    let mut session_guard = if fullscreen {
+        TerminalSession::new_fullscreen()?
+    } else {
+        TerminalSession::new()?
+    };
     let backend = CrosstermBackend::new(io::stdout());
-    let mut terminal = if detached_pty {
+    let mut terminal = if detached_pty || fullscreen {
         crate::terminal::Terminal::with_options_at_origin(backend)?
     } else {
         crate::terminal::Terminal::with_options(backend)?
@@ -659,6 +793,10 @@ pub fn run_app(
             on_task_action: Box::new(on_task_action),
             on_dispatch_slash: Box::new(on_dispatch_slash),
         },
+    );
+    app.configure_fullscreen(
+        fullscreen,
+        tui_core::theme_persist::load_copy_on_select().unwrap_or(true),
     );
     app.chat_widget.set_theme(startup_theme);
     // Persisted UI prefs (`/config verbose=…` / `vim=…`) read back from
@@ -731,6 +869,8 @@ pub fn run_app(
         tui_core::theme_persist::load_left_arrow_opens_agents().unwrap_or(true)
             && agent_view_enabled,
     );
+    app.chat_widget
+        .set_attached_background_session(detached_pty);
     // `defaultToAgentsView` ("Open agents view by default" / "Start in agent
     // view", default OFF): open the agents view over the fresh conversation at
     // startup — the oracle mounts the fleet view as the whole UI here
@@ -747,12 +887,15 @@ pub fn run_app(
     // route it through the same ChatWidget submission path as pressing Enter:
     // the user row, cancellation token and running-state bookkeeping must all
     // remain identical to an ordinary interactive turn.
+    if let Some(snapshot) = background_handoff.as_ref() {
+        app.chat_widget.restore_background_handoff(snapshot);
+    }
     if let Some(prompt) = initial_prompt.filter(|value| !value.trim().is_empty()) {
         if let ChatOutcome::Submit(prompt, images, token) = app.chat_widget.submit_prompt(prompt) {
             (app.callbacks.on_submit)(prompt, images, token);
         }
     }
-    app.run(&mut terminal)
+    app.run_with_session(&mut terminal, &mut session_guard)
 }
 
 #[cfg(test)]

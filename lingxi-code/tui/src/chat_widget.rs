@@ -58,6 +58,11 @@ pub enum ChatOutcome {
     Continue,
     /// Clear the physical terminal and replay structured transcript history.
     ForceRedraw,
+    /// `/tui`: toggle the alternate-screen full conversation surface.
+    ToggleFullscreen,
+    /// Release the controller for an attached background PTY and return to the
+    /// agents view without stopping the worker/session.
+    Detach,
     /// Exit the app.
     Quit,
     /// The user submitted `prompt`; the caller should drive a turn for it,
@@ -230,6 +235,12 @@ struct ApiRetryState {
     deadline: std::time::Instant,
 }
 
+/// Pending ← handoff while the current tool is allowed to reach its boundary.
+#[derive(Debug, Clone)]
+struct PendingBackgrounding {
+    requested_at: Instant,
+}
+
 /// The chat surface: owns the conversation state and the interactive footer,
 /// leaving only loop plumbing (terminal, channels, callbacks) to the app.
 pub struct ChatWidget {
@@ -284,6 +295,17 @@ pub struct ChatWidget {
     /// Latest orchestrator-reported wall-clock age for [`Self::active_tool_id`].
     /// This is live UI state only and is never appended to the transcript.
     active_tool_elapsed_ms: Option<u64>,
+    /// All tool calls that have started and not produced a paired result.
+    /// Unlike `active_tool_id` (the spinner's newest call), this preserves the
+    /// complete in-flight set required by the background handoff classifier.
+    active_tool_kinds: Vec<(protocol::ToolUseId, String)>,
+    /// Assistant text received in the current turn. This sidecar survives an
+    /// abort-then-fork boundary without changing the normal transcript wire.
+    partial_assistant_text: String,
+    /// Correlates a live turn with the snapshot persisted by backgrounding.
+    background_boundary_id: uuid::Uuid,
+    /// Set while ← waits for an active tool to finish.
+    pending_backgrounding: Option<PendingBackgrounding>,
     /// Running character length of the streamed response this turn (text +
     /// thinking deltas), reset on `TurnStarted`. Drives the spinner's live token
     /// estimate (`round(chars / 4)`, claude-code `Spinner.tsx:210`).
@@ -475,6 +497,10 @@ impl ChatWidget {
             activity: None,
             active_tool_id: None,
             active_tool_elapsed_ms: None,
+            active_tool_kinds: Vec::new(),
+            partial_assistant_text: String::new(),
+            background_boundary_id: uuid::Uuid::new_v4(),
+            pending_backgrounding: None,
             response_chars: 0,
             spinner_verb: spinner::sample_verb(),
             current_todo: None,
@@ -669,6 +695,13 @@ impl ChatWidget {
     /// Apply the merged `emojiCompletionEnabled` setting to the composer.
     pub fn set_emoji_completion_enabled(&mut self, enabled: bool) {
         self.bottom_pane.set_emoji_completion_enabled(enabled);
+    }
+
+    /// Tell the composer whether this mounted TUI controls an attached
+    /// background PTY session. Attached ← confirmation detaches instead of
+    /// opening another agents picker.
+    pub fn set_attached_background_session(&mut self, attached: bool) {
+        self.bottom_pane.set_attached_background_session(attached);
     }
 
     /// The active theme preference (`/theme` picker current marker; tests).
@@ -899,6 +932,9 @@ impl ChatWidget {
                 self.activity = None;
                 self.active_tool_id = None;
                 self.active_tool_elapsed_ms = None;
+                self.active_tool_kinds.clear();
+                self.partial_assistant_text.clear();
+                self.background_boundary_id = uuid::Uuid::new_v4();
                 self.api_retry = None;
                 self.response_chars = 0;
                 self.foreground_agents.clear();
@@ -923,6 +959,7 @@ impl ChatWidget {
                 self.response_chars = self
                     .response_chars
                     .saturating_add(delta.chars().count() as u64);
+                self.partial_assistant_text.push_str(&delta);
                 let appended = self
                     .transcript
                     .mutate_active(|cell| {
@@ -979,6 +1016,7 @@ impl ChatWidget {
                 self.activity = Some(activity_label(&tool));
                 self.active_tool_id = Some(id.clone());
                 self.active_tool_elapsed_ms = Some(0);
+                self.active_tool_kinds.push((id.clone(), tool.clone()));
                 // (Gap B) A `TodoWrite` replaces the whole session todo list
                 // each call, so its input is the authoritative source for the
                 // spinner's "current todo" (claude-code derives `currentTodo`
@@ -1053,6 +1091,8 @@ impl ChatWidget {
                 }
             }
             TurnEvent::ToolUseResult { id, tool, result } => {
+                self.active_tool_kinds
+                    .retain(|(active_id, _)| active_id != &id);
                 if is_plan_tool(&tool) {
                     let input = self.tool_inputs.get(&id).cloned().unwrap_or_default();
                     self.apply_plan_tool_result(&tool, &input, &result);
@@ -1103,6 +1143,8 @@ impl ChatWidget {
                 self.activity = None;
                 self.active_tool_id = None;
                 self.active_tool_elapsed_ms = None;
+                self.active_tool_kinds.clear();
+                self.partial_assistant_text.clear();
                 self.foreground_agents.clear();
                 self.sync_running_agents();
                 // A FAILED auto/reactive compaction emits `CompactStarted` but
@@ -1734,7 +1776,9 @@ impl ChatWidget {
 
     #[must_use]
     fn has_open_interactive_prompt(&self) -> bool {
-        self.has_open_permission() || self.has_open_ask_user_question() || self.has_open_computer_access()
+        self.has_open_permission()
+            || self.has_open_ask_user_question()
+            || self.has_open_computer_access()
     }
 
     /// Route a recognized slash command through the [`crate::command`]
@@ -1892,6 +1936,67 @@ impl ChatWidget {
         }
     }
 
+    /// Draw the complete conversation into the alternate-screen surface.
+    ///
+    /// Unlike inline mode, finalized history cannot live in the terminal's
+    /// native scrollback while an alternate screen is active.  The full-screen
+    /// frame therefore renders the structured transcript tail into all rows
+    /// above the status/composer pane.
+    pub fn render_fullscreen_frame(&mut self, frame: &mut crate::terminal::Frame<'_>) {
+        let area = frame.area();
+        self.bottom_pane.set_task_running(self.pane_status());
+
+        let status_lines = self.status_line_lines();
+        let status_height = u16::try_from(status_lines.len())
+            .unwrap_or(u16::MAX)
+            .min(area.height);
+        let pane_height = self
+            .bottom_pane
+            .desired_height(area.width)
+            .min(area.height.saturating_sub(status_height));
+        let history_height = area
+            .height
+            .saturating_sub(status_height)
+            .saturating_sub(pane_height);
+        let history_area = Rect::new(area.x, area.y, area.width, history_height);
+        let status_area = Rect::new(area.x, history_area.bottom(), area.width, status_height);
+        let pane_area = Rect::new(area.x, status_area.bottom(), area.width, pane_height);
+
+        let history = self
+            .transcript
+            .visible_fullscreen_lines(history_area.width, &self.theme);
+        let skip = history
+            .len()
+            .saturating_sub(usize::from(history_area.height));
+        for (row, line) in history.iter().skip(skip).enumerate() {
+            let row_area = Rect::new(
+                history_area.x,
+                history_area.y + u16::try_from(row).unwrap_or(u16::MAX),
+                history_area.width,
+                1,
+            );
+            Renderable::render(line, row_area, frame.buffer_mut());
+        }
+        for (row, line) in status_lines.iter().enumerate() {
+            let row_area = Rect::new(
+                status_area.x,
+                status_area.y + u16::try_from(row).unwrap_or(u16::MAX),
+                status_area.width,
+                1,
+            );
+            ratatui::widgets::Widget::render(
+                ratatui::widgets::Paragraph::new(line.clone()),
+                row_area,
+                frame.buffer_mut(),
+            );
+        }
+        self.bottom_pane.render(pane_area, frame.buffer_mut());
+        if let Some(pos) = self.bottom_pane.cursor_pos(pane_area) {
+            frame.set_cursor_position(pos);
+            frame.set_cursor_style(self.bottom_pane.cursor_style(pane_area));
+        }
+    }
+
     /// Commit finalized transcript cells into the terminal's native scrollback
     /// via [`crate::terminal::Terminal::insert_history_lines`] (written ABOVE
     /// the bottom viewport), delegating to
@@ -1942,6 +2047,12 @@ impl ChatWidget {
     pub(crate) fn cmd_help(&mut self, _args: &str) -> ChatOutcome {
         self.bottom_pane.show_view(Box::new(ScreenView::help()));
         ChatOutcome::Continue
+    }
+
+    /// Toggle the full-screen renderer.  The app owns terminal-mode changes so
+    /// the widget only emits an intent.
+    pub(crate) fn cmd_tui(&mut self, _args: &str) -> ChatOutcome {
+        ChatOutcome::ToggleFullscreen
     }
 
     /// `/model`: open the model picker over the CONNECTED subset of
@@ -2138,7 +2249,10 @@ impl ChatWidget {
             // Empty result = every target was already in the requested state
             // (claude's `p.length === 0`).
             Ok(out) if out.is_empty() => (mcp_already_msg(is_all, target, enable), false),
-            Ok(out) => (mcp_toggle_success_message(enable, is_all, target, &out), false),
+            Ok(out) => (
+                mcp_toggle_success_message(enable, is_all, target, &out),
+                false,
+            ),
             Err(e) => (
                 format!(
                     "/mcp {} failed: {e}",
@@ -2348,13 +2462,19 @@ impl ChatWidget {
             // — `ba()` is the remote workspace, which the port has no analogue
             // for). With agent view disabled the ids simply do not exist, so the
             // key must fall through to `icy`'s unknown-key answer.
-            "leftArrowOpensAgents" if traits::agent_view::is_enabled() => {
+            "leftArrowOpensAgents"
+                if traits::agent_view::is_enabled()
+                    && !telemetry::flag_bool("tengu_maple_sundial", false) =>
+            {
                 let want = parse_bool("leftArrowOpensAgents")?;
                 self.bottom_pane.set_left_arrow_opens_agents(want);
                 tui_core::theme_persist::save_left_arrow_opens_agents(want);
                 Ok(format!("Set leftArrowOpensAgents to {want}."))
             }
-            "defaultToAgentsView" if traits::agent_view::is_enabled() => {
+            "defaultToAgentsView"
+                if traits::agent_view::is_enabled()
+                    && !telemetry::flag_bool("tengu_maple_sundial", false) =>
+            {
                 let want = parse_bool("defaultToAgentsView")?;
                 tui_core::theme_persist::save_default_to_agents_view(want);
                 Ok(format!("Set defaultToAgentsView to {want}."))
@@ -2613,6 +2733,184 @@ impl ChatWidget {
         self.bottom_pane
             .show_tasks(self.task_snapshot().unwrap_or_default());
         ChatOutcome::Continue
+    }
+
+    fn backgrounding_snapshot(&self) -> traits::BackgroundingSnapshot {
+        let queued_commands = self
+            .queued_compact
+            .as_ref()
+            .map(|args| {
+                if args.is_empty() {
+                    "/compact".to_string()
+                } else {
+                    format!("/compact {args}")
+                }
+            })
+            .into_iter()
+            .collect();
+        let draft = self.bottom_pane.composer().text().to_string();
+        if self.current_turn.is_none() {
+            return traits::BackgroundingSnapshot::Idle {
+                queued_commands,
+                draft,
+                boundary_id: self.background_boundary_id,
+            };
+        }
+        let in_flight_kinds: Vec<String> = self
+            .active_tool_kinds
+            .iter()
+            .map(|(_, kind)| kind.clone())
+            .collect();
+        let restartable_count = in_flight_kinds
+            .iter()
+            .filter(|kind| is_agent_tool(kind))
+            .count();
+        if in_flight_kinds.is_empty() {
+            traits::BackgroundingSnapshot::Streaming {
+                queued_commands,
+                draft,
+                in_flight_kinds,
+                partial_text: self.partial_assistant_text.clone(),
+                boundary_id: self.background_boundary_id,
+                restartable_count,
+            }
+        } else {
+            traits::BackgroundingSnapshot::BetweenTools {
+                queued_commands,
+                draft,
+                in_flight_kinds,
+                partial_text: self.partial_assistant_text.clone(),
+                boundary_id: self.background_boundary_id,
+                restartable_count,
+            }
+        }
+    }
+
+    /// Restore the composer and queued command state captured in a durable
+    /// background handoff. The current producer only queues `/compact`; keep
+    /// the serialized vector so future queue kinds remain forward-compatible.
+    pub fn restore_background_handoff(&mut self, snapshot: &traits::BackgroundingSnapshot) {
+        self.bottom_pane.restore_composer_text(snapshot.draft());
+        let queued = snapshot.queued_commands().to_vec();
+        if self.queued_compact.is_none() {
+            self.queued_compact = queued.iter().find_map(|command| {
+                let command = command.trim();
+                command
+                    .strip_prefix("/compact")
+                    .filter(|suffix| suffix.is_empty() || suffix.starts_with(char::is_whitespace))
+                    .map(|suffix| suffix.trim().to_string())
+            });
+        }
+        self.bottom_pane.set_queued_messages(queued);
+    }
+
+    fn perform_backgrounding(
+        &mut self,
+        snapshot: traits::BackgroundingSnapshot,
+        abort_foreground: bool,
+    ) -> ChatOutcome {
+        let Some(handle) = self.orchestrator.clone() else {
+            self.pending_backgrounding = None;
+            return self.show_system_text(
+                "Cannot open agents — session persistence is disabled, so this conversation cannot be backgrounded.",
+                true,
+            );
+        };
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                self.pending_backgrounding = None;
+                return self.show_system_text(
+                    &format!("Could not background conversation: {error}"),
+                    true,
+                );
+            }
+        };
+        match runtime.block_on(handle.background_conversation(snapshot)) {
+            Ok(display) => {
+                // Do not destroy foreground work until the durable snapshot and
+                // daemon dispatch have both succeeded.
+                if abort_foreground {
+                    if let Some(token) = self.current_turn.as_ref() {
+                        token.cancel();
+                    }
+                }
+                self.pending_backgrounding = None;
+                self.show_system_text(&display, false);
+                self.open_agents_view()
+            }
+            Err(error) => {
+                self.pending_backgrounding = None;
+                self.show_system_text(&format!("Could not background conversation: {error}"), true)
+            }
+        }
+    }
+
+    /// Handle the confirmed ← gesture for a foreground session.
+    fn request_open_agents(&mut self) -> ChatOutcome {
+        let snapshot = self.backgrounding_snapshot();
+        let elapsed_ms = self.pending_backgrounding.as_ref().map_or(0, |pending| {
+            u64::try_from(pending.requested_at.elapsed().as_millis()).unwrap_or(u64::MAX)
+        });
+        match traits::classify_backgrounding(&snapshot, elapsed_ms) {
+            traits::BackgroundingDecision::IdleFork => self.perform_backgrounding(snapshot, false),
+            traits::BackgroundingDecision::DeferThenFork { .. } => {
+                if self.pending_backgrounding.is_some() {
+                    // A confirmed second ← is the oracle's “skip ahead” path.
+                    match traits::classify_backgrounding(
+                        &snapshot,
+                        traits::backgrounding::DEFAULT_BACKGROUND_DEFER_MS,
+                    ) {
+                        traits::BackgroundingDecision::AbortThenFork => {
+                            self.perform_backgrounding(snapshot, true)
+                        }
+                        traits::BackgroundingDecision::Refuse { reason } => {
+                            self.pending_backgrounding = None;
+                            self.show_system_text(reason, true)
+                        }
+                        _ => ChatOutcome::Continue,
+                    }
+                } else {
+                    self.pending_backgrounding = Some(PendingBackgrounding {
+                        requested_at: Instant::now(),
+                    });
+                    self.show_system_text("Backgrounding after the current tool finishes…", false)
+                }
+            }
+            traits::BackgroundingDecision::AbortThenFork => {
+                self.perform_backgrounding(snapshot, true)
+            }
+            traits::BackgroundingDecision::Refuse { reason } => {
+                self.pending_backgrounding = None;
+                self.show_system_text(reason, true)
+            }
+        }
+    }
+
+    /// Advance a deferred handoff from the app's regular redraw tick.
+    pub(crate) fn pump_backgrounding(&mut self) {
+        let Some(pending) = self.pending_backgrounding.as_ref() else {
+            return;
+        };
+        let elapsed_ms =
+            u64::try_from(pending.requested_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let snapshot = self.backgrounding_snapshot();
+        match traits::classify_backgrounding(&snapshot, elapsed_ms) {
+            traits::BackgroundingDecision::IdleFork => {
+                let _ = self.perform_backgrounding(snapshot, false);
+            }
+            traits::BackgroundingDecision::AbortThenFork => {
+                let _ = self.perform_backgrounding(snapshot, true);
+            }
+            traits::BackgroundingDecision::Refuse { reason } => {
+                self.pending_backgrounding = None;
+                let _ = self.show_system_text(reason, true);
+            }
+            traits::BackgroundingDecision::DeferThenFork { .. } => {}
+        }
     }
 
     /// Apply the `leftArrowOpensAgents` gate to the composer's ←-on-empty
@@ -3581,7 +3879,8 @@ impl ChatWidget {
             // through the SAME path as `/tasks` so the two cannot drift — the
             // row snapshot comes from the live registry, which only the owner
             // holds.
-            BottomPaneOutcome::OpenAgentsView => self.open_agents_view(),
+            BottomPaneOutcome::OpenAgentsView => self.request_open_agents(),
+            BottomPaneOutcome::Detach => ChatOutcome::Detach,
             BottomPaneOutcome::Quit => ChatOutcome::Quit,
             BottomPaneOutcome::Interrupt => {
                 if let Some(token) = self.current_compaction.as_ref() {
@@ -3603,6 +3902,7 @@ impl ChatWidget {
                 }
                 self.turn_started_at = None;
                 self.activity = None;
+                self.active_tool_kinds.clear();
                 self.current_todo = None;
                 self.foreground_agents.clear();
                 self.sync_running_agents();
@@ -4440,7 +4740,12 @@ mod tests {
         // ── single enable ──
         // Connected → plain quoted name.
         assert_eq!(
-            mcp_toggle_success_message(true, false, "myserver", &[toggle("myserver", Some(Connected))]),
+            mcp_toggle_success_message(
+                true,
+                false,
+                "myserver",
+                &[toggle("myserver", Some(Connected))]
+            ),
             "Enabled \"myserver\".",
         );
         // Failed → no "(state)" parenthetical, "Check its config" hint.
@@ -4466,7 +4771,12 @@ mod tests {
 
         // ── single disable ──
         assert_eq!(
-            mcp_toggle_success_message(false, false, "myserver", &[toggle("myserver", Some(Disabled))]),
+            mcp_toggle_success_message(
+                false,
+                false,
+                "myserver",
+                &[toggle("myserver", Some(Disabled))]
+            ),
             "Disabled \"myserver\".",
         );
         assert_eq!(
@@ -4793,6 +5103,22 @@ mod tests {
         std::env::remove_var(var);
     }
 
+    #[test]
+    fn config_shorthand_agents_view_keys_are_unknown_under_maple_sundial() {
+        telemetry::test_set_flag("tengu_maple_sundial", true);
+        for key in ["leftArrowOpensAgents", "defaultToAgentsView"] {
+            let mut w = widget();
+            w.cmd_config(&format!("{key}=true"));
+            let sys = cell::<crate::history_cell::system::SystemTextCell>(&w, 0);
+            assert_eq!(
+                sys.body(),
+                format!("{key} isn't a /config setting. Run /config to see what's available.")
+            );
+            assert!(sys.is_error());
+        }
+        telemetry::test_clear_flag("tengu_maple_sundial");
+    }
+
     /// parity 2.1.220 `defaultToAgentsView` / the ←-on-empty gesture: the agents
     /// view OPENS over an empty registry (the startup registry always is) and
     /// writes nothing to the transcript. The oracle mounts the fleet view as the
@@ -4825,6 +5151,123 @@ mod tests {
             cell::<crate::history_cell::system::SystemTextCell>(&w, 0).body(),
             "/tasks is unavailable (no engine handle wired)"
         );
+    }
+
+    #[test]
+    fn streaming_left_arrow_persists_partial_reply_before_cancelling() {
+        let (mut widget, _mock) = widget_with_orchestrator();
+        let ChatOutcome::Submit(_, _, token) = widget.submit_prompt("work".into()) else {
+            panic!("turn submit");
+        };
+        widget.apply_turn_event(TurnEvent::TurnStarted);
+        widget.apply_turn_event(TurnEvent::TextDelta("partial reply".into()));
+
+        assert!(matches!(
+            widget.backgrounding_snapshot(),
+            traits::BackgroundingSnapshot::Streaming {
+                ref partial_text,
+                ref in_flight_kinds,
+                ..
+            } if partial_text == "partial reply" && in_flight_kinds.is_empty()
+        ));
+        assert!(matches!(
+            widget.request_open_agents(),
+            ChatOutcome::Continue
+        ));
+        assert!(
+            token.is_cancelled(),
+            "foreground cancellation happens only after the durable handoff succeeds"
+        );
+        assert!(widget.bottom_pane().view_stack().active().is_some());
+    }
+
+    #[test]
+    fn background_handoff_restores_draft_and_queued_compact() {
+        let mut widget = widget();
+        let snapshot = traits::BackgroundingSnapshot::Streaming {
+            queued_commands: vec!["/compact focus on tests".into()],
+            draft: "继续检查 Unicode 🦀".into(),
+            in_flight_kinds: Vec::new(),
+            partial_text: "partial".into(),
+            boundary_id: uuid::Uuid::new_v4(),
+            restartable_count: 0,
+        };
+
+        widget.restore_background_handoff(&snapshot);
+
+        assert_eq!(
+            widget.bottom_pane().composer().text(),
+            "继续检查 Unicode 🦀"
+        );
+        assert_eq!(widget.queued_compact.as_deref(), Some("focus on tests"));
+    }
+
+    #[test]
+    fn between_tools_defers_then_second_confirm_restarts_agent_work() {
+        let (mut widget, _mock) = widget_with_orchestrator();
+        let ChatOutcome::Submit(_, _, token) = widget.submit_prompt("work".into()) else {
+            panic!("turn submit");
+        };
+        widget.apply_turn_event(TurnEvent::TurnStarted);
+        widget.apply_turn_event(TurnEvent::TextDelta("before tool".into()));
+        widget.apply_turn_event(TurnEvent::ToolUseStart {
+            id: protocol::ToolUseId::new(),
+            tool: "Agent".into(),
+            input: serde_json::json!({"description":"child"}),
+        });
+
+        assert!(matches!(
+            widget.request_open_agents(),
+            ChatOutcome::Continue
+        ));
+        assert!(widget.pending_backgrounding.is_some());
+        assert!(!token.is_cancelled(), "first confirm waits for the tool");
+        assert!(matches!(
+            widget.backgrounding_snapshot(),
+            traits::BackgroundingSnapshot::BetweenTools {
+                ref partial_text,
+                restartable_count: 1,
+                ..
+            } if partial_text == "before tool"
+        ));
+
+        assert!(matches!(
+            widget.request_open_agents(),
+            ChatOutcome::Continue
+        ));
+        assert!(token.is_cancelled(), "second confirm skips the defer");
+        assert!(widget.pending_backgrounding.is_none());
+    }
+
+    #[test]
+    fn non_restartable_tool_fails_closed_at_defer_cap() {
+        let (mut widget, _mock) = widget_with_orchestrator();
+        let ChatOutcome::Submit(_, _, token) = widget.submit_prompt("work".into()) else {
+            panic!("turn submit");
+        };
+        widget.apply_turn_event(TurnEvent::TurnStarted);
+        widget.apply_turn_event(TurnEvent::ToolUseStart {
+            id: protocol::ToolUseId::new(),
+            tool: "Bash".into(),
+            input: serde_json::json!({"command":"sleep 20"}),
+        });
+        let _ = widget.request_open_agents();
+        widget.pending_backgrounding = Some(PendingBackgrounding {
+            requested_at: Instant::now()
+                - std::time::Duration::from_millis(
+                    traits::backgrounding::DEFAULT_BACKGROUND_DEFER_MS,
+                ),
+        });
+        widget.pump_backgrounding();
+        assert!(!token.is_cancelled());
+        assert!(widget.pending_backgrounding.is_none());
+        let last = cells(&widget).last().copied().expect("refusal cell");
+        let system = last
+            .as_any()
+            .downcast_ref::<crate::history_cell::system::SystemTextCell>()
+            .expect("system refusal");
+        assert!(system.is_error());
+        assert!(system.body().contains("non-restartable"));
     }
 
     /// The widget-level `leftArrowOpensAgents` setter reaches the pane's

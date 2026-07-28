@@ -116,6 +116,21 @@ impl PluginsView {
         })
     }
 
+    /// Line index of the selected plugin in [`Self::lines`]. The list has a
+    /// two-line heading and each preceding plugin contributes its name row
+    /// plus an optional description row.
+    fn selected_line_index(&self) -> Option<u16> {
+        self.snapshot.plugins.get(self.selected)?;
+        let preceding = self
+            .snapshot
+            .plugins
+            .iter()
+            .take(self.selected)
+            .map(|row| 1usize + usize::from(!row.description.is_empty()))
+            .sum::<usize>();
+        u16::try_from(2usize.saturating_add(preceding)).ok()
+    }
+
     /// The rendered body lines (header + one/two lines per plugin + footer).
     fn lines(&self) -> Vec<Line<'static>> {
         let mut lines: Vec<Line<'static>> = Vec::new();
@@ -176,9 +191,9 @@ impl PluginsView {
         let max_scroll = total - viewport;
         // Header is 2 lines; each plugin is 1-2 lines. Bias toward the
         // selection so a low pick scrolls into view (approximate but bounded).
-        let selected = u16::try_from(self.selected).unwrap_or(0);
+        let selected = self.selected_line_index().unwrap_or(0);
         selected
-            .saturating_add(3)
+            .saturating_add(1)
             .saturating_sub(viewport)
             .min(max_scroll)
     }
@@ -203,6 +218,24 @@ impl Renderable for PluginsView {
         u16::try_from(self.lines().len())
             .unwrap_or(u16::MAX)
             .saturating_add(2)
+    }
+
+    fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
+        let selected_line = self.selected_line_index()?;
+        let inner = Block::new().borders(Borders::ALL).inner(area);
+        if inner.width == 0 || inner.height == 0 {
+            return None;
+        }
+        let total = u16::try_from(self.lines().len()).unwrap_or(u16::MAX);
+        let scroll = self.scroll_offset(total, inner.height);
+        let visible_row = selected_line.saturating_sub(scroll);
+        Some((
+            inner.x,
+            inner
+                .y
+                .saturating_add(visible_row)
+                .min(inner.bottom().saturating_sub(1)),
+        ))
     }
 }
 
@@ -344,5 +377,18 @@ mod tests {
             .join("\n");
         assert!(text.contains("weather"), "{text}");
         assert!(text.contains("Manage Plugins"), "{text}");
+    }
+
+    #[test]
+    fn cursor_tracks_selected_plugin_and_scroll_offset() {
+        let mut v = view((0..8).map(|i| row(&format!("plugin-{i}"), true)).collect());
+        for _ in 0..7 {
+            let _ = v.handle_key(press(KeyCode::Down));
+        }
+        let area = Rect::new(4, 5, 40, 7);
+        let (x, y) = v.cursor_pos(area).expect("selected row owns cursor");
+        assert!(x >= area.left() && x < area.right());
+        assert!(y >= area.top() && y < area.bottom());
+        assert_ne!(y, area.top(), "cursor is inside the bordered viewport");
     }
 }

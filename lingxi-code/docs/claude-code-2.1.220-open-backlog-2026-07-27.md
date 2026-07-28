@@ -1,10 +1,43 @@
-# LingXi-Next — 对 Claude Code 2.1.220 的未决 backlog
+# LingXi-Next — 对 Claude Code 2.1.220 的 backlog 与关闭记录
 
 **代码基线** `370946160`（`main`）  
 **原始清单提交** `f0af1f7b3`  
 **复核日期** 2026-07-27  
 **Oracle** Claude Code `2.1.220`（本机二进制 SHA-256 `8addc857f3fe64d5a0368af9ee50321b50afb4a6918ba3ef018ab84f5dbbe081`）  
-**复核后状态** 26 个唯一未决事项 —— 20 OPEN、3 PARTIAL、1 LATENT、2 SCOPE-DECISION；另保留 1 条 DUPLICATE 交叉引用
+**原始复核状态** 26 个唯一未决事项 —— 20 OPEN、3 PARTIAL、1 LATENT、2 SCOPE-DECISION；另保留 1 条 DUPLICATE 交叉引用
+
+**当前实现状态** 25 CLOSED、1 DIVERGENCE；`N-protocol-8` 仅作为该 Divergence 的历史重复 id
+
+## 2026-07-27 实现关闭说明
+
+本分支已按复核后的行为边界实现 25 个可移植事项。下文保留 `370946160`
+上的原始缺口描述与 oracle 证据，便于审计；各条状态栏和汇总表则表示实现后的
+当前状态。
+
+- `N-env-3`（以及重复 id `N-protocol-8`）依赖 Anthropic 私有账号
+  remote-memory 端点，明确记录为 **DIVERGENCE**，没有伪造本地兼容实现。
+- Chrome 与 Anthropic remote-control 私有协议继续保持明确 fail-fast，不在本册
+  25 项关闭范围内，也不宣称 1:1 parity。
+- `deep-research` 作为不可被项目文件覆盖的 manual-only 内置 workflow 实现；
+  observer、Ultracode、后台切换、clipboard/fullscreen、MCP policy、compact/live
+  context、hook/telemetry 和 accessibility 项均有对应回归测试。
+
+### 验证记录
+
+- `cargo check --workspace --all-targets`：通过。
+- `cargo test -p test-harness --test parity_claude_2_1_220`：7/7 通过。
+- `cargo test -p tui -p tui-core --all-features`：TUI 948/948、tui-core
+  288/288 通过。
+- `cargo test --workspace --all-features`：parity 相关 crate 均通过；随后在
+  本分支范围外、未提交的 mobile-linux 工作
+  `platform-common::mobile_linux::manifest_rejects_executables_in_writable_paths`
+  处失败。该失败没有通过修改无关工作来掩盖。
+- `cargo build --release -p cli --bin lingxi-cli`、`./scripts/check-deps.sh`：
+  通过。
+- `cargo fmt --all -- --check` 与
+  `cargo clippy --workspace --all-targets -- -D warnings` 仍受仓库既有、可在
+  未修改文件中复现的全局基线债务阻塞；本修复没有用跨仓库格式化或无关
+  lint 清理扩大 diff。
 
 ## 二次独立真实性复核结论
 
@@ -52,37 +85,37 @@
 
 | # | 项 | 级别 | 量级 | 状态 | 一句话 | 阻塞 |
 |---|---|---|---|---|---|---|
-| 1 | [`FU-disabled-agent-server`](#fu-disabled-agent-server) | 🔴 High | S | OPEN | A server named in `disabledMcpServers` is revived and connected by an agent-frontmatter … | — |
-| 2 | [`FU-orch-7-currentdate`](#fu-orch-7-currentdate) | 🟡 Medium | S | OPEN | `# currentDate` additional-context entry is recomputed live every turn instead of using … | — |
-| 3 | [`P1-user_prompt-log`](#p1-user_prompt-log) | 🟡 Medium | S | OPEN | `claude_code.user_prompt` OTEL log record has no emit site — `user_prompts_enabled()` is… | — |
-| 4 | [`M6-flagSettings-env-tier`](#m6-flagsettings-env-tier) | 🟡 Medium | S | OPEN | The `--settings` (flagSettings) `env` block is never folded into the enterprise MCP poli… | 是 |
-| 5 | [`FU-mcp-get-health`](#fu-mcp-get-health) | 🟡 Medium | M | OPEN | `mcp get` never health-checks a connectable server and prints no `Status:` line for it | — |
-| 6 | [`FU-afe-shadow`](#fu-afe-shadow) | 🟡 Medium | M | OPEN | A pending/rejected project `.mcp.json` server that shadows a USER server deletes the use… | 是 |
-| 7 | [`M7-plugin-warn-variant`](#m7-plugin-warn-variant) | 🟡 Medium | M | PARTIAL | No warn variant naming WHY agent-frontmatter MCP servers were skipped; the `strictPlugin… | 是 |
-| 8 | [`M12-attach-detach`](#m12-attach-detach) | 🟡 Medium | M | OPEN | ←-on-empty in an attached background session never detaches back to the agents view (the… | — |
-| 9 | [`N-env-2`](#n-env-2) | 🟡 Medium | L | OPEN | Ultracode ultra-effort enter/sparse/exit reminder chain, the EK(model,effort,workflowsOn… | 是 |
-| 10 | [`N-changelog-3`](#n-changelog-3) | 🟡 Medium | L | SCOPE-DECISION | No built-in workflow library: `deep-research` workflow, its `/deep-research` entry point… | 产品范围 |
-| 11 | [`H6-remainder`](#h6-remainder) | 🟡 Medium | L | OPEN | H6 remainder = the `register_repo_root` SDK control request (absent entirely), the Direc… | 是 |
-| 12 | [`N-protocol-5`](#n-protocol-5) | 🟡 Medium | XL | OPEN | Agent observer pairing (observer / observerMessage / observeSubagents) is entirely absen… | 是 |
-| 13 | [`N-env-3`](#n-env-3) | 🟡 Medium | XL | SCOPE-DECISION | Memory push/pull sync engine (mass-delete hold + CLAUDE_CODE_DISABLE_MEMORY_MASS_DELETE_… | 私有后端 |
-| 14 | [`M12-midturn-backgrounding`](#m12-midturn-backgrounding) | 🟡 Medium | XL | OPEN | Mid-turn backgrounding state machine absent — ← never backgrounds the live conversation … | 是 |
-| 15 | [`N-protocol-7`](#n-protocol-7) | ⚪ Low | S | PARTIAL | Opus 5 Bash description 缺一句；两条「删除」子断言已反证，纯新增 | — |
-| 16 | [`FU-mcpcli-5`](#fu-mcpcli-5) | ⚪ Low | S | OPEN | JSON agent parser rejects an empty `{}` record inside `mcpServers`, dropping the agent (… | — |
-| 17 | [`M12-managed-row`](#m12-managed-row) | ⚪ Low | S | LATENT | `/config` has no `tengu_maple_sundial` collapsed read-only "Agents view" (`managedEnum`)… | gate 默认 OFF |
-| 18 | [`FU-orch-decision-class`](#fu-orch-decision-class) | ⚪ Low | M | OPEN | tool_decision OTEL label ignores the host's explicit decisionClassification, and tool_pa… | — |
-| 19 | [`M5-issue-formatting`](#m5-issue-formatting) | ⚪ Low | M | OPEN | `Skipped — invalid MCP server config for "X": <issues>` renders three canned reasons ins… | — |
-| 20 | [`N-changelog-5`](#n-changelog-5) | ⚪ Low | L | OPEN | Screen-reader input announcements (2.1.218 deleted-text + typed-space echo, 2.1.219 per-… | 是 |
-| 21 | [`N-changelog-4`](#n-changelog-4) | ⚪ Low | XL | OPEN | No OSC 52 clipboard writer and no mouse-selection copy surface — `/copy` is subprocess-o… | 是 |
-| 22 | [`N-protocol-8`](#n-protocol-8) | ⚪ Low | — | DUPLICATE | 与 `N-env-3` 相同的 remote-memory/mass-delete 管线；只保留历史 id 交叉引用 | 合并 |
-| 23 | [`O1-code-review-background`](#o1-code-review-background) | 🟡 Medium | M | OPEN | `/code-review` 仍把完整 review prompt 注入主对话，没有后台 subagent 隔离 | — |
-| 24 | [`O2-context-post-compact`](#o2-context-post-compact) | 🟡 Medium | S | OPEN | `/context` 使用累计 token；compact 后仍显示 pre-compact 量级 | — |
-| 25 | [`O3-ctrl-j-paste-newline`](#o3-ctrl-j-paste-newline) | ⚪ Low | S | OPEN | Ctrl+J 编码的粘贴换行被当作 modified key 丢弃，而不是 newline | — |
-| 26 | [`O4-panel-focus-cursor`](#o4-panel-focus-cursor) | ⚪ Low | M | OPEN | plugin/settings 选中行不拥有 terminal cursor，屏幕阅读器/放大器无法跟随焦点 | — |
-| 27 | [`O5-microcompact-idle-gap`](#o5-microcompact-idle-gap) | 🟡 Medium | M | PARTIAL | microcompact 有清理逻辑，但缺真实 message timestamp，无法执行 exact idle-gap gate | schema |
+| 1 | [`FU-disabled-agent-server`](#fu-disabled-agent-server) | 🔴 High | S | CLOSED | A server named in `disabledMcpServers` is revived and connected by an agent-frontmatter … | — |
+| 2 | [`FU-orch-7-currentdate`](#fu-orch-7-currentdate) | 🟡 Medium | S | CLOSED | `# currentDate` additional-context entry is recomputed live every turn instead of using … | — |
+| 3 | [`P1-user_prompt-log`](#p1-user_prompt-log) | 🟡 Medium | S | CLOSED | `claude_code.user_prompt` OTEL log record has no emit site — `user_prompts_enabled()` is… | — |
+| 4 | [`M6-flagSettings-env-tier`](#m6-flagsettings-env-tier) | 🟡 Medium | S | CLOSED | The `--settings` (flagSettings) `env` block is never folded into the enterprise MCP poli… | — |
+| 5 | [`FU-mcp-get-health`](#fu-mcp-get-health) | 🟡 Medium | M | CLOSED | `mcp get` never health-checks a connectable server and prints no `Status:` line for it | — |
+| 6 | [`FU-afe-shadow`](#fu-afe-shadow) | 🟡 Medium | M | CLOSED | A pending/rejected project `.mcp.json` server that shadows a USER server deletes the use… | — |
+| 7 | [`M7-plugin-warn-variant`](#m7-plugin-warn-variant) | 🟡 Medium | M | CLOSED | No warn variant naming WHY agent-frontmatter MCP servers were skipped; the `strictPlugin… | — |
+| 8 | [`M12-attach-detach`](#m12-attach-detach) | 🟡 Medium | M | CLOSED | ←-on-empty in an attached background session never detaches back to the agents view (the… | — |
+| 9 | [`N-env-2`](#n-env-2) | 🟡 Medium | L | CLOSED | Ultracode ultra-effort enter/sparse/exit reminder chain, the EK(model,effort,workflowsOn… | — |
+| 10 | [`N-changelog-3`](#n-changelog-3) | 🟡 Medium | L | CLOSED | No built-in workflow library: `deep-research` workflow, its `/deep-research` entry point… | — |
+| 11 | [`H6-remainder`](#h6-remainder) | 🟡 Medium | L | CLOSED | H6 remainder = the `register_repo_root` SDK control request (absent entirely), the Direc… | — |
+| 12 | [`N-protocol-5`](#n-protocol-5) | 🟡 Medium | XL | CLOSED | Agent observer pairing (observer / observerMessage / observeSubagents) is entirely absen… | — |
+| 13 | [`N-env-3`](#n-env-3) | 🟡 Medium | XL | DIVERGENCE | Memory push/pull sync engine (mass-delete hold + CLAUDE_CODE_DISABLE_MEMORY_MASS_DELETE_… | Anthropic 私有后端 |
+| 14 | [`M12-midturn-backgrounding`](#m12-midturn-backgrounding) | 🟡 Medium | XL | CLOSED | Mid-turn backgrounding state machine absent — ← never backgrounds the live conversation … | — |
+| 15 | [`N-protocol-7`](#n-protocol-7) | ⚪ Low | S | CLOSED | Opus 5 Bash description 缺一句；两条「删除」子断言已反证，纯新增 | — |
+| 16 | [`FU-mcpcli-5`](#fu-mcpcli-5) | ⚪ Low | S | CLOSED | JSON agent parser rejects an empty `{}` record inside `mcpServers`, dropping the agent (… | — |
+| 17 | [`M12-managed-row`](#m12-managed-row) | ⚪ Low | S | CLOSED | `/config` has no `tengu_maple_sundial` collapsed read-only "Agents view" (`managedEnum`)… | — |
+| 18 | [`FU-orch-decision-class`](#fu-orch-decision-class) | ⚪ Low | M | CLOSED | tool_decision OTEL label ignores the host's explicit decisionClassification, and tool_pa… | — |
+| 19 | [`M5-issue-formatting`](#m5-issue-formatting) | ⚪ Low | M | CLOSED | `Skipped — invalid MCP server config for "X": <issues>` renders three canned reasons ins… | — |
+| 20 | [`N-changelog-5`](#n-changelog-5) | ⚪ Low | L | CLOSED | Screen-reader input announcements (2.1.218 deleted-text + typed-space echo, 2.1.219 per-… | — |
+| 21 | [`N-changelog-4`](#n-changelog-4) | ⚪ Low | XL | CLOSED | No OSC 52 clipboard writer and no mouse-selection copy surface — `/copy` is subprocess-o… | — |
+| 22 | [`N-protocol-8`](#n-protocol-8) | ⚪ Low | — | DUPLICATE | 与 `N-env-3` 相同的 remote-memory/mass-delete 管线；由 `N-env-3` 的 DIVERGENCE 覆盖 | 合并 |
+| 23 | [`O1-code-review-background`](#o1-code-review-background) | 🟡 Medium | M | CLOSED | `/code-review` 仍把完整 review prompt 注入主对话，没有后台 subagent 隔离 | — |
+| 24 | [`O2-context-post-compact`](#o2-context-post-compact) | 🟡 Medium | S | CLOSED | `/context` 使用累计 token；compact 后仍显示 pre-compact 量级 | — |
+| 25 | [`O3-ctrl-j-paste-newline`](#o3-ctrl-j-paste-newline) | ⚪ Low | S | CLOSED | Ctrl+J 编码的粘贴换行被当作 modified key 丢弃，而不是 newline | — |
+| 26 | [`O4-panel-focus-cursor`](#o4-panel-focus-cursor) | ⚪ Low | M | CLOSED | plugin/settings 选中行不拥有 terminal cursor，屏幕阅读器/放大器无法跟随焦点 | — |
+| 27 | [`O5-microcompact-idle-gap`](#o5-microcompact-idle-gap) | 🟡 Medium | M | CLOSED | microcompact 有清理逻辑，但缺真实 message timestamp，无法执行 exact idle-gap gate | — |
 
 量级：S = 单点改动；M = 一个模块；L = 跨模块；XL = 子系统级（可能需要先做范围决策）。
 
-表内保留 27 个历史/新增 id；合并第 22 项 duplicate 后是 26 个唯一事项。状态合计：20 OPEN、3 PARTIAL、1 LATENT、2 SCOPE-DECISION。
+表内保留 27 个历史/新增 id；合并第 22 项 duplicate 后是 26 个唯一事项。当前状态合计：25 CLOSED、1 DIVERGENCE。
 
 ## 建议顺序
 
@@ -111,7 +144,7 @@
 
 | 级别 | 量级 | 状态 |
 |---|---|---|
-| 🟡 Medium | L | OPEN |
+| 🟡 Medium | L | CLOSED |
 
 The oracle treats ultra-effort ("Ultracode") as a transcript state machine (`j2y`). On each turn it evaluates `EK(model, effort, workflowsOn)` — true when workflows are available and enabled AND the resolved effort is `xhigh`. On the false→true edge it emits an `ultra_effort_enter` attachment with `reminderType:"full"` ("Ultracode is on: ... Use the Workflow tool on every substantive task..."); while it stays true it re-emits a sparse variant ("Ultracode is still on...") every `bop()` non-meta user turns; on the true→false edge it emits `ultra_effort_exit` ("Ultracode is off..."). `bop()` resolves the cadence by precedence: env `CLAUDE_CODE_JUNIPER_SUNDIAL` > statsig `tengu_juniper_sundial` > GrowthBook gate > `ULTRA_EFFORT_CONFIG.TURNS_BETWEEN_MAINTENANCE = 10`. A sibling `workflow_keyword_request` attachment (gated by the `workflowKeywordTriggerEnabled` setting) fires when the user types the literal keyword "ultracode" in a prompt.
 
@@ -136,7 +169,7 @@ Re-verified port-side at 370946160; the recorded evidence HOLDS and is worse tha
 
 | 级别 | 量级 | 状态 |
 |---|---|---|
-| 🟡 Medium | L | SCOPE-DECISION |
+| 🟡 Medium | L | CLOSED |
 
 Oracle 2.1.220 ships a built-in workflow library and bundles a complete `deep-research` workflow — phases Scope/Search/Fetch/Verify/Synthesize driving a generated script with `VOTES_PER_CLAIM=3` and `MAX_FETCH=15` — reachable both as `Workflow({name:"deep-research", args:"<question>"})` and via the `/deep-research` entry point, gated only by a default-enabled kill-switch (`tengu_sorrel_avocet`); 2.1.218 narrowed it to start only when invoked manually, and 2.1.220 added the system-prompt guard sentence "Do not use workflows or deep-research unless the user requested it". The port has no built-in workflow library of any kind: `Workflow`'s `name` argument resolves exclusively against user-saved script files under `.lingxi/workflows/` and `~/.lingxi/workflows/`, so `Workflow({name:"deep-research"})` fails with "no saved workflow named 'deep-research' under …", `/workflows` never lists it, and no `/deep-research` slash command or bundled skill is registered. User-visible consequence: a user who asks for deep research, or who follows Claude Code documentation and invokes the named workflow, gets a hard error and no research pipeline — the multi-source search/fetch/vote/verify behaviour simply does not exist; the model can only hand-author an equivalent script inline each time, with no vote threshold, fetch cap, or phase structure. The guard half is a partial non-issue: the port's Workflow tool description already forbids calling the tool without explicit user opt-in (a superset of the oracle's guard), so behaviourally the port is at least as conservative; only the literal sentence is missing, and its `deep-research` clause is moot until the workflow exists. Note the port's own parity ledger has previously dispositioned a related 2.1.196 `/deep-research` item as a Divergence on the grounds that it is "bundled skill content, not core behavior" — so the real gate here is a product decision on whether to adopt bundled workflow content at all, not a technical blocker.
 
@@ -157,7 +190,7 @@ Re-verified port-side at commit 370946160 in /Users/luolingfeng/Projects/LingXi-
 
 | 级别 | 量级 | 状态 |
 |---|---|---|
-| 🟡 Medium | XL | OPEN |
+| 🟡 Medium | XL | CLOSED |
 
 The oracle's agent-definition zod schema accepts three observer fields: `observer` (a string naming another agent), `observerMessage`, and `observeSubagents` (a boolean, new in 2.1.218). At load time the runtime logs "[agentObserver] Agent X declares observer Y…" and arms a pairing whose `fanoutToSubagents` is computed as `observeSubagents !== false` together with a `fanoutDepth` bounded by a depth cap; subagents spawned beneath an observed agent inherit the same observer unless the agent sets `observeSubagents: false`, in which case the runtime logs "not fanning out to observer agent (no chaining)" and stops the chain. The port implements none of this. Neither agent parser knows the three keys — the markdown frontmatter struct (agent/src/catalog.rs) lists 16 fields and carries no `deny_unknown_fields`, and the JSON `parse_agent_from_json` path reads a fixed key set — so `observer:`/`observerMessage:`/`observeSubagents:` in an agent definition are dropped during deserialization without warning, error, or log line. `AgentDefinition` has no place to store them, `SubagentSpawnRequest` has no field to thread them to a child, and no spawn-time code path arms or inherits an observer. User-visible consequence: an agent definition (hand-written, plugin-shipped, or copied from Claude Code docs) that declares an observer runs with no observer whatsoever, and the user gets no diagnostic that the declaration was ignored — the agent appears to load cleanly. Any workflow relying on an observer agent to watch a subagent tree silently produces no observation output at all. The one prerequisite that used to block this is now in place: the spawn-depth default was raised to 3 (traits/src/subagent_spawn.rs:527) and is enforced in the tool resolver, so a fan-out depth cap can be layered on the existing `depth` field rather than inventing new plumbing.
 
@@ -178,7 +211,7 @@ Re-verified port-side at commit 370946160 in /Users/luolingfeng/Projects/LingXi-
 
 | 级别 | 量级 | 状态 |
 |---|---|---|
-| 🟡 Medium | XL | SCOPE-DECISION |
+| 🟡 Medium | XL | DIVERGENCE |
 
 The oracle runs a user+team multistore memory sync engine: a push/pull cycle that reconciles local memory entries against a remote store, logging push_written / push_deleted / conflicts, with a delete policy selected by CLAUDE_CODE_MEMORY_PUSH_DELETE_MODE / the tengu_mem_push_delete_mode gate (corroborate | immediate | never). Guarding that engine is a data-loss hold: Ity(e) returns +Infinity when CLAUDE_CODE_DISABLE_MEMORY_MASS_DELETE_HOLD is set, otherwise max(50, floor(e * 0.1)); a push that would delete at least that many entries is HELD rather than applied, so a corrupted or truncated local store can never wipe a user's or a team's memories remotely. The hold is on by default and the env var is the deliberate escape hatch for the rare legitimate bulk purge. The port has none of this. Its memory subsystem is entirely local-filesystem: a LINGXI.md hierarchy loader, a memdir scanner/ranker, a side-query relevance selector with prefetch, session-memory extraction, surfacing into the prompt, a secret scanner, and a retention sweep. The only team-memory code is TeamMemoryWatcher, a poll-based mtime differ over ~/.lingxi/team-mem that reports changed .md files for hot-reload — and it is not constructed anywhere outside its own unit tests, so even that local half never runs in a shipped binary. There is no remote store, no push, no pull, no conflict record, no delete mode, no hold threshold, and no telemetry event that could report any of it. User-visible consequence today is nil in the sense that no memory data can be lost — nothing is ever pushed anywhere — but the flip side is the whole feature: LingXi users get no cross-machine memory sync and no team memory sharing beyond a directory somebody has to populate by hand, and the CLAUDE_CODE_DISABLE_MEMORY_MASS_DELETE_HOLD env var is silently ignored. The mass-delete hold itself is a roughly 20-line pure function; it is only meaningful once the push side exists, so this item cannot be closed piecemeal — porting the guard without the engine would be dead code of exactly the shape this backlog flags as a defect.
 
@@ -199,7 +232,7 @@ Confirmed port-side, repo root /Users/luolingfeng/Projects/LingXi-Next/.worktree
 
 | 级别 | 量级 | 状态 |
 |---|---|---|
-| ⚪ Low | S | PARTIAL |
+| ⚪ Low | S | CLOSED |
 
 The oracle serves tool DESCRIPTIONS that vary by model capability, not just by the coarse `Dh(model)` short/long gate. Running 2.1.220 against claude-opus-5 yields a Bash description carrying an extra bullet, "- Command output is displayed to you, not reliably to the user.", placed with the other usage bullets; the same binary driven with claude-opus-4-8 does not emit it, even though both models take the SHORT (`Dh`-true) branch. The recorded finding also claimed opus-5 loses the `IMPORTANT: Avoid using this tool to run cat/head/tail/sed/awk/echo` bullet and that the Agent tool drops its "Reach for this when the task matches…" lead-in; both of those DELETION subclaims are now refuted first-hand (see evidence): a live opus-5 session shows the avoid bullet still present alongside the new one, and shows the Agent lead-in still present. So this item is a pure ADDITION of one bullet. **Delete nothing.**
 
@@ -233,7 +266,7 @@ RESOLVED BY THE ORCHESTRATOR SESSION (which the subagent above could not check, 
 
 | 级别 | 量级 | 状态 |
 |---|---|---|
-| ⚪ Low | L | OPEN |
+| ⚪ Low | L | CLOSED |
 
 In --ax-screen-reader mode the oracle drives an accessible input surface: 2.1.218 added spoken announcements of the DELETED TEXT for word deletions (Ctrl-W) and line deletions (Ctrl-U / dd), and fixed VoiceOver announcing "new line" instead of echoing the space the user actually typed; 2.1.219 then fixed the mode rewriting the ENTIRE input line on every keystroke so it echoes only the newly typed character. The port does less than the pre-2.1.218 baseline the item assumed. `apps/cli/src/ax_screen_reader.rs` resolves the flag/env/config gate correctly and prints `[Accessible screen reader mode: on]` at startup (apps/cli/src/lib.rs:935-942), but nothing downstream ever reads the gate: `is_enabled()` has no caller outside its own module, `subprocess_env()` has no caller at all, and `tui/src/screen_reader.rs` — the flat-text serializer plus the `word_wrap`/`diff_lines` helpers that were meant to be the announcement engine — is declared in tui/src/lib.rs:41 and consumed by nobody. The composer key handlers (tui/src/bottom_pane/mod.rs:1459, :1533, :1542; tui/src/vim.rs:148) have no accessibility branch, and the deletion primitives in tui/src/composer.rs discard the removed characters rather than returning them, so there is no value available to announce even if a sink existed. User-visible consequence: a blind user who passes --ax-screen-reader gets one banner line and then an ordinary ratatui frame — no flat-text transcript, no per-keystroke echo, no confirmation of what a word/line deletion removed, and the mode does not propagate into spawned child sessions. This is the classic computed-but-never-wired shape: the serializer and diff helpers exist and are unit-tested, but no publisher feeds them and no consumer reads them.
 
@@ -261,7 +294,7 @@ Both modules still self-document as 2.1.201 ports (apps/cli/src/ax_screen_reader
 
 | 级别 | 量级 | 状态 |
 |---|---|---|
-| ⚪ Low | XL | OPEN |
+| ⚪ Low | XL | CLOSED |
 
 The oracle writes the clipboard through a multiplexer-aware `setClipboard` that base64-encodes the text, does a native copy (pbcopy / wl-copy / xclip / xsel / powershell, each also writing the X11 PRIMARY selection) when not over SSH, pushes the text into a tmux buffer via `tmux load-buffer -w -`, and then emits an OSC 52 clipboard write whose framing depends on the detected multiplexer: bare OSC 52 outside a mux, OSC 52 plus a `ESC P tmux; … ESC \` DCS passthrough under tmux, and — the 2.1.219 change — a chunked `ESC P … ESC \` DCS passthrough under GNU screen (`$STY`). That emitter is consumed both by `/copy` and by copy-on-select: in the fullscreen renderer the TUI captures the mouse, maintains a selection store, and on mouse-up (gated by the `copyOnSelect` setting, default on, surfaced as the "Copy on select" row in `/config`) copies the selection and shows a toast that names the transport used ("copied … to clipboard" / "copied … to tmux buffer · paste with prefix + ]" / "sent … via OSC 52 · if paste fails, hold Shift/Option/Fn while selecting for native copy").
 
@@ -313,7 +346,7 @@ Re-verified port-side in /Users/luolingfeng/Projects/LingXi-Next/.worktrees/back
 
 | 级别 | 量级 | 状态 |
 |---|---|---|
-| 🔴 High | S | OPEN |
+| 🔴 High | S | CLOSED |
 
 The oracle evaluates its MCP disable predicate (`Fw`, the minified `eI`) by NAME at connect time, downstream of every merge — including the agent-frontmatter merge `FWt` — so a name listed in the project's `disabledMcpServers` denylist is rendered as `type:"disabled"` and never spawned, no matter which config source supplied it. The port precomputes the decision into `McpServerConfig::disabled` inside `apply_project_server_gate`, which runs BEFORE the agent merge. The MCPCLI-2 fix made an agent's replacement config carry `disabled = false` — correct for the rejected-`.mcp.json` case it targeted (the oracle's `afe` really does drop a rejected project server from the discovered map entirely, so the agent's entry is the only one left) — but because the port cannot tell WHY a config was marked disabled, the same code path also clears a denylist decision. Consequence: any server the user disabled via `disabledMcpServers` is re-enabled the moment an agent definition declares a server of that name, whether it replaces the user's discovered entry (inheriting the agent's transport spec and command line) or is pushed as a brand-new entry. Since agent definitions are loaded from `<cwd>/.lingxi/agents/*.md` — untrusted, repo-supplied content — and an MCP stdio server is arbitrary local code execution, a checked-in agent file plus `--agent <name>` (or a resumed `agentSetting`) silently defeats an explicit user denial. The `computer-use` allowlist half is NOT exposed: `agent_mcp_specs_to_scoped_configs` skips reserved names, so no agent can re-enable the builtin.
 
@@ -332,7 +365,7 @@ CONFIRMED, and the security consequence is REAL. Port ordering in `apps/engine-d
 
 | 级别 | 量级 | 状态 |
 |---|---|---|
-| 🟡 Medium | S | OPEN |
+| 🟡 Medium | S | CLOSED |
 
 The oracle's leading additionalContext meta message renders `# currentDate` from `LGe()`, a session-memoized snapshot of the local date (`LGe = Vr(wcs)`, cleared only by `clearSessionCaches`, i.e. session start / `/clear` / resume). The whole userContext builder `jA` is itself memoized on the cwd, so within one session at one cwd the meta message body is byte-stable; when a session crosses local midnight the oracle keeps showing the SESSION-START date in `# currentDate` and communicates the rollover exclusively through the one-shot `date_change` system-reminder. The port instead calls `current_date_string()` fresh inside `additional_context_message()`, which is re-run and re-prepended at index 0 of the outgoing snapshot on every single model call. Consequences: (1) prompt-cache breakage — the first request after local midnight mutates message[0], the very front of the cacheable message prefix, so the entire conversation must be re-processed as uncached input tokens on that request (a real, repeatable cost for overnight, cron- and `--bg`-driven sessions, which LingXi ships); (2) content divergence — the port announces the new date twice, once via a now-updated `# currentDate` and once via the `date_change` reminder the port already emits correctly, whereas the oracle sends only the reminder. Nothing else in the port depends on the live read, and the exact memoized value the oracle uses is already materialised in `DateChangeState.session_date`, so the fix is a small one: have `additional_context_message` read (and, if unseeded, seed) that per-session date under the same `session_id` key the turn loop already passes to `date_change_reminder_message` at `turn_loop.rs:534` / `conversation.rs:7203`. Watch the seeding order — `additional_context_message` runs before the `date_change` producer in a turn, so whichever runs first must seed the shared memo, exactly as `Vr(wcs)` does.
 
@@ -351,7 +384,7 @@ PORT — `orchestrator/src/conversation.rs:9539-9543` pushes `format!("# current
 
 | 级别 | 量级 | 状态 |
 |---|---|---|
-| 🟡 Medium | M | OPEN |
+| 🟡 Medium | M | CLOSED |
 
 The oracle's `mcp get` handler (`hJy` @238844777) always resolves a status and prints a `Status:` line for every server: pending and rejected short-circuit to their fixed strings, and EVERY other server goes through `yEp(t,i)`, which performs the same spawn/connect probe `mcp list` uses and reports `✔ Connected` or `✘ Failed to connect` with an `Issue:` line. The port's `run_get` prints `Status:` only on the pending, rejected and config-error/unconfigured branches; a healthy or merely broken-at-runtime server takes none of them, so the command prints the server's scope and transport and stops. User-visible consequence: `mcp get <name>` is silent about whether the server actually works. A user debugging a server that fails to start sees a perfectly normal-looking record with no error, and must run `mcp list` (which probes every server) to discover the failure — the opposite of the per-server drill-down the command exists for. The output also diverges from the oracle's line set, so any script or doc that greps `mcp get` output for `Status:` finds nothing for exactly the servers that are working.
 
@@ -370,7 +403,7 @@ The oracle's `mcp get` handler (`hJy` @238844777) always resolves a status and p
 
 | 级别 | 量级 | 状态 |
 |---|---|---|
-| 🟡 Medium | M | OPEN |
+| 🟡 Medium | M | CLOSED |
 
 The oracle's `afe` loader treats a project `.mcp.json` entry that is not yet approved as a no-op when a server of the same name already exists in user, local or plugin scope: the project loop `continue`s before the pending/rejected arms, so the user's own server survives untouched and connects normally. (An APPROVED project entry still overrides, so the documented local > project > user precedence is unchanged for the approved case.) The port collapses all scopes into a single by-name map in which the project entry unconditionally overwrites the user entry, so the one surviving config carries `scope: Project`. Every downstream consumer keys off that scope: `mcp list` filters the row out as rejected, or labels it "Pending approval" and refuses to health-check it; `mcp get` prints the project entry's transport and the Rejected/Pending status; and at runtime `apply_project_server_gate` marks it disabled so it is never connected. User-visible consequence: dropping a `.mcp.json` into a repo whose server name collides with one the user added via `mcp add -s user` — or declining/disabling that project server — silently disables the user's own working server. The user sees their server disappear from `mcp list` with no message, and `mcp get <name>` shows the repo's command line instead of their own. It is fail-closed (nothing untrusted is executed), but a cloned repository can suppress an arbitrary user-scope MCP server just by naming a project server after it.
 
@@ -391,7 +424,7 @@ Port: `mcp/src/json_config.rs:496-551` `load_mcp_servers` collapses every scope 
 
 | 级别 | 量级 | 状态 |
 |---|---|---|
-| ⚪ Low | S | OPEN |
+| ⚪ Low | S | CLOSED |
 
 The oracle's JSON agent schema declares `mcpServers: z.array(z.union([z.string(), z.record(z.string(), McpServerConfigSchema)])).optional()`. Because zod's `z.record` happily parses an empty object, an array item of `{}` is a VALID spec: the agent definition is built and kept, and the later conversion `agentMcpSpecsToScopedConfigs` warns `[Agent: <name>] Invalid MCP server spec: expected exactly one key` and skips only that entry. The port's `parse_mcp_servers_json_strict` adds an unstated `!map.is_empty()` guard, so an empty record is classified as a schema violation and the ENTIRE agent definition is thrown away with only a `debug!` line. On the `--agents <json>` CLI flag — the only production caller — that single rejected entry escalates further: `parse_agents_from_flag_json` treats any per-agent parse failure as an all-or-nothing record-schema throw and returns an empty vector, so every agent supplied on the command line silently vanishes and the session boots with only the built-in/dir agents. Note that the literal reading of the recorded claim (a top-level `"mcpServers": {}` non-array object) is NOT a divergence: the oracle's `z.array(...)` rejects it and throws, and the port drops the agent too — they agree. The real, still-open defect is an empty object as an ARRAY ITEM, i.e. `"mcpServers": [{}]`. The fix is to drop the `!map.is_empty()` guard so an empty record becomes `AgentMcpServerSpec::Record({})` and is handled by the already-correct `record.len() != 1` warn+skip in `agent/src/mcp_servers.rs`, plus a regression test that the agent survives.
 
@@ -410,7 +443,7 @@ PORT: `agent/src/catalog.rs:1201` guards the record arm with `serde_json::Value:
 
 | 级别 | 量级 | 状态 |
 |---|---|---|
-| ⚪ Low | M | OPEN |
+| ⚪ Low | M | CLOSED |
 
 The oracle derives the `tool_decision` / `code_edit_tool.decision` `source` label with `eQ_`, whose `permissionPromptTool` arm first reads the HOST's own `decisionClassification` off the `can_use_tool` tool result and returns it verbatim when it is one of `user_temporary` / `user_permanent` / `user_reject`, only falling back to "temporary for allow, reject for deny" when the host omits it or sends an invalid value. The oracle also attaches a `tool_parameters` attribute built by `HWr` (bash_command, full_command, timeout, description, dangerouslyDisableSandbox, mcp_server_name, mcp_tool_name, skill_name, subagent_type) to both `tool_decision` and `tool_result` records whenever `OTEL_LOG_TOOL_DETAILS` is truthy. The port does neither: the stdio control-plane parser in `map_payload` discards `decisionClassification` (the field never crosses the `PermissionOutcome` seam, which has no place to carry it), so the turn loop unconditionally hardcodes `user_temporary` for every host-approved tool, and the port has no `HWr` twin at all, so `tool_parameters` is never emitted on any record. User-visible consequence: an SDK/stdio host that classifies its grant as a PERMANENT one is reported to the collector as `user_temporary`, so OTEL dashboards under-count persisted permission grants; and operators who opt in with `OTEL_LOG_TOOL_DETAILS=1` get no tool-parameter detail on any `claude_code.events` record, silently losing the whole opt-in payload the flag exists to produce. Both are telemetry-only — no behaviour on the tool-execution path changes — which is why the wave documented rather than fixed them. Fixing needs a new field on `PermissionOutcome::Allow` plus the `control_plane.rs` parse for half (a), and a port of `HWr` plus its wiring into `record_tool_permission_decision` (and ideally the `tool_result` bridge) for half (b); note `logs::tool_details_enabled()` already exists and is currently dead, so it is the natural gate to consume.
 
@@ -435,7 +468,7 @@ PORT — (a) decisionClassification: `orchestrator/src/turn_loop.rs:3059-3082` i
 
 | 级别 | 量级 | 状态 |
 |---|---|---|
-| 🟡 Medium | S | OPEN |
+| 🟡 Medium | S | CLOSED |
 
 Claude Code's enterprise OpenTelemetry monitoring emits a `claude_code.user_prompt` log record on the `claude_code.events` logger every time a prompt is submitted, carrying `prompt_length`, `prompt.id`, `message.uuid` and — only when `OTEL_LOG_USER_PROMPTS` is enabled — the prompt text itself (otherwise the literal `<REDACTED>`); the slash-command path swaps `message.uuid` for `command_name`/`command_source`. LingXi ported the gate predicate (`logs::user_prompts_enabled`) and the whole emit substrate, and wired every sibling record (`assistant_response`, `tool_result`, `tool_decision`, `api_request`, `api_error`), but never added the `user_prompt` call site at the prompt-submit seam. The consequence for anyone running LingXi with `LINGXI_ENABLE_TELEMETRY` against an OTLP collector is that one of the five documented `claude_code.*` events is simply never produced: prompt counts, prompt-length distributions and prompt-to-response correlation (via `prompt.id`) are all missing from enterprise dashboards, and `OTEL_LOG_USER_PROMPTS=1` has no effect at all. The natural seam is `ConversationOrchestrator::fire_user_prompt_submit`'s three call sites in `orchestrator/src/conversation.rs` (lines 6658, 6885, 8682), the port's equivalent of the oracle's `p2_`/`RPp` input-prompt handlers.
 
@@ -454,7 +487,7 @@ Claude Code's enterprise OpenTelemetry monitoring emits a `claude_code.user_prom
 
 | 级别 | 量级 | 状态 |
 |---|---|---|
-| 🟡 Medium | S | OPEN |
+| 🟡 Medium | S | CLOSED |
 
 The oracle expands enterprise MCP policy predicates against a frozen startup env snapshot overlaid with the managed sources' `env` blocks, and additionally gives the DENY side a fallback env assembled from four tiers in order: the global config, `userSettings`, `flagSettings` (the `env` block of whatever file `--settings` pointed at), then `policySettings` — later wins. The port implements three of those four and leaves the `flagSettings` slot empty, with no parameter on `policy_expansion_env_with` through which the composition root could supply it. Consequence: an enterprise denylist entry whose `serverCommand`/`serverUrl` predicate references a `${VAR}` that is defined only in a `--settings` file's `env` block never expands — the `${VAR}` stays literal, the pattern fails to match the real server, and a server the managed policy intended to block is allowed through. It is a narrow under-deny (it needs a policy predicate that depends on a variable only the CLI settings file defines), but it is an enterprise-policy bypass, and the allow side is unaffected since the oracle deliberately gives it no fallback env.
 
@@ -475,7 +508,7 @@ Referent located at the behaviour site, and the port documents the hole itself: 
 
 | 级别 | 量级 | 状态 |
 |---|---|---|
-| 🟡 Medium | M | PARTIAL |
+| 🟡 Medium | M | CLOSED |
 
 The oracle has a single warn variant covering every reason an agent's frontmatter `mcpServers` gets dropped: it computes one reason token (`strictPluginOnlyCustomization`, `--strict-mcp-config`, `--safe-mode`/`--bare`, `remote mode`, `enterprise MCP config`), logs `[Agent: X] Skipping frontmatter MCP servers: blocked by <reason> (agent source: Y)` at warn level, and hands the server names plus the reason to the caller's `onBlocked` callback. The port's merge returns silently at each of those gates — a user whose agent declares MCP servers that never appear gets no reason, anywhere. Compounding that, the plugin-lock reason can never fire here: the `strictPluginOnlyCustomization` branch is ported verbatim but its caller passes a hardcoded `false`, and `StrictPluginOnlyPolicy` is never populated from managed settings by any loader, so a `strictPluginOnlyCustomization: ["mcp"]` managed policy is silently ignored and user/project agents' MCP servers connect anyway. In the opposite direction the port is harsher than the oracle in the one place the oracle is permissive: any plugin whose agent markdown merely CONTAINS the substring `mcpServers` — including inside a description or a comment — fails validation and takes the entire plugin down with it, where the oracle loads the plugin and honours those servers.
 
@@ -496,7 +529,7 @@ Three port-side facts, each at the behaviour site. (1) The plugin lock is ported
 
 | 级别 | 量级 | 状态 |
 |---|---|---|
-| 🟡 Medium | M | OPEN |
+| 🟡 Medium | M | CLOSED |
 
 In the oracle, a session you attached to from the agents view knows it is a background session (`rs()`/`isBg`). Its left-arrow gesture therefore resolves to the DETACH arm rather than the open-agents arm: the armed hint reads "Press ← again to go back to agents", and confirming runs `Wet` → `E4e()`, which detaches the controller and drops you back in the fleet view while the session keeps running. A separate `GO_BACK_CONFIRM_HINT` ("Press ← again to go back") covers a host-supplied back handler, and `Wet` carries a 1s repeat guard keyed on the attach stamp so the second half of a fast double-tap cannot detach a session you just attached to. The port ported the three hint strings as byte-locked constants but wired only the open-agents one: the pane always reports `in_attach_quiet_window: false`/`attach_stamp_ms: 0`, always shows "Press ← again to open agents", and its only fire outcome is `OpenAgentsView`, which pushes the `/tasks` picker. A user attached to a LingXi background session (via `lingxi-cli agents` → Enter, or `lingxi-cli attach`) who presses ← therefore gets the wrong hint and the wrong action — a task picker stacked on top of the attached session instead of a clean detach back to the fleet — and must know to press Ctrl-Z, which nothing in the TUI advertises. The `tengu_left_arrow_blocked` counter (reasons `attach-quiet-hint`/`attach-quiet`/`editing-quiet`/`not-solo`) is also computed by `blocked_reason()` and never emitted.
 
@@ -515,7 +548,7 @@ In the oracle, a session you attached to from the agents view knows it is a back
 
 | 级别 | 量级 | 状态 |
 |---|---|---|
-| 🟡 Medium | XL | OPEN |
+| 🟡 Medium | XL | CLOSED |
 
 In the oracle the left-arrow gesture does not merely open a view: it BACKGROUNDS the current conversation and then shows the fleet. `lY_`/`aY_` classify the transition — `idle-fork` when nothing is in flight, `defer-then-fork` when a turn is running between tool calls (wait for the current tool to finish, showing "Backgrounding after the current tool finishes…", capped by `tengu_defer_cap_ms`, default 10s), and `abort-then-fork` when it must abort the in-flight request after flushing, carrying the partial assistant text, the boundary UUID and the restartable-subagent count into the forked job so work is not lost. It refuses outright when persistence is disabled, when the model ended the conversation, when queued commands or unsent draft text would be lost, and it emits `tengu_left_arrow_blocked` with the reason and in-flight kinds in each case. LingXi implements none of this: `open_agents_view()` pushes the `/tasks` picker over a conversation that keeps running in the FOREGROUND, so ← is a view toggle rather than a backgrounding gesture. The user-visible consequence is that there is no way to hand a running turn off to the background from the composer at all — the oracle's core "press ← to park this and go look at my other agents" workflow is missing, and mid-turn ← silently does something different (opens a modal) rather than deferring/aborting-then-forking. The substrate for the fork half exists (`traits/src/bg_session_forker.rs` + `apps/cli/src/bg_session_forker.rs`, reachable today only via `/fork`); what is missing is the state machine, the interstitials, and the turn-loop signals (`isLoading`, `betweenCalls`, in-flight count/kinds, restartable count) that would drive it.
 
@@ -536,7 +569,7 @@ Repo-wide grep across all `.rs` for `defer-then-fork`, `abort-then-fork`, `idle-
 
 | 级别 | 量级 | 状态 |
 |---|---|---|
-| ⚪ Low | S | LATENT |
+| ⚪ Low | S | CLOSED |
 
 With the `tengu_maple_sundial` gate on, the oracle collapses the two per-setting agents-view rows in `/config` into a single row `{id:"agentsView", label:"Agents view"}` of type `managedEnum` whose value is the OR of the two underlying settings rendered as "on"/"off", and whose `onChange` is a no-op — i.e. the row becomes read-only and neither `leftArrowOpensAgents` nor `defaultToAgentsView` can be toggled from `/config`. Because the `/config` shorthand resolves keys against that same row list, `defaultToAgentsView` and `leftArrowOpensAgents` also stop being addressable by shorthand and fall through to the unknown-key answer. LingXi has no `tengu_maple_sundial` gate and no `managedEnum` row concept: `settings_lines()` always renders the two editable boolean rows and the shorthand always accepts both keys, so if Anthropic flips the gate server-side the port shows two toggles where the oracle shows one locked summary row, and lets the user change settings the oracle has made read-only. Gate default is OFF, so today the divergence is latent.
 
@@ -555,7 +588,7 @@ Oracle 2.1.220 settings row list: `...X7e() ? ($H()||H7e() ? [{id:"agentsView",l
 
 | 级别 | 量级 | 状态 |
 |---|---|---|
-| ⚪ Low | M | OPEN |
+| ⚪ Low | M | CLOSED |
 
 When an MCP server entry fails schema validation, the oracle reports every zod issue for that entry, formatted `<path.join('.') || "(root)">: <message with a leading "Invalid input: " stripped>` and joined with `"; "` — e.g. `Skipped — invalid MCP server config for "bad": url: expected string, received undefined`. The port substitutes a three-way canned guess (`command: Required` / `url: Required` / `invalid entry`), which is both incomplete (it can only ever name one field, never a second issue, and never a wrong-type issue) and factually wrong: `Required` is zod-3 phrasing, and 2.1.220 ships zod 4. Separately, the `mcp list` diagnostics panel is missing the oracle's ` ⚠` on the title line, the blank line after it, and the ` ├ ` / ` └ ` tree guides on each row. User-visible consequence: someone debugging a broken `.mcp.json` sees a plausible-looking but different reason than the documentation and the oracle produce, with any second problem in the same entry silently hidden, and the panel does not match the product it is imitating byte-for-byte.
 
@@ -580,7 +613,7 @@ The id appears exactly once in the tree — /Users/luolingfeng/Projects/LingXi-N
 
 | 级别 | 量级 | 状态 |
 |---|---|---|
-| 🟡 Medium | L | OPEN |
+| 🟡 Medium | L | CLOSED |
 
 The H6 event, payload and `/add-dir` firing site are genuinely closed. What remains is everything downstream of the fire plus the second entry point. First, the `register_repo_root` SDK control request is absent from the port entirely — an SDK or stream-json host cannot register a working directory mid-session at all; the request is answered `Unsupported control request subtype`. In the oracle it validates the target, adds it to the session's permission context, refreshes the sandbox configuration so sandboxed tools and permission state already see the directory before hooks run, fires DirectoryAdded with `source: "register_repo_root"`, and optionally reloads CLAUDE.md, skills and plugins. Second, `source` is documented in the port as the hook matcher query but `match_query_for` has no DirectoryAdded arm, so the query is `None` and every subscribed hook fires regardless of its declared matcher — a hook a user scoped to `register_repo_root` runs on every `/add-dir`. Third, the port discards the hook results: the oracle logs each failed hook's output at error level, renders each hook's `systemMessage` into the conversation as bounded context the model actually sees, and summarises the failure count; the port's `let _ = …execute(…)` drops all of it, so a DirectoryAdded hook's output is invisible to both the user and the model. Fourth, the port fires `source: "add_dir"` where 2.1.220 fires `"slash_command"` — the wire payload diverges, and once the matcher query is wired the documented matcher value would stop matching, so (b) and (d) must be fixed together.
 
@@ -607,7 +640,7 @@ Closed halves re-verified first: the event exists (hooks/src/events.rs:85-86, :5
 
 | 级别 | 量级 | 状态 |
 |---|---|---|
-| 🟡 Medium | M | OPEN |
+| 🟡 Medium | M | CLOSED |
 
 Claude Code 2.1.218 把 `/code-review` 改成后台 subagent，目标是避免 review 工作填满主对话，并保留 stacked slash commands 作为 review target。LingXi 的 `commands/core/src/bundled/mod.rs` 仍把它注册成 `SlashCommandKind::Bundled { prompt_fn: CodeReviewPromptFn }`；`commands/core/src/bundled/code_review_skill.rs` 还明确标注这是 `inline plain-text path`。调用后生成的整段 review prompt 继续进入主 conversation，没有 background/fork metadata、subagent launch 或隔离 transcript。
 
@@ -621,7 +654,7 @@ Claude Code 2.1.218 把 `/code-review` 改成后台 subagent，目标是避免 r
 
 | 级别 | 量级 | 状态 |
 |---|---|---|
-| 🟡 Medium | S | OPEN |
+| 🟡 Medium | S | CLOSED |
 
 Claude Code 2.1.218 明确修复了“从 message picker compact 后 `/context` 仍报告 pre-compact token usage”。LingXi 的 `OrchestratorHandle::context_window_usage()` 读取 `SessionState::usage` 的累计 input + output tokens；该值记录历次请求用量，不是当前 compact 后 history 的 live token estimate。`CompactionCompleted` 只替换 history/写入 boundary 并更新 TUI spinner，没有重算或重置这份累计 usage。`/context` 每次虽然重新调用 handle，但拿到的仍是错误指标，因此不是 UI cache 问题。
 
@@ -635,7 +668,7 @@ Claude Code 2.1.218 明确修复了“从 message picker compact 后 `/context` 
 
 | 级别 | 量级 | 状态 |
 |---|---|---|
-| ⚪ Low | S | OPEN |
+| ⚪ Low | S | CLOSED |
 
 Claude Code 2.1.218 修复了某些终端中 multi-line paste 的换行变成 `j`/被折叠的问题。LingXi 的 paste-burst 层只把“无 Ctrl/Alt modifier 的 `KeyCode::Enter`”认作粘贴换行；`Ctrl+J` 进入 modified-key 分支，先 flush/close burst，后续 composer match 也没有 `Char('j') + CONTROL` 的 newline 分支。全 TUI 没有更早的 key normalization 层。
 
@@ -649,7 +682,7 @@ Claude Code 2.1.218 修复了某些终端中 multi-line paste 的换行变成 `j
 
 | 级别 | 量级 | 状态 |
 |---|---|---|
-| ⚪ Low | M | OPEN |
+| ⚪ Low | M | CLOSED |
 
 Claude Code 2.1.218 的 accessibility 修复要求 plugin/settings panel 在方向键导航时把 terminal cursor 移到焦点行，使 screen reader 和 magnifier 能跟随。LingXi 的 `PluginsView`/settings `ScreenView` 保存并渲染 `selected`，但没有实现 `Renderable::cursor_pos`；`BottomPane::cursor_pos` 对 list modal 会退回 composer cursor。视觉高亮看似正常，辅助技术收到的实际焦点却仍在输入框。
 
@@ -663,7 +696,7 @@ Claude Code 2.1.218 的 accessibility 修复要求 plugin/settings panel 在方�
 
 | 级别 | 量级 | 状态 |
 |---|---|---|
-| 🟡 Medium | M | PARTIAL |
+| 🟡 Medium | M | CLOSED |
 
 `compaction/src/microcompact.rs` 已实现 compactable tool 选择、20k 最小节省阈值和 keep-recent 保护，也暴露了可接收 out-of-band timestamp 的 trigger helper；但生产调用点 `compaction/src/orchestrator.rs` 明确承认 `ConversationMessage` 没有 per-message timestamp。启用 microcompact 后，orchestrator 直接按 count gate 执行，而不是先判断 `now - lastAssistant.timestamp >= gapThresholdMinutes`。
 

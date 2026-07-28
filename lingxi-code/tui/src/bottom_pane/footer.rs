@@ -25,6 +25,10 @@ pub(crate) struct FooterProps {
     pub mode: FooterMode,
     pub vim_label: Option<String>,
     pub cost: Option<String>,
+    /// Screen-reader edit announcement. When present it replaces the normal
+    /// shortcut hint for this frame so assistive technology hears only the
+    /// current character/deleted text, never the whole composer line.
+    pub accessibility_announcement: Option<String>,
 }
 
 /// Rows the footer occupies (codex `footer_height`; single-line today).
@@ -35,6 +39,9 @@ pub(crate) fn footer_height(_props: &FooterProps) -> u16 {
 /// The footer line: hint copy is byte-identical to the pre-move status row.
 pub(crate) fn footer_line(props: &FooterProps, theme: &tui_core::theme::Theme) -> Line<'static> {
     let dim = crate::style_adapter::to_ratatui(theme.dim);
+    if let Some(announcement) = &props.accessibility_announcement {
+        return Line::from(Span::styled(announcement.clone(), Style::default().fg(dim)));
+    }
     if let FooterMode::LeftArrowReminder(hint) = props.mode {
         let claude = crate::style_adapter::to_ratatui(theme.claude);
         return Line::from(Span::styled(hint, Style::default().fg(claude)));
@@ -97,6 +104,7 @@ mod tests {
             mode: FooterMode::Idle,
             vim_label: None,
             cost: Some("$0.0123".into()),
+            accessibility_announcement: None,
         };
         let line = footer_line(&props, &tui_core::theme::Theme::dark());
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
@@ -112,6 +120,7 @@ mod tests {
             mode: FooterMode::Idle,
             vim_label: None,
             cost: None,
+            accessibility_announcement: None,
         };
         let area = Rect::new(0, 0, 80, 1);
         let mut buf = Buffer::empty(area);
@@ -136,6 +145,7 @@ mod tests {
             mode: FooterMode::CtrlCReminder,
             vim_label: None,
             cost: Some("$1".into()),
+            accessibility_announcement: None,
         };
         let line = footer_line(&props, &tui_core::theme::Theme::dark());
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();

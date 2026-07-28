@@ -56,9 +56,7 @@ fn web_fetch_user_agent_is_2_1_220() {
 fn the_identifiers_share_one_source() {
     let v = traits::CLAUDE_CODE_VERSION;
     assert!(format!("claude-code_{}_agent", v.replace('.', "-")).contains(&v.replace('.', "-")));
-    assert!(
-        format!("Claude-User (claude-code/{v}; +https://support.anthropic.com/)").contains(v)
-    );
+    assert!(format!("Claude-User (claude-code/{v}; +https://support.anthropic.com/)").contains(v));
 }
 
 /// Wave 0 maps every approved engineering item to exactly one implementation
@@ -95,12 +93,10 @@ fn private_remote_memory_is_one_explicit_divergence() {
         .expect("divergences array");
     assert_eq!(divergences.len(), 1);
     assert_eq!(divergences[0]["id"], "N-env-3/N-protocol-8");
-    assert!(
-        divergences[0]["reason"]
-            .as_str()
-            .expect("divergence reason")
-            .contains("private account remote-memory")
-    );
+    assert!(divergences[0]["reason"]
+        .as_str()
+        .expect("divergence reason")
+        .contains("private account remote-memory"));
 }
 
 /// These are the clean-room black-box contracts most likely to be weakened by
@@ -127,10 +123,7 @@ fn stateful_2_1_220_contracts_are_pinned() {
         contracts["opus_5_bash_addition"],
         "Command output is displayed to you, not reliably to the user."
     );
-    assert_eq!(
-        contracts["attached_left_arrow"]["outcome"],
-        "detach"
-    );
+    assert_eq!(contracts["attached_left_arrow"]["outcome"], "detach");
     assert_eq!(
         contracts["accessibility"]["announces_edit_delta_only"],
         true

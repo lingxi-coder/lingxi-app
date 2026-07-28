@@ -103,6 +103,11 @@ pub fn init(flag: bool, config: Option<bool>) -> bool {
     let resolved = resolve(flag, env.as_deref(), config);
     // First writer wins; ignore the error from a redundant re-init.
     let _ = ENABLED.set(resolved);
+    // `tui` cannot depend back on this CLI module. Propagate the resolved gate
+    // through the same env seam child sessions already inherit.
+    if is_enabled() {
+        std::env::set_var(ENV_VAR, "1");
+    }
     is_enabled()
 }
 

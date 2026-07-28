@@ -379,6 +379,16 @@ pub const BUILTIN: &[SlashCommand] = &[
         run: ChatWidget::cmd_clear,
     },
     SlashCommand {
+        name: "/tui",
+        aliases: &["/focus"],
+        description: "Toggle full-screen mode",
+        dynamic_description: None,
+        hint: "",
+        args: ArgSpec::None,
+        advertised: true,
+        run: ChatWidget::cmd_tui,
+    },
+    SlashCommand {
         name: "/exit",
         aliases: &["/quit"],
         description: "Exit the CLI",

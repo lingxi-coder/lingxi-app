@@ -28,6 +28,80 @@ use crate::renderable::Renderable;
 /// content scrolls to follow the cursor.
 pub const MAX_VISIBLE_LINES: usize = 6;
 
+/// The exact text mutation produced by one composer edit.
+///
+/// Keeping this separate from the rendered buffer lets accessibility surfaces
+/// announce only the current character/deletion instead of re-reading the
+/// entire input line on every key.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EditDelta {
+    /// Text inserted by the edit, in logical order.
+    pub inserted: String,
+    /// Text removed by the edit, in logical order.
+    pub deleted: String,
+}
+
+impl EditDelta {
+    /// An insertion-only delta.
+    #[must_use]
+    pub fn inserted(text: impl Into<String>) -> Self {
+        Self {
+            inserted: text.into(),
+            deleted: String::new(),
+        }
+    }
+
+    /// A deletion-only delta.
+    #[must_use]
+    pub fn deleted(text: impl Into<String>) -> Self {
+        Self {
+            inserted: String::new(),
+            deleted: text.into(),
+        }
+    }
+
+    /// Whether this edit changed no text.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.inserted.is_empty() && self.deleted.is_empty()
+    }
+
+    /// Derive the single contiguous edit between two composer snapshots.
+    ///
+    /// Composer key operations mutate one contiguous range, so a shared
+    /// prefix/suffix diff yields the exact inserted/deleted text without
+    /// exposing internal cursor indices to the Vim layer.
+    #[must_use]
+    pub fn between(before: &str, after: &str) -> Self {
+        if before == after {
+            return Self::default();
+        }
+        let before_chars = before.chars().collect::<Vec<_>>();
+        let after_chars = after.chars().collect::<Vec<_>>();
+        let prefix = before_chars
+            .iter()
+            .zip(&after_chars)
+            .take_while(|(left, right)| left == right)
+            .count();
+        let max_suffix = before_chars.len().min(after_chars.len()) - prefix;
+        let suffix = before_chars[prefix..]
+            .iter()
+            .rev()
+            .zip(after_chars[prefix..].iter().rev())
+            .take(max_suffix)
+            .take_while(|(left, right)| left == right)
+            .count();
+        Self {
+            inserted: after_chars[prefix..after_chars.len() - suffix]
+                .iter()
+                .collect(),
+            deleted: before_chars[prefix..before_chars.len() - suffix]
+                .iter()
+                .collect(),
+        }
+    }
+}
+
 /// The input buffer + cursor + submitted-prompt history.
 #[derive(Debug, Default)]
 pub struct Composer {
@@ -215,15 +289,16 @@ impl Composer {
 
     /// Insert a character at the cursor (adopts the browsed history line as the
     /// live buffer first).
-    pub fn insert(&mut self, c: char) {
+    pub fn insert(&mut self, c: char) -> EditDelta {
         self.detach_history();
         self.chars.insert(self.cursor, c);
         self.cursor += 1;
+        EditDelta::inserted(c.to_string())
     }
 
     /// Insert a newline at the cursor (modified-Enter).
-    pub fn insert_newline(&mut self) {
-        self.insert('\n');
+    pub fn insert_newline(&mut self) -> EditDelta {
+        self.insert('\n')
     }
 
     /// Replace the whole buffer with `text`, cursor at the end (used by command
@@ -300,20 +375,22 @@ impl Composer {
     }
 
     /// Delete the character before the cursor (`Backspace`).
-    pub fn backspace(&mut self) {
+    pub fn backspace(&mut self) -> EditDelta {
         self.detach_history();
         if self.cursor > 0 {
             self.cursor -= 1;
-            self.chars.remove(self.cursor);
+            return EditDelta::deleted(self.chars.remove(self.cursor).to_string());
         }
+        EditDelta::default()
     }
 
     /// Delete the character at the cursor (`Delete`).
-    pub fn delete(&mut self) {
+    pub fn delete(&mut self) -> EditDelta {
         self.detach_history();
         if self.cursor < self.chars.len() {
-            self.chars.remove(self.cursor);
+            return EditDelta::deleted(self.chars.remove(self.cursor).to_string());
         }
+        EditDelta::default()
     }
 
     /// Move the cursor one char left.
@@ -455,47 +532,56 @@ impl Composer {
     }
 
     /// Insert a string at the cursor (used by vim paste), cursor after it.
-    pub fn insert_str(&mut self, s: &str) {
+    pub fn insert_str(&mut self, s: &str) -> EditDelta {
         self.detach_history();
         let chars: Vec<char> = s.chars().collect();
         let n = chars.len();
         self.chars.splice(self.cursor..self.cursor, chars);
         self.cursor += n;
+        EditDelta::inserted(s)
     }
 
     /// Delete from the cursor back to the previous word boundary.
-    pub fn delete_word(&mut self) {
+    pub fn delete_word(&mut self) -> EditDelta {
         self.detach_history();
         let target = self.word_left_from(self.cursor);
+        let deleted = self.chars[target..self.cursor].iter().collect::<String>();
         self.chars.drain(target..self.cursor);
         self.cursor = target;
+        EditDelta::deleted(deleted)
     }
 
     /// Delete from the start of the current line up to the cursor.
-    pub fn kill_to_line_start(&mut self) {
+    pub fn kill_to_line_start(&mut self) -> EditDelta {
         self.detach_history();
         let start = self.line_start(self.cursor);
+        let deleted = self.chars[start..self.cursor].iter().collect::<String>();
         self.chars.drain(start..self.cursor);
         self.cursor = start;
+        EditDelta::deleted(deleted)
     }
 
     /// Delete from the cursor to the end of the current line (vim `D`).
-    pub fn kill_to_line_end(&mut self) {
+    pub fn kill_to_line_end(&mut self) -> EditDelta {
         self.detach_history();
         let end = self.line_end(self.cursor);
+        let deleted = self.chars[self.cursor..end].iter().collect::<String>();
         self.chars.drain(self.cursor..end);
+        EditDelta::deleted(deleted)
     }
 
     /// Delete the whole current line, including its trailing newline (vim `dd`).
-    pub fn delete_line(&mut self) {
+    pub fn delete_line(&mut self) -> EditDelta {
         self.detach_history();
         let start = self.line_start(self.cursor);
         let mut end = self.line_end(self.cursor);
         if end < self.chars.len() && self.chars[end] == '\n' {
             end += 1;
         }
+        let deleted = self.chars[start..end].iter().collect::<String>();
         self.chars.drain(start..end);
         self.cursor = start.min(self.chars.len());
+        EditDelta::deleted(deleted)
     }
 
     /// Move the cursor up one line preserving the column (vim `k`); unlike
@@ -1100,9 +1186,12 @@ mod tests {
     #[test]
     fn delete_word_removes_previous_word() {
         let mut c = typed("foo bar");
-        c.delete_word();
+        let delta = c.delete_word();
+        assert_eq!(delta.inserted, "");
+        assert_eq!(delta.deleted, "bar");
         assert_eq!(c.text(), "foo ");
-        c.delete_word();
+        let delta = c.delete_word();
+        assert_eq!(delta.deleted, "foo ");
         assert_eq!(c.text(), "");
     }
 
@@ -1113,8 +1202,35 @@ mod tests {
         for ch in "drop this".chars() {
             c.insert(ch);
         }
-        c.kill_to_line_start();
+        let delta = c.kill_to_line_start();
+        assert_eq!(delta.deleted, "drop this");
         assert_eq!(c.text(), "keep\n");
+    }
+
+    #[test]
+    fn edit_delta_reports_inserted_and_deleted_text_exactly() {
+        let mut c = typed("a 你");
+        assert_eq!(
+            c.insert(' '),
+            EditDelta {
+                inserted: " ".to_string(),
+                deleted: String::new(),
+            }
+        );
+        assert_eq!(
+            c.backspace(),
+            EditDelta {
+                inserted: String::new(),
+                deleted: " ".to_string(),
+            }
+        );
+        assert_eq!(
+            c.delete_word(),
+            EditDelta {
+                inserted: String::new(),
+                deleted: "你".to_string(),
+            }
+        );
     }
 
     #[test]
@@ -1152,10 +1268,12 @@ mod tests {
         c.move_right();
         c.move_right();
         c.move_right(); // after "drop "
-        c.kill_to_line_end();
+        let delta = c.kill_to_line_end();
+        assert_eq!(delta.deleted, "rest");
         assert_eq!(c.text(), "keep\ndrop ");
         // dd removes the whole current line + its structure.
-        c.delete_line();
+        let delta = c.delete_line();
+        assert_eq!(delta.deleted, "drop ");
         assert_eq!(c.text(), "keep\n");
     }
 

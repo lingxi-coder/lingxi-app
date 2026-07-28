@@ -294,6 +294,10 @@ const LEFT_ARROW_OPENS_AGENTS_KEY: &str = "leftArrowOpensAgents";
 /// (the oracle's `?? !1`).
 const DEFAULT_TO_AGENTS_VIEW_KEY: &str = "defaultToAgentsView";
 
+/// Full-screen mouse-up copies the selected text unless explicitly disabled.
+/// Inline mode never captures the mouse and therefore ignores this setting.
+const COPY_ON_SELECT_KEY: &str = "copyOnSelect";
+
 /// Read the stored `leftArrowOpensAgents` flag. `None` on any error / absent
 /// key (caller defaults to `true`, mirroring `!== false`).
 #[must_use]
@@ -321,6 +325,33 @@ pub fn save_left_arrow_opens_agents(enabled: bool) {
 /// Test seam: write the flag at an explicit path.
 pub fn save_left_arrow_opens_agents_to(path: &Path, enabled: bool) -> std::io::Result<()> {
     save_bool_field_to(path, LEFT_ARROW_OPENS_AGENTS_KEY, enabled)
+}
+
+/// Read `copyOnSelect`; callers default an absent key to `true`.
+#[must_use]
+pub fn load_copy_on_select() -> Option<bool> {
+    load_copy_on_select_from(&settings_path()?)
+}
+
+/// Test seam for reading `copyOnSelect`.
+#[must_use]
+pub fn load_copy_on_select_from(path: &Path) -> Option<bool> {
+    load_bool_field_from(path, COPY_ON_SELECT_KEY)
+}
+
+/// Persist the full-screen copy-on-select preference best-effort.
+pub fn save_copy_on_select(enabled: bool) {
+    let Some(path) = settings_path() else {
+        return;
+    };
+    if let Err(e) = save_copy_on_select_to(&path, enabled) {
+        tracing::debug!(error = %e, "copyOnSelect persist failed (session-only)");
+    }
+}
+
+/// Test seam for writing `copyOnSelect`.
+pub fn save_copy_on_select_to(path: &Path, enabled: bool) -> std::io::Result<()> {
+    save_bool_field_to(path, COPY_ON_SELECT_KEY, enabled)
 }
 
 /// Read the stored `defaultToAgentsView` flag. `None` on any error / absent
@@ -473,6 +504,7 @@ mod tests {
         // the oracle's `!== false` — and `defaultToAgentsView` to false).
         assert_eq!(load_left_arrow_opens_agents_from(&path), None);
         assert_eq!(load_default_to_agents_view_from(&path), None);
+        assert_eq!(load_copy_on_select_from(&path), None);
 
         // Seed another key, then round-trip both flags; the earlier key survives.
         save_string_field_to(&path, EDITOR_MODE_KEY, "vim").unwrap();
@@ -480,6 +512,8 @@ mod tests {
         assert_eq!(load_left_arrow_opens_agents_from(&path), Some(false));
         save_default_to_agents_view_to(&path, true).unwrap();
         assert_eq!(load_default_to_agents_view_from(&path), Some(true));
+        save_copy_on_select_to(&path, false).unwrap();
+        assert_eq!(load_copy_on_select_from(&path), Some(false));
         assert_eq!(load_left_arrow_opens_agents_from(&path), Some(false));
         assert_eq!(load_editor_mode_is_vim_from(&path), Some(true));
         let _ = std::fs::remove_file(&path);

@@ -52,6 +52,43 @@
 
 use std::fmt;
 
+use crate::composer::EditDelta;
+
+/// Environment propagation seam shared with `apps/cli::ax_screen_reader`.
+pub const AX_SCREEN_READER_ENV: &str = "LINGXI_AX_SCREEN_READER";
+
+/// Read the process-level accessibility mode inherited by the TUI.
+///
+/// The CLI resolves flag/env/config precedence once and sets this variable for
+/// the mounted process and children. Any non-empty value is truthy, matching
+/// the JavaScript gate.
+#[must_use]
+pub fn is_enabled() -> bool {
+    std::env::var(AX_SCREEN_READER_ENV)
+        .ok()
+        .is_some_and(|value| !value.is_empty())
+}
+
+/// Convert one exact composer mutation into assistive-technology text.
+///
+/// Insertions announce only the inserted character/text. Spaces and newlines
+/// use words VoiceOver reads correctly. Deletions preserve the removed text so
+/// word/line deletion is unambiguous.
+#[must_use]
+pub fn input_announcement(delta: &EditDelta) -> Option<String> {
+    if !delta.deleted.is_empty() {
+        return Some(format!("Deleted {}", delta.deleted));
+    }
+    if delta.inserted.is_empty() {
+        return None;
+    }
+    Some(match delta.inserted.as_str() {
+        " " => "space".to_string(),
+        "\n" => "new line".to_string(),
+        text => text.to_string(),
+    })
+}
+
 /// Flex direction of a box, mirroring Yoga's `flexDirection`. Encodes both the
 /// join axis (row → `" "`, column → `"\n"`) and whether children are reversed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -423,12 +460,34 @@ pub fn diff_lines(previous: &[String], current: &[String]) -> Vec<LineChange> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::composer::EditDelta;
 
     // ---- (0) raw text leaf ----------------------------------------------
 
     #[test]
     fn text_leaf_returns_value_verbatim() {
         assert_eq!(AxNode::text("hello world").to_flat_text(), "hello world");
+    }
+
+    #[test]
+    fn input_announcement_speaks_only_the_current_edit_delta() {
+        assert_eq!(
+            input_announcement(&EditDelta::inserted("x")),
+            Some("x".to_string())
+        );
+        assert_eq!(
+            input_announcement(&EditDelta::inserted(" ")),
+            Some("space".to_string())
+        );
+        assert_eq!(
+            input_announcement(&EditDelta::inserted("\n")),
+            Some("new line".to_string())
+        );
+        assert_eq!(
+            input_announcement(&EditDelta::deleted("two words")),
+            Some("Deleted two words".to_string())
+        );
+        assert_eq!(input_announcement(&EditDelta::default()), None);
     }
 
     // ---- (1) hidden → skip ----------------------------------------------

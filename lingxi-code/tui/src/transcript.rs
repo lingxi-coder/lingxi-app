@@ -148,6 +148,29 @@ impl Transcript {
         })
     }
 
+    /// Render the complete structured transcript for the alternate-screen
+    /// surface.  Inline mode continues to commit finalized cells into native
+    /// scrollback; full-screen mode has no native scrollback and therefore
+    /// redraws the committed cells plus active tail from this immutable view.
+    #[must_use]
+    pub fn visible_fullscreen_lines(&self, width: u16, theme: &Theme) -> Vec<Line<'static>> {
+        let width = width.max(1);
+        let mut lines = Vec::new();
+        for cell in &self.committed {
+            lines.extend(wrap_to_width(
+                cell.display_lines(width, theme, self.render_mode),
+                width,
+            ));
+        }
+        if let Some(active) = &self.active {
+            lines.extend(wrap_to_width(
+                active.display_lines(width, theme, self.render_mode),
+                width,
+            ));
+        }
+        lines
+    }
+
     /// Drop all transcript state: committed cells, the active cell, and the
     /// native-scrollback commit cursor (`/clear`).
     pub fn clear(&mut self) {

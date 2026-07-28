@@ -39,6 +39,7 @@ pub mod renderable;
 pub mod replay;
 pub mod resume;
 pub mod screen_reader;
+pub mod selection;
 pub mod session;
 pub mod spinner;
 pub mod spinner_status;

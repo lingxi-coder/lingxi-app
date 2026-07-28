@@ -130,7 +130,7 @@ pub struct LeftArrowInputs {
 /// Decide what a ← on an empty composer does (claude `W_p`).
 #[must_use]
 pub fn decide_left_arrow(state: &LeftArrowState, inputs: &LeftArrowInputs) -> LeftArrowAction {
-    use LeftArrowAction::{Absorb, Arm, AttachArm, AttachAbsorb, Fire, Reject};
+    use LeftArrowAction::{Absorb, Arm, AttachAbsorb, AttachArm, Fire, Reject};
 
     // A ← that came in with other bytes is not a gesture.
     if !inputs.solo_keypress {

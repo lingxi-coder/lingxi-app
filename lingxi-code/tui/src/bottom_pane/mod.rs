@@ -65,7 +65,7 @@ use crate::bottom_pane::computer_access_view::ComputerAccessView;
 use crate::bottom_pane::model_picker_view::ModelPickerView;
 use crate::bottom_pane::pending_input_preview::PendingInputPreview;
 use crate::bottom_pane::permission_view::PermissionView;
-use crate::composer::{Composer, ComposerView};
+use crate::composer::{Composer, ComposerView, EditDelta};
 use crate::renderable::Renderable;
 use crate::session::ModelRow;
 use crate::vim::{VimOutcome, VimState};
@@ -146,6 +146,9 @@ pub enum BottomPaneOutcome {
     /// outcome rather than handled in the pane because the row snapshot comes
     /// from the task registry, which only the owner holds.
     OpenAgentsView,
+    /// An attached background TUI released its controller lease and should
+    /// return to the agents view. This never stops the worker/session.
+    Detach,
     /// A view asks the owner to run a command effect on its behalf.
     RunCommand(CommandAction),
     /// A view asks the owner to run a `/web` effect on its behalf. A test
@@ -260,6 +263,13 @@ pub struct BottomPane {
     left_arrow_hint_at: Option<Instant>,
     /// Monotonic origin for the gesture's millisecond stamps.
     left_arrow_epoch: Instant,
+    /// True only while this editor is the controller attached to a live
+    /// background PTY session. Its ← gesture detaches instead of stacking an
+    /// agents picker over the attached conversation.
+    attached_background_session: bool,
+    /// Monotonic stamp of the current attach epoch. Gesture timestamps older
+    /// than this cannot confirm a detach after reattach.
+    attach_stamp_ms: u64,
     /// Non-bracketed paste-burst detector (codex `paste_burst.rs`): rapid
     /// plain-char streams are buffered and flushed as ONE paste through
     /// [`Self::apply_paste_text`] (large-paste placeholder + image-path
@@ -319,6 +329,12 @@ pub struct BottomPane {
     /// every submission enqueues its raw (placeholder-form) text and flushes
     /// on a background thread — the store's `Drop` is the exit flush.
     history_store: Option<std::sync::Arc<session::prompt_history::PromptHistoryStore>>,
+    /// Whether incremental accessibility announcements are enabled for this
+    /// mounted editor.
+    screen_reader_enabled: bool,
+    /// The exact current edit announcement rendered in the footer. Cleared at
+    /// the start of the next key so stale text is never re-announced.
+    accessibility_announcement: Option<String>,
 }
 
 impl BottomPane {
@@ -340,6 +356,8 @@ impl BottomPane {
             left_arrow_opens_agents: true,
             left_arrow_hint_at: None,
             left_arrow_epoch: Instant::now(),
+            attached_background_session: false,
+            attach_stamp_ms: 0,
             paste_burst: paste_burst::PasteBurst::default(),
             // Unit tests default the heuristic OFF: synthetic keystrokes
             // arrive at machine speed, which IS the burst signature. Burst
@@ -359,6 +377,28 @@ impl BottomPane {
             accent: None,
             attached_image_labels: Vec::new(),
             registry_commands: Vec::new(),
+            screen_reader_enabled: crate::screen_reader::is_enabled(),
+            accessibility_announcement: None,
+        }
+    }
+
+    /// Override the process-derived screen-reader gate (tests/embedders).
+    pub fn set_screen_reader_enabled(&mut self, enabled: bool) {
+        self.screen_reader_enabled = enabled;
+        if !enabled {
+            self.accessibility_announcement = None;
+        }
+    }
+
+    /// Current per-edit announcement, when accessibility mode is active.
+    #[must_use]
+    pub fn accessibility_announcement(&self) -> Option<&str> {
+        self.accessibility_announcement.as_deref()
+    }
+
+    fn record_edit_delta(&mut self, delta: &EditDelta) {
+        if self.screen_reader_enabled {
+            self.accessibility_announcement = crate::screen_reader::input_announcement(delta);
         }
     }
 
@@ -411,6 +451,7 @@ impl BottomPane {
     /// Route one key press. Layered: the active view owns the keyboard until
     /// it resolves, then the completion popup, then vim, then the composer.
     pub fn handle_key(&mut self, key: KeyEvent) -> BottomPaneOutcome {
+        self.accessibility_announcement = None;
         if let Some(outcome) = self.view_stack.route_key(key) {
             return Self::map_view_outcome(outcome);
         }
@@ -425,8 +466,9 @@ impl BottomPane {
                 .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
             let burst_owns_key = !self.disable_paste_burst
                 && (self.paste_burst.is_active()
-                    || (plain
-                        && key.code == KeyCode::Enter
+                    || ((plain && key.code == KeyCode::Enter
+                        || (key.code == KeyCode::Char('j')
+                            && key.modifiers == KeyModifiers::CONTROL))
                         && self
                             .paste_burst
                             .newline_should_insert_instead_of_submit(Instant::now())));
@@ -495,12 +537,17 @@ impl BottomPane {
                     .as_ref()
                     .is_some_and(|v| v.mode == crate::vim::VimMode::Normal);
             if !normal_left_on_empty {
+                let before = self.screen_reader_enabled.then(|| self.composer.text());
                 let vim_outcome = {
                     let vim = self.vim.as_mut().expect("vim is Some");
                     crate::vim::handle_key(vim, &mut self.composer, key)
                 };
                 match vim_outcome {
                     VimOutcome::Consumed => {
+                        if let Some(before) = before {
+                            let delta = EditDelta::between(&before, &self.composer.text());
+                            self.record_edit_delta(&delta);
+                        }
                         self.sync_completion();
                         return BottomPaneOutcome::Consumed;
                     }
@@ -1068,6 +1115,13 @@ impl BottomPane {
         &self.composer
     }
 
+    /// Restore an unsubmitted draft captured by a foreground→background
+    /// handoff. The cursor is placed at the end, matching ordinary composer
+    /// restoration and preserving Unicode scalar boundaries.
+    pub fn restore_composer_text(&mut self, text: &str) {
+        self.composer.replace_all(text);
+    }
+
     /// The completion popup, when open.
     #[must_use]
     pub fn completion(&self) -> Option<&CompletionView> {
@@ -1090,6 +1144,29 @@ impl BottomPane {
         }
     }
 
+    /// Apply the live session kind supplied by the attach composition root.
+    ///
+    /// Entering attached mode starts a fresh monotonic attach epoch and clears
+    /// any foreground gesture state. Leaving it clears the detach hint. No
+    /// worker/process lifecycle action happens here; this is controller UI
+    /// state only.
+    pub fn set_attached_background_session(&mut self, attached: bool) {
+        self.attached_background_session = attached;
+        self.left_arrow = tui_core::left_arrow_gesture::LeftArrowState::default();
+        self.left_arrow_hint_at = None;
+        self.attach_stamp_ms = if attached {
+            self.left_arrow_epoch.elapsed().as_millis() as u64 + 1
+        } else {
+            0
+        };
+    }
+
+    /// Whether the composer currently controls an attached background PTY.
+    #[must_use]
+    pub fn is_attached_background_session(&self) -> bool {
+        self.attached_background_session
+    }
+
     /// The live `leftArrowOpensAgents` gate (for the `/config` screen row).
     #[must_use]
     pub fn left_arrow_opens_agents(&self) -> bool {
@@ -1105,7 +1182,11 @@ impl BottomPane {
         if at.elapsed().as_millis() as u64 >= tui_core::left_arrow_gesture::FEEDBACK_TIMEOUT_MS {
             return None;
         }
-        Some(tui_core::left_arrow_gesture::OPEN_AGENTS_CONFIRM_HINT)
+        Some(if self.attached_background_session {
+            tui_core::left_arrow_gesture::BACK_TO_AGENTS_CONFIRM_HINT
+        } else {
+            tui_core::left_arrow_gesture::OPEN_AGENTS_CONFIRM_HINT
+        })
     }
 
     /// Route a ← pressed on an EMPTY composer through the gesture guard.
@@ -1127,11 +1208,11 @@ impl BottomPane {
                 // On by default, matching the oracle's
                 // `Ke("tengu_left_arrow_editing_guard", true)`.
                 guard_enabled: true,
-                // The port surfaces no post-attach quiet window, and 2.1.220
-                // hard-codes its own probe to `false`, so both take the
-                // non-attach arms.
-                in_attach_quiet_window: false,
-                attach_stamp_ms: 0,
+                // An attached controller uses the attach-confirm arm. The
+                // state machine enforces the 150ms minimum dwell and rejects
+                // gesture stamps from before this attach epoch.
+                in_attach_quiet_window: self.attached_background_session,
+                attach_stamp_ms: self.attach_stamp_ms,
             },
         );
         apply_left_arrow(&mut self.left_arrow, action, now_ms);
@@ -1409,10 +1490,25 @@ impl BottomPane {
                         .paste_burst
                         .newline_should_insert_instead_of_submit(now)
                     {
-                        self.composer.insert_newline();
+                        let delta = self.composer.insert_newline();
+                        self.record_edit_delta(&delta);
                         self.sync_completion();
                         return BottomPaneOutcome::Consumed;
                     }
+                }
+                KeyCode::Char('j')
+                    if key.modifiers == KeyModifiers::CONTROL
+                        && self
+                            .paste_burst
+                            .newline_should_insert_instead_of_submit(now) =>
+                {
+                    if self.paste_burst.append_newline_if_active(now) {
+                        return BottomPaneOutcome::Consumed;
+                    }
+                    let delta = self.composer.insert_newline();
+                    self.record_edit_delta(&delta);
+                    self.sync_completion();
+                    return BottomPaneOutcome::Consumed;
                 }
                 _ => {
                     if let Some(pasted) = self.paste_burst.flush_before_modified_input() {
@@ -1457,11 +1553,18 @@ impl BottomPane {
                 BottomPaneOutcome::Consumed
             }
             KeyCode::Char('w') if ctrl => {
-                self.composer.delete_word();
+                let delta = self.composer.delete_word();
+                self.record_edit_delta(&delta);
                 BottomPaneOutcome::Consumed
             }
             KeyCode::Char('u') if ctrl => {
-                self.composer.kill_to_line_start();
+                let delta = self.composer.kill_to_line_start();
+                self.record_edit_delta(&delta);
+                BottomPaneOutcome::Consumed
+            }
+            KeyCode::Char('k') if ctrl => {
+                let delta = self.composer.kill_to_line_end();
+                self.record_edit_delta(&delta);
                 BottomPaneOutcome::Consumed
             }
             // Ctrl-O toggles verbose (expand thinking/tool-use/grouped
@@ -1473,7 +1576,8 @@ impl BottomPane {
                     .modifiers
                     .intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) =>
             {
-                self.composer.insert_newline();
+                let delta = self.composer.insert_newline();
+                self.record_edit_delta(&delta);
                 BottomPaneOutcome::Consumed
             }
             KeyCode::Enter => self
@@ -1503,12 +1607,21 @@ impl BottomPane {
                 // off there is no handler at all (claude's `kCt` gate in
                 // `kGt`), so the press falls straight through to the move.
                 let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-                if self.composer.is_empty() && !shift && self.left_arrow_opens_agents {
+                if self.composer.is_empty()
+                    && !shift
+                    && (self.attached_background_session || self.left_arrow_opens_agents)
+                {
                     // A ← inside a paste burst is pasted content, not a
                     // deliberate keystroke.
                     let solo = !self.paste_burst_pending();
                     match self.on_left_arrow_on_empty(solo) {
-                        LeftArrowOutcome::Fire => return BottomPaneOutcome::OpenAgentsView,
+                        LeftArrowOutcome::Fire => {
+                            return if self.attached_background_session {
+                                BottomPaneOutcome::Detach
+                            } else {
+                                BottomPaneOutcome::OpenAgentsView
+                            };
+                        }
                         // Armed / absorbed: the press is spent on the gesture,
                         // so it must NOT also move the cursor.
                         LeftArrowOutcome::Swallow => return BottomPaneOutcome::Consumed,
@@ -1531,16 +1644,29 @@ impl BottomPane {
                 self.composer.down();
                 BottomPaneOutcome::Consumed
             }
+            KeyCode::Backspace if key.modifiers.contains(KeyModifiers::SUPER) => {
+                let delta = self.composer.kill_to_line_start();
+                self.record_edit_delta(&delta);
+                BottomPaneOutcome::Consumed
+            }
+            KeyCode::Backspace if key.modifiers.contains(KeyModifiers::ALT) => {
+                let delta = self.composer.delete_word();
+                self.record_edit_delta(&delta);
+                BottomPaneOutcome::Consumed
+            }
             KeyCode::Backspace => {
-                self.composer.backspace();
+                let delta = self.composer.backspace();
+                self.record_edit_delta(&delta);
                 BottomPaneOutcome::Consumed
             }
             KeyCode::Delete => {
-                self.composer.delete();
+                let delta = self.composer.delete();
+                self.record_edit_delta(&delta);
                 BottomPaneOutcome::Consumed
             }
             KeyCode::Char(c) if !ctrl => {
-                self.composer.insert(c);
+                let delta = self.composer.insert(c);
+                self.record_edit_delta(&delta);
                 BottomPaneOutcome::Consumed
             }
             _ => BottomPaneOutcome::Consumed,
@@ -1645,6 +1771,7 @@ impl BottomPane {
             mode,
             vim_label: self.vim.as_ref().map(|v| v.label().to_string()),
             cost: self.status.cost.clone(),
+            accessibility_announcement: self.accessibility_announcement.clone(),
         }
     }
 
@@ -1680,7 +1807,9 @@ impl BottomPane {
     /// queued-input preview, planned tasks, composer, live agents, permission
     /// mode, then the completion/footer slot.
     fn zones(&self, area: Rect) -> std::rc::Rc<[Rect]> {
-        let below = if let Some(c) = self.completion.as_ref() {
+        let below = if self.accessibility_announcement.is_some() {
+            footer::footer_height(&self.footer_props())
+        } else if let Some(c) = self.completion.as_ref() {
             CompletionView::desired_height(c)
         } else {
             footer::footer_height(&self.footer_props())
@@ -1749,7 +1878,9 @@ impl BottomPane {
         } else {
             0
         };
-        let below = if let Some(popup) = &self.completion {
+        let below = if self.accessibility_announcement.is_some() {
+            footer::footer_height(&self.footer_props())
+        } else if let Some(popup) = &self.completion {
             popup.desired_height()
         } else {
             footer::footer_height(&self.footer_props())
@@ -1820,7 +1951,9 @@ impl Renderable for BottomPane {
             Paragraph::new(line).render(zones[6], buf);
         }
         let below = zones[7];
-        if let Some(popup) = &self.completion {
+        if self.accessibility_announcement.is_some() {
+            footer::render_footer(below, buf, &self.footer_props(), &self.theme);
+        } else if let Some(popup) = &self.completion {
             // `CompletionView::render` anchors UPWARD from the rect it is
             // given (it grew up from the composer's top edge in the old
             // above-composer layout). Feeding it a zero-height rect pinned
@@ -2543,6 +2676,43 @@ mod tests {
             "hello world
 "
         );
+    }
+
+    #[test]
+    fn ctrl_j_is_newline_only_inside_paste_burst_window() {
+        let mut pane = BottomPane::new(Theme::dark());
+        pane.set_disable_paste_burst(false);
+        for c in "hello world".chars() {
+            let _ = pane.handle_key(key(KeyCode::Char(c)));
+        }
+        assert!(matches!(
+            pane.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL)),
+            BottomPaneOutcome::Consumed
+        ));
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let _ = pane.flush_paste_burst_if_due();
+        assert_eq!(pane.composer().text(), "hello world\n");
+
+        let mut ordinary = BottomPane::new(Theme::dark());
+        ordinary.set_disable_paste_burst(false);
+        let _ = ordinary.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
+        assert_eq!(
+            ordinary.composer().text(),
+            "",
+            "ordinary Ctrl+J keeps its existing shortcut/modal semantics"
+        );
+    }
+
+    #[test]
+    fn accessibility_footer_announces_only_the_latest_edit_delta() {
+        let mut pane = BottomPane::new(Theme::dark());
+        pane.set_screen_reader_enabled(true);
+        let _ = pane.handle_key(key(KeyCode::Char('你')));
+        assert_eq!(pane.accessibility_announcement(), Some("你"));
+        let _ = pane.handle_key(key(KeyCode::Char(' ')));
+        assert_eq!(pane.accessibility_announcement(), Some("space"));
+        let _ = pane.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT));
+        assert_eq!(pane.accessibility_announcement(), Some("Deleted 你 "));
     }
 
     #[test]
@@ -3637,6 +3807,32 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn attached_left_confirmation_detaches_without_opening_or_stopping() {
+        let mut p = pane();
+        p.set_left_arrow_opens_agents(false);
+        p.set_attached_background_session(true);
+
+        // First press always arms the attached-session confirmation.
+        assert!(matches!(
+            p.handle_key(k(KeyCode::Left)),
+            BottomPaneOutcome::Consumed
+        ));
+        assert_eq!(
+            p.left_arrow_hint(),
+            Some(tui_core::left_arrow_gesture::BACK_TO_AGENTS_CONFIRM_HINT)
+        );
+
+        // Pass the attach arm's 150ms minimum dwell, then confirm. The only
+        // effect is the controller-level Detach intent.
+        p.left_arrow_epoch = Instant::now() - std::time::Duration::from_millis(500);
+        assert!(matches!(
+            p.handle_key(k(KeyCode::Left)),
+            BottomPaneOutcome::Detach
+        ));
+        assert!(p.is_attached_background_session());
+    }
+
     /// ← on a NON-empty composer is an ordinary cursor move, never the
     /// gesture — this is the case the whole feature must not break.
     #[test]
@@ -3823,5 +4019,4 @@ mod tests {
             BottomPaneOutcome::Consumed
         ));
     }
-
 }

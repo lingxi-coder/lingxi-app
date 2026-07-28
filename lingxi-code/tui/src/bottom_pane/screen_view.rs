@@ -16,6 +16,7 @@
 //! Phase 8), so `/help` can never advertise a dead chord or command.
 
 use std::any::Any;
+use std::cell::Cell;
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::buffer::Buffer;
@@ -52,6 +53,14 @@ pub struct ScreenView {
     footer: String,
     /// Lines scrolled down from the top (`0` = top).
     scroll: u16,
+    /// Whether this panel represents a focusable settings list. Other
+    /// read-only screens retain the historical hidden-cursor behavior.
+    focusable: bool,
+    /// Focused line in the unscrolled body for accessibility cursor tracking.
+    selected: u16,
+    /// Height of the most recently rendered body viewport. A one-row default
+    /// preserves deterministic navigation before the first render.
+    viewport_height: Cell<u16>,
     /// Optional tab strip (`(label, body)` pairs). Empty for single-body
     /// screens; non-empty for the `/usage` Usage/Stats screen, where `Tab`
     /// (and `←`/`→`) cycle the active tab and swap [`Self::lines`] to its body.
@@ -73,6 +82,9 @@ impl ScreenView {
             lines,
             footer: footer.into(),
             scroll: 0,
+            focusable: false,
+            selected: 0,
+            viewport_height: Cell::new(1),
             tabs: Vec::new(),
             active_tab: 0,
         }
@@ -95,6 +107,9 @@ impl ScreenView {
             lines: Vec::new(),
             footer: footer.into(),
             scroll: 0,
+            focusable: false,
+            selected: 0,
+            viewport_height: Cell::new(1),
             tabs,
             active_tab,
         };
@@ -182,7 +197,7 @@ impl ScreenView {
         lingxi_home: &str,
         cwd: &str,
     ) -> Self {
-        Self::new(
+        let mut view = Self::new(
             "Settings",
             settings_lines(
                 theme,
@@ -195,7 +210,9 @@ impl ScreenView {
                 cwd,
             ),
             "esc to close · ↑/↓ scroll",
-        )
+        );
+        view.focusable = true;
+        view
     }
 
     /// The `/usage` (aliases `/cost`, `/stats`) interactive screen — the
@@ -378,6 +395,15 @@ impl ScreenView {
             .collect::<Vec<_>>()
             .join("\n")
     }
+
+    fn reveal_selection(&mut self) {
+        let height = self.viewport_height.get().max(1);
+        if self.selected < self.scroll {
+            self.scroll = self.selected;
+        } else if self.selected >= self.scroll.saturating_add(height) {
+            self.scroll = self.selected.saturating_add(1).saturating_sub(height);
+        }
+    }
 }
 
 impl Renderable for ScreenView {
@@ -395,6 +421,7 @@ impl Renderable for ScreenView {
                 Style::default().add_modifier(Modifier::DIM),
             )));
         let inner = block.inner(area);
+        self.viewport_height.set(inner.height.max(1));
         block.render(area, buf);
         Paragraph::new(self.lines.clone())
             .scroll((self.scroll, 0))
@@ -408,6 +435,24 @@ impl Renderable for ScreenView {
         u16::try_from(self.lines.len())
             .unwrap_or(u16::MAX)
             .saturating_add(2)
+    }
+
+    fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
+        if !self.focusable || self.lines.is_empty() {
+            return None;
+        }
+        let inner = Block::new().borders(Borders::ALL).inner(area);
+        if inner.width == 0 || inner.height == 0 {
+            return None;
+        }
+        let visible_row = self.selected.saturating_sub(self.scroll);
+        Some((
+            inner.x,
+            inner
+                .y
+                .saturating_add(visible_row)
+                .min(inner.bottom().saturating_sub(1)),
+        ))
     }
 }
 
@@ -431,27 +476,53 @@ impl BottomPaneView for ScreenView {
                 ViewOutcome::Pending
             }
             KeyCode::Up => {
-                self.scroll = self.scroll.saturating_sub(1);
+                if self.focusable {
+                    self.selected = self.selected.saturating_sub(1);
+                    self.reveal_selection();
+                } else {
+                    self.scroll = self.scroll.saturating_sub(1);
+                }
                 ViewOutcome::Pending
             }
             KeyCode::Down => {
-                self.scroll = self.scroll.saturating_add(1).min(max);
+                if self.focusable {
+                    self.selected = self.selected.saturating_add(1).min(max);
+                    self.reveal_selection();
+                } else {
+                    self.scroll = self.scroll.saturating_add(1).min(max);
+                }
                 ViewOutcome::Pending
             }
             KeyCode::PageUp => {
-                self.scroll = self.scroll.saturating_sub(10);
+                if self.focusable {
+                    self.selected = self.selected.saturating_sub(10);
+                    self.reveal_selection();
+                } else {
+                    self.scroll = self.scroll.saturating_sub(10);
+                }
                 ViewOutcome::Pending
             }
             KeyCode::PageDown => {
-                self.scroll = self.scroll.saturating_add(10).min(max);
+                if self.focusable {
+                    self.selected = self.selected.saturating_add(10).min(max);
+                    self.reveal_selection();
+                } else {
+                    self.scroll = self.scroll.saturating_add(10).min(max);
+                }
                 ViewOutcome::Pending
             }
             KeyCode::Home => {
                 self.scroll = 0;
+                self.selected = 0;
                 ViewOutcome::Pending
             }
             KeyCode::End => {
-                self.scroll = max;
+                if self.focusable {
+                    self.selected = max;
+                    self.reveal_selection();
+                } else {
+                    self.scroll = max;
+                }
                 ViewOutcome::Pending
             }
             _ => ViewOutcome::Pending,
@@ -631,11 +702,21 @@ fn settings_lines(
     // "Open agents view by default" first, then `leftArrowOpensAgents`
     // "${DW} opens agents"), hidden entirely while agent view is disabled.
     if agent_view_enabled {
-        out.push(row(
-            "└ Open agents view by default",
-            on_off(default_to_agents_view),
-        ));
-        out.push(row("└ ← opens agents", on_off(left_arrow_opens_agents)));
+        if telemetry::flag_bool("tengu_maple_sundial", false) {
+            // 2.1.220 managedEnum: the server-side gate collapses the two
+            // booleans into one read-only summary row. There is deliberately
+            // no per-setting control in this shape.
+            out.push(row(
+                "└ Agents view",
+                on_off(default_to_agents_view || left_arrow_opens_agents),
+            ));
+        } else {
+            out.push(row(
+                "└ Open agents view by default",
+                on_off(default_to_agents_view),
+            ));
+            out.push(row("└ ← opens agents", on_off(left_arrow_opens_agents)));
+        }
     }
     out.push(Line::from(""));
     out.push(header("Settings files"));
@@ -810,6 +891,52 @@ mod tests {
         let text = text_of(&lines);
         assert!(!text.contains("Open agents view by default"), "{text}");
         assert!(!text.contains("opens agents"), "{text}");
+    }
+
+    #[test]
+    fn maple_sundial_collapses_agents_settings_to_managed_row() {
+        telemetry::test_set_flag("tengu_maple_sundial", true);
+        let lines = settings_lines(
+            ThemeName::Dark,
+            false,
+            true,
+            true,
+            false,
+            true,
+            "/no/such/home",
+            "/no/such/project",
+        );
+        telemetry::test_clear_flag("tengu_maple_sundial");
+        let text = text_of(&lines);
+        assert!(
+            text.contains("Agents view") && text.contains("on"),
+            "{text}"
+        );
+        assert!(!text.contains("Open agents view by default"), "{text}");
+        assert!(!text.contains("opens agents"), "{text}");
+    }
+
+    #[test]
+    fn settings_cursor_tracks_focused_row_inside_scrolled_viewport() {
+        let mut view = ScreenView::settings(
+            ThemeName::Dark,
+            false,
+            false,
+            true,
+            true,
+            false,
+            "/no/such/home",
+            "/no/such/project",
+        );
+        let area = Rect::new(3, 4, 50, 6);
+        let mut buf = Buffer::empty(area);
+        view.render(area, &mut buf);
+        for _ in 0..8 {
+            let _ = view.handle_key(press(KeyCode::Down));
+        }
+        let (x, y) = view.cursor_pos(area).expect("settings row owns cursor");
+        assert!(x >= area.left() && x < area.right());
+        assert!(y > area.top() && y < area.bottom());
     }
 
     #[test]

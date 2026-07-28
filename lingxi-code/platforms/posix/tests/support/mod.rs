@@ -17,8 +17,12 @@ pub fn mock_stdio_mcp_bin() -> PathBuf {
     } else {
         "release"
     };
-    let binary = workspace
-        .join("target")
+    // Keep the runnable fixture outside the workspace target directory used
+    // by the parent `cargo test --all-targets`. The parent invocation may
+    // replace the plain binary with a test-harness artifact while integration
+    // test processes are running in parallel.
+    let fixture_target = workspace.join("target").join("test-fixtures");
+    let binary = fixture_target
         .join(profile)
         .join(format!("mock_stdio_mcp{}", std::env::consts::EXE_SUFFIX));
     if binary.is_file() {
@@ -26,13 +30,16 @@ pub fn mock_stdio_mcp_bin() -> PathBuf {
     }
 
     let mut command = Command::new(env!("CARGO"));
-    command.current_dir(&workspace).args([
-        "build",
-        "-p",
-        "mock_stdio_mcp",
-        "--bin",
-        "mock_stdio_mcp",
-    ]);
+    command
+        .current_dir(&workspace)
+        .env("CARGO_TARGET_DIR", &fixture_target)
+        .args([
+            "build",
+            "-p",
+            "mock_stdio_mcp",
+            "--bin",
+            "mock_stdio_mcp",
+        ]);
     if !cfg!(debug_assertions) {
         command.arg("--release");
     }

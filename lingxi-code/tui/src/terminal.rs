@@ -39,6 +39,8 @@ use crossterm::terminal::disable_raw_mode;
 use crossterm::terminal::enable_raw_mode;
 use crossterm::terminal::Clear as CtClear;
 use crossterm::terminal::ClearType as CtClearType;
+use crossterm::terminal::EnterAlternateScreen;
+use crossterm::terminal::LeaveAlternateScreen;
 use ratatui::backend::Backend;
 use ratatui::backend::ClearType;
 use ratatui::buffer::Buffer;
@@ -59,7 +61,9 @@ use unicode_width::UnicodeWidthStr;
 /// per interactive run, before building the [`Terminal`], and keep it alive
 /// until the terminal has been dropped.
 pub struct TerminalSession {
-    _private: (),
+    bracketed_paste: bool,
+    alternate_screen: bool,
+    mouse_capture: bool,
 }
 
 impl TerminalSession {
@@ -70,17 +74,77 @@ impl TerminalSession {
     /// bracketed-paste escape.
     pub fn new() -> io::Result<Self> {
         enable_raw_mode()?;
+        let mut session = Self {
+            bracketed_paste: false,
+            alternate_screen: false,
+            mouse_capture: false,
+        };
         execute!(io::stdout(), crossterm::event::EnableBracketedPaste)?;
-        Ok(Self { _private: () })
+        session.bracketed_paste = true;
+        Ok(session)
+    }
+
+    /// Enable the full-screen surface: alternate screen, raw input, bracketed
+    /// paste, and mouse capture.  Inline mode intentionally does not capture
+    /// the mouse so iTerm2/native selection remains available.
+    ///
+    /// Construction is transactional: if any escape write fails, the partially
+    /// initialized guard is dropped and restores every mode it enabled.
+    pub fn new_fullscreen() -> io::Result<Self> {
+        let mut session = Self::new()?;
+        session.set_fullscreen(true)?;
+        Ok(session)
+    }
+
+    /// Enter or leave the alternate-screen mouse surface at runtime (`/tui`).
+    /// Bracketed paste and raw mode stay enabled across the transition.
+    pub fn set_fullscreen(&mut self, enabled: bool) -> io::Result<()> {
+        if enabled == self.alternate_screen {
+            return Ok(());
+        }
+        let mut stdout = io::stdout();
+        if enabled {
+            execute!(stdout, EnterAlternateScreen)?;
+            self.alternate_screen = true;
+            if let Err(error) = execute!(stdout, crossterm::event::EnableMouseCapture) {
+                let _ = execute!(stdout, LeaveAlternateScreen);
+                self.alternate_screen = false;
+                return Err(error);
+            }
+            self.mouse_capture = true;
+        } else {
+            if self.mouse_capture {
+                execute!(stdout, crossterm::event::DisableMouseCapture)?;
+                self.mouse_capture = false;
+            }
+            execute!(stdout, LeaveAlternateScreen)?;
+            self.alternate_screen = false;
+        }
+        Ok(())
+    }
+
+    /// Whether this guard currently owns the alternate screen.
+    #[must_use]
+    pub const fn is_fullscreen(&self) -> bool {
+        self.alternate_screen
     }
 }
 
 impl Drop for TerminalSession {
     fn drop(&mut self) {
         // Best-effort restore; a failing write must not double-panic.
+        let mut stdout = io::stdout();
+        if self.mouse_capture {
+            let _ = execute!(stdout, crossterm::event::DisableMouseCapture);
+        }
+        if self.bracketed_paste {
+            let _ = execute!(stdout, crossterm::event::DisableBracketedPaste);
+        }
+        if self.alternate_screen {
+            let _ = execute!(stdout, LeaveAlternateScreen);
+        }
         let _ = execute!(
-            io::stdout(),
-            crossterm::event::DisableBracketedPaste,
+            stdout,
             SetCursorStyle::DefaultUserShape,
             crossterm::cursor::Show,
         );
@@ -203,7 +267,7 @@ where
     ///
     /// Detached background PTYs have no controller available to answer DSR;
     /// their logical screen starts at the origin and is repainted on attach.
-    pub fn with_options_at_origin(mut backend: B) -> io::Result<Self> {
+    pub fn with_options_at_origin(backend: B) -> io::Result<Self> {
         let screen_size = backend.size()?;
         Ok(Self::from_screen_and_cursor(
             backend,
@@ -245,6 +309,13 @@ where
     /// The underlying backend.
     pub fn backend(&self) -> &B {
         &self.backend
+    }
+
+    /// Buffer most recently rendered by the app.  Full-screen mouse selection
+    /// reads this immutable view after a drag completes.
+    #[must_use]
+    pub fn current_buffer(&self) -> &Buffer {
+        &self.buffers[1 - self.current]
     }
 
     /// The underlying backend, mutably (for raw escape writes).

@@ -164,7 +164,9 @@ fn handle_normal(vim: &mut VimState, composer: &mut Composer, code: KeyCode) -> 
                 composer.delete();
             }
         }
-        KeyCode::Char('D') => composer.kill_to_line_end(),
+        KeyCode::Char('D') => {
+            composer.kill_to_line_end();
+        }
         KeyCode::Char('d') => vim.pending = Some('d'),
         KeyCode::Char('p') => {
             let reg = vim.register.clone();

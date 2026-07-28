@@ -106,13 +106,17 @@ impl ComputerAccessView {
         if !state.accessibility {
             rows.push((
                 "Open System Settings \u{2192} Accessibility",
-                Some("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"),
+                Some(
+                    "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+                ),
             ));
         }
         if !state.screen_recording {
             rows.push((
                 "Open System Settings \u{2192} Screen Recording",
-                Some("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"),
+                Some(
+                    "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+                ),
             ));
         }
         rows.push(("Try again", None));
@@ -493,7 +497,10 @@ mod tests {
 
     fn exchange(
         request: ComputerAccessRequest,
-    ) -> (ComputerAccessView, oneshot::Receiver<ComputerAccessResponse>) {
+    ) -> (
+        ComputerAccessView,
+        oneshot::Receiver<ComputerAccessResponse>,
+    ) {
         let (resp_tx, resp_rx) = oneshot::channel();
         (
             ComputerAccessView::new(ComputerAccessExchange { request, resp_tx }),
@@ -519,7 +526,10 @@ mod tests {
 
     #[test]
     fn app_list_renders_apps_pre_checked() {
-        let (view, _rx) = exchange(app_list_request(&["Slack", "Chrome"], (false, false, false)));
+        let (view, _rx) = exchange(app_list_request(
+            &["Slack", "Chrome"],
+            (false, false, false),
+        ));
         let text = buffer_text(&view, Rect::new(0, 0, 60, view.desired_height(60)));
         assert!(text.contains("[x] Slack"), "{text}");
         assert!(text.contains("[x] Chrome"), "{text}");
@@ -528,7 +538,10 @@ mod tests {
 
     #[test]
     fn unchecking_an_app_updates_the_submit_count_and_result() {
-        let (mut view, rx) = exchange(app_list_request(&["Slack", "Chrome"], (false, false, false)));
+        let (mut view, rx) = exchange(app_list_request(
+            &["Slack", "Chrome"],
+            (false, false, false),
+        ));
         view.handle_key(press(KeyCode::Char(' '))); // uncheck Slack (row 0)
         let text = buffer_text(&view, Rect::new(0, 0, 60, view.desired_height(60)));
         assert!(text.contains("Allow for this session (1 app)"), "{text}");

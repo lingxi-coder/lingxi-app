@@ -37,7 +37,7 @@ pub enum ContentBlock {
         /// Tool-specific structured input.
         input: Value,
         /// Verbatim provider-issued tool-call id (e.g. Anthropic `"toolu_01…"`,
-        /// OpenAI `"call_…"`). `ToolUseId` is a UUID newtype and cannot hold a
+        /// `OpenAI` `"call_…"`). `ToolUseId` is a UUID newtype and cannot hold a
         /// provider string, so the original is preserved here and replayed
         /// verbatim on egress — Anthropic pairs `tool_result.tool_use_id` to the
         /// `tool_use.id` it issued, and claude-code never rewrites the id.
@@ -282,6 +282,9 @@ pub struct CompactBoundaryMetadata {
 /// A single message in a conversation, role-tagged for serde.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "lowercase")]
+// Keep compact metadata inline: boxing this public enum field would introduce
+// a source-level compatibility break for every constructor and pattern match.
+#[allow(clippy::large_enum_variant)]
 pub enum ConversationMessage {
     /// User-authored message — always structured content blocks.
     User {

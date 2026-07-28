@@ -64,7 +64,6 @@ import androidx.compose.ui.unit.sp
 import com.lingxi.code.components.LXIcon
 import com.lingxi.code.components.LXIconName
 import com.lingxi.code.components.oklch
-import com.lingxi.code.model.MockData
 import com.lingxi.code.voice.OrbCanvas
 import com.lingxi.code.voice.OrbPhase
 import kotlinx.coroutines.delay
@@ -73,9 +72,11 @@ import kotlin.math.min
 // MARK: - First-run setup wizard (心流 onboarding)
 //
 // Port of the prototype's `SetupWizard` (lingxi-iphone.html), mirroring the iOS
-// `SetupWizardView`. 5 steps over the sci-fi orb backdrop: welcome → name the
+// `SetupWizardView`. 6 steps over the sci-fi orb backdrop: welcome → name the
 // assistant (wake word) → your name → enroll a voiceprint (optional, simulated)
-// → pick a default model. On finish it hands the chosen values back via
+// → choose an offline voice pack → finish. Provider/model selection is deliberately
+// deferred to the real provider catalog in Settings rather than showing prototype
+// model rows here. On finish it hands the chosen values back via
 // [onFinish] (MainActivity persists them + flips setupDone).
 
 private const val TOTAL = 6
@@ -248,13 +249,8 @@ private fun SetupWizardContent(
                     )
                     else -> {
                         Badge(LXIconName.Brain)
-                        WizH("选择默认模型")
-                        WizSub("随时可在对话中切换。不确定就先用推荐的主力模型。")
-                        Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                            MockData.models.forEach { m ->
-                                ModelRow(m.id, m.name, "${m.desc} · ${m.tag}", m.color, modelId == m.id) { modelId = m.id }
-                            }
-                        }
+                        WizH("基础设置完成")
+                        WizSub("进入应用后，请在「设置 → AI 提供商」保存真实凭据并选择默认模型。模型列表会直接来自当前已配置的提供商。")
                     }
                 }
             }
@@ -334,35 +330,6 @@ private fun VoiceprintStep(vp: VpState, pct: Float, userName: String, onRecord: 
     if (vp != VpState.Done) {
         Spacer(Modifier.height(8.dp))
         Text("「你好灵犀，我是${userName.ifBlank { "我" }}。」", color = oklch(0.86f, 0.03f, 280f), fontSize = 15.sp, fontStyle = FontStyle.Italic)
-    }
-}
-
-@Composable
-private fun ModelRow(id: String, name: String, sub: String, dot: Color, on: Boolean, onSelect: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(if (on) oklch(0.70f, 0.18f, 285f, 0.16f) else Color.White.copy(alpha = 0.04f), RoundedCornerShape(15.dp))
-            .border(1.dp, if (on) oklch(0.70f, 0.18f, 285f, 0.55f) else Color.White.copy(alpha = 0.1f), RoundedCornerShape(15.dp))
-            .clickable(onClick = onSelect)
-            .padding(horizontal = 16.dp, vertical = 14.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Canvas(Modifier.size(10.dp)) { drawCircle(dot) }
-        Spacer(Modifier.width(13.dp))
-        Column(Modifier.weight(1f)) {
-            Text(name, color = oklch(0.95f, 0.02f, 285f), fontSize = 15.5.sp, fontWeight = FontWeight.SemiBold)
-            Text(sub, color = oklch(0.66f, 0.03f, 280f), fontSize = 12.5.sp)
-        }
-        Box(
-            modifier = Modifier
-                .size(22.dp)
-                .background(if (on) oklch(0.66f, 0.20f, 288f) else Color.Transparent, CircleShape)
-                .border(1.5.dp, if (on) oklch(0.70f, 0.18f, 285f) else Color.White.copy(alpha = 0.25f), CircleShape),
-            contentAlignment = Alignment.Center,
-        ) {
-            if (on) LXIcon(LXIconName.Check, size = 13.dp, color = Color.White, stroke = 3f)
-        }
     }
 }
 

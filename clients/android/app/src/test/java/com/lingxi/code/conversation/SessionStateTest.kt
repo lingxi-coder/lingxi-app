@@ -8,6 +8,7 @@ import com.lingxi.code.bindings.SessionRowDto
 import com.lingxi.code.model.EngineModelState
 import com.lingxi.code.model.EngineSessionState
 import com.lingxi.code.model.Message
+import com.lingxi.code.model.SessionCatalogPhase
 import com.lingxi.code.model.SessionCatalog
 import com.lingxi.code.model.SessionRow
 import kotlinx.coroutines.Dispatchers
@@ -76,7 +77,7 @@ class SessionStateTest {
     @Test
     fun sessionList_replacesCatalog_mappingWireRowsToUiRows() {
         val next = reduceSessionEvent(
-            EngineSessionState(),
+            EngineSessionState.loading(),
             ClientEvent.SessionList(
                 sessions = listOf(
                     dto("u1", "重装 LingXi", "2024-06-15T11:30:00Z", 8),
@@ -86,6 +87,7 @@ class SessionStateTest {
             nowEpochSeconds = now,
         )
         assertTrue(next.hasSessions)
+        assertEquals(SessionCatalogPhase.Ready, next.phase)
         assertEquals(listOf("u1", "u2"), next.rows.map { it.uuid })
         assertEquals(listOf("重装 LingXi", "客户邮件模板"), next.rows.map { it.title })
         assertEquals(listOf(8, 4), next.rows.map { it.messageCount })
@@ -96,7 +98,7 @@ class SessionStateTest {
 
     @Test
     fun sessionList_replacesAPriorCatalog_wholesale() {
-        val prev = EngineSessionState(
+        val prev = EngineSessionState.ready(
             rows = listOf(SessionRow("old", "Old", 1, "刚刚")),
         )
         val next = reduceSessionEvent(
@@ -108,20 +110,22 @@ class SessionStateTest {
     }
 
     @Test
-    fun sessionList_empty_clearsCatalog_backToMockFallback() {
-        val prev = EngineSessionState(rows = listOf(SessionRow("u", "T", 1, "刚刚")))
+    fun sessionList_empty_marksReadyEmpty_withoutMockFallback() {
+        val prev = EngineSessionState.ready(rows = listOf(SessionRow("u", "T", 1, "刚刚")))
         val next = reduceSessionEvent(
             prev,
             ClientEvent.SessionList(sessions = emptyList()),
             nowEpochSeconds = now,
         )
         assertFalse(next.hasSessions)
+        assertTrue(next.isEmpty)
+        assertEquals(SessionCatalogPhase.Ready, next.phase)
     }
 
     @Test
     fun blankTitle_fallsBackToPlaceholder_neverEmpty() {
         val next = reduceSessionEvent(
-            EngineSessionState(),
+            EngineSessionState.loading(),
             ClientEvent.SessionList(sessions = listOf(dto("u", "   ", "2024-06-15T12:00:00Z", 0))),
             nowEpochSeconds = now,
         )
@@ -132,7 +136,7 @@ class SessionStateTest {
 
     @Test
     fun nonSessionEvent_returnsPrevUnchanged_identity() {
-        val prev = EngineSessionState(rows = listOf(SessionRow("u", "T", 3, "刚刚")))
+        val prev = EngineSessionState.ready(rows = listOf(SessionRow("u", "T", 3, "刚刚")))
         // TextDelta / Error / lifecycle events must NOT disturb the catalog.
         assertSame(prev, reduceSessionEvent(prev, ClientEvent.TextDelta("hi"), now))
         assertSame(prev, reduceSessionEvent(prev, ClientEvent.SessionStarted(sessionId = "x"), now))
@@ -152,7 +156,7 @@ class SessionStateTest {
     /** A source whose session + resume state we drive; submit/streams are inert. */
     private class FakeSessionSource(
         private val sessions: MutableStateFlow<EngineSessionState>,
-        private val resumed: MutableStateFlow<RestoredSession?> = MutableStateFlow(null),
+        private val activated: MutableStateFlow<ActivatedSession?> = MutableStateFlow(null),
     ) : ConversationSource {
         val resumeCalls = mutableListOf<String>()
         var newSessionCalls = 0
@@ -160,24 +164,24 @@ class SessionStateTest {
         override fun initialMessages(): List<Message> = emptyList()
         override fun submit(text: String): Flow<ReplyEvent> = emptyFlow()
         override val sessionState: StateFlow<EngineSessionState> = sessions.asStateFlow()
-        override val resumedSession: StateFlow<RestoredSession?> = resumed.asStateFlow()
+        override val activeSessionState: StateFlow<ActivatedSession?> = activated.asStateFlow()
         override suspend fun refreshSessions() { refreshCalls++ }
         override suspend fun resumeSession(uuid: String) { resumeCalls += uuid }
         override suspend fun newSession() { newSessionCalls++ }
     }
 
     @Test
-    fun emptyCatalog_viewModelExposesEmpty_drawerKeepsMock() {
-        val vm = ChatViewModel(FakeSessionSource(MutableStateFlow(EngineSessionState())))
-        assertFalse(vm.sessions.value.hasSessions)
+    fun loadingCatalog_viewModelExposesLoadingState() {
+        val vm = ChatViewModel(FakeSessionSource(MutableStateFlow(EngineSessionState.loading())))
+        assertTrue(vm.sessions.value.isLoading)
     }
 
     @Test
     fun engineCatalog_mirrorsIntoViewModelSessions_outOfBand() {
-        val flow = MutableStateFlow(EngineSessionState())
+        val flow = MutableStateFlow(EngineSessionState.loading())
         val vm = ChatViewModel(FakeSessionSource(flow))
 
-        flow.value = EngineSessionState(rows = listOf(SessionRow("u1", "会话一", 5, "刚刚")))
+        flow.value = EngineSessionState.ready(rows = listOf(SessionRow("u1", "会话一", 5, "刚刚")))
 
         assertEquals(listOf("u1"), vm.sessions.value.rows.map { it.uuid })
         assertEquals("会话一", vm.sessions.value.rows.single().title)
@@ -185,7 +189,7 @@ class SessionStateTest {
 
     @Test
     fun resumeSession_selectsLocally_andSubmitsResume() = runTest(dispatcher) {
-        val source = FakeSessionSource(MutableStateFlow(EngineSessionState()))
+        val source = FakeSessionSource(MutableStateFlow(EngineSessionState.loading()))
         val vm = ChatViewModel(source)
 
         val row = SessionRow(uuid = "uuid-42", title = "差旅规划", messageCount = 12, relativeTime = "昨天")
@@ -201,7 +205,7 @@ class SessionStateTest {
         assertEquals(listOf("uuid-42"), source.resumeCalls)
     }
 
-    // --- restoredSessionFrom: the out-of-band live-resume recognizer -------
+    // --- sessionActivationFrom: the out-of-band session activation path -------
 
     private fun userDto(text: String) =
         MessageDto(role = "user", blocks = listOf(MessageBlockDto.Text(text)))
@@ -210,8 +214,8 @@ class SessionStateTest {
         MessageDto(role = "assistant", blocks = blocks.toList())
 
     @Test
-    fun restoredSessionFrom_sessionResumed_lowersTranscriptOldestFirst() {
-        val restored = restoredSessionFrom(
+    fun sessionActivationFrom_sessionResumed_lowersTranscriptOldestFirst() {
+        val restored = sessionActivationFrom(
             ClientEvent.SessionResumed(
                 sessionId = "22222222-2222-4222-8222-222222222222",
                 messages = listOf(
@@ -225,6 +229,7 @@ class SessionStateTest {
         )
         assertNotNull(restored)
         assertEquals("22222222-2222-4222-8222-222222222222", restored!!.sessionId)
+        assertEquals(SessionActivationKind.Resumed, restored.kind)
         // Two messages, OLDEST-FIRST, role-mapped.
         assertEquals(2, restored.transcript.size)
         assertEquals(com.lingxi.code.model.Role.User, restored.transcript[0].role)
@@ -236,8 +241,19 @@ class SessionStateTest {
     }
 
     @Test
-    fun restoredSessionFrom_emptyTranscript_isNonNullWithNoMessages() {
-        val restored = restoredSessionFrom(
+    fun sessionActivationFrom_sessionStarted_yieldsEmptyTranscript() {
+        val restored = sessionActivationFrom(
+            ClientEvent.SessionStarted(sessionId = "s"),
+        )
+        assertNotNull(restored)
+        assertTrue(restored!!.transcript.isEmpty())
+        assertEquals(SessionActivationKind.Started, restored.kind)
+        assertEquals("s", restored.sessionId)
+    }
+
+    @Test
+    fun sessionActivationFrom_emptyTranscript_isNonNullWithNoMessages() {
+        val restored = sessionActivationFrom(
             ClientEvent.SessionResumed(sessionId = "s", messages = emptyList()),
         )
         assertNotNull(restored)
@@ -246,10 +262,9 @@ class SessionStateTest {
     }
 
     @Test
-    fun restoredSessionFrom_nonResumeEvent_isNull() {
-        assertNull(restoredSessionFrom(ClientEvent.TextDelta("hi")))
-        assertNull(restoredSessionFrom(ClientEvent.SessionStarted(sessionId = "x")))
-        assertNull(restoredSessionFrom(ClientEvent.SessionList(sessions = emptyList())))
+    fun sessionActivationFrom_nonActivationEvent_isNull() {
+        assertNull(sessionActivationFrom(ClientEvent.TextDelta("hi")))
+        assertNull(sessionActivationFrom(ClientEvent.SessionList(sessions = emptyList())))
     }
 
     @Test
@@ -274,22 +289,23 @@ class SessionStateTest {
         assertFalse(text.contains("\n\n\n"))
     }
 
-    // --- ChatViewModel resume rehydration (the inbound SessionResumed path) -
+    // --- ChatViewModel session activation rehydration -----------------------
 
     @Test
-    fun resumedSession_rehydratesTranscript_andSetsActiveSession_outOfBand() {
-        val resumed = MutableStateFlow<RestoredSession?>(null)
-        val source = FakeSessionSource(MutableStateFlow(EngineSessionState()), resumed)
+    fun activeSessionState_rehydratesTranscript_andSetsActiveSession_outOfBand() {
+        val resumed = MutableStateFlow<ActivatedSession?>(null)
+        val source = FakeSessionSource(MutableStateFlow(EngineSessionState.loading()), resumed)
         val vm = ChatViewModel(source)
 
         // A live SessionResumed lands with 3 messages, oldest-first.
-        resumed.value = RestoredSession(
+        resumed.value = ActivatedSession(
             sessionId = "uuid-99",
             transcript = listOf(
                 Message(role = com.lingxi.code.model.Role.User, text = "q1"),
                 Message(role = com.lingxi.code.model.Role.Ai, text = "a1"),
                 Message(role = com.lingxi.code.model.Role.User, text = "q2"),
             ),
+            kind = SessionActivationKind.Resumed,
         )
 
         // N messages rendered, in order.
@@ -302,35 +318,37 @@ class SessionStateTest {
     }
 
     @Test
-    fun resumedSession_replacesCurrentTranscript_wholesale() {
-        val resumed = MutableStateFlow<RestoredSession?>(null)
-        val source = FakeSessionSource(MutableStateFlow(EngineSessionState()), resumed)
+    fun activeSessionState_replacesCurrentTranscript_wholesale() {
+        val resumed = MutableStateFlow<ActivatedSession?>(null)
+        val source = FakeSessionSource(MutableStateFlow(EngineSessionState.loading()), resumed)
         val vm = ChatViewModel(source)
 
         // Seed a stale transcript (a prior turn), then resume swaps it wholesale.
         vm.reduce(ReplyEvent.Delta("stale turn"))
         assertEquals(1, vm.state.value.messages.size)
 
-        resumed.value = RestoredSession(
+        resumed.value = ActivatedSession(
             sessionId = "uuid-77",
             transcript = listOf(Message(role = com.lingxi.code.model.Role.User, text = "restored")),
+            kind = SessionActivationKind.Resumed,
         )
 
         assertEquals(listOf("restored"), vm.state.value.messages.map { it.text })
     }
 
     @Test
-    fun applyRestoredSession_preservesDrawerSelectedTitle_whenIdMatches() {
-        val source = FakeSessionSource(MutableStateFlow(EngineSessionState()))
+    fun applyActivatedSession_preservesDrawerSelectedTitle_whenIdMatches() {
+        val source = FakeSessionSource(MutableStateFlow(EngineSessionState.loading()))
         val vm = ChatViewModel(source)
 
         // The drawer's optimistic local select set the title before resume landed.
         vm.resumeSession(SessionRow(uuid = "uuid-55", title = "差旅规划", messageCount = 3, relativeTime = "昨天"))
         // The engine confirms with the rehydrated transcript (id matches the select).
-        vm.applyRestoredSession(
-            RestoredSession(
+        vm.applyActivatedSession(
+            ActivatedSession(
                 sessionId = "uuid-55",
                 transcript = listOf(Message(role = com.lingxi.code.model.Role.User, text = "hi")),
+                kind = SessionActivationKind.Resumed,
             ),
         )
 
@@ -341,7 +359,7 @@ class SessionStateTest {
 
     @Test
     fun startNewSession_resetsTranscriptLocally_andSubmitsNewSession() = runTest(dispatcher) {
-        val source = FakeSessionSource(MutableStateFlow(EngineSessionState()))
+        val source = FakeSessionSource(MutableStateFlow(EngineSessionState.loading()))
         val vm = ChatViewModel(source)
 
         // Seed a non-empty transcript, then start a new session.
@@ -355,21 +373,21 @@ class SessionStateTest {
 
     @Test
     fun refreshSessions_drivesSourceRefresh() = runTest(dispatcher) {
-        val source = FakeSessionSource(MutableStateFlow(EngineSessionState()))
+        val source = FakeSessionSource(MutableStateFlow(EngineSessionState.loading()))
         val vm = ChatViewModel(source)
         vm.refreshSessions()
         assertEquals(1, source.refreshCalls)
     }
 
-    // A no-op smoke: the default ConversationSource session surface is inert
-    // (the mock / test sources that don't override it expose an empty catalog).
+    // A no-op smoke: the default ConversationSource session surface starts in
+    // loading, not in a mock-filled state.
     @Test
-    fun defaultSource_hasEmptySessionState() {
+    fun defaultSource_startsLoadingSessionState() {
         val inert = object : ConversationSource {
             override fun initialMessages(): List<Message> = emptyList()
             override fun submit(text: String): Flow<ReplyEvent> = emptyFlow()
         }
-        assertFalse(inert.sessionState.value.hasSessions)
+        assertTrue(inert.sessionState.value.isLoading)
         // And reduceModelEvent / reduceSessionEvent remain independent surfaces.
         assertFalse(EngineModelState().hasCatalog)
     }

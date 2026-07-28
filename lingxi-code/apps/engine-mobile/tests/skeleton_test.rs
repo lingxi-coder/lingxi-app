@@ -136,4 +136,20 @@ fn submit_send_prompt_drives_listener_text_then_turn_ended() {
         }
         other => panic!("expected TurnEnded, got {other:?}"),
     }
+
+    // A terminal turn must release the connection's in-flight slot. Session
+    // control is the externally-observable contract here: before the fix the
+    // stale, non-cancelled token made every post-turn NewSession look mid-turn
+    // and therefore fail forever.
+    handle
+        .runtime()
+        .block_on(async {
+            handle
+                .submit(ClientCommand::NewSession {
+                    cwd: None,
+                    model: None,
+                })
+                .await
+        })
+        .expect("a completed turn must release the slot so NewSession succeeds");
 }

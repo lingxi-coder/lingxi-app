@@ -22,6 +22,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -69,13 +70,16 @@ fun SettingsHost(
     accentId: String,
     modifier: Modifier = Modifier,
     navController: NavHostController = rememberNavController(),
-    store: SettingsStore = viewModel(),
+    store: SettingsStore? = null,
     onClose: () -> Unit = {},
     onReplayOnboarding: () -> Unit = {},
     onReconnectEngine: () -> Unit = {},
 ) {
+    val context = LocalContext.current
+    val resolvedStore: SettingsStore =
+        store ?: viewModel(factory = SettingsStore.factory(context))
     val t = LingXiTheme.palette
-    val state by store.state.collectAsState()
+    val state by resolvedStore.state.collectAsState()
     val backEntry by navController.currentBackStackEntryAsState()
     val route = backEntry?.destination?.route
     val atRoot = route == null || route == SettingsRoutes.MAIN
@@ -121,10 +125,10 @@ fun SettingsHost(
                     AppearancePage(store = appearanceStore, isDark = isDark, accentId = accentId)
                 }
                 page(SettingsRoutes.LANGUAGE) {
-                    LanguagePage(language = state.language, onSelect = store::setLanguage)
+                    LanguagePage(language = state.language, onSelect = resolvedStore::setLanguage)
                 }
                 page(SettingsRoutes.NOTIFICATIONS) {
-                    NotificationsPage(notifs = state.notifs, onChange = store::setNotifs)
+                    NotificationsPage(notifs = state.notifs, onChange = resolvedStore::setNotifs)
                 }
                 page(SettingsRoutes.INPUT) { InputPage() }
 
@@ -133,14 +137,14 @@ fun SettingsHost(
 
                 // 智能 — providers (A7) + voice TTS editor
                 page(SettingsRoutes.VOICE) {
-                    VoicePage(voice = state.voice, onChange = store::setVoice)
+                    VoicePage(voice = state.voice, onChange = resolvedStore::setVoice)
                 }
                 page(SettingsRoutes.PROVIDER_LIST) {
                     val kind = providerKindArg(it)
                     ProviderListPage(
                         kind = kind,
                         state = state,
-                        store = store,
+                        store = resolvedStore,
                         onEdit = { id -> navController.navigate(SettingsRoutes.providerEdit(kind.name, id)) },
                         onAdd = { navController.navigate(SettingsRoutes.providerPicker(kind.name)) },
                         onReconnectEngine = onReconnectEngine,
@@ -150,7 +154,7 @@ fun SettingsHost(
                     val kind = providerKindArg(it)
                     ProviderPickerPage(
                         kind = kind,
-                        store = store,
+                        store = resolvedStore,
                         // Replace the picker with the edit page so the back stack is
                         // list → edit (the iOS `replaceTopTwo` behavior).
                         onPicked = { newId ->
@@ -167,7 +171,8 @@ fun SettingsHost(
                         kind = kind,
                         providerId = id,
                         state = state,
-                        store = store,
+                        store = resolvedStore,
+                        onReconnectEngine = onReconnectEngine,
                         onPop = { navController.popBackStack() },
                     )
                 }
@@ -175,7 +180,7 @@ fun SettingsHost(
                 page(SettingsRoutes.SKILLS) {
                     SkillsPage(
                         state = state,
-                        store = store,
+                        store = resolvedStore,
                         onDetail = { id -> navController.navigate(SettingsRoutes.skillDetail(id)) },
                     )
                 }
@@ -184,30 +189,30 @@ fun SettingsHost(
                     SkillDetailPage(
                         skillId = id,
                         state = state,
-                        store = store,
+                        store = resolvedStore,
                         onPop = { navController.popBackStack() },
                     )
                 }
                 page(SettingsRoutes.MCP_LIST) {
                     MCPListPage(
                         state = state,
-                        store = store,
+                        store = resolvedStore,
                         onEdit = { id -> navController.navigate(SettingsRoutes.mcpEdit(id)) },
                     )
                 }
                 page(SettingsRoutes.LINUX_RUNTIME) {
-                    LinuxRuntimePage(state = state, store = store)
+                    LinuxRuntimePage(state = state, store = resolvedStore)
                 }
                 page(SettingsRoutes.MCP_EDIT) {
                     val id = it.arguments?.getString("id") ?: ""
                     MCPEditPage(
                         mcpId = id,
                         state = state,
-                        store = store,
+                        store = resolvedStore,
                         onPop = { navController.popBackStack() },
                     )
                 }
-                page(SettingsRoutes.DREAM) { DreamPage(state = state, store = store) }
+                page(SettingsRoutes.DREAM) { DreamPage(state = state, store = resolvedStore) }
                 page(SettingsRoutes.CRON) { com.lingxi.code.cron.CronScreen() }
             }
         }

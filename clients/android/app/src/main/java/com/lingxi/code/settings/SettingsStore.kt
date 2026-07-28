@@ -1,6 +1,7 @@
 package com.lingxi.code.settings
 
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.lingxi.code.model.ConnStatus
 import com.lingxi.code.model.DreamConfig
@@ -11,7 +12,7 @@ import com.lingxi.code.model.ProviderKind
 import com.lingxi.code.model.SettingsMock
 import com.lingxi.code.model.Skill
 import com.lingxi.code.model.VoiceConfig
-import kotlinx.coroutines.delay
+import android.content.Context
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -22,9 +23,9 @@ import kotlinx.coroutines.launch
  * Mutable settings state — the Android analog of the iOS `SettingsStore`
  * (`ObservableObject`). Holds the mock provider / skill / MCP / Dream / voice
  * data plus the simple toggles (language, notifications, privacy switches) and
- * exposes them as a single [StateFlow]. UI mutates via the typed setters; no
- * network or engine work happens here — `test connection` / `reconnect` are
- * local animations driven by the pages.
+ * exposes them as a single [StateFlow]. Provider launch-affecting edits are
+ * persisted immediately but remain explicitly pending until the user applies
+ * them and the host rebuilds the mobile engine.
  *
  * A6 reads [SettingsUiState] for the main-list counts and drives the simple
  * pages' toggles/radios; A7/A8 build the provider / skills / MCP / Dream editors
@@ -32,9 +33,9 @@ import kotlinx.coroutines.launch
  * DataStore-backed `AppearanceStore` so theme + accent persist and stay live.
  */
 data class SettingsUiState(
-    val llmProviders: List<GenericProvider> = SettingsMock.llmProviders,
-    val searchProviders: List<GenericProvider> = SettingsMock.searchProviders,
-    val fetchProviders: List<GenericProvider> = SettingsMock.fetchProviders,
+    val llmProviders: List<GenericProvider> = emptyList(),
+    val searchProviders: List<GenericProvider> = emptyList(),
+    val fetchProviders: List<GenericProvider> = emptyList(),
     val voice: VoiceConfig = VoiceConfig(),
     val linuxRuntime: LinuxRuntimeUiState = LinuxRuntimeUiState(),
     val skills: List<Skill> = SettingsMock.skills,
@@ -42,8 +43,7 @@ data class SettingsUiState(
     val dream: DreamConfig = DreamConfig(),
     val language: String = "zh-CN",
     val notifs: NotifConfig = NotifConfig(),
-    val smartRouting: Boolean = true,
-    val streamingDefault: Boolean = true,
+    val pendingLlmProviderChanges: Set<String> = emptySet(),
     val bioLock: Boolean = true,
     val telemetry: Boolean = false,
     val autoUpdate: Boolean = true,
@@ -56,9 +56,29 @@ data class SettingsUiState(
     }
 }
 
-class SettingsStore : ViewModel() {
-    private val _state = MutableStateFlow(SettingsUiState())
+class SettingsStore(
+    private val providerRepo: ProviderSettingsRepository? = null,
+) : ViewModel() {
+    private val _state = MutableStateFlow(
+        providerRepo?.loadProviderState()?.let { (llm, search, fetch) ->
+            SettingsUiState(
+                llmProviders = llm,
+                searchProviders = search,
+                fetchProviders = fetch,
+            )
+        } ?: SettingsUiState()
+    )
     val state: StateFlow<SettingsUiState> = _state.asStateFlow()
+
+    init {
+        if (providerRepo != null) {
+            viewModelScope.launch {
+                val llm = providerRepo.refreshLlmStatuses(_state.value.llmProviders)
+                _state.update { it.copy(llmProviders = llm) }
+                providerRepo.persistProviders(ProviderKind.Llm, llm)
+            }
+        }
+    }
 
     // --- simple toggles / radios (A6) --------------------------------------
 
@@ -139,12 +159,9 @@ class SettingsStore : ViewModel() {
             linuxRuntime = current.linuxRuntime.copy(busyAction = null),
         )
     }
-    fun setSmartRouting(on: Boolean) = _state.update { it.copy(smartRouting = on) }
-    fun setStreamingDefault(on: Boolean) = _state.update { it.copy(streamingDefault = on) }
-
     // --- provider store access by kind (A7) --------------------------------
 
-    private fun setProviders(kind: ProviderKind, value: List<GenericProvider>) =
+    private fun setProviders(kind: ProviderKind, value: List<GenericProvider>) {
         _state.update {
             when (kind) {
                 ProviderKind.Llm -> it.copy(llmProviders = value)
@@ -152,37 +169,149 @@ class SettingsStore : ViewModel() {
                 ProviderKind.Fetch -> it.copy(fetchProviders = value)
             }
         }
+        providerRepo?.persistProviders(kind, _state.value.providers(kind))
+    }
 
     fun updateProvider(kind: ProviderKind, id: String, mutate: (GenericProvider) -> GenericProvider) {
+        val before = _state.value.providers(kind).firstOrNull { it.id == id }
         val updated = _state.value.providers(kind).map { if (it.id == id) mutate(it) else it }
         setProviders(kind, updated)
+        val after = updated.firstOrNull { it.id == id }
+        if (
+            kind == ProviderKind.Llm &&
+            before != null &&
+            after != null &&
+            providerLaunchConfigurationChanged(before, after)
+        ) {
+            markLlmProviderConfigurationPending(id)
+        }
     }
 
     fun setDefaultProvider(kind: ProviderKind, id: String) {
+        val previousDefault = _state.value.providers(kind).firstOrNull { it.isDefault }?.id
         setProviders(kind, _state.value.providers(kind).map { it.copy(isDefault = it.id == id) })
+        if (kind == ProviderKind.Llm && previousDefault != id) {
+            markLlmProviderConfigurationPending(id)
+        }
     }
 
-    fun removeProvider(kind: ProviderKind, id: String) {
-        setProviders(kind, _state.value.providers(kind).filter { it.id != id })
+    fun removeProvider(
+        kind: ProviderKind,
+        id: String,
+        onDone: (String?) -> Unit = {},
+    ) {
+        val provider = _state.value.providers(kind).firstOrNull { it.id == id }
+            ?: return onDone("provider not found")
+        val repo = providerRepo
+        if (kind == ProviderKind.Llm && repo == null && provider.credentialConfigured) {
+            return onDone("provider repository unavailable; saved credential was not deleted")
+        }
+        viewModelScope.launch {
+            val error = removeProviderCredentialFirst(
+                kind = kind,
+                provider = provider,
+                deleteCredential = { target ->
+                    repo?.deleteCredential(target) ?: ProviderCredentialSnapshot(
+                        configuredProviderIds = emptySet(),
+                        unavailableProviderIds = emptySet(),
+                        storageEncrypted = false,
+                    )
+                },
+                removePersistedProvider = {
+                    setProviders(kind, _state.value.providers(kind).filter { it.id != id })
+                    if (kind == ProviderKind.Llm) markLlmProviderConfigurationPending(id)
+                },
+            )
+            onDone(error)
+        }
     }
 
     /** Adds a provider from a preset; returns the new id. */
     fun addProvider(kind: ProviderKind, presetId: String): String {
-        val next = SettingsMock.newProvider(kind, presetId)
+        val preset = kind.presets.first { it.id == presetId }
+        val next = ProviderSettingsRepository.newProvider(kind, preset)
         setProviders(kind, _state.value.providers(kind) + next)
+        if (kind == ProviderKind.Llm) markLlmProviderConfigurationPending(next.id)
         return next.id
     }
 
-    /**
-     * Local "test connection" animation (no network): flip to [ConnStatus.Testing],
-     * then settle to [ConnStatus.Connected] after ~1.1s — the Android analog of the
-     * iOS `asyncAfter`. Driven from [viewModelScope] so the page stays stateless.
-     */
-    fun testProviderConnection(kind: ProviderKind, id: String) {
-        updateProvider(kind, id) { it.copy(status = ConnStatus.Testing) }
+    fun markLlmConfigurationApplied() {
+        _state.update { it.copy(pendingLlmProviderChanges = emptySet()) }
+    }
+
+    private fun markLlmProviderConfigurationPending(id: String) {
+        _state.update {
+            it.copy(pendingLlmProviderChanges = it.pendingLlmProviderChanges + id)
+        }
+    }
+
+    fun refreshProviderStatuses() {
+        val repo = providerRepo ?: return
         viewModelScope.launch {
-            delay(1100)
-            updateProvider(kind, id) { it.copy(status = ConnStatus.Connected) }
+            val llm = repo.refreshLlmStatuses(_state.value.llmProviders)
+            _state.update { it.copy(llmProviders = llm) }
+            repo.persistProviders(ProviderKind.Llm, llm)
+        }
+    }
+
+    fun saveProviderCredential(
+        kind: ProviderKind,
+        id: String,
+        secret: String,
+        onDone: (String?) -> Unit = {},
+    ) {
+        val repo = providerRepo ?: return onDone("provider repository unavailable")
+        val provider = _state.value.providers(kind).firstOrNull { it.id == id }
+            ?: return onDone("provider not found")
+        viewModelScope.launch {
+            val snapshot = repo.setCredential(provider, secret)
+            if (snapshot.error != null) {
+                onDone(snapshot.error)
+                return@launch
+            }
+            val configured = ProviderSettingsRepository.engineCredentialIdFor(provider)
+                ?.let(snapshot.configuredProviderIds::contains) == true
+            updateProvider(kind, id) {
+                it.copy(
+                    credentialConfigured = configured,
+                    status = ProviderSettingsRepository.statusFor(
+                        it,
+                        configured,
+                        snapshot.storageEncrypted,
+                        unavailable = false,
+                    ),
+                )
+            }
+            onDone(null)
+        }
+    }
+
+    fun clearProviderCredential(
+        kind: ProviderKind,
+        id: String,
+        onDone: (String?) -> Unit = {},
+    ) {
+        val repo = providerRepo ?: return onDone("provider repository unavailable")
+        val provider = _state.value.providers(kind).firstOrNull { it.id == id }
+            ?: return onDone("provider not found")
+        viewModelScope.launch {
+            val snapshot = repo.deleteCredential(provider)
+            if (snapshot.error != null) {
+                onDone(snapshot.error)
+                return@launch
+            }
+            updateProvider(kind, id) {
+                it.copy(
+                    credentialConfigured = false,
+                    status = ProviderSettingsRepository.statusFor(
+                        it,
+                        credentialConfigured = false,
+                        encrypted = snapshot.storageEncrypted,
+                        unavailable = false,
+                    ),
+                )
+            }
+            onDone(null)
         }
     }
 
@@ -202,4 +331,46 @@ class SettingsStore : ViewModel() {
         _state.update { s -> s.copy(mcpServers = s.mcpServers.filter { it.id != id }) }
 
     fun setDream(dream: DreamConfig) = _state.update { it.copy(dream = dream) }
+
+    override fun onCleared() {
+        providerRepo?.close()
+        super.onCleared()
+    }
+
+    companion object {
+        fun factory(context: Context): ViewModelProvider.Factory =
+            object : ViewModelProvider.Factory {
+                override fun <T : ViewModel> create(modelClass: Class<T>): T {
+                    @Suppress("UNCHECKED_CAST")
+                    return SettingsStore(ProviderSettingsRepository(context.applicationContext)) as T
+                }
+            }
+    }
+}
+
+internal fun providerLaunchConfigurationChanged(
+    before: GenericProvider,
+    after: GenericProvider,
+): Boolean =
+    before.url.trim() != after.url.trim() ||
+        before.model.trim() != after.model.trim() ||
+        before.enabled != after.enabled
+
+/**
+ * Removes the secure credential before the persisted provider row. A credential
+ * deletion error aborts the operation so the UI never claims a provider was
+ * removed while its secret remains in engine storage.
+ */
+internal suspend fun removeProviderCredentialFirst(
+    kind: ProviderKind,
+    provider: GenericProvider,
+    deleteCredential: suspend (GenericProvider) -> ProviderCredentialSnapshot,
+    removePersistedProvider: () -> Unit,
+): String? {
+    if (kind == ProviderKind.Llm && ProviderSettingsRepository.engineCredentialIdFor(provider) != null) {
+        val snapshot = deleteCredential(provider)
+        if (snapshot.error != null) return snapshot.error
+    }
+    removePersistedProvider()
+    return null
 }

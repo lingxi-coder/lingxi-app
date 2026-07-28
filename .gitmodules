@@ -1,0 +1,3 @@
+[submodule "docs/superpowers/references/OpenMinis"]
+	path = docs/superpowers/references/OpenMinis
+	url = https://github.com/OpenMinis/OpenMinis.git

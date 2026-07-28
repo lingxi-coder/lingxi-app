@@ -26,12 +26,15 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.viewmodel.compose.viewModel
 import com.lingxi.code.cron.CronAlarmScheduler
 import com.lingxi.code.onboarding.SetupWizardOverlay
 import com.lingxi.code.settings.SettingsHost
+import com.lingxi.code.settings.SettingsStore
 import com.lingxi.code.theme.AppearancePrefs
 import com.lingxi.code.theme.AppearanceStore
 import com.lingxi.code.theme.LingXiTheme
@@ -130,6 +133,8 @@ class MainActivity : ComponentActivity() {
         }
         setContent {
             val store = remember { AppearanceStore(applicationContext) }
+            val settingsStore: SettingsStore =
+                viewModel(factory = SettingsStore.factory(applicationContext))
             val scope = rememberCoroutineScope()
             val prefs by store.prefs.collectAsState(initial = AppearancePrefs())
             val darkTheme = when (prefs.themeMode) {
@@ -141,10 +146,9 @@ class MainActivity : ComponentActivity() {
             // conversation (the Android analog of the iOS settings sheet); the
             // drawer's account row opens it, system-back / close dismisses it.
             var settingsOpen by remember { mutableStateOf(false) }
-            // Bumped when the user taps 重新连接引擎 after entering an API key — re-keys
-            // RootScreen's engine source + chat VM so the new key takes effect with
-            // no app restart.
-            var engineReconnect by remember { mutableIntStateOf(0) }
+            // Monotonic across configuration changes: rotation must not turn a
+            // prior reconnect generation back into zero and rebuild a live engine.
+            var engineReconnect by rememberSaveable { mutableIntStateOf(0) }
 
             LingXiTheme(darkTheme = darkTheme, accentId = prefs.accentId) {
                 Box(Modifier.fillMaxSize()) {
@@ -160,6 +164,7 @@ class MainActivity : ComponentActivity() {
                         inputDialog = prefs.inputDialog,
                         voiceLang = prefs.voiceLang,
                         reconnectToken = engineReconnect,
+                        settingsStore = settingsStore,
                     )
                     AnimatedVisibility(
                         visible = settingsOpen,
@@ -170,6 +175,7 @@ class MainActivity : ComponentActivity() {
                             appearanceStore = store,
                             isDark = darkTheme,
                             accentId = prefs.accentId,
+                            store = settingsStore,
                             onClose = { settingsOpen = false },
                             // 关于 → 重新观看引导: clear setupDone (replays the wizard)
                             // and drop back to the conversation behind it.

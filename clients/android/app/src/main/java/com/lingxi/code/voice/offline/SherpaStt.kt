@@ -1,5 +1,6 @@
 package com.lingxi.code.voice.offline
 
+import android.annotation.SuppressLint
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
@@ -32,15 +33,24 @@ class SherpaStt private constructor(
     private val online: OnlineRecognizer?,
     private val offline: OfflineRecognizer?,
 ) {
-    /** Record one utterance and transcribe it. Returns null on empty/failure. */
+    /**
+     * Record one utterance and transcribe it. The UI checks RECORD_AUDIO before
+     * entering this method; the constructor is still guarded because permission
+     * can be revoked between that check and opening the recorder.
+     */
+    @SuppressLint("MissingPermission")
     suspend fun transcribeOnce(): String? = withContext(Dispatchers.IO) {
         val sampleRate = 16_000
         val minBuf = AudioRecord.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
-        val record = AudioRecord(
-            MediaRecorder.AudioSource.VOICE_RECOGNITION, sampleRate,
-            AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT,
-            maxOf(minBuf, sampleRate),
-        )
+        val record = try {
+            AudioRecord(
+                MediaRecorder.AudioSource.VOICE_RECOGNITION, sampleRate,
+                AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT,
+                maxOf(minBuf, sampleRate),
+            )
+        } catch (_: SecurityException) {
+            return@withContext null
+        }
         if (record.state != AudioRecord.STATE_INITIALIZED) { record.release(); return@withContext null }
         val all = ArrayList<Float>(sampleRate * 6)
         try {

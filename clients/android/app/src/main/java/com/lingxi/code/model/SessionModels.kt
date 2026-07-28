@@ -8,14 +8,45 @@ package com.lingxi.code.model
  * rather than the per-turn reply stream — mirroring how `ModelList` rides
  * `ConversationSource.modelState`.
  *
- * Empty ([rows] empty) means "the engine hasn't reported its session catalog
- * yet (or we're in mock mode)" — the drawer keeps showing the branded
- * [MockData] session list until a real `SessionList` arrives.
+ * [phase] distinguishes "still loading", "loaded but empty", and "could not
+ * load". This keeps production UI from falling back to branded mock sessions
+ * when the engine has not replied yet or is unavailable.
  */
+enum class SessionCatalogPhase {
+    Loading,
+    Ready,
+    Error,
+}
+
 data class EngineSessionState(
     val rows: List<SessionRow> = emptyList(),
+    val phase: SessionCatalogPhase = SessionCatalogPhase.Loading,
+    val errorMessage: String? = null,
 ) {
     val hasSessions: Boolean get() = rows.isNotEmpty()
+    val isLoading: Boolean get() = phase == SessionCatalogPhase.Loading
+    val isEmpty: Boolean get() = phase == SessionCatalogPhase.Ready && rows.isEmpty()
+    val isError: Boolean get() = phase == SessionCatalogPhase.Error
+
+    companion object {
+        fun loading(): EngineSessionState = EngineSessionState(
+            rows = emptyList(),
+            phase = SessionCatalogPhase.Loading,
+            errorMessage = null,
+        )
+
+        fun ready(rows: List<SessionRow>): EngineSessionState = EngineSessionState(
+            rows = rows,
+            phase = SessionCatalogPhase.Ready,
+            errorMessage = null,
+        )
+
+        fun error(message: String): EngineSessionState = EngineSessionState(
+            rows = emptyList(),
+            phase = SessionCatalogPhase.Error,
+            errorMessage = message,
+        )
+    }
 }
 
 /**

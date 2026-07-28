@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<lint>
+    <!--
+      UniFFI emits a guarded java.lang.ref.Cleaner implementation and checks the
+      class by reflection before instantiating it, falling back to JNA on older
+      Android releases. Keep NewApi active everywhere else; suppress only this
+      generated source, which is replaced whenever bindings are regenerated.
+    -->
+    <issue id="NewApi">
+        <ignore path="src/main/java/com/lingxi/code/bindings/android_aar.kt" />
+    </issue>
+</lint>

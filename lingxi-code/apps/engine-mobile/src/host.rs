@@ -33,7 +33,8 @@
 //! `Platform` (`platform-ios` / `platform-android`) is `cfg(target_os)`-gated in
 //! `Cargo.toml`, so this module never names a device crate.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -66,7 +67,7 @@ use permission::gate::PermissionGate;
 use permission::PermissionMode;
 use sandbox::runtime_config::{Platform as SandboxPlatform, SandboxRuntimeConfig};
 use secret::CredentialManager;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, Notify, RwLock};
 use tokio_util::sync::CancellationToken;
 use tool_api::AnthropicRequestBuilder;
 use tool_api::BuiltinToolContext;
@@ -274,6 +275,52 @@ impl MobileConfig {
     }
 }
 
+/// Parse the non-secret provider configuration supplied by a mobile host.
+///
+/// Keeping JSON decoding in `engine-mobile` avoids making the Android/iOS
+/// packager crates depend on `serde_json` on host builds. Secrets deliberately
+/// travel through `SetProviderCredential` instead of either JSON document.
+pub fn parse_mobile_provider_config_json(
+    provider_profiles_json: &str,
+    routing_json: Option<&str>,
+) -> Result<
+    (
+        Option<std::collections::BTreeMap<String, serde_json::Value>>,
+        Option<serde_json::Value>,
+    ),
+    MobileEngineError,
+> {
+    const MAX_CONFIG_BYTES: usize = 512 * 1024;
+    if provider_profiles_json.len() > MAX_CONFIG_BYTES
+        || routing_json.is_some_and(|value| value.len() > MAX_CONFIG_BYTES)
+    {
+        return Err(MobileEngineError::Internal(
+            "invalid provider config: payload too large".to_string(),
+        ));
+    }
+
+    let profiles = if provider_profiles_json.trim().is_empty() {
+        None
+    } else {
+        Some(
+            serde_json::from_str::<std::collections::BTreeMap<String, serde_json::Value>>(
+                provider_profiles_json,
+            )
+            .map_err(|error| {
+                MobileEngineError::Internal(format!("invalid provider profiles JSON: {error}"))
+            })?,
+        )
+    };
+    let routing = routing_json
+        .filter(|value| !value.trim().is_empty())
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(|error| {
+            MobileEngineError::Internal(format!("invalid provider routing JSON: {error}"))
+        })?;
+    Ok((profiles, routing))
+}
+
 /// Everything a mobile host needs to drive a conversation, built deterministically
 /// by [`build_mobile`] from a [`MobileConfig`] + an `Arc<dyn Platform>`.
 ///
@@ -312,6 +359,11 @@ pub struct MobileRuntime {
     /// the real native store is a §11 / Plan-17 follow-up). Becomes `true`
     /// automatically once a native Keychain/Keystore SecureStorage is injected.
     pub oauth_supported: bool,
+    /// Shared provider credential manager used by the live LLM client, OAuth,
+    /// and the mobile provider-settings commands. Retaining this handle is what
+    /// lets a credential written after boot take effect on the next request
+    /// without rebuilding the engine.
+    pub credentials: Arc<CredentialManager>,
     /// Mobile-only Linux userspace runtime seam (Android PRoot / iOS iSH),
     /// when the platform wires one. `None` preserves the pre-migration state.
     pub mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
@@ -533,7 +585,12 @@ fn anthropic_models(default_model: &str) -> Vec<llm_client::ModelProfile> {
         "claude-sonnet-4-6".to_string(),
         "claude-haiku-4-5".to_string(),
     ];
-    ids.push(default_model.to_string());
+    match default_model.split_once('/') {
+        Some(("anthropic", model)) if !model.is_empty() => ids.push(model.to_string()),
+        Some(_) => {}
+        None if !default_model.is_empty() => ids.push(default_model.to_string()),
+        None => {}
+    }
     // Env-configured small-fast / haiku model a `prompt` hook may resolve to
     // (matching `hook_prompt_runner::resolve_model`'s precedence:
     // `ANTHROPIC_SMALL_FAST_MODEL` > `ANTHROPIC_DEFAULT_HAIKU_MODEL` > default
@@ -560,6 +617,73 @@ fn anthropic_models(default_model: &str) -> Vec<llm_client::ModelProfile> {
             capabilities: caps,
         })
         .collect()
+}
+
+const MOBILE_ENABLED_PROFILES_KEY: &str = "mobileEnabledProfiles";
+
+/// Apply the mobile host's explicit provider profile allowlist after shared
+/// provider assembly and before any model catalog or client is constructed.
+///
+/// The reserved routing key is interpreted only in this mobile composition
+/// root, so desktop assembly remains unchanged. Absence preserves the shared
+/// catalog for backward-compatible hosts. Presence is fail-closed: a malformed
+/// value is treated as an empty allowlist.
+fn apply_mobile_profile_allowlist(
+    assembled: &mut provider_config::Assembled,
+    routing: Option<&serde_json::Value>,
+) {
+    let Some(value) = routing.and_then(|routing| routing.get(MOBILE_ENABLED_PROFILES_KEY)) else {
+        return;
+    };
+    let enabled_profiles: std::collections::BTreeSet<String> = match value.as_array() {
+        Some(items) => {
+            let mut profiles = std::collections::BTreeSet::new();
+            for item in items {
+                let Some(profile) = item.as_str().filter(|profile| !profile.is_empty()) else {
+                    profiles.clear();
+                    break;
+                };
+                profiles.insert(profile.to_string());
+            }
+            profiles
+        }
+        None => std::collections::BTreeSet::new(),
+    };
+
+    let allowed_routes: Vec<(llm_client::ProviderId, String)> = assembled
+        .client_config
+        .providers
+        .iter()
+        .filter(|provider| enabled_profiles.contains(&provider.profile_name))
+        .flat_map(|provider| {
+            let provider_id = provider.provider_id.clone();
+            provider
+                .models
+                .iter()
+                .map(move |model| (provider_id.clone(), model.request_model.clone()))
+        })
+        .collect();
+
+    assembled
+        .client_config
+        .providers
+        .retain(|provider| enabled_profiles.contains(&provider.profile_name));
+    assembled
+        .credential_sources
+        .retain(|source| enabled_profiles.contains(&source.profile_name));
+    assembled.chains.aliases.retain(|_, target| {
+        target
+            .split_once('/')
+            .is_some_and(|(profile, _)| enabled_profiles.contains(profile))
+    });
+    assembled.chains.chains.retain(|_, entries| {
+        entries.retain(|entry| {
+            allowed_routes.iter().any(|(provider_id, model)| {
+                provider_id == &entry.provider_id && model == &entry.model
+            })
+        });
+        !entries.is_empty()
+    });
 }
 
 /// A [`PermissionRequestSink`] that records `request_id → tool_name` and then
@@ -702,7 +826,7 @@ pub async fn build_mobile_inner(
     let llm_transport: Arc<dyn Transport> =
         Arc::new(LlmTransportBridge::new(DynHttp(http.clone())));
     let has_api_key = !cfg.api_key.is_empty();
-    let assembled = provider_config::assemble(provider_config::AssembleInputs {
+    let mut assembled = provider_config::assemble(provider_config::AssembleInputs {
         anthropic_api_base: cfg.api_base.clone(),
         anthropic_models: anthropic_models(&cfg.default_model),
         anthropic_has_api_key: has_api_key,
@@ -710,6 +834,7 @@ pub async fn build_mobile_inner(
         user_providers: cfg.provider_profiles.clone().unwrap_or_default(),
         routing: cfg.routing.clone(),
     });
+    apply_mobile_profile_allowlist(&mut assembled, cfg.routing.as_ref());
     for w in &assembled.warnings {
         tracing::warn!(warning = %w, "provider-config assembly (mobile)");
     }
@@ -864,7 +989,7 @@ pub async fn build_mobile_inner(
     let oauth_client = Arc::new(ClaudeAiOAuthClient::new(
         oauth_cfg,
         http.clone(),
-        credentials,
+        credentials.clone(),
     ));
     let auth: Arc<dyn AuthHandle> = Arc::new(OAuthHandle::new(oauth_client));
 
@@ -1562,6 +1687,7 @@ pub async fn build_mobile_inner(
         listener,
         event_sink,
         oauth_supported,
+        credentials,
         mobile_linux,
     })
 }
@@ -1640,7 +1766,7 @@ pub struct MobileEngineHandle {
     /// The cancellation token for the IN-FLIGHT turn, armed by
     /// `submit(SendPrompt)` and fired by `submit(Cancel)`. `None` when no turn is
     /// active. One connection ⇒ one in-flight turn (§0.5), so a single slot.
-    active_cancel: Arc<Mutex<Option<CancellationToken>>>,
+    active_cancel: Arc<Mutex<Option<Arc<ActiveTurn>>>>,
     /// `request_id → tool_name` recorded as each permission request is emitted, so
     /// an inbound `ApprovePermission`/`DenyPermission` (which carries only the
     /// `request_id`) can supply the tool name back to
@@ -1679,6 +1805,97 @@ pub struct MobileEngineHandle {
 /// (SESSIONS/HISTORY). Mirrors the CLI `/resume` default (`apps/cli/src/run.rs`
 /// passes `5`).
 const DEFAULT_SESSION_LIST_LIMIT: usize = 5;
+
+/// Maximum time an FFI `Cancel` waits for the owned turn to unwind and release
+/// the connection slot.
+const CANCEL_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Connection-scoped ownership record for one streamed turn.
+struct ActiveTurn {
+    cancel: CancellationToken,
+    completed: AtomicBool,
+    completion: Notify,
+}
+
+impl ActiveTurn {
+    fn new() -> Self {
+        Self {
+            cancel: CancellationToken::new(),
+            completed: AtomicBool::new(false),
+            completion: Notify::new(),
+        }
+    }
+
+    async fn wait_completed(&self) {
+        loop {
+            if self.completed.load(Ordering::Acquire) {
+                return;
+            }
+            let notified = self.completion.notified();
+            tokio::pin!(notified);
+            // Register before the second state check so completion cannot be
+            // lost between checking and awaiting.
+            notified.as_mut().enable();
+            if self.completed.load(Ordering::Acquire) {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    fn mark_completed(&self) {
+        self.completed.store(true, Ordering::Release);
+        self.completion.notify_waiters();
+    }
+}
+
+/// Mobile's flat model DTO has no provider field, so encode the provider
+/// profile into its stable wire value. This stays local to the mobile host and
+/// leaves the shared desktop/TUI listing contract untouched.
+fn mobile_model_ref(model: &str, profile: Option<&str>) -> String {
+    profile
+        .filter(|profile| !profile.is_empty())
+        .map_or_else(|| model.to_string(), |profile| format!("{profile}/{model}"))
+}
+
+/// Mobile-specific sibling of `traits::curated_model_names` that preserves
+/// provider identity in the protocol's existing `Vec<String>` shape.
+fn curated_mobile_model_refs(
+    listings: &[traits::ModelListing],
+    available: &[String],
+    current: &str,
+    current_profile: Option<&str>,
+) -> Vec<String> {
+    if listings.is_empty() {
+        let mut models = available.to_vec();
+        if !current.is_empty() && current_profile.is_some() {
+            let qualified = mobile_model_ref(current, current_profile);
+            if let Some(index) = models.iter().position(|model| model == current) {
+                models[index] = qualified;
+            } else if !models.contains(&qualified) {
+                models.insert(0, qualified);
+            }
+        }
+        return models;
+    }
+
+    let mut models = Vec::new();
+    let mut seen = HashSet::new();
+    if !current.is_empty() {
+        let current = mobile_model_ref(current, current_profile);
+        seen.insert(current.clone());
+        models.push(current);
+    }
+    for listing in listings {
+        if traits::is_curated_model(&listing.provider_id, &listing.request_model) {
+            let model = mobile_model_ref(&listing.request_model, Some(&listing.provider_id));
+            if seen.insert(model.clone()) {
+                models.push(model);
+            }
+        }
+    }
+    models
+}
 
 impl MobileEngineHandle {
     /// Number of builtin mobile skills assembled. (Under `uniffi`:
@@ -1761,14 +1978,67 @@ impl MobileEngineHandle {
     }
 
     /// Test/inspection helper: `true` iff the in-flight turn's cancellation token
-    /// has been fired. Used by the F3-05 `submit_cancel_fires_token` test.
+    /// has been fired.
     #[doc(hidden)]
     pub async fn active_turn_is_cancelled(&self) -> bool {
         self.active_cancel
             .lock()
             .await
             .as_ref()
-            .is_some_and(CancellationToken::is_cancelled)
+            .is_some_and(|turn| turn.cancel.is_cancelled())
+    }
+
+    /// Reserve the connection's single turn slot without replacing its owner.
+    async fn reserve_turn(&self) -> Result<Arc<ActiveTurn>, ClientError> {
+        let mut active = self.active_cancel.lock().await;
+        if active.is_some() {
+            return Err(ClientError::Rejected {
+                message: "a turn is already in flight".into(),
+            });
+        }
+        let turn = Arc::new(ActiveTurn::new());
+        *active = Some(turn.clone());
+        Ok(turn)
+    }
+
+    /// Start one streamed turn and release its slot on every normal return path
+    /// (success, orchestrator error, or cancellation). Pointer ownership keeps a
+    /// finishing task from clearing a newer reservation.
+    async fn start_streaming_turn(
+        &self,
+        text: String,
+        turn_id: Option<u64>,
+    ) -> Result<(), ClientError> {
+        let turn = self.reserve_turn().await?;
+
+        let wrapper = TurnWrapper::new(self.event_sink.clone());
+        wrapper.emit_turn_started(turn_id).await;
+
+        let orch = self.inner.orchestrator.clone();
+        let sink = self.event_sink.clone();
+        let active_cancel = self.active_cancel.clone();
+        self.runtime.spawn(async move {
+            let result = orch
+                .run_turn_streaming_with_cancel(&text, turn.cancel.clone())
+                .await;
+            if let Err(err) = result {
+                sink.emit(client_adapter::map_orchestrator_error(&err))
+                    .await;
+            }
+
+            let mut active = active_cancel.lock().await;
+            if active
+                .as_ref()
+                .is_some_and(|owner| Arc::ptr_eq(owner, &turn))
+            {
+                *active = None;
+            }
+            drop(active);
+            // Notify only after the slot is released: Cancel returning is the
+            // guarantee that New/Resume/Clear can no longer observe this turn.
+            turn.mark_completed();
+        });
+        Ok(())
     }
 
     async fn read_mobile_linux_status(
@@ -1853,41 +2123,25 @@ impl MobileEngineHandle {
         match command {
             // ── Turn driving (SPAWN + return promptly) ─────────────────────
             ClientCommand::SendPrompt { text, turn_id, .. } => {
-                // Arm a fresh cancellation token for this turn and record it so
-                // a later `Cancel` can fire it (one in-flight turn per
-                // connection, §0.5).
-                let cancel = CancellationToken::new();
-                *self.active_cancel.lock().await = Some(cancel.clone());
-
-                // Synthesize `TurnStarted` (the engine never emits it) on the
-                // shared event sink BEFORE spawning, so it precedes the streamed
-                // turn events.
-                let wrapper = TurnWrapper::new(self.event_sink.clone());
-                wrapper.emit_turn_started(turn_id).await;
-
-                // Spawn the streaming turn on the handle-owned runtime so this
-                // FFI call returns promptly. The `AdapterOutputStream` streams
-                // every turn event (`TextDelta` / `ToolUse*` / `CostUpdate` /
-                // `TurnEnded`) to the listener as a side effect; on a turn
-                // `Err(OrchestratorError)` we push the lowered `Error` event so
-                // the foreign host learns the turn failed (the cancelable entry
-                // returns `TurnOutcome`, not the `PumpedTurn` blocks, so there is
-                // no `MessageComplete` to synthesize here — `TurnEnded` is the
-                // boundary, matching the bridge-server turn driver).
-                let orch = self.inner.orchestrator.clone();
-                let sink = self.event_sink.clone();
-                self.runtime.spawn(async move {
-                    if let Err(err) = orch.run_turn_streaming_with_cancel(&text, cancel).await {
-                        sink.emit(client_adapter::map_orchestrator_error(&err))
-                            .await;
-                    }
-                });
-                Ok(())
+                self.start_streaming_turn(text, turn_id).await
             }
 
             ClientCommand::Cancel { .. } => {
-                if let Some(token) = self.active_cancel.lock().await.as_ref() {
-                    token.cancel();
+                let turn = self.active_cancel.lock().await.clone();
+                if let Some(turn) = turn {
+                    turn.cancel.cancel();
+                    if tokio::time::timeout(CANCEL_WAIT_TIMEOUT, turn.wait_completed())
+                        .await
+                        .is_err()
+                        && !turn.completed.load(Ordering::Acquire)
+                    {
+                        return Err(ClientError::Internal {
+                            message: format!(
+                                "cancel timed out after {} seconds while waiting for the turn to stop",
+                                CANCEL_WAIT_TIMEOUT.as_secs()
+                            ),
+                        });
+                    }
                 }
                 Ok(())
             }
@@ -1921,6 +2175,98 @@ impl MobileEngineHandle {
                 Ok(())
             }
 
+            // ── Provider credentials ────────────────────────────────────────
+            // Mobile uses the same CredentialManager instance as the live
+            // multi-provider client. Settings writes therefore become visible
+            // to the next request immediately; secret values are never echoed.
+            ClientCommand::ListProviderCredentials {
+                operation_id,
+                provider_ids,
+            } => {
+                let validation_error = if provider_ids.len() > 32
+                    || provider_ids.iter().any(|id| !provider_id_is_valid(id))
+                {
+                    Some("invalid provider credential query".to_string())
+                } else {
+                    None
+                };
+                self.emit_provider_credential_status(operation_id, &provider_ids, validation_error)
+                    .await;
+                Ok(())
+            }
+            ClientCommand::SetProviderCredential {
+                operation_id,
+                provider_id,
+                credential,
+            } => {
+                let error = if !provider_id_is_valid(&provider_id)
+                    || credential.expose_secret().is_empty()
+                    || credential.expose_secret().len() > 16_384
+                    || credential.expose_secret().contains('\0')
+                {
+                    Some("invalid provider credential".to_string())
+                } else {
+                    self.inner
+                        .credentials
+                        .set_provider_key(&provider_id, credential.expose_secret())
+                        .await
+                        .err()
+                        .map(|failure| format!("failed to store provider credential: {failure}"))
+                };
+                let applied = error.is_none();
+                self.event_sink
+                    .emit(ClientEvent::ProviderCredentialStatus {
+                        operation_id,
+                        configured_provider_ids: applied
+                            .then_some(provider_id.clone())
+                            .into_iter()
+                            .collect(),
+                        unavailable_provider_ids: (!applied)
+                            .then_some(provider_id)
+                            .into_iter()
+                            .collect(),
+                        storage_encrypted: self
+                            .inner
+                            .credentials
+                            .provider_key_storage_is_encrypted(),
+                        error,
+                    })
+                    .await;
+                Ok(())
+            }
+            ClientCommand::DeleteProviderCredential {
+                operation_id,
+                provider_id,
+            } => {
+                let error = if !provider_id_is_valid(&provider_id) {
+                    Some("invalid provider id".to_string())
+                } else {
+                    self.inner
+                        .credentials
+                        .delete_provider_key(&provider_id)
+                        .await
+                        .err()
+                        .map(|failure| format!("failed to delete provider credential: {failure}"))
+                };
+                let applied = error.is_none();
+                self.event_sink
+                    .emit(ClientEvent::ProviderCredentialStatus {
+                        operation_id,
+                        configured_provider_ids: Vec::new(),
+                        unavailable_provider_ids: (!applied)
+                            .then_some(provider_id)
+                            .into_iter()
+                            .collect(),
+                        storage_encrypted: self
+                            .inner
+                            .credentials
+                            .provider_key_storage_is_encrypted(),
+                        error,
+                    })
+                    .await;
+                Ok(())
+            }
+
             // ── Model ──────────────────────────────────────────────────────
             ClientCommand::SetModel { model } => {
                 let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
@@ -1932,8 +2278,10 @@ impl MobileEngineHandle {
                     .map_err(|e| ClientError::Internal {
                         message: format!("switch_model failed: {e}"),
                     })?;
+                let snapshot = handle.get_status_snapshot().await;
+                let selected = mobile_model_ref(&snapshot.model, snapshot.model_profile.as_deref());
                 self.event_sink
-                    .emit(ClientEvent::ModelChanged { model: model_id })
+                    .emit(ClientEvent::ModelChanged { model: selected })
                     .await;
                 Ok(())
             }
@@ -1951,20 +2299,7 @@ impl MobileEngineHandle {
             ClientCommand::RunSlashCommand { raw } => {
                 match self.inner.dispatcher.dispatch(&raw).await {
                     traits::SlashDispatchResult::RunAsTurn { prompt } => {
-                        let cancel = CancellationToken::new();
-                        *self.active_cancel.lock().await = Some(cancel.clone());
-                        let wrapper = TurnWrapper::new(self.event_sink.clone());
-                        wrapper.emit_turn_started(None).await;
-                        let orch = self.inner.orchestrator.clone();
-                        let sink = self.event_sink.clone();
-                        self.runtime.spawn(async move {
-                            if let Err(err) =
-                                orch.run_turn_streaming_with_cancel(&prompt, cancel).await
-                            {
-                                sink.emit(client_adapter::map_orchestrator_error(&err))
-                                    .await;
-                            }
-                        });
+                        self.start_streaming_turn(prompt, None).await?;
                     }
                     traits::SlashDispatchResult::Handled { display }
                     | traits::SlashDispatchResult::Unknown { display, .. } => {
@@ -2071,12 +2406,7 @@ impl MobileEngineHandle {
             // ── Session control ──────────────────────────────────────────────
             ClientCommand::ClearSession => {
                 // Mid-turn semantics (plan §2): reject while a turn is in flight.
-                let mid_turn = self
-                    .active_cancel
-                    .lock()
-                    .await
-                    .as_ref()
-                    .is_some_and(|t| !t.is_cancelled());
+                let mid_turn = self.active_cancel.lock().await.is_some();
                 if mid_turn {
                     return Err(ClientError::Rejected {
                         message: "cannot clear the session while a turn is in flight".into(),
@@ -2126,12 +2456,7 @@ impl MobileEngineHandle {
             ClientCommand::NewSession { cwd: _, model } => {
                 // Reject mid-turn (same contract as `ClearSession`): a new session
                 // must not race an in-flight turn.
-                let mid_turn = self
-                    .active_cancel
-                    .lock()
-                    .await
-                    .as_ref()
-                    .is_some_and(|t| !t.is_cancelled());
+                let mid_turn = self.active_cancel.lock().await.is_some();
                 if mid_turn {
                     return Err(ClientError::Rejected {
                         message: "cannot start a new session while a turn is in flight".into(),
@@ -2175,12 +2500,7 @@ impl MobileEngineHandle {
             ClientCommand::ResumeSession { session_id, cwd } => {
                 // (a) Reject mid-turn (same contract as `ClearSession` /
                 // `NewSession`): a resume must not race an in-flight turn.
-                let mid_turn = self
-                    .active_cancel
-                    .lock()
-                    .await
-                    .as_ref()
-                    .is_some_and(|t| !t.is_cancelled());
+                let mid_turn = self.active_cancel.lock().await.is_some();
                 if mid_turn {
                     return Err(ClientError::Rejected {
                         message: "cannot resume while a turn is in flight".into(),
@@ -2371,6 +2691,55 @@ impl MobileEngineHandle {
         }
     }
 
+    async fn emit_provider_credential_status(
+        &self,
+        operation_id: u64,
+        provider_ids: &[String],
+        operation_error: Option<String>,
+    ) {
+        if let Some(error) = operation_error {
+            self.event_sink
+                .emit(ClientEvent::ProviderCredentialStatus {
+                    operation_id,
+                    configured_provider_ids: Vec::new(),
+                    unavailable_provider_ids: provider_ids.to_vec(),
+                    storage_encrypted: self.inner.credentials.provider_key_storage_is_encrypted(),
+                    error: Some(error),
+                })
+                .await;
+            return;
+        }
+
+        let mut configured_provider_ids = Vec::new();
+        let mut unavailable_provider_ids = Vec::new();
+        let mut failures = Vec::new();
+        for provider_id in provider_ids {
+            match self.inner.credentials.get_provider_key(provider_id).await {
+                Ok(Some(_)) => configured_provider_ids.push(provider_id.clone()),
+                Ok(None) => {}
+                Err(failure) => {
+                    unavailable_provider_ids.push(provider_id.clone());
+                    failures.push(format!("{provider_id}: {failure}"));
+                }
+            }
+        }
+        let error = (!failures.is_empty()).then(|| {
+            format!(
+                "provider credential storage is unavailable ({})",
+                failures.join("; ")
+            )
+        });
+        self.event_sink
+            .emit(ClientEvent::ProviderCredentialStatus {
+                operation_id,
+                configured_provider_ids,
+                unavailable_provider_ids,
+                storage_encrypted: self.inner.credentials.provider_key_storage_is_encrypted(),
+                error,
+            })
+            .await;
+    }
+
     /// Enumerate the on-disk resumable-session catalog and emit a `SessionList`
     /// event (SESSIONS/HISTORY).
     ///
@@ -2429,8 +2798,14 @@ impl MobileEngineHandle {
                 // `[Connect]` gating + grouping stays a TUI/structured-DTO concern.
                 let available = handle.list_available_models().await;
                 let listings = handle.list_model_listings().await;
-                let current = handle.get_status_snapshot().await.model;
-                let models = traits::curated_model_names(&listings, &available, &current);
+                let snapshot = handle.get_status_snapshot().await;
+                let models = curated_mobile_model_refs(
+                    &listings,
+                    &available,
+                    &snapshot.model,
+                    snapshot.model_profile.as_deref(),
+                );
+                let current = mobile_model_ref(&snapshot.model, snapshot.model_profile.as_deref());
                 self.event_sink
                     .emit(ClientEvent::ModelList { models, current })
                     .await;
@@ -2504,6 +2879,16 @@ fn lower_auth_state(
         },
         None => client_protocol::listings::AuthStateDto::SignedOut,
     }
+}
+
+fn provider_id_is_valid(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value.chars().enumerate().all(|(index, ch)| {
+            ch.is_ascii_lowercase()
+                || ch.is_ascii_digit()
+                || (index > 0 && matches!(ch, '-' | '_' | '.'))
+        })
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -2942,8 +3327,10 @@ pub fn build_mobile_engine_inner(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex as StdMutex};
 
+    use async_trait::async_trait;
     use client_adapter::{ClientEventListener, PermissionRequestSink};
 
     use super::{build_mobile, MobileConfig};
@@ -2956,6 +3343,73 @@ mod tests {
         test_config, CollectingPermissionSink as RecordingPermissionSink, FakeListener,
         HostFakePlatform,
     };
+
+    /// In-memory encrypted store used to exercise post-boot provider credential
+    /// writes without involving a platform keychain.
+    #[derive(Default)]
+    struct FakeEncryptedStore {
+        map: StdMutex<HashMap<(String, String), protocol::SecureStorageData>>,
+    }
+
+    #[async_trait]
+    impl traits::SecureStorage for FakeEncryptedStore {
+        async fn store(
+            &self,
+            service: &str,
+            account: &str,
+            data: protocol::SecureStorageData,
+        ) -> Result<(), traits::SecureStorageError> {
+            self.map
+                .lock()
+                .unwrap()
+                .insert((service.to_string(), account.to_string()), data);
+            Ok(())
+        }
+
+        async fn retrieve(
+            &self,
+            service: &str,
+            account: &str,
+        ) -> Result<Option<protocol::SecureStorageData>, traits::SecureStorageError> {
+            Ok(self
+                .map
+                .lock()
+                .unwrap()
+                .get(&(service.to_string(), account.to_string()))
+                .cloned())
+        }
+
+        async fn delete(
+            &self,
+            service: &str,
+            account: &str,
+        ) -> Result<(), traits::SecureStorageError> {
+            self.map
+                .lock()
+                .unwrap()
+                .remove(&(service.to_string(), account.to_string()));
+            Ok(())
+        }
+
+        async fn list(&self, service: &str) -> Result<Vec<String>, traits::SecureStorageError> {
+            Ok(self
+                .map
+                .lock()
+                .unwrap()
+                .keys()
+                .filter(|(stored_service, _)| stored_service == service)
+                .map(|(_, account)| account.clone())
+                .collect())
+        }
+
+        fn is_encrypted(&self) -> bool {
+            true
+        }
+
+        fn backend(&self) -> traits::SecureStorageBackend {
+            traits::SecureStorageBackend::EncryptedFile
+        }
+    }
 
     /// F3-03: `MobileConfig::default` is constructible and its frozen field set
     /// is reachable — the mobile analog of `desktop_config_default_is_constructible`.
@@ -3088,72 +3542,6 @@ mod tests {
     /// end-to-end, off-device.
     #[tokio::test]
     async fn injected_encrypted_store_enables_oauth() {
-        use async_trait::async_trait;
-        use std::collections::HashMap;
-        use std::sync::Mutex;
-
-        /// In-memory `SecureStorage` that reports itself as encrypted — the
-        /// off-device stand-in for a real Keychain/Keystore bridge.
-        #[derive(Default)]
-        struct FakeEncryptedStore {
-            map: Mutex<HashMap<(String, String), protocol::SecureStorageData>>,
-        }
-        #[async_trait]
-        impl traits::SecureStorage for FakeEncryptedStore {
-            async fn store(
-                &self,
-                service: &str,
-                account: &str,
-                data: protocol::SecureStorageData,
-            ) -> Result<(), traits::SecureStorageError> {
-                self.map
-                    .lock()
-                    .unwrap()
-                    .insert((service.to_string(), account.to_string()), data);
-                Ok(())
-            }
-            async fn retrieve(
-                &self,
-                service: &str,
-                account: &str,
-            ) -> Result<Option<protocol::SecureStorageData>, traits::SecureStorageError>
-            {
-                Ok(self
-                    .map
-                    .lock()
-                    .unwrap()
-                    .get(&(service.to_string(), account.to_string()))
-                    .cloned())
-            }
-            async fn delete(
-                &self,
-                service: &str,
-                account: &str,
-            ) -> Result<(), traits::SecureStorageError> {
-                self.map
-                    .lock()
-                    .unwrap()
-                    .remove(&(service.to_string(), account.to_string()));
-                Ok(())
-            }
-            async fn list(&self, service: &str) -> Result<Vec<String>, traits::SecureStorageError> {
-                Ok(self
-                    .map
-                    .lock()
-                    .unwrap()
-                    .keys()
-                    .filter(|(s, _)| s == service)
-                    .map(|(_, a)| a.clone())
-                    .collect())
-            }
-            fn is_encrypted(&self) -> bool {
-                true
-            }
-            fn backend(&self) -> traits::SecureStorageBackend {
-                traits::SecureStorageBackend::EncryptedFile
-            }
-        }
-
         let tmp = tempfile::tempdir().expect("tempdir");
 
         // No store injected → the non-persisting stub → OAuth /login gated off.
@@ -3452,6 +3840,136 @@ mod tests {
         (handle, listener)
     }
 
+    fn build_submit_handle_with_secure_store(
+        root: &std::path::Path,
+    ) -> (Arc<MobileEngineHandle>, Arc<FakeListener>) {
+        let platform: Arc<dyn traits::Platform> = Arc::new(
+            HostFakePlatform::new(root.to_path_buf())
+                .with_secure_storage(Arc::new(FakeEncryptedStore::default())),
+        );
+        let listener = Arc::new(FakeListener::default());
+        let listener_dyn: Arc<dyn ClientEventListener> = listener.clone();
+        let perm_sink: Arc<dyn PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+        let handle = build_mobile_engine(test_config(root), platform, listener_dyn, perm_sink)
+            .expect("build_mobile_engine failed");
+        (handle, listener)
+    }
+
+    #[test]
+    fn provider_credentials_round_trip_through_mobile_submit() {
+        use client_protocol::commands::ProviderCredentialSecretDto;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, listener) = build_submit_handle_with_secure_store(tmp.path());
+
+        handle.runtime().block_on(async {
+            handle
+                .submit(ClientCommand::SetProviderCredential {
+                    operation_id: 11,
+                    provider_id: "openai".into(),
+                    credential: ProviderCredentialSecretDto::new("sk-test-secret".into()),
+                })
+                .await
+                .expect("set provider credential");
+            handle
+                .submit(ClientCommand::ListProviderCredentials {
+                    operation_id: 12,
+                    provider_ids: vec!["openai".into()],
+                })
+                .await
+                .expect("list provider credentials");
+            handle
+                .submit(ClientCommand::DeleteProviderCredential {
+                    operation_id: 13,
+                    provider_id: "openai".into(),
+                })
+                .await
+                .expect("delete provider credential");
+
+            let events = listener.received.lock().await;
+            assert!(events.iter().any(|event| matches!(
+                event,
+                Ev::ProviderCredentialStatus {
+                    operation_id: 11,
+                    configured_provider_ids,
+                    storage_encrypted: true,
+                    error: None,
+                    ..
+                } if configured_provider_ids == &vec!["openai".to_string()]
+            )));
+            assert!(events.iter().any(|event| matches!(
+                event,
+                Ev::ProviderCredentialStatus {
+                    operation_id: 12,
+                    configured_provider_ids,
+                    storage_encrypted: true,
+                    error: None,
+                    ..
+                } if configured_provider_ids == &vec!["openai".to_string()]
+            )));
+            assert!(events.iter().any(|event| matches!(
+                event,
+                Ev::ProviderCredentialStatus {
+                    operation_id: 13,
+                    configured_provider_ids,
+                    storage_encrypted: true,
+                    error: None,
+                    ..
+                } if configured_provider_ids.is_empty()
+            )));
+        });
+    }
+
+    /// Mobile's flat model event must retain the provider profile in both the
+    /// catalog and the active selection so identical ids from different
+    /// providers remain independently selectable.
+    #[test]
+    fn submit_model_events_use_provider_qualified_ids() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, listener) = build_submit_handle(tmp.path());
+
+        handle.runtime().block_on(async {
+            handle
+                .submit(ClientCommand::ListModels)
+                .await
+                .expect("submit(ListModels) ok");
+
+            let events = listener.received.lock().await.clone();
+            let models = events
+                .iter()
+                .find_map(|event| match event {
+                    Ev::ModelList { models, .. } => Some(models),
+                    _ => None,
+                })
+                .expect("ModelList must be emitted");
+            assert!(
+                models.iter().any(|model| model == "openai/gpt-5.5"),
+                "OpenAI's shared model id must stay qualified: {models:?}"
+            );
+            assert!(
+                models.iter().any(|model| model == "github-copilot/gpt-5.5"),
+                "Copilot's shared model id must stay qualified: {models:?}"
+            );
+
+            handle
+                .submit(ClientCommand::SetModel {
+                    model: "github-copilot/gpt-5.5".into(),
+                })
+                .await
+                .expect("submit(SetModel) ok");
+
+            let events = listener.received.lock().await;
+            assert!(
+                events.iter().any(|event| matches!(
+                    event,
+                    Ev::ModelChanged { model } if model == "github-copilot/gpt-5.5"
+                )),
+                "ModelChanged must preserve the selected provider profile: {events:?}"
+            );
+        });
+    }
+
     /// F3-05: `submit(SendPrompt)` MUST spawn the streaming turn on the
     /// handle-owned runtime and RETURN PROMPTLY — it must not block for the
     /// whole turn (results stream via the listener). We prove the call resolves
@@ -3495,12 +4013,11 @@ mod tests {
         );
     }
 
-    /// F3-05: `submit(Cancel)` fires the connection-scoped cancellation token so
-    /// an in-flight streaming turn unwinds. We arm a turn (`SendPrompt`), then
-    /// `submit(Cancel)`, and assert the handle's active cancel token is now
-    /// cancelled.
+    /// `submit(Cancel)` does not return at token-fire time: it waits until the
+    /// owned turn has unwound and released the slot, so an immediate session
+    /// transition cannot race the cancelled task.
     #[test]
-    fn submit_cancel_fires_token() {
+    fn submit_cancel_waits_for_cleanup_before_new_session() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let (handle, _listener) = build_submit_handle(tmp.path());
 
@@ -3527,9 +4044,117 @@ mod tests {
                 .expect("submit(Cancel) ok");
 
             assert!(
-                handle.active_turn_is_cancelled().await,
-                "submit(Cancel) must fire the in-flight cancellation token"
+                handle.active_cancel.lock().await.is_none(),
+                "Cancel must not return until the cancelled turn releases its slot"
             );
+            handle
+                .submit(ClientCommand::NewSession {
+                    cwd: None,
+                    model: None,
+                })
+                .await
+                .expect("NewSession immediately after Cancel must not see an in-flight turn");
+        });
+    }
+
+    /// A connection owns at most one live turn. A second `SendPrompt` must be
+    /// rejected instead of replacing the first turn's cancellation token,
+    /// otherwise Cancel and session guards start controlling the wrong task.
+    #[test]
+    fn submit_send_prompt_rejects_overlapping_turn() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, _listener) = build_submit_handle(tmp.path());
+
+        handle.runtime().block_on(async {
+            *handle.active_cancel.lock().await = Some(Arc::new(super::ActiveTurn::new()));
+
+            let result = handle
+                .submit(ClientCommand::SendPrompt {
+                    text: "must be rejected".into(),
+                    prompt_mode: None,
+                    images: Vec::new(),
+                    turn_id: Some(99),
+                })
+                .await;
+
+            assert!(
+                matches!(result, Err(ClientError::Rejected { .. })),
+                "overlapping SendPrompt must be rejected, got {result:?}"
+            );
+        });
+    }
+
+    /// A provider/model failure is terminal for the connection slot just like a
+    /// successful or cancelled turn. The orchestrator surfaces authentication
+    /// failure as a `model_error` turn, then session control becomes available.
+    #[test]
+    fn submit_model_error_releases_slot() {
+        use crate::test_support::new_engine_with_streaming;
+        use orchestrator::test_support_stream::MockStreamingApiClient;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let platform: Arc<dyn traits::Platform> =
+            Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
+        let listener = Arc::new(FakeListener::default());
+        let listener_dyn: Arc<dyn ClientEventListener> = listener.clone();
+        let perm_sink: Arc<dyn PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+        let streaming: Arc<dyn orchestrator::StreamingApiClient> =
+            Arc::new(MockStreamingApiClient::with_open_error(
+                llm_client::LlmError::Authentication,
+                Vec::new(),
+            ));
+        let handle = new_engine_with_streaming(
+            test_config(tmp.path()),
+            platform,
+            listener_dyn,
+            perm_sink,
+            Some(streaming),
+        )
+        .expect("build_mobile_engine failed");
+
+        handle.runtime().block_on(async {
+            handle
+                .submit(ClientCommand::SendPrompt {
+                    text: "fail deterministically".into(),
+                    prompt_mode: None,
+                    images: Vec::new(),
+                    turn_id: Some(100),
+                })
+                .await
+                .expect("submit(SendPrompt) ok");
+
+            for _ in 0..2000 {
+                let failed = listener.received.lock().await.iter().any(|event| {
+                    matches!(
+                        event,
+                        Ev::TurnEnded { stop_reason, .. }
+                            if stop_reason.as_deref() == Some("model_error")
+                    )
+                });
+                if failed && handle.active_cancel.lock().await.is_none() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+
+            let events = listener.received.lock().await.clone();
+            assert!(
+                events.iter().any(|event| matches!(
+                    event,
+                    Ev::TurnEnded { stop_reason, .. }
+                        if stop_reason.as_deref() == Some("model_error")
+                )),
+                "a provider failure must terminate as model_error: {events:?}"
+            );
+            assert!(
+                handle.active_cancel.lock().await.is_none(),
+                "a failed turn must release its connection slot"
+            );
+            handle
+                .submit(ClientCommand::ClearSession)
+                .await
+                .expect("session control must work after a failed turn");
         });
     }
 
@@ -4051,5 +4676,155 @@ mod tests {
         let (id3, profile3) = traits::parse_model_ref("github-copilot/gpt-5.2", &listings);
         assert_eq!(id3, "gpt-5.2");
         assert_eq!(profile3.as_deref(), Some("github-copilot"));
+    }
+
+    #[test]
+    fn mobile_model_refs_keep_duplicate_provider_models_distinct() {
+        let listings = vec![
+            traits::ModelListing {
+                display_model: "gpt-5.5".into(),
+                request_model: "gpt-5.5".into(),
+                provider_id: "openai".into(),
+                provider_label: "OpenAI".into(),
+                description: None,
+                supports_reasoning: true,
+            },
+            traits::ModelListing {
+                display_model: "gpt-5.5".into(),
+                request_model: "gpt-5.5".into(),
+                provider_id: "github-copilot".into(),
+                provider_label: "GitHub Copilot".into(),
+                description: None,
+                supports_reasoning: true,
+            },
+        ];
+
+        let refs = super::curated_mobile_model_refs(
+            &listings,
+            &["gpt-5.5".into()],
+            "gpt-5.5",
+            Some("github-copilot"),
+        );
+
+        assert_eq!(refs[0], "github-copilot/gpt-5.5");
+        assert!(refs.iter().any(|model| model == "openai/gpt-5.5"));
+        assert_eq!(
+            refs.iter()
+                .filter(|model| model.as_str() == "github-copilot/gpt-5.5")
+                .count(),
+            1,
+            "the active model and catalog row must de-duplicate by qualified id"
+        );
+        assert!(
+            !refs.iter().any(|model| model == "gpt-5.5"),
+            "ambiguous bare ids must not leak into the mobile picker"
+        );
+    }
+}
+
+#[cfg(test)]
+mod mobile_provider_allowlist_tests {
+    use std::collections::BTreeMap;
+
+    use serde_json::{json, Value};
+
+    use super::{anthropic_models, apply_mobile_profile_allowlist};
+
+    fn assembled(routing: Option<Value>) -> provider_config::Assembled {
+        let user_providers = BTreeMap::from([
+            (
+                "alpha".to_string(),
+                json!({
+                    "type": "openai",
+                    "baseUrl": "https://alpha.example/v1",
+                    "apiKeyEnv": "ALPHA_API_KEY",
+                    "models": [{"id": "model-a"}]
+                }),
+            ),
+            (
+                "beta".to_string(),
+                json!({
+                    "type": "openai",
+                    "baseUrl": "https://beta.example/v1",
+                    "apiKeyEnv": "BETA_API_KEY",
+                    "models": [{"id": "model-b"}]
+                }),
+            ),
+        ]);
+        provider_config::assemble(provider_config::AssembleInputs {
+            anthropic_api_base: "https://api.anthropic.com".to_string(),
+            anthropic_models: anthropic_models("claude-sonnet-4-20250514"),
+            anthropic_has_api_key: false,
+            anthropic_has_oauth: false,
+            user_providers,
+            routing,
+        })
+    }
+
+    #[test]
+    fn absent_mobile_allowlist_preserves_full_catalog() {
+        let mut assembled = assembled(None);
+        let provider_count = assembled.client_config.providers.len();
+        let credential_count = assembled.credential_sources.len();
+
+        apply_mobile_profile_allowlist(&mut assembled, None);
+
+        assert_eq!(provider_count, assembled.client_config.providers.len());
+        assert_eq!(credential_count, assembled.credential_sources.len());
+    }
+
+    #[test]
+    fn explicit_empty_mobile_allowlist_filters_every_profile_and_route() {
+        let routing = json!({
+            "mobileEnabledProfiles": [],
+            "fallback": {
+                "primary": ["alpha/model-a", "beta/model-b"]
+            }
+        });
+        let mut assembled = assembled(Some(routing.clone()));
+        assert!(!assembled.client_config.providers.is_empty());
+        assert!(!assembled.chains.chains.is_empty());
+
+        apply_mobile_profile_allowlist(&mut assembled, Some(&routing));
+
+        assert!(assembled.client_config.providers.is_empty());
+        assert!(assembled.credential_sources.is_empty());
+        assert!(assembled.chains.aliases.is_empty());
+        assert!(assembled.chains.chains.is_empty());
+    }
+
+    #[test]
+    fn mobile_allowlist_filters_providers_credentials_aliases_and_fallbacks() {
+        let routing = json!({
+            "mobileEnabledProfiles": ["alpha"],
+            "aliases": {
+                "allowed": "alpha/model-a",
+                "blocked": "beta/model-b"
+            },
+            "fallback": {
+                "mixed": ["alpha/model-a", "beta/model-b"],
+                "blocked": ["beta/model-b"]
+            }
+        });
+        let mut assembled = assembled(Some(routing.clone()));
+
+        apply_mobile_profile_allowlist(&mut assembled, Some(&routing));
+
+        let profiles: Vec<_> = assembled
+            .client_config
+            .providers
+            .iter()
+            .map(|provider| provider.profile_name.as_str())
+            .collect();
+        assert_eq!(vec!["alpha"], profiles);
+        assert_eq!(1, assembled.credential_sources.len());
+        assert_eq!("alpha", assembled.credential_sources[0].profile_name);
+        assert_eq!(
+            Some(&"alpha/model-a".to_string()),
+            assembled.chains.aliases.get("allowed")
+        );
+        assert!(!assembled.chains.aliases.contains_key("blocked"));
+        assert_eq!(1, assembled.chains.chains["mixed"].len());
+        assert!(!assembled.chains.chains.contains_key("blocked"));
     }
 }

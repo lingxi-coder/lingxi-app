@@ -12,6 +12,20 @@ import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 
+interface RealtimeSpeechCallbacks {
+    fun onReady() {}
+    fun onPartial(text: String) {}
+    fun onFinal(text: String) {}
+    fun onError(code: String, message: String, retriable: Boolean) {}
+    fun onClosed() {}
+}
+
+interface RealtimeSpeechSession {
+    fun stop()
+    fun cancel()
+    fun close()
+}
+
 /**
  * Android system `SpeechRecognizer` wrapped as [SttProvider].
  *
@@ -27,8 +41,9 @@ import kotlin.coroutines.resume
  * Designed for a talk-mode path where a higher layer opens the mic itself;
  * here the provider just delegates to the system service for transcription.
  *
- * No retry, no streaming partials — `SpeechRecognizer` gives one final
- * transcript per call.
+ * The [SttProvider] method remains a one-shot compatibility path. Interactive
+ * hold-to-talk uses [openRealtimeSession], enables partial results, and keeps
+ * the recognizer alive until stop/cancel/terminal delivery.
  */
 class SystemSpeechRecognizerStt(private val context: Context) : SttProvider {
 
@@ -80,6 +95,33 @@ class SystemSpeechRecognizerStt(private val context: Context) : SttProvider {
             recognizer.startListening(intent)
         }
 
+    fun openRealtimeSession(
+        language: String?,
+        callbacks: RealtimeSpeechCallbacks,
+    ): RealtimeSpeechSession {
+        check(SpeechRecognizer.isRecognitionAvailable(context)) {
+            "Device has no SpeechRecognizer service installed."
+        }
+        val recognizer = SpeechRecognizer.createSpeechRecognizer(context)
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            if (!language.isNullOrBlank()) {
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE, language)
+            }
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+        }
+        val listener = RealtimeListener(recognizer, callbacks)
+        recognizer.setRecognitionListener(listener)
+        runOnMainThreadSync {
+            recognizer.startListening(intent)
+        }
+        return object : RealtimeSpeechSession {
+            override fun stop() = runOnMainThreadSync { listener.stop() }
+            override fun cancel() = runOnMainThreadSync { listener.cancel() }
+            override fun close() = runOnMainThreadSync { listener.close() }
+        }
+    }
+
     /**
      * `SpeechRecognizer` must be touched from the main thread. The provider
      * may be called from any context, so we hop on demand.
@@ -89,6 +131,14 @@ class SystemSpeechRecognizerStt(private val context: Context) : SttProvider {
             block()
         } else {
             kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) { block() }
+        }
+    }
+
+    private fun runOnMainThreadSync(block: () -> Unit) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            block()
+        } else {
+            Handler(Looper.getMainLooper()).post(block)
         }
     }
 
@@ -134,6 +184,85 @@ class SystemSpeechRecognizerStt(private val context: Context) : SttProvider {
         override fun onBufferReceived(buffer: ByteArray?) {}
         override fun onEndOfSpeech() {}
         override fun onPartialResults(partialResults: Bundle?) {}
+        override fun onEvent(eventType: Int, params: Bundle?) {}
+    }
+
+    private class RealtimeListener(
+        private val recognizer: SpeechRecognizer,
+        private val callbacks: RealtimeSpeechCallbacks,
+    ) : RecognitionListener {
+        private var closed = false
+        private var terminalDelivered = false
+
+        fun stop() {
+            if (!closed) runCatching { recognizer.stopListening() }
+        }
+
+        fun cancel() {
+            if (!closed) {
+                runCatching { recognizer.cancel() }
+                close()
+            }
+        }
+
+        fun close() {
+            if (closed) return
+            closed = true
+            runCatching { recognizer.destroy() }
+            callbacks.onClosed()
+        }
+
+        private fun finishFinal(text: String) {
+            if (terminalDelivered) return
+            terminalDelivered = true
+            callbacks.onFinal(text)
+            close()
+        }
+
+        private fun finishError(code: String, message: String, retriable: Boolean) {
+            if (terminalDelivered) return
+            terminalDelivered = true
+            callbacks.onError(code, message, retriable)
+            close()
+        }
+
+        override fun onReadyForSpeech(params: Bundle?) {
+            callbacks.onReady()
+        }
+
+        override fun onPartialResults(partialResults: Bundle?) {
+            val text = partialResults
+                ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                ?.firstOrNull()
+                .orEmpty()
+            callbacks.onPartial(text)
+        }
+
+        override fun onResults(results: Bundle?) {
+            val text = results
+                ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                ?.firstOrNull()
+                .orEmpty()
+            finishFinal(text)
+        }
+
+        override fun onError(error: Int) {
+            val (code, retriable) = when (error) {
+                SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "permission_denied" to false
+                SpeechRecognizer.ERROR_NETWORK,
+                SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "network_error" to true
+                SpeechRecognizer.ERROR_NO_MATCH,
+                SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "no_speech" to false
+                SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "audio_io_unavailable" to true
+                else -> "provider_error" to false
+            }
+            finishError(code, "SpeechRecognizer error=$error", retriable)
+        }
+
+        override fun onBeginningOfSpeech() {}
+        override fun onRmsChanged(rmsdB: Float) {}
+        override fun onBufferReceived(buffer: ByteArray?) {}
+        override fun onEndOfSpeech() {}
         override fun onEvent(eventType: Int, params: Bundle?) {}
     }
 }

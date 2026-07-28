@@ -24,10 +24,10 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
@@ -48,16 +48,16 @@ import com.lingxi.code.model.ConnStatus
 import com.lingxi.code.model.GenericProvider
 import com.lingxi.code.model.ProviderKind
 import com.lingxi.code.model.ProviderPreset
-import com.lingxi.code.secure.SecureKeyStore
 import com.lingxi.code.theme.LXFont
 import com.lingxi.code.theme.LingXiTheme
+import kotlinx.coroutines.launch
 
 /**
  * The three provider flows (LLM / web search / web fetch), ported 1:1 from the
  * iOS `ProviderPages.swift`. All three share the list → preset-picker → edit
  * pattern over the same [SettingsStore]; [ProviderKind] selects the dataset and
- * copy. Mock-only: `test connection` is a local 1.1s animation, set-default /
- * remove mutate the hoisted store. No network / engine work.
+ * copy. LLM provider credentials persist through the engine's shared secure
+ * store; non-secret row config persists locally in Android storage.
  *
  * Navigation note — the iOS `host.replaceTopTwo(with: [.list, .edit])` after
  * picking a preset (so the picker is popped and the edit page sits atop the
@@ -78,8 +78,9 @@ private fun ProviderKind.preset(of: GenericProvider): ProviderPreset =
 
 /**
  * The "已添加" provider list for a [kind]: a status dot + current model + default
- * badge per row, a dashed add button, and (LLM only) the 高级 smart-routing /
- * streaming toggles.
+ * badge per row and a dashed add button. Mobile does not yet wire smart-routing
+ * or a configurable streaming default into the engine launch contract, so those
+ * controls are rendered as explicitly unavailable instead of fake toggles.
  */
 @Composable
 fun ProviderListPage(
@@ -95,14 +96,6 @@ fun ProviderListPage(
 
     Column(Modifier.fillMaxWidth()) {
         Blurb(kind.blurb())
-
-        // SHIP-BLOCKER #1: the engine's own Anthropic key, configured + stored
-        // encrypted-at-rest (SecureKeyStore). Only on the LLM page — this is the
-        // key the in-process engine authenticates with, distinct from the mock
-        // per-provider rows below.
-        if (kind == ProviderKind.Llm) {
-            EngineKeySection(onReconnectEngine = onReconnectEngine)
-        }
 
         SettingsSection(label = "已添加 · ${arr.size}") {
             if (arr.isEmpty()) {
@@ -128,28 +121,53 @@ fun ProviderListPage(
         DashedAddButton(title = "添加${kind.title}", onClick = onAdd)
 
         if (kind == ProviderKind.Llm) {
+            if (state.pendingLlmProviderChanges.isNotEmpty()) {
+                Column(Modifier.padding(top = 22.dp)) {
+                    SettingsSection(
+                        label = "待应用",
+                        footer = "URL、模型、启用状态或默认提供商已写入本机配置；重连后才会用于新请求。",
+                    ) {
+                        SettingsRow(
+                            icon = LXIconName.Workflow,
+                            iconColor = t.accent,
+                            label = "提供商配置有更改",
+                            sub = "${state.pendingLlmProviderChanges.size} 项待应用",
+                            chevron = false,
+                            isLast = true,
+                            trailing = {
+                                ProviderTextAction(
+                                    label = "应用并重连",
+                                    enabled = true,
+                                    onClick = {
+                                        onReconnectEngine()
+                                        store.markLlmConfigurationApplied()
+                                    },
+                                )
+                            },
+                        )
+                    }
+                }
+            }
             Column(Modifier.padding(top = 22.dp)) {
                 SettingsSection(
                     label = "高级",
-                    footer = "智能路由：根据任务类型自动选择最合适的模型（推理→Opus / 速度→Mini / 代码→Code）。流式响应：边生成边显示。",
+                    footer = "当前移动引擎尚未提供这两项可配置能力；设置页不会保存无效开关。",
                 ) {
                     SettingsRow(
                         icon = LXIconName.Sparkle, iconColor = t.accent,
-                        label = "智能路由", sub = "自动在已启用提供商间调度", chevron = false,
+                        label = "智能路由", sub = "尚未接入移动引擎", chevron = false,
                         trailing = {
-                            com.lingxi.code.components.LXToggle(
-                                checked = state.smartRouting,
-                                onCheckedChange = store::setSmartRouting,
-                            )
+                            Text("不可用", color = t.text4, fontSize = 12.sp)
                         },
                     )
                     SettingsRow(
-                        label = "流式响应", icon = LXIconName.Workflow, chevron = false, isLast = true,
+                        label = "默认流式策略",
+                        sub = "当前由移动引擎固定管理",
+                        icon = LXIconName.Workflow,
+                        chevron = false,
+                        isLast = true,
                         trailing = {
-                            com.lingxi.code.components.LXToggle(
-                                checked = state.streamingDefault,
-                                onCheckedChange = store::setStreamingDefault,
-                            )
+                            Text("不可配置", color = t.text4, fontSize = 12.sp)
                         },
                     )
                 }
@@ -257,7 +275,7 @@ fun ProviderPickerPage(
 // MARK: - Provider edit ------------------------------------------------------
 
 /**
- * The provider editor: a live status banner with a test-connection animation,
+ * The provider editor: a live credential-status banner,
  * display-name / API-base / API-key (show-hide) fields, an optional cx field
  * (Google search), an LLM default-model radio (or a free model-id field for
  * custom), and an enable / set-default / remove section.
@@ -272,9 +290,11 @@ fun ProviderEditPage(
     providerId: String,
     state: SettingsUiState,
     store: SettingsStore,
+    onReconnectEngine: () -> Unit = {},
     onPop: () -> Unit,
 ) {
     val t = LingXiTheme.palette
+    val scope = rememberCoroutineScope()
     val editing = state.providers(kind).firstOrNull { it.id == providerId }
     if (editing == null) {
         LaunchedEffect(providerId) { onPop() }
@@ -282,10 +302,25 @@ fun ProviderEditPage(
     }
     val preset = kind.preset(of = editing)
     var showKey by remember { mutableStateOf(false) }
+    var keyDraft by remember(providerId) { mutableStateOf("") }
+    var removalMessage by remember(providerId) { mutableStateOf<String?>(null) }
+    var removing by remember(providerId) { mutableStateOf(false) }
+    var credentialMessage by remember(providerId, editing.credentialConfigured) {
+        mutableStateOf(
+            when {
+                kind != ProviderKind.Llm -> "当前页面仅对 LLM provider 接入真实 credential 存储。"
+                !store.state.value.providers(kind).any { it.id == providerId } -> ""
+                !store.state.value.providers(kind).first { it.id == providerId }.credentialConfigured ->
+                    "尚未保存凭据"
+                else -> "凭据已在本机安全区配置；尚未执行网络连通性验证"
+            },
+        )
+    }
+    val builtInSupported = kind != ProviderKind.Llm || ProviderSettingsRepository.engineCredentialIdFor(editing) != null
 
     Column(Modifier.fillMaxWidth()) {
         StatusBanner(status = editing.status) {
-            store.testProviderConnection(kind, providerId)
+            store.refreshProviderStatuses()
         }
 
         FieldLabel("显示名称")
@@ -306,13 +341,19 @@ fun ProviderEditPage(
 
         FieldLabel("API Key")
         KeyField(
-            value = editing.key,
-            placeholder = preset.keyPrefix + "...",
+            value = keyDraft,
+            placeholder = if (editing.credentialConfigured) "留空保持已保存凭据不变" else preset.keyPrefix + "...",
             show = showKey,
             onToggleShow = { showKey = !showKey },
-            onValueChange = { v -> store.updateProvider(kind, providerId) { it.copy(key = v) } },
+            onValueChange = { v -> keyDraft = v },
         )
-        FieldHint("密钥仅本地加密存储 · 从不上传到灵犀服务器")
+        FieldHint(
+            when {
+                kind != ProviderKind.Llm -> "搜索/抓取 provider 仍是本地配置页；当前未接入真实 engine credential 协议。"
+                !builtInSupported -> "该预设当前不在 Android 内建 provider catalog 中；需后续 bridge/profile 扩展。"
+                else -> "凭据保存到引擎共享安全存储；Anthropic 还会镜像到当前启动兼容 key 槽。"
+            },
+        )
 
         if (preset.needsCx) {
             FieldLabel("Custom Search Engine ID (cx)")
@@ -343,6 +384,98 @@ fun ProviderEditPage(
             }
         }
 
+        if (kind == ProviderKind.Llm) {
+            SettingsSection(
+                label = "应用",
+                footer = if (providerId in state.pendingLlmProviderChanges) {
+                    "配置已保存但尚未用于当前引擎。点击应用后会重建引擎，新请求将使用最新配置。"
+                } else {
+                    "当前引擎已使用这份提供商配置。"
+                },
+            ) {
+                SettingsRow(
+                    label = "应用配置并重连",
+                    sub = "一次性应用 URL、模型与启用状态",
+                    chevron = false,
+                    isLast = true,
+                    trailing = {
+                        ProviderTextAction(
+                            label = if (providerId in state.pendingLlmProviderChanges) "应用" else "已应用",
+                            enabled = providerId in state.pendingLlmProviderChanges,
+                            onClick = {
+                                onReconnectEngine()
+                                store.markLlmConfigurationApplied()
+                            },
+                        )
+                    },
+                )
+            }
+
+            SettingsSection(
+                label = "凭据",
+                footer = credentialMessage,
+            ) {
+                SettingsRow(
+                    label = "保存凭据",
+                    sub = if (builtInSupported) "写入引擎共享安全存储" else "当前预设未接入 Android 内建 provider catalog",
+                    chevron = false,
+                    trailing = {
+                        Text(
+                            "保存",
+                            color = if (builtInSupported) t.accent else t.text4,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .clickable(enabled = builtInSupported && keyDraft.isNotBlank()) {
+                                    scope.launch {
+                                        store.saveProviderCredential(kind, providerId, keyDraft) { error ->
+                                            credentialMessage =
+                                                error ?: "凭据已保存到引擎共享安全存储"
+                                            if (error == null) {
+                                                keyDraft = ""
+                                                onReconnectEngine()
+                                                store.markLlmConfigurationApplied()
+                                            }
+                                        }
+                                    }
+                                }
+                                .padding(horizontal = 7.dp, vertical = 5.dp),
+                        )
+                    },
+                )
+                SettingsRow(
+                    label = "清除已保存凭据",
+                    sub = if (editing.credentialConfigured) "删除共享安全存储中的 provider key" else "当前没有已保存凭据",
+                    chevron = false,
+                    isLast = true,
+                    trailing = {
+                        Text(
+                            "清除",
+                            color = if (editing.credentialConfigured && builtInSupported) t.danger else t.text4,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .clickable(enabled = editing.credentialConfigured && builtInSupported) {
+                                    scope.launch {
+                                        store.clearProviderCredential(kind, providerId) { error ->
+                                            credentialMessage =
+                                                error ?: "共享安全存储中的凭据已清除"
+                                            if (error == null) {
+                                                onReconnectEngine()
+                                                store.markLlmConfigurationApplied()
+                                            }
+                                        }
+                                    }
+                                }
+                                .padding(horizontal = 7.dp, vertical = 5.dp),
+                        )
+                    },
+                )
+            }
+        }
+
         SettingsSection {
             SettingsRow(
                 label = "启用", chevron = false,
@@ -355,7 +488,13 @@ fun ProviderEditPage(
             )
             SettingsRow(
                 label = "设为默认", chevron = false, isLast = true,
-                onTap = { store.setDefaultProvider(kind, providerId) },
+                onTap = {
+                    store.setDefaultProvider(kind, providerId)
+                    if (kind == ProviderKind.Llm) {
+                        onReconnectEngine()
+                        store.markLlmConfigurationApplied()
+                    }
+                },
                 trailing = {
                     if (editing.isDefault) {
                         LXIcon(name = LXIconName.Check, size = 16.dp, color = t.accent, stroke = 2.2f)
@@ -374,84 +513,38 @@ fun ProviderEditPage(
                 .padding(top = 8.dp)
                 .clip(RoundedCornerShape(11.dp))
                 .border(0.5.dp, t.border, RoundedCornerShape(11.dp))
-                .clickable { store.removeProvider(kind, providerId); onPop() }
+                .clickable(enabled = !removing) {
+                    removing = true
+                    removalMessage = null
+                    store.removeProvider(kind, providerId) { error ->
+                        removing = false
+                        removalMessage = error
+                        if (error == null) {
+                            if (kind == ProviderKind.Llm) {
+                                onReconnectEngine()
+                                store.markLlmConfigurationApplied()
+                            }
+                            onPop()
+                        }
+                    }
+                }
                 .padding(12.dp),
         ) {
-            Text("移除此提供商", color = t.danger, fontSize = 13.5f.sp, fontWeight = FontWeight.Medium)
+            Text(
+                if (removing) "正在删除凭据…" else "移除此提供商",
+                color = if (removing) t.text4 else t.danger,
+                fontSize = 13.5f.sp,
+                fontWeight = FontWeight.Medium,
+            )
         }
-    }
-}
-
-// MARK: - Engine key (SHIP-BLOCKER #1) ---------------------------------------
-
-/**
- * The in-process engine's Anthropic credentials, configured here and persisted
- * encrypted-at-rest via [SecureKeyStore]. A shipped mobile app has no process
- * environment, so this is the source of truth `EngineConversationSource.create`
- * reads first (env is only a dev override). The key is masked (show/hide), and
- * a blank value clears the stored entry.
- *
- * State is local-to-this-composable and seeded from the store on first
- * composition; each edit writes straight through to the encrypted store. If the
- * Keystore can't be provisioned ([SecureKeyStore.create] returns `null`) the
- * field still renders but edits are no-ops — the engine then degrades to the
- * env / mock path.
- */
-@Composable
-fun EngineKeySection(onReconnectEngine: () -> Unit = {}) {
-    val context = LocalContext.current
-    val store = remember(context) { SecureKeyStore.create(context) }
-
-    var key by remember { mutableStateOf(store?.apiKey().orEmpty()) }
-    var base by remember { mutableStateOf(store?.apiBase().orEmpty()) }
-    var showKey by remember { mutableStateOf(false) }
-
-    Column(Modifier.fillMaxWidth().padding(bottom = 22.dp)) {
-        FieldLabel("引擎 API Key")
-        KeyField(
-            value = key,
-            placeholder = "sk-ant-...",
-            show = showKey,
-            onToggleShow = { showKey = !showKey },
-            onValueChange = { v ->
-                key = v
-                store?.setApiKey(v)
-            },
-        )
-        FieldHint("灵犀引擎用此密钥直连 Anthropic · 加密存储于本机安全区 · 从不上传")
-
-        FieldLabel("API 地址（可选）")
-        SettingsField(
-            value = base,
-            onValueChange = { v ->
-                base = v
-                store?.setApiBase(v)
-            },
-            placeholder = "https://api.anthropic.com",
-        )
-        FieldHint("留空使用官方地址 · 可填代理 / 镜像 / 兼容网关")
-
-        // The engine is built once at launch; writing a key here takes effect only
-        // after a rebuild. This reconnects the in-process engine against the
-        // just-saved key — no app restart — and drops back to the (now real)
-        // conversation. A no-op when no key is set (the source stays mock).
-        val t = LingXiTheme.palette
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(top = 14.dp)
-                .clip(RoundedCornerShape(12.dp))
-                .background(t.accent)
-                .clickable { onReconnectEngine() }
-                .padding(vertical = 12.dp),
-            contentAlignment = Alignment.Center,
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                LXIcon(LXIconName.Plug, size = 16.dp, color = Color.White, stroke = 2f)
-                Text("重新连接引擎", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-            }
+        if (removalMessage != null) {
+            Text(
+                removalMessage.orEmpty(),
+                color = t.danger,
+                fontSize = 12.sp,
+                modifier = Modifier.padding(top = 8.dp, start = 4.dp, end = 4.dp),
+            )
         }
-        FieldHint("保存密钥后点此重新连接 · 无需重启应用")
     }
 }
 
@@ -494,10 +587,8 @@ private fun Badge(text: String, color: Color, strong: Boolean = false) {
 }
 
 /**
- * The connection-status banner. The dot pulses while testing; the test button
- * triggers [onTest] (the caller flips status to [ConnStatus.Testing]) and after
- * a 1.1s delay this composable settles the status to connected — mirroring the
- * iOS `asyncAfter` local animation. No network call.
+ * Credential status is read from the engine's shared encrypted store. Refresh
+ * never manufactures a successful network result.
  */
 @Composable
 private fun StatusBanner(status: ConnStatus, onTest: () -> Unit) {
@@ -521,7 +612,7 @@ private fun StatusBanner(status: ConnStatus, onTest: () -> Unit) {
             modifier = Modifier.padding(start = 8.dp).weight(1f),
         )
         Text(
-            "测试连接",
+            "刷新本地状态",
             color = t.text2, fontSize = 12.sp, fontWeight = FontWeight.Medium,
             modifier = Modifier
                 .clip(RoundedCornerShape(7.dp))
@@ -531,6 +622,25 @@ private fun StatusBanner(status: ConnStatus, onTest: () -> Unit) {
                 .padding(horizontal = 10.dp, vertical = 6.dp),
         )
     }
+}
+
+@Composable
+private fun ProviderTextAction(
+    label: String,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    val t = LingXiTheme.palette
+    Text(
+        label,
+        color = if (enabled) t.accent else t.text4,
+        fontSize = 12.sp,
+        fontWeight = FontWeight.Medium,
+        modifier = Modifier
+            .clip(RoundedCornerShape(6.dp))
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 7.dp, vertical = 5.dp),
+    )
 }
 
 /** An 8dp dot with an optional pulsing ring (used while a connection is testing). */

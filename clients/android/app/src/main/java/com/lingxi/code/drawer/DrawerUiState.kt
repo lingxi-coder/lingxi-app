@@ -55,7 +55,7 @@ class DrawerUiState(
     }
 
     companion object {
-        /** Default selection matches the iOS `RootView` ("work" / "s1", project p1 open). */
+        /** Production defaults contain no prototype workspace/session/project identifiers. */
         val Saver: Saver<DrawerUiState, *> = listSaver(
             save = { listOf(it.activeWs, it.activeSession, it.section.key, it.openProjects.joinToString(",")) },
             restore = {
@@ -73,10 +73,10 @@ class DrawerUiState(
 /** Remember a [DrawerUiState] across recomposition and process death. */
 @Composable
 fun rememberDrawerUiState(
-    activeWs: String = "work",
-    activeSession: String = "s1",
+    activeWs: String = "",
+    activeSession: String = "",
     section: DrawerSection = DrawerSection.Chats,
-    openProjects: Set<String> = setOf("p1"),
+    openProjects: Set<String> = emptySet(),
 ): DrawerUiState = rememberSaveable(saver = DrawerUiState.Saver) {
     DrawerUiState(activeWs, activeSession, section, openProjects)
 }

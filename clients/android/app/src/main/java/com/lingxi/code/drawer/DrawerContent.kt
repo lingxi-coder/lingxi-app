@@ -46,11 +46,26 @@ import com.lingxi.code.components.UiTags
 import com.lingxi.code.components.tint
 import com.lingxi.code.model.Chat
 import com.lingxi.code.model.Cron
-import com.lingxi.code.model.MockData
+import com.lingxi.code.model.EngineSessionState
 import com.lingxi.code.model.Project
 import com.lingxi.code.model.SessionRow
+import com.lingxi.code.model.SessionRef
 import com.lingxi.code.model.Workspace
 import com.lingxi.code.theme.LingXiTheme
+
+/**
+ * Production drawer collections supplied by real repositories.
+ *
+ * `null` means that capability has not been connected yet; an empty list means
+ * the real source loaded successfully but currently has no rows. Defaults are
+ * deliberately unavailable so preview/prototype [com.lingxi.code.model.MockData]
+ * can never leak into a production session or conversation callback.
+ */
+data class DrawerProductionData(
+    val workspaces: List<Workspace>? = null,
+    val projects: List<Project>? = null,
+    val crons: List<Cron>? = null,
+)
 
 /**
  * The 对话 / 项目 / 定时 drawer content — the Android analog of the iOS `Drawer`,
@@ -69,19 +84,20 @@ import com.lingxi.code.theme.LingXiTheme
 @Composable
 fun DrawerContent(
     ui: DrawerUiState,
-    onSelectSession: (String) -> Unit,
+    onSelectSession: (SessionRef) -> Unit,
     onOpenSettings: () -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
     /**
-     * The engine's REAL resumable sessions (out-of-band catalog). When non-empty
-     * the 对话 tab renders THESE in place of the [MockData] chats; empty (mock
-     * mode / before the first `SessionList`) keeps the MockData list. The default
-     * is empty so previews / the mock shell render unchanged.
+     * The engine's REAL resumable sessions (out-of-band catalog). The 对话 tab
+     * renders this state directly, including loading / empty / error, and never
+     * falls back to mock sessions in production.
      */
-    engineSessions: List<SessionRow> = emptyList(),
-    /** Resume a real engine session by its wire uuid. Defaults to [onSelectSession]. */
-    onResumeSession: (String) -> Unit = onSelectSession,
+    engineSessions: EngineSessionState = EngineSessionState.loading(),
+    /** Resume a real engine session by its wire uuid. */
+    onResumeSession: (String) -> Unit = { onSelectSession(SessionRef(it, it)) },
+    /** Real project/cron/workspace collections. Null collections render unavailable. */
+    productionData: DrawerProductionData = DrawerProductionData(),
 ) {
     val t = LingXiTheme.palette
 
@@ -91,17 +107,23 @@ fun DrawerContent(
     // closes); the workspace-scoped lists below recompute on every keystroke.
     var query by remember { mutableStateOf("") }
 
-    val wsChats = remember(ui.activeWs) { MockData.chats.filter { it.wsId == ui.activeWs } }
-    val wsProjects = remember(ui.activeWs) { MockData.projects.filter { it.wsId == ui.activeWs } }
-    val wsCrons = remember(ui.activeWs) { MockData.crons.filter { it.wsId == ui.activeWs } }
-
-    // The engine catalog is global (not workspace-scoped), so it ignores
-    // `activeWs`; the same live `query` filters it.
-    val hasEngineSessions = engineSessions.isNotEmpty()
-    val sessions = remember(engineSessions, query) { filterSessions(engineSessions, query) }
-    val chats = remember(wsChats, query) { filterChats(wsChats, query) }
-    val projects = remember(wsProjects, query) { filterProjects(wsProjects, query) }
-    val crons = remember(wsCrons, query) { filterCrons(wsCrons, query) }
+    val filteredEngineSessions = remember(engineSessions.rows, query) {
+        filterSessions(engineSessions.rows, query)
+    }
+    val projects = remember(productionData.projects, ui.activeWs, query) {
+        productionData.projects
+            ?.let { rows ->
+                if (ui.activeWs.isBlank()) rows else rows.filter { it.wsId == ui.activeWs }
+            }
+            ?.let { filterProjects(it, query) }
+    }
+    val crons = remember(productionData.crons, ui.activeWs, query) {
+        productionData.crons
+            ?.let { rows ->
+                if (ui.activeWs.isBlank()) rows else rows.filter { it.wsId == ui.activeWs }
+            }
+            ?.let { filterCrons(it, query) }
+    }
 
     Column(
         modifier = modifier
@@ -110,15 +132,17 @@ fun DrawerContent(
             .windowInsetsPadding(WindowInsets.statusBars),
     ) {
         DrawerHeader(onClose = onClose)
-        WorkspacePills(activeWs = ui.activeWs, onSelect = ui::selectWorkspace)
+        WorkspaceSource(
+            workspaces = productionData.workspaces,
+            activeWs = ui.activeWs,
+            onSelect = ui::selectWorkspace,
+        )
         SearchBar(query = query, onQueryChange = { query = it })
         SectionTabs(
-            // The 对话 count reflects whichever list the tab renders: the engine
-            // catalog when available, else the MockData chats.
             section = ui.section,
-            chats = if (hasEngineSessions) sessions.size else chats.size,
-            projects = projects.size,
-            crons = crons.size,
+            chats = filteredEngineSessions.size,
+            projects = projects?.size ?: 0,
+            crons = crons?.size ?: 0,
             onSelect = { ui.section = it },
         )
 
@@ -132,31 +156,29 @@ fun DrawerContent(
                 .padding(top = 4.dp, bottom = 8.dp),
         ) {
             when (ui.section) {
-                // Real engine history when the catalog is populated; the MockData
-                // chats otherwise (mock mode / before the first `SessionList`).
-                DrawerSection.Chats -> if (hasEngineSessions) {
-                    EngineSessionsSection(
-                        sessions = sessions,
+                DrawerSection.Chats -> EngineSessionsSection(
+                    state = engineSessions.copy(rows = filteredEngineSessions),
+                    activeSession = ui.activeSession,
+                    onSelectSession = { onResumeSession(it) },
+                )
+
+                DrawerSection.Projects -> when {
+                    projects == null -> DrawerCollectionState("项目数据源尚未接入")
+                    projects.isEmpty() -> DrawerCollectionState("暂无项目")
+                    else -> ProjectsSection(
+                        projects = projects,
                         activeSession = ui.activeSession,
-                        onSelectSession = { onResumeSession(it) },
-                    )
-                } else {
-                    ChatsSection(
-                        chats = chats,
-                        activeSession = ui.activeSession,
-                        onSelectSession = { onSelectSession(it) },
+                        openProjects = ui.openProjects,
+                        onToggleProject = ui::toggleProject,
+                        onSelectSession = onSelectSession,
                     )
                 }
 
-                DrawerSection.Projects -> ProjectsSection(
-                    projects = projects,
-                    activeSession = ui.activeSession,
-                    openProjects = ui.openProjects,
-                    onToggleProject = ui::toggleProject,
-                    onSelectSession = { onSelectSession(it) },
-                )
-
-                DrawerSection.Crons -> CronsSection(crons = crons)
+                DrawerSection.Crons -> when {
+                    crons == null -> DrawerCollectionState("定时任务数据源尚未接入")
+                    crons.isEmpty() -> DrawerCollectionState("暂无定时任务")
+                    else -> CronsSection(crons = crons)
+                }
             }
         }
 
@@ -194,7 +216,19 @@ private fun DrawerHeader(onClose: () -> Unit) {
 // MARK: - workspace pills ---------------------------------------------------
 
 @Composable
-private fun WorkspacePills(activeWs: String, onSelect: (String) -> Unit) {
+private fun WorkspaceSource(
+    workspaces: List<Workspace>?,
+    activeWs: String,
+    onSelect: (String) -> Unit,
+) {
+    if (workspaces == null) {
+        WorkspaceUnavailableMessage("工作区数据源尚未接入")
+        return
+    }
+    if (workspaces.isEmpty()) {
+        WorkspaceUnavailableMessage("暂无工作区")
+        return
+    }
     Row(
         horizontalArrangement = Arrangement.spacedBy(6.dp),
         modifier = Modifier
@@ -203,10 +237,24 @@ private fun WorkspacePills(activeWs: String, onSelect: (String) -> Unit) {
             .padding(horizontal = 18.dp)
             .padding(bottom = 12.dp),
     ) {
-        MockData.workspaces.forEach { ws ->
+        workspaces.forEach { ws ->
             WorkspacePill(ws = ws, active = ws.id == activeWs, onClick = { onSelect(ws.id) })
         }
     }
+}
+
+@Composable
+private fun WorkspaceUnavailableMessage(message: String) {
+    val t = LingXiTheme.palette
+    Text(
+        message,
+        color = t.text4,
+        fontSize = 12.sp,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 18.dp)
+            .padding(bottom = 12.dp),
+    )
 }
 
 @Composable
@@ -343,6 +391,19 @@ private fun SectionTab(
             fontWeight = FontWeight.SemiBold,
         )
     }
+}
+
+@Composable
+private fun DrawerCollectionState(message: String) {
+    val t = LingXiTheme.palette
+    Text(
+        message,
+        color = t.text4,
+        fontSize = 12.sp,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+    )
 }
 
 // MARK: - shortcuts + account ----------------------------------------------

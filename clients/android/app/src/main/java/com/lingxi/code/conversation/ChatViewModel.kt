@@ -3,16 +3,21 @@ package com.lingxi.code.conversation
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.lingxi.code.bindings.PermissionResponseDto
 import com.lingxi.code.model.EngineModelCatalog
 import com.lingxi.code.model.EngineModelState
 import com.lingxi.code.model.EngineSessionState
+import com.lingxi.code.model.MCPServer
 import com.lingxi.code.model.Message
-import com.lingxi.code.model.MockData
 import com.lingxi.code.model.ModelOption
 import com.lingxi.code.model.Role
 import com.lingxi.code.model.SessionRef
 import com.lingxi.code.model.SessionRow
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -30,15 +35,22 @@ data class ChatState(
     val isNew: Boolean = false,
     /** True while the assistant reply streams — renders the pulsing dots row. */
     val streaming: Boolean = false,
-    /** The model selected in the composer chip (the active engine id, or a mock row). */
+    /** True while ResumeSession/NewSession is awaiting engine confirmation. */
+    val sessionTransitioning: Boolean = false,
+    /**
+     * False when the visible session has not been confirmed by the engine.
+     * Sending is rejected in that state so a cached transcript can never be
+     * presented as context that the engine does not actually hold.
+     */
+    val sessionReady: Boolean = true,
+    /** The model selected in the composer chip (a real engine id once loaded). */
     val model: ModelOption,
     /**
      * The catalog the picker shows. Driven by the engine's REAL `ModelList`
-     * (out-of-band, via [ConversationSource.modelState]); falls back to the
-     * branded [MockData.models] when the engine hasn't reported a catalog yet
-     * (mock mode / before the first `ModelList`). The active row is [model].
+     * (out-of-band, via [ConversationSource.modelState]). It remains empty until
+     * the engine reports a catalog. The active row is [model].
      */
-    val availableModels: List<ModelOption> = MockData.models,
+    val availableModels: List<ModelOption> = emptyList(),
     /**
      * A transient, user-visible status line (tool activity). `null` hides the
      * row. Mirrors the iOS `ConversationModel.statusLine`. Errors no longer ride
@@ -97,86 +109,44 @@ internal fun classifyError(message: String): ChatErrorKind {
 }
 
 /**
- * Minimal, Bundle-safe (string) serialization for the transcript persisted into
- * [SavedStateHandle], so the conversation survives process death without pulling
- * in a serialization library or making [Message] `Parcelable`.
- *
- * Each [Message] becomes ONE line of `roletagidtext`
- * (`` is a control char that never appears in user text); a blank `tag`
- * round-trips back to `null`. The [text] is placed LAST and is the only field
- * allowed to contain newlines, so the list is stored as an `ArrayList<String>`
- * (one entry per message) — a primitive the saved-state `Bundle` persists
- * verbatim across process death. PURE (no Android types) so it is unit-testable
- * on the plain JVM.
- */
-internal object TranscriptCodec {
-    private const val FS = '' // field separator (never in user text)
-
-    fun encode(messages: List<Message>): ArrayList<String> =
-        ArrayList(
-            messages.map { m ->
-                // role, tag, id, text — text last (the only newline-bearing field).
-                "${m.role.name}$FS${m.tag.orEmpty()}$FS${m.id}$FS${m.text}"
-            },
-        )
-
-    fun decode(lines: List<String>?): List<Message> {
-        if (lines.isNullOrEmpty()) return emptyList()
-        return lines.mapNotNull { line ->
-            // limit=4 so a text field containing the (improbable) separator or any
-            // newline is preserved intact as the final segment.
-            val parts = line.split(FS, limit = 4)
-            if (parts.size < 4) return@mapNotNull null
-            val role = when (parts[0]) {
-                Role.Ai.name -> Role.Ai
-                Role.User.name -> Role.User
-                else -> return@mapNotNull null
-            }
-            val tag = parts[1].ifEmpty { null }
-            Message(role = role, text = parts[3], tag = tag, id = parts[2])
-        }
-    }
-}
-
-/**
  * Conversation ViewModel. Holds the conversation as a [StateFlow] and exposes
  * intent functions ([send], [newChat], [openSession], [selectModel]) the
  * composables call. All engine/network concerns sit behind the injected
  * [ConversationSource], so swapping in the real UniFFI source later requires no
  * changes here beyond the constructor argument.
  *
- * The optional [savedState] persists the live transcript, the composer draft and
- * the active session id so they survive process death (low-memory kill while the
- * app is backgrounded). It is keyed by primitive/`ArrayList<String>` values only,
- * so the saved-state `Bundle` round-trips them without a serialization library.
- * `null` (the default, and what the reducer unit tests pass) disables persistence
- * — the ViewModel then behaves exactly as before.
+ * The optional [savedState] persists only lightweight navigation state: session
+ * id/title, composer draft, and the new-chat flag. Transcripts remain in the
+ * engine's session store and are restored exclusively through ResumeSession.
+ * This keeps Android's saved-state Bundle small and prevents cached UI messages
+ * from impersonating engine context after process death.
  */
 class ChatViewModel(
-    private val source: ConversationSource = MockConversationSource(),
+    private var source: ConversationSource = UnavailableConversationSource(),
     private val savedState: SavedStateHandle? = null,
+    private var sourceGeneration: Int = 0,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(
         run {
-            // Restore the persisted transcript + session if process death dropped
-            // us; otherwise start from the source's initial transcript. A restored
-            // (possibly empty) transcript wins over `initialMessages()` so a user
-            // who had cleared to a fresh chat doesn't get the mock seed back.
-            val restored: List<Message>? =
-                savedState?.takeIf { it.contains(KEY_TRANSCRIPT) }
-                    ?.let { TranscriptCodec.decode(it.get<ArrayList<String>>(KEY_TRANSCRIPT)) }
+            // Restore only the session identity. Its transcript is authoritative
+            // only after ResumeSession returns SessionResumed.
             val sessionId = savedState?.get<String>(KEY_SESSION_ID)
             val sessionTitle = savedState?.get<String>(KEY_SESSION_TITLE)
             val session =
                 if (sessionId != null && sessionTitle != null) SessionRef(sessionId, sessionTitle)
-                else MockData.allSessions.first()
-            val isNew = savedState?.get<Boolean>(KEY_IS_NEW) ?: false
+                else SessionRef(id = "new", title = "新对话")
+            val requiresResume = session.id != "new"
+            val seededMessages = if (requiresResume) emptyList() else source.initialMessages()
+            val isNew = savedState?.get<Boolean>(KEY_IS_NEW) ?: seededMessages.isEmpty()
             ChatState(
                 session = session,
-                messages = restored ?: source.initialMessages(),
+                messages = seededMessages,
                 isNew = isNew,
-                model = MockData.models.first(),
+                sessionTransitioning = requiresResume,
+                sessionReady = !requiresResume,
+                model = EngineModelCatalog.pending,
+                statusLine = if (requiresResume) "正在恢复会话…" else null,
             )
         },
     )
@@ -185,13 +155,17 @@ class ChatViewModel(
     /**
      * The engine's REAL resumable-session catalog, mirrored from the source's
      * OUT-OF-BAND [ConversationSource.sessionState] (sibling of the model
-     * catalog). The drawer observes this to render real history; an empty
-     * catalog (mock mode / before the first `SessionList`) means "fall back to
-     * MockData". Exposed as the ViewModel's own [StateFlow] so the drawer reads
-     * one surface and never reaches into the source directly.
+     * catalog). The drawer observes this single surface to render explicit
+     * loading, ready-empty, ready-with-rows, and error states.
      */
-    private val _sessions = MutableStateFlow(EngineSessionState())
+    private val _sessions = MutableStateFlow(EngineSessionState.loading())
     val sessions: StateFlow<EngineSessionState> = _sessions.asStateFlow()
+
+    /** Permission and MCP state mirrored from the same source this ViewModel owns. */
+    private val _pendingPermission = MutableStateFlow(source.pendingPermission.value)
+    val pendingPermission: StateFlow<PermissionPromptState?> = _pendingPermission.asStateFlow()
+    private val _mcpServers = MutableStateFlow(source.mcpServers.value)
+    val mcpServers: StateFlow<List<MCPServer>> = _mcpServers.asStateFlow()
 
     /**
      * The composer draft, persisted into [savedState] so an in-progress (unsent)
@@ -206,43 +180,168 @@ class ChatViewModel(
         savedState?.set(KEY_DRAFT, draft)
     }
 
+    /** Index of the assistant message currently receiving streamed deltas. */
+    private var streamingIndex: Int? = null
+
+    /** Collector for the active reply stream. */
+    private var turnJob: Job? = null
+
+    /** Best-effort explicit Stop operation that a later session switch must await. */
+    private var explicitCancellation: Deferred<Result<Unit>>? = null
+
+    /** Current Resume/New submission job. Confirmation arrives via activeSessionState. */
+    private var sessionTransitionJob: Job? = null
+
+    /** Parent job for all out-of-band flows of the currently owned source. */
+    private var sourceBindingJob: Job? = null
+
+    /** Monotonic reply-stream generation used to reject stale turn events. */
+    private var turnToken: Long = 0L
+
+    /** Monotonic session-operation generation used to reject stale failures. */
+    private var sessionToken: Long = 0L
+
+    /** Expected resume id; null while starting a new session or while idle. */
+    private var pendingResumeId: String? =
+        _state.value.session.id.takeIf { _state.value.sessionTransitioning }
+
+    /** True while the current transition expects SessionStarted. */
+    private var pendingNewSession: Boolean = false
+
     init {
-        // Observe the engine's OUT-OF-BAND model state (SHIP-BLOCKER #2): a real
-        // `ModelList` populates the picker with wire ids; `ModelChanged` (or the
-        // `ListModels` reply's `current`) selects the active row. Mock sources
-        // keep an empty state forever, so this never disturbs MockData.models.
-        viewModelScope.launch {
-            source.modelState.collect { engine -> applyModelState(engine) }
-        }
-        // Mirror the engine's OUT-OF-BAND session catalog (sibling of the model
-        // state above): a real `SessionList` populates the drawer with history;
-        // mock sources keep an empty state forever, so the drawer keeps MockData.
-        viewModelScope.launch {
-            source.sessionState.collect { engine -> _sessions.value = engine }
-        }
-        // Mirror the engine's OUT-OF-BAND live-resume result (sibling of the
-        // catalog above): a real `SessionResumed` carries the rehydrated
-        // transcript, which `applyRestoredSession` swaps into state so the user
-        // sees the prior conversation the next turn continues from. Mock sources
-        // keep this null forever, so this never disturbs the local-only resume.
-        viewModelScope.launch {
-            source.resumedSession.collect { restored ->
-                restored?.let { applyRestoredSession(it) }
-            }
-        }
-        // Keep the persisted transcript + session id in lock-step with state, so a
-        // process-death kill at any moment restores the latest committed transcript.
+        // Compatibility migration from builds that serialized every message into
+        // SavedStateHandle. Never decode or display it; remove it before the next
+        // state save so large legacy Bundles naturally shrink after one launch.
+        savedState?.remove<ArrayList<String>>(LEGACY_KEY_TRANSCRIPT)
+        bindSource()
+        // Keep the lightweight navigation state in lock-step with the UI.
         if (savedState != null) {
             viewModelScope.launch {
                 _state.collect { s -> persist(s) }
             }
         }
+        // Process-death restoration is not complete until the new engine handle
+        // has actually resumed the persisted session. The composer remains gated
+        // until the authoritative SessionResumed transcript arrives.
+        if (_state.value.sessionTransitioning) {
+            beginSessionTransition(
+                target = _state.value.session,
+                newSession = false,
+                status = "正在恢复会话…",
+            )
+        }
     }
 
-    /** Write the durable slice of [ChatState] into [savedState] (Bundle-safe values). */
+    /**
+     * Bind every out-of-band flow from the source currently owned by this
+     * ViewModel. The generation check rejects a final late emission from a
+     * source being replaced during provider reconnect.
+     */
+    private fun bindSource() {
+        sourceBindingJob?.cancel()
+        val boundSource = source
+        val generation = sourceGeneration
+        sourceBindingJob = viewModelScope.launch {
+            launch {
+                boundSource.modelState.collect { engine ->
+                    if (sourceGeneration == generation) applyModelState(engine)
+                }
+            }
+            launch {
+                boundSource.sessionState.collect { engine ->
+                    if (sourceGeneration == generation) _sessions.value = engine
+                }
+            }
+            launch {
+                boundSource.activeSessionState.collect { activated ->
+                    if (sourceGeneration == generation) {
+                        activated?.let { applyActivatedSession(it) }
+                    }
+                }
+            }
+            launch {
+                boundSource.pendingPermission.collect { prompt ->
+                    if (sourceGeneration == generation) _pendingPermission.value = prompt
+                }
+            }
+            launch {
+                boundSource.mcpServers.collect { servers ->
+                    if (sourceGeneration == generation) _mcpServers.value = servers
+                }
+            }
+        }
+    }
+
+    /**
+     * Replace the engine after an explicit provider reconnect while retaining a
+     * single Activity-scoped ViewModel across configuration changes.
+     *
+     * Recomposition/rotation reuses the same generation and creates nothing.
+     * A new generation closes the prior native source immediately, binds all UI
+     * state to the replacement, and re-establishes the visible session before
+     * sending is enabled.
+     */
+    internal fun ensureSource(
+        generation: Int,
+        createSource: () -> ConversationSource,
+    ) {
+        if (generation <= sourceGeneration) return
+
+        val replacement = createSource()
+        if (replacement is UnavailableConversationSource) {
+            replacement.close()
+            _state.update {
+                it.copy(
+                    statusLine = null,
+                    error = ChatError(
+                        message = "引擎重连失败：${replacement.reason}",
+                        kind = classifyError(replacement.reason),
+                    ),
+                )
+            }
+            return
+        }
+        val previous = source
+        sourceGeneration = generation
+
+        abandonLocalTurn()?.cancel()
+        explicitCancellation?.cancel()
+        explicitCancellation = null
+        sessionTransitionJob?.cancel()
+        sessionTransitionJob = null
+        sourceBindingJob?.cancel()
+
+        source = replacement
+        _sessions.value = EngineSessionState.loading()
+        _pendingPermission.value = null
+        _mcpServers.value = emptyList()
+        bindSource()
+        previous.close()
+
+        val visibleSession = _state.value.session
+        beginSessionTransition(
+            target = visibleSession,
+            newSession = visibleSession.id == "new",
+            status = if (visibleSession.id == "new") "正在重新连接…" else "正在恢复会话…",
+        )
+    }
+
+    suspend fun approvePermission(requestId: ULong, response: PermissionResponseDto) {
+        source.approvePermission(requestId, response)
+    }
+
+    suspend fun denyPermission(requestId: ULong) {
+        source.denyPermission(requestId)
+    }
+
+    fun refreshMcpServers() {
+        viewModelScope.launch { source.refreshMcpServers() }
+    }
+
+    /** Write only the small navigation slice into [savedState]. */
     private fun persist(s: ChatState) {
         val sv = savedState ?: return
-        sv[KEY_TRANSCRIPT] = TranscriptCodec.encode(s.messages)
+        sv.remove<ArrayList<String>>(LEGACY_KEY_TRANSCRIPT)
         sv[KEY_SESSION_ID] = s.session.id
         sv[KEY_SESSION_TITLE] = s.session.title
         sv[KEY_IS_NEW] = s.isNew
@@ -250,23 +349,23 @@ class ChatViewModel(
 
     /**
      * Fold the engine's [EngineModelState] into [ChatState]: build the picker
-     * rows from the REAL wire ids and select the active one. Empty catalog →
-     * leave the mock list + selection untouched (mock mode). Extracted so the
-     * mapping is exercised directly in unit tests with a fake source.
+     * rows from the real wire ids and select the active one. An empty catalog
+     * leaves the pending selection untouched. Extracted for reducer tests.
      */
     internal fun applyModelState(engine: EngineModelState) {
-        if (!engine.hasCatalog) return // mock mode: keep MockData.models + its selection
+        if (!engine.hasCatalog) return
         val options = EngineModelCatalog.options(engine.available)
         val active = options.firstOrNull { it.id == engine.active } ?: options.first()
         _state.update { it.copy(availableModels = options, model = active) }
     }
 
     /**
-     * Apply a LIVE resume the engine confirmed (`SessionResumed`): adopt the REAL
-     * session id and REPLACE the transcript with the rehydrated, oldest-first
-     * scrollback so the user sees the prior conversation the next turn continues
-     * from. Any in-flight turn is abandoned first (the orphaned-turn guard, so a
-     * late event from the pre-resume turn can't mutate the restored transcript).
+     * Apply a live session activation the engine confirmed (`SessionStarted` or
+     * `SessionResumed`): adopt the real session id and, for resumed sessions,
+     * replace the transcript with the rehydrated oldest-first scrollback so the
+     * next turn continues from real persisted history. Any in-flight turn is
+     * abandoned first (the orphaned-turn guard, so a late event from the
+     * pre-activation turn can't mutate the updated transcript).
      *
      * The title is preserved from the drawer's optimistic local select when the
      * id matches (`resumeSession` set it before submitting `ResumeSession`), else
@@ -274,8 +373,19 @@ class ChatViewModel(
      * bar never reverts to a placeholder on a real resume. Extracted (internal)
      * so the rehydration is exercised directly in unit tests with a fake source.
      */
-    internal fun applyRestoredSession(restored: RestoredSession) {
-        abandonInFlightTurn()
+    internal fun applyActivatedSession(restored: ActivatedSession) {
+        if (_state.value.sessionTransitioning) {
+            val matchesPendingResume =
+                pendingResumeId != null &&
+                    restored.kind == SessionActivationKind.Resumed &&
+                    restored.sessionId == pendingResumeId
+            val matchesPendingNew =
+                pendingNewSession && restored.kind == SessionActivationKind.Started
+            if (!matchesPendingResume && !matchesPendingNew) return
+        }
+        abandonLocalTurn()
+        pendingResumeId = null
+        pendingNewSession = false
         val title = _state.value.session.takeIf { it.id == restored.sessionId }?.title
             ?: _sessions.value.rows.firstOrNull { it.uuid == restored.sessionId }?.title
             ?: _state.value.session.title
@@ -283,95 +393,130 @@ class ChatViewModel(
             it.copy(
                 session = SessionRef(id = restored.sessionId, title = title),
                 messages = restored.transcript, // clear-then-restore (oldest-first)
-                isNew = false,
+                isNew = restored.kind == SessionActivationKind.Started && restored.transcript.isEmpty(),
                 streaming = false,
+                sessionTransitioning = false,
+                sessionReady = true,
                 statusLine = null,
                 error = null,
             )
         }
     }
 
-    /**
-     * Index into [ChatState.messages] of the assistant message currently being
-     * streamed (deltas append into it). `null` between turns / before the first
-     * delta of a turn. Mirrors the iOS `EngineConversationSource.streamingIndex`.
-     */
-    private var streamingIndex: Int? = null
-
-    /**
-     * The coroutine collecting the active turn's reply stream. Held so [cancel]
-     * (and a session switch) can stop local collection, and so [send] can detect
-     * an in-flight turn to ignore an overlapping submit. `null` between turns.
-     */
-    private var turnJob: Job? = null
-
-    /**
-     * Monotonic turn generation, bumped by EVERY action that abandons the
-     * in-flight turn ([openSession], [newChat], [send], [cancel]). Each collecting
-     * coroutine captures the token live at its launch and stamps it onto every
-     * [reduce] call; [reduce] DROPS any event whose token is stale.
-     *
-     * ORPHANED-TURN FIX: `Job.cancel()` is cooperative — it can't stop a `reduce`
-     * that is already executing on the collector thread when the session switches,
-     * so a late `Delta`/`End` from the old turn could otherwise mutate the NEW
-     * session's transcript. The token closes that race deterministically: a stale
-     * turn's events are ignored even if its coroutine briefly outlives the switch.
-     */
-    private var turnToken: Long = 0L
-
-    /** Switch to another session: cancel any in-flight turn and reset state. */
+    /** Switch to another session through the real engine. */
     fun openSession(ref: SessionRef) {
-        abandonInFlightTurn()
-        _state.update {
-            it.copy(
-                session = ref,
-                messages = source.initialMessages(),
-                isNew = false,
-                streaming = false,
-                statusLine = null,
-                error = null,
-            )
-        }
+        if (ref.id.isBlank() || ref.id == "new") return
+        if (_state.value.sessionReady && _state.value.session.id == ref.id) return
+        beginSessionTransition(ref, newSession = false, status = "正在恢复会话…")
     }
 
-    /** Start a fresh, empty chat (top-bar "edit" / new-chat button). */
+    /** Start a fresh chat through the real engine. */
     fun newChat() {
-        abandonInFlightTurn()
-        _state.update {
-            it.copy(
-                session = SessionRef(id = "new", title = "新对话"),
-                messages = emptyList(),
-                isNew = true,
-                streaming = false,
-                statusLine = null,
-                error = null,
-            )
-        }
+        beginSessionTransition(
+            target = SessionRef(id = "new", title = "新对话"),
+            newSession = true,
+            status = "正在新建会话…",
+        )
     }
 
     /**
-     * Cancel the in-flight collecting coroutine and reset the per-turn cursors so
-     * NO stale event can mutate the next session's transcript. Bumping [turnToken]
-     * is the deterministic half (events from the old turn are dropped by [reduce]
-     * even if its coroutine hasn't observed cancellation yet); cancelling
-     * [turnJob] is the eager half (stop collecting promptly). Shared by
-     * [openSession] / [newChat].
+     * Detach the local collector immediately and invalidate every late event.
+     * The returned job is still awaited after the real engine receives Cancel.
      */
-    private fun abandonInFlightTurn() {
+    private fun abandonLocalTurn(): Job? {
         turnToken++
-        turnJob?.cancel()
+        val job = turnJob
         turnJob = null
         streamingIndex = null
+        return job
+    }
+
+    /**
+     * Cancel a detached turn in the engine, then wait for local collection to
+     * stop. Cancel is intentionally submitted before cancelAndJoin: otherwise
+     * unsubscribing first could hide the terminal event while the engine keeps
+     * running.
+     */
+    private suspend fun cancelEngineTurn(job: Job?) {
+        if (job == null) return
+        try {
+            source.cancel()
+        } finally {
+            job.cancelAndJoin()
+        }
+    }
+
+    /**
+     * Serialize session control: any explicit Stop completes first, then the
+     * active engine turn is cancelled and joined, and only then is Resume/New
+     * submitted. The UI is optimistic only about the selected title; transcript
+     * and send capability stay unavailable until the engine confirmation event.
+     */
+    private fun beginSessionTransition(
+        target: SessionRef,
+        newSession: Boolean,
+        status: String,
+    ) {
+        // Do not enqueue a second ambiguous Resume/New while the first command
+        // is accepted but its SessionResumed/SessionStarted event is still in
+        // flight. Those events do not carry a client operation id.
+        if (_state.value.sessionTransitioning && sessionTransitionJob != null) return
+        sessionToken++
+        val token = sessionToken
+        pendingResumeId = target.id.takeUnless { newSession }
+        pendingNewSession = newSession
+        val detachedTurn = abandonLocalTurn()
+        _state.update {
+            it.copy(
+                session = target,
+                messages = emptyList(),
+                isNew = newSession,
+                streaming = false,
+                sessionTransitioning = true,
+                sessionReady = false,
+                statusLine = status,
+                error = null,
+            )
+        }
+        sessionTransitionJob = viewModelScope.launch {
+            try {
+                explicitCancellation?.await()?.getOrThrow()
+                explicitCancellation = null
+                cancelEngineTurn(detachedTurn)
+                if (newSession) source.newSession() else source.resumeSession(target.id)
+                // Success here means the command was accepted. sessionReady remains
+                // false until SessionStarted/SessionResumed is observed.
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (t: Throwable) {
+                if (token == sessionToken) {
+                    pendingResumeId = null
+                    pendingNewSession = false
+                    _state.update {
+                        it.copy(
+                            streaming = false,
+                            sessionTransitioning = false,
+                            sessionReady = false,
+                            statusLine = null,
+                            error = ChatError(
+                                message = "会话切换失败：${t.message ?: t::class.simpleName}",
+                                kind = classifyError(t.message.orEmpty()),
+                            ),
+                        )
+                    }
+                }
+            }
+        }
     }
 
     /**
      * Change the active model. Reflects the pick locally immediately (snappy
      * chip), then submits `SetModel(id)` to the engine with the REAL wire id —
      * the engine confirms with `ModelChanged`, which re-selects the row via
-     * [applyModelState]. For the mock source `setModel` is a no-op, so the local
-     * selection stands.
+     * [applyModelState].
      */
     fun selectModel(model: ModelOption) {
+        if (model.id.isBlank()) return
         _state.update { it.copy(model = model) }
         viewModelScope.launch { source.setModel(model.id) }
     }
@@ -379,7 +524,7 @@ class ChatViewModel(
     /**
      * Ask the source to (re)report its resumable-session catalog (the drawer's
      * open trigger). Drives `ListSessions`; the reply updates [sessions]
-     * out-of-band. A no-op for the mock source.
+     * out-of-band.
      */
     fun refreshSessions() {
         viewModelScope.launch { source.refreshSessions() }
@@ -392,23 +537,18 @@ class ChatViewModel(
      * submits `ResumeSession(uuid)` so the engine swaps its inner orchestrator
      * (confirmed by `SessionResumed`, after which the resumed transcript streams).
      * Routed through [openSession] so the in-flight turn is abandoned and the
-     * orphaned-turn guard holds, exactly like a mock-session switch.
+     * orphaned-turn guard holds.
      */
     fun resumeSession(row: SessionRow) {
         openSession(SessionRef(id = row.uuid, title = row.title))
-        viewModelScope.launch { source.resumeSession(row.uuid) }
     }
 
     /**
-     * Start a fresh chat that ALSO tells the engine to begin a new session.
-     * Resets the local transcript immediately (via [newChat]) for snappiness,
-     * then submits `NewSession`; the engine confirms with `SessionStarted`. Used
-     * by the drawer's "新建对话" affordance (the top-bar new-chat button keeps
-     * calling [newChat], which is the local-only reset).
+     * Start a fresh engine session. [newChat] clears the visible transcript and
+     * submits `NewSession`; `SessionStarted` confirms the new session id.
      */
     fun startNewSession() {
         newChat()
-        viewModelScope.launch { source.newSession() }
     }
 
     /**
@@ -426,6 +566,8 @@ class ChatViewModel(
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return
         if (_state.value.streaming) return // ignore overlapping submit while streaming
+        if (!_state.value.sessionReady || _state.value.sessionTransitioning) return
+        if (explicitCancellation?.isActive == true) return
 
         // A new turn supersedes any prior (e.g. just-cancelled) one — bump the
         // token so a lingering old coroutine's events are dropped by `reduce`, and
@@ -460,16 +602,34 @@ class ChatViewModel(
         if (!_state.value.streaming) return
         // Supersede the turn: a late event arriving after the engine's Cancel
         // round-trip must not re-open streaming on the now-idle transcript.
-        turnToken++
-        val job = turnJob
-        turnJob = null
-        viewModelScope.launch {
-            // Tell the engine first (best-effort), then drop local collection.
-            source.cancel()
-            job?.cancel()
+        val job = abandonLocalTurn()
+        _state.update { it.copy(streaming = false, statusLine = "正在停止…") }
+        val cancellation = viewModelScope.async {
+            runCatching { cancelEngineTurn(job) }
         }
-        streamingIndex = null
-        _state.update { it.copy(streaming = false, statusLine = null) }
+        explicitCancellation = cancellation
+        viewModelScope.launch {
+            val result = cancellation.await()
+            if (explicitCancellation === cancellation) explicitCancellation = null
+            result.fold(
+                onSuccess = {
+                    if (!_state.value.sessionTransitioning) {
+                        _state.update { it.copy(statusLine = null) }
+                    }
+                },
+                onFailure = { t ->
+                    _state.update {
+                        it.copy(
+                            statusLine = null,
+                            error = ChatError(
+                                "取消生成失败：${t.message ?: t::class.simpleName}",
+                                classifyError(t.message.orEmpty()),
+                            ),
+                        )
+                    }
+                },
+            )
+        }
     }
 
     /** Dismiss the persistent error banner (its × affordance). */
@@ -542,10 +702,17 @@ class ChatViewModel(
             }
 
             is ReplyEvent.Completed -> {
+                val completedIndex = streamingIndex
                 streamingIndex = null
                 turnJob = null
-                _state.update {
-                    it.copy(streaming = false, messages = it.messages + event.message)
+                _state.update { s ->
+                    if (completedIndex != null && s.messages.indices.contains(completedIndex)) {
+                        val updated = s.messages.toMutableList()
+                        updated[completedIndex] = event.message
+                        s.copy(streaming = false, messages = updated)
+                    } else {
+                        s.copy(streaming = false, messages = s.messages + event.message)
+                    }
                 }
             }
 
@@ -557,9 +724,17 @@ class ChatViewModel(
         }
     }
 
+    override fun onCleared() {
+        abandonLocalTurn()?.cancel()
+        sessionTransitionJob?.cancel()
+        sourceBindingJob?.cancel()
+        source.close()
+        super.onCleared()
+    }
+
     private companion object {
-        // SavedStateHandle keys for the durable conversation slice (process death).
-        const val KEY_TRANSCRIPT = "chat.transcript" // ArrayList<String>, see TranscriptCodec
+        // SavedStateHandle keys for lightweight process-death navigation state.
+        const val LEGACY_KEY_TRANSCRIPT = "chat.transcript" // removed on migration; never decoded
         const val KEY_DRAFT = "chat.draft" // String — unsent composer text
         const val KEY_SESSION_ID = "chat.session.id" // String
         const val KEY_SESSION_TITLE = "chat.session.title" // String

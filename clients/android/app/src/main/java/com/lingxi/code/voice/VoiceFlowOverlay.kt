@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -61,13 +62,14 @@ fun VoiceFlowOverlay(
     visible: Boolean,
     modifier: Modifier = Modifier,
 ) {
+    val captureState by VoiceCaptureStore.state.collectAsState()
     AnimatedVisibility(
         visible = visible,
         enter = fadeIn(animationSpec = tween(durationMillis = 250)),
         exit = fadeOut(animationSpec = tween(durationMillis = 250)),
         modifier = modifier,
     ) {
-        VoiceFlowContent()
+        VoiceFlowContent(captureState = captureState)
     }
 }
 
@@ -77,7 +79,7 @@ fun VoiceFlowOverlay(
  * visibility wrapper so the infinite animations only spin while shown.
  */
 @Composable
-private fun VoiceFlowContent() {
+private fun VoiceFlowContent(captureState: VoiceCaptureUiState) {
     val t = LingXiTheme.palette
 
     Box(
@@ -95,17 +97,25 @@ private fun VoiceFlowContent() {
             HaloOrb()
             Spacer(Modifier.height(28.dp))
             androidx.compose.material3.Text(
-                text = "正在聆听…",
+                text = captureState.statusText,
                 color = Color.White,
                 fontSize = 17.sp,
                 fontWeight = FontWeight.SemiBold,
             )
             Spacer(Modifier.height(6.dp))
             androidx.compose.material3.Text(
-                text = "松开发送 · 上滑取消",
+                text = captureState.partialTranscript.ifBlank { "松开发送 · 上滑取消" },
                 color = Color.White.copy(alpha = 0.6f),
                 fontSize = 13.sp,
             )
+            captureState.errorMessage?.takeIf { it.isNotBlank() }?.let { message ->
+                Spacer(Modifier.height(10.dp))
+                androidx.compose.material3.Text(
+                    text = message,
+                    color = Color.White.copy(alpha = 0.75f),
+                    fontSize = 12.sp,
+                )
+            }
         }
     }
 }

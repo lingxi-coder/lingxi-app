@@ -5,9 +5,12 @@ import com.lingxi.code.bindings.CostDto
 import com.lingxi.code.bindings.ErrorKindDto
 import com.lingxi.code.bindings.TurnOutcomeDto
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.onSubscription
 import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -43,6 +46,34 @@ class EngineReplyStreamTest {
         sessionDurationSecs = 0u,
         formatted = "$0.00",
     )
+
+    @Test
+    fun losslessRelay_preservesBurstAndTerminalEvent_forSlowCollector() = runTest {
+        val relay = LosslessEventRelay<ClientEvent>(backgroundScope)
+        val received = async {
+            relay.events
+                .take(1_001)
+                .toList()
+        }
+        runCurrent() // collector is subscribed before the callback burst starts
+
+        repeat(1_000) { relay.offer(ClientEvent.TextDelta("$it")) }
+        relay.offer(
+            ClientEvent.TurnEnded(
+                outcome = TurnOutcomeDto.END_TURN,
+                stopReason = "end_turn",
+                cost = cost,
+            ),
+        )
+        runCurrent()
+
+        val values = received.await()
+        assertEquals(1_001, values.size)
+        assertEquals("0", (values.first() as ClientEvent.TextDelta).text)
+        assertEquals("999", (values[999] as ClientEvent.TextDelta).text)
+        assertTrue(values.last() is ClientEvent.TurnEnded)
+        relay.close()
+    }
 
     /**
      * The race regression test. A `replay = 0` SharedFlow (exactly the engine

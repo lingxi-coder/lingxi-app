@@ -147,8 +147,10 @@ fun ChatScreen(
                 availableModels = state.availableModels,
                 onModelChange = onSelectModel,
                 onSend = {
-                    onSend(draft)
-                    onDraftChange("")
+                    if (state.sessionReady && !state.sessionTransitioning) {
+                        onSend(draft)
+                        onDraftChange("")
+                    }
                 },
                 onMicClick = onMicClick,
                 onMicHoldStart = onMicHoldStart,
@@ -157,6 +159,7 @@ fun ChatScreen(
                 attachment = attachment,
                 onRemoveAttachment = onRemoveAttachment,
                 isStreaming = state.isStreaming,
+                enabled = state.sessionReady && !state.sessionTransitioning,
                 onStop = onStop,
             )
         }

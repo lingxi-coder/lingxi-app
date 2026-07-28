@@ -29,15 +29,12 @@ import androidx.lifecycle.viewmodel.viewModelFactory
 import com.lingxi.code.conversation.ChatScreen
 import com.lingxi.code.conversation.ChatViewModel
 import com.lingxi.code.conversation.ComposerAttachment
-import com.lingxi.code.conversation.ConversationSource
 import com.lingxi.code.conversation.EngineConversationSource
-import com.lingxi.code.conversation.MockConversationSource
 import com.lingxi.code.conversation.PermissionPromptDialog
 import com.lingxi.code.connectivity.rememberOnlineState
 import com.lingxi.code.connectivity.shouldShowOfflineBanner
 import com.lingxi.code.drawer.DrawerContent
 import com.lingxi.code.drawer.rememberDrawerUiState
-import com.lingxi.code.model.MockData
 import com.lingxi.code.settings.SettingsStore
 import com.lingxi.code.theme.LingXiTheme
 import com.lingxi.code.voice.offline.SherpaVoice
@@ -83,46 +80,43 @@ fun RootScreen(
     // The chosen offline voice-pack language ("zh"/"en"/""). When its sherpa pack
     // is downloaded, the orb uses on-device STT/TTS instead of the system voice.
     voiceLang: String = "",
-    // Bumped (from Settings → 重新连接引擎) to REBUILD the engine source + chat VM
-    // after the user writes a new API key — so a key entered live takes effect
-    // without an app restart. Re-keys the `remember`/`viewModel` below.
+    // Bumped from Settings → 重新连接引擎. The retained ChatViewModel replaces
+    // its owned engine source so provider changes take effect without restart.
     reconnectToken: Int = 0,
+    settingsStore: SettingsStore? = null,
     viewModel: ChatViewModel? = null,
 ) {
     val context = LocalContext.current
 
-    // Wire the chat to the REAL engine: build an EngineConversationSource (which
-    // owns the MobileEngineHandle + its single event listener) once for this
-    // shell, falling back to the canned MockConversationSource when the engine is
-    // unavailable (JVM host / missing cdylib / PlatformUnavailable). This mirrors
-    // the iOS ConversationSourceFactory.make() guard. The previous build-then-drop
-    // `buildVoiceEngine` val is gone — the source is now the sole handle owner.
-    // Keyed on `reconnectToken` so writing a new API key in settings rebuilds the
-    // engine (re-reads SecureKeyStore) instead of stranding the mock until restart.
-    val source: ConversationSource = remember(context, reconnectToken) {
-        EngineConversationSource.create(context) ?: MockConversationSource()
-    }
+    // The Activity-scoped ViewModel owns the one native engine source. This is
+    // important across configuration changes: Compose is recreated, while the
+    // ViewModel and its live engine remain. Provider reconnects replace the
+    // source inside that same ViewModel instead of accumulating keyed VMs.
+    val appContext = context.applicationContext
     val chatViewModel: ChatViewModel = viewModel ?: viewModel(
-        // Re-key the VM on reconnect so it rebinds to the freshly-built source
-        // (a new engine handle) rather than the stale one it was created against.
-        key = "chat-$reconnectToken",
-        // Pass a SavedStateHandle so the transcript / draft / active session
-        // survive process death (low-memory kill while backgrounded). The handle
-        // is created from the CreationExtras the factory receives, scoped to this
-        // ViewModel — the durable conversation slice round-trips through it.
+        key = "chat",
         factory = viewModelFactory {
-            initializer { ChatViewModel(source, createSavedStateHandle()) }
+            initializer {
+                ChatViewModel(
+                    source = EngineConversationSource.create(appContext),
+                    savedState = createSavedStateHandle(),
+                    sourceGeneration = reconnectToken,
+                )
+            }
         },
     )
-
+    LaunchedEffect(chatViewModel, reconnectToken) {
+        if (viewModel == null) {
+            chatViewModel.ensureSource(reconnectToken) {
+                EngineConversationSource.create(appContext)
+            }
+        }
+    }
     val state by chatViewModel.state.collectAsState()
-    // The head parked permission request, driven by the engine's outbound
-    // AndroidPermissionSink (SHIP-BLOCKER #3). The mock source never emits one,
-    // so this stays null and the prompt is never shown there.
-    val pendingPermission by source.pendingPermission.collectAsState()
+    val pendingPermission by chatViewModel.pendingPermission.collectAsState()
     // The engine's REAL resumable-session catalog (out-of-band, sibling of the
-    // model catalog). Empty for the mock → the drawer keeps MockData; populated
-    // once the engine replies to ListSessions → the drawer renders real history.
+    // model catalog). The drawer renders its loading / empty / error states
+    // directly and never falls back to mock sessions.
     val sessionState by chatViewModel.sessions.collectAsState()
     val drawerUi = rememberDrawerUiState()
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
@@ -130,8 +124,8 @@ fun RootScreen(
 
     // Refresh the session catalog whenever the drawer transitions to open, so the
     // list is fresh each time the user reaches for it (the engine re-reports via
-    // SessionList; a no-op for the mock). `isOpen` flips on the open animation's
-    // start, so this fires once per open, not per frame.
+    // SessionList). `isOpen` flips on the open animation's start, so this fires
+    // once per open, not per frame.
     LaunchedEffect(drawerState.isOpen) {
         if (drawerState.isOpen) chatViewModel.refreshSessions()
     }
@@ -164,13 +158,15 @@ fun RootScreen(
         ?.let { if (it.role == Role.Ai) it.text else "" } ?: ""
 
     // Mirror the engine's REAL MCP listing into the activity-scoped SettingsStore
-    // (the same instance SettingsHost renders), so the MCP settings page shows
-    // real servers. RefreshListings is fired once; the StateFlow updates the store
-    // when the reply lands. Empty list ⇒ the page keeps its mock servers.
-    val settingsStore: SettingsStore = viewModel()
-    val engineMcp by source.mcpServers.collectAsState()
-    LaunchedEffect(Unit) { source.refreshMcpServers() }
-    LaunchedEffect(engineMcp) { if (engineMcp.isNotEmpty()) settingsStore.setMcpServers(engineMcp) }
+    // (the same instance SettingsHost renders). RefreshListings runs again after
+    // provider reconnect; an empty reply remains an explicit empty catalog.
+    val resolvedSettingsStore: SettingsStore =
+        settingsStore ?: viewModel(factory = SettingsStore.factory(context))
+    val engineMcp by chatViewModel.mcpServers.collectAsState()
+    LaunchedEffect(chatViewModel, reconnectToken) { chatViewModel.refreshMcpServers() }
+    LaunchedEffect(engineMcp) {
+        resolvedSettingsStore.setMcpServers(engineMcp)
+    }
 
     // The composer draft is hoisted here so a voice transcription (the
     // hold-to-talk release) can route its recognized text straight into the
@@ -178,14 +174,23 @@ fun RootScreen(
     // so an unsent draft survives process death; every edit mirrors back into the
     // handle (see onDraftChange below) and `send` clears it.
     var draft by remember { mutableStateOf(chatViewModel.restoredDraft) }
+    var voiceDraftBase by remember { mutableStateOf("") }
 
     // Hold-to-talk → live transcription, gated on RECORD_AUDIO. The recognized
-    // utterance is appended to the composer draft on release.
-    val (onVoiceHoldStart, onVoiceHoldRelease) = rememberVoiceCapture(
+    // partial utterance replaces the live voice suffix while recognition is
+    // running; the final result replaces that same suffix on release.
+    val (startVoiceCapture, onVoiceHoldRelease) = rememberVoiceCapture(
         onTranscript = { transcript ->
-            draft = if (draft.isBlank()) transcript else "$draft $transcript"
+            draft = appendVoiceTranscript(voiceDraftBase, transcript)
+        },
+        onPartialTranscript = { partial ->
+            draft = appendVoiceTranscript(voiceDraftBase, partial)
         },
     )
+    val onVoiceHoldStart: () -> Unit = {
+        voiceDraftBase = draft
+        startVoiceCapture()
+    }
 
     // The captured-photo attachment is hoisted here exactly like the voice draft:
     // tapping the composer's camera affordance drives an on-device capture through
@@ -239,11 +244,9 @@ fun RootScreen(
                 ) {
                     DrawerContent(
                         ui = drawerUi,
-                        onSelectSession = { id ->
-                            // MockData path (mock mode / projects / crons tabs):
-                            // select + switch to the canned session.
-                            drawerUi.selectSession(id)
-                            chatViewModel.openSession(MockData.session(id))
+                        onSelectSession = { ref ->
+                            drawerUi.selectSession(ref.id)
+                            chatViewModel.openSession(ref)
                             closeDrawer()
                         },
                         onOpenSettings = {
@@ -251,9 +254,7 @@ fun RootScreen(
                             onOpenSettings()
                         },
                         onClose = { closeDrawer() },
-                        // The engine's REAL sessions; non-empty flips the 对话 tab
-                        // from MockData to real history.
-                        engineSessions = sessionState.rows,
+                        engineSessions = sessionState,
                         onResumeSession = { uuid ->
                             // Tapping a real session: highlight it locally AND ask
                             // the engine to resume it (ResumeSession). The local
@@ -337,13 +338,19 @@ fun RootScreen(
         PermissionPromptDialog(
             state = pendingPermission,
             onApprove = { requestId, response ->
-                scope.launch { source.approvePermission(requestId, response) }
+                scope.launch { chatViewModel.approvePermission(requestId, response) }
             },
             onDeny = { requestId ->
-                scope.launch { source.denyPermission(requestId) }
+                scope.launch { chatViewModel.denyPermission(requestId) }
             },
         )
     }
+}
+
+internal fun appendVoiceTranscript(base: String, transcript: String): String = when {
+    transcript.isBlank() -> base
+    base.isBlank() -> transcript
+    else -> "$base $transcript"
 }
 
 @Preview(showBackground = true)

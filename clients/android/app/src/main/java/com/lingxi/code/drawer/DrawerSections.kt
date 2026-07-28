@@ -47,9 +47,11 @@ import com.lingxi.code.components.mix
 import com.lingxi.code.components.tint
 import com.lingxi.code.model.Chat
 import com.lingxi.code.model.Cron
+import com.lingxi.code.model.EngineSessionState
 import com.lingxi.code.model.Project
 import com.lingxi.code.model.ProjectSession
 import com.lingxi.code.model.SessionRow
+import com.lingxi.code.model.SessionRef
 import com.lingxi.code.theme.LingXiTheme
 
 /**
@@ -65,7 +67,7 @@ import com.lingxi.code.theme.LingXiTheme
 internal fun ChatsSection(
     chats: List<Chat>,
     activeSession: String,
-    onSelectSession: (String) -> Unit,
+    onSelectSession: (SessionRef) -> Unit,
 ) {
     val t = LingXiTheme.palette
     val grouped = chats.groupBy { it.group }
@@ -82,7 +84,11 @@ internal fun ChatsSection(
                     .padding(top = 8.dp, bottom = 4.dp),
             )
             grouped[group].orEmpty().forEach { chat ->
-                ChatRow(chat = chat, active = chat.id == activeSession, onClick = { onSelectSession(chat.id) })
+                ChatRow(
+                    chat = chat,
+                    active = chat.id == activeSession,
+                    onClick = { onSelectSession(SessionRef(chat.id, chat.title)) },
+                )
             }
             Spacer(Modifier.height(8.dp))
         }
@@ -142,20 +148,56 @@ private fun ChatRow(chat: Chat, active: Boolean, onClick: () -> Unit) {
  */
 @Composable
 internal fun EngineSessionsSection(
-    sessions: List<SessionRow>,
+    state: EngineSessionState,
     activeSession: String,
     onSelectSession: (String) -> Unit,
 ) {
     val t = LingXiTheme.palette
     Column(Modifier.fillMaxWidth()) {
-        sessions.forEach { row ->
+        when {
+            state.isLoading -> {
+                Text(
+                    text = "正在加载会话…",
+                    color = t.text4,
+                    fontSize = 12.sp,
+                    modifier = Modifier
+                        .padding(horizontal = 14.dp)
+                        .padding(top = 8.dp),
+                )
+                return@Column
+            }
+            state.isError -> {
+                Text(
+                    text = state.errorMessage ?: "会话列表加载失败",
+                    color = t.statusError,
+                    fontSize = 12.sp,
+                    lineHeight = 18.sp,
+                    modifier = Modifier
+                        .padding(horizontal = 14.dp)
+                        .padding(top = 8.dp),
+                )
+                return@Column
+            }
+            state.isEmpty -> {
+                Text(
+                    text = "暂无会话",
+                    color = t.text4,
+                    fontSize = 12.sp,
+                    modifier = Modifier
+                        .padding(horizontal = 14.dp)
+                        .padding(top = 8.dp),
+                )
+                return@Column
+            }
+        }
+        state.rows.forEach { row ->
             EngineSessionRow(
                 row = row,
                 active = row.uuid == activeSession,
                 onClick = { onSelectSession(row.uuid) },
             )
         }
-        if (sessions.isEmpty()) {
+        if (state.rows.isEmpty()) {
             // The catalog was reported but the search filtered everything out.
             Text(
                 text = "无匹配会话",
@@ -228,7 +270,7 @@ internal fun ProjectsSection(
     activeSession: String,
     openProjects: Set<String>,
     onToggleProject: (String) -> Unit,
-    onSelectSession: (String) -> Unit,
+    onSelectSession: (SessionRef) -> Unit,
 ) {
     Column(
         verticalArrangement = Arrangement.spacedBy(6.dp),
@@ -253,7 +295,7 @@ private fun ProjectRow(
     isOpen: Boolean,
     activeSession: String,
     onToggle: () -> Unit,
-    onSelectSession: (String) -> Unit,
+    onSelectSession: (SessionRef) -> Unit,
 ) {
     val t = LingXiTheme.palette
     val hasActive = project.sessions.any { it.id == activeSession }
@@ -324,7 +366,7 @@ private fun ProjectRow(
                             project = project,
                             session = session,
                             active = session.id == activeSession,
-                            onClick = { onSelectSession(session.id) },
+                            onClick = { onSelectSession(SessionRef(session.id, session.title)) },
                         )
                     }
                     Row(

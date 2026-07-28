@@ -186,6 +186,37 @@ pub struct AndroidMobileLinuxConfigFfi {
     pub authorization_file: Option<String>,
 }
 
+/// Android-provided multi-provider configuration for the mobile engine.
+///
+/// The JSON strings contain non-secret provider/routing settings only. API
+/// keys are sent separately through `SetProviderCredential` and persist in the
+/// injected encrypted `AndroidSecureStorage` implementation.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct AndroidProviderConfigFfi {
+    /// JSON object matching the shared `settings.providers` schema.
+    pub provider_profiles_json: String,
+    /// Optional JSON value matching the shared `settings.routing` schema.
+    pub routing_json: Option<String>,
+}
+
+/// Compact launch configuration for the extended Android engine constructor.
+///
+/// Keeping the scalar and record inputs behind one FFI record is intentional:
+/// the Android JNA bridge has to pass UniFFI `RustBuffer` values by value, and
+/// the former flat constructor exceeded the reliable arm64 calling surface
+/// once provider configuration was added.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct AndroidEngineLaunchConfigFfi {
+    pub api_base: String,
+    pub api_key: String,
+    pub model: String,
+    pub app_files_root: String,
+    pub provider_config: Option<AndroidProviderConfigFfi>,
+    pub mobile_linux: Option<AndroidMobileLinuxConfigFfi>,
+}
+
 /// FFI rootfs lifecycle state.
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
@@ -2977,10 +3008,11 @@ fn bootstrap_bundled_shell(native_library_dir: &str, app_files_root: &str) -> Op
 ///   inputs); `None`/`null` keeps shell support fully absent.
 /// - `git` — optional Android Git-tool config (spec P4 §G5 gate + §G3 auth);
 ///   `None`/`null` keeps Git support fully absent.
+/// - `provider_config` — non-secret provider profiles and routing JSON. Secrets
+///   are submitted separately through `SetProviderCredential`.
 /// - `mobile_linux` — optional Android mobile-linux config. When selected, the
 ///   phase-1 build wires a capability/status bridge and a blocked/unavailable
 ///   runtime stub; it does NOT link GPL runtime code.
-///
 /// On non-Android hosts this returns [`MobileEngineError::PlatformUnavailable`]
 /// (the `AndroidPlatform` is only linked under `cfg(target_os = "android")`).
 #[cfg(feature = "uniffi")]
@@ -3011,10 +3043,14 @@ pub fn build_android_engine(
     secure_storage: Option<Box<dyn AndroidSecureStorage>>,
 ) -> Result<Arc<MobileEngineHandle>, MobileEngineError> {
     build_android_engine_with_mobile_linux(
-        api_base,
-        api_key,
-        model,
-        app_files_root,
+        AndroidEngineLaunchConfigFfi {
+            api_base,
+            api_key,
+            model,
+            app_files_root,
+            provider_config: None,
+            mobile_linux: None,
+        },
         listener,
         stt,
         tts,
@@ -3026,7 +3062,6 @@ pub fn build_android_engine(
         permissions,
         shell,
         git,
-        None,
         git_credential_provider,
         secure_storage,
     )
@@ -3037,10 +3072,7 @@ pub fn build_android_engine(
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_lines)]
 pub fn build_android_engine_with_mobile_linux(
-    api_base: String,
-    api_key: String,
-    model: String,
-    app_files_root: String,
+    config: AndroidEngineLaunchConfigFfi,
     listener: Box<dyn AndroidEventListener>,
     stt: Box<dyn AndroidStt>,
     tts: Box<dyn AndroidTts>,
@@ -3052,10 +3084,17 @@ pub fn build_android_engine_with_mobile_linux(
     permissions: Box<dyn AndroidPermissionSink>,
     shell: Option<AndroidShellConfigFfi>,
     git: Option<AndroidGitConfigFfi>,
-    mobile_linux: Option<AndroidMobileLinuxConfigFfi>,
     git_credential_provider: Option<Box<dyn AndroidGitCredentialProvider>>,
     secure_storage: Option<Box<dyn AndroidSecureStorage>>,
 ) -> Result<Arc<MobileEngineHandle>, MobileEngineError> {
+    let AndroidEngineLaunchConfigFfi {
+        api_base,
+        api_key,
+        model,
+        app_files_root,
+        provider_config,
+        mobile_linux,
+    } = config;
     let listener: Arc<dyn ClientEventListener> =
         Arc::new(AndroidListenerBridge { inner: listener });
     #[cfg(target_os = "android")]
@@ -3081,6 +3120,14 @@ pub fn build_android_engine_with_mobile_linux(
         cfg.api_key = api_key;
         if !model.is_empty() {
             cfg.default_model = model;
+        }
+        if let Some(provider_config) = provider_config {
+            let (profiles, routing) = engine_mobile::parse_mobile_provider_config_json(
+                &provider_config.provider_profiles_json,
+                provider_config.routing_json.as_deref(),
+            )?;
+            cfg.provider_profiles = profiles;
+            cfg.routing = routing;
         }
         // P5b-T7: bundled-shell bootstrap MUST run BEFORE `shell_cfg` is built —
         // `shell_cfg` is moved into `AndroidPlatformInputs.shell` (so `prepare`
@@ -3338,6 +3385,7 @@ pub fn build_android_engine_with_mobile_linux(
             permissions,
             shell,
             git,
+            provider_config,
             mobile_linux,
             git_credential_provider,
             secure_storage,

@@ -43,9 +43,9 @@ import org.junit.runner.RunWith
  *   * `submit(ClientCommand.SendPrompt(...))` returns once the turn is queued —
  *     per the binding contract a turn failure is NOT thrown from `submit`; it is
  *     spawned on the engine's runtime and streams to the listener.
- *   * the keyless turn then resolves to a TERMINAL `ClientEvent` — either an
- *     `Error` (the model call fails with no key, the expected keyless outcome) or,
- *     defensively, a clean `TurnEnded`. We assert a terminal arrived, NOT which.
+ *   * the keyless turn uses the production empty-provider allowlist and resolves
+ *     locally to a TERMINAL `ClientEvent`, without depending on external network
+ *     timing. We assert a terminal arrived, not its concrete terminal type.
  *
  * Hermetic: the engine roots its filesystem under the instrumentation TARGET
  * context's private `filesDir` (the app under test, on the device sandbox); no
@@ -74,6 +74,7 @@ class EngineRoundtripTest {
      */
     private fun buildEngineKeyless(
         model: String,
+        routingJson: String? = null,
         onEvent: suspend (ClientEvent) -> Unit,
     ): MobileEngineHandle? {
         val targetContext = InstrumentationRegistry.getInstrumentation().targetContext
@@ -82,6 +83,7 @@ class EngineRoundtripTest {
             apiBase = System.getenv("ANTHROPIC_BASE_URL") ?: "https://api.anthropic.com",
             apiKey = System.getenv("ANTHROPIC_API_KEY") ?: "",
             model = model,
+            routingJson = routingJson,
             onEvent = onEvent,
         )
     }
@@ -99,9 +101,9 @@ class EngineRoundtripTest {
      * UniFFI callback within a generous timeout.
      *
      * This single test exercises every hop of the Compose→UniFFI→engine→listener
-     * path without a network success and without a secret. Keyless, the turn is
-     * expected to surface a terminal `Error` (the model call fails with no key);
-     * we accept a clean `TurnEnded` too and assert only that A terminal arrived.
+     * path without network access or a secret. With no enabled provider, the turn
+     * is expected to surface a terminal `Error`; we also accept a clean
+     * `TurnEnded` and assert only that a terminal arrived.
      */
     @Test
     fun keylessSendPromptDeliversTerminalEvent() {
@@ -115,6 +117,10 @@ class EngineRoundtripTest {
         // HANDSHAKE / engine-build: must succeed even with NO api key.
         val handle = buildEngineKeyless(
             model = "claude-sonnet-4-20250514",
+            // A fresh production install has no enabled provider rows. Exercise
+            // that fail-closed state explicitly so this handshake test is
+            // hermetic and never waits on an unauthenticated network request.
+            routingJson = """{"mobileEnabledProfiles":[]}""",
             onEvent = { event ->
                 received.add(event)
                 if (event.isTerminal()) terminal.trySend(event)
@@ -139,9 +145,7 @@ class EngineRoundtripTest {
                 ),
             )
             // Wait for the streamed terminal event to reach the listener over the
-            // UniFFI callback. Generous timeout: the engine spins up its runtime
-            // and the keyless turn round-trips to the (rejecting) model endpoint
-            // (or fails to connect) before terminating.
+            // UniFFI callback. The empty provider catalog must fail locally.
             withTimeout(60_000) { terminal.receive() }
         }
 

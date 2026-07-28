@@ -5,7 +5,6 @@ import com.lingxi.code.bindings.ErrorKindDto
 import com.lingxi.code.model.EngineModelCatalog
 import com.lingxi.code.model.EngineModelState
 import com.lingxi.code.model.Message
-import com.lingxi.code.model.MockData
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
@@ -155,11 +154,10 @@ class ModelStateTest {
     }
 
     @Test
-    fun emptyCatalog_keepsMockModels_asTheUiFallback() {
+    fun emptyCatalog_staysExplicitlyPending_withoutFakeModels() {
         val vm = ChatViewModel(FakeModelSource(MutableStateFlow(EngineModelState())))
-        // No engine catalog → the picker still shows the branded mock list.
-        assertEquals(MockData.models, vm.state.value.availableModels)
-        assertEquals(MockData.models.first(), vm.state.value.model)
+        assertTrue(vm.state.value.availableModels.isEmpty())
+        assertEquals(EngineModelCatalog.pending, vm.state.value.model)
     }
 
     @Test

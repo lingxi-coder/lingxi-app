@@ -30,6 +30,8 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -43,7 +45,6 @@ import com.lingxi.code.components.LXIcon
 import com.lingxi.code.components.LXIconName
 import com.lingxi.code.components.UiTags
 import com.lingxi.code.components.tint
-import com.lingxi.code.model.MockData
 import com.lingxi.code.model.ModelOption
 import com.lingxi.code.theme.LingXiTheme
 import com.lingxi.code.voice.voiceHold
@@ -71,8 +72,8 @@ fun Composer(
     onModelChange: (ModelOption) -> Unit,
     onSend: () -> Unit,
     modifier: Modifier = Modifier,
-    /** The catalog the model chip's dropdown shows — engine ids, or the mock list. */
-    availableModels: List<ModelOption> = MockData.models,
+    /** The real engine catalog the model chip's dropdown shows. */
+    availableModels: List<ModelOption> = emptyList(),
     onMicClick: () -> Unit = {},
     onMicHoldStart: () -> Unit = {},
     onMicHoldRelease: () -> Unit = {},
@@ -81,6 +82,8 @@ fun Composer(
     onRemoveAttachment: () -> Unit = {},
     /** True while a turn streams — the trailing action becomes a Stop button. */
     isStreaming: Boolean = false,
+    /** False until the visible engine session has been confirmed. */
+    enabled: Boolean = true,
     /** Fired by the Stop button to cancel the in-flight turn. */
     onStop: () -> Unit = {},
 ) {
@@ -122,6 +125,7 @@ fun Composer(
                 BasicTextField(
                     value = text,
                     onValueChange = onTextChange,
+                    enabled = enabled,
                     textStyle = LocalTextStyle.current.merge(
                         TextStyle(color = t.text, fontSize = 15.5f.sp),
                     ),
@@ -130,7 +134,7 @@ fun Composer(
                     keyboardActions = androidx.compose.foundation.text.KeyboardActions(
                         // Don't start a second turn from the IME Send key while one
                         // is already streaming (the VM also guards this).
-                        onSend = { if (!isStreaming) onSend() },
+                        onSend = { if (enabled && !isStreaming) onSend() },
                     ),
                     keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
                         imeAction = ImeAction.Send,
@@ -149,7 +153,7 @@ fun Composer(
                 // `traits::CameraControl`; the result surfaces as the attachment
                 // chip above (mirrors the mic → transcript surfacing).
                 IconHit(
-                    onClick = onCameraClick,
+                    onClick = { if (enabled) onCameraClick() },
                     modifier = Modifier.testTag(UiTags.COMPOSER_CAMERA),
                 ) {
                     LXIcon(name = LXIconName.Paperclip, size = 18.dp, color = t.text3, stroke = 1.8f, contentDescription = "拍照")
@@ -183,19 +187,28 @@ fun Composer(
                             .size(34.dp)
                             .clip(RoundedCornerShape(10.dp))
                             .background(t.accent)
-                            .clickable(onClick = onSend)
+                            .clickable(enabled = enabled, onClick = onSend)
                             .testTag(UiTags.COMPOSER_SEND),
                         contentAlignment = Alignment.Center,
                     ) {
                         LXIcon(name = LXIconName.ArrowUp, size = 16.dp, color = Color.White, contentDescription = "发送")
                     }
                     // Idle, empty: the mic (voice-hold) affordance.
-                    else -> IconHit(
-                        onClick = onMicClick,
-                        modifier = Modifier.voiceHold(
-                            onStart = onMicHoldStart,
-                            onRelease = onMicHoldRelease,
-                        ),
+                    else -> Box(
+                        modifier = Modifier
+                            .size(34.dp)
+                            .voiceHold(
+                                onTap = { if (enabled) onMicClick() },
+                                onStart = { if (enabled) onMicHoldStart() },
+                                onRelease = { if (enabled) onMicHoldRelease() },
+                            )
+                            .semantics {
+                                onClick(label = "打开语音模式") {
+                                    if (enabled) onMicClick()
+                                    enabled
+                                }
+                            },
+                        contentAlignment = Alignment.Center,
                     ) {
                         LXIcon(name = LXIconName.Mic, size = 18.dp, color = t.text2, stroke = 1.8f, contentDescription = "按住说话")
                     }

@@ -46,7 +46,8 @@ mod skill_loader;
 #[cfg(feature = "uniffi")]
 pub use host::{
     build_mobile, build_mobile_engine, build_mobile_engine_inner, build_mobile_inner,
-    MobileBuildError, MobileConfig, MobileEngineError, MobileEngineHandle, MobileRuntime,
+    parse_mobile_provider_config_json, MobileBuildError, MobileConfig, MobileEngineError,
+    MobileEngineHandle, MobileRuntime,
 };
 
 // F3-06: the host-only walking-skeleton support — a portable fake `Platform`

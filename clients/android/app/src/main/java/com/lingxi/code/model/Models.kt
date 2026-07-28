@@ -198,9 +198,9 @@ object MockData {
  * picker's [ModelOption] rows, attaching a friendly display name without ever
  * losing the wire id (the id is what `SetModel` sends).
  *
- * The empty state ([available] empty) means "the engine hasn't reported its
- * catalog yet (or we're in mock mode)" — the UI keeps showing [MockData.models]
- * until a real `ModelList` arrives.
+ * The empty state ([available] empty) means the engine has not reported its
+ * catalog yet. Production UI renders [EngineModelCatalog.pending] instead of a
+ * fabricated model list.
  */
 data class EngineModelState(
     val available: List<String> = emptyList(),
@@ -216,6 +216,14 @@ data class EngineModelState(
  * so it is unit-testable on the plain JVM.
  */
 object EngineModelCatalog {
+
+    val pending: ModelOption = ModelOption(
+        id = "",
+        name = "加载模型…",
+        desc = "等待移动端引擎返回真实模型目录",
+        tag = "",
+        color = Color(red = 0.5728f, green = 0.6177f, blue = 0.7466f),
+    )
 
     // A small, deterministic accent palette (reusing the brand colors the mock
     // catalog already uses) so each picker row gets a stable dot color keyed by
@@ -254,7 +262,7 @@ object EngineModelCatalog {
      * Build the picker rows from the engine's REAL [ids]. Each [ModelOption.id]
      * is the verbatim wire id (what `SetModel` sends); the name is a friendly
      * label and the dot color is keyed by position. Returns an empty list for an
-     * empty catalog (the caller falls back to [MockData.models]).
+     * empty catalog.
      */
     fun options(ids: List<String>): List<ModelOption> =
         ids.mapIndexed { i, id ->

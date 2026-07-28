@@ -60,6 +60,16 @@
         android:name="android.hardware.camera"
         android:required="false" />
 
+    <!-- Android 11+ package visibility: SpeechRecognizer checks for an
+         installed RecognitionService before opening a realtime session. This
+         intent query makes the system-selected service visible without naming
+         or granting access to any vendor package. -->
+    <queries>
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
+    </queries>
+
     <application
         android:allowBackup="true"
         android:label="@string/app_name"

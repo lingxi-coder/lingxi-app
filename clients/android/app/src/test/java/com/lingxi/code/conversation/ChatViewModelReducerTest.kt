@@ -2,17 +2,21 @@ package com.lingxi.code.conversation
 
 import androidx.lifecycle.SavedStateHandle
 import com.lingxi.code.model.Message
-import com.lingxi.code.model.MockData
 import com.lingxi.code.model.Role
 import com.lingxi.code.model.SessionRef
+import com.lingxi.code.model.SessionRow
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.After
@@ -64,6 +68,40 @@ class ChatViewModelReducerTest {
     }
 
     /**
+     * Records session-control ordering and lets a test hold engine cancellation
+     * open. Session switches must not submit Resume/New until this gate opens.
+     */
+    private class SessionControlSource(
+        private val cancelGate: CompletableDeferred<Unit> = CompletableDeferred(Unit),
+        private val resumeFailure: Throwable? = null,
+    ) : ConversationSource {
+        val operations = mutableListOf<String>()
+        val active = MutableStateFlow<ActivatedSession?>(null)
+        private val never = MutableSharedFlow<ReplyEvent>()
+        var submitCount = 0
+
+        override fun submit(text: String): Flow<ReplyEvent> {
+            submitCount++
+            return never.asSharedFlow()
+        }
+        override val activeSessionState = active.asStateFlow()
+
+        override suspend fun cancel() {
+            operations += "cancel"
+            cancelGate.await()
+        }
+
+        override suspend fun resumeSession(uuid: String) {
+            operations += "resume:$uuid"
+            resumeFailure?.let { throw it }
+        }
+
+        override suspend fun newSession() {
+            operations += "new"
+        }
+    }
+
+    /**
      * A source whose reply stream is a hot [MutableSharedFlow] the test drives by
      * hand — so a turn can be left mid-stream, the session switched, and a STALE
      * event then pushed to prove the orphaned-turn guard drops it.
@@ -72,10 +110,30 @@ class ChatViewModelReducerTest {
         private val initial: List<Message> = emptyList(),
     ) : ConversationSource {
         val stream = MutableSharedFlow<ReplyEvent>(extraBufferCapacity = 16)
+        val active = MutableStateFlow<ActivatedSession?>(null)
         var cancelCount = 0
         override fun initialMessages(): List<Message> = initial
         override fun submit(text: String): Flow<ReplyEvent> = stream.asSharedFlow()
+        override val activeSessionState = active.asStateFlow()
         override suspend fun cancel() { cancelCount++ }
+        override suspend fun resumeSession(uuid: String) {
+            active.value = ActivatedSession(uuid, emptyList(), SessionActivationKind.Resumed)
+        }
+        override suspend fun newSession() {
+            active.value = ActivatedSession("new-engine", emptyList(), SessionActivationKind.Started)
+        }
+    }
+
+    private class CloseTrackingSource : ConversationSource {
+        var closeCount = 0
+        var newSessionCount = 0
+        override fun submit(text: String): Flow<ReplyEvent> = emptyFlow()
+        override suspend fun newSession() {
+            newSessionCount++
+        }
+        override fun close() {
+            closeCount++
+        }
     }
 
     private fun newVm() = ChatViewModel(StubSource())
@@ -355,50 +413,129 @@ class ChatViewModelReducerTest {
         assertFalse(vm.state.value.streaming)
     }
 
-    // --- TranscriptCodec round-trip --------------------------------------
-
     @Test
-    fun transcriptCodec_roundTripsMessages_preservingRoleTagIdText() {
-        val original = listOf(
-            Message(role = Role.User, text = "hello", id = "u1"),
-            Message(role = Role.Ai, text = "multi\nline\nreply", tag = "思考了 8 秒", id = "a1"),
-            Message(role = Role.User, text = "", id = "u2"), // empty text edge case
+    fun resumeSession_cancelsEngineTurnBeforeSubmittingResume() = runTest(dispatcher) {
+        val gate = CompletableDeferred<Unit>()
+        val src = SessionControlSource(cancelGate = gate)
+        val vm = ChatViewModel(src)
+        vm.send("still running")
+
+        vm.resumeSession(SessionRow("B", "会话 B", 1, "刚刚"))
+        runCurrent()
+
+        assertEquals(listOf("cancel"), src.operations)
+        assertTrue(vm.state.value.sessionTransitioning)
+        assertFalse(vm.state.value.sessionReady)
+
+        gate.complete(Unit)
+        runCurrent()
+
+        assertEquals(listOf("cancel", "resume:B"), src.operations)
+        assertTrue("resume remains gated until SessionResumed arrives", vm.state.value.sessionTransitioning)
+
+        src.active.value = ActivatedSession(
+            sessionId = "B",
+            transcript = listOf(Message(Role.User, "authoritative")),
+            kind = SessionActivationKind.Resumed,
         )
-        val decoded = TranscriptCodec.decode(TranscriptCodec.encode(original))
-        assertEquals(original, decoded)
+        runCurrent()
+
+        assertFalse(vm.state.value.sessionTransitioning)
+        assertTrue(vm.state.value.sessionReady)
+        assertEquals(listOf("authoritative"), vm.state.value.messages.map { it.text })
     }
 
     @Test
-    fun transcriptCodec_decodesNullAndEmptyToEmptyList() {
-        assertTrue(TranscriptCodec.decode(null).isEmpty())
-        assertTrue(TranscriptCodec.decode(emptyList()).isEmpty())
+    fun newChat_cancelsEngineTurnBeforeSubmittingNewSession() = runTest(dispatcher) {
+        val gate = CompletableDeferred<Unit>()
+        val src = SessionControlSource(cancelGate = gate)
+        val vm = ChatViewModel(src)
+        vm.send("still running")
+
+        vm.newChat()
+        runCurrent()
+        assertEquals(listOf("cancel"), src.operations)
+
+        gate.complete(Unit)
+        runCurrent()
+        assertEquals(listOf("cancel", "new"), src.operations)
+        assertFalse(vm.state.value.sessionReady)
+    }
+
+    @Test
+    fun resumeFailure_isVisibleAndKeepsComposerBlocked() = runTest(dispatcher) {
+        val src = SessionControlSource(resumeFailure = IllegalStateException("session file missing"))
+        val vm = ChatViewModel(src)
+
+        vm.resumeSession(SessionRow("missing", "丢失会话", 0, "刚刚"))
+        runCurrent()
+
+        assertFalse(vm.state.value.sessionTransitioning)
+        assertFalse(vm.state.value.sessionReady)
+        assertTrue(vm.state.value.error!!.message.contains("session file missing"))
+
+        vm.send("must not reach the wrong engine session")
+        assertEquals(0, src.submitCount)
+        assertTrue(vm.state.value.messages.isEmpty())
     }
 
     // --- SavedStateHandle persistence / restore --------------------------
 
     @Test
-    fun savedState_restoresTranscriptDraftAndSession() = runTest(dispatcher) {
+    fun savedState_resumesEngineBeforeShowingAuthoritativeTranscript() = runTest(dispatcher) {
+        val handle = SavedStateHandle(
+            mapOf(
+                "chat.session.id" to "s-keep",
+                "chat.session.title" to "保留会话",
+                // Compatibility fixture from an older build. It must be removed
+                // without decoding or displaying any of its cached messages.
+                "chat.transcript" to arrayListOf("legacy cached transcript"),
+                "chat.draft" to "half-typed",
+                "chat.isNew" to false,
+            ),
+        )
+        val src = SessionControlSource()
+        val vm = ChatViewModel(src, handle)
+        runCurrent()
+
+        assertEquals(listOf("resume:s-keep"), src.operations)
+        assertEquals("s-keep", vm.state.value.session.id)
+        assertTrue("cached transcript must not impersonate engine context", vm.state.value.messages.isEmpty())
+        assertTrue(vm.state.value.sessionTransitioning)
+        assertFalse(vm.state.value.sessionReady)
+        assertEquals("half-typed", vm.restoredDraft)
+        assertFalse("legacy transcript key is migrated away", handle.contains("chat.transcript"))
+
+        src.active.value = ActivatedSession(
+            sessionId = "s-keep",
+            transcript = listOf(
+                Message(Role.User, "engine question"),
+                Message(Role.Ai, "engine answer"),
+            ),
+            kind = SessionActivationKind.Resumed,
+        )
+        runCurrent()
+
+        assertTrue(vm.state.value.sessionReady)
+        assertFalse(vm.state.value.sessionTransitioning)
+        assertEquals(listOf("engine question", "engine answer"), vm.state.value.messages.map { it.text })
+    }
+
+    @Test
+    fun savedState_neverPersistsTranscript_evenAfterStreamingMessages() = runTest(dispatcher) {
         val handle = SavedStateHandle()
-        val src = EmittingSource(initial = emptyList())
+        val source = EmittingSource()
+        val vm = ChatViewModel(source, handle)
 
-        // First lifetime: stream a turn into a chosen session + type a draft.
-        val vm1 = ChatViewModel(src, handle)
-        vm1.openSession(SessionRef(id = "s-keep", title = "保留会话"))
-        vm1.send("question")
-        src.stream.emit(ReplyEvent.Delta("answer"))
-        src.stream.emit(ReplyEvent.End)
-        vm1.onDraftChanged("half-typed")
+        vm.send("question")
+        source.stream.emit(ReplyEvent.Delta("answer"))
+        source.stream.emit(ReplyEvent.End)
+        runCurrent()
 
-        // Second lifetime (process death): a new ViewModel restores from the same
-        // handle the OS would have persisted.
-        val src2 = EmittingSource(initial = listOf(Message(role = Role.User, text = "SEED")))
-        val vm2 = ChatViewModel(src2, handle)
-        val s = vm2.state.value
-        assertEquals("s-keep", s.session.id)
-        assertEquals("保留会话", s.session.title)
-        // Restored transcript wins over the new source's initialMessages() seed.
-        assertEquals(listOf("question", "answer"), s.messages.map { it.text })
-        assertEquals("half-typed", vm2.restoredDraft)
+        assertEquals(listOf("question", "answer"), vm.state.value.messages.map { it.text })
+        assertFalse("messages must stay out of Android's saved-state Bundle", handle.contains("chat.transcript"))
+        assertEquals("new", handle.get<String>("chat.session.id"))
+        assertEquals("新对话", handle.get<String>("chat.session.title"))
     }
 
     @Test
@@ -413,10 +550,68 @@ class ChatViewModelReducerTest {
 
     @Test
     fun noSavedState_behavesAsBefore_restoredDraftEmpty() {
-        // The reducer-test default (null handle) must keep the prior behavior:
-        // initialMessages seed the transcript, restoredDraft is blank.
+        // The reducer-test default (null handle) still starts from an explicit
+        // empty "new chat" state with a blank restored draft.
         val vm = ChatViewModel(StubSource())
         assertEquals("", vm.restoredDraft)
-        assertEquals(MockData.allSessions.first(), vm.state.value.session)
+        assertEquals(SessionRef(id = "new", title = "新对话"), vm.state.value.session)
+        assertTrue(vm.state.value.isNew)
+    }
+
+    @Test
+    fun sourceGeneration_survivesRecomposition_andReplacesOnlyOnReconnect() = runTest(dispatcher) {
+        val original = CloseTrackingSource()
+        val replacement = CloseTrackingSource()
+        val vm = ChatViewModel(source = original, sourceGeneration = 7)
+        var factoryCalls = 0
+
+        vm.ensureSource(7) {
+            factoryCalls++
+            replacement
+        }
+        assertEquals("rotation with the same token must retain the live source", 0, factoryCalls)
+        assertEquals(0, original.closeCount)
+
+        vm.ensureSource(8) {
+            factoryCalls++
+            replacement
+        }
+        runCurrent()
+
+        assertEquals(1, factoryCalls)
+        assertEquals("reconnect must release the superseded native source", 1, original.closeCount)
+        assertEquals("replacement must establish a real engine session", 1, replacement.newSessionCount)
+    }
+
+    @Test
+    fun sourceGeneration_ignoresRestoredOlderToken() = runTest(dispatcher) {
+        val original = CloseTrackingSource()
+        val vm = ChatViewModel(source = original, sourceGeneration = 7)
+        var factoryCalls = 0
+
+        vm.ensureSource(0) {
+            factoryCalls++
+            CloseTrackingSource()
+        }
+        runCurrent()
+
+        assertEquals(0, factoryCalls)
+        assertEquals(0, original.closeCount)
+    }
+
+    @Test
+    fun reconnectFailure_keepsWorkingSource_andSurfacesError() = runTest(dispatcher) {
+        val original = CloseTrackingSource()
+        val vm = ChatViewModel(source = original, sourceGeneration = 1)
+
+        vm.ensureSource(2) {
+            UnavailableConversationSource("native engine failed to boot")
+        }
+        runCurrent()
+
+        assertEquals("failed replacement must not destroy the current engine", 0, original.closeCount)
+        assertTrue(vm.state.value.sessionReady)
+        assertFalse(vm.state.value.sessionTransitioning)
+        assertTrue(vm.state.value.error!!.message.contains("failed to boot"))
     }
 }

@@ -18,6 +18,7 @@ import java.util.UUID
 
 /** Connection state of a provider / MCP server. */
 enum class ConnStatus(val label: String) {
+    Configured("已配置"),
     Connected("已连接"),
     Idle("未验证"),
     Testing("检测中…"),
@@ -25,6 +26,7 @@ enum class ConnStatus(val label: String) {
 
     /** Dot color for a given palette (idle resolves to text4). */
     fun dot(t: Palette): Color = when (this) {
+        Configured -> t.accent
         Connected -> t.statusConnected
         Idle -> t.text4
         Testing -> t.statusTesting
@@ -56,6 +58,7 @@ data class GenericProvider(
     val status: ConnStatus,
     val isDefault: Boolean = false,
     val enabled: Boolean,
+    val credentialConfigured: Boolean = false,
 )
 
 data class Skill(

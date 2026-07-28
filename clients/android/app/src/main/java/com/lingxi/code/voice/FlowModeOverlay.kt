@@ -326,6 +326,7 @@ private fun FlowModeContent(
     var didSend by remember { mutableStateOf(false) }
     var typing by remember { mutableStateOf(false) }
     var draft by remember { mutableStateOf("") }
+    var listenGeneration by remember { mutableLongStateOf(0L) }
     val name = assistantName.ifBlank { "灵犀" }
     // Speak the reply with the OFFLINE sherpa TTS when its pack is downloaded,
     // else the system TextToSpeech.
@@ -340,8 +341,10 @@ private fun FlowModeContent(
 
     // Start a one-shot listen → send → (engine streams the reply) cycle.
     fun listen() {
+        val generation = ++listenGeneration
         onCancel(); stopSpeak(); userCaption = ""; didSend = false; phase = OrbPhase.Listening
         onListen { text ->
+            if (generation != listenGeneration) return@onListen
             if (!text.isNullOrBlank()) {
                 userCaption = text; didSend = true; phase = OrbPhase.Thinking; onSend(text)
             } else if (phase == OrbPhase.Listening) {
@@ -352,12 +355,21 @@ private fun FlowModeContent(
     fun submitTyped(text: String) {
         val t = text.trim()
         if (t.isEmpty()) return
+        listenGeneration++
+        cancelActiveOrbVoiceSession()
         userCaption = t; didSend = true; phase = OrbPhase.Thinking; onSend(t)
     }
 
     // Auto-listen on open; cancel the turn + stop TTS on close.
     LaunchedEffect(Unit) { listen() }
-    DisposableEffect(Unit) { onDispose { onCancel(); stopSpeak() } }
+    DisposableEffect(Unit) {
+        onDispose {
+            listenGeneration++
+            cancelActiveOrbVoiceSession()
+            onCancel()
+            stopSpeak()
+        }
+    }
     // First assistant delta flips thinking → speaking.
     LaunchedEffect(assistantText) {
         if (phase == OrbPhase.Thinking && assistantText.isNotEmpty()) phase = OrbPhase.Speaking
@@ -402,7 +414,7 @@ private fun FlowModeContent(
                 ),
             ),
     ) {
-        // The orb — tap to interrupt / re-listen.
+        // The orb — stop the active utterance, or interrupt/re-listen otherwise.
         OrbCanvas(
             phase = phase,
             cyFrac = 0.40f,
@@ -411,7 +423,13 @@ private fun FlowModeContent(
                 .clickable(
                     interactionSource = remember { MutableInteractionSource() },
                     indication = null,
-                ) { listen() },
+                ) {
+                    if (phase == OrbPhase.Listening) {
+                        stopActiveOrbVoiceSession()
+                    } else {
+                        listen()
+                    }
+                },
         )
 
         // top bar
@@ -423,7 +441,11 @@ private fun FlowModeContent(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            CircleGlassButton(LXIconName.Chevron, "退出心流", onClick = onClose)
+            CircleGlassButton(LXIconName.Chevron, "退出心流") {
+                listenGeneration++
+                cancelActiveOrbVoiceSession()
+                onClose()
+            }
             if (inputDialog) {
                 CircleGlassButton(LXIconName.Message, "文字输入") { typing = true }
             } else {

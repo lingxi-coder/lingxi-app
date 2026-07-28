@@ -127,9 +127,23 @@ class ClientEventMapperTest {
     // --- ignored events ---------------------------------------------------
 
     @Test
-    fun messageComplete_isIgnored() {
+    fun messageComplete_withMessage_mapsToCompleted() {
+        val r = clientEventToReply(
+            ClientEvent.MessageComplete(
+                stopReason = "end_turn",
+                message = MessageDto(role = "assistant", blocks = listOf(MessageBlockDto.Text("done"))),
+            ),
+        )
+        assertTrue(r is ReplyEvent.Completed)
+        val completed = r as ReplyEvent.Completed
+        assertEquals(Role.Ai, completed.message.role)
+        assertEquals("done", completed.message.text)
+    }
+
+    @Test
+    fun messageComplete_withoutMessage_mapsToEnd() {
         val r = clientEventToReply(ClientEvent.MessageComplete(stopReason = "end_turn", message = null))
-        assertNull(r)
+        assertEquals(ReplyEvent.End, r)
     }
 
     @Test
@@ -149,8 +163,8 @@ class ClientEventMapperTest {
 
     @Test
     fun sessionResumed_isIgnoredByPerTurnMapper_ridesOutOfBandPath() {
-        // SessionResumed carries the restored transcript on the SEPARATE
-        // out-of-band path (restoredSessionFrom → resumedSession), NOT the
+        // SessionResumed carries the restored transcript on the separate
+        // out-of-band path (sessionActivationFrom → activeSessionState), NOT the
         // per-turn reply stream — so the reply mapper drops it.
         val r = clientEventToReply(
             ClientEvent.SessionResumed(

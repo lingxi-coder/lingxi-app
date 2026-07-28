@@ -85,6 +85,7 @@ traits = { path = "../../traits" }
 protocol = { path = "../../protocol" }
 branding.workspace = true
 thiserror.workspace = true
+sha2 = "0.10"
 
 # F3-04: optional UniFFI dep — pulled under the (default) `uniffi` feature so the
 # re-exported shared-host scaffolding lands in this crate's library. Pinned

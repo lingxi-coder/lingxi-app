@@ -33,12 +33,14 @@ pub use process::AndroidMinijailProcessRunner;
 pub use receipt::AndroidSandboxReceipt;
 pub use sandbox::AndroidMinijailSandbox;
 
+use platform_common::{MobileLinuxProcessRunner, MobileLinuxSandbox};
 use std::path::PathBuf;
 use std::sync::Arc;
 use traits::{
-    CameraControl, Clipboard, Clock, FileSystem, HttpTransport, NotificationService, Platform,
-    ProcessRunner, Sandbox, SecureStorage, SharingService, SpeechToText, TextToSpeech,
-    VoiceRecorder, WorktreeManager,
+    CameraControl, Clipboard, Clock, FileSystem, HttpTransport, MobileLinuxRuntime,
+    MobileLinuxRuntimeMode, MountPurpose, MountSpec, NotificationService, Platform, ProcessRunner,
+    Sandbox, SandboxBackend, SandboxError, SecureStorage, SharingService, SpeechToText,
+    TextToSpeech, UnavailableMobileLinuxRuntime, VoiceRecorder, WorktreeManager,
 };
 
 /// Construction inputs for [`AndroidPlatform`].
@@ -71,6 +73,16 @@ pub struct AndroidPlatformInputs {
     /// `/login` off (it cannot persist tokens). Inject a real store to enable
     /// subscription login.
     pub secure_storage: Option<Arc<dyn SecureStorage>>,
+    /// Mobile Linux runtime bridge (Android PRoot path). `None` keeps the
+    /// legacy shell runner in place.
+    pub mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
+    /// Host workspace root exposed to the mobile-linux guest. Defaults to
+    /// `<app_files_root>/workspaces/default` when unset.
+    pub mobile_linux_workspace_root: Option<PathBuf>,
+    /// Stable workspace identifier for the guest path `/workspace/<id>`.
+    pub mobile_linux_workspace_id: Option<String>,
+    /// Managed rootfs directory reserved for the runtime implementation.
+    pub mobile_linux_managed_root: Option<PathBuf>,
     /// Android shell/sandbox configuration (spec r3). `None` keeps shell
     /// support fully absent (posix-minimal stubs stay wired).
     pub shell: Option<AndroidShellConfig>,
@@ -92,6 +104,8 @@ pub struct AndroidPlatform {
     notifications: Option<Arc<dyn NotificationService>>,
     clipboard: Option<Arc<dyn Clipboard>>,
     secure_storage: Option<Arc<dyn SecureStorage>>,
+    mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
+    mobile_linux_mode: MobileLinuxRuntimeMode,
     /// The shared capability cache when shell support is wired (`None` for the
     /// posix-minimal-stub configuration). Held so the eager probe (engine-mobile)
     /// and the runner can read/populate the SAME instance the sandbox reads.
@@ -102,11 +116,88 @@ impl AndroidPlatform {
     /// Assemble an [`AndroidPlatform`] from native inputs.
     #[must_use]
     pub fn new(inputs: AndroidPlatformInputs) -> Self {
+        Self::new_with_mode(inputs, MobileLinuxRuntimeMode::Legacy)
+    }
+
+    /// Assemble an [`AndroidPlatform`] while explicitly selecting the shared
+    /// mobile Linux runtime mode. The legacy constructor remains unchanged for
+    /// current production callers.
+    #[must_use]
+    pub fn new_with_mode(
+        inputs: AndroidPlatformInputs,
+        mobile_linux_mode: MobileLinuxRuntimeMode,
+    ) -> Self {
         use platform_posix_minimal::{
             PosixClock, PosixFileSystem, PosixProcess, PosixSandbox, PosixWorktree,
         };
-        let (process, sandbox, shell_caps) = match inputs.shell {
-            Some(shell_cfg) => {
+        let default_workspace_root = inputs.app_files_root.join("workspaces").join("default");
+        let workspace_root = inputs
+            .mobile_linux_workspace_root
+            .clone()
+            .or_else(|| {
+                inputs
+                    .shell
+                    .as_ref()
+                    .map(|cfg| cfg.shell_workspace_root.clone())
+            })
+            .unwrap_or(default_workspace_root);
+        let workspace_id = inputs
+            .mobile_linux_workspace_id
+            .clone()
+            .unwrap_or_else(|| "default".to_string());
+        let workspace_valid =
+            workspace_root_is_allowed(&workspace_root, inputs.mobile_linux_managed_root.as_deref());
+        let mobile_linux_runtime = match (mobile_linux_mode, inputs.mobile_linux.clone()) {
+            (MobileLinuxRuntimeMode::MobileLinux, Some(runtime)) => Some(runtime),
+            (MobileLinuxRuntimeMode::MobileLinux, None) => {
+                Some(Arc::new(UnavailableMobileLinuxRuntime::unavailable(
+                    SandboxBackend::AndroidProot,
+                    MobileLinuxRuntimeMode::MobileLinux,
+                    "android",
+                    "unknown",
+                    "mobile-linux mode selected without a wired Android runtime",
+                )) as Arc<dyn MobileLinuxRuntime>)
+            }
+            (MobileLinuxRuntimeMode::Legacy, runtime) => runtime,
+        };
+        let (process, sandbox, shell_caps, effective_mobile_linux_runtime) = match (
+            mobile_linux_mode,
+            mobile_linux_runtime.clone(),
+            inputs.shell,
+        ) {
+            (MobileLinuxRuntimeMode::MobileLinux, Some(runtime), _) => {
+                let sandbox_result = if workspace_valid {
+                    MobileLinuxSandbox::new(
+                        runtime.clone(),
+                        default_mobile_linux_mounts(&workspace_root, &workspace_id),
+                    )
+                } else {
+                    Err(SandboxError::Unavailable(
+                        "invalid mobile-linux workspace mount configuration".to_string(),
+                    ))
+                };
+                let (runtime, sandbox): (Arc<dyn MobileLinuxRuntime>, Arc<dyn Sandbox>) =
+                    match sandbox_result {
+                        Ok(sandbox) => (runtime, Arc::new(sandbox)),
+                        Err(error) => {
+                            let unavailable: Arc<dyn MobileLinuxRuntime> =
+                                Arc::new(UnavailableMobileLinuxRuntime::unavailable(
+                                    SandboxBackend::AndroidProot,
+                                    MobileLinuxRuntimeMode::MobileLinux,
+                                    "android",
+                                    "unknown",
+                                    format!("invalid mobile-linux workspace mount: {error}"),
+                                ));
+                            let sandbox = MobileLinuxSandbox::new(unavailable.clone(), Vec::new())
+                                .expect("empty mobile-linux mount set must be valid");
+                            (unavailable, Arc::new(sandbox))
+                        }
+                    };
+                let process: Arc<dyn ProcessRunner> =
+                    Arc::new(MobileLinuxProcessRunner::new(runtime.clone()));
+                (process, sandbox, None, Some(runtime))
+            }
+            (_, _, Some(shell_cfg)) => {
                 let caps = Arc::new(crate::capabilities::CapabilityCache::new());
                 let process: Arc<dyn ProcessRunner> = Arc::new(
                     crate::process::AndroidMinijailProcessRunner::new(caps.clone()),
@@ -114,12 +205,13 @@ impl AndroidPlatform {
                 let sandbox: Arc<dyn Sandbox> = Arc::new(
                     crate::sandbox::AndroidMinijailSandbox::new(shell_cfg, caps.clone()),
                 );
-                (process, sandbox, Some(caps))
+                (process, sandbox, Some(caps), mobile_linux_runtime)
             }
-            None => (
+            (_, _, None) => (
                 Arc::new(PosixProcess::new()) as Arc<dyn ProcessRunner>,
                 Arc::new(PosixSandbox::new()) as Arc<dyn Sandbox>,
                 None,
+                mobile_linux_runtime,
             ),
         };
         Self {
@@ -137,6 +229,8 @@ impl AndroidPlatform {
             notifications: inputs.notifications,
             clipboard: inputs.clipboard,
             secure_storage: inputs.secure_storage,
+            mobile_linux: effective_mobile_linux_runtime,
+            mobile_linux_mode,
             shell_caps,
         }
     }
@@ -154,6 +248,58 @@ impl AndroidPlatform {
     ) -> Option<std::sync::Arc<crate::capabilities::CapabilityCache>> {
         self.shell_caps.clone()
     }
+
+    /// Selected mobile Linux runtime mode.
+    #[must_use]
+    pub fn mobile_linux_mode(&self) -> MobileLinuxRuntimeMode {
+        self.mobile_linux_mode
+    }
+}
+
+fn default_mobile_linux_mounts(
+    workspace_root: &std::path::Path,
+    workspace_id: &str,
+) -> Vec<MountSpec> {
+    let workspace_id = sanitize_workspace_id(workspace_id);
+    vec![MountSpec {
+        host_path: workspace_root.to_path_buf(),
+        guest_path: format!("/workspace/{workspace_id}"),
+        read_only: false,
+        purpose: MountPurpose::Workspace,
+    }]
+}
+
+fn sanitize_workspace_id(input: &str) -> String {
+    let filtered: String = input
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    if filtered.is_empty() {
+        "default".to_string()
+    } else {
+        filtered
+    }
+}
+
+fn workspace_root_is_allowed(
+    workspace_root: &std::path::Path,
+    managed_root: Option<&std::path::Path>,
+) -> bool {
+    let text = workspace_root.to_string_lossy().to_ascii_lowercase();
+    if text.contains("/.lingxi")
+        || text.contains("keystore")
+        || text.contains("credential")
+        || text.contains("secret")
+        || text.contains("token")
+    {
+        return false;
+    }
+    if let Some(managed_root) = managed_root {
+        if workspace_root.starts_with(managed_root) || managed_root.starts_with(workspace_root) {
+            return false;
+        }
+    }
+    true
 }
 
 impl Platform for AndroidPlatform {
@@ -199,6 +345,9 @@ impl Platform for AndroidPlatform {
     fn secure_storage(&self) -> Option<Arc<dyn SecureStorage>> {
         self.secure_storage.clone()
     }
+    fn mobile_linux(&self) -> Option<Arc<dyn MobileLinuxRuntime>> {
+        self.mobile_linux.clone()
+    }
     // computer_control() defaults to None.
 }
 
@@ -208,8 +357,8 @@ mod tests {
     use async_trait::async_trait;
     use traits::{
         CameraControl, CameraError, CapturePhotoOpts, CapturedImage, Platform, SandboxBackend,
-        ShareError, SharePayload, ShareResult, SharingService, VoiceError, VoiceRecorder,
-        VoiceRecording, VoiceRecordingOpts,
+        ShareError, SharePayload, ShareResult, SharingService, UnavailableMobileLinuxRuntime,
+        VoiceError, VoiceRecorder, VoiceRecording, VoiceRecordingOpts,
     };
 
     struct NoCam;
@@ -254,6 +403,10 @@ mod tests {
             notifications: None,
             clipboard: None,
             secure_storage: None,
+            mobile_linux: None,
+            mobile_linux_workspace_root: None,
+            mobile_linux_workspace_id: None,
+            mobile_linux_managed_root: None,
             shell,
         }
     }
@@ -315,5 +468,29 @@ mod tests {
     fn no_shell_platform_has_no_cache() {
         let p = AndroidPlatform::new(inputs(None));
         assert!(p.shell_capability_cache().is_none());
+    }
+
+    #[test]
+    fn explicit_mobile_linux_mode_and_runtime_are_retained() {
+        let runtime = Arc::new(UnavailableMobileLinuxRuntime::blocked(
+            SandboxBackend::AndroidProot,
+            MobileLinuxRuntimeMode::MobileLinux,
+            "android",
+            "arm64-v8a",
+            "license blocked",
+        ));
+        let mut android_inputs = inputs(Some(shell_cfg()));
+        android_inputs.mobile_linux = Some(runtime.clone());
+
+        let platform =
+            AndroidPlatform::new_with_mode(android_inputs, MobileLinuxRuntimeMode::MobileLinux);
+
+        assert_eq!(
+            platform.mobile_linux_mode(),
+            MobileLinuxRuntimeMode::MobileLinux
+        );
+        let rt = platform.mobile_linux().expect("runtime should be injected");
+        assert_eq!(rt.backend(), SandboxBackend::AndroidProot);
+        assert_eq!(rt.mode(), MobileLinuxRuntimeMode::MobileLinux);
     }
 }

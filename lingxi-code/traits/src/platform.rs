@@ -18,6 +18,7 @@ use crate::clock::Clock;
 use crate::computer_control::ComputerControl;
 use crate::filesystem::FileSystem;
 use crate::http::HttpTransport;
+use crate::mobile_linux::MobileLinuxRuntime;
 use crate::notification::NotificationService;
 use crate::process::ProcessRunner;
 use crate::sandbox::Sandbox;
@@ -85,6 +86,12 @@ pub trait Platform: Send + Sync {
     /// here so the engine's `CredentialManager` persists secrets to the OS vault
     /// instead of the plaintext fallback.
     fn secure_storage(&self) -> Option<Arc<dyn SecureStorage>> {
+        None
+    }
+    /// Mobile-only Linux userspace runtime (Android PRoot / iOS iSH bridge),
+    /// when the platform wires one. Desktop platforms keep the default `None`,
+    /// preserving the existing execution stack unchanged.
+    fn mobile_linux(&self) -> Option<Arc<dyn MobileLinuxRuntime>> {
         None
     }
 }

@@ -124,7 +124,7 @@ class DrawerSearchTest {
 
     @Test
     fun sessions_matchOnTitle_caseInsensitive() {
-        val out = filterSessions(sessions, "claude")
+        val out = filterSessions(sessions, "lingxi")
         assertEquals(listOf("u1"), out.map { it.uuid })
     }
 

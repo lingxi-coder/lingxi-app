@@ -32,6 +32,10 @@ targets:
       - framework: Frameworks/LingxiCodeFFI.xcframework
         embed: false
         link: true
+      # Native Rust dependencies reference the platform zlib/iconv supplied by
+      # the iOS SDK; static XCFrameworks cannot encode these transitive links.
+      - sdk: libz.tbd
+      - sdk: libiconv.tbd
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.code
@@ -66,6 +70,8 @@ targets:
       - framework: Frameworks/LingxiCodeFFI.xcframework
         embed: false
         link: true
+      - sdk: libz.tbd
+      - sdk: libiconv.tbd
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.code.tests

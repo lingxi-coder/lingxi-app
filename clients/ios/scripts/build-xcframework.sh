@@ -42,6 +42,13 @@ HOST_DYLIB="lib${LIB_STEM}.dylib"
 PROFILE="release"
 PROFILE_DIR="release"               # `--release` → target/<triple>/release
 
+# Keep Rust's linker target and every vendored C/C++ dependency on the same
+# minimum OS as the XcodeGen project. Without this, current Xcode compiles C
+# objects for the SDK default (for example iOS 26.x) while rustc links for its
+# historical iOS 10 default, which can introduce unavailable symbols such as
+# ___chkstk_darwin.
+export IPHONEOS_DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET:-17.0}"
+
 GEN_DIR="${IOS_DIR}/Generated"
 FRAMEWORKS_DIR="${IOS_DIR}/Frameworks"
 XCFRAMEWORK="${FRAMEWORKS_DIR}/LingxiCodeFFI.xcframework"
@@ -55,6 +62,7 @@ SIM_TARGETS=("aarch64-apple-ios-sim" "x86_64-apple-ios")
 # Use the Xcode-toolchain lipo (xcrun resolves it) — avoids a stray `lipo` on
 # PATH (e.g. anaconda) that does not understand Mach-O fat archives correctly.
 LIPO=(xcrun lipo)
+LIBTOOL=(xcrun libtool)
 
 log() { printf '\033[1;34m[build-xcframework]\033[0m %s\n' "$*"; }
 
@@ -64,6 +72,7 @@ log() { printf '\033[1;34m[build-xcframework]\033[0m %s\n' "$*"; }
 for tool in cargo rustc xcrun xcodebuild; do
   command -v "${tool}" >/dev/null 2>&1 || { echo "ERROR: required tool not found: ${tool}" >&2; exit 1; }
 done
+SIMULATOR_SDK="$(xcrun --sdk iphonesimulator --show-sdk-path)"
 
 # Resolve the toolchain cargo/rustc actually use here (the workspace pins one via
 # rust-toolchain.toml), and check the iOS std targets are installed FOR THAT
@@ -303,7 +312,7 @@ if ! grep -q 'uniffiEnsureInitialized() // M10-P4: register IosEventListener vta
   mv "${tmp}" "${IOSF}"
 fi
 
-SWIFT_COUNT="$(ls "${GEN_DIR}"/*.swift 2>/dev/null | wc -l | tr -d ' ')"
+SWIFT_COUNT="$(find "${GEN_DIR}" -maxdepth 1 -type f -name '*.swift' -print | wc -l | tr -d ' ')"
 [[ "${SWIFT_COUNT}" -gt 0 ]] || { echo "ERROR: no Swift bindings generated in ${GEN_DIR}" >&2; exit 1; }
 log "Swift bindings: ${SWIFT_COUNT} .swift file(s) + headers + module.modulemap (single-module deduped)"
 
@@ -312,24 +321,101 @@ log "Swift bindings: ${SWIFT_COUNT} .swift file(s) + headers + module.modulemap 
 # ---------------------------------------------------------------------------
 for t in "${DEVICE_TARGET}" "${SIM_TARGETS[@]}"; do
   log "Building staticlib (${PROFILE}) for ${t} …"
-  cargo build --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" --features uniffi \
-    --target "${t}" --"${PROFILE}"
+  if [[ "${t}" == "aarch64-apple-ios-sim" ]]; then
+    # rquickjs-sys 0.6 passes Rust's `*-ios-sim` triple directly to libclang,
+    # but Apple clang spells the same target `*-ios<version>-simulator`.
+    # A later --target argument wins, and the explicit SDK supplies libc
+    # headers to bindgen without changing Rust's target or the resulting slice.
+    simulator_bindgen_args="--target=arm64-apple-ios${IPHONEOS_DEPLOYMENT_TARGET}-simulator -isysroot ${SIMULATOR_SDK}"
+    BINDGEN_EXTRA_CLANG_ARGS="${BINDGEN_EXTRA_CLANG_ARGS:-} ${simulator_bindgen_args}" \
+      cargo build --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" --features uniffi \
+        --target "${t}" --"${PROFILE}"
+  elif [[ "${t}" == "x86_64-apple-ios" ]]; then
+    simulator_bindgen_args="--target=x86_64-apple-ios${IPHONEOS_DEPLOYMENT_TARGET}-simulator -isysroot ${SIMULATOR_SDK}"
+    BINDGEN_EXTRA_CLANG_ARGS="${BINDGEN_EXTRA_CLANG_ARGS:-} ${simulator_bindgen_args}" \
+      cargo build --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" --features uniffi \
+        --target "${t}" --"${PROFILE}"
+  else
+    cargo build --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" --features uniffi \
+      --target "${t}" --"${PROFILE}"
+  fi
   arch_lib="${CARGO_TARGET_DIR}/${t}/${PROFILE_DIR}/${STATICLIB}"
   [[ -f "${arch_lib}" ]] || { echo "ERROR: staticlib not produced: ${arch_lib}" >&2; exit 1; }
 done
 
-DEVICE_LIB="${CARGO_TARGET_DIR}/${DEVICE_TARGET}/${PROFILE_DIR}/${STATICLIB}"
-
 # ---------------------------------------------------------------------------
-# 3. lipo the simulator slices into one fat archive
+# 3. Merge native static dependencies, then lipo the simulator slices
 # ---------------------------------------------------------------------------
 rm -rf "${BUILD_DIR}"
 mkdir -p "${BUILD_DIR}"
+
+# Rust `staticlib` archives do not absorb native archives linked with
+# `static:-bundle`. mbedtls-sys deliberately uses that mode for normal Rust
+# binaries, so package its three target-specific archives beside the Rust
+# objects before handing the result to Xcode.
+resolve_mbedtls_out() {
+  local target="$1"
+  local candidates=()
+  local selected candidate archive candidate_mtime selected_mtime representative minos
+  shopt -s nullglob
+  candidates=("${CARGO_TARGET_DIR}/${target}/${PROFILE_DIR}/build"/mbedtls-sys-*/out)
+  shopt -u nullglob
+  [[ ${#candidates[@]} -gt 0 ]] || {
+    echo "ERROR: mbedTLS archives not found for ${target}" >&2
+    return 1
+  }
+  selected="${candidates[0]}"
+  selected_mtime="$(stat -f '%m' "${selected}")"
+  for candidate in "${candidates[@]:1}"; do
+    candidate_mtime="$(stat -f '%m' "${candidate}")"
+    if (( candidate_mtime > selected_mtime )); then
+      selected="${candidate}"
+      selected_mtime="${candidate_mtime}"
+    fi
+  done
+  for archive in libmbedtls.a libmbedx509.a libmbedcrypto.a; do
+    [[ -f "${selected}/${archive}" ]] || {
+      echo "ERROR: missing ${selected}/${archive}" >&2
+      return 1
+    }
+  done
+  # Cargo intentionally retains build-hash directories when an environment
+  # input changes. The newest OUT_DIR is the one produced (or selected from
+  # cache) by the immediately preceding target build; older directories may be
+  # byte-different precisely because their deployment target was different.
+  # Verify the selected C objects instead of either rejecting valid cache
+  # history or accidentally merging a stale archive.
+  representative="$(find "${selected}" -maxdepth 1 -type f -name '*.o' -print -quit)"
+  [[ -n "${representative}" ]] || {
+    echo "ERROR: no mbedTLS object available for deployment-target validation: ${selected}" >&2
+    return 1
+  }
+  minos="$(xcrun vtool -show-build "${representative}" 2>/dev/null | awk '$1 == "minos" { print $2; exit }')"
+  [[ "${minos}" == "${IPHONEOS_DEPLOYMENT_TARGET}" ]] || {
+    echo "ERROR: mbedTLS ${target} object targets iOS ${minos:-unknown}; expected ${IPHONEOS_DEPLOYMENT_TARGET}" >&2
+    return 1
+  }
+  printf '%s\n' "${selected}"
+}
+
+for t in "${DEVICE_TARGET}" "${SIM_TARGETS[@]}"; do
+  arch_lib="${CARGO_TARGET_DIR}/${t}/${PROFILE_DIR}/${STATICLIB}"
+  mbedtls_out="$(resolve_mbedtls_out "${t}")"
+  combined_dir="${BUILD_DIR}/${t}"
+  mkdir -p "${combined_dir}"
+  "${LIBTOOL[@]}" -static -o "${combined_dir}/${STATICLIB}" \
+    "${arch_lib}" \
+    "${mbedtls_out}/libmbedtls.a" \
+    "${mbedtls_out}/libmbedx509.a" \
+    "${mbedtls_out}/libmbedcrypto.a"
+done
+
+DEVICE_LIB="${BUILD_DIR}/${DEVICE_TARGET}/${STATICLIB}"
 FAT_SIM_LIB="${BUILD_DIR}/${STATICLIB}"
 
 sim_inputs=()
 for t in "${SIM_TARGETS[@]}"; do
-  sim_inputs+=("${CARGO_TARGET_DIR}/${t}/${PROFILE_DIR}/${STATICLIB}")
+  sim_inputs+=("${BUILD_DIR}/${t}/${STATICLIB}")
 done
 log "lipo-ing simulator slices → ${FAT_SIM_LIB}"
 "${LIPO[@]}" -create "${sim_inputs[@]}" -output "${FAT_SIM_LIB}"

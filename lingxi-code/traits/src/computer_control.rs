@@ -109,11 +109,7 @@ pub trait ComputerControl: Send + Sync {
     /// Press, move to `to`, and release. `from = None` drags from the current
     /// cursor position (parity with `left_click_drag`'s optional
     /// `start_coordinate`).
-    async fn drag(
-        &self,
-        from: Option<(u32, u32)>,
-        to: (u32, u32),
-    ) -> Result<(), ComputerError> {
+    async fn drag(&self, from: Option<(u32, u32)>, to: (u32, u32)) -> Result<(), ComputerError> {
         let _ = (from, to);
         Err(ComputerError::Unsupported("left_click_drag".into()))
     }

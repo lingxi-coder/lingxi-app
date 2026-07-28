@@ -35,18 +35,19 @@ pub mod computer_control;
 pub mod coordinator_mode;
 pub mod effect_handler;
 pub mod env;
-pub mod model_capabilities;
 pub mod file_history_sink;
-pub mod fork_resume_gate;
-pub mod parked_agent_store;
 pub mod filesystem;
+pub mod fork_resume_gate;
 pub mod fork_subagent;
 pub mod http;
 pub mod lsp;
 pub mod mailbox;
 pub mod mcp;
+pub mod mobile_linux;
+pub mod model_capabilities;
 pub mod notification;
 pub mod orchestrator;
+pub mod parked_agent_store;
 pub mod permission_gate;
 pub mod platform;
 pub mod process;
@@ -102,6 +103,13 @@ pub use mailbox::{
     MailboxError as RouterMailboxError, MailboxMessage, MailboxRouterHandle, RouteAck,
 };
 pub use mcp::*;
+pub use mobile_linux::{
+    LinuxCommandRequest, LinuxCommandResult, LinuxProcessHandle, MobileLinuxCapability,
+    MobileLinuxError, MobileLinuxEvent, MobileLinuxEventKind, MobileLinuxRuntime,
+    MobileLinuxRuntimeMode, MobileLinuxSandboxPlan, MobileLinuxTaskSnapshot, MobileLinuxTaskStatus,
+    MountPurpose, MountSpec, PtyOpenRequest, PtySessionHandle, PtySize, RootfsState, RootfsStatus,
+    UnavailableMobileLinuxRuntime,
+};
 pub use notification::{NotificationError, NotificationRequest, NotificationService};
 pub use orchestrator::{
     curated_model_names, is_curated_model, parse_model_ref, provider_default_model,

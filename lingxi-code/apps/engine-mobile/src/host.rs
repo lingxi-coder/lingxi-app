@@ -76,7 +76,8 @@ use traits::http::{
     WebSocketConnectionWithMeta, WebSocketMessageStreamWithMeta,
 };
 use traits::{
-    AuthHandle, HttpTransport, OrchestratorHandle, OutputStream, Platform, SlashCommandDispatcher,
+    AuthHandle, HttpTransport, MobileLinuxCapability, MobileLinuxRuntime, MobileLinuxRuntimeMode,
+    OrchestratorHandle, OutputStream, Platform, RootfsState, RootfsStatus, SlashCommandDispatcher,
 };
 
 use crate::{mobile_command_registry, mobile_tool_registry_with_skill_loader};
@@ -178,22 +179,19 @@ pub struct MobileConfig {
     /// Settings-declared `routing` block as raw JSON, fed verbatim to
     /// `llm_client::ClientConfig`. `None` ⟶ the default (empty) routing config.
     pub routing: Option<serde_json::Value>,
-    /// Android-only Shell tool gate + prompt carrier (spec r3 §Registration gates,
-    /// P3). `None` on iOS and desktop — the Shell tool is absent on those
-    /// platforms. Built by `android-aar::build_android_engine` from the probed
-    /// capability cache + the `AndroidShellConfig` gate; consumed by
-    /// `tool_shell_mobile::register_all` in the composition root.
+    /// Stable compatibility carrier for the mobile `Shell` tool gate + prompt
+    /// metadata. Existing Android call sites still populate this field; iOS can
+    /// reuse the same carrier type once its runtime bridge enables shell/git.
     pub android_shell: Option<tool_api::AndroidShellToolCtx>,
-    /// Android-only Git tool gate + workspace carrier (spec §G5, P4). `None` on
-    /// iOS and desktop — the Git tool is absent on those platforms. Built by
-    /// `android-aar::build_android_engine` from the enable flag + workspace
-    /// readiness + CA-store reachability; consumed by
-    /// `tool_git_mobile::register_all` in the composition root.
+    /// Stable compatibility carrier for the mobile structured `Git` tool gate +
+    /// workspace metadata. Existing Android call sites still populate this
+    /// field; iOS can reuse the same carrier type once its runtime bridge
+    /// enables git.
     pub android_git: Option<tool_api::AndroidGitToolCtx>,
-    /// Android-only Git network secret (HTTPS token + CA dir, spec §G3, P4).
-    /// Held separately from the public [`MobileConfig::android_git`] carrier so
-    /// the token never enters the broadly-cloned public ctx. `None` until Task 10
-    /// wires it from `android-aar`; `tool-git-mobile` reads it at call time.
+    /// Mobile Git network secret (HTTPS token + CA dir, spec §G3, P4). Held
+    /// separately from the public [`MobileConfig::android_git`] carrier so the
+    /// token never enters the broadly-cloned public ctx. `tool-git-mobile`
+    /// reads it at call time.
     pub android_git_secret: Option<tool_api::AndroidGitSecret>,
     /// P0.2 (mobile LINGXI.md hierarchy): the memory hierarchy provider the
     /// orchestrator loads its instruction files from. The production FFI entry
@@ -259,6 +257,23 @@ impl Default for MobileConfig {
     }
 }
 
+impl MobileConfig {
+    #[must_use]
+    pub fn mobile_shell(&self) -> Option<&tool_api::MobileShellToolCtx> {
+        self.android_shell.as_ref()
+    }
+
+    #[must_use]
+    pub fn mobile_git(&self) -> Option<&tool_api::MobileGitToolCtx> {
+        self.android_git.as_ref()
+    }
+
+    #[must_use]
+    pub fn mobile_git_secret(&self) -> Option<&tool_api::MobileGitSecret> {
+        self.android_git_secret.as_ref()
+    }
+}
+
 /// Everything a mobile host needs to drive a conversation, built deterministically
 /// by [`build_mobile`] from a [`MobileConfig`] + an `Arc<dyn Platform>`.
 ///
@@ -297,6 +312,185 @@ pub struct MobileRuntime {
     /// the real native store is a §11 / Plan-17 follow-up). Becomes `true`
     /// automatically once a native Keychain/Keystore SecureStorage is injected.
     pub oauth_supported: bool,
+    /// Mobile-only Linux userspace runtime seam (Android PRoot / iOS iSH),
+    /// when the platform wires one. `None` preserves the pre-migration state.
+    pub mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
+}
+
+/// Lowered rootfs lifecycle state for the foreign host.
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MobileLinuxRootfsStateDto {
+    Missing,
+    Installing,
+    Ready,
+    Corrupt,
+    Repairing,
+    Resetting,
+    Unsupported,
+    BlockedByLicense,
+}
+
+/// Combined runtime + rootfs status for Android/iOS settings UIs.
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[derive(Debug, Clone)]
+pub struct MobileLinuxStatusDto {
+    /// Selected runtime mode.
+    pub mode: String,
+    /// Backend label for diagnostics / UI.
+    pub backend: String,
+    /// Whether the runtime can be used right now.
+    pub available: bool,
+    /// Human-readable availability / failure detail.
+    pub reason: Option<String>,
+    /// Rootfs lifecycle state.
+    pub rootfs_state: MobileLinuxRootfsStateDto,
+    /// Platform string (`android` / `ios`).
+    pub platform: String,
+    /// ABI / architecture string.
+    pub abi: String,
+    /// Active rootfs version, when present.
+    pub version: Option<String>,
+    /// Installed rootfs size in bytes, when known.
+    pub installed_size_bytes: Option<u64>,
+    /// Writable guest paths currently permitted.
+    pub writable_guest_paths: Vec<String>,
+    /// Capability flags.
+    pub streaming_output: bool,
+    pub background_processes: bool,
+    pub pty: bool,
+    pub bind_mounts: bool,
+    pub rootfs_integrity: bool,
+}
+
+fn lower_mobile_linux_state(state: RootfsState) -> MobileLinuxRootfsStateDto {
+    match state {
+        RootfsState::Missing => MobileLinuxRootfsStateDto::Missing,
+        RootfsState::Installing => MobileLinuxRootfsStateDto::Installing,
+        RootfsState::Ready => MobileLinuxRootfsStateDto::Ready,
+        RootfsState::Corrupt => MobileLinuxRootfsStateDto::Corrupt,
+        RootfsState::Repairing => MobileLinuxRootfsStateDto::Repairing,
+        RootfsState::Resetting => MobileLinuxRootfsStateDto::Resetting,
+        RootfsState::Unsupported => MobileLinuxRootfsStateDto::Unsupported,
+        RootfsState::BlockedByLicense => MobileLinuxRootfsStateDto::BlockedByLicense,
+    }
+}
+
+fn lower_mobile_linux_mode(mode: MobileLinuxRuntimeMode) -> String {
+    match mode {
+        MobileLinuxRuntimeMode::Legacy => "legacy".to_string(),
+        MobileLinuxRuntimeMode::MobileLinux => "mobile-linux".to_string(),
+    }
+}
+
+fn lower_mobile_linux_backend(backend: traits::SandboxBackend) -> String {
+    match backend {
+        traits::SandboxBackend::LinuxNamespaces => "linux-namespaces",
+        traits::SandboxBackend::LinuxFirejail => "linux-firejail",
+        traits::SandboxBackend::MacOsSandboxExec => "macos-sandbox-exec",
+        traits::SandboxBackend::WindowsJobObject => "windows-job-object",
+        traits::SandboxBackend::AndroidMinijail => "android-minijail",
+        traits::SandboxBackend::AndroidProot => "android-proot",
+        traits::SandboxBackend::IosIsh => "ios-ish",
+        traits::SandboxBackend::None => "none",
+    }
+    .to_string()
+}
+
+fn lower_mobile_linux_status(
+    capability: MobileLinuxCapability,
+    status: RootfsStatus,
+) -> MobileLinuxStatusDto {
+    MobileLinuxStatusDto {
+        mode: lower_mobile_linux_mode(status.mode),
+        backend: lower_mobile_linux_backend(status.backend),
+        available: capability.available,
+        reason: capability.reason.or(status.last_error),
+        rootfs_state: lower_mobile_linux_state(status.state),
+        platform: status.platform,
+        abi: status.abi,
+        version: status.version,
+        installed_size_bytes: status.installed_size_bytes,
+        writable_guest_paths: status.writable_guest_paths,
+        streaming_output: capability.streaming_output,
+        background_processes: capability.background_processes,
+        pty: capability.pty,
+        bind_mounts: capability.bind_mounts,
+        rootfs_integrity: capability.rootfs_integrity,
+    }
+}
+
+fn gate_mobile_shell_ctx(
+    carrier: Option<tool_api::MobileShellToolCtx>,
+    capability: Option<&MobileLinuxCapability>,
+) -> Option<tool_api::MobileShellToolCtx> {
+    let mut carrier = carrier?;
+    if capability.is_some_and(|cap| {
+        matches!(cap.mode, MobileLinuxRuntimeMode::MobileLinux) && !cap.available
+    }) {
+        carrier.enabled = false;
+    }
+    Some(carrier)
+}
+
+fn gate_mobile_git_ctx(
+    carrier: Option<tool_api::MobileGitToolCtx>,
+    capability: Option<&MobileLinuxCapability>,
+) -> Option<tool_api::MobileGitToolCtx> {
+    let mut carrier = carrier?;
+    if capability.is_some_and(|cap| {
+        matches!(cap.mode, MobileLinuxRuntimeMode::MobileLinux) && !cap.available
+    }) {
+        carrier.enabled = false;
+    }
+    Some(carrier)
+}
+
+#[cfg(test)]
+mod mobile_tool_gate_tests {
+    use super::*;
+
+    fn unavailable_mobile_linux_capability() -> MobileLinuxCapability {
+        MobileLinuxCapability {
+            available: false,
+            backend: traits::SandboxBackend::IosIsh,
+            mode: MobileLinuxRuntimeMode::MobileLinux,
+            reason: Some("runtime unavailable".into()),
+            streaming_output: false,
+            background_processes: false,
+            pty: false,
+            bind_mounts: false,
+            rootfs_integrity: false,
+        }
+    }
+
+    #[test]
+    fn mobile_shell_gate_disables_selected_but_unavailable_runtime() {
+        let gated = gate_mobile_shell_ctx(
+            Some(tool_api::MobileShellToolCtx::mobile_linux_guest(
+                true,
+                vec!["sh".into()],
+                None,
+            )),
+            Some(&unavailable_mobile_linux_capability()),
+        )
+        .expect("carrier present");
+        assert!(!gated.enabled);
+    }
+
+    #[test]
+    fn mobile_git_gate_disables_selected_but_unavailable_runtime() {
+        let gated = gate_mobile_git_ctx(
+            Some(tool_api::MobileGitToolCtx {
+                enabled: true,
+                has_token: true,
+                workspace_root: "/workspace".into(),
+            }),
+            Some(&unavailable_mobile_linux_capability()),
+        )
+        .expect("carrier present");
+        assert!(!gated.enabled);
+    }
 }
 
 /// Errors surfaced while building a [`MobileRuntime`].
@@ -466,6 +660,11 @@ pub async fn build_mobile_inner(
     let http = platform.http();
     let clock = platform.clock();
     let fs = platform.filesystem();
+    let mobile_linux = platform.mobile_linux();
+    let mobile_linux_capability = match mobile_linux.as_ref() {
+        Some(runtime) => Some(runtime.probe_capability().await),
+        None => None,
+    };
     let process = platform.process();
     let sandbox = platform.sandbox();
     let worktree = platform.worktree();
@@ -1082,15 +1281,25 @@ pub async fn build_mobile_inner(
         notifications: platform.notifications(),
         clipboard: platform.clipboard(),
         computer_control: platform.computer_control(),
-        // P3: thread the Android Shell gate + prompt carrier from MobileConfig.
-        // `None` on iOS and desktop (cfg.android_shell defaults to None).
-        android_shell: cfg.android_shell.clone(),
-        // P4: thread the Android Git gate + workspace carrier from MobileConfig.
-        // `None` on iOS and desktop (cfg.android_git defaults to None).
-        android_git: cfg.android_git.clone(),
-        // P4: thread the Android Git network secret (token + CA dir) from
-        // MobileConfig. `None` on iOS and desktop; T10 populates from android-aar.
-        android_git_secret: cfg.android_git_secret.clone(),
+        // Mobile shell/git registration is fail-closed when the host selected
+        // mobile-linux but the runtime is blocked or unlinked. In that state the
+        // tools stay ABSENT rather than silently falling back to the Android
+        // legacy path.
+        android_shell: gate_mobile_shell_ctx(
+            cfg.mobile_shell().cloned(),
+            mobile_linux_capability.as_ref(),
+        ),
+        android_git: gate_mobile_git_ctx(
+            cfg.mobile_git().cloned(),
+            mobile_linux_capability.as_ref(),
+        ),
+        // Secret carrier follows the same public-gate decision: if the public
+        // git tool is gated off, keep the secret seam absent too.
+        android_git_secret: gate_mobile_git_ctx(
+            cfg.mobile_git().cloned(),
+            mobile_linux_capability.as_ref(),
+        )
+        .and_then(|_| cfg.mobile_git_secret().cloned()),
         // The V2 task tools' BLOCKING TaskCreated/TaskCompleted hooks are a
         // desktop composition-root wiring; mobile leaves them unwired (the tool
         // path is then non-blocking, matching the registry firer behavior).
@@ -1278,7 +1487,7 @@ pub async fn build_mobile_inner(
     // discovery layer, so no managed dir / no additional dirs / safe-mode off.
     command_core::register_core_batch_8(
         &mut reg,
-        handle,
+        handle.clone(),
         shared_command_registry.clone(),
         cwd.clone(),
         cfg.lingxi_home.clone(),
@@ -1289,8 +1498,25 @@ pub async fn build_mobile_inner(
         disable_agent_view,
     );
     *shared_command_registry.write().await = reg;
+    let background_command_handle = handle.clone();
     let dispatcher = RegistrySlashDispatcher::new(shared_command_registry.clone())
         .with_skill_usage_home(cfg.lingxi_home.clone())
+        .with_background_prompt_launcher(Arc::new(move |prompt| {
+            let handle = background_command_handle.clone();
+            Box::pin(async move {
+                handle
+                    .fork_conversation(&prompt)
+                    .await
+                    .map(|outcome| {
+                        let tail = &outcome.agent_id[outcome.agent_id.len().saturating_sub(4)..];
+                        format!(
+                            "\u{2442} started code-review in background as {} ({tail})",
+                            outcome.name
+                        )
+                    })
+                    .map_err(|error| error.to_string())
+            })
+        }))
         // (#3) Real embedded-shell expansion for markdown/plugin + builtin
         // `InjectMessage` prompts. Non-MCP only.
         .with_shell_expansion(shell_expansion_provider);
@@ -1336,6 +1562,7 @@ pub async fn build_mobile_inner(
         listener,
         event_sink,
         oauth_supported,
+        mobile_linux,
     })
 }
 
@@ -1542,6 +1769,17 @@ impl MobileEngineHandle {
             .await
             .as_ref()
             .is_some_and(CancellationToken::is_cancelled)
+    }
+
+    async fn read_mobile_linux_status(
+        runtime: &dyn MobileLinuxRuntime,
+    ) -> Result<MobileLinuxStatusDto, MobileEngineError> {
+        let capability = runtime.probe_capability().await;
+        let status = runtime
+            .rootfs_status()
+            .await
+            .map_err(|e| MobileEngineError::Internal(format!("mobile_linux_status failed: {e}")))?;
+        Ok(lower_mobile_linux_status(capability, status))
     }
 }
 
@@ -2055,6 +2293,57 @@ impl MobileEngineHandle {
         // is genuinely driven by the executor, not resolved eagerly on the caller.
         tokio::task::yield_now().await;
         format!("{:?}", tokio::runtime::Handle::current().id())
+    }
+
+    /// Inspect the mobile Linux runtime/rootfs status exposed by the current
+    /// mobile platform backend.
+    pub async fn mobile_linux_status(&self) -> Result<MobileLinuxStatusDto, MobileEngineError> {
+        let Some(runtime) = self.inner.mobile_linux.as_ref() else {
+            return Err(MobileEngineError::PlatformUnavailable);
+        };
+        Self::read_mobile_linux_status(runtime.as_ref()).await
+    }
+
+    /// Re-run rootfs verification and return the updated status.
+    pub async fn verify_mobile_linux_rootfs(
+        &self,
+    ) -> Result<MobileLinuxStatusDto, MobileEngineError> {
+        let Some(runtime) = self.inner.mobile_linux.as_ref() else {
+            return Err(MobileEngineError::PlatformUnavailable);
+        };
+        let status = runtime.verify_rootfs().await.map_err(|e| {
+            MobileEngineError::Internal(format!("verify_mobile_linux_rootfs failed: {e}"))
+        })?;
+        let capability = runtime.probe_capability().await;
+        Ok(lower_mobile_linux_status(capability, status))
+    }
+
+    /// Attempt a non-destructive rootfs repair and return the updated status.
+    pub async fn repair_mobile_linux_rootfs(
+        &self,
+    ) -> Result<MobileLinuxStatusDto, MobileEngineError> {
+        let Some(runtime) = self.inner.mobile_linux.as_ref() else {
+            return Err(MobileEngineError::PlatformUnavailable);
+        };
+        let status = runtime.repair_rootfs().await.map_err(|e| {
+            MobileEngineError::Internal(format!("repair_mobile_linux_rootfs failed: {e}"))
+        })?;
+        let capability = runtime.probe_capability().await;
+        Ok(lower_mobile_linux_status(capability, status))
+    }
+
+    /// Reset the managed rootfs state and return the updated status.
+    pub async fn reset_mobile_linux_rootfs(
+        &self,
+    ) -> Result<MobileLinuxStatusDto, MobileEngineError> {
+        let Some(runtime) = self.inner.mobile_linux.as_ref() else {
+            return Err(MobileEngineError::PlatformUnavailable);
+        };
+        let status = runtime.reset_rootfs().await.map_err(|e| {
+            MobileEngineError::Internal(format!("reset_mobile_linux_rootfs failed: {e}"))
+        })?;
+        let capability = runtime.probe_capability().await;
+        Ok(lower_mobile_linux_status(capability, status))
     }
 }
 
@@ -2733,7 +3022,10 @@ mod tests {
             // ~1/16 of the time).
             assert_eq!(created.id.len(), 8, "cron id is 8 chars: {}", created.id);
             assert!(
-                created.id.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()),
+                created
+                    .id
+                    .bytes()
+                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()),
                 "cron id is lowercase hex: {}",
                 created.id
             );

@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "runtime": "android-proot",
+  "platform": "android",
+  "abi": "arm64",
+  "rootfs_version": "1.0.0",
+  "archive": {
+    "filename": "alpine-rootfs-android-arm64-v1.0.0.tar.zst",
+    "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "size_bytes": 104857600
+  },
+  "packages": [
+    {
+      "name": "busybox",
+      "version": "REPLACE_WITH_REAL_VERSION"
+    },
+    {
+      "name": "git",
+      "version": "REPLACE_WITH_REAL_VERSION"
+    },
+    {
+      "name": "openssh-client",
+      "version": "REPLACE_WITH_REAL_VERSION"
+    },
+    {
+      "name": "python3",
+      "version": "REPLACE_WITH_REAL_VERSION"
+    },
+    {
+      "name": "ca-certificates",
+      "version": "REPLACE_WITH_REAL_VERSION"
+    }
+  ],
+  "executable_allowlist": [
+    {
+      "path": "/bin/busybox",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "kind": "interpreter"
+    },
+    {
+      "path": "/bin/sh",
+      "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "kind": "interpreter"
+    },
+    {
+      "path": "/usr/bin/git",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "kind": "elf"
+    },
+    {
+      "path": "/usr/bin/ssh",
+      "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "kind": "elf"
+    },
+    {
+      "path": "/usr/bin/python3",
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "kind": "interpreter"
+    },
+    {
+      "path": "/usr/lib/libpython3.12.so.1.0",
+      "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "kind": "shared-library"
+    }
+  ],
+  "writable_paths": [
+    "/root",
+    "/tmp",
+    "/var/tmp",
+    "/workspace"
+  ]
+}

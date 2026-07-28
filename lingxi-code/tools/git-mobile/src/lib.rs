@@ -1,6 +1,7 @@
-//! Mobile-only structured `Git` tool crate (Android, spec G1–G8).
+//! Mobile-only structured `Git` tool crate (shared mobile git surface, spec
+//! G1–G8).
 //!
-//! `GitTool` is the model-facing git tool on Android, backed by libgit2 (the
+//! `GitTool` is the model-facing git tool on mobile, backed by libgit2 (the
 //! `git2` crate) running **in-process** — there is no `git` binary, no exec, no
 //! sandbox/minijail involvement. Operations are a fixed enum (clone / fetch /
 //! pull / status / diff / log / show / `branch_list` / checkout / add / commit
@@ -11,10 +12,11 @@
 //! callback — never to disk or a child-process env).
 //!
 //! The tool is registered ONLY when the device + config gate passes
-//! (`ctx.android_git.enabled`); the gate itself is computed in `android-aar`
-//! (enable flag + workspace-ready + CA-store-reachable) and threaded through
-//! `MobileConfig` -> `BuiltinToolContext.android_git`. On desktop / iOS the
-//! `android_git` carrier is `None`, so the tool is absent (not erroring).
+//! (`ctx.mobile_git().is_some_and(|c| c.enabled)`). The gate is computed in the
+//! mobile engine composition root so a selected but blocked/unlinked
+//! mobile-linux runtime never silently falls back to the legacy Android git
+//! carrier. On builds with no mobile git carrier the tool is absent (not
+//! erroring).
 //!
 //! `git2` is a safe wrapper; the only C is `libgit2-sys` at build time. The
 //! crate is `#![deny(unsafe_code)]` (NOT `forbid`) for TWO audited carve-outs,
@@ -118,7 +120,7 @@ impl Tool for GitTool {
         // Defensive double-gate: registration (`register_all`) already filters
         // on this same flag, but keep the tool inert if it ever lands in a
         // registry without the gate set.
-        self.ctx.android_git.as_ref().is_some_and(|g| g.enabled)
+        self.ctx.mobile_git().is_some_and(|g| g.enabled)
     }
 
     fn max_result_size_chars(&self) -> usize {
@@ -159,7 +161,7 @@ impl Tool for GitTool {
     }
 
     async fn prompt(&self, _opts: &PromptOptions) -> String {
-        let has_token = self.ctx.android_git.as_ref().is_some_and(|g| g.has_token);
+        let has_token = self.ctx.mobile_git().is_some_and(|g| g.has_token);
 
         let mut prompt = String::new();
         prompt.push_str(
@@ -237,10 +239,10 @@ impl Tool for GitTool {
         // comes from the `repo` param (default ".").
         let workspace_root = self
             .ctx
-            .android_git
+            .mobile_git()
             .as_ref()
             .map(|g| g.workspace_root.clone())
-            .ok_or_else(|| ToolError::InvalidInput("android_git context is absent".into()))?;
+            .ok_or_else(|| ToolError::InvalidInput("mobile_git context is absent".into()))?;
         let repo_rel = input.get("repo").and_then(Value::as_str).unwrap_or(".");
         let workspace_path = std::path::Path::new(&workspace_root);
 
@@ -271,12 +273,12 @@ impl Tool for GitTool {
 
 impl GitTool {
     /// Build the per-operation [`ops::GitNetConfig`] from the in-memory secret
-    /// seam (`ctx.android_git_secret`). The token is cloned out of the secret
+    /// seam (`ctx.mobile_git_secret()`). The token is cloned out of the secret
     /// carrier only for the duration of the call; it is never logged, written
     /// to disk, or passed to a child process. When no secret is configured the
     /// config is empty (anonymous / public remotes, default CA).
     fn git_net_config(&self) -> ops::GitNetConfig {
-        match self.ctx.android_git_secret.as_ref() {
+        match self.ctx.mobile_git_secret() {
             Some(secret) => ops::GitNetConfig {
                 provider: secret.credential_provider.clone(),
                 ca_dir: secret.ca_dir.clone(),
@@ -440,13 +442,12 @@ fn map_git_op_error(e: ops::GitOpError) -> ToolError {
 
 /// Register the mobile `Git` tool against `reg` — ONLY when the gate passes.
 ///
-/// The gate is `ctx.android_git.enabled` (`enable_git` + workspace-ready +
-/// CA-store-reachable, computed in `android-aar`). When the gate is unmet the
-/// tool is simply not registered — **absent, not erroring** (spec invariant).
-/// On desktop / iOS the `android_git` field is `None`, so this is a no-op.
+/// The gate is `ctx.mobile_git().is_some_and(|c| c.enabled)`. When the gate is
+/// unmet the tool is simply not registered — **absent, not erroring** (spec
+/// invariant).
 pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinToolContext) {
     use std::sync::Arc;
-    if ctx.android_git.as_ref().is_some_and(|g| g.enabled) {
+    if ctx.mobile_git().is_some_and(|g| g.enabled) {
         reg.register_builtin(Arc::new(GitTool::new(ctx)));
     }
 }

@@ -36,12 +36,12 @@ fn shell_absent_when_android_shell_is_none() {
 #[test]
 fn shell_present_when_android_shell_enabled() {
     let mut ctx = base_ctx();
-    ctx.android_shell = Some(AndroidShellToolCtx {
-        enabled: true,
-        applets: vec!["ls".to_string(), "cat".to_string()],
-        sh_version: Some("mksh R59".to_string()),
-        bundled: false,
-    });
+    ctx.android_shell = Some(AndroidShellToolCtx::android_legacy(
+        true,
+        vec!["ls".to_string(), "cat".to_string()],
+        Some("mksh R59".to_string()),
+        false,
+    ));
     assert!(
         has_shell(ctx),
         "Shell MUST be registered when android_shell.enabled == true"
@@ -51,12 +51,12 @@ fn shell_present_when_android_shell_enabled() {
 #[test]
 fn shell_absent_when_android_shell_disabled() {
     let mut ctx = base_ctx();
-    ctx.android_shell = Some(AndroidShellToolCtx {
-        enabled: false,
-        applets: vec![],
-        sh_version: None,
-        bundled: false,
-    });
+    ctx.android_shell = Some(AndroidShellToolCtx::android_legacy(
+        false,
+        vec![],
+        None,
+        false,
+    ));
     assert!(
         !has_shell(ctx),
         "Shell must NOT be registered when android_shell.enabled == false"

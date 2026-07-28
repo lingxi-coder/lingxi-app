@@ -29,6 +29,24 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Mobile Linux is fail-closed. The repository variable stays `0` while the
+  # GPL runtime grants are absent; setting it to `1` makes this job require the
+  # signed authorization manifest, SBOM, license inventory, executable
+  # allowlist, and store-policy scan before either mobile build can proceed.
+  mobile-linux-policy:
+    runs-on: ubuntu-latest
+    env:
+      LINGXI_MOBILE_LINUX_ENABLED: ${{ vars.LINGXI_MOBILE_LINUX_ENABLED || '0' }}
+      LINGXI_MOBILE_LINUX_AUTHORIZATION_SHA256: ${{ vars.LINGXI_MOBILE_LINUX_AUTHORIZATION_SHA256 || '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate mobile Linux authorization, rootfs, and store policy
+        run: bash lingxi-code/scripts/mobile-linux/smoke.sh
+
+      - name: Test mobile Linux rootfs tooling
+        run: bash lingxi-code/scripts/mobile-linux/test-rootfs-tooling.sh
+
   # ---------------------------------------------------------------------------
   # 1. node-clients — shared TS SDK + Electron typecheck (ubuntu).
   #    The Electron app depends on the shared SDK via `file:../shared`, so the
@@ -76,6 +94,10 @@ jobs:
   # ---------------------------------------------------------------------------
   android:
     runs-on: ubuntu-latest
+    needs: mobile-linux-policy
+    env:
+      LINGXI_MOBILE_LINUX_ENABLED: ${{ vars.LINGXI_MOBILE_LINUX_ENABLED || '0' }}
+      LINGXI_MOBILE_LINUX_AUTHORIZATION_SHA256: ${{ vars.LINGXI_MOBILE_LINUX_AUTHORIZATION_SHA256 || '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -199,6 +221,10 @@ jobs:
   # ---------------------------------------------------------------------------
   ios:
     runs-on: macos-latest
+    needs: mobile-linux-policy
+    env:
+      LINGXI_MOBILE_LINUX_ENABLED: ${{ vars.LINGXI_MOBILE_LINUX_ENABLED || '0' }}
+      LINGXI_MOBILE_LINUX_AUTHORIZATION_SHA256: ${{ vars.LINGXI_MOBILE_LINUX_AUTHORIZATION_SHA256 || '' }}
     steps:
       - uses: actions/checkout@v4
 

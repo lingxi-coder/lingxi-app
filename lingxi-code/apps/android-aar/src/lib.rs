@@ -50,7 +50,11 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "uniffi")]
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+#[cfg(feature = "uniffi")]
+use traits::mobile_linux::MAX_MOBILE_LINUX_EVENT_BATCH;
 use traits::{CameraControl, SharingService, VoiceRecorder};
 // `Platform` is named only inside the `cfg(target_os = "android")` constructor
 // body; importing it unconditionally warns on the host build, so scope it.
@@ -77,6 +81,8 @@ pub struct PlatformImpls {
     pub share: Arc<dyn SharingService>,
     /// The app's private files-dir root.
     pub app_files_root: String,
+    /// Optional mobile-linux runtime configuration.
+    pub mobile_linux: Option<AndroidMobileLinuxConfigFfi>,
 }
 
 /// FFI carrier for the Android shell/sandbox configuration (spec r3 §Android
@@ -137,6 +143,310 @@ pub struct AndroidGitConfigFfi {
     pub ssh_known_hosts_sha256_hex: Vec<String>,
 }
 
+/// Mobile Linux runtime mode exposed to the Android host.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[derive(Debug, Clone, Copy)]
+pub enum MobileLinuxRuntimeModeFfi {
+    Legacy,
+    MobileLinux,
+}
+
+impl From<MobileLinuxRuntimeModeFfi> for traits::MobileLinuxRuntimeMode {
+    fn from(value: MobileLinuxRuntimeModeFfi) -> Self {
+        match value {
+            MobileLinuxRuntimeModeFfi::Legacy => Self::Legacy,
+            MobileLinuxRuntimeModeFfi::MobileLinux => Self::MobileLinux,
+        }
+    }
+}
+
+/// FFI carrier for Android mobile-linux configuration.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[derive(Debug, Clone)]
+pub struct AndroidMobileLinuxConfigFfi {
+    /// Legacy backend vs mobile-linux backend selection.
+    pub mode: MobileLinuxRuntimeModeFfi,
+    /// App-private root where rootfs state is managed.
+    pub managed_root: String,
+    /// Host workspace root exposed to the guest, if any.
+    pub workspace_host_path: Option<String>,
+    /// Stable workspace identifier used in the guest mount path.
+    pub stable_workspace_id: Option<String>,
+    /// ABI name for the rootfs payload (`arm64-v8a`, `x86_64`).
+    pub abi: String,
+    /// Expected rootfs version label.
+    pub rootfs_version: String,
+    /// Expected rootfs archive sha256, if known.
+    pub archive_sha256: Option<String>,
+    /// Optional path to the written distribution authorization. It is accepted
+    /// only when its digest matches the build-pinned
+    /// `LINGXI_MOBILE_LINUX_AUTHORIZATION_SHA256`.
+    pub authorization_file: Option<String>,
+}
+
+/// FFI rootfs lifecycle state.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[derive(Debug, Clone, Copy)]
+pub enum MobileLinuxRootfsStateFfi {
+    Missing,
+    Installing,
+    Ready,
+    Corrupt,
+    Repairing,
+    Resetting,
+    Unsupported,
+    BlockedByLicense,
+}
+
+/// FFI capability snapshot for the Android mobile-linux runtime.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[derive(Debug, Clone)]
+pub struct MobileLinuxCapabilityFfi {
+    pub available: bool,
+    pub backend: String,
+    pub mode: MobileLinuxRuntimeModeFfi,
+    pub reason: Option<String>,
+    pub streaming_output: bool,
+    pub background_processes: bool,
+    pub pty: bool,
+    pub bind_mounts: bool,
+    pub rootfs_integrity: bool,
+}
+
+/// FFI rootfs status snapshot for the Android mobile-linux runtime.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[derive(Debug, Clone)]
+pub struct MobileLinuxStatusFfi {
+    pub state: MobileLinuxRootfsStateFfi,
+    pub backend: String,
+    pub mode: MobileLinuxRuntimeModeFfi,
+    pub platform: String,
+    pub abi: String,
+    pub version: Option<String>,
+    pub managed_root: Option<String>,
+    pub active_root: Option<String>,
+    pub staged_root: Option<String>,
+    pub archive_sha256: Option<String>,
+    pub installed_size_bytes: Option<u64>,
+    pub writable_guest_paths: Vec<String>,
+    pub last_error: Option<String>,
+}
+
+/// FFI mount purpose for the mobile-linux runtime.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[derive(Debug, Clone, Copy)]
+pub enum MobileLinuxMountPurposeFfi {
+    Workspace,
+    Memory,
+    Skills,
+    Shared,
+    External,
+    Temp,
+}
+
+/// FFI mount descriptor for guest-visible paths.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[derive(Debug, Clone)]
+pub struct MobileLinuxMountSpecFfi {
+    pub host_path: String,
+    pub guest_path: String,
+    pub read_only: bool,
+    pub purpose: MobileLinuxMountPurposeFfi,
+}
+
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[derive(Debug, Clone)]
+pub struct MobileLinuxEnvEntryFfi {
+    pub key: String,
+    pub value: String,
+}
+
+/// FFI request for a command executed inside the mobile-linux runtime.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[derive(Debug, Clone)]
+pub struct MobileLinuxCommandRequestFfi {
+    pub command: String,
+    pub args: Vec<String>,
+    pub cwd: Option<String>,
+    pub env: Vec<MobileLinuxEnvEntryFfi>,
+    pub stdin: Option<String>,
+    pub timeout_ms: Option<u64>,
+    pub allow_network: bool,
+    pub mounts: Vec<MobileLinuxMountSpecFfi>,
+}
+
+/// FFI command result returned by the mobile-linux runtime.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[derive(Debug, Clone)]
+pub struct MobileLinuxCommandResultFfi {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: i32,
+    pub timed_out: bool,
+    pub cancelled: bool,
+}
+
+/// FFI background-process handle.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[derive(Debug, Clone)]
+pub struct MobileLinuxProcessHandleFfi {
+    pub id: String,
+}
+
+/// FFI PTY size.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[derive(Debug, Clone, Copy)]
+pub struct MobileLinuxPtySizeFfi {
+    pub cols: u16,
+    pub rows: u16,
+}
+
+/// FFI PTY open request.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[derive(Debug, Clone)]
+pub struct MobileLinuxPtyOpenRequestFfi {
+    pub command: String,
+    pub args: Vec<String>,
+    pub cwd: Option<String>,
+    pub env: Vec<MobileLinuxEnvEntryFfi>,
+    pub size: MobileLinuxPtySizeFfi,
+    pub mounts: Vec<MobileLinuxMountSpecFfi>,
+}
+
+/// FFI PTY-session handle.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[derive(Debug, Clone)]
+pub struct MobileLinuxPtySessionHandleFfi {
+    pub id: String,
+}
+
+/// FFI stream sink for live command output.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
+#[async_trait::async_trait]
+pub trait AndroidMobileLinuxStreamSink: Send + Sync {
+    async fn stdout_line(&self, line: String) -> Result<(), MobileLinuxApiErrorFfi>;
+    async fn stderr_chunk(&self, chunk: Vec<u8>) -> Result<(), MobileLinuxApiErrorFfi>;
+}
+
+/// FFI error surface for mobile-linux operations.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
+#[derive(Debug, thiserror::Error)]
+pub enum MobileLinuxApiErrorFfi {
+    #[error("legacy backend selected")]
+    LegacySelected,
+    #[error("mobile-linux runtime unavailable: {message}")]
+    Unavailable { message: String },
+    #[error("mobile-linux runtime license blocked: {message}")]
+    LicenseBlocked { message: String },
+    #[error("invalid mobile-linux request: {message}")]
+    InvalidRequest { message: String },
+    #[error("mobile-linux operation failed: {message}")]
+    OperationFailed { message: String },
+}
+
+/// Event kind emitted by run/PTY streaming APIs.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[derive(Debug, Clone, Copy)]
+pub enum MobileLinuxEventKindFfi {
+    TaskStatusChanged,
+    StdoutLine,
+    StderrChunk,
+    PtyOutput,
+    PtyClosed,
+    RuntimeError,
+}
+
+/// Streaming/runtime event delivered to the Android host.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[derive(Debug, Clone)]
+pub struct MobileLinuxEventFfi {
+    pub sequence: u64,
+    pub task_id: Option<String>,
+    pub kind: MobileLinuxEventKindFfi,
+    pub data: Option<Vec<u8>>,
+    pub text: Option<String>,
+    pub session_id: Option<String>,
+    pub status: Option<MobileLinuxTaskStateFfi>,
+    pub exit_code: Option<i32>,
+    pub timed_out: Option<bool>,
+    pub cancelled: Option<bool>,
+    pub detail: Option<String>,
+}
+
+/// Crate-local callback interface for mobile-linux events.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
+#[async_trait::async_trait]
+pub trait AndroidMobileLinuxEventSink: Send + Sync {
+    async fn on_event(&self, event: MobileLinuxEventFfi) -> Result<(), MobileLinuxApiErrorFfi>;
+}
+
+/// FFI task kind for host-visible runtime work.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[derive(Debug, Clone, Copy)]
+pub enum MobileLinuxTaskKindFfi {
+    Command,
+    PtySession,
+}
+
+/// FFI task status for host-visible runtime work.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[derive(Debug, Clone, Copy)]
+pub enum MobileLinuxTaskStateFfi {
+    Queued,
+    Running,
+    Backgrounded,
+    Completed,
+    Failed,
+    Cancelled,
+    TimedOut,
+}
+
+/// FFI task snapshot. Phase-1 keeps this fail-closed unless a real runtime is linked.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[derive(Debug, Clone)]
+pub struct MobileLinuxTaskSnapshotFfi {
+    pub task_id: String,
+    pub status: MobileLinuxTaskStateFfi,
+    pub command: String,
+    pub started_at_ms: Option<u64>,
+    pub finished_at_ms: Option<u64>,
+    pub exit_code: Option<i32>,
+    pub detail: Option<String>,
+}
+
+/// Persistent Android mobile-linux runtime handle. Holds one runtime instance so
+/// PTY/task/event state survives across FFI calls.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
+pub struct AndroidMobileLinuxRuntimeHandle {
+    runtime: Arc<dyn traits::MobileLinuxRuntime>,
+}
+
+#[cfg(feature = "uniffi")]
+static MOBILE_LINUX_FFI_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+
 /// Top-level `UniFFI` constructor: build the mobile engine from the Kotlin-supplied
 /// platform callbacks + event listener. (Under `uniffi`: `#[uniffi::export]`.)
 ///
@@ -169,18 +479,41 @@ pub fn build_mobile_engine(
             memory_provider: Some(orchestrator::prompt::real_provider()),
             ..MobileConfig::default()
         };
-        let platform: Arc<dyn Platform> = Arc::new(AndroidPlatform::new(AndroidPlatformInputs {
-            app_files_root: std::path::PathBuf::from(impls.app_files_root),
-            camera: impls.camera,
-            voice: impls.voice,
-            share: impls.share,
-            stt: None,
-            tts: None,
-            notifications: None,
-            clipboard: None,
-            shell: None,
-            secure_storage: None,
-        }));
+        let mobile_linux_mode = impls
+            .mobile_linux
+            .as_ref()
+            .map_or(traits::MobileLinuxRuntimeMode::Legacy, |cfg| {
+                cfg.mode.into()
+            });
+        let platform: Arc<dyn Platform> = Arc::new(AndroidPlatform::new_with_mode(
+            AndroidPlatformInputs {
+                app_files_root: std::path::PathBuf::from(impls.app_files_root),
+                camera: impls.camera,
+                voice: impls.voice,
+                share: impls.share,
+                stt: None,
+                tts: None,
+                notifications: None,
+                clipboard: None,
+                mobile_linux: android_mobile_linux_runtime(impls.mobile_linux.as_ref()),
+                mobile_linux_workspace_root: impls
+                    .mobile_linux
+                    .as_ref()
+                    .and_then(|cfg| cfg.workspace_host_path.clone())
+                    .map(std::path::PathBuf::from),
+                mobile_linux_workspace_id: impls
+                    .mobile_linux
+                    .as_ref()
+                    .and_then(|cfg| cfg.stable_workspace_id.clone()),
+                mobile_linux_managed_root: impls
+                    .mobile_linux
+                    .as_ref()
+                    .map(|cfg| std::path::PathBuf::from(cfg.managed_root.clone())),
+                shell: None,
+                secure_storage: None,
+            },
+            mobile_linux_mode,
+        ));
         engine_mobile::build_mobile_engine(cfg, platform, listener, permission_sink)
     }
     #[cfg(not(target_os = "android"))]
@@ -188,6 +521,1262 @@ pub fn build_mobile_engine(
         let _ = (impls, listener, permission_sink);
         Err(MobileEngineError::PlatformUnavailable)
     }
+}
+
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn build_android_mobile_linux_runtime_handle(
+    config: AndroidMobileLinuxConfigFfi,
+) -> Result<Arc<AndroidMobileLinuxRuntimeHandle>, MobileLinuxApiErrorFfi> {
+    let runtime = require_mobile_linux_runtime(Some(&config))?;
+    Ok(Arc::new(AndroidMobileLinuxRuntimeHandle { runtime }))
+}
+
+#[cfg(feature = "uniffi")]
+fn mobile_linux_backend_name(backend: traits::SandboxBackend) -> String {
+    match backend {
+        traits::SandboxBackend::LinuxNamespaces => "linux-namespaces",
+        traits::SandboxBackend::LinuxFirejail => "linux-firejail",
+        traits::SandboxBackend::MacOsSandboxExec => "macos-sandbox-exec",
+        traits::SandboxBackend::WindowsJobObject => "windows-job-object",
+        traits::SandboxBackend::AndroidMinijail => "android-minijail",
+        traits::SandboxBackend::AndroidProot => "android-proot",
+        traits::SandboxBackend::IosIsh => "ios-ish",
+        traits::SandboxBackend::None => "none",
+    }
+    .to_string()
+}
+
+#[cfg(feature = "uniffi")]
+fn rootfs_state_to_ffi(state: traits::RootfsState) -> MobileLinuxRootfsStateFfi {
+    match state {
+        traits::RootfsState::Missing => MobileLinuxRootfsStateFfi::Missing,
+        traits::RootfsState::Installing => MobileLinuxRootfsStateFfi::Installing,
+        traits::RootfsState::Ready => MobileLinuxRootfsStateFfi::Ready,
+        traits::RootfsState::Corrupt => MobileLinuxRootfsStateFfi::Corrupt,
+        traits::RootfsState::Repairing => MobileLinuxRootfsStateFfi::Repairing,
+        traits::RootfsState::Resetting => MobileLinuxRootfsStateFfi::Resetting,
+        traits::RootfsState::Unsupported => MobileLinuxRootfsStateFfi::Unsupported,
+        traits::RootfsState::BlockedByLicense => MobileLinuxRootfsStateFfi::BlockedByLicense,
+    }
+}
+
+#[cfg(feature = "uniffi")]
+fn mobile_linux_authorization_verified(path: Option<&String>) -> bool {
+    use sha2::{Digest, Sha256};
+
+    let Some(expected) = option_env!("LINGXI_MOBILE_LINUX_AUTHORIZATION_SHA256") else {
+        return false;
+    };
+    if expected.len() != 64
+        || !expected
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return false;
+    }
+    let Some(path) = path else {
+        return false;
+    };
+    let path = std::path::Path::new(path);
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 1024 * 1024 {
+        return false;
+    }
+    let Ok(bytes) = std::fs::read(path) else {
+        return false;
+    };
+    let actual = format!("{:x}", Sha256::digest(bytes));
+    actual == expected
+}
+
+#[cfg(feature = "uniffi")]
+fn configured_workspace_guest_path(cfg: &AndroidMobileLinuxConfigFfi) -> String {
+    let workspace_id = cfg
+        .stable_workspace_id
+        .as_deref()
+        .unwrap_or("default")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect::<String>();
+    let workspace_id = if workspace_id.is_empty() {
+        "default".to_string()
+    } else {
+        workspace_id
+    };
+    format!("/workspace/{workspace_id}")
+}
+
+#[cfg(feature = "uniffi")]
+fn capability_to_ffi(capability: traits::MobileLinuxCapability) -> MobileLinuxCapabilityFfi {
+    MobileLinuxCapabilityFfi {
+        available: capability.available,
+        backend: mobile_linux_backend_name(capability.backend),
+        mode: match capability.mode {
+            traits::MobileLinuxRuntimeMode::Legacy => MobileLinuxRuntimeModeFfi::Legacy,
+            traits::MobileLinuxRuntimeMode::MobileLinux => MobileLinuxRuntimeModeFfi::MobileLinux,
+        },
+        reason: capability.reason,
+        streaming_output: capability.streaming_output,
+        background_processes: capability.background_processes,
+        pty: capability.pty,
+        bind_mounts: capability.bind_mounts,
+        rootfs_integrity: capability.rootfs_integrity,
+    }
+}
+
+#[cfg(feature = "uniffi")]
+fn status_to_ffi(status: traits::RootfsStatus) -> MobileLinuxStatusFfi {
+    MobileLinuxStatusFfi {
+        state: rootfs_state_to_ffi(status.state),
+        backend: mobile_linux_backend_name(status.backend),
+        mode: match status.mode {
+            traits::MobileLinuxRuntimeMode::Legacy => MobileLinuxRuntimeModeFfi::Legacy,
+            traits::MobileLinuxRuntimeMode::MobileLinux => MobileLinuxRuntimeModeFfi::MobileLinux,
+        },
+        platform: status.platform,
+        abi: status.abi,
+        version: status.version,
+        managed_root: status
+            .managed_root
+            .map(|p| p.to_string_lossy().into_owned()),
+        active_root: status.active_root.map(|p| p.to_string_lossy().into_owned()),
+        staged_root: status.staged_root.map(|p| p.to_string_lossy().into_owned()),
+        archive_sha256: status.archive_sha256,
+        installed_size_bytes: status.installed_size_bytes,
+        writable_guest_paths: status.writable_guest_paths,
+        last_error: status.last_error,
+    }
+}
+
+#[cfg(feature = "uniffi")]
+fn mount_purpose_to_traits(value: MobileLinuxMountPurposeFfi) -> traits::MountPurpose {
+    match value {
+        MobileLinuxMountPurposeFfi::Workspace => traits::MountPurpose::Workspace,
+        MobileLinuxMountPurposeFfi::Memory => traits::MountPurpose::Memory,
+        MobileLinuxMountPurposeFfi::Skills => traits::MountPurpose::Skills,
+        MobileLinuxMountPurposeFfi::Shared => traits::MountPurpose::Shared,
+        MobileLinuxMountPurposeFfi::External => traits::MountPurpose::External,
+        MobileLinuxMountPurposeFfi::Temp => traits::MountPurpose::Temp,
+    }
+}
+
+#[cfg(feature = "uniffi")]
+fn command_request_to_traits(
+    request: MobileLinuxCommandRequestFfi,
+) -> Result<traits::LinuxCommandRequest, MobileLinuxApiErrorFfi> {
+    let command = request.command.trim();
+    if command.is_empty() {
+        return Err(MobileLinuxApiErrorFfi::InvalidRequest {
+            message: "command must not be empty".to_string(),
+        });
+    }
+    let mounts = request
+        .mounts
+        .into_iter()
+        .map(mount_spec_to_traits)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(traits::LinuxCommandRequest {
+        command: command.to_string(),
+        args: request.args,
+        cwd: request.cwd,
+        env: request
+            .env
+            .into_iter()
+            .map(|entry| (entry.key, entry.value))
+            .collect(),
+        stdin: request.stdin,
+        timeout_ms: request.timeout_ms,
+        network: if request.allow_network {
+            traits::NetworkPolicy::Allowed
+        } else {
+            traits::NetworkPolicy::Disabled
+        },
+        mounts,
+    })
+}
+
+#[cfg(feature = "uniffi")]
+fn command_result_to_ffi(result: traits::LinuxCommandResult) -> MobileLinuxCommandResultFfi {
+    MobileLinuxCommandResultFfi {
+        stdout: result.stdout,
+        stderr: result.stderr,
+        exit_code: result.exit_code,
+        timed_out: result.timed_out,
+        cancelled: result.cancelled,
+    }
+}
+
+#[cfg(feature = "uniffi")]
+fn task_status_to_ffi(status: traits::MobileLinuxTaskStatus) -> MobileLinuxTaskStateFfi {
+    match status {
+        traits::MobileLinuxTaskStatus::Queued => MobileLinuxTaskStateFfi::Queued,
+        traits::MobileLinuxTaskStatus::Running => MobileLinuxTaskStateFfi::Running,
+        traits::MobileLinuxTaskStatus::Backgrounded => MobileLinuxTaskStateFfi::Backgrounded,
+        traits::MobileLinuxTaskStatus::Completed => MobileLinuxTaskStateFfi::Completed,
+        traits::MobileLinuxTaskStatus::Failed => MobileLinuxTaskStateFfi::Failed,
+        traits::MobileLinuxTaskStatus::Cancelled => MobileLinuxTaskStateFfi::Cancelled,
+        traits::MobileLinuxTaskStatus::TimedOut => MobileLinuxTaskStateFfi::TimedOut,
+    }
+}
+
+#[cfg(feature = "uniffi")]
+fn task_snapshot_to_ffi(task: traits::MobileLinuxTaskSnapshot) -> MobileLinuxTaskSnapshotFfi {
+    MobileLinuxTaskSnapshotFfi {
+        task_id: task.task_id,
+        status: task_status_to_ffi(task.status),
+        command: task.command,
+        started_at_ms: task.started_at_ms,
+        finished_at_ms: task.finished_at_ms,
+        exit_code: task.exit_code,
+        detail: task.detail,
+    }
+}
+
+#[cfg(feature = "uniffi")]
+fn event_to_ffi(event: traits::MobileLinuxEvent) -> MobileLinuxEventFfi {
+    match event.kind {
+        traits::MobileLinuxEventKind::TaskStatusChanged {
+            status,
+            exit_code,
+            detail,
+        } => MobileLinuxEventFfi {
+            sequence: event.sequence,
+            task_id: event.task_id,
+            kind: MobileLinuxEventKindFfi::TaskStatusChanged,
+            data: None,
+            text: None,
+            session_id: None,
+            status: Some(task_status_to_ffi(status)),
+            exit_code,
+            timed_out: Some(matches!(status, traits::MobileLinuxTaskStatus::TimedOut)),
+            cancelled: Some(matches!(status, traits::MobileLinuxTaskStatus::Cancelled)),
+            detail,
+        },
+        traits::MobileLinuxEventKind::StdoutLine { line } => MobileLinuxEventFfi {
+            sequence: event.sequence,
+            task_id: event.task_id,
+            kind: MobileLinuxEventKindFfi::StdoutLine,
+            data: None,
+            text: Some(line),
+            session_id: None,
+            status: None,
+            exit_code: None,
+            timed_out: None,
+            cancelled: None,
+            detail: None,
+        },
+        traits::MobileLinuxEventKind::StderrChunk { chunk } => MobileLinuxEventFfi {
+            sequence: event.sequence,
+            task_id: event.task_id,
+            kind: MobileLinuxEventKindFfi::StderrChunk,
+            data: Some(chunk),
+            text: None,
+            session_id: None,
+            status: None,
+            exit_code: None,
+            timed_out: None,
+            cancelled: None,
+            detail: None,
+        },
+        traits::MobileLinuxEventKind::PtyOutput { session_id, data } => MobileLinuxEventFfi {
+            sequence: event.sequence,
+            task_id: event.task_id,
+            kind: MobileLinuxEventKindFfi::PtyOutput,
+            data: Some(data),
+            text: None,
+            session_id: Some(session_id),
+            status: None,
+            exit_code: None,
+            timed_out: None,
+            cancelled: None,
+            detail: None,
+        },
+        traits::MobileLinuxEventKind::PtyClosed {
+            session_id,
+            exit_code,
+            detail,
+        } => MobileLinuxEventFfi {
+            sequence: event.sequence,
+            task_id: event.task_id,
+            kind: MobileLinuxEventKindFfi::PtyClosed,
+            data: None,
+            text: None,
+            session_id: Some(session_id),
+            status: None,
+            exit_code,
+            timed_out: None,
+            cancelled: None,
+            detail,
+        },
+        traits::MobileLinuxEventKind::RuntimeError { detail } => MobileLinuxEventFfi {
+            sequence: event.sequence,
+            task_id: event.task_id,
+            kind: MobileLinuxEventKindFfi::RuntimeError,
+            data: None,
+            text: None,
+            session_id: None,
+            status: None,
+            exit_code: None,
+            timed_out: None,
+            cancelled: None,
+            detail: Some(detail),
+        },
+    }
+}
+
+#[cfg(feature = "uniffi")]
+fn mount_spec_to_traits(
+    mount: MobileLinuxMountSpecFfi,
+) -> Result<traits::MountSpec, MobileLinuxApiErrorFfi> {
+    if mount.guest_path.trim().is_empty() || !mount.guest_path.starts_with('/') {
+        return Err(MobileLinuxApiErrorFfi::InvalidRequest {
+            message: format!("invalid guest mount path: {}", mount.guest_path),
+        });
+    }
+    if mount.host_path.trim().is_empty() {
+        return Err(MobileLinuxApiErrorFfi::InvalidRequest {
+            message: "host mount path must not be empty".to_string(),
+        });
+    }
+    Ok(traits::MountSpec {
+        host_path: std::path::PathBuf::from(mount.host_path),
+        guest_path: mount.guest_path,
+        read_only: mount.read_only,
+        purpose: mount_purpose_to_traits(mount.purpose),
+    })
+}
+
+#[cfg(feature = "uniffi")]
+fn pty_open_request_to_traits(
+    request: MobileLinuxPtyOpenRequestFfi,
+) -> Result<traits::PtyOpenRequest, MobileLinuxApiErrorFfi> {
+    let command = request.command.trim();
+    if command.is_empty() {
+        return Err(MobileLinuxApiErrorFfi::InvalidRequest {
+            message: "pty command must not be empty".to_string(),
+        });
+    }
+    let mounts = request
+        .mounts
+        .into_iter()
+        .map(mount_spec_to_traits)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(traits::PtyOpenRequest {
+        command: command.to_string(),
+        args: request.args,
+        cwd: request.cwd,
+        env: request
+            .env
+            .into_iter()
+            .map(|entry| (entry.key, entry.value))
+            .collect(),
+        size: traits::PtySize {
+            cols: request.size.cols,
+            rows: request.size.rows,
+        },
+        mounts,
+    })
+}
+
+#[cfg(feature = "uniffi")]
+fn process_handle_to_ffi(handle: traits::LinuxProcessHandle) -> MobileLinuxProcessHandleFfi {
+    MobileLinuxProcessHandleFfi { id: handle.id }
+}
+
+#[cfg(feature = "uniffi")]
+fn process_handle_to_traits(
+    handle: MobileLinuxProcessHandleFfi,
+) -> Result<traits::LinuxProcessHandle, MobileLinuxApiErrorFfi> {
+    if handle.id.trim().is_empty() {
+        return Err(MobileLinuxApiErrorFfi::InvalidRequest {
+            message: "process handle id must not be empty".to_string(),
+        });
+    }
+    Ok(traits::LinuxProcessHandle { id: handle.id })
+}
+
+#[cfg(feature = "uniffi")]
+fn pty_handle_to_ffi(handle: traits::PtySessionHandle) -> MobileLinuxPtySessionHandleFfi {
+    MobileLinuxPtySessionHandleFfi { id: handle.id }
+}
+
+#[cfg(feature = "uniffi")]
+fn pty_handle_to_traits(
+    handle: MobileLinuxPtySessionHandleFfi,
+) -> Result<traits::PtySessionHandle, MobileLinuxApiErrorFfi> {
+    if handle.id.trim().is_empty() {
+        return Err(MobileLinuxApiErrorFfi::InvalidRequest {
+            message: "pty handle id must not be empty".to_string(),
+        });
+    }
+    Ok(traits::PtySessionHandle { id: handle.id })
+}
+
+#[cfg(feature = "uniffi")]
+fn mobile_linux_error_to_ffi(error: traits::MobileLinuxError) -> MobileLinuxApiErrorFfi {
+    match error {
+        traits::MobileLinuxError::Unsupported => MobileLinuxApiErrorFfi::Unavailable {
+            message: "runtime unsupported on this build".to_string(),
+        },
+        traits::MobileLinuxError::Unavailable(message) => {
+            MobileLinuxApiErrorFfi::Unavailable { message }
+        }
+        traits::MobileLinuxError::LicenseBlocked(message) => {
+            MobileLinuxApiErrorFfi::LicenseBlocked { message }
+        }
+        traits::MobileLinuxError::InvalidRequest(message) => {
+            MobileLinuxApiErrorFfi::InvalidRequest { message }
+        }
+        traits::MobileLinuxError::Integrity(message) | traits::MobileLinuxError::Io(message) => {
+            MobileLinuxApiErrorFfi::OperationFailed { message }
+        }
+        traits::MobileLinuxError::Timeout => MobileLinuxApiErrorFfi::OperationFailed {
+            message: "timeout".to_string(),
+        },
+    }
+}
+
+#[cfg(feature = "uniffi")]
+struct AndroidMobileLinuxEventSinkBridge {
+    task_id: String,
+    inner: Box<dyn AndroidMobileLinuxEventSink>,
+}
+
+#[cfg(feature = "uniffi")]
+impl AndroidMobileLinuxEventSinkBridge {
+    async fn emit_event(&self, event: MobileLinuxEventFfi) -> Result<(), MobileLinuxApiErrorFfi> {
+        self.inner.on_event(event).await
+    }
+}
+
+#[cfg(feature = "uniffi")]
+#[async_trait::async_trait]
+impl traits::ProcessStreamSink for AndroidMobileLinuxEventSinkBridge {
+    async fn stdout_line(&self, line: String) -> Result<(), traits::ProcessError> {
+        self.inner
+            .on_event(MobileLinuxEventFfi {
+                sequence: 0,
+                task_id: Some(self.task_id.clone()),
+                kind: MobileLinuxEventKindFfi::StdoutLine,
+                data: None,
+                text: Some(line),
+                session_id: None,
+                status: None,
+                exit_code: None,
+                timed_out: None,
+                cancelled: None,
+                detail: None,
+            })
+            .await
+            .map_err(|err| traits::ProcessError::Io(err.to_string()))
+    }
+
+    async fn stderr_chunk(&self, chunk: Vec<u8>) -> Result<(), traits::ProcessError> {
+        self.inner
+            .on_event(MobileLinuxEventFfi {
+                sequence: 0,
+                task_id: Some(self.task_id.clone()),
+                kind: MobileLinuxEventKindFfi::StderrChunk,
+                data: Some(chunk),
+                text: None,
+                session_id: None,
+                status: None,
+                exit_code: None,
+                timed_out: None,
+                cancelled: None,
+                detail: None,
+            })
+            .await
+            .map_err(|err| traits::ProcessError::Io(err.to_string()))
+    }
+}
+
+#[cfg(feature = "uniffi")]
+fn require_mobile_linux_runtime(
+    config: Option<&AndroidMobileLinuxConfigFfi>,
+) -> Result<Arc<dyn traits::MobileLinuxRuntime>, MobileLinuxApiErrorFfi> {
+    match config {
+        None => Err(MobileLinuxApiErrorFfi::LegacySelected),
+        Some(cfg) if matches!(cfg.mode, MobileLinuxRuntimeModeFfi::Legacy) => {
+            Err(MobileLinuxApiErrorFfi::LegacySelected)
+        }
+        Some(_) => {
+            android_mobile_linux_runtime(config).ok_or(MobileLinuxApiErrorFfi::Unavailable {
+                message: "mobile-linux runtime is not wired into this build".to_string(),
+            })
+        }
+    }
+}
+
+#[cfg(feature = "uniffi")]
+fn block_on_mobile_linux_call<T>(
+    config: Option<&AndroidMobileLinuxConfigFfi>,
+    op: impl FnOnce(
+        Arc<dyn traits::MobileLinuxRuntime>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<T, traits::MobileLinuxError>> + Send>,
+    >,
+) -> Result<T, MobileLinuxApiErrorFfi> {
+    let runtime = require_mobile_linux_runtime(config)?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|err| MobileLinuxApiErrorFfi::OperationFailed {
+            message: err.to_string(),
+        })?;
+    rt.block_on(op(runtime)).map_err(mobile_linux_error_to_ffi)
+}
+
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export(async_runtime = "tokio"))]
+impl AndroidMobileLinuxRuntimeHandle {
+    pub async fn capability(&self) -> MobileLinuxCapabilityFfi {
+        capability_to_ffi(self.runtime.probe_capability().await)
+    }
+
+    pub async fn status(&self) -> Result<MobileLinuxStatusFfi, MobileLinuxApiErrorFfi> {
+        self.runtime
+            .rootfs_status()
+            .await
+            .map(status_to_ffi)
+            .map_err(mobile_linux_error_to_ffi)
+    }
+
+    pub async fn boot(&self) -> Result<MobileLinuxStatusFfi, MobileLinuxApiErrorFfi> {
+        self.runtime
+            .boot()
+            .await
+            .map(status_to_ffi)
+            .map_err(mobile_linux_error_to_ffi)
+    }
+
+    pub async fn shutdown(&self) -> Result<(), MobileLinuxApiErrorFfi> {
+        self.runtime
+            .shutdown()
+            .await
+            .map_err(mobile_linux_error_to_ffi)
+    }
+
+    pub async fn verify_rootfs(&self) -> Result<MobileLinuxStatusFfi, MobileLinuxApiErrorFfi> {
+        self.runtime
+            .verify_rootfs()
+            .await
+            .map(status_to_ffi)
+            .map_err(mobile_linux_error_to_ffi)
+    }
+
+    pub async fn repair_rootfs(&self) -> Result<MobileLinuxStatusFfi, MobileLinuxApiErrorFfi> {
+        self.runtime
+            .repair_rootfs()
+            .await
+            .map(status_to_ffi)
+            .map_err(mobile_linux_error_to_ffi)
+    }
+
+    pub async fn reset_rootfs(&self) -> Result<MobileLinuxStatusFfi, MobileLinuxApiErrorFfi> {
+        self.runtime
+            .reset_rootfs()
+            .await
+            .map(status_to_ffi)
+            .map_err(mobile_linux_error_to_ffi)
+    }
+
+    pub async fn run_command(
+        &self,
+        request: MobileLinuxCommandRequestFfi,
+    ) -> Result<MobileLinuxCommandResultFfi, MobileLinuxApiErrorFfi> {
+        self.runtime
+            .run(command_request_to_traits(request)?)
+            .await
+            .map(command_result_to_ffi)
+            .map_err(mobile_linux_error_to_ffi)
+    }
+
+    pub async fn run_command_streaming(
+        &self,
+        request: MobileLinuxCommandRequestFfi,
+        sink: Box<dyn AndroidMobileLinuxEventSink>,
+    ) -> Result<MobileLinuxCommandResultFfi, MobileLinuxApiErrorFfi> {
+        let task_id = format!(
+            "run-{}",
+            MOBILE_LINUX_FFI_ID_COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        let sink = Arc::new(AndroidMobileLinuxEventSinkBridge {
+            task_id,
+            inner: sink,
+        });
+        let result = self
+            .runtime
+            .run_streaming(command_request_to_traits(request)?, sink.clone())
+            .await
+            .map_err(mobile_linux_error_to_ffi)?;
+        sink.emit_event(MobileLinuxEventFfi {
+            sequence: 0,
+            task_id: Some(sink.task_id.clone()),
+            kind: MobileLinuxEventKindFfi::TaskStatusChanged,
+            data: None,
+            text: None,
+            session_id: None,
+            status: Some(if result.cancelled {
+                MobileLinuxTaskStateFfi::Cancelled
+            } else if result.timed_out {
+                MobileLinuxTaskStateFfi::TimedOut
+            } else if result.exit_code == 0 {
+                MobileLinuxTaskStateFfi::Completed
+            } else {
+                MobileLinuxTaskStateFfi::Failed
+            }),
+            exit_code: Some(result.exit_code),
+            timed_out: Some(result.timed_out),
+            cancelled: Some(result.cancelled),
+            detail: None,
+        })
+        .await?;
+        Ok(command_result_to_ffi(result))
+    }
+
+    pub async fn spawn_background(
+        &self,
+        request: MobileLinuxCommandRequestFfi,
+    ) -> Result<MobileLinuxProcessHandleFfi, MobileLinuxApiErrorFfi> {
+        self.runtime
+            .spawn_background(command_request_to_traits(request)?)
+            .await
+            .map(process_handle_to_ffi)
+            .map_err(mobile_linux_error_to_ffi)
+    }
+
+    pub async fn kill_process(
+        &self,
+        handle: MobileLinuxProcessHandleFfi,
+    ) -> Result<(), MobileLinuxApiErrorFfi> {
+        self.runtime
+            .kill(&process_handle_to_traits(handle)?)
+            .await
+            .map_err(mobile_linux_error_to_ffi)
+    }
+
+    pub async fn open_pty(
+        &self,
+        request: MobileLinuxPtyOpenRequestFfi,
+    ) -> Result<MobileLinuxPtySessionHandleFfi, MobileLinuxApiErrorFfi> {
+        self.runtime
+            .open_pty(pty_open_request_to_traits(request)?)
+            .await
+            .map(pty_handle_to_ffi)
+            .map_err(mobile_linux_error_to_ffi)
+    }
+
+    pub async fn write_pty(
+        &self,
+        handle: MobileLinuxPtySessionHandleFfi,
+        input: Vec<u8>,
+    ) -> Result<(), MobileLinuxApiErrorFfi> {
+        self.runtime
+            .write_pty(&pty_handle_to_traits(handle)?, input)
+            .await
+            .map_err(mobile_linux_error_to_ffi)
+    }
+
+    pub async fn resize_pty(
+        &self,
+        handle: MobileLinuxPtySessionHandleFfi,
+        size: MobileLinuxPtySizeFfi,
+    ) -> Result<(), MobileLinuxApiErrorFfi> {
+        self.runtime
+            .resize_pty(
+                &pty_handle_to_traits(handle)?,
+                traits::PtySize {
+                    cols: size.cols,
+                    rows: size.rows,
+                },
+            )
+            .await
+            .map_err(mobile_linux_error_to_ffi)
+    }
+
+    pub async fn close_pty(
+        &self,
+        handle: MobileLinuxPtySessionHandleFfi,
+    ) -> Result<(), MobileLinuxApiErrorFfi> {
+        self.runtime
+            .close_pty(&pty_handle_to_traits(handle)?)
+            .await
+            .map_err(mobile_linux_error_to_ffi)
+    }
+
+    pub async fn configure_mounts(
+        &self,
+        mounts: Vec<MobileLinuxMountSpecFfi>,
+    ) -> Result<MobileLinuxStatusFfi, MobileLinuxApiErrorFfi> {
+        let mounts = mounts
+            .into_iter()
+            .map(mount_spec_to_traits)
+            .collect::<Result<Vec<_>, _>>()?;
+        self.runtime
+            .configure_mounts(mounts)
+            .await
+            .map_err(mobile_linux_error_to_ffi)?;
+        self.status().await
+    }
+
+    pub async fn read_events(
+        &self,
+        after_sequence: Option<u64>,
+        limit: Option<u32>,
+    ) -> Result<Vec<MobileLinuxEventFfi>, MobileLinuxApiErrorFfi> {
+        let limit = limit
+            .map(|value| value as usize)
+            .unwrap_or(MAX_MOBILE_LINUX_EVENT_BATCH)
+            .min(MAX_MOBILE_LINUX_EVENT_BATCH);
+        self.runtime
+            .read_events(after_sequence, limit)
+            .await
+            .map(|events| events.into_iter().map(event_to_ffi).collect())
+            .map_err(mobile_linux_error_to_ffi)
+    }
+
+    pub async fn list_tasks(
+        &self,
+    ) -> Result<Vec<MobileLinuxTaskSnapshotFfi>, MobileLinuxApiErrorFfi> {
+        self.runtime
+            .list_tasks()
+            .await
+            .map(|tasks| tasks.into_iter().map(task_snapshot_to_ffi).collect())
+            .map_err(mobile_linux_error_to_ffi)
+    }
+
+    pub async fn task_status(
+        &self,
+        task_id: String,
+    ) -> Result<Option<MobileLinuxTaskSnapshotFfi>, MobileLinuxApiErrorFfi> {
+        if task_id.trim().is_empty() {
+            return Err(MobileLinuxApiErrorFfi::InvalidRequest {
+                message: "task_id must not be empty".to_string(),
+            });
+        }
+        self.runtime
+            .task_status(&task_id)
+            .await
+            .map(|task| task.map(task_snapshot_to_ffi))
+            .map_err(mobile_linux_error_to_ffi)
+    }
+}
+
+#[cfg(feature = "uniffi")]
+fn android_mobile_linux_status_from_config(
+    config: Option<&AndroidMobileLinuxConfigFfi>,
+) -> MobileLinuxStatusFfi {
+    match config {
+        None => MobileLinuxStatusFfi {
+            state: MobileLinuxRootfsStateFfi::Unsupported,
+            backend: "android-minijail".to_string(),
+            mode: MobileLinuxRuntimeModeFfi::Legacy,
+            platform: "android".to_string(),
+            abi: "unknown".to_string(),
+            version: None,
+            managed_root: None,
+            active_root: None,
+            staged_root: None,
+            archive_sha256: None,
+            installed_size_bytes: None,
+            writable_guest_paths: vec![],
+            last_error: Some("legacy backend selected".to_string()),
+        },
+        Some(cfg) if matches!(cfg.mode, MobileLinuxRuntimeModeFfi::Legacy) => {
+            MobileLinuxStatusFfi {
+                state: MobileLinuxRootfsStateFfi::Unsupported,
+                backend: "android-minijail".to_string(),
+                mode: MobileLinuxRuntimeModeFfi::Legacy,
+                platform: "android".to_string(),
+                abi: cfg.abi.clone(),
+                version: Some(cfg.rootfs_version.clone()),
+                managed_root: Some(cfg.managed_root.clone()),
+                active_root: None,
+                staged_root: None,
+                archive_sha256: cfg.archive_sha256.clone(),
+                installed_size_bytes: None,
+                writable_guest_paths: vec![
+                    "/root".to_string(),
+                    "/tmp".to_string(),
+                    "/var/tmp".to_string(),
+                    configured_workspace_guest_path(cfg),
+                ],
+                last_error: Some("legacy backend selected".to_string()),
+            }
+        }
+        Some(cfg) => {
+            let auth_present = mobile_linux_authorization_verified(cfg.authorization_file.as_ref());
+            let (state, message) = if auth_present {
+                (
+                    MobileLinuxRootfsStateFfi::Unsupported,
+                    "authorization present, but Android PRoot runtime is not linked in this build",
+                )
+            } else {
+                (
+                    MobileLinuxRootfsStateFfi::BlockedByLicense,
+                    "missing additional written authorization for PRoot/iSH redistribution",
+                )
+            };
+            MobileLinuxStatusFfi {
+                state,
+                backend: "android-proot".to_string(),
+                mode: MobileLinuxRuntimeModeFfi::MobileLinux,
+                platform: "android".to_string(),
+                abi: cfg.abi.clone(),
+                version: Some(cfg.rootfs_version.clone()),
+                managed_root: Some(cfg.managed_root.clone()),
+                active_root: None,
+                staged_root: None,
+                archive_sha256: cfg.archive_sha256.clone(),
+                installed_size_bytes: None,
+                writable_guest_paths: vec![
+                    "/root".to_string(),
+                    "/tmp".to_string(),
+                    "/var/tmp".to_string(),
+                    configured_workspace_guest_path(cfg),
+                ],
+                last_error: Some(message.to_string()),
+            }
+        }
+    }
+}
+
+#[cfg(feature = "uniffi")]
+fn android_mobile_linux_runtime(
+    config: Option<&AndroidMobileLinuxConfigFfi>,
+) -> Option<Arc<dyn traits::MobileLinuxRuntime>> {
+    let cfg = config?;
+    if matches!(cfg.mode, MobileLinuxRuntimeModeFfi::Legacy) {
+        return None;
+    }
+    let auth_present = mobile_linux_authorization_verified(cfg.authorization_file.as_ref());
+    let runtime = if auth_present {
+        traits::UnavailableMobileLinuxRuntime::unavailable(
+            traits::SandboxBackend::AndroidProot,
+            traits::MobileLinuxRuntimeMode::MobileLinux,
+            "android",
+            cfg.abi.clone(),
+            "authorization present, but Android PRoot runtime is not linked in this build",
+        )
+    } else {
+        traits::UnavailableMobileLinuxRuntime::blocked(
+            traits::SandboxBackend::AndroidProot,
+            traits::MobileLinuxRuntimeMode::MobileLinux,
+            "android",
+            cfg.abi.clone(),
+            "missing additional written authorization for PRoot/iSH redistribution",
+        )
+    };
+    Some(Arc::new(runtime) as Arc<dyn traits::MobileLinuxRuntime>)
+}
+
+#[cfg(feature = "uniffi")]
+fn android_mobile_linux_capability_from_config(
+    config: Option<&AndroidMobileLinuxConfigFfi>,
+) -> MobileLinuxCapabilityFfi {
+    match config {
+        None => MobileLinuxCapabilityFfi {
+            available: false,
+            backend: "android-minijail".to_string(),
+            mode: MobileLinuxRuntimeModeFfi::Legacy,
+            reason: Some("legacy backend selected".to_string()),
+            streaming_output: false,
+            background_processes: false,
+            pty: false,
+            bind_mounts: false,
+            rootfs_integrity: false,
+        },
+        Some(cfg) if matches!(cfg.mode, MobileLinuxRuntimeModeFfi::Legacy) => {
+            MobileLinuxCapabilityFfi {
+                available: false,
+                backend: "android-minijail".to_string(),
+                mode: MobileLinuxRuntimeModeFfi::Legacy,
+                reason: Some("legacy backend selected".to_string()),
+                streaming_output: false,
+                background_processes: false,
+                pty: false,
+                bind_mounts: false,
+                rootfs_integrity: false,
+            }
+        }
+        Some(cfg) => {
+            let auth_present = mobile_linux_authorization_verified(cfg.authorization_file.as_ref());
+            MobileLinuxCapabilityFfi {
+                available: false,
+                backend: "android-proot".to_string(),
+                mode: MobileLinuxRuntimeModeFfi::MobileLinux,
+                reason: Some(if auth_present {
+                    "authorization present, but Android PRoot runtime is not linked in this build"
+                        .to_string()
+                } else {
+                    "missing additional written authorization for PRoot/iSH redistribution"
+                        .to_string()
+                }),
+                streaming_output: false,
+                background_processes: false,
+                pty: false,
+                bind_mounts: false,
+                rootfs_integrity: false,
+            }
+        }
+    }
+}
+
+#[cfg(feature = "uniffi")]
+fn block_on_mobile_linux_status(
+    config: Option<&AndroidMobileLinuxConfigFfi>,
+    op: fn(
+        Arc<dyn traits::MobileLinuxRuntime>,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<traits::RootfsStatus, traits::MobileLinuxError>>
+                + Send,
+        >,
+    >,
+) -> MobileLinuxStatusFfi {
+    let Some(runtime) = android_mobile_linux_runtime(config) else {
+        return android_mobile_linux_status_from_config(config);
+    };
+    let fallback = android_mobile_linux_status_from_config(config);
+    let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    else {
+        return fallback;
+    };
+    match rt.block_on(op(runtime)) {
+        Ok(status) => status_to_ffi(status),
+        Err(error) => {
+            let mut status = fallback;
+            status.last_error = Some(error.to_string());
+            status
+        }
+    }
+}
+
+#[cfg(feature = "uniffi")]
+fn verify_rootfs_op(
+    runtime: Arc<dyn traits::MobileLinuxRuntime>,
+) -> std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = Result<traits::RootfsStatus, traits::MobileLinuxError>>
+            + Send,
+    >,
+> {
+    Box::pin(async move { runtime.verify_rootfs().await })
+}
+
+#[cfg(feature = "uniffi")]
+fn repair_rootfs_op(
+    runtime: Arc<dyn traits::MobileLinuxRuntime>,
+) -> std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = Result<traits::RootfsStatus, traits::MobileLinuxError>>
+            + Send,
+    >,
+> {
+    Box::pin(async move { runtime.repair_rootfs().await })
+}
+
+#[cfg(feature = "uniffi")]
+fn reset_rootfs_op(
+    runtime: Arc<dyn traits::MobileLinuxRuntime>,
+) -> std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = Result<traits::RootfsStatus, traits::MobileLinuxError>>
+            + Send,
+    >,
+> {
+    Box::pin(async move { runtime.reset_rootfs().await })
+}
+
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn android_mobile_linux_capability(
+    config: Option<AndroidMobileLinuxConfigFfi>,
+) -> MobileLinuxCapabilityFfi {
+    android_mobile_linux_capability_from_config(config.as_ref())
+}
+
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn android_mobile_linux_status(
+    config: Option<AndroidMobileLinuxConfigFfi>,
+) -> MobileLinuxStatusFfi {
+    android_mobile_linux_status_from_config(config.as_ref())
+}
+
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn android_mobile_linux_verify_rootfs(
+    config: Option<AndroidMobileLinuxConfigFfi>,
+) -> MobileLinuxStatusFfi {
+    block_on_mobile_linux_status(config.as_ref(), verify_rootfs_op)
+}
+
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn android_mobile_linux_repair_rootfs(
+    config: Option<AndroidMobileLinuxConfigFfi>,
+) -> MobileLinuxStatusFfi {
+    block_on_mobile_linux_status(config.as_ref(), repair_rootfs_op)
+}
+
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn android_mobile_linux_reset_rootfs(
+    config: Option<AndroidMobileLinuxConfigFfi>,
+) -> MobileLinuxStatusFfi {
+    block_on_mobile_linux_status(config.as_ref(), reset_rootfs_op)
+}
+
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn android_mobile_linux_boot(
+    config: Option<AndroidMobileLinuxConfigFfi>,
+) -> Result<MobileLinuxStatusFfi, MobileLinuxApiErrorFfi> {
+    block_on_mobile_linux_call(config.as_ref(), |runtime| {
+        Box::pin(async move { runtime.boot().await })
+    })
+    .map(status_to_ffi)
+}
+
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn android_mobile_linux_shutdown(
+    config: Option<AndroidMobileLinuxConfigFfi>,
+) -> Result<(), MobileLinuxApiErrorFfi> {
+    block_on_mobile_linux_call(config.as_ref(), |runtime| {
+        Box::pin(async move {
+            runtime.shutdown().await?;
+            Ok(())
+        })
+    })
+}
+
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn android_mobile_linux_run_command(
+    config: Option<AndroidMobileLinuxConfigFfi>,
+    request: MobileLinuxCommandRequestFfi,
+) -> Result<MobileLinuxCommandResultFfi, MobileLinuxApiErrorFfi> {
+    let request = command_request_to_traits(request)?;
+    block_on_mobile_linux_call(config.as_ref(), |runtime| {
+        Box::pin(async move { runtime.run(request).await })
+    })
+    .map(command_result_to_ffi)
+}
+
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn android_mobile_linux_run_command_streaming(
+    config: Option<AndroidMobileLinuxConfigFfi>,
+    request: MobileLinuxCommandRequestFfi,
+    sink: Box<dyn AndroidMobileLinuxEventSink>,
+) -> Result<MobileLinuxCommandResultFfi, MobileLinuxApiErrorFfi> {
+    let request = command_request_to_traits(request)?;
+    let task_id = format!(
+        "run-{}",
+        MOBILE_LINUX_FFI_ID_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    block_on_mobile_linux_call(config.as_ref(), |runtime| {
+        let sink = std::sync::Arc::new(AndroidMobileLinuxEventSinkBridge {
+            task_id: task_id.clone(),
+            inner: sink,
+        });
+        Box::pin(async move {
+            let result = runtime.run_streaming(request, sink.clone()).await?;
+            sink.emit_event(MobileLinuxEventFfi {
+                sequence: 0,
+                task_id: Some(task_id),
+                kind: MobileLinuxEventKindFfi::TaskStatusChanged,
+                data: None,
+                text: None,
+                session_id: None,
+                status: Some(if result.cancelled {
+                    MobileLinuxTaskStateFfi::Cancelled
+                } else if result.timed_out {
+                    MobileLinuxTaskStateFfi::TimedOut
+                } else if result.exit_code == 0 {
+                    MobileLinuxTaskStateFfi::Completed
+                } else {
+                    MobileLinuxTaskStateFfi::Failed
+                }),
+                exit_code: Some(result.exit_code),
+                timed_out: Some(result.timed_out),
+                cancelled: Some(result.cancelled),
+                detail: None,
+            })
+            .await
+            .map_err(|err| traits::MobileLinuxError::Io(err.to_string()))?;
+            Ok(result)
+        })
+    })
+    .map(command_result_to_ffi)
+}
+
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn android_mobile_linux_spawn_background(
+    config: Option<AndroidMobileLinuxConfigFfi>,
+    request: MobileLinuxCommandRequestFfi,
+) -> Result<MobileLinuxProcessHandleFfi, MobileLinuxApiErrorFfi> {
+    let request = command_request_to_traits(request)?;
+    block_on_mobile_linux_call(config.as_ref(), |runtime| {
+        Box::pin(async move { runtime.spawn_background(request).await })
+    })
+    .map(process_handle_to_ffi)
+}
+
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn android_mobile_linux_kill_process(
+    config: Option<AndroidMobileLinuxConfigFfi>,
+    handle: MobileLinuxProcessHandleFfi,
+) -> Result<(), MobileLinuxApiErrorFfi> {
+    let handle = process_handle_to_traits(handle)?;
+    block_on_mobile_linux_call(config.as_ref(), |runtime| {
+        Box::pin(async move {
+            runtime.kill(&handle).await?;
+            Ok(())
+        })
+    })
+}
+
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn android_mobile_linux_open_pty(
+    config: Option<AndroidMobileLinuxConfigFfi>,
+    request: MobileLinuxPtyOpenRequestFfi,
+) -> Result<MobileLinuxPtySessionHandleFfi, MobileLinuxApiErrorFfi> {
+    let request = pty_open_request_to_traits(request)?;
+    block_on_mobile_linux_call(config.as_ref(), |runtime| {
+        Box::pin(async move { runtime.open_pty(request).await })
+    })
+    .map(pty_handle_to_ffi)
+}
+
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn android_mobile_linux_write_pty(
+    config: Option<AndroidMobileLinuxConfigFfi>,
+    handle: MobileLinuxPtySessionHandleFfi,
+    input: Vec<u8>,
+) -> Result<(), MobileLinuxApiErrorFfi> {
+    let handle = pty_handle_to_traits(handle)?;
+    block_on_mobile_linux_call(config.as_ref(), |runtime| {
+        Box::pin(async move {
+            runtime.write_pty(&handle, input).await?;
+            Ok(())
+        })
+    })
+}
+
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn android_mobile_linux_resize_pty(
+    config: Option<AndroidMobileLinuxConfigFfi>,
+    handle: MobileLinuxPtySessionHandleFfi,
+    size: MobileLinuxPtySizeFfi,
+) -> Result<(), MobileLinuxApiErrorFfi> {
+    let handle = pty_handle_to_traits(handle)?;
+    block_on_mobile_linux_call(config.as_ref(), |runtime| {
+        Box::pin(async move {
+            runtime
+                .resize_pty(
+                    &handle,
+                    traits::PtySize {
+                        cols: size.cols,
+                        rows: size.rows,
+                    },
+                )
+                .await?;
+            Ok(())
+        })
+    })
+}
+
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn android_mobile_linux_close_pty(
+    config: Option<AndroidMobileLinuxConfigFfi>,
+    handle: MobileLinuxPtySessionHandleFfi,
+) -> Result<(), MobileLinuxApiErrorFfi> {
+    let handle = pty_handle_to_traits(handle)?;
+    block_on_mobile_linux_call(config.as_ref(), |runtime| {
+        Box::pin(async move {
+            runtime.close_pty(&handle).await?;
+            Ok(())
+        })
+    })
+}
+
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn android_mobile_linux_configure_mounts(
+    config: Option<AndroidMobileLinuxConfigFfi>,
+    mounts: Vec<MobileLinuxMountSpecFfi>,
+) -> Result<MobileLinuxStatusFfi, MobileLinuxApiErrorFfi> {
+    let mounts = mounts
+        .into_iter()
+        .map(mount_spec_to_traits)
+        .collect::<Result<Vec<_>, _>>()?;
+    block_on_mobile_linux_call(config.as_ref(), |runtime| {
+        Box::pin(async move {
+            runtime.configure_mounts(mounts).await?;
+            runtime.rootfs_status().await
+        })
+    })
+    .map(status_to_ffi)
+}
+
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn android_mobile_linux_list_tasks(
+    config: Option<AndroidMobileLinuxConfigFfi>,
+) -> Result<Vec<MobileLinuxTaskSnapshotFfi>, MobileLinuxApiErrorFfi> {
+    block_on_mobile_linux_call(config.as_ref(), |runtime| {
+        Box::pin(async move { runtime.list_tasks().await })
+    })
+    .map(|tasks| tasks.into_iter().map(task_snapshot_to_ffi).collect())
+}
+
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn android_mobile_linux_read_events(
+    config: Option<AndroidMobileLinuxConfigFfi>,
+    after_sequence: Option<u64>,
+    limit: Option<u32>,
+) -> Result<Vec<MobileLinuxEventFfi>, MobileLinuxApiErrorFfi> {
+    let limit = limit
+        .map(|value| value as usize)
+        .unwrap_or(MAX_MOBILE_LINUX_EVENT_BATCH)
+        .min(MAX_MOBILE_LINUX_EVENT_BATCH);
+    block_on_mobile_linux_call(config.as_ref(), |runtime| {
+        Box::pin(async move { runtime.read_events(after_sequence, limit).await })
+    })
+    .map(|events| events.into_iter().map(event_to_ffi).collect())
+}
+
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn android_mobile_linux_task_status(
+    config: Option<AndroidMobileLinuxConfigFfi>,
+    task_id: String,
+) -> Result<Option<MobileLinuxTaskSnapshotFfi>, MobileLinuxApiErrorFfi> {
+    if task_id.trim().is_empty() {
+        return Err(MobileLinuxApiErrorFfi::InvalidRequest {
+            message: "task_id must not be empty".to_string(),
+        });
+    }
+    block_on_mobile_linux_call(config.as_ref(), |runtime| {
+        Box::pin(async move { runtime.task_status(&task_id).await })
+    })
+    .map(|snapshot| snapshot.map(task_snapshot_to_ffi))
 }
 
 // ---------------------------------------------------------------------------
@@ -1388,6 +2977,9 @@ fn bootstrap_bundled_shell(native_library_dir: &str, app_files_root: &str) -> Op
 ///   inputs); `None`/`null` keeps shell support fully absent.
 /// - `git` — optional Android Git-tool config (spec P4 §G5 gate + §G3 auth);
 ///   `None`/`null` keeps Git support fully absent.
+/// - `mobile_linux` — optional Android mobile-linux config. When selected, the
+///   phase-1 build wires a capability/status bridge and a blocked/unavailable
+///   runtime stub; it does NOT link GPL runtime code.
 ///
 /// On non-Android hosts this returns [`MobileEngineError::PlatformUnavailable`]
 /// (the `AndroidPlatform` is only linked under `cfg(target_os = "android")`).
@@ -1415,6 +3007,52 @@ pub fn build_android_engine(
     permissions: Box<dyn AndroidPermissionSink>,
     shell: Option<AndroidShellConfigFfi>,
     git: Option<AndroidGitConfigFfi>,
+    git_credential_provider: Option<Box<dyn AndroidGitCredentialProvider>>,
+    secure_storage: Option<Box<dyn AndroidSecureStorage>>,
+) -> Result<Arc<MobileEngineHandle>, MobileEngineError> {
+    build_android_engine_with_mobile_linux(
+        api_base,
+        api_key,
+        model,
+        app_files_root,
+        listener,
+        stt,
+        tts,
+        camera,
+        share,
+        voice,
+        notifications,
+        clipboard,
+        permissions,
+        shell,
+        git,
+        None,
+        git_credential_provider,
+        secure_storage,
+    )
+}
+
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
+pub fn build_android_engine_with_mobile_linux(
+    api_base: String,
+    api_key: String,
+    model: String,
+    app_files_root: String,
+    listener: Box<dyn AndroidEventListener>,
+    stt: Box<dyn AndroidStt>,
+    tts: Box<dyn AndroidTts>,
+    camera: Box<dyn AndroidCamera>,
+    share: Box<dyn AndroidShare>,
+    voice: Box<dyn AndroidVoice>,
+    notifications: Box<dyn AndroidNotification>,
+    clipboard: Box<dyn AndroidClipboard>,
+    permissions: Box<dyn AndroidPermissionSink>,
+    shell: Option<AndroidShellConfigFfi>,
+    git: Option<AndroidGitConfigFfi>,
+    mobile_linux: Option<AndroidMobileLinuxConfigFfi>,
     git_credential_provider: Option<Box<dyn AndroidGitCredentialProvider>>,
     secure_storage: Option<Box<dyn AndroidSecureStorage>>,
 ) -> Result<Arc<MobileEngineHandle>, MobileEngineError> {
@@ -1474,23 +3112,42 @@ pub fn build_android_engine(
         // `AndroidPlatformInputs.shell` — the registration gate (computed below,
         // after the probe) needs `enable_shell` + the D11 secrets gate from it.
         let shell_cfg_for_gate = shell_cfg.clone();
-        let android_platform = AndroidPlatform::new(AndroidPlatformInputs {
-            app_files_root: std::path::PathBuf::from(app_files_root),
-            camera: Arc::new(AndroidCameraBridge { inner: camera }),
-            voice: Arc::new(AndroidVoiceBridge { inner: voice }),
-            share: Arc::new(AndroidShareBridge { inner: share }),
-            stt: Some(Arc::new(AndroidSttBridge { inner: stt })),
-            tts: Some(Arc::new(AndroidTtsBridge { inner: tts })),
-            notifications: Some(Arc::new(AndroidNotificationBridge {
-                inner: notifications,
-            })),
-            clipboard: Some(Arc::new(AndroidClipboardBridge { inner: clipboard })),
-            shell: shell_cfg,
-            secure_storage: secure_storage.map(|s| {
-                std::sync::Arc::new(AndroidSecureStorageBridge { inner: s })
-                    as std::sync::Arc<dyn traits::SecureStorage>
-            }),
-        });
+        let mobile_linux_mode = mobile_linux
+            .as_ref()
+            .map_or(traits::MobileLinuxRuntimeMode::Legacy, |cfg| {
+                cfg.mode.into()
+            });
+        let android_platform = AndroidPlatform::new_with_mode(
+            AndroidPlatformInputs {
+                app_files_root: std::path::PathBuf::from(app_files_root),
+                camera: Arc::new(AndroidCameraBridge { inner: camera }),
+                voice: Arc::new(AndroidVoiceBridge { inner: voice }),
+                share: Arc::new(AndroidShareBridge { inner: share }),
+                stt: Some(Arc::new(AndroidSttBridge { inner: stt })),
+                tts: Some(Arc::new(AndroidTtsBridge { inner: tts })),
+                notifications: Some(Arc::new(AndroidNotificationBridge {
+                    inner: notifications,
+                })),
+                clipboard: Some(Arc::new(AndroidClipboardBridge { inner: clipboard })),
+                mobile_linux: android_mobile_linux_runtime(mobile_linux.as_ref()),
+                mobile_linux_workspace_root: mobile_linux
+                    .as_ref()
+                    .and_then(|cfg| cfg.workspace_host_path.clone())
+                    .map(std::path::PathBuf::from),
+                mobile_linux_workspace_id: mobile_linux
+                    .as_ref()
+                    .and_then(|cfg| cfg.stable_workspace_id.clone()),
+                mobile_linux_managed_root: mobile_linux
+                    .as_ref()
+                    .map(|cfg| std::path::PathBuf::from(cfg.managed_root.clone())),
+                shell: shell_cfg,
+                secure_storage: secure_storage.map(|s| {
+                    std::sync::Arc::new(AndroidSecureStorageBridge { inner: s })
+                        as std::sync::Arc<dyn traits::SecureStorage>
+                }),
+            },
+            mobile_linux_mode,
+        );
 
         // D8: run the eager capability probe and populate the SHARED cache
         // BEFORE erasing to `Arc<dyn Platform>` and assembling the (synchronous)
@@ -1548,8 +3205,8 @@ pub fn build_android_engine(
             // the gate fail-closed (§B2): no bundled bootstrap ⇒ Shell absent.
             if let Some(shell_cfg) = shell_cfg_for_gate {
                 let caps = cache.get();
-                cfg.android_shell = Some(tool_api::AndroidShellToolCtx {
-                    enabled: android_shell_gate(
+                cfg.android_shell = Some(tool_api::AndroidShellToolCtx::android_legacy(
+                    android_shell_gate(
                         shell_cfg.enable_shell,
                         shell_cfg.secrets_gate_satisfied(),
                         caps.available(),
@@ -1557,18 +3214,18 @@ pub fn build_android_engine(
                         caps.net_deny_verified,
                         bundled_ready,
                     ),
-                    applets: if bundled_ready {
+                    if bundled_ready {
                         caps.bundled_applets.clone()
                     } else {
                         caps.toybox_applets.clone()
                     },
-                    sh_version: if bundled_ready {
+                    if bundled_ready {
                         caps.bundled_mksh_version.clone()
                     } else {
                         caps.system_sh_version.clone()
                     },
-                    bundled: bundled_ready,
-                });
+                    bundled_ready,
+                ));
             }
         }
 
@@ -1681,6 +3338,7 @@ pub fn build_android_engine(
             permissions,
             shell,
             git,
+            mobile_linux,
             git_credential_provider,
             secure_storage,
         );
@@ -2639,6 +4297,103 @@ mod tests {
             ctx.has_token,
             "has_token must still reflect a supplied credential provider"
         );
+    }
+
+    #[test]
+    fn mobile_linux_legacy_config_reports_legacy_status() {
+        let status = super::android_mobile_linux_status_from_config(Some(
+            &super::AndroidMobileLinuxConfigFfi {
+                mode: super::MobileLinuxRuntimeModeFfi::Legacy,
+                managed_root: "/tmp/mobile-linux".to_string(),
+                workspace_host_path: Some("/tmp/workspaces/default".to_string()),
+                stable_workspace_id: Some("default".to_string()),
+                abi: "arm64-v8a".to_string(),
+                rootfs_version: "v1".to_string(),
+                archive_sha256: None,
+                authorization_file: None,
+            },
+        ));
+        assert!(matches!(
+            status.state,
+            super::MobileLinuxRootfsStateFfi::Unsupported
+        ));
+        assert!(matches!(
+            status.mode,
+            super::MobileLinuxRuntimeModeFfi::Legacy
+        ));
+        assert_eq!(status.backend, "android-minijail");
+    }
+
+    #[test]
+    fn mobile_linux_selected_without_authorization_is_blocked() {
+        let capability = super::android_mobile_linux_capability_from_config(Some(
+            &super::AndroidMobileLinuxConfigFfi {
+                mode: super::MobileLinuxRuntimeModeFfi::MobileLinux,
+                managed_root: "/tmp/mobile-linux".to_string(),
+                workspace_host_path: Some("/tmp/workspaces/default".to_string()),
+                stable_workspace_id: Some("default".to_string()),
+                abi: "arm64-v8a".to_string(),
+                rootfs_version: "v1".to_string(),
+                archive_sha256: None,
+                authorization_file: None,
+            },
+        ));
+        assert!(!capability.available);
+        assert!(matches!(
+            capability.mode,
+            super::MobileLinuxRuntimeModeFfi::MobileLinux
+        ));
+        let reason = capability
+            .reason
+            .expect("blocked capability carries reason");
+        assert!(reason.contains("authorization"));
+    }
+
+    #[test]
+    fn mobile_linux_boot_rejects_legacy_mode() {
+        let err = super::android_mobile_linux_boot(Some(super::AndroidMobileLinuxConfigFfi {
+            mode: super::MobileLinuxRuntimeModeFfi::Legacy,
+            managed_root: "/tmp/mobile-linux".to_string(),
+            workspace_host_path: Some("/tmp/workspaces/default".to_string()),
+            stable_workspace_id: Some("default".to_string()),
+            abi: "arm64-v8a".to_string(),
+            rootfs_version: "v1".to_string(),
+            archive_sha256: None,
+            authorization_file: None,
+        }))
+        .expect_err("legacy mode must fail closed");
+        assert!(matches!(err, super::MobileLinuxApiErrorFfi::LegacySelected));
+    }
+
+    #[test]
+    fn mobile_linux_run_command_rejects_empty_command() {
+        let err = super::android_mobile_linux_run_command(
+            Some(super::AndroidMobileLinuxConfigFfi {
+                mode: super::MobileLinuxRuntimeModeFfi::MobileLinux,
+                managed_root: "/tmp/mobile-linux".to_string(),
+                workspace_host_path: Some("/tmp/workspaces/default".to_string()),
+                stable_workspace_id: Some("default".to_string()),
+                abi: "arm64-v8a".to_string(),
+                rootfs_version: "v1".to_string(),
+                archive_sha256: None,
+                authorization_file: None,
+            }),
+            super::MobileLinuxCommandRequestFfi {
+                command: "   ".to_string(),
+                args: vec![],
+                cwd: None,
+                env: vec![],
+                stdin: None,
+                timeout_ms: None,
+                allow_network: false,
+                mounts: vec![],
+            },
+        )
+        .expect_err("empty command must be rejected");
+        assert!(matches!(
+            err,
+            super::MobileLinuxApiErrorFfi::InvalidRequest { .. }
+        ));
     }
 
     /// Minimal host-side [`super::AndroidGitCredentialProvider`] impl for tests:

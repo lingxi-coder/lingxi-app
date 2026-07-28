@@ -17,6 +17,7 @@ pub mod mcp_http;
 pub mod mcp_sse;
 pub mod mcp_stdio;
 pub mod mcp_ws;
+pub mod mobile_linux;
 pub mod worktree_create_guard;
 pub mod worktree_include;
 
@@ -27,5 +28,10 @@ pub use llm_config::{
 };
 pub use mcp_http::{connect_http, HttpConnectError};
 pub use mcp_sse::{connect_sse, SseConnectError, IDE_AUTH_HEADER};
+pub use mobile_linux::{
+    MobileLinuxProcessRunner, MobileLinuxSandbox, RootfsArchive, RootfsEntryKind, RootfsManifest,
+    RootfsManifestEntry, RootfsManifestError, RootfsPackage, RootfsStore, RootfsStoreError,
+    RootfsVerificationIssue, RootfsVerificationReport,
+};
 pub use worktree_create_guard::reject_worktree_create_symlinks;
 pub use worktree_include::copy_worktree_include_files;

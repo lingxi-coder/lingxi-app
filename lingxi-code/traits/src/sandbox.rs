@@ -65,6 +65,11 @@ pub enum SandboxBackend {
     /// Android in-engine Minijail (`no_new_privs` / rlimits / seccomp via
     /// libminijail linked into the engine .so). Spec r3 D6.
     AndroidMinijail,
+    /// Android Linux userspace runtime backed by PRoot, still wrapped by the
+    /// outer Minijail boundary.
+    AndroidProot,
+    /// iOS Linux userspace runtime backed by iSH userspace emulation.
+    IosIsh,
     /// No sandbox enforcement (used for explicit bypass).
     None,
 }

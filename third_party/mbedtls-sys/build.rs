@@ -61,6 +61,12 @@ const SRC_TLS: &[&str] = &[
 
 fn main() {
     let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
+    // `cargo_metadata(false)` below intentionally suppresses cc-rs' automatic
+    // Cargo directives, including its environment invalidation hints. Keep the
+    // Apple deployment target explicit so rebuilding an iOS XCFramework after
+    // changing the minimum OS cannot silently reuse C objects stamped for the
+    // SDK's current (and potentially much newer) default deployment version.
+    println!("cargo:rerun-if-env-changed=IPHONEOS_DEPLOYMENT_TARGET");
     // `third_party/mbedtls` lives next to `third_party/mbedtls-sys`.
     let src_root = manifest.parent().unwrap().join("mbedtls");
     let include = src_root.join("include");

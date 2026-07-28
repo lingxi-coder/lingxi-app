@@ -85,6 +85,10 @@ pub struct PromptShellRunner {
     /// uses (default `LegacyWrapRunner` = byte-identical to the previous direct
     /// `wrap_with_sandbox` call).
     sandbox_runner: Arc<dyn tool_api::SandboxRunner>,
+    /// Mobile-only override: execute via the platform sandbox/process adapters
+    /// instead of `bypass_with_audit`, so mobile-linux guest shells route
+    /// through the injected runtime bridge.
+    force_platform_sandbox: bool,
     /// One lazily-created shell snapshot shared by every command expansion in
     /// this session/provider.
     snapshot: Arc<ShellSnapshot>,
@@ -257,15 +261,18 @@ impl ShellRunner for PromptShellRunner {
         use traits::sandbox::ProcessCommand;
 
         let shell_path = resolve_shell_path();
-        let snapshot = self
-            .snapshot
-            .ensure(
-                shell_path,
-                self.process.as_ref(),
-                self.sandbox.as_ref(),
-                &self.workspace,
-            )
-            .await;
+        let snapshot = if self.force_platform_sandbox {
+            None
+        } else {
+            self.snapshot
+                .ensure(
+                    shell_path,
+                    self.process.as_ref(),
+                    self.sandbox.as_ref(),
+                    &self.workspace,
+                )
+                .await
+        };
         // Snapshot mode sources the captured aliases/functions/options and uses
         // `eval` so aliases expand. If snapshot creation/access failed, retain
         // the login-shell fallback.
@@ -343,9 +350,26 @@ impl ShellRunner for PromptShellRunner {
             timeout: None,
             stdin: None,
         };
-        let sandboxed = self
-            .sandbox
-            .bypass_with_audit(pcmd, "prompt_shell_expansion");
+        let sandboxed = if self.force_platform_sandbox {
+            let policy = traits::sandbox::SandboxPolicy {
+                network: traits::sandbox::NetworkPolicy::Disabled,
+                writable_paths: vec![],
+                denied_paths: vec![],
+                allow_subprocess: true,
+                limits: traits::sandbox::ResourceLimits::default(),
+            };
+            self.sandbox
+                .prepare(pcmd, &policy)
+                .map_err(|e| ShellRunError {
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    interrupted: false,
+                    generic_message: Some(format!("{e}")),
+                })?
+        } else {
+            self.sandbox
+                .bypass_with_audit(pcmd, "prompt_shell_expansion")
+        };
         let run_result = self.process.run(&sandboxed).await;
         // The wrapped command has finished: tear down any per-command sandbox
         // state. No-op for the default `LegacyWrapRunner`.
@@ -538,6 +562,10 @@ impl ShellExpansionProvider for PromptShellExpansionProvider {
             sandbox_runtime: sandbox_runtime.clone(),
             platform: self.ctx.platform,
             sandbox_runner: self.ctx.sandbox_runner.clone(),
+            force_platform_sandbox: self
+                .ctx
+                .mobile_shell()
+                .is_some_and(|carrier| carrier.force_platform_sandbox),
             snapshot: self.snapshot.clone(),
         });
         let mut effective = build_effective_policy(
@@ -583,8 +611,15 @@ mod tests {
     use super::*;
     use permission::filesystem::FsRoots;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
     use telemetry::AnalyticsBus;
     use tool_api::test_support::{ctx_for_file_tools, make_dummy_fs};
+    use traits::process::{ProcessError, ProcessHandle, ProcessOutput, ProcessRunner};
+    use traits::sandbox::{
+        Sandbox, SandboxBackend, SandboxCapability, SandboxError, SandboxFeatures, SandboxPolicy,
+        SandboxedCommand, SandboxedTag,
+    };
 
     fn test_ctx() -> BuiltinToolContext {
         ctx_for_file_tools(
@@ -592,6 +627,84 @@ mod tests {
             Arc::new(AnalyticsBus::new()),
             vec![PathBuf::from("/tmp")],
         )
+    }
+
+    #[derive(Default)]
+    struct RecordingSandbox {
+        prepare_calls: AtomicUsize,
+        bypass_calls: AtomicUsize,
+        last_network: Mutex<Option<traits::sandbox::NetworkPolicy>>,
+    }
+
+    #[async_trait]
+    impl Sandbox for RecordingSandbox {
+        fn is_available(&self) -> bool {
+            true
+        }
+        fn backend(&self) -> SandboxBackend {
+            SandboxBackend::AndroidProot
+        }
+        fn prepare(
+            &self,
+            cmd: traits::sandbox::ProcessCommand,
+            policy: &SandboxPolicy,
+        ) -> Result<SandboxedCommand, SandboxError> {
+            self.prepare_calls.fetch_add(1, Ordering::SeqCst);
+            *self.last_network.lock().unwrap() = Some(policy.network);
+            Ok(SandboxedCommand::__new_sandboxed(
+                cmd,
+                SandboxedTag::Wrapped {
+                    backend: SandboxBackend::AndroidProot,
+                },
+            ))
+        }
+        fn bypass_with_audit(
+            &self,
+            cmd: traits::sandbox::ProcessCommand,
+            reason: &str,
+        ) -> SandboxedCommand {
+            let _ = reason;
+            self.bypass_calls.fetch_add(1, Ordering::SeqCst);
+            SandboxedCommand::__new_sandboxed(
+                cmd,
+                SandboxedTag::BypassAuditedWithReason {
+                    reason: "prompt-shell-test".into(),
+                },
+            )
+        }
+        async fn probe_capability(&self) -> SandboxCapability {
+            SandboxCapability {
+                available: true,
+                reason: None,
+                features: SandboxFeatures::default(),
+            }
+        }
+    }
+
+    struct RecordingProcessRunner;
+
+    #[async_trait]
+    impl ProcessRunner for RecordingProcessRunner {
+        async fn run(&self, _: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+            Ok(ProcessOutput {
+                stdout: "ok".into(),
+                stderr: String::new(),
+                exit_code: 0,
+                timed_out: false,
+            })
+        }
+        async fn spawn_background(
+            &self,
+            _: &SandboxedCommand,
+        ) -> Result<ProcessHandle, ProcessError> {
+            unreachable!()
+        }
+        async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+            Ok(())
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
     }
 
     /// The gate folds a 3-valued `PermissionResult` to a 2-valued decision:
@@ -725,5 +838,32 @@ mod tests {
         assert!(command.starts_with(". '/tmp/has space/snapshot.sh' 2>/dev/null || true; eval "));
         assert!(command.contains("'\\''"));
         assert!(command.contains("setopt NO_EXTENDED_GLOB"));
+    }
+
+    #[tokio::test]
+    async fn mobile_force_platform_sandbox_uses_prepare_not_bypass() {
+        let mut ctx = test_ctx();
+        let sandbox = Arc::new(RecordingSandbox::default());
+        ctx.sandbox = sandbox.clone();
+        ctx.process = Arc::new(RecordingProcessRunner);
+        ctx.android_shell = Some(tool_api::MobileShellToolCtx::mobile_linux_guest(
+            true,
+            vec!["sh".into()],
+            None,
+        ));
+        let provider = build_prompt_shell_provider(&ctx);
+        let expansion = provider.build(&[], None);
+        let out = expansion
+            .runner
+            .run("printf ok", None)
+            .await
+            .expect("mobile prompt-shell run");
+        assert_eq!(out.stdout, "ok");
+        assert_eq!(sandbox.prepare_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(sandbox.bypass_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            *sandbox.last_network.lock().unwrap(),
+            Some(traits::sandbox::NetworkPolicy::Disabled)
+        );
     }
 }

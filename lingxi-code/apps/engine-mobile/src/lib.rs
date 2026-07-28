@@ -155,11 +155,10 @@ fn register_mobile_non_skill_tools(reg: &mut ToolRegistry, ctx: BuiltinToolConte
     // camera / voice / speech / notification / clipboard / share, folded into
     // the single `tool-mobile` crate.
     tool_mobile::register_all(reg, ctx.clone());
-    // P3: Android-only Shell tool. Self-gates on ctx.android_shell.enabled;
-    // iOS and desktop are unaffected (their ctx.android_shell is None).
+    // P3/P4: mobile shell tool. The composition root pre-gates it so a selected
+    // but unavailable mobile-linux runtime never silently falls back to legacy.
     tool_shell_mobile::register_all(reg, ctx.clone());
-    // P4: Android-only Git tool. Self-gates on ctx.android_git.as_ref().is_some_and(|g| g.enabled);
-    // iOS and desktop are unaffected (their ctx.android_git is None).
+    // P4: mobile structured git tool. Same pre-gate rule as shell.
     tool_git_mobile::register_all(reg, ctx);
 }
 

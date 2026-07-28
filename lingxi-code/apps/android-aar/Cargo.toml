@@ -51,6 +51,7 @@ traits = { path = "../../traits" }
 protocol = { path = "../../protocol" }
 branding.workspace = true
 thiserror.workspace = true
+sha2 = "0.10"
 
 # F3-04: optional UniFFI dep — pulled under the (default) `uniffi` feature so the
 # re-exported shared-host scaffolding lands in this crate's library. Pinned
@@ -86,7 +87,6 @@ serde_json = { workspace = true }
 # `libmksh.so` for the runner's content-identity check and hex-encodes it.
 # Target-gated (android-only) like `platform-android` to keep host builds
 # dep-minimal. Pins match `platforms/android/Cargo.toml`.
-sha2 = "0.10"
 hex = "0.4"
 
 [dev-dependencies]

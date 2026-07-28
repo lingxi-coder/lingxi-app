@@ -6,7 +6,7 @@ enum SettingsPage: Equatable {
     case providerList(ProviderKindBox)
     case providerPicker(ProviderKindBox)
     case providerEdit(ProviderKindBox, String)
-    case voice, knowledge, memory, workflows
+    case voice, linuxRuntime, knowledge, memory, workflows
     case appearance, language, notifications, input, privacy
     case skills, skillDetail(String)
     case mcpList, mcpEdit(String)
@@ -139,6 +139,7 @@ struct SettingsHost: View {
         case .providerEdit(let b, let id):
             return store.providers(b.kind).first(where: { $0.id == id })?.name ?? "编辑"
         case .voice: return "语音 TTS"
+        case .linuxRuntime: return "Linux 运行时"
         case .knowledge: return "知识库"
         case .memory: return "记忆"
         case .workflows: return "工作流"

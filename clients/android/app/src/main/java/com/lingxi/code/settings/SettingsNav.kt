@@ -31,6 +31,7 @@ object SettingsRoutes {
     const val SKILL_DETAIL = "settings/skills/{id}"
     const val MCP_LIST = "settings/mcp"
     const val MCP_EDIT = "settings/mcp/{id}"
+    const val LINUX_RUNTIME = "settings/linux-runtime"
     const val DREAM = "settings/dream"
     const val CRON = "settings/cron"
 
@@ -65,6 +66,7 @@ object SettingsTitles {
     const val PRIVACY = "数据与隐私"
     const val SKILLS = "Skills"
     const val MCP = "MCP 服务器"
+    const val LINUX_RUNTIME = "Linux 运行时"
     const val DREAM = "Dream 模式"
     const val CRON = "定时任务"
 }

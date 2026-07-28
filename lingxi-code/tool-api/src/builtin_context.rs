@@ -238,28 +238,27 @@ pub struct BuiltinToolContext {
     /// on every search call so runtime `updatedPermissions` are observed.
     pub read_deny_exclude_globs: Vec<String>,
 
-    // ===== Android-sandbox P3 seam =====
-    /// Android-only `Shell` tool wiring (spec r3 §Shell tool). `None` on
-    /// desktop / iOS. Built by `android-aar` from the probed capability cache +
-    /// the `AndroidShellConfig` gate; consumed by `tool-shell-mobile::register_all`
-    /// (registration gate) and the tool's prompt.
-    pub android_shell: Option<AndroidShellToolCtx>,
+    // ===== Mobile Linux shell / git seams =====
+    /// Stable compatibility carrier for the mobile `Shell` tool wiring. The
+    /// type is now [`MobileShellToolCtx`]; the field name stays
+    /// `android_shell` so existing Android call sites keep compiling while iOS
+    /// can reuse the same carrier via the new generic type alias surface.
+    pub android_shell: Option<MobileShellToolCtx>,
 
-    // ===== Android-git P4 seam =====
-    /// Android-only `Git` tool wiring (spec §G5 gate). `None` on desktop /
-    /// iOS. Built by `android-aar` from the enable flag, workspace readiness,
-    /// and CA-store reachability; consumed by `tool-git-mobile::register_all`
-    /// (registration gate) and the tool's prompt.
-    pub android_git: Option<AndroidGitToolCtx>,
+    /// Stable compatibility carrier for the mobile structured `Git` tool
+    /// wiring. The type is now [`MobileGitToolCtx`]; the field name stays
+    /// `android_git` so existing Android call sites keep compiling while iOS
+    /// can reuse the same carrier via the generic type alias surface.
+    pub android_git: Option<MobileGitToolCtx>,
 
-    /// Android-only Git **secret** seam (spec §G3 auth). Carries the HTTPS
-    /// token + CA directory used by the network ops (clone/fetch/pull). Held
-    /// SEPARATELY from the public [`AndroidGitToolCtx`] so the token never
+    /// Mobile Git **secret** seam (spec §G3 auth). Carries the HTTPS token +
+    /// CA directory used by the network ops (clone/fetch/pull). Held
+    /// SEPARATELY from the public [`MobileGitToolCtx`] so the token never
     /// enters the broadly-cloned public carrier (which only exposes
     /// `has_token: bool`). `None` on desktop / iOS and whenever no token /
     /// CA dir is configured. Populated by `android-aar` (T10) and consumed by
     /// `tool-git-mobile`'s network ops. Never logged or persisted.
-    pub android_git_secret: Option<AndroidGitSecret>,
+    pub android_git_secret: Option<MobileGitSecret>,
 
     // ===== V2 task lifecycle BLOCKING hooks (TaskCreate/TaskUpdate tool path) =====
     /// BLOCKING `TaskCreated` / `TaskCompleted` lifecycle-hook firer for the V2
@@ -380,6 +379,27 @@ impl BuiltinToolContext {
         sandbox::policy_convert::reconcile_deny_write_symlinks(&mut cfg);
         cfg
     }
+
+    /// Mobile shell carrier, independent of platform naming. The stable
+    /// backing field remains [`Self::android_shell`].
+    #[must_use]
+    pub fn mobile_shell(&self) -> Option<&MobileShellToolCtx> {
+        self.android_shell.as_ref()
+    }
+
+    /// Mobile git carrier, independent of platform naming. The stable backing
+    /// field remains [`Self::android_git`].
+    #[must_use]
+    pub fn mobile_git(&self) -> Option<&MobileGitToolCtx> {
+        self.android_git.as_ref()
+    }
+
+    /// Mobile git secret carrier, independent of platform naming. The stable
+    /// backing field remains [`Self::android_git_secret`].
+    #[must_use]
+    pub fn mobile_git_secret(&self) -> Option<&MobileGitSecret> {
+        self.android_git_secret.as_ref()
+    }
 }
 
 /// BLOCKING `TaskCreated` / `TaskCompleted` lifecycle-hook firer for the V2
@@ -449,12 +469,10 @@ pub trait TaskLifecycleHookFirer: Send + Sync {
     }
 }
 
-/// Android-only `Shell` tool wiring (spec r3 §Shell tool). `None` on desktop /
-/// iOS. Built by `android-aar` from the probed capability cache + the
-/// `AndroidShellConfig` gate; consumed by `tool-shell-mobile::register_all`
-/// (registration gate) and the tool's prompt.
+/// Mobile `Shell` tool wiring (shared by Android legacy shell and future
+/// mobile-linux backends). `None` on builds that do not expose a mobile shell.
 #[derive(Debug, Clone)]
-pub struct AndroidShellToolCtx {
+pub struct MobileShellToolCtx {
     /// The full registration gate result: capability-probe OK + `enable_shell`
     /// + D11 secrets gate all satisfied.
     ///
@@ -462,6 +480,16 @@ pub struct AndroidShellToolCtx {
     pub enabled: bool,
     /// Probed toybox applet inventory (for the tool prompt; may be empty).
     pub applets: Vec<String>,
+    /// Shell executable path the mobile shell tool must invoke. Examples:
+    /// Android legacy `/system/bin/sh`, mobile-linux guest `/bin/sh`.
+    pub shell_path: String,
+    /// Human-readable runtime label used in prompts/diagnostics. Examples:
+    /// `system mksh`, `Alpine BusyBox sh`.
+    pub runtime_label: String,
+    /// Route embedded prompt-shell commands through the mobile platform
+    /// sandbox/process adapters. This is enabled only for the mobile-linux
+    /// guest carrier; Android legacy and all desktop contexts remain unchanged.
+    pub force_platform_sandbox: bool,
     /// System sh version string (`KSH_VERSION`) when probed, for the prompt.
     pub sh_version: Option<String>,
     /// When true, the Shell runs the BUNDLED version-locked mksh + a fixed
@@ -471,12 +499,11 @@ pub struct AndroidShellToolCtx {
     pub bundled: bool,
 }
 
-/// Android-only `Git` tool wiring (spec §G5 gate). `None` on desktop / iOS.
-/// Built by `android-aar` from the enable flag + workspace readiness +
-/// CA-store reachability; consumed by `tool-git-mobile::register_all`
-/// (registration gate) and the tool's prompt.
+/// Mobile structured `Git` tool wiring (shared by Android legacy git and
+/// future mobile-linux backends). `None` on builds that do not expose mobile
+/// git.
 #[derive(Debug, Clone)]
-pub struct AndroidGitToolCtx {
+pub struct MobileGitToolCtx {
     /// The full registration gate result: `enable_git` + workspace-ready +
     /// CA-store-reachable all satisfied.
     ///
@@ -492,10 +519,10 @@ pub struct AndroidGitToolCtx {
     pub workspace_root: String,
 }
 
-/// Android-only Git **secret** seam (spec §G3 auth). Carries the in-memory
-/// HTTPS token + CA-certificate directory used by the network git ops
+/// Mobile Git **secret** seam (spec §G3 auth). Carries the in-memory HTTPS
+/// token + CA-certificate directory used by the network git ops
 /// (clone/fetch/pull). Deliberately held outside the public
-/// [`AndroidGitToolCtx`] — which only exposes `has_token: bool` — so the token
+/// [`MobileGitToolCtx`] — which only exposes `has_token: bool` — so the token
 /// never enters the broadly-cloned public tool carrier. `tool-git-mobile`
 /// converts this into its own `GitNetConfig` at call time.
 ///
@@ -503,7 +530,7 @@ pub struct AndroidGitToolCtx {
 /// (libgit2 is in-process), and is never logged. `android-aar` (T10) builds
 /// this from the Keystore-backed host token + the system cacerts dir.
 #[derive(Clone, Default)]
-pub struct AndroidGitSecret {
+pub struct MobileGitSecret {
     /// Per-op secret provider (HTTPS token + SSH passphrase). `None` → no secrets
     /// available (anonymous/public remotes only). Replaces the former resident
     /// `token`/`ssh_passphrase` fields — secrets are no longer held resident.
@@ -540,9 +567,9 @@ pub trait GitCredentialProvider: Send + Sync {
 // A manual `Debug` that omits the secret-bearing credential provider so secrets
 // can never leak via a debug print of the context. The key/public-key paths and
 // pinned host hashes are non-secret and shown normally.
-impl std::fmt::Debug for AndroidGitSecret {
+impl std::fmt::Debug for MobileGitSecret {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AndroidGitSecret")
+        f.debug_struct("MobileGitSecret")
             .field(
                 "credential_provider",
                 &self.credential_provider.as_ref().map(|_| "<provider>"),
@@ -555,6 +582,56 @@ impl std::fmt::Debug for AndroidGitSecret {
                 &self.ssh_known_hosts_sha256_hex,
             )
             .finish()
+    }
+}
+
+/// Stable compatibility alias for existing Android mobile-shell call sites.
+pub type AndroidShellToolCtx = MobileShellToolCtx;
+/// Stable compatibility alias for existing Android mobile-git call sites.
+pub type AndroidGitToolCtx = MobileGitToolCtx;
+/// Stable compatibility alias for existing Android mobile-git secret call sites.
+pub type AndroidGitSecret = MobileGitSecret;
+
+impl MobileShellToolCtx {
+    /// Android legacy shell carrier.
+    #[must_use]
+    pub fn android_legacy(
+        enabled: bool,
+        applets: Vec<String>,
+        sh_version: Option<String>,
+        bundled: bool,
+    ) -> Self {
+        Self {
+            enabled,
+            applets,
+            shell_path: "/system/bin/sh".into(),
+            runtime_label: if bundled {
+                "bundled mksh".into()
+            } else {
+                "system mksh".into()
+            },
+            force_platform_sandbox: false,
+            sh_version,
+            bundled,
+        }
+    }
+
+    /// Mobile-linux guest shell carrier.
+    #[must_use]
+    pub fn mobile_linux_guest(
+        enabled: bool,
+        applets: Vec<String>,
+        sh_version: Option<String>,
+    ) -> Self {
+        Self {
+            enabled,
+            applets,
+            shell_path: "/bin/sh".into(),
+            runtime_label: "Alpine BusyBox sh".into(),
+            force_platform_sandbox: true,
+            sh_version,
+            bundled: true,
+        }
     }
 }
 
@@ -755,7 +832,7 @@ mod tests {
     /// TDD anchor for Task 1 (P3).
     ///
     /// Asserts:
-    /// 1. `AndroidShellToolCtx` constructs with all three fields.
+    /// 1. `AndroidShellToolCtx` constructs with the legacy Android routing.
     /// 2. The test-builder `ctx_for_file_tools` defaults `android_shell` to
     ///    `None` (i.e. the field exists on `BuiltinToolContext`).
     #[test]
@@ -764,6 +841,9 @@ mod tests {
         let carrier = AndroidShellToolCtx {
             enabled: true,
             applets: vec!["grep".into(), "ls".into()],
+            shell_path: "/system/bin/sh".into(),
+            runtime_label: "system mksh".into(),
+            force_platform_sandbox: false,
             sh_version: Some("@(#)MIRBSD KSH R59 2020/01/19".into()),
             bundled: false,
         };
@@ -775,6 +855,9 @@ mod tests {
         let disabled = AndroidShellToolCtx {
             enabled: false,
             applets: vec![],
+            shell_path: "/system/bin/sh".into(),
+            runtime_label: "system mksh".into(),
+            force_platform_sandbox: false,
             sh_version: None,
             bundled: false,
         };

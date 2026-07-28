@@ -8,6 +8,7 @@
 pub mod allow_suggestion;
 pub mod auto_edit_safety;
 pub mod auto_gate;
+pub mod auto_mode_argv;
 pub mod auto_mode_defaults;
 pub mod auto_mode_destructive;
 pub mod auto_mode_facts;
@@ -18,10 +19,8 @@ pub mod auto_mode_producers;
 pub mod auto_mode_propose;
 pub mod auto_mode_recon;
 pub mod auto_mode_sections;
-pub mod auto_mode_wizard;
-pub mod auto_mode_argv;
-pub mod git_bare_repo;
 pub mod auto_mode_setup;
+pub mod auto_mode_wizard;
 #[cfg(feature = "bash-ast")]
 pub mod bash_ast_security;
 pub mod bash_security;
@@ -38,6 +37,7 @@ pub mod defaults_per_tool;
 pub mod denial_tracking;
 pub mod filesystem;
 pub mod gate;
+pub mod git_bare_repo;
 pub mod headless_gate;
 pub mod internal_writes;
 pub mod loader;
@@ -103,8 +103,7 @@ pub use loader::{
     additional_directories_from_settings_json,
     allow_managed_permission_rules_only_from_settings_json, auto_mode_disabled_from_settings_json,
     bypass_permissions_disabled_from_settings_json, classify_all_shell_from_settings_json,
-    default_mode_from_settings_json,
-    permission_rule_file_warning, permission_rule_startup_warning,
+    default_mode_from_settings_json, permission_rule_file_warning, permission_rule_startup_warning,
     permission_rules_from_settings_json,
 };
 pub use mode::{next_permission_mode, PermissionMode};

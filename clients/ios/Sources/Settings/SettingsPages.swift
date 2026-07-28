@@ -14,6 +14,7 @@ struct SettingsPages: View {
         case .providerPicker(let b):      ProviderPickerPage(store: store, host: host, kind: b.kind)
         case .providerEdit(let b, let id): ProviderEditPage(store: store, host: host, kind: b.kind, providerId: id)
         case .voice:                      VoicePage(store: store)
+        case .linuxRuntime:               LinuxRuntimePage(store: store)
         case .knowledge:                  KnowledgePage()
         case .memory:                     MemoryPage()
         case .workflows:                  WorkflowsPage()
@@ -71,6 +72,9 @@ struct MainSettingsPage: View {
                 SettingsRow(icon: .plug, iconColor: Color(srgb: 0,0.78,0.55), label: "MCP 服务器",
                             sub: "Model Context Protocol", value: "\(store.mcpServers.filter{$0.enabled}.count) 连接",
                             onTap: { host.push(.mcpList) })
+                SettingsRow(icon: .workflow, iconColor: Color(srgb: 0.3503,0.6649,0.9741), label: "Linux 运行时",
+                            sub: store.linuxRuntime.summary, value: store.linuxRuntime.badge,
+                            onTap: { host.push(.linuxRuntime) })
                 SettingsRow(icon: .dream, iconColor: Color(srgb: 0.809,0.4552,0.8891), label: "Dream 模式",
                             sub: "后台离线思考与整理", value: store.dream.enabled ? "开启" : "关闭", isLast: true,
                             onTap: { host.push(.dream) })

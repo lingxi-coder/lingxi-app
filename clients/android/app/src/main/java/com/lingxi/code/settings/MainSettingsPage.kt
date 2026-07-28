@@ -106,6 +106,13 @@ fun MainSettingsPage(
                 onTap = { navController.navigate(SettingsRoutes.MCP_LIST) },
             )
             SettingsRow(
+                icon = LXIconName.Workflow, iconColor = Color(red = 0.3503f, green = 0.6649f, blue = 0.9741f),
+                label = "Linux 运行时",
+                sub = state.linuxRuntime.summary,
+                value = state.linuxRuntime.badge,
+                onTap = { navController.navigate(SettingsRoutes.LINUX_RUNTIME) },
+            )
+            SettingsRow(
                 icon = LXIconName.Dream, iconColor = Color(red = 0.809f, green = 0.4552f, blue = 0.8891f),
                 label = "Dream 模式", sub = "后台离线思考与整理",
                 value = if (state.dream.enabled) "开启" else "关闭",

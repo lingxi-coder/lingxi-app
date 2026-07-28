@@ -1,13 +1,14 @@
-//! Mobile-only `Shell` tool crate (Android, spec r3 §Shell tool / D9, D10).
+//! Mobile-only `Shell` tool crate (shared mobile shell surface, spec r3 §Shell
+//! tool / D9, D10).
 //!
-//! `ShellMobileTool` is the model-facing shell on Android. Its `call()` builds
-//! a **deny-net** [`SandboxPolicy`] and runs the command through the P2
-//! in-engine Minijail runner — `ctx.sandbox.prepare()` then
-//! `ctx.process.run()`. The tool is registered ONLY when the device + config
-//! gate passes (`ctx.android_shell.enabled`); the gate itself is computed in
-//! `android-aar` from the probed capability cache + the `AndroidShellConfig`
-//! gate (D11) and threaded through `MobileConfig`. Desktop `BashTool` and iOS
-//! are untouched (the carrier field defaults to `None`).
+//! `ShellMobileTool` is the model-facing shell on mobile. Its `call()` builds a
+//! **deny-net** [`SandboxPolicy`] and runs the command through the platform's
+//! injected mobile `ProcessRunner` / `Sandbox` pair — `ctx.sandbox.prepare()`
+//! then `ctx.process.run()`. The tool is registered ONLY when the device +
+//! config gate passes (`ctx.mobile_shell().is_some_and(|c| c.enabled)`); that
+//! gate is computed in the mobile engine composition root so a selected but
+//! blocked/unlinked mobile-linux runtime never silently falls back to the
+//! legacy Android shell. Desktop `BashTool` remains untouched.
 //!
 //! Network-intent commands (`git clone`, `curl`, …) are refused up-front with
 //! an advisory pointing at the (future) structured Git tool, rather than run to
@@ -40,9 +41,6 @@ use traits::sandbox::{NetworkPolicy, ProcessCommand, ResourceLimits, SandboxErro
 
 /// Tool name byte-lock — the model-facing name for the mobile shell.
 pub const TOOL_NAME: &str = "Shell";
-
-/// Shell binary spawned on Android (system mksh).
-const ANDROID_SHELL: &str = "/system/bin/sh";
 
 /// Maximum shell timeout (ms) — mirrors the desktop Bash 10-minute ceiling.
 const SHELL_MAX_TIMEOUT_MS: u64 = 600_000;
@@ -134,7 +132,7 @@ impl Tool for ShellMobileTool {
         // Defensive double-gate: registration (`register_all`) already filters
         // on this same flag, but keep the tool inert if it ever lands in a
         // registry without the gate set.
-        self.ctx.android_shell.as_ref().is_some_and(|a| a.enabled)
+        self.ctx.mobile_shell().is_some_and(|a| a.enabled)
     }
 
     fn max_result_size_chars(&self) -> usize {
@@ -164,7 +162,7 @@ impl Tool for ShellMobileTool {
         // NOT in tool-level rule code — so this mirrors the desktop stub.
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
-                reason: "android-shell deny-net (engine AdapterPermissionGate handles allow/ask)"
+                reason: "mobile-shell deny-net (engine AdapterPermissionGate handles allow/ask)"
                     .into(),
             },
             updated_input: None,
@@ -181,9 +179,14 @@ impl Tool for ShellMobileTool {
     }
 
     async fn prompt(&self, _opts: &PromptOptions) -> String {
-        let (applets, sh_version, bundled) = match self.ctx.android_shell.as_ref() {
-            Some(a) => (a.applets.clone(), a.sh_version.clone(), a.bundled),
-            None => (Vec::new(), None, false),
+        let (applets, sh_version, bundled, runtime_label) = match self.ctx.mobile_shell() {
+            Some(a) => (
+                a.applets.clone(),
+                a.sh_version.clone(),
+                a.bundled,
+                a.runtime_label.clone(),
+            ),
+            None => (Vec::new(), None, false, "system mksh".to_string()),
         };
         let applet_line = if applets.is_empty() {
             "system toybox".to_string()
@@ -192,19 +195,19 @@ impl Tool for ShellMobileTool {
         };
         let mut prompt = String::new();
         if bundled {
-            prompt.push_str(
-                "Run a shell command on this Android device. The shell is a \
-                 **bundled, version-locked mksh** (MirBSD Korn shell) — NOT bash. \
+            prompt.push_str(&format!(
+                "Run a shell command on this mobile device. The shell is a \
+                 **{runtime_label}** — NOT bash. \
                  Avoid bash-only syntax: no process substitution `<(...)`, no \
-                 `${var,,}` case-folding, no `mapfile`/`readarray`.\n\n",
-            );
+                 `${{var,,}}` case-folding, no `mapfile`/`readarray`.\n\n",
+            ));
         } else {
-            prompt.push_str(
-                "Run a shell command on this Android device. The shell is the system \
-                 **mksh** (MirBSD Korn shell) via /system/bin/sh — NOT bash. Avoid bash-only \
-                 syntax: no process substitution `<(...)`, no `${var,,}` case-folding, no \
+            prompt.push_str(&format!(
+                "Run a shell command on this mobile device. The shell is the \
+                 current mobile backend's **{runtime_label}** — NOT bash. Avoid bash-only \
+                 syntax: no process substitution `<(...)`, no `${{var,,}}` case-folding, no \
                  `mapfile`/`readarray`.\n\n",
-            );
+            ));
         }
         prompt.push_str(
             "This shell is DENY-NET: it has no network access. Network commands \
@@ -274,12 +277,18 @@ impl Tool for ShellMobileTool {
             return Err(ToolError::InvalidInput(advice));
         }
 
+        let shell_path = self
+            .ctx
+            .mobile_shell()
+            .map(|ctx| ctx.shell_path.clone())
+            .ok_or_else(|| ToolError::InvalidInput("mobile_shell context is absent".into()))?;
+
         // 3. Build the raw command (system mksh, -c). An unspecified timeout
         //    falls back to the default so the runner watchdog always has a
         //    bound (never relies on the runner's own ceiling).
         let effective_timeout = timeout_ms.unwrap_or(SHELL_DEFAULT_TIMEOUT_MS);
         let pcmd = ProcessCommand {
-            command: ANDROID_SHELL.to_string(),
+            command: shell_path,
             args: vec!["-c".to_string(), command],
             cwd: Some(self.ctx.cwd()),
             env: HashMap::new(),
@@ -341,14 +350,12 @@ impl Tool for ShellMobileTool {
 
 /// Register the mobile `Shell` tool against `reg` — ONLY when the gate passes.
 ///
-/// The gate is `ctx.android_shell.enabled` (capability-probe OK plus
-/// `enable_shell` plus the D11 secrets gate, computed in `android-aar`). When
-/// the gate is unmet the tool is simply not registered — **absent, not
-/// erroring** (spec invariant). On desktop / iOS the `android_shell` field is
-/// `None`, so this is a no-op.
+/// The gate is `ctx.mobile_shell().is_some_and(|c| c.enabled)`. When the gate
+/// is unmet the tool is simply not registered — **absent, not erroring** (spec
+/// invariant).
 pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinToolContext) {
     use std::sync::Arc;
-    if ctx.android_shell.as_ref().is_some_and(|a| a.enabled) {
+    if ctx.mobile_shell().is_some_and(|a| a.enabled) {
         reg.register_builtin(Arc::new(ShellMobileTool::new(ctx)));
     }
 }
@@ -459,12 +466,12 @@ mod tests {
             out,
             calls: calls.clone(),
         });
-        ctx.android_shell = Some(AndroidShellToolCtx {
-            enabled: true,
-            applets: vec!["grep".into(), "sed".into()],
-            sh_version: Some("@(#)MIRBSD KSH".into()),
-            bundled: false,
-        });
+        ctx.android_shell = Some(AndroidShellToolCtx::android_legacy(
+            true,
+            vec!["grep".into(), "sed".into()],
+            Some("@(#)MIRBSD KSH".into()),
+            false,
+        ));
         (ctx, sandbox, calls)
     }
 
@@ -544,12 +551,12 @@ mod tests {
     #[tokio::test]
     async fn prompt_reflects_bundled_locked_inventory_when_bundled() {
         let mut ctx = shell_test_ctx(ok_output(""));
-        ctx.android_shell = Some(AndroidShellToolCtx {
-            enabled: true,
-            applets: vec!["grep".into(), "sed".into(), "find".into()],
-            sh_version: Some("@(#)MIRBSD KSH R59".into()),
-            bundled: true,
-        });
+        ctx.android_shell = Some(AndroidShellToolCtx::android_legacy(
+            true,
+            vec!["grep".into(), "sed".into(), "find".into()],
+            Some("@(#)MIRBSD KSH R59".into()),
+            true,
+        ));
         let tool = ShellMobileTool::new(ctx);
         let prompt = tool
             .prompt(&PromptOptions {

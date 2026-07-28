@@ -195,6 +195,9 @@ fun SettingsHost(
                         onEdit = { id -> navController.navigate(SettingsRoutes.mcpEdit(id)) },
                     )
                 }
+                page(SettingsRoutes.LINUX_RUNTIME) {
+                    LinuxRuntimePage(state = state, store = store)
+                }
                 page(SettingsRoutes.MCP_EDIT) {
                     val id = it.arguments?.getString("id") ?: ""
                     MCPEditPage(
@@ -248,6 +251,7 @@ private fun titleFor(entry: androidx.navigation.NavBackStackEntry?, state: Setti
         SettingsRoutes.PRIVACY -> SettingsTitles.PRIVACY
         SettingsRoutes.SKILLS -> SettingsTitles.SKILLS
         SettingsRoutes.MCP_LIST -> SettingsTitles.MCP
+        SettingsRoutes.LINUX_RUNTIME -> SettingsTitles.LINUX_RUNTIME
         SettingsRoutes.DREAM -> SettingsTitles.DREAM
         SettingsRoutes.CRON -> SettingsTitles.CRON
         SettingsRoutes.PROVIDER_LIST -> providerKindArg(entry).title

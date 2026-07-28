@@ -493,7 +493,11 @@ impl DeferredToolsDelta {
         }
         // "available again (MCP server reconnected …)" — oracle readddedNames branch.
         if !self.readded.is_empty() {
-            let verb = if self.readded.len() == 1 { " is" } else { "s are" };
+            let verb = if self.readded.len() == 1 {
+                " is"
+            } else {
+                "s are"
+            };
             parts.push(format!(
                 "{count} deferred tool{verb} available again (MCP server reconnected \u{2014} names announced earlier in this conversation): {names}. Load via {tool} as before.",
                 count = self.readded.len(),
@@ -736,7 +740,10 @@ mod tests {
 
         // (1) First announcement: both names are genuinely new (addedLines).
         let delta = d.compute_deferred_delta(&["Alpha".to_string(), "Beta".to_string()]);
-        assert_eq!(delta.added_lines, vec!["Alpha".to_string(), "Beta".to_string()]);
+        assert_eq!(
+            delta.added_lines,
+            vec!["Alpha".to_string(), "Beta".to_string()]
+        );
         assert!(delta.readded.is_empty() && delta.removed.is_empty());
         assert_eq!(
             delta.render_reminder().expect("announce reminder"),
@@ -775,7 +782,8 @@ mod tests {
         let d = DeferralState::new(ToolSearchMode::Enabled, false);
         d.compute_deferred_delta(&["mcp__srv__a".to_string(), "mcp__srv__b".to_string()]);
         d.compute_deferred_delta(&[]); // both removed
-        let delta = d.compute_deferred_delta(&["mcp__srv__a".to_string(), "mcp__srv__b".to_string()]);
+        let delta =
+            d.compute_deferred_delta(&["mcp__srv__a".to_string(), "mcp__srv__b".to_string()]);
         assert_eq!(
             delta.readded,
             vec!["mcp__srv__a".to_string(), "mcp__srv__b".to_string()]
@@ -796,7 +804,10 @@ mod tests {
         d.mark_loaded(["Beta"]);
         // Beta is now loaded, so the currently-deferred set is just Alpha.
         let delta = d.compute_deferred_delta(&["Alpha".to_string()]);
-        assert!(delta.removed.is_empty(), "a discovered tool is not 'removed'");
+        assert!(
+            delta.removed.is_empty(),
+            "a discovered tool is not 'removed'"
+        );
         assert!(delta.is_empty());
         assert_eq!(delta.render_reminder(), None);
     }

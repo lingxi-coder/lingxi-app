@@ -610,6 +610,7 @@ final class MockConversationSource: ConversationSource {
                 notifications: NotificationImpl(),
                 clipboard: ClipboardImpl(),
                 permissions: permissionSink,
+                mobileLinux: nil,
                 // Native Keychain secure store — enables OAuth /login token persist
                 // (flips the engine's oauth_supported true).
                 secureStorage: SecureStorageImpl())

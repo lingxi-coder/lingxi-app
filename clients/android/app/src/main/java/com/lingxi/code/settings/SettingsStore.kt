@@ -36,6 +36,7 @@ data class SettingsUiState(
     val searchProviders: List<GenericProvider> = SettingsMock.searchProviders,
     val fetchProviders: List<GenericProvider> = SettingsMock.fetchProviders,
     val voice: VoiceConfig = VoiceConfig(),
+    val linuxRuntime: LinuxRuntimeUiState = LinuxRuntimeUiState(),
     val skills: List<Skill> = SettingsMock.skills,
     val mcpServers: List<MCPServer> = SettingsMock.mcpServers,
     val dream: DreamConfig = DreamConfig(),
@@ -67,6 +68,77 @@ class SettingsStore : ViewModel() {
     fun setAutoUpdate(on: Boolean) = _state.update { it.copy(autoUpdate = on) }
     fun setNotifs(notifs: NotifConfig) = _state.update { it.copy(notifs = notifs) }
     fun setVoice(voice: VoiceConfig) = _state.update { it.copy(voice = voice) }
+    @Synchronized
+    fun setLinuxRuntimeMode(mode: LinuxRuntimeMode) {
+        val current = _state.value
+        if (current.linuxRuntime.selectedMode == mode) return
+        _state.value = current.copy(
+            linuxRuntime = current.linuxRuntime.copy(
+                selectedMode = mode,
+                busyAction = null,
+            ),
+        )
+    }
+
+    @Synchronized
+    fun tryBeginLinuxRuntimeAction(
+        action: LinuxRuntimeAction,
+        mode: LinuxRuntimeMode,
+    ): Boolean {
+        val current = _state.value
+        if (current.linuxRuntime.selectedMode != mode || current.linuxRuntime.busyAction != null) {
+            return false
+        }
+        _state.value = current.copy(
+            linuxRuntime = current.linuxRuntime.copy(busyAction = action),
+        )
+        return true
+    }
+
+    @Synchronized
+    fun completeLinuxRuntimeAction(
+        action: LinuxRuntimeAction,
+        mode: LinuxRuntimeMode,
+        snapshot: LinuxRuntimeUiState,
+    ) {
+        val current = _state.value
+        if (current.linuxRuntime.selectedMode != mode || current.linuxRuntime.busyAction != action) {
+            return
+        }
+        _state.value = current.copy(linuxRuntime = snapshot.copy(busyAction = null))
+    }
+
+    @Synchronized
+    fun failLinuxRuntimeAction(
+        action: LinuxRuntimeAction,
+        mode: LinuxRuntimeMode,
+        message: String,
+    ) {
+        val current = _state.value
+        if (current.linuxRuntime.selectedMode != mode || current.linuxRuntime.busyAction != action) {
+            return
+        }
+        _state.value = current.copy(
+            linuxRuntime = current.linuxRuntime.copy(
+                summary = "Mobile Linux 操作失败",
+                detail = message,
+                lastAction = action,
+                lastActionMessage = message,
+                busyAction = null,
+            ),
+        )
+    }
+
+    @Synchronized
+    fun cancelLinuxRuntimeAction(action: LinuxRuntimeAction, mode: LinuxRuntimeMode) {
+        val current = _state.value
+        if (current.linuxRuntime.selectedMode != mode || current.linuxRuntime.busyAction != action) {
+            return
+        }
+        _state.value = current.copy(
+            linuxRuntime = current.linuxRuntime.copy(busyAction = null),
+        )
+    }
     fun setSmartRouting(on: Boolean) = _state.update { it.copy(smartRouting = on) }
     fun setStreamingDefault(on: Boolean) = _state.update { it.copy(streamingDefault = on) }
 

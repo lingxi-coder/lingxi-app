@@ -802,7 +802,7 @@ mod imp {
     fn mode(bits: u32, path: &Path) -> Result<Mode, FsError> {
         let bits = u16::try_from(bits)
             .map_err(|_| FsError::Io(format!("{}: invalid unix mode {bits:o}", path.display())))?;
-        Ok(Mode::from_bits_retain(bits))
+        Ok(Mode::from_bits_retain(bits.into()))
     }
 
     fn open_root(root: &Path) -> Result<OwnedFd, FsError> {

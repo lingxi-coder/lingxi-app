@@ -15,28 +15,23 @@
 //   * `submit(.sendPrompt(...))` returns Ok — per the binding contract, a turn
 //     failure is NOT thrown from `submit`; the turn is spawned on the engine's
 //     runtime and `submit` returns once it is queued.
-//   * the keyless turn then fails at the model call and the adapter streams a
-//     TERMINAL `ClientEvent.error(kind:message:)` back to the listener.
+//   * the keyless turn then fails at the model boundary and the adapter streams a
+//     TERMINAL `.error` or `.turnEnded(stopReason: "model_error")` back.
 //
 // On the simulator `cfg(target_os = "ios")` is TRUE, so `buildIosEngine` builds
 // the REAL `IosPlatform` whose `http` handle is the shared `reqwest` + `rustls`
-// client (`platform_common::http::ReqwestHttp`).  The keyless turn therefore
-// makes a REAL HTTPS request to the Anthropic-compatible endpoint and the
-// terminal error is a real transport outcome — a `401` (`non-success HTTP status
-// 401: …`) when the request reaches the host, or a `connection failed: …` when
-// the simulator has no route to it.  EITHER is proof the real client ran; what it
-// must NOT be is the old `platform-posix-minimal` stub, whose error carries the
-// literal `posix-minimal: … SSE stub (Plan 17 wires the real client)`.  This test
-// asserts exactly that distinction (see `assertRealHttpAttempt` below).
+// client (`platform_common::http::ReqwestHttp`).  Missing credentials may be
+// rejected locally before any request is attempted; if a transport `.error`
+// arrives, this test still verifies it is not the old posix-minimal SSE stub.
 //
 // So a keyless run is itself a complete proof: engine-build succeeded AND a real
 // engine-originated event arrived through the UniFFI callback on the listener AND
-// it came from a real `reqwest` call, not the stub.  (WITH a key, the same path
-// streams `.textDelta` — see README-engine.md for the real-run command; this test
-// does not require or assert that, so it never needs a secret in CI.)
+// it reaches a terminal model-error outcome.  (WITH a key, the same path streams
+// `.textDelta`; this test does not require or assert that, so it never needs a
+// secret in CI.)
 //
-// NO secrets: the test never sets or reads a hardcoded key.  It asserts the
-// keyless behavior; the engine reads `ANTHROPIC_API_KEY` from the environment.
+// NO secrets: the test passes an explicitly empty key and never reads or logs a
+// credential from the environment.
 
 import XCTest
 
@@ -138,7 +133,7 @@ import XCTest
         ///
         /// This single test exercises every hop of the SwiftUI→UniFFI→engine→
         /// listener path without a network success and without a secret.
-        func testKeylessSendPromptDeliversTerminalErrorEvent() async throws {
+        func testKeylessSendPromptDeliversTerminalEvent() async throws {
             // The terminal-event expectation: the keyless turn streams a final
             // `.error` (or, defensively, a `.turnEnded`) to the listener.
             let terminal = expectation(description: "engine delivers a terminal ClientEvent to the listener")
@@ -153,9 +148,9 @@ import XCTest
             defer { try? FileManager.default.removeItem(at: sandbox) }
 
             // HANDSHAKE / engine-build: must succeed even with NO api key.  We do
-            // NOT pass a key — read it from the env, which is empty in keyless CI.
-            // (We deliberately do not source a hardcoded secret here.)
-            let apiKey = ProcessInfo.processInfo.environment["ANTHROPIC_API_KEY"] ?? ""
+            // Pass an explicitly empty key so a developer's local environment
+            // cannot silently turn this into a credentialed/network-success test.
+            let apiKey = ""
             let handle: MobileEngineHandle
             do {
                 handle = try buildIosEngine(
@@ -172,7 +167,9 @@ import XCTest
                     voice: VoiceImpl(),
                     notifications: NotificationImpl(),
                     clipboard: ClipboardImpl(),
-                    permissions: NoopPermissionSink())
+                    permissions: NoopPermissionSink(),
+                    mobileLinux: nil,
+                    secureStorage: nil)
             } catch {
                 XCTFail("buildIosEngine must succeed keyless (handshake), got error: \(error)")
                 return
@@ -193,9 +190,8 @@ import XCTest
             await fulfillment(of: [terminal], timeout: 60)
 
             // PROOF: at least one real engine-originated event arrived on the
-            // listener, and the keyless turn surfaced a terminal `error` (the
-            // expected keyless outcome).  WITH a key the same path yields
-            // `.textDelta`; keyless it is `.error`.
+            // listener, and the keyless turn surfaced either a terminal `.error`
+            // or the current adapter contract's `.turnEnded(model_error)`.
             let received = listener.events
             // Diagnostic: surface the real engine-originated event stream in the
             // test log (no secrets — these are ClientEvent kinds/messages).
@@ -208,9 +204,16 @@ import XCTest
                 if case let .error(kind, message) = ev { return (kind, message) }
                 return nil
             }
-            XCTAssertFalse(errorEvents.isEmpty,
+            let modelErrorEnds = received.compactMap { ev -> String? in
+                if case let .turnEnded(_, stopReason, _) = ev,
+                   stopReason == "model_error" {
+                    return stopReason
+                }
+                return nil
+            }
+            XCTAssertFalse(errorEvents.isEmpty && modelErrorEnds.isEmpty,
                            """
-                           keyless turn must deliver a terminal ClientEvent.error to the listener \
+                           keyless turn must deliver ClientEvent.error or turnEnded(model_error) \
                            (proves SwiftUI→UniFFI→engine→listener end to end). \
                            Received events: \(received.map { String(describing: $0) })
                            """)
@@ -269,7 +272,9 @@ import XCTest
                     voice: VoiceImpl(),
                     notifications: NotificationImpl(),
                     clipboard: ClipboardImpl(),
-                    permissions: NoopPermissionSink())
+                    permissions: NoopPermissionSink(),
+                    mobileLinux: nil,
+                    secureStorage: nil)
             } catch {
                 XCTFail("buildIosEngine must succeed keyless with empty model, got: \(error)")
                 return

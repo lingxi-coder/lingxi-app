@@ -98,6 +98,75 @@ struct NotifConfig: Equatable {
     var enabledCount: Int { [workflows, mentions, crons, marketing].filter { $0 }.count }
 }
 
+enum LinuxRuntimeMode: String, CaseIterable, Equatable {
+    case legacy = "Legacy"
+    case mobileLinux = "Mobile Linux"
+}
+
+enum LinuxRuntimeAction: Equatable {
+    case refresh, verify, repair, reset
+
+    var label: String {
+        switch self {
+        case .refresh: return "刷新"
+        case .verify: return "校验"
+        case .repair: return "修复"
+        case .reset: return "重置"
+        }
+    }
+}
+
+enum LinuxRuntimeRootfsState: Equatable {
+    case missing, installing, ready, corrupt, repairing, resetting, unsupported, blockedByLicense
+
+    var label: String {
+        switch self {
+        case .missing: return "未安装"
+        case .installing: return "安装中"
+        case .ready: return "就绪"
+        case .corrupt: return "损坏"
+        case .repairing: return "修复中"
+        case .resetting: return "重置中"
+        case .unsupported: return "未接入"
+        case .blockedByLicense: return "授权阻塞"
+        }
+    }
+}
+
+struct LinuxRuntimeState: Equatable {
+    var selectedMode: LinuxRuntimeMode = .legacy
+    var backend: String = "ios-posix"
+    var rootfsState: LinuxRuntimeRootfsState = .unsupported
+    var version: String? = nil
+    var managedRoot: String? = nil
+    var installedSizeBytes: UInt64? = nil
+    var available: Bool = false
+    var terminalSupported: Bool = false
+    var verifyAllowed: Bool = false
+    var repairAllowed: Bool = false
+    var resetAllowed: Bool = false
+    var writableGuestPaths: [String] = []
+    var summary: String = "当前仍使用 iOS unavailable shell stub"
+    var detail: String = "iSH / fakefs 运行时仅接入到 phase-1 管理面板，未授权时不会链接进商店构建。"
+    var lastAction: LinuxRuntimeAction? = nil
+    var lastActionMessage: String? = nil
+    var busyAction: LinuxRuntimeAction? = nil
+    var tasks: [LinuxRuntimeTaskRow] = []
+    var mounts: [LinuxRuntimeMountRow] = []
+    var terminal = LinuxTerminalState()
+
+    var badge: String {
+        if selectedMode == .legacy { return "默认" }
+        switch rootfsState {
+        case .blockedByLicense: return "授权阻塞"
+        case .unsupported: return "未接入"
+        default: return available ? "可用" : "不可用"
+        }
+    }
+
+    var canOpenTerminal: Bool { terminalSupported && available }
+}
+
 // MARK: - Presets data
 
 enum Presets {
@@ -155,6 +224,7 @@ final class SettingsStore: ObservableObject {
         .init(id: "f_jin", preset: "jina", name: "Jina Reader", url: "https://r.jina.ai", key: "", status: .connected, isDefault: true, enabled: true),
     ]
     @Published var voice = VoiceConfig()
+    @Published var linuxRuntime = LinuxRuntimeState()
     @Published var skills: [Skill] = [
         .init(id: "sk1", name: "周报生成", author: "官方", desc: "聚合 Linear / GitHub / 日历自动出周报", triggers: ["每周五 17:00", "@周报"], enabled: true, builtin: true),
         .init(id: "sk2", name: "代码评审", author: "官方", desc: "对粘贴的 diff 给出严格 review", triggers: ["/review", "拖入 .diff"], enabled: true, builtin: true),

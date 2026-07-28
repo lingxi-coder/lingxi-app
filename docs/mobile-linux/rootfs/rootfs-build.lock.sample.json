@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "alpine": {
+    "version": "3.24.1",
+    "branch": "v3.24",
+    "repositories": [
+      "https://dl-cdn.alpinelinux.org/alpine/v3.24/main",
+      "https://dl-cdn.alpinelinux.org/alpine/v3.24/community"
+    ]
+  },
+  "policy": {
+    "archive_format": "tar.zst",
+    "busybox_applet_strategy": "hardlink",
+    "apk_disabled": true,
+    "forbidden_package_manager_paths": [
+      "/bin/apk",
+      "/sbin/apk",
+      "/usr/bin/apk",
+      "/usr/sbin/apk",
+      "/usr/bin/pip",
+      "/usr/bin/pip3",
+      "/usr/bin/npm",
+      "/usr/bin/npx"
+    ],
+    "fixed_primary_packages": [
+      "busybox",
+      "git",
+      "openssh-client",
+      "python3",
+      "ca-certificates"
+    ]
+  },
+  "resolved_packages": [
+    {
+      "name": "busybox",
+      "version": "REPLACE_WITH_REAL_VERSION",
+      "license": "REPLACE_WITH_REAL_LICENSE",
+      "architecture": "arm64",
+      "origin": "busybox"
+    }
+  ]
+}

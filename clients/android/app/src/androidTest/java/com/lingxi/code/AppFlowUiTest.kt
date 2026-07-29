@@ -1,5 +1,6 @@
 package com.lingxi.code
 
+import android.view.WindowManager
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
@@ -10,6 +11,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.lingxi.code.components.UiTags
 import com.lingxi.code.drawer.DrawerSection
 import org.junit.Rule
+import org.junit.Assert.assertEquals
 import org.junit.Test
 import org.junit.runner.RunWith
 
@@ -32,6 +34,15 @@ class AppFlowUiTest {
 
     @get:Rule
     val rule = createAndroidComposeRule<MainActivity>()
+
+    @Suppress("DEPRECATION")
+    @Test
+    fun mainWindow_resizesContentForTheIme() {
+        val adjustMode = rule.activity.window.attributes.softInputMode and
+            WindowManager.LayoutParams.SOFT_INPUT_MASK_ADJUST
+
+        assertEquals(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE, adjustMode)
+    }
 
     /** Open the 对话/项目/定时 drawer via the conversation top-bar hamburger. */
     private fun openDrawer() {

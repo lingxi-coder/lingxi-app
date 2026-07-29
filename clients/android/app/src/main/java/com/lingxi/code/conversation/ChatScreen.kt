@@ -50,6 +50,7 @@ import com.lingxi.code.components.UiTags
 import com.lingxi.code.components.tint
 import com.lingxi.code.connectivity.OfflineBanner
 import com.lingxi.code.model.ModelOption
+import com.lingxi.code.model.ModelProviderStatus
 import com.lingxi.code.theme.LingXiTheme
 
 /**
@@ -93,6 +94,14 @@ fun ChatScreen(
     showOfflineBanner: Boolean = false,
     onDismissOffline: () -> Unit = {},
     onRetryOffline: (() -> Unit)? = null,
+    /** True when the user has not selected an enabled Provider/model yet. */
+    modelSetupRequired: Boolean = false,
+    /** Opens settings directly at the LLM Provider page. */
+    onOpenModelSettings: () -> Unit = {},
+    /** Settings/credential state displayed alongside each provider section. */
+    modelProviderStatuses: List<ModelProviderStatus> = emptyList(),
+    /** Opens the matching provider editor, or the provider list for null. */
+    onOpenProviderSettings: (String?) -> Unit = { onOpenModelSettings() },
 ) {
     val t = LingXiTheme.palette
     val listState = rememberLazyListState()
@@ -138,7 +147,11 @@ fun ChatScreen(
                 onDismiss = onDismissOffline,
                 onRetry = onRetryOffline,
             )
-            state.error?.let { ErrorBanner(error = it, onDismiss = onDismissError) }
+            if (modelSetupRequired) {
+                ModelSetupBanner(onOpenModelSettings = onOpenModelSettings)
+            } else {
+                state.error?.let { ErrorBanner(error = it, onDismiss = onDismissError) }
+            }
             state.statusLine?.let { StatusRow(text = it) }
             Composer(
                 text = draft,
@@ -147,7 +160,9 @@ fun ChatScreen(
                 availableModels = state.availableModels,
                 onModelChange = onSelectModel,
                 onSend = {
-                    if (state.sessionReady && !state.sessionTransitioning) {
+                    if (modelSetupRequired) {
+                        onOpenModelSettings()
+                    } else if (state.sessionReady && !state.sessionTransitioning) {
                         onSend(draft)
                         onDraftChange("")
                     }
@@ -159,7 +174,11 @@ fun ChatScreen(
                 attachment = attachment,
                 onRemoveAttachment = onRemoveAttachment,
                 isStreaming = state.isStreaming,
-                enabled = state.sessionReady && !state.sessionTransitioning,
+                enabled = modelSetupRequired || (state.sessionReady && !state.sessionTransitioning),
+                modelSetupRequired = modelSetupRequired,
+                onOpenModelSettings = onOpenModelSettings,
+                modelProviderStatuses = modelProviderStatuses,
+                onOpenProviderSettings = onOpenProviderSettings,
                 onStop = onStop,
             )
         }
@@ -317,6 +336,67 @@ private fun StatusRow(text: String) {
             .padding(horizontal = 20.dp)
             .padding(bottom = 4.dp),
     )
+}
+
+/** An actionable configuration state, kept separate from runtime failures. */
+@Composable
+private fun ModelSetupBanner(onOpenModelSettings: () -> Unit) {
+    val t = LingXiTheme.palette
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        modifier = Modifier
+            .testTag(UiTags.MODEL_SETUP_BANNER)
+            .fillMaxWidth()
+            .padding(horizontal = 14.dp)
+            .padding(top = 4.dp, bottom = 4.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(t.accent.tint(0.10f))
+            .border(0.5.dp, t.accent.tint(0.35f), RoundedCornerShape(12.dp))
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(28.dp)
+                .clip(CircleShape)
+                .background(t.accent.tint(0.16f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            LXIcon(name = LXIconName.Cog, size = 15.dp, color = t.accent, stroke = 2f)
+        }
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = "尚未设置模型",
+                color = t.text,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                text = "添加 LLM Provider 并选择模型后即可开始对话",
+                color = t.text2,
+                fontSize = 12.5f.sp,
+                lineHeight = (12.5f * 1.4f).sp,
+            )
+        }
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(3.dp),
+            modifier = Modifier
+                .clip(RoundedCornerShape(8.dp))
+                .background(t.accent)
+                .clickable(onClick = onOpenModelSettings)
+                .testTag(UiTags.MODEL_SETUP_ACTION)
+                .padding(horizontal = 10.dp, vertical = 7.dp),
+        ) {
+            Text(
+                text = "去设置",
+                color = Color.White,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            LXIcon(name = LXIconName.ChevronR, size = 11.dp, color = Color.White, stroke = 2f)
+        }
+    }
 }
 
 /**

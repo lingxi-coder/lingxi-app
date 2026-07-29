@@ -3,6 +3,7 @@ package com.lingxi.code
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
@@ -35,6 +36,8 @@ import com.lingxi.code.connectivity.rememberOnlineState
 import com.lingxi.code.connectivity.shouldShowOfflineBanner
 import com.lingxi.code.drawer.DrawerContent
 import com.lingxi.code.drawer.rememberDrawerUiState
+import com.lingxi.code.model.ModelProviderStatus
+import com.lingxi.code.settings.ProviderSettingsRepository
 import com.lingxi.code.settings.SettingsStore
 import com.lingxi.code.theme.LingXiTheme
 import com.lingxi.code.voice.offline.SherpaVoice
@@ -73,6 +76,9 @@ fun RootScreen(
     onToggleTheme: () -> Unit,
     modifier: Modifier = Modifier,
     onOpenSettings: () -> Unit = {},
+    onOpenModelSettings: () -> Unit = {},
+    onOpenProviderSettings: (String?) -> Unit = { onOpenModelSettings() },
+    modelSetupRequired: Boolean = false,
     // FlowMode (心流) profile bits, read from the persisted AppearancePrefs and
     // passed down so the voice-orb overlay can label itself + gate its text input.
     assistantName: String = "灵犀",
@@ -162,6 +168,19 @@ fun RootScreen(
     // provider reconnect; an empty reply remains an explicit empty catalog.
     val resolvedSettingsStore: SettingsStore =
         settingsStore ?: viewModel(factory = SettingsStore.factory(context))
+    val settingsState by resolvedSettingsStore.state.collectAsState()
+    val modelProviderStatuses = remember(settingsState.llmProviders) {
+        settingsState.llmProviders.map { provider ->
+            ModelProviderStatus(
+                profileId = ProviderSettingsRepository.profileNameFor(provider),
+                settingsId = provider.id,
+                name = provider.name,
+                status = provider.status,
+                enabled = provider.enabled,
+                credentialConfigured = provider.credentialConfigured,
+            )
+        }
+    }
     val engineMcp by chatViewModel.mcpServers.collectAsState()
     LaunchedEffect(chatViewModel, reconnectToken) { chatViewModel.refreshMcpServers() }
     LaunchedEffect(engineMcp) {
@@ -269,7 +288,12 @@ fun RootScreen(
                 }
             },
         ) {
-            Box(modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.systemBars)) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .windowInsetsPadding(WindowInsets.systemBars)
+                    .imePadding(),
+            ) {
                 ChatScreen(
                     state = state,
                     onSend = chatViewModel::send,
@@ -309,6 +333,10 @@ fun RootScreen(
                     // banner's visibility honest (it auto-clears once a validated
                     // network returns, regardless of this tap).
                     onRetryOffline = { chatViewModel.resendLast() },
+                    modelSetupRequired = modelSetupRequired,
+                    onOpenModelSettings = onOpenModelSettings,
+                    modelProviderStatuses = modelProviderStatuses,
+                    onOpenProviderSettings = onOpenProviderSettings,
                 )
             }
         }

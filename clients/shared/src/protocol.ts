@@ -133,6 +133,12 @@ export type MessageBlockDto =
   | { type: 'text'; text: string }
   | { type: 'thinking'; thinking: string; signature?: string }
   | { type: 'redacted_thinking'; data: string }
+  | {
+      type: 'compact_boundary';
+      messages_before: number;
+      messages_after: number;
+      summary: string;
+    }
   | { type: 'tool_use'; id: string; tool: string; input_json: string }
   | {
       type: 'tool_result';

@@ -251,6 +251,15 @@ test('session_resumed atomically replaces the transcript with lowered history', 
     messages: [
       { role: 'user', blocks: [{ type: 'text', text: 'prior question' }] },
       {
+        role: 'system',
+        blocks: [{
+          type: 'compact_boundary',
+          messages_before: 12,
+          messages_after: 3,
+          summary: 'hidden compact summary',
+        }],
+      },
+      {
         role: 'assistant',
         blocks: [
           { type: 'thinking', thinking: 'considering' },
@@ -262,12 +271,21 @@ test('session_resumed atomically replaces the transcript with lowered history', 
     ],
   });
   assert.equal(s.running, false);
-  assert.equal(s.items.length, 4);
-  assert.deepEqual(s.items.map((item) => item.type), ['narration', 'thinking', 'agent', 'narration']);
+  assert.equal(s.items.length, 5);
+  assert.deepEqual(s.items.map((item) => item.type), [
+    'narration',
+    'narration',
+    'thinking',
+    'agent',
+    'narration',
+  ]);
   const user = s.items[0] as Narration;
   assert.equal(user.text, 'prior question');
   assert.equal(user.strong, true);
-  const tool = s.items[2] as Agent;
+  const boundary = s.items[1] as Narration;
+  assert.equal(boundary.text, 'Conversation compacted (12 messages)');
+  assert.doesNotMatch(boundary.text, /hidden compact summary/);
+  const tool = s.items[3] as Agent;
   assert.equal(tool.state, 'done');
   assert.equal(tool.detail, 'contents');
 });

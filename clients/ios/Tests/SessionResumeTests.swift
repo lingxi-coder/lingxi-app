@@ -82,6 +82,8 @@ import XCTest
             let assistant = MessageDto(role: "assistant", blocks: [
                 .text(text: "正文"),
                 .thinking(thinking: "推理", signature: nil),
+                .compactBoundary(messagesBefore: 8, messagesAfter: 2,
+                                 summary: "hidden compact summary"),
                 .toolUse(id: "t1", tool: "Read", inputJson: "{\"path\":\"a\"}"),
                 .toolResult(id: "t1", tool: "", resultJson: "\"ok\"",
                             isError: false, oldString: nil, newString: nil, filePath: nil),
@@ -92,6 +94,10 @@ import XCTest
             let text = source.model.messages[0].text
             XCTAssertTrue(text.contains("正文"), "text block body must be present")
             XCTAssertTrue(text.contains("推理"), "thinking block body must be present")
+            XCTAssertTrue(text.contains("对话已压缩"),
+                          "compact boundary must remain visible after resume")
+            XCTAssertFalse(text.contains("hidden compact summary"),
+                           "internal compact summary must not be rendered as user text")
             XCTAssertTrue(text.contains("调用工具 Read"),
                           "a tool_use block must surface a labeled line, not vanish")
             XCTAssertEqual(source.model.messages[0].role, .ai,

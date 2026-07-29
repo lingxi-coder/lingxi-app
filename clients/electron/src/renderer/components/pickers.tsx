@@ -1,7 +1,8 @@
 import { useT } from '../theme/ThemeContext';
 import {
-  MODELS, EFFORTS, PLAN_USAGE, PERM_MODES, PERM_DEFAULT, type Model,
+  EFFORTS, PLAN_USAGE, PERM_MODES, PERM_DEFAULT, type Model,
 } from '../data';
+import { groupModelReferences } from '../bridge/modelCatalog';
 import { Icon } from './Icon';
 import { Kbd } from './primitives';
 
@@ -94,9 +95,10 @@ export function PermissionPicker({
 
 // ─── MODEL PICKER (with Effort + Fast mode) ──────────────
 export function ModelPicker({
-  model, setModel, open, setOpen, effort, setEffort, fastMode, setFastMode,
+  model, models, setModel, open, setOpen, effort, setEffort, fastMode, setFastMode,
 }: {
   model: Model;
+  models: readonly Model[];
   setModel: (m: Model) => void;
   open: boolean;
   setOpen: (v: boolean) => void;
@@ -106,6 +108,8 @@ export function ModelPicker({
   setFastMode: (v: boolean) => void;
 }) {
   const t = useT();
+  const modelsById = new Map(models.map((entry) => [entry.id, entry]));
+  const modelGroups = groupModelReferences(models.map((entry) => entry.id));
   return (
     <div style={{ position: 'relative' }}>
       <button
@@ -152,33 +156,43 @@ export function ModelPicker({
               <Kbd>⌘</Kbd>
               <Kbd>I</Kbd>
             </div>
-            {MODELS.map((m, i) => {
-              const active = m.id === model.id;
-              return (
-                <div
-                  key={m.id}
-                  onClick={() => setModel(m)}
-                  style={{
-                    display: 'flex', alignItems: 'center', gap: 10,
-                    padding: '6px 10px', borderRadius: 7, cursor: 'pointer',
-                    background: active ? t.surfaceHover : 'transparent',
-                  }}
-                  onMouseEnter={(e) => {
-                    if (!active) e.currentTarget.style.background = t.surfaceHover;
-                  }}
-                  onMouseLeave={(e) => {
-                    if (!active) e.currentTarget.style.background = 'transparent';
-                  }}
-                >
-                  <span style={{ flex: 1, display: 'flex', alignItems: 'baseline', gap: 6, fontSize: 13.5, color: t.text }}>
-                    <span style={{ fontWeight: 500 }}>{m.name}</span>
-                    {m.variant && <span style={{ color: t.text3, fontWeight: 500, fontSize: 13 }}>{m.variant}</span>}
-                  </span>
-                  {active ? <Icon name="check" size={13} color={t.accent} stroke={2.4} /> : <span style={{ width: 13 }} />}
-                  <span style={{ fontSize: 11.5, color: t.text4, fontFamily: 'inherit', minWidth: 10, textAlign: 'right' }}>{i + 1}</span>
-                </div>
-              );
-            })}
+            {modelGroups.map((group, groupIndex) => (
+              <section
+                key={group.providerId ?? 'unqualified'}
+                aria-labelledby={`model-provider-${group.providerId ?? 'other'}`}
+                style={groupIndex === 0 ? undefined : { marginTop: 5, paddingTop: 5, borderTop: `0.5px solid ${t.border}` }}
+              >
+                <div id={`model-provider-${group.providerId ?? 'other'}`} style={{ padding: '7px 10px 4px', fontSize: 10.5, color: t.text3, fontWeight: 650, letterSpacing: '.06em', textTransform: 'uppercase' }}>{group.providerLabel}</div>
+                {group.models.map((entry) => {
+                  const m = modelsById.get(entry.reference);
+                  if (!m) return null;
+                  const active = m.id === model.id;
+                  return (
+                    <div
+                      key={m.id}
+                      onClick={() => setModel(m)}
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: 10,
+                        padding: '6px 10px', borderRadius: 7, cursor: 'pointer',
+                        background: active ? t.surfaceHover : 'transparent',
+                      }}
+                      onMouseEnter={(e) => {
+                        if (!active) e.currentTarget.style.background = t.surfaceHover;
+                      }}
+                      onMouseLeave={(e) => {
+                        if (!active) e.currentTarget.style.background = 'transparent';
+                      }}
+                    >
+                      <span style={{ flex: 1, display: 'flex', alignItems: 'baseline', gap: 6, fontSize: 13.5, color: t.text }}>
+                        <span style={{ fontWeight: 500 }}>{m.name}</span>
+                        {m.variant && <span style={{ color: t.text3, fontWeight: 500, fontSize: 13 }}>{m.variant}</span>}
+                      </span>
+                      {active ? <Icon name="check" size={13} color={t.accent} stroke={2.4} /> : <span style={{ width: 13 }} />}
+                    </div>
+                  );
+                })}
+              </section>
+            ))}
 
             <div style={{ height: 0.5, background: t.border, margin: '6px 10px' }} />
 

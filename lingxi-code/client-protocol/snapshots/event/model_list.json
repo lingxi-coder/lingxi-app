@@ -1,8 +1,8 @@
 {
   "type": "model_list",
   "models": [
-    "claude-opus-4-7",
-    "claude-sonnet-4-5"
+    "anthropic/claude-opus-4-8",
+    "openai/gpt-5.5"
   ],
-  "current": "claude-opus-4-7"
+  "current": "anthropic/claude-opus-4-8"
 }

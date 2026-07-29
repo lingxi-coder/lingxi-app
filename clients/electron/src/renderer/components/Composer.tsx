@@ -8,6 +8,7 @@ import { PermissionPicker, ModelPicker, ContextPicker } from './pickers';
 interface ComposerProps {
   repo: Project;
   model: Model;
+  models: readonly Model[];
   setModel: (m: Model) => void;
   appendMessage: (msg: RunItem) => void;
   /** Submit a text prompt to the live engine (no-op-able in browser preview). */
@@ -20,7 +21,7 @@ interface ComposerProps {
 
 const NUM_BARS = 90;
 
-export function Composer({ repo, model, setModel, appendMessage, onSubmit, onCancel, running = false }: ComposerProps) {
+export function Composer({ repo, model, models, setModel, appendMessage, onSubmit, onCancel, running = false }: ComposerProps) {
   const t = useT();
   const [text, setText] = useState('');
   const [slashOpen, setSlashOpen] = useState(false);
@@ -409,6 +410,7 @@ export function Composer({ repo, model, setModel, appendMessage, onSubmit, onCan
           <span style={{ flex: 1 }} />
           <ModelPicker
             model={model}
+            models={models}
             setModel={setModel}
             open={modelOpen}
             setOpen={setModelOpen}

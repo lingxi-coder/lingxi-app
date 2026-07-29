@@ -150,14 +150,6 @@ export interface Model {
   color: string;
 }
 
-export const MODELS: Model[] = [
-  { id: 'lx-47', name: 'Lingxi 4.7', tag: '', desc: '默认 · 200K 上下文', color: 'oklch(72% 0.18 268)' },
-  { id: 'lx-47-1m', name: 'Lingxi 4.7', variant: '1M', tag: 'Max', desc: '深度推理 · 100万 token 上下文', color: 'oklch(72% 0.18 268)' },
-  { id: 'lx-46s', name: 'Sonata 4.6', tag: '', desc: '快速响应 · 日常交互', color: 'oklch(74% 0.16 195)' },
-  { id: 'lx-45h', name: 'Mini 4.5', tag: '', desc: '极速 · 轻量调用', color: 'oklch(74% 0.16 155)' },
-  { id: 'lx-46l', name: 'Lingxi 4.6', variant: 'Legacy', tag: '', desc: '上一代 · 兼容性保留', color: 'oklch(60% 0.04 270)' },
-];
-
 export interface Effort {
   id: string;
   label: string;

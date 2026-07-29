@@ -27,6 +27,11 @@ data class ProviderCredentialSnapshot(
     val error: String? = null,
 )
 
+data class ProviderStatusRefreshResult(
+    val providers: List<GenericProvider>,
+    val error: String? = null,
+)
+
 data class ProviderEngineLaunchConfig(
     val providerProfilesJson: String,
     val routingJson: String,
@@ -167,15 +172,17 @@ class ProviderSettingsRepository(
         return Triple(llm, search, fetch)
     }
 
-    suspend fun refreshLlmStatuses(providers: List<GenericProvider>): List<GenericProvider> {
+    suspend fun refreshLlmStatuses(providers: List<GenericProvider>): ProviderStatusRefreshResult {
         val supportedIds = providers.mapNotNull { engineCredentialIdFor(it) }.distinct()
         if (supportedIds.isEmpty()) {
-            return providers.map { provider ->
-                provider.copy(
-                    credentialConfigured = false,
-                    status = statusFor(provider, false, encrypted = false, unavailable = false),
-                )
-            }
+            return ProviderStatusRefreshResult(
+                providers = providers.map { provider ->
+                    provider.copy(
+                        credentialConfigured = false,
+                        status = statusFor(provider, false, encrypted = false, unavailable = false),
+                    )
+                },
+            )
         }
         // One-time compatibility migration: early Android builds stored only
         // the Anthropic key in EncryptedSharedPreferences. Copy it into the
@@ -189,15 +196,10 @@ class ProviderSettingsRepository(
             }
             ?.let { credentialClient.set("anthropic", secureKeyStore?.apiKey().orEmpty()) }
         val snapshot = credentialClient.list(supportedIds)
-        return providers.map { provider ->
-            val credentialId = engineCredentialIdFor(provider)
-            val configured = credentialId != null && snapshot.configuredProviderIds.contains(credentialId)
-            val unavailable = credentialId != null && snapshot.unavailableProviderIds.contains(credentialId)
-            provider.copy(
-                credentialConfigured = configured,
-                status = statusFor(provider, configured, snapshot.storageEncrypted, unavailable),
-            )
-        }
+        return ProviderStatusRefreshResult(
+            providers = applyCredentialSnapshot(providers, snapshot),
+            error = snapshot.error,
+        )
     }
 
     fun persistProviders(kind: ProviderKind, providers: List<GenericProvider>) {
@@ -261,6 +263,19 @@ class ProviderSettingsRepository(
         private const val PREF_SEARCH = "providers_search"
         private const val PREF_FETCH = "providers_fetch"
 
+        internal fun migrateLegacyDeepSeek(provider: GenericProvider): GenericProvider {
+            if (provider.preset != "deepseek") return provider
+            val migratedUrl = when (provider.url.trimEnd('/')) {
+                "https://api.deepseek.com/v1" -> "https://api.deepseek.com"
+                else -> provider.url
+            }
+            val migratedModel = when (provider.model) {
+                "deepseek-chat", "deepseek-reasoner" -> "deepseek-v4-flash"
+                else -> provider.model
+            }
+            return provider.copy(url = migratedUrl, model = migratedModel)
+        }
+
         internal fun buildEngineLaunchConfig(
             savedProviders: List<GenericProvider>,
         ): ProviderEngineLaunchConfig {
@@ -301,18 +316,16 @@ class ProviderSettingsRepository(
          * [profileNameFor] to `[A-Za-z0-9_.-]`, so direct quoting is safe and
          * keeps this tiny launch envelope testable on the plain JVM.
          */
-        internal fun buildMobileRoutingJson(enabledProfiles: List<String>): String =
-            enabledProfiles.joinToString(
-                prefix = """{"$MOBILE_ENABLED_PROFILES_KEY":[""",
-                separator = """","""",
-                postfix = "\"]}",
-            ).let { encoded ->
-                if (enabledProfiles.isEmpty()) {
-                    """{"$MOBILE_ENABLED_PROFILES_KEY":[]}"""
-                } else {
-                    encoded
-                }
+        internal fun buildMobileRoutingJson(enabledProfiles: List<String>): String {
+            if (enabledProfiles.isEmpty()) {
+                return """{"$MOBILE_ENABLED_PROFILES_KEY":[]}"""
             }
+            return enabledProfiles.joinToString(
+                prefix = "{\"$MOBILE_ENABLED_PROFILES_KEY\":[\"",
+                separator = "\",\"",
+                postfix = "\"]}",
+            )
+        }
 
         internal fun engineCredentialIdFor(provider: GenericProvider): String? =
             providerType(provider)?.let { profileNameFor(provider) }
@@ -350,6 +363,28 @@ class ProviderSettingsRepository(
             credentialConfigured && encrypted -> ConnStatus.Configured
             credentialConfigured -> ConnStatus.Error
             else -> ConnStatus.Idle
+        }
+
+        internal fun applyCredentialSnapshot(
+            providers: List<GenericProvider>,
+            snapshot: ProviderCredentialSnapshot,
+        ): List<GenericProvider> = providers.map { provider ->
+            val credentialId = engineCredentialIdFor(provider)
+            val configured = credentialId != null &&
+                snapshot.configuredProviderIds.contains(credentialId)
+            val unavailable = credentialId != null && (
+                snapshot.unavailableProviderIds.contains(credentialId) ||
+                    (snapshot.error != null && !configured)
+                )
+            provider.copy(
+                credentialConfigured = configured,
+                status = statusFor(
+                    provider = provider,
+                    credentialConfigured = configured,
+                    encrypted = snapshot.storageEncrypted,
+                    unavailable = unavailable,
+                ),
+            )
         }
 
         internal fun newProvider(kind: ProviderKind, preset: ProviderPreset): GenericProvider {
@@ -443,18 +478,20 @@ class ProviderSettingsRepository(
                 for (i in 0 until array.length()) {
                     val obj = array.getJSONObject(i)
                     add(
-                        GenericProvider(
-                            id = obj.getString("id"),
-                            preset = obj.getString("preset"),
-                            name = obj.getString("name"),
-                            url = obj.getString("url"),
-                            key = "",
-                            model = obj.optString("model"),
-                            cx = obj.optString("cx"),
-                            status = ConnStatus.Idle,
-                            isDefault = obj.optBoolean("isDefault"),
-                            enabled = obj.optBoolean("enabled", true),
-                            credentialConfigured = obj.optBoolean("credentialConfigured", false),
+                        migrateLegacyDeepSeek(
+                            GenericProvider(
+                                id = obj.getString("id"),
+                                preset = obj.getString("preset"),
+                                name = obj.getString("name"),
+                                url = obj.getString("url"),
+                                key = "",
+                                model = obj.optString("model"),
+                                cx = obj.optString("cx"),
+                                status = ConnStatus.Idle,
+                                isDefault = obj.optBoolean("isDefault"),
+                                enabled = obj.optBoolean("enabled", true),
+                                credentialConfigured = obj.optBoolean("credentialConfigured", false),
+                            ),
                         ),
                     )
                 }

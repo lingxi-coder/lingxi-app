@@ -11,6 +11,35 @@ import org.junit.Test
 
 class ProviderSettingsSemanticsTest {
     @Test
+    fun modelSetup_isRequiredWithoutAnEnabledProviderModel() {
+        assertTrue(SettingsUiState().needsLlmSetup)
+        assertTrue(
+            SettingsUiState(
+                llmProviders = listOf(provider().copy(enabled = false)),
+            ).needsLlmSetup,
+        )
+        assertTrue(
+            SettingsUiState(
+                llmProviders = listOf(provider().copy(model = "")),
+            ).needsLlmSetup,
+        )
+    }
+
+    @Test
+    fun selectedProviderModel_satisfiesModelSetupBeforeCredentialRefreshCompletes() {
+        val state = SettingsUiState(
+            llmProviders = listOf(
+                provider().copy(
+                    credentialConfigured = false,
+                    status = ConnStatus.Idle,
+                ),
+            ),
+        )
+
+        assertFalse(state.needsLlmSetup)
+    }
+
+    @Test
     fun encryptedCredential_isConfigured_notNetworkConnected() {
         val status = ProviderSettingsRepository.statusFor(
             provider = provider(),
@@ -33,6 +62,50 @@ class ProviderSettingsSemanticsTest {
         )
 
         assertEquals(ConnStatus.Configured, status)
+    }
+
+    @Test
+    fun refreshSnapshot_restoresConfiguredCredentialStatus() {
+        val refreshed = ProviderSettingsRepository.applyCredentialSnapshot(
+            providers = listOf(provider()),
+            snapshot = ProviderCredentialSnapshot(
+                configuredProviderIds = setOf("openai"),
+                unavailableProviderIds = emptySet(),
+                storageEncrypted = true,
+            ),
+        )
+
+        assertTrue(refreshed.single().credentialConfigured)
+        assertEquals(ConnStatus.Configured, refreshed.single().status)
+    }
+
+    @Test
+    fun refreshFailure_isVisibleInsteadOfFallingBackToUnverified() {
+        val refreshed = ProviderSettingsRepository.applyCredentialSnapshot(
+            providers = listOf(provider()),
+            snapshot = ProviderCredentialSnapshot(
+                configuredProviderIds = emptySet(),
+                unavailableProviderIds = emptySet(),
+                storageEncrypted = false,
+                error = "credential status timed out",
+            ),
+        )
+
+        assertFalse(refreshed.single().credentialConfigured)
+        assertEquals(ConnStatus.Error, refreshed.single().status)
+    }
+
+    @Test
+    fun providerApplyState_savesCredentialDraftAlongsideConfiguration() {
+        val state = providerApplyUiState(
+            hasPendingConfiguration = false,
+            hasCredentialDraft = true,
+            busy = false,
+        )
+
+        assertTrue(state.enabled)
+        assertTrue(state.saveCredential)
+        assertEquals("保存并应用", state.label)
     }
 
     @Test

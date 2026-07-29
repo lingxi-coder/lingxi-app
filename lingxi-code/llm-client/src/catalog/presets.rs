@@ -230,9 +230,12 @@ mod tests {
         use crate::model::context_window::{context_window_for_model, max_output_tokens_for_model};
         // Assembling the catalog registers each model's real limits.
         let _ = builtin_presets();
-        // deepseek-chat: real 1,000,000 / 384,000 — NOT the Claude 200k / 32k.
-        assert_eq!(context_window_for_model("deepseek-chat", &[]), 1_000_000);
-        assert_eq!(max_output_tokens_for_model("deepseek-chat"), 384_000);
+        // DeepSeek V4: real 1,000,000 / 384,000 — NOT the Claude 200k / 32k.
+        assert_eq!(
+            context_window_for_model("deepseek-v4-flash", &[]),
+            1_000_000
+        );
+        assert_eq!(max_output_tokens_for_model("deepseek-v4-flash"), 384_000);
         // gpt-4.1: real 1,047,576 / 32,768.
         assert_eq!(context_window_for_model("gpt-4.1", &[]), 1_047_576);
         assert_eq!(max_output_tokens_for_model("gpt-4.1"), 32_768);

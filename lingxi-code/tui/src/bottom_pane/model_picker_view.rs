@@ -94,8 +94,9 @@ impl ModelPickerView {
         let mut n = 0usize;
         let mut prev: Option<&str> = None;
         for r in &self.rows {
-            if prev != Some(r.provider_label.as_str()) {
-                prev = Some(r.provider_label.as_str());
+            let provider = provider_key(r);
+            if prev != Some(provider) {
+                prev = Some(provider);
                 if !r.provider_label.is_empty() {
                     n += 1;
                 }
@@ -163,6 +164,12 @@ impl ModelPickerView {
     }
 }
 
+fn provider_key(row: &ModelRow) -> &str {
+    row.profile
+        .as_deref()
+        .unwrap_or(row.provider_label.as_str())
+}
+
 /// Stable-group rows under their provider so same-provider models render
 /// contiguously beneath one dim provider header. Provider order is
 /// first-appearance (the catalog's routable-first ordering); within a provider
@@ -170,25 +177,25 @@ impl ModelPickerView {
 fn group_by_provider(mut rows: Vec<ModelRow>) -> Vec<ModelRow> {
     let mut order: Vec<String> = Vec::new();
     for r in &rows {
-        if !order.iter().any(|l| l == &r.provider_label) {
-            order.push(r.provider_label.clone());
+        if !order.iter().any(|provider| provider == provider_key(r)) {
+            order.push(provider_key(r).to_string());
         }
     }
     rows.sort_by_key(|r| {
         order
             .iter()
-            .position(|l| l == &r.provider_label)
+            .position(|provider| provider == provider_key(r))
             .unwrap_or(usize::MAX)
     });
     // De-duplicate models that appear more than once under the same provider
     // header (a live/routable listing plus its catalog twin surface the same
-    // `(provider, display)` — e.g. GLM-5.1 twice). Keep the first, but let a
+    // `(provider, request_model)` — e.g. GLM-5.1 twice). Keep the first, but let a
     // later `is_current` row win so the active model stays highlighted.
     let mut out: Vec<ModelRow> = Vec::with_capacity(rows.len());
     for r in rows {
         if let Some(existing) = out
             .iter_mut()
-            .find(|e| e.provider_label == r.provider_label && e.display == r.display)
+            .find(|e| provider_key(e) == provider_key(&r) && e.request_model == r.request_model)
         {
             if r.is_current && !existing.is_current {
                 *existing = r;
@@ -236,11 +243,12 @@ impl Renderable for ModelPickerView {
         // emitted whenever the provider changes from the previous rendered row
         // (including the first row of the window). The model rows below it show
         // only the model name (the provider is the header now).
-        let mut prev_label: Option<&str> = None;
+        let mut prev_provider: Option<&str> = None;
         for (i, row) in self.rows[self.offset..end].iter().enumerate() {
             let idx = self.offset + i;
-            if prev_label != Some(row.provider_label.as_str()) {
-                prev_label = Some(row.provider_label.as_str());
+            let provider = provider_key(row);
+            if prev_provider != Some(provider) {
+                prev_provider = Some(provider);
                 if !row.provider_label.is_empty() {
                     lines.push(Line::from(Span::styled(
                         row.provider_label.clone(),
@@ -433,6 +441,39 @@ mod tests {
             1,
             "no duplicate row: {text}"
         );
+    }
+
+    #[test]
+    fn provider_profile_keeps_same_label_and_model_distinct() {
+        let rows = vec![
+            ModelRow {
+                display: "Shared Model".into(),
+                request_model: "shared-model".into(),
+                profile: Some("provider-a".into()),
+                provider_label: "Custom".into(),
+                is_current: false,
+                supports_reasoning: true,
+            },
+            ModelRow {
+                display: "Shared Model".into(),
+                request_model: "shared-model".into(),
+                profile: Some("provider-b".into()),
+                provider_label: "Custom".into(),
+                is_current: true,
+                supports_reasoning: true,
+            },
+        ];
+        let mut picker = ModelPickerView::new(rows);
+
+        assert_eq!(picker.rows().len(), 2);
+        assert_eq!(picker.group_count(), 2);
+        assert_eq!(picker.selected(), 1);
+        assert!(matches!(
+            picker.handle_key(press(KeyCode::Enter)),
+            ViewOutcome::SwitchModel { ref request_model, ref profile }
+                if request_model == "shared-model"
+                    && profile.as_deref() == Some("provider-b")
+        ));
     }
 
     #[test]

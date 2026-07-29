@@ -279,12 +279,19 @@ class SessionStateTest {
                     oldString = null, newString = null, filePath = null,
                 ),
                 MessageBlockDto.RedactedThinking(data = "opaque"),
+                MessageBlockDto.CompactBoundary(
+                    messagesBefore = 8u,
+                    messagesAfter = 2u,
+                    summary = "hidden compact summary",
+                ),
             ),
         )
         assertTrue(text.contains("正文"))
         assertTrue(text.contains("bash")) // the tool-use activity line
         assertTrue(text.contains("工具结果"))
         assertTrue(text.contains("已折叠的思考"))
+        assertTrue(text.contains("对话已压缩"))
+        assertFalse(text.contains("hidden compact summary"))
         // The blank text block left no dangling double-blank run.
         assertFalse(text.contains("\n\n\n"))
     }

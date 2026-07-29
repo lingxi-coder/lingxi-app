@@ -124,6 +124,40 @@ class ClientEventMapperTest {
         assertEquals(ReplyEvent.Error("internal failure"), r)
     }
 
+    @Test
+    fun transportDnsError_mapsToActionableNetworkMessage() {
+        val r = clientEventToReply(
+            ClientEvent.Error(
+                kind = ErrorKindDto.TRANSPORT,
+                message = "connection failed: error sending request for url: " +
+                    "client error (Connect): dns error: failed to lookup address information",
+            ),
+        )
+
+        assertEquals(
+            ReplyEvent.Error("无法解析模型服务地址。请检查 VPN、私人 DNS 或当前网络后重试。"),
+            r,
+        )
+    }
+
+    @Test
+    fun transportTlsAndTimeoutErrors_haveSpecificGuidance() {
+        assertEquals(
+            "模型服务安全连接失败。请检查系统时间、VPN 或证书设置后重试。",
+            userFacingEngineError(
+                ErrorKindDto.TRANSPORT,
+                "connection failed: TLS certificate verify failed",
+            ),
+        )
+        assertEquals(
+            "连接模型服务超时。请检查当前网络或 VPN 后重试。",
+            userFacingEngineError(
+                ErrorKindDto.TRANSPORT,
+                "connection failed: request timed out",
+            ),
+        )
+    }
+
     // --- ignored events ---------------------------------------------------
 
     @Test

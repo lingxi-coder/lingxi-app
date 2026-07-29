@@ -654,6 +654,38 @@ async fn set_model_routes() {
 }
 
 #[tokio::test]
+async fn set_model_keeps_provider_in_acknowledgement() {
+    let handle = Arc::new(MockOrchestratorHandle::new());
+    handle.set_model_listings(vec![traits::ModelListing {
+        display_model: "GPT-5.5".into(),
+        request_model: "gpt-5.5".into(),
+        provider_id: "github-copilot".into(),
+        provider_label: "GitHub Copilot".into(),
+        description: None,
+        supports_reasoning: true,
+    }]);
+    let router = router_with(handle.clone(), Arc::new(MockTaskRegistry { rows: vec![] }));
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::SetModel {
+                model: "github-copilot/gpt-5.5".into(),
+            },
+            sink.clone(),
+        )
+        .await;
+
+    assert_eq!(handle.last_switched_model().as_deref(), Some("gpt-5.5"));
+    assert_eq!(
+        sink.events().await,
+        vec![ClientEvent::ModelChanged {
+            model: "github-copilot/gpt-5.5".into(),
+        }]
+    );
+}
+
+#[tokio::test]
 async fn set_permission_mode_routes_and_acknowledges_authoritative_mode() {
     let handle = Arc::new(MockOrchestratorHandle::new());
     let router = router_with(handle.clone(), Arc::new(MockTaskRegistry { rows: vec![] }));
@@ -755,6 +787,55 @@ async fn list_models_routes() {
             models: vec!["a".into(), "b".into()],
             current: "a".into(),
         }
+    );
+}
+
+#[tokio::test]
+async fn list_models_curates_and_preserves_provider_identity() {
+    let handle = Arc::new(MockOrchestratorHandle::new());
+    handle.set_available_models(vec!["gpt-5.5".into(), "gpt-4o".into()]);
+    handle.set_model_listings(vec![
+        traits::ModelListing {
+            display_model: "GPT-5.5".into(),
+            request_model: "gpt-5.5".into(),
+            provider_id: "openai".into(),
+            provider_label: "OpenAI".into(),
+            description: None,
+            supports_reasoning: true,
+        },
+        traits::ModelListing {
+            display_model: "GPT-4o".into(),
+            request_model: "gpt-4o".into(),
+            provider_id: "openai".into(),
+            provider_label: "OpenAI".into(),
+            description: None,
+            supports_reasoning: false,
+        },
+        traits::ModelListing {
+            display_model: "GPT-5.5".into(),
+            request_model: "gpt-5.5".into(),
+            provider_id: "github-copilot".into(),
+            provider_label: "GitHub Copilot".into(),
+            description: None,
+            supports_reasoning: true,
+        },
+    ]);
+    handle.set_status_snapshot(StatusSnapshot {
+        model: "gpt-5.5".into(),
+        model_profile: Some("github-copilot".into()),
+        ..StatusSnapshot::default()
+    });
+    let router = router_with(handle, Arc::new(MockTaskRegistry { rows: vec![] }));
+    let sink = CapturingSink::arc();
+
+    router.route(ClientCommand::ListModels, sink.clone()).await;
+
+    assert_eq!(
+        sink.events().await,
+        vec![ClientEvent::ModelList {
+            models: vec!["github-copilot/gpt-5.5".into(), "openai/gpt-5.5".into(),],
+            current: "github-copilot/gpt-5.5".into(),
+        }]
     );
 }
 

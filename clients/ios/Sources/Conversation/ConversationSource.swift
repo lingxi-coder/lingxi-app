@@ -38,6 +38,7 @@ struct ConversationError: Identifiable, Equatable {
         case `protocol`
         case server
         case maxTurns
+        case rejected
         case `internal`
         /// A failure originating in the Swift host (e.g. engine build/submit
         /// threw) rather than a lowered engine `ErrorKindDto`.
@@ -50,6 +51,7 @@ struct ConversationError: Identifiable, Equatable {
             case .protocol: return "协议错误"
             case .server: return "服务端错误"
             case .maxTurns: return "已达最大轮数"
+            case .rejected: return "操作被拒绝"
             case .internal: return "内部错误"
             case .host: return "引擎错误"
             }
@@ -868,6 +870,10 @@ final class MockConversationSource: ConversationSource {
                 case .redactedThinking:
                     // Opaque encrypted reasoning — nothing user-readable to show.
                     return nil
+                case .compactBoundary:
+                    // Keep the boundary visible without presenting the internal
+                    // summary as user-authored transcript text.
+                    return "对话已压缩"
                 case let .toolUse(_, tool, _):
                     return "调用工具 \(tool)"
                 case let .toolResult(_, _, _, isError, _, _, _):
@@ -887,6 +893,7 @@ final class MockConversationSource: ConversationSource {
             case .protocol: return .protocol
             case .server: return .server
             case .maxTurns: return .maxTurns
+            case .rejected: return .rejected
             case .internal: return .internal
             @unknown default: return .internal
             }

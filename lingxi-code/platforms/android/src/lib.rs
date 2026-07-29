@@ -216,7 +216,12 @@ impl AndroidPlatform {
         };
         Self {
             fs: Arc::new(PosixFileSystem::new(inputs.app_files_root)),
-            http: Arc::new(http_client::ReqwestHttp::new()),
+            // Android surfaces transport failures directly in the conversation
+            // UI. Retain reqwest's nested DNS/TCP/TLS causes so the Kotlin layer
+            // can distinguish an unresolvable host from an invalid key/model.
+            // Desktop continues to use `ReqwestHttp::new()` and keeps its exact
+            // legacy error text.
+            http: Arc::new(http_client::ReqwestHttp::new_with_detailed_connection_errors()),
             clock: Arc::new(PosixClock::new()),
             process,
             sandbox,

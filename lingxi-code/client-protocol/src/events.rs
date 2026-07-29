@@ -203,18 +203,21 @@ pub enum ClientEvent {
         sessions: Vec<SessionRowDto>,
     },
 
-    /// The available-model catalog + the active model (`/model` no-arg list).
+    /// The curated available-model catalog + active model (`/model` no-arg
+    /// list). When provider identity is known, entries use the stable
+    /// `provider/model` reference accepted by [`ClientCommand::SetModel`].
     ModelList {
-        /// Model names the orchestrator will accept via `SetModel`.
+        /// Latest/common model references the orchestrator will accept via
+        /// `SetModel`; clients group the qualified references by provider.
         models: Vec<String>,
-        /// The currently active model.
+        /// The currently active model reference.
         current: String,
     },
 
     /// The active model changed (1:1 with a successful `SetModel` /
     /// `switch_model`).
     ModelChanged {
-        /// The model now active for subsequent turns.
+        /// The model reference now active for subsequent turns.
         model: String,
     },
 

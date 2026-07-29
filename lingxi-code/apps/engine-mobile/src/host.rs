@@ -33,7 +33,7 @@
 //! `Platform` (`platform-ios` / `platform-android`) is `cfg(target_os)`-gated in
 //! `Cargo.toml`, so this module never names a device crate.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -1849,54 +1849,6 @@ impl ActiveTurn {
     }
 }
 
-/// Mobile's flat model DTO has no provider field, so encode the provider
-/// profile into its stable wire value. This stays local to the mobile host and
-/// leaves the shared desktop/TUI listing contract untouched.
-fn mobile_model_ref(model: &str, profile: Option<&str>) -> String {
-    profile
-        .filter(|profile| !profile.is_empty())
-        .map_or_else(|| model.to_string(), |profile| format!("{profile}/{model}"))
-}
-
-/// Mobile-specific sibling of `traits::curated_model_names` that preserves
-/// provider identity in the protocol's existing `Vec<String>` shape.
-fn curated_mobile_model_refs(
-    listings: &[traits::ModelListing],
-    available: &[String],
-    current: &str,
-    current_profile: Option<&str>,
-) -> Vec<String> {
-    if listings.is_empty() {
-        let mut models = available.to_vec();
-        if !current.is_empty() && current_profile.is_some() {
-            let qualified = mobile_model_ref(current, current_profile);
-            if let Some(index) = models.iter().position(|model| model == current) {
-                models[index] = qualified;
-            } else if !models.contains(&qualified) {
-                models.insert(0, qualified);
-            }
-        }
-        return models;
-    }
-
-    let mut models = Vec::new();
-    let mut seen = HashSet::new();
-    if !current.is_empty() {
-        let current = mobile_model_ref(current, current_profile);
-        seen.insert(current.clone());
-        models.push(current);
-    }
-    for listing in listings {
-        if traits::is_curated_model(&listing.provider_id, &listing.request_model) {
-            let model = mobile_model_ref(&listing.request_model, Some(&listing.provider_id));
-            if seen.insert(model.clone()) {
-                models.push(model);
-            }
-        }
-    }
-    models
-}
-
 impl MobileEngineHandle {
     /// Number of builtin mobile skills assembled. (Under `uniffi`:
     /// `#[uniffi::export]`.)
@@ -2279,7 +2231,8 @@ impl MobileEngineHandle {
                         message: format!("switch_model failed: {e}"),
                     })?;
                 let snapshot = handle.get_status_snapshot().await;
-                let selected = mobile_model_ref(&snapshot.model, snapshot.model_profile.as_deref());
+                let selected =
+                    traits::qualified_model_ref(&snapshot.model, snapshot.model_profile.as_deref());
                 self.event_sink
                     .emit(ClientEvent::ModelChanged { model: selected })
                     .await;
@@ -2799,13 +2752,14 @@ impl MobileEngineHandle {
                 let available = handle.list_available_models().await;
                 let listings = handle.list_model_listings().await;
                 let snapshot = handle.get_status_snapshot().await;
-                let models = curated_mobile_model_refs(
+                let models = traits::curated_model_refs(
                     &listings,
                     &available,
                     &snapshot.model,
                     snapshot.model_profile.as_deref(),
                 );
-                let current = mobile_model_ref(&snapshot.model, snapshot.model_profile.as_deref());
+                let current =
+                    traits::qualified_model_ref(&snapshot.model, snapshot.model_profile.as_deref());
                 self.event_sink
                     .emit(ClientEvent::ModelList { models, current })
                     .await;
@@ -4699,7 +4653,7 @@ mod tests {
             },
         ];
 
-        let refs = super::curated_mobile_model_refs(
+        let refs = traits::curated_model_refs(
             &listings,
             &["gpt-5.5".into()],
             "gpt-5.5",

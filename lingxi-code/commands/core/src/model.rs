@@ -1,7 +1,9 @@
 //! `/model` — list (no arg) or switch (one arg) the active model.
 //!
-//! Locked display templates (`LingXi` UX, M5-11 T0 step 2 L3/L4):
-//!   - No-arg list: `"Current model: {name}\nAvailable: {csv}"`
+//! Display templates (`LingXi` UX, M5-11 T0 step 2 L3/L4):
+//!   - No-arg list: the current qualified model plus provider-grouped choices
+//!     (`provider/model`). Catalog-less compatibility handles retain the legacy
+//!     comma-separated list.
 //!   - Switch:      `"Switched to model: {name}"`
 //!
 //! Failure prefix: `"Could not switch model: "`.
@@ -15,7 +17,68 @@ use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
 use std::sync::Arc;
 use telemetry::tengu::command as cmd_evt;
-use traits::OrchestratorHandle;
+use traits::{ModelListing, OrchestratorHandle};
+
+fn provider_for_ref<'a>(
+    model_ref: &str,
+    listings: &'a [ModelListing],
+) -> Option<(&'a str, &'a str)> {
+    listings
+        .iter()
+        .find(|listing| {
+            traits::qualified_model_ref(&listing.request_model, Some(&listing.provider_id))
+                == model_ref
+        })
+        .or_else(|| {
+            let (provider, _) = model_ref.split_once('/')?;
+            listings
+                .iter()
+                .find(|listing| listing.provider_id == provider)
+        })
+        .map(|listing| {
+            (
+                listing.provider_id.as_str(),
+                listing.provider_label.as_str(),
+            )
+        })
+}
+
+fn render_grouped_model_refs(refs: &[String], listings: &[ModelListing]) -> String {
+    if listings.is_empty() {
+        return refs.join(", ");
+    }
+
+    let mut groups: Vec<(Option<String>, String, Vec<&str>)> = Vec::new();
+    for model_ref in refs {
+        let provider = provider_for_ref(model_ref, listings);
+        let key = provider.map(|(id, _)| id.to_string());
+        let label = provider
+            .map(|(id, label)| {
+                if label.is_empty() {
+                    id.to_string()
+                } else {
+                    label.to_string()
+                }
+            })
+            .unwrap_or_else(|| "Other".to_string());
+        if let Some((_, _, models)) = groups.iter_mut().find(|(group, _, _)| *group == key) {
+            models.push(model_ref);
+        } else {
+            groups.push((key, label, vec![model_ref]));
+        }
+    }
+
+    if groups.is_empty() {
+        return "(none)".to_string();
+    }
+
+    let mut lines = Vec::new();
+    for (_, label, models) in groups {
+        lines.push(format!("{label}:"));
+        lines.extend(models.into_iter().map(|model| format!("  - {model}")));
+    }
+    lines.join("\n")
+}
 
 /// `/model` handler — list / switch active model.
 #[derive(Clone)]
@@ -38,22 +101,40 @@ impl BuiltinCommandHandler for ModelHandler {
         let trimmed = args.raw_args.trim();
         if trimmed.is_empty() {
             // List mode. Curate to the "latest few" per provider (the shared
-            // `traits::curated_model_names`, same whitelist as the TUI picker +
+            // `traits::curated_model_refs`, same whitelist as the TUI picker +
             // mobile listing) instead of joining the full assembled catalog
             // (~hundreds of ids — every preset is injected into the live config by
-            // `provider_config::assemble`). With no catalog wired (library/stub)
-            // the helper returns the raw list unchanged.
+            // `provider_config::assemble`). Qualified refs preserve provider
+            // identity when two providers expose the same wire model id. With no
+            // catalog wired (library/stub), the raw legacy list remains unchanged.
             let available = self.handle.list_available_models().await;
             let listings = self.handle.list_model_listings().await;
             let snap = self.handle.get_status_snapshot().await;
-            let models = traits::curated_model_names(&listings, &available, &snap.model);
+            let models = traits::curated_model_refs(
+                &listings,
+                &available,
+                &snap.model,
+                snap.model_profile.as_deref(),
+            );
+            // The helper keeps the active model first and can infer its unique
+            // provider when an older status snapshot omits `model_profile`.
+            // Reuse that exact ref so Current and the selectable row agree.
+            let current = if snap.model.is_empty() {
+                String::new()
+            } else {
+                models.first().cloned().unwrap_or_else(|| {
+                    traits::qualified_model_ref(&snap.model, snap.model_profile.as_deref())
+                })
+            };
+            let available = render_grouped_model_refs(&models, &listings);
+            let available = if listings.is_empty() {
+                format!("Available: {available}")
+            } else {
+                format!("Available:\n{available}")
+            };
             telemetry::emit_command_completed(cmd_evt::MODEL_COMPLETED, "list");
             return CommandResult::Done {
-                display: Some(format!(
-                    "Current model: {}\nAvailable: {}",
-                    snap.model,
-                    models.join(", ")
-                )),
+                display: Some(format!("Current model: {current}\n{available}")),
             };
         }
         // Switch mode. Resolve an optional `profile/model` qualifier so a shared
@@ -115,6 +196,78 @@ mod tests {
         } else {
             panic!();
         }
+    }
+
+    #[tokio::test]
+    async fn list_mode_groups_curated_qualified_refs_by_provider() {
+        fn listing(provider_id: &str, provider_label: &str, request_model: &str) -> ModelListing {
+            ModelListing {
+                display_model: request_model.to_string(),
+                request_model: request_model.to_string(),
+                provider_id: provider_id.to_string(),
+                provider_label: provider_label.to_string(),
+                description: None,
+                supports_reasoning: true,
+            }
+        }
+
+        let mock = Arc::new(MockOrchestratorHandle::new());
+        mock.set_available_models(vec!["gpt-5.5".into(), "gpt-4o".into()]);
+        mock.set_model_listings(vec![
+            listing("openai", "OpenAI", "gpt-5.5"),
+            listing("openai", "OpenAI", "gpt-5.4"),
+            listing("openai", "OpenAI", "gpt-4o"),
+            listing("github-copilot", "GitHub Copilot", "gpt-5.5"),
+        ]);
+        mock.set_status_snapshot(traits::StatusSnapshot {
+            model: "gpt-5.5".into(),
+            model_profile: Some("github-copilot".into()),
+            ..traits::StatusSnapshot::default()
+        });
+
+        let h = ModelHandler::new(mock);
+        let CommandResult::Done { display: Some(s) } = h.handle(&args("")).await else {
+            panic!();
+        };
+
+        assert_eq!(
+            s,
+            concat!(
+                "Current model: github-copilot/gpt-5.5\n",
+                "Available:\n",
+                "GitHub Copilot:\n",
+                "  - github-copilot/gpt-5.5\n",
+                "OpenAI:\n",
+                "  - openai/gpt-5.5\n",
+                "  - openai/gpt-5.4"
+            )
+        );
+        assert!(!s.contains("gpt-4o"), "non-curated models stay hidden");
+    }
+
+    #[tokio::test]
+    async fn list_mode_uses_inferred_provider_for_current_model() {
+        let mock = Arc::new(MockOrchestratorHandle::new());
+        mock.set_model_listings(vec![ModelListing {
+            display_model: "DeepSeek V4 Flash".into(),
+            request_model: "deepseek-v4-flash".into(),
+            provider_id: "deepseek".into(),
+            provider_label: "DeepSeek".into(),
+            description: None,
+            supports_reasoning: true,
+        }]);
+        mock.set_status_snapshot(traits::StatusSnapshot {
+            model: "deepseek-v4-flash".into(),
+            model_profile: None,
+            ..traits::StatusSnapshot::default()
+        });
+
+        let h = ModelHandler::new(mock);
+        let CommandResult::Done { display: Some(s) } = h.handle(&args("")).await else {
+            panic!();
+        };
+        assert!(s.starts_with("Current model: deepseek/deepseek-v4-flash\n"));
+        assert!(s.contains("  - deepseek/deepseek-v4-flash"));
     }
 
     #[tokio::test]

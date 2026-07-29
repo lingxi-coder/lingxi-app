@@ -50,7 +50,7 @@ class ProviderProfileMappingTest {
         val disabled = provider(
             id = "l_deepseek",
             preset = "deepseek",
-            url = "https://api.deepseek.com/v1",
+            url = "https://api.deepseek.com",
         ).copy(enabled = false)
 
         val allowlist = ProviderSettingsRepository.mobileEnabledProfileNames(
@@ -62,10 +62,39 @@ class ProviderProfileMappingTest {
     }
 
     @Test
+    fun legacyDeepSeekConfig_migratesToCurrentOfficialEndpointAndModel() {
+        val legacyChat = provider(
+            preset = "deepseek",
+            url = "https://api.deepseek.com/v1/",
+        ).copy(model = "deepseek-chat")
+        val legacyReasoner = legacyChat.copy(model = "deepseek-reasoner")
+
+        assertEquals(
+            legacyChat.copy(
+                url = "https://api.deepseek.com",
+                model = "deepseek-v4-flash",
+            ),
+            ProviderSettingsRepository.migrateLegacyDeepSeek(legacyChat),
+        )
+        assertEquals(
+            "deepseek-v4-flash",
+            ProviderSettingsRepository.migrateLegacyDeepSeek(legacyReasoner).model,
+        )
+    }
+
+    @Test
     fun engineLaunchConfig_emptySavedList_emitsExplicitEmptyAllowlist() {
         assertEquals(
             """{"mobileEnabledProfiles":[]}""",
             ProviderSettingsRepository.buildMobileRoutingJson(emptyList()),
+        )
+    }
+
+    @Test
+    fun engineLaunchConfig_enabledProfiles_emitsValidQuotedJsonValues() {
+        assertEquals(
+            """{"mobileEnabledProfiles":["deepseek","openai"]}""",
+            ProviderSettingsRepository.buildMobileRoutingJson(listOf("deepseek", "openai")),
         )
     }
 

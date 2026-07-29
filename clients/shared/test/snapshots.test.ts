@@ -121,6 +121,13 @@ function validateMessageBlock(v: unknown): void {
     case 'redacted_thinking':
       assert.ok(isString(o['data']));
       break;
+    case 'compact_boundary':
+      assert.ok(
+        isNumber(o['messages_before']) &&
+          isNumber(o['messages_after']) &&
+          isString(o['summary']),
+      );
+      break;
     case 'tool_use':
       assert.ok(isString(o['id']) && isString(o['tool']) && isString(o['input_json']));
       break;

@@ -97,8 +97,7 @@ pub fn connected_model_rows_restricted(
         .iter()
         .find(|m| m.is_current)
         .and_then(|m| m.profile.clone());
-    let rows: Vec<ModelRow> = all
-        .iter()
+    all.iter()
         .filter(|m| {
             if m.is_current {
                 return true;
@@ -122,66 +121,7 @@ pub fn connected_model_rows_restricted(
                 )
         })
         .cloned()
-        .collect();
-    curate_openrouter_rows(rows)
-}
-
-/// Whether an OpenRouter model id is free (OpenRouter's `…:free` convention).
-fn is_openrouter_free(request_model: &str) -> bool {
-    request_model.contains(":free")
-}
-
-/// The OpenRouter meta-routers (`openrouter/auto`, `openrouter/free`), kept in
-/// the shortlist as clearly-labeled routers.
-fn is_openrouter_router(request_model: &str) -> bool {
-    request_model == "openrouter/auto" || request_model == "openrouter/free"
-}
-
-/// Whether an OpenRouter row is a VERSIONED "latest" model. models.dev tags the
-/// newest pinned version per family `"… N.N (latest)"` (e.g. `"Claude Opus 4.5
-/// (latest)"`). Unlike the `~vendor/x-latest` dynamic ALIASES — whose names are
-/// version-less (`"Claude Opus Latest"`) and therefore uninformative in the
-/// picker — these carry a real version, so the shortlist surfaces THEM instead.
-fn is_openrouter_versioned_latest(display: &str) -> bool {
-    display.to_ascii_lowercase().contains("(latest)")
-}
-
-/// opencode-style OpenRouter curation. The raw OpenRouter catalog is 300+
-/// entries, which overwhelms the `/model` picker. Within the OpenRouter group we
-/// keep the FREE models, the VERSIONED "(latest)" models, and the meta-routers
-/// (the long tail of specific paid versions AND the version-less
-/// `~vendor/x-latest` aliases are hidden), FREE first with a `· 免费` tag. The
-/// currently-selected OpenRouter model is always kept even if it's outside the
-/// shortlist. Non-OpenRouter rows pass through UNCHANGED (order + content).
-#[must_use]
-fn curate_openrouter_rows(rows: Vec<ModelRow>) -> Vec<ModelRow> {
-    let mut out: Vec<ModelRow> = Vec::with_capacity(rows.len());
-    let mut free: Vec<ModelRow> = Vec::new();
-    let mut latest: Vec<ModelRow> = Vec::new();
-    for row in rows {
-        if row.profile.as_deref() != Some("openrouter") {
-            out.push(row);
-            continue;
-        }
-        if is_openrouter_free(&row.request_model) {
-            let mut row = row;
-            if !row.display.contains("免费") {
-                row.display = format!("{} · 免费", row.display);
-            }
-            free.push(row);
-        } else if row.is_current
-            || is_openrouter_versioned_latest(&row.display)
-            || is_openrouter_router(&row.request_model)
-        {
-            latest.push(row);
-        }
-        // else: version-less `~vendor/x-latest` aliases + specific paid versions
-        // → hidden from the shortlist.
-    }
-    // Free first (the user's ask), then the versioned-latest + routers + current.
-    out.extend(free);
-    out.extend(latest);
-    out
+        .collect()
 }
 
 /// Self-contained `/doctor` diagnostics, captured from the environment + a few
@@ -318,21 +258,28 @@ mod tests {
                 "meta-llama/llama-3.3-70b-instruct:free",
                 "openrouter",
                 false,
-            ), // FREE
+            ), // arbitrary passthrough — hidden
             row(
                 "Claude Opus 4.5 (latest)",
                 "anthropic/claude-opus-4.5",
                 "openrouter",
                 false,
-            ), // VERSIONED latest — kept
+            ), // arbitrary versioned passthrough — hidden
+            row(
+                "Claude Sonnet Latest",
+                "~anthropic/claude-sonnet-latest",
+                "openrouter",
+                false,
+            ), // shared curated alias — kept
+            row("GPT Latest", "~openai/gpt-latest", "openrouter", false), // shared curated alias — kept
             row(
                 "Claude Opus Latest",
                 "~anthropic/claude-opus-latest",
                 "openrouter",
                 false,
-            ), // version-less ~alias — HIDDEN
+            ), // non-curated alias — hidden
             row("OR GPT passthrough", "openai/gpt-4o", "openrouter", false), // paid non-alias — HIDDEN
-            row("DeepSeek Chat", "deepseek-chat", "deepseek", false), // curated but UNCONNECTED
+            row("DeepSeek V4 Flash", "deepseek-v4-flash", "deepseek", false), // curated but UNCONNECTED
         ];
         // Only anthropic + openrouter are connected.
         let mut avail = BTreeMap::new();
@@ -352,39 +299,37 @@ mod tests {
             !ids.contains(&"claude-2-legacy"),
             "non-curated curated-provider model hidden"
         );
-        // OpenRouter curation: FREE model kept + labeled; the meta-router and the
-        // VERSIONED "(latest)" model are kept; the version-less `~`-alias and the
-        // paid non-alias passthrough are hidden (300+-model tail trimmed).
-        assert!(ids.contains(&"meta-llama/llama-3.3-70b-instruct:free"));
+        // OpenRouter uses the same shared curated shortlist as all clients:
+        // auto + a few stable latest aliases. Free/versioned/pass-through rows
+        // from the several-hundred-model aggregator catalog stay hidden.
         assert!(ids.contains(&"openrouter/auto"), "meta-router kept");
         assert!(
-            ids.contains(&"anthropic/claude-opus-4.5"),
-            "versioned (latest) model kept"
+            ids.contains(&"~anthropic/claude-sonnet-latest"),
+            "curated Claude alias kept"
+        );
+        assert!(
+            ids.contains(&"~openai/gpt-latest"),
+            "curated GPT alias kept"
+        );
+        assert!(
+            !ids.contains(&"meta-llama/llama-3.3-70b-instruct:free"),
+            "arbitrary free model hidden"
+        );
+        assert!(
+            !ids.contains(&"anthropic/claude-opus-4.5"),
+            "arbitrary versioned model hidden"
         );
         assert!(
             !ids.contains(&"~anthropic/claude-opus-latest"),
-            "version-less ~vendor/x-latest alias hidden"
+            "non-curated latest alias hidden"
         );
         assert!(
             !ids.contains(&"openai/gpt-4o"),
             "paid non-alias OpenRouter model hidden"
         );
-        // Free comes BEFORE the alias, and carries the 免费 tag.
-        let free_pos = ids.iter().position(|id| id.contains(":free")).unwrap();
-        let alias_pos = ids.iter().position(|id| *id == "openrouter/auto").unwrap();
-        assert!(free_pos < alias_pos, "free models are listed first");
-        let free_row = shown
-            .iter()
-            .find(|m| m.request_model.contains(":free"))
-            .unwrap();
-        assert!(
-            free_row.display.contains("免费"),
-            "free row is tagged: {}",
-            free_row.display
-        );
         // DeepSeek is unconnected → hidden entirely, even though curated.
         assert!(
-            !ids.contains(&"deepseek-chat"),
+            !ids.contains(&"deepseek-v4-flash"),
             "unconnected provider hidden"
         );
     }

@@ -19,6 +19,7 @@ import {
   slashCommandText,
   slashNavigationDirection,
 } from '../bridge/slashCommands';
+import { groupModelReferences, modelReference } from '../bridge/modelCatalog';
 import { Icon } from './Icon';
 import { PROVIDERS, providerById } from '../../shared/providers';
 import { PERM_MODES } from '../data';
@@ -252,10 +253,7 @@ function speechRecognitionConstructor(): SpeechRecognitionConstructor | null {
 
 function modelLabel(model?: string | null): string {
   if (!model) return 'Select model';
-  const name = model.split('/').at(-1) ?? model;
-  return name
-    .replace(/[-_]/g, ' ')
-    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+  return modelReference(model).label;
 }
 
 type FilePickerState = {
@@ -375,6 +373,10 @@ export function BetaComposer({ bridge, ready }: { bridge: UseBridge; ready: bool
   const slashCommands = useMemo(
     () => filterSlashCommands(bridge.desktop.slashCommands, slashQuery ?? ''),
     [bridge.desktop.slashCommands, slashQuery],
+  );
+  const modelGroups = useMemo(
+    () => groupModelReferences(bridge.desktop.models),
+    [bridge.desktop.models],
   );
   const slashMenuOpen = slashQuery !== null && ready && !bridge.running;
 
@@ -1065,8 +1067,37 @@ export function BetaComposer({ bridge, ready }: { bridge: UseBridge; ready: bool
               <Icon name="chevron" size={14} color={t.text3} />
             </button>
             {modelOpen && <div style={composerMenuStyle(t, 'right')} role="menu" aria-label="Available models">
-              <div style={{ padding: '7px 10px 5px', color: t.text3, fontSize: 10.5, fontWeight: 700, letterSpacing: '.08em', textTransform: 'uppercase' }}>Model</div>
-              {bridge.desktop.models.map((entry) => <button key={entry} type="button" role="menuitemradio" aria-checked={entry === bridge.desktop.currentModel} onClick={() => { invoke(() => bridge.setModel(entry)); setModelOpen(false); }} style={{ display: 'flex', alignItems: 'center', gap: 9, width: '100%', padding: '9px 10px', border: 0, borderRadius: 7, background: entry === bridge.desktop.currentModel ? t.accentBg : 'transparent', color: t.text, textAlign: 'left', cursor: 'pointer', font: 'inherit', fontSize: 12.5 }}><Icon name="bolt" size={14} color={entry === bridge.desktop.currentModel ? t.accent : t.text3} /><span style={{ flex: 1 }}>{modelLabel(entry)}</span>{entry === bridge.desktop.currentModel && <Icon name="check" size={14} color={t.accent} stroke={2.2} />}</button>)}
+              {modelGroups.map((group, groupIndex) => (
+                <section
+                  key={group.providerId ?? 'unqualified'}
+                  aria-labelledby={`desktop-model-provider-${group.providerId ?? 'other'}`}
+                  style={groupIndex === 0 ? undefined : { marginTop: 5, paddingTop: 5, borderTop: `0.5px solid ${t.border}` }}
+                >
+                  <div id={`desktop-model-provider-${group.providerId ?? 'other'}`} style={{ padding: '7px 10px 5px', color: t.text3, fontSize: 10.5, fontWeight: 700, letterSpacing: '.08em', textTransform: 'uppercase' }}>{group.providerLabel}</div>
+                  {group.models.map((entry) => (
+                    <button
+                      key={entry.reference}
+                      type="button"
+                      role="menuitemradio"
+                      aria-checked={entry.reference === bridge.desktop.currentModel}
+                      onClick={() => {
+                        invoke(() => bridge.setModel(entry.reference));
+                        setModelOpen(false);
+                      }}
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: 9, width: '100%',
+                        padding: '9px 10px', border: 0, borderRadius: 7,
+                        background: entry.reference === bridge.desktop.currentModel ? t.accentBg : 'transparent',
+                        color: t.text, textAlign: 'left', cursor: 'pointer', font: 'inherit', fontSize: 12.5,
+                      }}
+                    >
+                      <Icon name="bolt" size={14} color={entry.reference === bridge.desktop.currentModel ? t.accent : t.text3} />
+                      <span style={{ flex: 1 }}>{entry.label}</span>
+                      {entry.reference === bridge.desktop.currentModel && <Icon name="check" size={14} color={t.accent} stroke={2.2} />}
+                    </button>
+                  ))}
+                </section>
+              ))}
             </div>}
           </div>
           <button type="button" disabled={!ready || bridge.running} aria-label={voiceState === 'listening' ? 'Stop voice input' : 'Start voice input'} title={voiceState === 'unsupported' ? 'Voice input is unavailable in this environment' : voiceState === 'denied' ? 'Microphone permission was denied' : 'Voice input'} onClick={toggleVoice} style={{ ...composerIconStyle(t), color: voiceState === 'listening' ? t.accent : voiceState === 'denied' ? t.danger : t.text }}><Icon name="mic" size={20} color="currentColor" stroke={voiceState === 'listening' ? 2.1 : 1.7} /></button>

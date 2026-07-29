@@ -20,6 +20,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.platform.LocalContext
@@ -71,6 +72,7 @@ fun SettingsHost(
     modifier: Modifier = Modifier,
     navController: NavHostController = rememberNavController(),
     store: SettingsStore? = null,
+    initialRoute: String = SettingsRoutes.MAIN,
     onClose: () -> Unit = {},
     onReplayOnboarding: () -> Unit = {},
     onReconnectEngine: () -> Unit = {},
@@ -83,6 +85,14 @@ fun SettingsHost(
     val backEntry by navController.currentBackStackEntryAsState()
     val route = backEntry?.destination?.route
     val atRoot = route == null || route == SettingsRoutes.MAIN
+
+    LaunchedEffect(navController, initialRoute) {
+        if (initialRoute != SettingsRoutes.MAIN) {
+            navController.navigate(initialRoute) {
+                launchSingleTop = true
+            }
+        }
+    }
 
     // System back: pop one page, or close the whole surface at the root.
     BackHandler(enabled = true) {

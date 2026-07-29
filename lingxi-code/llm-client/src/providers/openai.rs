@@ -27,6 +27,18 @@ impl OpenAiChatCodec {
     fn chat_completions_url(&self) -> String {
         format!("{}/chat/completions", self.base_url.trim_end_matches('/'))
     }
+
+    fn deepseek_legacy_model(&self, model: &str) -> Option<(&'static str, &'static str)> {
+        let endpoint = self.base_url.trim_end_matches('/');
+        if endpoint != "https://api.deepseek.com" && endpoint != "https://api.deepseek.com/v1" {
+            return None;
+        }
+        match model {
+            "deepseek-chat" => Some(("deepseek-v4-flash", "disabled")),
+            "deepseek-reasoner" => Some(("deepseek-v4-flash", "enabled")),
+            _ => None,
+        }
+    }
 }
 
 impl WireCodec for OpenAiChatCodec {
@@ -53,8 +65,16 @@ impl WireCodec for OpenAiChatCodec {
         messages.extend(request.messages.iter().flat_map(encode_message));
 
         let mut body = serde_json::Map::new();
-        body.insert("model".to_string(), Value::String(request.model.clone()));
+        let legacy_deepseek = self.deepseek_legacy_model(&request.model);
+        let wire_model = legacy_deepseek.map_or(request.model.as_str(), |(model, _)| model);
+        body.insert("model".to_string(), Value::String(wire_model.to_string()));
         body.insert("messages".to_string(), Value::Array(messages));
+        if let Some((_, thinking_type)) = legacy_deepseek {
+            body.insert(
+                "thinking".to_string(),
+                serde_json::json!({"type": thinking_type}),
+            );
+        }
 
         if request.stream {
             body.insert("stream".to_string(), Value::Bool(true));
@@ -792,7 +812,7 @@ mod tests {
     /// chat-completions body has no reasoning/budget field (there is no wire slot).
     #[test]
     fn reasoning_budget_is_dropped_not_rejected() {
-        let mut request = LlmRequest::new("deepseek-reasoner");
+        let mut request = LlmRequest::new("deepseek-v4-flash");
         request.reasoning = Some(ReasoningConfig::Enabled {
             budget_tokens: 4096,
         });
@@ -824,6 +844,34 @@ mod tests {
             !body.contains_key("budget_tokens"),
             "no budget_tokens field"
         );
+    }
+
+    #[test]
+    fn retired_deepseek_ids_are_translated_with_their_previous_thinking_mode() {
+        let codec = OpenAiChatCodec::new("https://api.deepseek.com");
+
+        let chat = codec
+            .encode_request(&LlmRequest::new("deepseek-chat"))
+            .expect("legacy chat request");
+        assert_eq!(body_of(&chat)["model"], "deepseek-v4-flash");
+        assert_eq!(body_of(&chat)["thinking"]["type"], "disabled");
+
+        let reasoner = codec
+            .encode_request(&LlmRequest::new("deepseek-reasoner"))
+            .expect("legacy reasoner request");
+        assert_eq!(body_of(&reasoner)["model"], "deepseek-v4-flash");
+        assert_eq!(body_of(&reasoner)["thinking"]["type"], "enabled");
+    }
+
+    #[test]
+    fn retired_deepseek_ids_are_not_rewritten_for_custom_openai_endpoints() {
+        let codec = OpenAiChatCodec::new("https://gateway.example/v1");
+        let request = codec
+            .encode_request(&LlmRequest::new("deepseek-chat"))
+            .expect("custom endpoint request");
+
+        assert_eq!(body_of(&request)["model"], "deepseek-chat");
+        assert!(body_of(&request).get("thinking").is_none());
     }
 
     /// (b) History containing a Reasoning block (emitted by the stream decoder on a

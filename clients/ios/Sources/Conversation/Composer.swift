@@ -4,11 +4,9 @@ import SwiftUI
 struct Composer: View {
     @Environment(\.theme) private var t
     @Binding var model: ModelOption
-    // SHIP-BLOCKER #2: the picker is driven by the ENGINE's real model catalog when
-    // available. `availableModels` are real engine ids (empty ⇒ engine unavailable,
-    // fall back to the mock catalog); `activeModelId` is whatever the engine reports;
-    // `onSelectModel` submits `SetModel(id)` with a real id. The `model` binding is
-    // kept only as the friendly chip label (and the mock-fallback selection).
+    // The picker is driven exclusively by the engine's curated, provider-qualified
+    // refs. Empty means the catalog is still loading; no mock rows are invented.
+    // `model` remains in the view API for compatibility with its existing owner.
     var availableModels: [String] = []
     var activeModelId: String = ""
     var onSelectModel: (String) -> Void = { _ in }
@@ -135,47 +133,50 @@ struct Composer: View {
             }
     }
 
-    /// One picker row, abstracting over a real engine id and a mock catalog entry
-    /// so the menu renders identically in both modes (SHIP-BLOCKER #2).
+    /// One picker row derived from a real engine model reference.
     private struct ModelRow: Identifiable {
-        let id: String        // the real engine id (or mock id) submitted on pick
+        let id: String        // the provider-qualified engine ref submitted on pick
         let name: String      // display label (friendly when known, else the id)
-        let desc: String?     // optional subtitle (mock only)
+        let desc: String?     // provider-local model id
         let color: Color      // dot color
     }
 
-    /// The rows to render: the engine's real catalog when present, else the mock
-    /// catalog (engine unavailable / not yet listed). `ModelDisplay` maps a raw
-    /// engine id to a friendly label + a stable color (friendly display optional).
-    private var modelRows: [ModelRow] {
-        if !availableModels.isEmpty {
-            return availableModels.map { id in
-                ModelRow(id: id,
-                         name: ModelDisplay.name(for: id),
-                         desc: nil,
-                         color: ModelDisplay.color(for: id))
-            }
-        }
-        return MockData.models.map {
-            ModelRow(id: $0.id, name: $0.name, desc: $0.desc, color: $0.color)
+    private struct ModelSection: Identifiable {
+        let id: String
+        let name: String
+        let rows: [ModelRow]
+    }
+
+    /// Group the exact curated engine input by Provider. No Provider catalog is
+    /// queried or expanded here; the complete qualified reference stays in `id`.
+    private var modelSections: [ModelSection] {
+        ModelDisplay.sections(for: availableModels).map { section in
+            ModelSection(
+                id: section.providerId,
+                name: section.name,
+                rows: section.models.map { item in
+                    ModelRow(
+                        id: item.reference,
+                        name: item.name,
+                        desc: item.modelId,
+                        color: item.color)
+                })
         }
     }
 
-    /// The id considered "active" for the chip + highlight: the engine's reported
-    /// id when driving, else the mock chip's id.
+    /// The provider-qualified id considered active for the chip + highlight.
     private var selectedModelId: String {
-        availableModels.isEmpty ? model.id : activeModelId
+        activeModelId
     }
 
-    /// The chip's short label: the friendly name of the active engine id when
-    /// driving, else the mock chip's short name.
+    /// The chip's short label from authoritative engine state.
     private var chipLabel: String {
-        availableModels.isEmpty ? model.shortName : ModelDisplay.shortName(for: activeModelId)
+        availableModels.isEmpty ? "加载模型…" : ModelDisplay.shortName(for: activeModelId)
     }
 
     /// The chip's dot color: derived from the active engine id when driving.
     private var chipColor: Color {
-        availableModels.isEmpty ? model.color : ModelDisplay.color(for: activeModelId)
+        availableModels.isEmpty ? t.text4 : ModelDisplay.color(for: activeModelId)
     }
 
     private var modelChip: some View {
@@ -190,33 +191,62 @@ struct Composer: View {
             .background(modelOpen ? t.surfaceHover : .clear)
             .clipShape(RoundedRectangle(cornerRadius: 8))
         }
+        .disabled(availableModels.isEmpty)
     }
 
     private var modelMenu: some View {
-        VStack(spacing: 0) {
-            ForEach(modelRows) { m in
-                Button {
-                    onSelectModel(m.id)
-                    withAnimation(.easeOut(duration: 0.15)) { modelOpen = false }
-                } label: {
-                    HStack(spacing: 10) {
-                        Circle().fill(m.color).frame(width: 8, height: 8)
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(m.name).font(.system(size: 13, weight: .medium)).foregroundColor(t.text)
-                            if let desc = m.desc {
-                                Text(desc).font(.system(size: 11)).foregroundColor(t.text3)
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                if modelSections.isEmpty {
+                    Text("正在加载模型…")
+                        .font(.system(size: 12))
+                        .foregroundStyle(t.text3)
+                        .padding(12)
+                }
+                ForEach(modelSections) { section in
+                    Text(section.name)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(t.text3)
+                        .textCase(.uppercase)
+                        .padding(.horizontal, 10)
+                        .padding(.top, 8)
+                        .padding(.bottom, 3)
+
+                    ForEach(section.rows) { m in
+                        Button {
+                            onSelectModel(m.id)
+                            withAnimation(.easeOut(duration: 0.15)) { modelOpen = false }
+                        } label: {
+                            HStack(spacing: 10) {
+                                Circle().fill(m.color).frame(width: 8, height: 8)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(m.name)
+                                        .font(.system(size: 13, weight: .medium))
+                                        .foregroundStyle(t.text)
+                                    if let desc = m.desc {
+                                        Text(desc)
+                                            .font(.system(size: 11))
+                                            .foregroundStyle(t.text3)
+                                            .lineLimit(1)
+                                    }
+                                }
+                                Spacer()
+                                if m.id == selectedModelId {
+                                    LXIcon(name: .check, size: 12, color: t.accent, stroke: 2.5)
+                                }
                             }
+                            .padding(.horizontal, 10).padding(.vertical, 8)
+                            .background(m.id == selectedModelId ? t.accent.tint(0.15) : .clear)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
                         }
-                        Spacer()
                     }
-                    .padding(.horizontal, 10).padding(.vertical, 8)
-                    .background(m.id == selectedModelId ? t.accent.tint(0.15) : .clear)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
                 }
             }
         }
+        .scrollIndicators(.hidden)
         .padding(5)
-        .frame(width: 200)
+        .frame(width: 240)
+        .frame(maxHeight: 360)
         .background(t.surface)
         .clipShape(RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(t.borderStrong, lineWidth: 0.5))

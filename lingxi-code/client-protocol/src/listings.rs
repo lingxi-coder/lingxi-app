@@ -74,8 +74,10 @@ pub struct SessionRowDto {
 
 // ── Models ───────────────────────────────────────────────────────────────────
 //
-// `ModelList`/`ModelChanged` carry only `String`s, so they have no supporting
-// struct here — they are plain `ClientEvent` variants (see `events.rs`).
+// `ModelList`/`ModelChanged` carry provider-qualified `String` references, so
+// they have no supporting struct here — they are plain `ClientEvent` variants
+// (see `events.rs`). Keeping the existing wire shape avoids a protocol/UniFFI
+// break while preserving provider identity for grouped client pickers.
 
 // ── MCP ──────────────────────────────────────────────────────────────────────
 

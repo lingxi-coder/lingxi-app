@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -18,6 +19,7 @@ import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -35,6 +37,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.Image
@@ -45,7 +48,9 @@ import com.lingxi.code.components.LXIcon
 import com.lingxi.code.components.LXIconName
 import com.lingxi.code.components.UiTags
 import com.lingxi.code.components.tint
+import com.lingxi.code.model.EngineModelCatalog
 import com.lingxi.code.model.ModelOption
+import com.lingxi.code.model.ModelProviderStatus
 import com.lingxi.code.theme.LingXiTheme
 import com.lingxi.code.voice.voiceHold
 
@@ -84,6 +89,14 @@ fun Composer(
     isStreaming: Boolean = false,
     /** False until the visible engine session has been confirmed. */
     enabled: Boolean = true,
+    /** True when no enabled Provider/model choice has been persisted yet. */
+    modelSetupRequired: Boolean = false,
+    /** Opens the LLM Provider settings page from the chip or send action. */
+    onOpenModelSettings: () -> Unit = {},
+    /** Current settings/credential state keyed by the engine provider profile. */
+    modelProviderStatuses: List<ModelProviderStatus> = emptyList(),
+    /** Opens a specific provider editor, or the provider list when id is null. */
+    onOpenProviderSettings: (String?) -> Unit = { onOpenModelSettings() },
     /** Fired by the Stop button to cancel the in-flight turn. */
     onStop: () -> Unit = {},
 ) {
@@ -134,7 +147,11 @@ fun Composer(
                     keyboardActions = androidx.compose.foundation.text.KeyboardActions(
                         // Don't start a second turn from the IME Send key while one
                         // is already streaming (the VM also guards this).
-                        onSend = { if (enabled && !isStreaming) onSend() },
+                        onSend = {
+                            if (enabled && !isStreaming) {
+                                if (modelSetupRequired) onOpenModelSettings() else onSend()
+                            }
+                        },
                     ),
                     keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
                         imeAction = ImeAction.Send,
@@ -158,7 +175,15 @@ fun Composer(
                 ) {
                     LXIcon(name = LXIconName.Paperclip, size = 18.dp, color = t.text3, stroke = 1.8f, contentDescription = "拍照")
                 }
-                ModelChip(model = model, models = availableModels, onModelChange = onModelChange)
+                ModelChip(
+                    model = model,
+                    models = availableModels,
+                    modelSetupRequired = modelSetupRequired,
+                    onOpenModelSettings = onOpenModelSettings,
+                    providerStatuses = modelProviderStatuses,
+                    onOpenProviderSettings = onOpenProviderSettings,
+                    onModelChange = onModelChange,
+                )
                 Spacer(Modifier.weight(1f))
                 when {
                     // Streaming: the send action becomes a Stop button that
@@ -187,7 +212,9 @@ fun Composer(
                             .size(34.dp)
                             .clip(RoundedCornerShape(10.dp))
                             .background(t.accent)
-                            .clickable(enabled = enabled, onClick = onSend)
+                            .clickable(enabled = enabled) {
+                                if (modelSetupRequired) onOpenModelSettings() else onSend()
+                            }
                             .testTag(UiTags.COMPOSER_SEND),
                         contentAlignment = Alignment.Center,
                     ) {
@@ -280,19 +307,30 @@ private fun IconHit(
 }
 
 /**
- * Model-selector chip + anchored dropdown menu. Shows a colored dot, the model's
- * short name, and a chevron; tapping opens a [DropdownMenu] of all models with
- * the active row tinted.
+ * Model-selector chip + anchored dropdown menu. The engine has already curated
+ * the latest common models; this menu groups exactly those rows by provider and
+ * keeps the active provider-qualified id highlighted.
  */
 @Composable
 private fun ModelChip(
     model: ModelOption,
     models: List<ModelOption>,
+    modelSetupRequired: Boolean,
+    onOpenModelSettings: () -> Unit,
+    providerStatuses: List<ModelProviderStatus>,
+    onOpenProviderSettings: (String?) -> Unit,
     onModelChange: (ModelOption) -> Unit,
 ) {
     val t = LingXiTheme.palette
     var open by remember { mutableStateOf(false) }
+    var query by remember { mutableStateOf("") }
     val chipShape = RoundedCornerShape(8.dp)
+    val filteredModels = remember(models, query) { EngineModelCatalog.filter(models, query) }
+    val groups = remember(filteredModels) { EngineModelCatalog.groups(filteredModels) }
+
+    LaunchedEffect(open) {
+        if (!open) query = ""
+    }
 
     Box {
         Row(
@@ -301,48 +339,202 @@ private fun ModelChip(
             modifier = Modifier
                 .clip(chipShape)
                 .background(if (open) t.surfaceHover else Color.Transparent)
-                .clickable { open = true }
+                .clickable {
+                    if (modelSetupRequired) {
+                        onOpenModelSettings()
+                    } else if (models.isNotEmpty()) {
+                        open = true
+                    }
+                }
+                .then(
+                    if (modelSetupRequired) Modifier.testTag(UiTags.MODEL_SETUP_CHIP)
+                    else Modifier.testTag(UiTags.MODEL_PICKER_CHIP),
+                )
                 .padding(horizontal = 9.dp, vertical = 5.dp),
         ) {
-            Dot(color = model.color, size = 6.dp)
+            if (modelSetupRequired) {
+                LXIcon(name = LXIconName.Cog, size = 13.dp, color = t.accent, stroke = 1.9f)
+            } else {
+                Dot(color = model.color, size = 6.dp)
+            }
             Text(
-                text = model.shortName,
-                color = t.text2,
+                text = if (modelSetupRequired) "设置模型" else model.shortName,
+                color = if (modelSetupRequired) t.accent else t.text2,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Medium,
             )
-            LXIcon(name = LXIconName.Chevron, size = 11.dp, color = t.text4, stroke = 2f)
+            LXIcon(
+                name = if (modelSetupRequired) LXIconName.ChevronR else LXIconName.Chevron,
+                size = 11.dp,
+                color = if (modelSetupRequired) t.accent else t.text4,
+                stroke = 2f,
+            )
         }
 
         DropdownMenu(
             expanded = open,
             onDismissRequest = { open = false },
             containerColor = t.surface,
-            modifier = Modifier.width(220.dp),
+            modifier = Modifier
+                .width(330.dp)
+                .heightIn(max = 600.dp),
         ) {
-            models.forEach { m ->
-                val active = m.id == model.id
+            ModelSearchField(
+                query = query,
+                onQueryChange = { query = it },
+            )
+            groups.forEachIndexed { groupIndex, group ->
+                val providerStatus = EngineModelCatalog.providerStatus(group.id, providerStatuses)
+                val providerLabel = providerStatus?.displayLabel ?: "未配置"
+                val providerColor = providerStatus?.status?.dot(t) ?: t.text4
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 5.dp, vertical = 2.dp)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(if (active) t.accent.tint(0.15f) else Color.Transparent)
-                        .clickable {
-                            onModelChange(m)
-                            open = false
-                        }
-                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                    modifier = Modifier.padding(
+                        start = 15.dp,
+                        end = 15.dp,
+                        top = if (groupIndex == 0) 8.dp else 12.dp,
+                        bottom = 4.dp,
+                    ).fillMaxWidth(),
                 ) {
-                    Dot(color = m.color, size = 8.dp)
-                    Column(Modifier.weight(1f)) {
-                        Text(m.name, color = t.text, fontSize = 13.sp, fontWeight = FontWeight.Medium)
-                        Text(m.desc, color = t.text3, fontSize = 11.sp)
+                    Text(
+                        text = group.name,
+                        color = t.text3,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Dot(color = providerColor, size = 6.dp)
+                    Spacer(Modifier.width(5.dp))
+                    Text(
+                        text = providerLabel,
+                        color = providerColor,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Medium,
+                    )
+                }
+                group.models.forEach { m ->
+                    val active = m.id == model.id
+                    val canSelect = providerStatus?.canSelect == true
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 5.dp, vertical = 2.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(if (active) t.accent.tint(0.15f) else Color.Transparent)
+                            .clickable {
+                                open = false
+                                if (canSelect) {
+                                    onModelChange(m)
+                                } else {
+                                    onOpenProviderSettings(providerStatus?.settingsId)
+                                }
+                            }
+                            .padding(horizontal = 10.dp, vertical = 8.dp),
+                    ) {
+                        Dot(color = m.color, size = 8.dp)
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                text = m.name,
+                                color = if (canSelect) t.text else t.text2,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Medium,
+                            )
+                            Text(
+                                text = m.desc,
+                                color = t.text3,
+                                fontSize = 10.5f.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            if (m.metadata.summaryItems.isNotEmpty()) {
+                                Text(
+                                    text = m.metadata.summaryItems.joinToString(" · "),
+                                    color = t.text3,
+                                    fontSize = 9.5f.sp,
+                                    lineHeight = 13.sp,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
+                        when {
+                            !canSelect -> Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(2.dp),
+                            ) {
+                                Text("配置", color = t.accent, fontSize = 10.sp)
+                                LXIcon(
+                                    name = LXIconName.ChevronR,
+                                    size = 10.dp,
+                                    color = t.accent,
+                                    stroke = 2f,
+                                    contentDescription = "配置 ${group.name}",
+                                )
+                            }
+                            active -> LXIcon(
+                                name = LXIconName.Check,
+                                size = 13.dp,
+                                color = t.accent,
+                                stroke = 2f,
+                                contentDescription = "当前模型",
+                            )
+                        }
                     }
                 }
             }
+            if (groups.isEmpty()) {
+                Text(
+                    text = "没有匹配的模型",
+                    color = t.text3,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 18.dp),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ModelSearchField(
+    query: String,
+    onQueryChange: (String) -> Unit,
+) {
+    val t = LingXiTheme.palette
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 10.dp, vertical = 8.dp)
+            .clip(RoundedCornerShape(9.dp))
+            .background(t.surfaceHover)
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+    ) {
+        LXIcon(
+            name = LXIconName.Search,
+            size = 14.dp,
+            color = t.text3,
+            stroke = 1.8f,
+            contentDescription = "搜索模型",
+        )
+        Box(Modifier.weight(1f)) {
+            if (query.isEmpty()) {
+                Text("搜索模型、Provider 或规格", color = t.text4, fontSize = 12.sp)
+            }
+            BasicTextField(
+                value = query,
+                onValueChange = onQueryChange,
+                singleLine = true,
+                textStyle = LocalTextStyle.current.merge(
+                    TextStyle(color = t.text, fontSize = 12.sp),
+                ),
+                cursorBrush = SolidColor(t.accent),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag(UiTags.MODEL_PICKER_SEARCH),
+            )
         }
     }
 }

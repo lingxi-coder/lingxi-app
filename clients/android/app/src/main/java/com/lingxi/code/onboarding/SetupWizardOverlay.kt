@@ -33,15 +33,15 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.draw.clip
 import com.lingxi.code.voice.offline.ModelState
 import com.lingxi.code.voice.offline.VOICE_PACKS
 import com.lingxi.code.voice.offline.VoicePack
+import com.lingxi.code.voice.offline.VoicePackProgress
 import com.lingxi.code.voice.offline.VoiceModelDownloader
-import androidx.compose.runtime.mutableFloatStateOf
+import com.lingxi.code.voice.offline.voicePackProgress
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -66,20 +66,20 @@ import com.lingxi.code.components.LXIconName
 import com.lingxi.code.components.oklch
 import com.lingxi.code.voice.OrbCanvas
 import com.lingxi.code.voice.OrbPhase
-import kotlinx.coroutines.delay
-import kotlin.math.min
+import java.util.Locale
 
 // MARK: - First-run setup wizard (心流 onboarding)
 //
 // Port of the prototype's `SetupWizard` (lingxi-iphone.html), mirroring the iOS
-// `SetupWizardView`. 6 steps over the sci-fi orb backdrop: welcome → name the
-// assistant (wake word) → your name → enroll a voiceprint (optional, simulated)
-// → choose an offline voice pack → finish. Provider/model selection is deliberately
-// deferred to the real provider catalog in Settings rather than showing prototype
-// model rows here. On finish it hands the chosen values back via
-// [onFinish] (MainActivity persists them + flips setupDone).
+// `SetupWizardView`. The active Android flow has 5 steps over the sci-fi orb
+// backdrop: welcome → name the assistant (wake word) → your name → choose an
+// offline voice pack → finish. Voiceprint enrollment is temporarily excluded
+// from onboarding; an existing voiceprint preference is preserved unchanged.
+// Provider/model selection is deliberately deferred to the real provider catalog
+// in Settings rather than showing prototype model rows here. On finish it hands
+// the chosen values back via [onFinish] (MainActivity persists them + flips setupDone).
 
-private const val TOTAL = 6
+private const val TOTAL = 5
 private enum class VpState { Idle, Rec, Done }
 
 @Composable
@@ -125,16 +125,6 @@ private fun SetupWizardContent(
     // wizard (only step 0 lets back fall through to exit).
     BackHandler(enabled = step > 0) { step = (step - 1).coerceAtLeast(0) }
 
-    var vpState by remember { mutableStateOf(if (initialVoiceprint) VpState.Done else VpState.Idle) }
-    var vpPct by remember { mutableFloatStateOf(if (initialVoiceprint) 100f else 0f) }
-    LaunchedEffect(vpState) {
-        if (vpState == VpState.Rec) {
-            var elapsed = 0L
-            while (elapsed < 2600) { delay(40); elapsed += 40; vpPct = min(100f, elapsed / 2600f * 100f) }
-            vpPct = 100f; vpState = VpState.Done
-        }
-    }
-
     val ctaDisabled = when (step) {
         1 -> assistantName.isBlank()
         2 -> userName.isBlank()
@@ -142,15 +132,13 @@ private fun SetupWizardContent(
     }
     val cta = when (step) {
         0 -> "开始设置"
-        3 -> if (vpState == VpState.Done) "继续" else "稍后再说"
         TOTAL - 1 -> "进入灵犀"
         else -> "继续"
     }
-    val skip = if (step == 3 && vpState != VpState.Done) "跳过此步" else null
 
     fun next() {
         if (step < TOTAL - 1) step += 1
-        else onFinish(assistantName.trim(), userName.trim(), vpState == VpState.Done, modelId, voiceLang)
+        else onFinish(assistantName.trim(), userName.trim(), initialVoiceprint, modelId, voiceLang)
     }
 
     Box(
@@ -240,8 +228,7 @@ private fun SetupWizardContent(
                         WizSub("灵犀会用这个名字称呼你，让对话更自然亲切。")
                         WizField(userName, "你的名字") { userName = it.take(16) }
                     }
-                    3 -> VoiceprintStep(vpState, vpPct, userName) { if (vpState != VpState.Rec) vpState = VpState.Rec }
-                    4 -> VoicePackStep(
+                    3 -> VoicePackStep(
                         states = modelStates,
                         selected = voiceLang,
                         onSelect = { voiceLang = it },
@@ -275,17 +262,13 @@ private fun SetupWizardContent(
                     Spacer(Modifier.width(8.dp))
                     LXIcon(if (step == TOTAL - 1) LXIconName.Sparkle else LXIconName.ArrowRight, size = 17.dp, color = fg, stroke = 2f)
                 }
-                Box(Modifier.fillMaxWidth().heightIn(min = 20.dp).padding(top = 12.dp), contentAlignment = Alignment.Center) {
-                    if (skip != null) {
-                        Text(skip, color = oklch(0.60f, 0.03f, 275f), fontSize = 13.5.sp, fontWeight = FontWeight.Medium,
-                            modifier = Modifier.clickable { step += 1 })
-                    }
-                }
             }
         }
     }
 }
 
+// Retained for the future Settings-based enrollment entry point; deliberately
+// absent from the active onboarding step mapping above.
 @Composable
 private fun VoiceprintStep(vp: VpState, pct: Float, userName: String, onRecord: () -> Unit) {
     Badge(LXIconName.Mic)
@@ -400,7 +383,7 @@ private fun VoicePackStep(
         VOICE_PACKS.forEach { pack ->
             VoicePackRow(
                 pack = pack,
-                agg = aggregatePackState(states, pack),
+                progress = voicePackProgress(states, pack),
                 selected = selected == pack.language,
                 onSelect = { onSelect(pack.language) },
                 onDownload = { onDownload(pack.language) },
@@ -425,36 +408,23 @@ private fun VoicePackStep(
     }
 }
 
-/** Combine the pack's STT+TTS model states into one aggregate for the row. */
-private fun aggregatePackState(states: Map<String, ModelState>, pack: VoicePack): ModelState {
-    val ms = pack.models.map { states[it.id] ?: ModelState.NotInstalled }
-    ms.firstOrNull { it is ModelState.Failed }?.let { return it }
-    if (ms.all { it is ModelState.Ready }) return ModelState.Ready
-    if (ms.any { it is ModelState.Verifying }) return ModelState.Verifying
-    if (ms.any { it is ModelState.Extracting }) return ModelState.Extracting
-    if (ms.any { it is ModelState.Downloading }) {
-        val total = pack.models.sumOf { it.approxSizeBytes }
-        val bytes = pack.models.sumOf { m ->
-            when (val s = states[m.id]) {
-                is ModelState.Downloading -> s.bytes
-                is ModelState.Ready -> m.approxSizeBytes
-                else -> 0L
-            }
-        }
-        return ModelState.Downloading(bytes, total)
-    }
-    return ModelState.NotInstalled
-}
-
 @Composable
 private fun VoicePackRow(
     pack: VoicePack,
-    agg: ModelState,
+    progress: VoicePackProgress,
     selected: Boolean,
     onSelect: () -> Unit,
     onDownload: () -> Unit,
 ) {
-    val sizeMb = pack.totalBytes / (1024 * 1024)
+    val sizeText = formatDownloadSize(pack.totalBytes)
+    val agg = progress.state
+    val activeModel = progress.activeModel
+    val activeLabel = activeModel?.localizedDisplayName("zh").orEmpty()
+    val activePosition = if (activeModel != null && progress.activeModelIndex >= 0) {
+        "（${progress.activeModelIndex + 1}/${pack.models.size}）"
+    } else {
+        ""
+    }
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -466,28 +436,95 @@ private fun VoicePackRow(
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text(pack.title, color = oklch(0.95f, 0.02f, 285f), fontSize = 15.5.sp, fontWeight = FontWeight.SemiBold)
-                Text("${pack.subtitle} · ≈ $sizeMb MB", color = oklch(0.66f, 0.03f, 280f), fontSize = 12.5.sp)
+                Text("${pack.subtitle} · $sizeText", color = oklch(0.66f, 0.03f, 280f), fontSize = 12.5.sp)
             }
             RadioDot(selected)
         }
         Spacer(Modifier.height(10.dp))
         when (agg) {
             is ModelState.Ready -> Text("✓ 已下载到本机", color = oklch(0.74f, 0.15f, 155f), fontSize = 13.sp, fontWeight = FontWeight.Medium)
-            is ModelState.Verifying -> Text("校验中…", color = oklch(0.78f, 0.04f, 280f), fontSize = 13.sp)
-            is ModelState.Extracting -> Text("解压中…", color = oklch(0.78f, 0.04f, 280f), fontSize = 13.sp)
-            is ModelState.Downloading -> {
-                val pct = if (agg.total > 0) (agg.bytes.toFloat() / agg.total).coerceIn(0f, 1f) else 0f
-                Box(
-                    Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(99.dp)).background(Color.White.copy(alpha = 0.1f)),
-                ) {
-                    Box(Modifier.fillMaxWidth(pct).height(6.dp).clip(RoundedCornerShape(99.dp)).background(oklch(0.66f, 0.2f, 288f)))
-                }
-                Spacer(Modifier.height(6.dp))
-                Text("下载中… ${(pct * 100).toInt()}%（可继续，下载在后台进行）", color = oklch(0.78f, 0.04f, 280f), fontSize = 12.sp)
+            is ModelState.Queued -> VoicePackProgressStatus(
+                progress = progress,
+                status = "等待下载 $activeLabel$activePosition",
+            )
+            is ModelState.Verifying -> VoicePackProgressStatus(
+                progress = progress,
+                status = "正在校验 $activeLabel$activePosition",
+            )
+            is ModelState.Extracting -> {
+                val next = progress.nextModel?.localizedDisplayName("zh")
+                VoicePackProgressStatus(
+                    progress = progress,
+                    status = buildString {
+                        append("正在安装 $activeLabel$activePosition")
+                        if (next != null) append("，完成后继续下载 $next")
+                    },
+                )
             }
-            is ModelState.Failed -> DownloadBtn("下载失败：${agg.message} · 点此重试", oklch(0.65f, 0.2f, 25f), onDownload)
-            ModelState.NotInstalled -> DownloadBtn("下载 (≈ $sizeMb MB)", oklch(0.66f, 0.2f, 288f), onDownload)
+            is ModelState.Downloading -> {
+                val status = if (progress.downloadedBytes == 0L) {
+                    "正在连接 $activeLabel$activePosition"
+                } else {
+                    "正在下载 $activeLabel$activePosition"
+                }
+                VoicePackProgressStatus(progress = progress, status = status)
+            }
+            is ModelState.Failed -> DownloadBtn(
+                "下载失败（$activeLabel$activePosition）：${agg.message} · 点此重试",
+                oklch(0.65f, 0.2f, 25f),
+                onDownload,
+            )
+            ModelState.NotInstalled -> DownloadBtn("下载 ($sizeText)", oklch(0.66f, 0.2f, 288f), onDownload)
         }
+    }
+}
+
+@Composable
+private fun VoicePackProgressStatus(
+    progress: VoicePackProgress,
+    status: String,
+) {
+    val pct = if (progress.totalBytes > 0L) {
+        (progress.downloadedBytes.toFloat() / progress.totalBytes).coerceIn(0f, 1f)
+    } else {
+        0f
+    }
+    Box(
+        Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(99.dp)).background(Color.White.copy(alpha = 0.1f)),
+    ) {
+        Box(
+            Modifier.fillMaxWidth(pct).height(6.dp).clip(RoundedCornerShape(99.dp))
+                .background(oklch(0.66f, 0.2f, 288f)),
+        )
+    }
+    Spacer(Modifier.height(6.dp))
+    Text(
+        "$status · ${formatDownloadPercent(progress.downloadedBytes, progress.totalBytes)}" +
+            "（${formatDownloadSize(progress.downloadedBytes)} / ${formatDownloadSize(progress.totalBytes)}）",
+        color = oklch(0.78f, 0.04f, 280f),
+        fontSize = 12.sp,
+    )
+}
+
+private fun formatDownloadSize(bytes: Long): String {
+    val kib = bytes.toDouble() / 1024.0
+    val mib = kib / 1024.0
+    val gib = bytes.toDouble() / (1024.0 * 1024.0 * 1024.0)
+    return when {
+        gib >= 1.0 -> String.format(Locale.US, "%.1f GB", gib)
+        mib >= 1.0 -> String.format(Locale.US, "%.1f MB", mib)
+        kib >= 1.0 -> String.format(Locale.US, "%.0f KB", kib)
+        else -> "$bytes B"
+    }
+}
+
+private fun formatDownloadPercent(bytes: Long, total: Long): String {
+    if (total <= 0L) return "0%"
+    val percent = (bytes.toDouble() / total * 100.0).coerceIn(0.0, 100.0)
+    return when {
+        percent < 0.1 -> String.format(Locale.US, "%.2f%%", percent)
+        percent < 10.0 -> String.format(Locale.US, "%.1f%%", percent)
+        else -> String.format(Locale.US, "%.0f%%", percent)
     }
 }
 

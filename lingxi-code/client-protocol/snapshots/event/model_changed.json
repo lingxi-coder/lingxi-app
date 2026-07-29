@@ -1,4 +1,4 @@
 {
   "type": "model_changed",
-  "model": "claude-sonnet-4-5"
+  "model": "openai/gpt-5.5"
 }

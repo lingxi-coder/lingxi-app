@@ -277,6 +277,15 @@ export function conversationFromMessages(messages: readonly MessageDto[]): Conve
         case 'redacted_thinking':
           items.push({ type: 'thinking', text: 'Prior reasoning was redacted.', done: true });
           break;
+        case 'compact_boundary':
+          items.push({
+            type: 'narration',
+            text: block.messages_before > 0
+              ? `Conversation compacted (${block.messages_before} messages)`
+              : 'Conversation compacted',
+            tone: 'muted',
+          });
+          break;
         case 'tool_use': {
           const idx = items.length;
           items.push({

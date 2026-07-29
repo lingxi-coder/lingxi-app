@@ -118,7 +118,7 @@ object Presets {
         ProviderPreset("anthropic", "Anthropic", "Claude API", Color(red = 0.9351f, green = 0.5079f, blue = 0.4015f), "https://api.anthropic.com", "sk-ant-", listOf("claude-sonnet-4-5", "claude-opus-4", "claude-haiku-4-5")),
         ProviderPreset("openai", "OpenAI", "ChatGPT API", Color(red = 0.1326f, green = 0.7261f, blue = 0.5350f), "https://api.openai.com/v1", "sk-proj-", listOf("gpt-4o", "gpt-4o-mini", "o1-preview")),
         ProviderPreset("google", "Google", "Gemini API", Color(red = 0.3503f, green = 0.6649f, blue = 0.9741f), "https://generativelanguage.googleapis.com/v1", "AIza", listOf("gemini-2.5-pro", "gemini-2.5-flash")),
-        ProviderPreset("deepseek", "DeepSeek", "DeepSeek API", Color(red = 0.6451f, green = 0.5662f, blue = 1.0000f), "https://api.deepseek.com/v1", "sk-", listOf("deepseek-chat", "deepseek-reasoner")),
+        ProviderPreset("deepseek", "DeepSeek", "DeepSeek API", Color(red = 0.6451f, green = 0.5662f, blue = 1.0000f), "https://api.deepseek.com", "sk-", listOf("deepseek-v4-flash", "deepseek-v4-pro")),
         ProviderPreset("qwen", "通义千问", "DashScope", Color(red = 0.8826f, green = 0.6256f, blue = 0.2074f), "https://dashscope.aliyuncs.com/v1", "sk-", listOf("qwen-max", "qwen-plus", "qwen-turbo")),
         ProviderPreset("openrouter", "OpenRouter", "多模型聚合", Color(red = 0.0000f, green = 0.7441f, blue = 0.7802f), "https://openrouter.ai/api/v1", "sk-or-", listOf("anthropic/claude-sonnet-4.5", "openai/gpt-4o", "google/gemini-2.5-pro")),
         ProviderPreset("custom", "自定义", "OpenAI 兼容端点", Color(red = 0.5728f, green = 0.6177f, blue = 0.7466f), "https://", "", emptyList()),
@@ -171,7 +171,7 @@ object SettingsMock {
     val llmProviders: List<GenericProvider> = listOf(
         GenericProvider("p_ant", "anthropic", "Anthropic", "https://api.anthropic.com", "sk-ant-api03-••••••••7Hq2", "claude-sonnet-4-5", status = ConnStatus.Connected, isDefault = true, enabled = true),
         GenericProvider("p_oai", "openai", "OpenAI", "https://api.openai.com/v1", "sk-proj-••••••••4nQ8", "gpt-4o", status = ConnStatus.Idle, enabled = true),
-        GenericProvider("p_dsk", "deepseek", "DeepSeek", "https://api.deepseek.com/v1", "", "deepseek-chat", status = ConnStatus.Idle, enabled = false),
+        GenericProvider("p_dsk", "deepseek", "DeepSeek", "https://api.deepseek.com", "", "deepseek-v4-flash", status = ConnStatus.Idle, enabled = false),
     )
 
     val searchProviders: List<GenericProvider> = listOf(

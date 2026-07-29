@@ -29,6 +29,21 @@ object UiTags {
     /** The error banner's dismiss (×) affordance. */
     const val CHAT_ERROR_DISMISS = "tag.chatErrorDismiss"
 
+    /** The actionable banner shown when no enabled LLM model is configured. */
+    const val MODEL_SETUP_BANNER = "tag.modelSetupBanner"
+
+    /** The model-setup banner's direct link to LLM Provider settings. */
+    const val MODEL_SETUP_ACTION = "tag.modelSetupAction"
+
+    /** The composer chip that becomes a setup action when no model exists. */
+    const val MODEL_SETUP_CHIP = "tag.modelSetupChip"
+
+    /** The normal composer model chip that opens the searchable model picker. */
+    const val MODEL_PICKER_CHIP = "tag.modelPickerChip"
+
+    /** The model picker's inline search field. */
+    const val MODEL_PICKER_SEARCH = "tag.modelPickerSearch"
+
     /** A message bubble's share affordance that surfaces the native share chooser. */
     const val MESSAGE_SHARE = "tag.messageShare"
 

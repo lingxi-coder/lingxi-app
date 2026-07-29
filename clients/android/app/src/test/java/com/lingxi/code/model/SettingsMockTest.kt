@@ -91,6 +91,17 @@ class SettingsMockTest {
         assertEquals(prefixes.size, prefixes.toSet().size)
     }
 
+    @Test
+    fun deepSeekPreset_usesCurrentOfficialEndpointAndModels() {
+        val deepSeek = Presets.llm.single { it.id == "deepseek" }
+
+        assertEquals("https://api.deepseek.com", deepSeek.defaultUrl)
+        assertEquals(
+            listOf("deepseek-v4-flash", "deepseek-v4-pro"),
+            deepSeek.models,
+        )
+    }
+
     // --- ConnStatus labels ------------------------------------------------
 
     @Test

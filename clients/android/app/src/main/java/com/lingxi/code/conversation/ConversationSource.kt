@@ -348,6 +348,8 @@ fun messageDtoToMessage(dto: MessageDto): Message {
  *  - Thinking         → the reasoning text (the bubble has no separate thinking
  *                       region for restored scrollback; it reads inline).
  *  - RedactedThinking → a placeholder marker (the payload is opaque).
+ *  - CompactBoundary  → a visible boundary marker; its hidden summary is not
+ *                       rendered as user-authored text.
  *  - ToolUse          → a compact "调用工具 <tool>" activity line.
  *  - ToolResult       → a compact "工具结果"/"工具失败" line.
  * Blocks are joined by blank lines and blanks are dropped so an empty trailing
@@ -361,6 +363,7 @@ fun messageDtoText(blocks: List<MessageBlockDto>): String =
             is MessageBlockDto.Text -> block.text
             is MessageBlockDto.Thinking -> block.thinking
             is MessageBlockDto.RedactedThinking -> "[已折叠的思考]"
+            is MessageBlockDto.CompactBoundary -> "对话已压缩"
             is MessageBlockDto.ToolUse -> "调用工具 ${block.tool}…"
             is MessageBlockDto.ToolResult ->
                 if (block.isError) "工具失败" else "工具结果"
@@ -417,8 +420,49 @@ fun clientEventToReply(event: ClientEvent): ReplyEvent? = when (event) {
         ?.let { ReplyEvent.Completed(messageDtoToMessage(it)) }
         ?: ReplyEvent.End
     is ClientEvent.TurnEnded -> ReplyEvent.End
-    is ClientEvent.Error -> ReplyEvent.Error(event.message)
+    is ClientEvent.Error -> ReplyEvent.Error(
+        userFacingEngineError(event.kind, event.message),
+    )
     else -> null // cost / usage / model / message-boundary / listings — ignored
+}
+
+/**
+ * Convert transport diagnostics into concise, actionable mobile copy.
+ *
+ * The Android HTTP backend opts into reqwest's nested cause chain, so DNS,
+ * timeout, and TLS failures are identifiable here. Provider responses such as
+ * 401/404 are not rewritten: their original message still reaches the existing
+ * auth/model error handling.
+ */
+internal fun userFacingEngineError(kind: ErrorKindDto, message: String): String {
+    if (kind != ErrorKindDto.TRANSPORT) return message
+    val normalized = message.lowercase()
+    return when {
+        listOf(
+            "dns",
+            "unknown host",
+            "no such host",
+            "failed to lookup",
+            "name or service not known",
+            "nodename nor servname",
+        ).any(normalized::contains) ->
+            "无法解析模型服务地址。请检查 VPN、私人 DNS 或当前网络后重试。"
+
+        listOf("certificate", "tls", "ssl").any(normalized::contains) ->
+            "模型服务安全连接失败。请检查系统时间、VPN 或证书设置后重试。"
+
+        listOf("timeout", "timed out").any(normalized::contains) ->
+            "连接模型服务超时。请检查当前网络或 VPN 后重试。"
+
+        listOf(
+            "connection failed",
+            "connect error",
+            "error sending request",
+        ).any(normalized::contains) ->
+            "无法连接模型服务。请检查当前网络或 VPN 后重试。"
+
+        else -> message
+    }
 }
 
 /**

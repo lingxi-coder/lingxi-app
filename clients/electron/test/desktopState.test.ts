@@ -17,14 +17,14 @@ test('session and model events replace authoritative host state', () => {
   const state = reduceDesktopEvents(emptyDesktopState(), [
     { type: 'session_list', sessions },
     { type: 'session_resumed', session_id: 's1', messages: [] },
-    { type: 'model_list', models: ['m1', 'm2'], current: 'm1' },
-    { type: 'model_changed', model: 'm2' },
+    { type: 'model_list', models: ['openai/gpt-5.4', 'anthropic/claude-sonnet-5'], current: 'openai/gpt-5.4' },
+    { type: 'model_changed', model: 'anthropic/claude-sonnet-5' },
     { type: 'permission_mode_changed', mode: 'auto' },
   ]);
   assert.deepEqual(state.sessions, sessions);
   assert.equal(state.activeSessionId, 's1');
-  assert.deepEqual(state.models, ['m1', 'm2']);
-  assert.equal(state.currentModel, 'm2');
+  assert.deepEqual(state.models, ['openai/gpt-5.4', 'anthropic/claude-sonnet-5']);
+  assert.equal(state.currentModel, 'anthropic/claude-sonnet-5');
   assert.equal(state.permissionMode, 'auto');
 });
 

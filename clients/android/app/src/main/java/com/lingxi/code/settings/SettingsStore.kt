@@ -48,6 +48,19 @@ data class SettingsUiState(
     val telemetry: Boolean = false,
     val autoUpdate: Boolean = true,
 ) {
+    /**
+     * True when chat cannot name an enabled LLM model yet.
+     *
+     * Credential status refresh is deliberately not part of this predicate:
+     * secure-storage discovery is asynchronous, while the persisted provider
+     * row already records the user's model choice. This avoids briefly sending
+     * configured users back to setup on every cold start.
+     */
+    val needsLlmSetup: Boolean
+        get() = llmProviders.none { provider ->
+            provider.enabled && provider.model.isNotBlank()
+        }
+
     /** Providers for a [ProviderKind] (used by A7's list page). */
     fun providers(kind: ProviderKind): List<GenericProvider> = when (kind) {
         ProviderKind.Llm -> llmProviders
@@ -73,9 +86,9 @@ class SettingsStore(
     init {
         if (providerRepo != null) {
             viewModelScope.launch {
-                val llm = providerRepo.refreshLlmStatuses(_state.value.llmProviders)
-                _state.update { it.copy(llmProviders = llm) }
-                providerRepo.persistProviders(ProviderKind.Llm, llm)
+                val result = providerRepo.refreshLlmStatuses(_state.value.llmProviders)
+                _state.update { it.copy(llmProviders = mergeProviderStatuses(it.llmProviders, result.providers)) }
+                providerRepo.persistProviders(ProviderKind.Llm, _state.value.llmProviders)
             }
         }
     }
@@ -245,12 +258,26 @@ class SettingsStore(
         }
     }
 
-    fun refreshProviderStatuses() {
-        val repo = providerRepo ?: return
+    fun refreshProviderStatuses(onDone: (String?) -> Unit = {}) {
+        val repo = providerRepo ?: return onDone("provider repository unavailable")
+        _state.update { current ->
+            current.copy(
+                llmProviders = current.llmProviders.map { provider ->
+                    if (ProviderSettingsRepository.engineCredentialIdFor(provider) != null) {
+                        provider.copy(status = ConnStatus.Testing)
+                    } else {
+                        provider
+                    }
+                },
+            )
+        }
         viewModelScope.launch {
-            val llm = repo.refreshLlmStatuses(_state.value.llmProviders)
-            _state.update { it.copy(llmProviders = llm) }
-            repo.persistProviders(ProviderKind.Llm, llm)
+            val result = repo.refreshLlmStatuses(_state.value.llmProviders)
+            _state.update {
+                it.copy(llmProviders = mergeProviderStatuses(it.llmProviders, result.providers))
+            }
+            repo.persistProviders(ProviderKind.Llm, _state.value.llmProviders)
+            onDone(result.error)
         }
     }
 
@@ -355,6 +382,21 @@ internal fun providerLaunchConfigurationChanged(
     before.url.trim() != after.url.trim() ||
         before.model.trim() != after.model.trim() ||
         before.enabled != after.enabled
+
+internal fun mergeProviderStatuses(
+    current: List<GenericProvider>,
+    refreshed: List<GenericProvider>,
+): List<GenericProvider> {
+    val refreshedById = refreshed.associateBy(GenericProvider::id)
+    return current.map { provider ->
+        refreshedById[provider.id]?.let { status ->
+            provider.copy(
+                status = status.status,
+                credentialConfigured = status.credentialConfigured,
+            )
+        } ?: provider
+    }
+}
 
 /**
  * Removes the secure credential before the persisted provider row. A credential

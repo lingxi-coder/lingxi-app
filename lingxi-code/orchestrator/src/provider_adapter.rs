@@ -872,7 +872,7 @@ mod tests {
         );
         // Kept: tool-capable models remain selectable — incl. gpt-3.5-turbo,
         // whose tool_call=false was a DATA error (it supports function calling).
-        assert!(has("deepseek-chat"), "tool-capable model must remain");
+        assert!(has("deepseek-v4-flash"), "tool-capable model must remain");
         assert!(has("gpt-5.2"), "tool-capable OpenAI model must remain");
         assert!(
             has("gpt-3.5-turbo"),

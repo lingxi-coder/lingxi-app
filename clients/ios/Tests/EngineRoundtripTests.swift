@@ -128,6 +128,47 @@ import XCTest
 
     final class EngineRoundtripTests: XCTestCase {
 
+        func testModelDisplayGroupsOnlyInputByProviderAndPreservesReferences() {
+            let references = [
+                "openai/gpt-5.5",
+                "openai/gpt-5.4-mini",
+                "github-copilot/gpt-5.5",
+                "deepseek/deepseek-v4-flash",
+            ]
+
+            let sections = ModelDisplay.sections(for: references)
+
+            XCTAssertEqual(sections.map(\.providerId), ["openai", "github-copilot", "deepseek"])
+            XCTAssertEqual(sections.map(\.name), ["OpenAI", "GitHub Copilot", "DeepSeek"])
+            XCTAssertEqual(sections.flatMap(\.models).map(\.reference), references)
+            XCTAssertEqual(sections[0].models.map(\.name), ["GPT-5.5", "GPT-5.4 Mini"])
+            XCTAssertEqual(sections[2].models.first?.name, "DeepSeek V4 Flash")
+        }
+
+        func testModelDisplayKeepsSameWireModelDistinctAcrossProviders() {
+            let sections = ModelDisplay.sections(for: [
+                "openai/gpt-5.5",
+                "github-copilot/gpt-5.5",
+                "openai/gpt-5.5", // exact duplicate is safe to collapse
+            ])
+            let items = sections.flatMap(\.models)
+
+            XCTAssertEqual(items.map(\.reference), [
+                "openai/gpt-5.5",
+                "github-copilot/gpt-5.5",
+            ])
+            XCTAssertEqual(items.map(\.modelId), ["gpt-5.5", "gpt-5.5"])
+            XCTAssertEqual(Set(items.map(\.id)).count, 2)
+        }
+
+        func testModelDisplaySplitsOnlyFirstSlashForAggregatorModels() {
+            let item = ModelDisplay.item(for: "openrouter/openai/gpt-5.5")
+
+            XCTAssertEqual(item.providerId, "openrouter")
+            XCTAssertEqual(item.modelId, "openai/gpt-5.5")
+            XCTAssertEqual(item.reference, "openrouter/openai/gpt-5.5")
+        }
+
         /// End-to-end, KEYLESS:  build the engine, submit a prompt, and assert a
         /// terminal engine event is delivered to the listener over UniFFI.
         ///

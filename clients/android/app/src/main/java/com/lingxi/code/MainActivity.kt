@@ -34,7 +34,9 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.lingxi.code.cron.CronAlarmScheduler
 import com.lingxi.code.onboarding.SetupWizardOverlay
 import com.lingxi.code.settings.SettingsHost
+import com.lingxi.code.settings.SettingsRoutes
 import com.lingxi.code.settings.SettingsStore
+import com.lingxi.code.model.ProviderKind
 import com.lingxi.code.theme.AppearancePrefs
 import com.lingxi.code.theme.AppearanceStore
 import com.lingxi.code.theme.LingXiTheme
@@ -135,6 +137,7 @@ class MainActivity : ComponentActivity() {
             val store = remember { AppearanceStore(applicationContext) }
             val settingsStore: SettingsStore =
                 viewModel(factory = SettingsStore.factory(applicationContext))
+            val settingsState by settingsStore.state.collectAsState()
             val scope = rememberCoroutineScope()
             val prefs by store.prefs.collectAsState(initial = AppearancePrefs())
             val darkTheme = when (prefs.themeMode) {
@@ -146,6 +149,7 @@ class MainActivity : ComponentActivity() {
             // conversation (the Android analog of the iOS settings sheet); the
             // drawer's account row opens it, system-back / close dismisses it.
             var settingsOpen by remember { mutableStateOf(false) }
+            var settingsInitialRoute by remember { mutableStateOf(SettingsRoutes.MAIN) }
             // Monotonic across configuration changes: rotation must not turn a
             // prior reconnect generation back into zero and rebuild a live engine.
             var engineReconnect by rememberSaveable { mutableIntStateOf(0) }
@@ -159,7 +163,21 @@ class MainActivity : ComponentActivity() {
                                 store.setThemeMode(if (darkTheme) ThemeMode.Light else ThemeMode.Dark)
                             }
                         },
-                        onOpenSettings = { settingsOpen = true },
+                        onOpenSettings = {
+                            settingsInitialRoute = SettingsRoutes.MAIN
+                            settingsOpen = true
+                        },
+                        onOpenModelSettings = {
+                            settingsInitialRoute = SettingsRoutes.providerList(ProviderKind.Llm.name)
+                            settingsOpen = true
+                        },
+                        onOpenProviderSettings = { providerSettingsId ->
+                            settingsInitialRoute = providerSettingsId
+                                ?.let { SettingsRoutes.providerEdit(ProviderKind.Llm.name, it) }
+                                ?: SettingsRoutes.providerList(ProviderKind.Llm.name)
+                            settingsOpen = true
+                        },
+                        modelSetupRequired = settingsState.needsLlmSetup,
                         assistantName = prefs.assistantName,
                         inputDialog = prefs.inputDialog,
                         voiceLang = prefs.voiceLang,
@@ -176,7 +194,11 @@ class MainActivity : ComponentActivity() {
                             isDark = darkTheme,
                             accentId = prefs.accentId,
                             store = settingsStore,
-                            onClose = { settingsOpen = false },
+                            initialRoute = settingsInitialRoute,
+                            onClose = {
+                                settingsOpen = false
+                                settingsInitialRoute = SettingsRoutes.MAIN
+                            },
                             // 关于 → 重新观看引导: clear setupDone (replays the wizard)
                             // and drop back to the conversation behind it.
                             onReplayOnboarding = {

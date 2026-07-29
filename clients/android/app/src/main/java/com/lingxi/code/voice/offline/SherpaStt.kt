@@ -10,9 +10,9 @@ import com.k2fsa.sherpa.onnx.OfflineMoonshineModelConfig
 import com.k2fsa.sherpa.onnx.OfflineRecognizer
 import com.k2fsa.sherpa.onnx.OfflineRecognizerConfig
 import com.k2fsa.sherpa.onnx.OnlineModelConfig
-import com.k2fsa.sherpa.onnx.OnlineParaformerModelConfig
 import com.k2fsa.sherpa.onnx.OnlineRecognizer
 import com.k2fsa.sherpa.onnx.OnlineRecognizerConfig
+import com.k2fsa.sherpa.onnx.OnlineTransducerModelConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
@@ -111,13 +111,14 @@ class SherpaStt private constructor(
     companion object {
         /** Build the recognizer for an STT [entry] whose files are unpacked in [modelDir]. */
         fun load(entry: OfflineModelEntry, modelDir: File): SherpaStt = when (val p = entry.runtimeParams) {
-            is SherpaRuntimeParams.Asr.OnlineParaformer -> {
+            is SherpaRuntimeParams.Asr.OnlineTransducer -> {
                 val cfg = OnlineRecognizerConfig().apply {
                     featConfig = FeatureConfig().apply { sampleRate = entry.sampleRateHz; featureDim = 80 }
                     modelConfig = OnlineModelConfig().apply {
-                        paraformer = OnlineParaformerModelConfig().apply {
-                            encoder = File(modelDir, "encoder.int8.onnx").absolutePath
-                            decoder = File(modelDir, "decoder.int8.onnx").absolutePath
+                        transducer = OnlineTransducerModelConfig().apply {
+                            encoder = File(modelDir, "encoder-epoch-99-avg-1.int8.onnx").absolutePath
+                            decoder = File(modelDir, "decoder-epoch-99-avg-1.onnx").absolutePath
+                            joiner = File(modelDir, "joiner-epoch-99-avg-1.int8.onnx").absolutePath
                         }
                         tokens = File(modelDir, "tokens.txt").absolutePath
                         numThreads = p.numThreads

@@ -407,8 +407,17 @@ impl EngineCommandRouter {
     async fn emit_listing(&self, kind: ListingKindDto, sink: &dyn ClientEventSink) {
         match kind {
             ListingKindDto::Models => {
-                let models = self.handle.list_available_models().await;
-                let current = self.handle.get_status_snapshot().await.model;
+                let available = self.handle.list_available_models().await;
+                let listings = self.handle.list_model_listings().await;
+                let snapshot = self.handle.get_status_snapshot().await;
+                let models = traits::curated_model_refs(
+                    &listings,
+                    &available,
+                    &snapshot.model,
+                    snapshot.model_profile.as_deref(),
+                );
+                let current =
+                    traits::qualified_model_ref(&snapshot.model, snapshot.model_profile.as_deref());
                 sink.emit(ClientEvent::ModelList { models, current }).await;
             }
             ListingKindDto::Mcp => {
@@ -684,7 +693,8 @@ impl CommandRouter for EngineCommandRouter {
                     .await
                 {
                     Ok(()) => {
-                        sink.emit(ClientEvent::ModelChanged { model: model_id })
+                        let selected = traits::qualified_model_ref(&model_id, profile.as_deref());
+                        sink.emit(ClientEvent::ModelChanged { model: selected })
                             .await
                     }
                     Err(e) => {

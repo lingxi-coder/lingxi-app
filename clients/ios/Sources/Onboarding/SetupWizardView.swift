@@ -12,8 +12,7 @@ struct SetupWizardView: View {
     @EnvironmentObject private var app: AppState
     /// The shared conversation model — its `availableModels` / `activeModelId`
     /// carry the engine's REAL model catalog (out-of-band). The model step renders
-    /// these when present and falls back to the mock catalog only when the engine
-    /// is unavailable (empty until the first `ModelList` lands).
+    /// only these references; empty means the first `ModelList` has not landed.
     @ObservedObject var convo: ConversationModel
     /// Commit the chosen model to the engine (`SetModel`) when it is a real id.
     var onSetModel: (String) -> Void = { _ in }
@@ -23,21 +22,33 @@ struct SetupWizardView: View {
 
     private static let total = 5
 
-    /// One model row, abstracting over a real engine id and a mock catalog entry
-    /// so the picker renders identically in both modes.
+    /// One model row, keeping the full provider-qualified selection reference.
     private struct WizModel: Identifiable { let id: String; let name: String; let sub: String; let color: Color }
+    private struct WizModelSection: Identifiable {
+        let id: String
+        let name: String
+        let models: [WizModel]
+    }
 
-    /// The rows to render: the engine's real catalog when present, else the mock
-    /// catalog (engine unavailable / not yet listed).
+    /// Group only the curated references received from the engine. The wizard
+    /// never fills a section from the Provider's complete remote catalog.
+    private var wizardModelSections: [WizModelSection] {
+        ModelDisplay.sections(for: convo.availableModels).map { section in
+            WizModelSection(
+                id: section.providerId,
+                name: section.name,
+                models: section.models.map { item in
+                    WizModel(
+                        id: item.reference,
+                        name: item.name,
+                        sub: item.modelId,
+                        color: item.color)
+                })
+        }
+    }
+
     private var wizardModels: [WizModel] {
-        if !convo.availableModels.isEmpty {
-            return convo.availableModels.map {
-                WizModel(id: $0, name: ModelDisplay.name(for: $0), sub: $0, color: ModelDisplay.color(for: $0))
-            }
-        }
-        return MockData.models.map {
-            WizModel(id: $0.id, name: $0.name, sub: "\($0.desc) · \($0.tag)", color: $0.color)
-        }
+        wizardModelSections.flatMap(\.models)
     }
 
     /// The effective selection: the user's pick when it's in the catalog, else the
@@ -55,7 +66,7 @@ struct SetupWizardView: View {
     // Editable copies, seeded from AppState on first appear.
     @State private var assistantName = "灵犀"
     @State private var userName = ""
-    @State private var modelId = "lx-72b"
+    @State private var modelId = ""
 
     // Voiceprint enrollment simulation: idle | rec | done.
     private enum VP { case idle, rec, done }
@@ -207,8 +218,26 @@ struct SetupWizardView: View {
                 badge(.brain)
                 wizH("选择默认模型")
                 wizSub("随时可在对话中切换。不确定就先用推荐的主力模型。")
-                VStack(spacing: 10) {
-                    ForEach(wizardModels) { m in modelRow(m) }
+                VStack(alignment: .leading, spacing: 14) {
+                    if wizardModelSections.isEmpty {
+                        Text("正在从引擎加载可用模型…")
+                            .font(.system(size: 13))
+                            .foregroundStyle(Color(okl: 0.68, 0.04, 280))
+                            .frame(maxWidth: .infinity, alignment: .center)
+                            .padding(.vertical, 20)
+                    }
+                    ForEach(wizardModelSections) { section in
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(section.name)
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(Color(okl: 0.68, 0.04, 280))
+                                .textCase(.uppercase)
+                                .padding(.leading, 4)
+                            ForEach(section.models) { model in
+                                modelRow(model)
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -352,11 +381,13 @@ struct SetupWizardView: View {
         let chosen = selectedModelId
         app.assistantName = assistantName.trimmingCharacters(in: .whitespaces)
         app.userName = userName.trimmingCharacters(in: .whitespaces)
-        app.defaultModelId = chosen
         app.voiceprint = (vp == .done)
         app.setupDone = true
         // When the engine's real catalog is present, commit the pick to it.
-        if !convo.availableModels.isEmpty { onSetModel(chosen) }
+        if !convo.availableModels.isEmpty {
+            app.defaultModelId = chosen
+            onSetModel(chosen)
+        }
         onDone()
     }
 

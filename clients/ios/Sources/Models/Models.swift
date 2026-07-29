@@ -57,44 +57,191 @@ struct ModelOption: Identifiable, Equatable {
     var shortName: String { name.replacingOccurrences(of: "Lingxi-", with: "") }
 }
 
-/// Friendly display for a REAL engine model id (SHIP-BLOCKER #2). The picker is
-/// driven by the engine's raw ids (e.g. `claude-sonnet-4-20250514`); these helpers
-/// derive an optional human label + a stable dot color so the UI looks the same as
-/// the mock catalog without inventing branded names. Unknown ids fall back to the
-/// raw id (never hidden) so a turn always shows the real model it will send.
+/// One engine-provided model reference prepared for display.
+///
+/// `reference` remains byte-for-byte identical to `ModelList.models`, so picking
+/// a row always submits the provider-qualified route (`provider/model`) rather
+/// than losing provider identity. `modelId` is only the display-side suffix.
+struct ModelCatalogItem: Identifiable, Equatable {
+    let reference: String
+    let providerId: String
+    let modelId: String
+
+    var id: String { reference }
+    var name: String { ModelDisplay.modelName(for: modelId) }
+    var shortName: String { ModelDisplay.shortModelName(for: modelId) }
+    var color: Color { ModelDisplay.providerColor(for: providerId) }
+}
+
+/// A stable Provider section derived only from the curated references supplied
+/// by the engine. The UI never expands this with a Provider's full model catalog.
+struct ModelProviderSection: Identifiable, Equatable {
+    let providerId: String
+    let name: String
+    let models: [ModelCatalogItem]
+
+    var id: String { providerId }
+}
+
+/// Friendly display for REAL, provider-qualified engine model references.
+///
+/// The engine owns the curated "latest and commonly used" shortlist. These
+/// helpers only group and label that input; they never invent or append models.
 enum ModelDisplay {
-    /// A human-friendly full name for a raw id, best-effort. Known Anthropic
-    /// families get a tidy label; anything else shows the raw id verbatim.
-    static func name(for id: String) -> String {
-        let l = id.lowercased()
-        if l.contains("opus") { return "Claude Opus" }
-        if l.contains("sonnet") { return "Claude Sonnet" }
-        if l.contains("haiku") { return "Claude Haiku" }
-        return id
+    private static let unqualifiedProviderId = "other"
+
+    /// Group the exact engine input by provider while preserving its order.
+    /// Duplicate references are ignored so every SwiftUI row has stable identity.
+    static func sections(for references: [String]) -> [ModelProviderSection] {
+        var providerOrder: [String] = []
+        var itemsByProvider: [String: [ModelCatalogItem]] = [:]
+        var seenReferences = Set<String>()
+
+        for reference in references where !reference.isEmpty {
+            guard seenReferences.insert(reference).inserted else { continue }
+            let item = item(for: reference)
+            if itemsByProvider[item.providerId] == nil {
+                providerOrder.append(item.providerId)
+            }
+            itemsByProvider[item.providerId, default: []].append(item)
+        }
+
+        return providerOrder.map { providerId in
+            ModelProviderSection(
+                providerId: providerId,
+                name: providerName(for: providerId),
+                models: itemsByProvider[providerId, default: []])
+        }
     }
 
-    /// A compact label for the composer chip — the family word when known, else
-    /// the raw id (so the active real model is always visible).
-    static func shortName(for id: String) -> String {
-        let l = id.lowercased()
+    /// Parse only the first slash: aggregator model ids may themselves contain
+    /// slashes (`openrouter/openai/gpt-5.5`).
+    static func item(for reference: String) -> ModelCatalogItem {
+        guard let slash = reference.firstIndex(of: "/"),
+              slash != reference.startIndex,
+              reference.index(after: slash) != reference.endIndex else {
+            return ModelCatalogItem(
+                reference: reference,
+                providerId: unqualifiedProviderId,
+                modelId: reference)
+        }
+        return ModelCatalogItem(
+            reference: reference,
+            providerId: String(reference[..<slash]),
+            modelId: String(reference[reference.index(after: slash)...]))
+    }
+
+    static func providerName(for providerId: String) -> String {
+        switch providerId.lowercased() {
+        case "anthropic": return "Anthropic"
+        case "builtin": return "Anthropic (Built-in)"
+        case "openai": return "OpenAI"
+        case "openai-chatgpt": return "OpenAI (ChatGPT)"
+        case "deepseek": return "DeepSeek"
+        case "gemini": return "Google Gemini"
+        case "github-copilot": return "GitHub Copilot"
+        case "zai": return "Z.AI"
+        case "glm-coding": return "GLM Coding Plan"
+        case "openrouter": return "OpenRouter"
+        case unqualifiedProviderId: return "其他"
+        default:
+            return providerId
+                .split(separator: "-", omittingEmptySubsequences: true)
+                .map { $0.prefix(1).uppercased() + String($0.dropFirst()) }
+                .joined(separator: " ")
+        }
+    }
+
+    /// A human-friendly name for the curated model ids shared by all clients.
+    /// Unknown ids remain visible verbatim instead of being guessed incorrectly.
+    static func modelName(for modelId: String) -> String {
+        let displayId = modelId.split(separator: "/").last.map(String.init) ?? modelId
+        switch displayId.lowercased() {
+        case "claude-sonnet-5": return "Claude Sonnet 5"
+        case "claude-sonnet-4-6", "claude-sonnet-4.6": return "Claude Sonnet 4.6"
+        case "claude-opus-4-8", "claude-opus-4.8": return "Claude Opus 4.8"
+        case "claude-haiku-4-5", "claude-haiku-4.5": return "Claude Haiku 4.5"
+        case "claude-fable-5": return "Claude Fable 5"
+        case "gpt-5.5": return "GPT-5.5"
+        case "gpt-5.4": return "GPT-5.4"
+        case "gpt-5.4-mini": return "GPT-5.4 Mini"
+        case "gpt-5.3-codex": return "GPT-5.3 Codex"
+        case "gpt-5-codex": return "GPT-5 Codex"
+        case "deepseek-v4-flash": return "DeepSeek V4 Flash"
+        case "deepseek-v4-pro": return "DeepSeek V4 Pro"
+        case "gemini-3.6-flash": return "Gemini 3.6 Flash"
+        case "gemini-3.5-flash": return "Gemini 3.5 Flash"
+        case "gemini-3.5-flash-lite": return "Gemini 3.5 Flash Lite"
+        case "gemini-3.1-pro-preview": return "Gemini 3.1 Pro Preview"
+        case "glm-5.1": return "GLM-5.1"
+        case "glm-5": return "GLM-5"
+        case "glm-5-turbo": return "GLM-5 Turbo"
+        case "glm-4.7": return "GLM-4.7"
+        default:
+            return displayId
+                .split(whereSeparator: { $0 == "-" || $0 == "_" })
+                .map { segment in
+                    switch segment.lowercased() {
+                    case "gpt": return "GPT"
+                    case "glm": return "GLM"
+                    case "deepseek": return "DeepSeek"
+                    case "gemini": return "Gemini"
+                    case "claude": return "Claude"
+                    default:
+                        return segment.prefix(1).uppercased() + String(segment.dropFirst())
+                    }
+                }
+                .joined(separator: " ")
+        }
+    }
+
+    /// A human-friendly full name for a qualified reference.
+    static func name(for reference: String) -> String {
+        item(for: reference).name
+    }
+
+    /// A compact chip label. Parsing the reference first prevents the provider
+    /// prefix from leaking into the chip while retaining the full route in state.
+    static func shortName(for reference: String) -> String {
+        item(for: reference).shortName
+    }
+
+    fileprivate static func shortModelName(for modelId: String) -> String {
+        let displayId = modelId.split(separator: "/").last.map(String.init) ?? modelId
+        let l = displayId.lowercased()
         if l.contains("opus") { return "Opus" }
         if l.contains("sonnet") { return "Sonnet" }
         if l.contains("haiku") { return "Haiku" }
-        return id.isEmpty ? "默认" : id
+        if l.hasPrefix("gpt-") { return modelName(for: displayId) }
+        if l.hasPrefix("gemini-") { return modelName(for: displayId).replacingOccurrences(of: "Gemini ", with: "") }
+        if l.hasPrefix("deepseek-") { return modelName(for: displayId).replacingOccurrences(of: "DeepSeek ", with: "") }
+        if l.hasPrefix("glm-") { return modelName(for: displayId) }
+        return displayId.isEmpty ? "默认" : displayId
     }
 
-    /// A stable dot color for a raw id (hash-derived so the same id always gets the
-    /// same hue), reusing the mock palette's accent family.
-    static func color(for id: String) -> Color {
-        let palette: [Color] = [
-            Color(srgb: 0.4340, 0.5865, 1.0000), // blue
-            Color(srgb: 0.8090, 0.4552, 0.8891), // purple
-            Color(srgb: 0.0000, 0.7601, 0.7664), // teal
-            Color(srgb: 0.2085, 0.7571, 0.4656), // green
-        ]
-        guard !id.isEmpty else { return palette[0] }
-        let h = abs(id.hashValue)
-        return palette[h % palette.count]
+    /// A deterministic Provider color (Swift's `hashValue` is process-randomized,
+    /// so it is unsuitable for stable cross-launch UI).
+    static func providerColor(for providerId: String) -> Color {
+        switch providerId.lowercased() {
+        case "anthropic", "builtin":
+            return Color(srgb: 0.9351, 0.5079, 0.4015)
+        case "openai", "openai-chatgpt":
+            return Color(srgb: 0.1326, 0.7261, 0.5350)
+        case "deepseek":
+            return Color(srgb: 0.6451, 0.5662, 1.0000)
+        case "gemini":
+            return Color(srgb: 0.3503, 0.6649, 0.9741)
+        case "github-copilot":
+            return Color(srgb: 0.5728, 0.6177, 0.7466)
+        case "zai", "glm-coding":
+            return Color(srgb: 0.0000, 0.7601, 0.7664)
+        default:
+            return Color(srgb: 0.4340, 0.5865, 1.0000)
+        }
+    }
+
+    static func color(for reference: String) -> Color {
+        item(for: reference).color
     }
 }
 

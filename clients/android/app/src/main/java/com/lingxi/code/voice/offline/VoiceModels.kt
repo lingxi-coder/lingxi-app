@@ -3,9 +3,8 @@ package com.lingxi.code.voice.offline
 // Offline voice model catalog — ported from ~/lingxi/android
 // (core/voiceclient/offline/{OfflineModelEntry,OfflineModelCatalog}.kt). These are
 // sherpa-onnx models downloaded on demand; the user picks a LANGUAGE PACK in the
-// setup wizard and the matching STT+TTS models are fetched. `runtimeParams` is
-// carried verbatim for the (later) native sherpa runtime; the download path only
-// needs id/url/sha256/files/size.
+// setup wizard and the matching STT+TTS models are fetched. `runtimeParams`
+// selects the matching native sherpa recognizer/synthesizer configuration.
 
 enum class ModelKind { Stt, Tts }
 
@@ -13,12 +12,12 @@ data class TtsVoiceEntry(val id: String, val displayName: String, val language: 
 
 sealed interface SherpaRuntimeParams {
     sealed interface Asr : SherpaRuntimeParams {
-        data class OnlineParaformer(val numThreads: Int, val decoding: String) : Asr
+        data class OnlineTransducer(val numThreads: Int, val decoding: String) : Asr
         data class OfflineMoonshine(val numThreads: Int) : Asr
     }
     sealed interface Tts : SherpaRuntimeParams {
-        data class Kokoro(val numThreads: Int) : Tts
-        data class Matcha(val numThreads: Int) : Tts
+        data class Vits(val numThreads: Int) : Tts
+        data class Kitten(val numThreads: Int) : Tts
     }
 }
 
@@ -32,6 +31,7 @@ data class OfflineModelEntry(
     val approxSizeBytes: Long,
     val sha256: String,
     val files: List<String>,
+    val requiredDirectories: List<String> = emptyList(),
     val sourceUrl: String,
     val runtimeParams: SherpaRuntimeParams,
     val voices: List<TtsVoiceEntry> = emptyList(),
@@ -45,82 +45,91 @@ data class OfflineModelEntry(
 object OfflineModelCatalog {
     val all: List<OfflineModelEntry> = listOf(
         OfflineModelEntry(
-            id = "sherpa.paraformer-zh-en-stream",
+            id = "sherpa.zipformer-zh-14m-mobile",
             kind = ModelKind.Stt,
-            displayName = mapOf("zh" to "Paraformer 中英流式", "en" to "Paraformer zh+en streaming"),
-            languages = setOf("zh", "en"),
+            displayName = mapOf("zh" to "Zipformer 中文 14M", "en" to "Zipformer Chinese 14M"),
+            languages = setOf("zh"),
             streaming = true,
             sampleRateHz = 16_000,
-            approxSizeBytes = 125L * 1024 * 1024,
-            sha256 = "f8f9d727efc9eb4853589717974c80d840f3f2240b5ff78ab6c41ed2ac242e5d",
-            files = listOf("encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt"),
-            sourceUrl = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-paraformer-bilingual-zh-en.tar.bz2",
-            runtimeParams = SherpaRuntimeParams.Asr.OnlineParaformer(numThreads = 2, decoding = "greedy_search"),
+            approxSizeBytes = 54_344_380L,
+            sha256 = "d394cab72b17f788b8b09ffc610f5f070e610fecf022eedca2eae9e38be4f20a",
+            files = listOf(
+                "encoder-epoch-99-avg-1.int8.onnx",
+                "decoder-epoch-99-avg-1.onnx",
+                "joiner-epoch-99-avg-1.int8.onnx",
+                "tokens.txt",
+            ),
+            sourceUrl = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23-mobile.tar.bz2",
+            runtimeParams = SherpaRuntimeParams.Asr.OnlineTransducer(numThreads = 2, decoding = "greedy_search"),
             license = "Apache-2.0",
         ),
         OfflineModelEntry(
-            id = "sherpa.moonshine-base-en",
+            id = "sherpa.moonshine-tiny-en",
             kind = ModelKind.Stt,
-            displayName = mapOf("zh" to "Moonshine 英文 Base", "en" to "Moonshine Base (English)"),
+            displayName = mapOf("zh" to "Moonshine 英文 Tiny", "en" to "Moonshine Tiny (English)"),
             languages = setOf("en"),
             streaming = false,
             sampleRateHz = 16_000,
-            approxSizeBytes = 135L * 1024 * 1024,
-            sha256 = "c2254d0c2055fbd81d23db63e6f2120dcc365473bb632f7559ebf18270b278da",
+            approxSizeBytes = 107_600_538L,
+            sha256 = "d5fe6ec4334fef36255b2a4010412cad4c007e33103fec62fb5d17cad88086f2",
             files = listOf(
                 "preprocess.onnx", "encode.int8.onnx", "uncached_decode.int8.onnx",
                 "cached_decode.int8.onnx", "tokens.txt",
             ),
-            sourceUrl = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-moonshine-base-en-int8.tar.bz2",
+            sourceUrl = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-moonshine-tiny-en-int8.tar.bz2",
             runtimeParams = SherpaRuntimeParams.Asr.OfflineMoonshine(numThreads = 2),
             license = "MIT",
         ),
         OfflineModelEntry(
-            id = "sherpa.kokoro-multi-zh-en",
+            id = "sherpa.melo-zh-en",
             kind = ModelKind.Tts,
-            displayName = mapOf("zh" to "Kokoro 中英多语", "en" to "Kokoro multi-lingual"),
+            displayName = mapOf("zh" to "MeloTTS 中英双语", "en" to "MeloTTS Chinese + English"),
             languages = setOf("zh", "en"),
             streaming = true,
-            sampleRateHz = 24_000,
-            approxSizeBytes = 350L * 1024 * 1024,
-            sha256 = "c133d26353d776da730870dac7da07dbfc9a5e3bc80cc5e8e83ab6e823be7046",
-            files = listOf("model.onnx", "voices.bin", "tokens.txt"),
-            sourceUrl = "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-multi-lang-v1_0.tar.bz2",
-            runtimeParams = SherpaRuntimeParams.Tts.Kokoro(numThreads = 2),
-            voices = listOf(
-                TtsVoiceEntry("zf_xiaobei", "晓贝 (女)", "zh"),
-                TtsVoiceEntry("zm_yunjian", "云健 (男)", "zh"),
-                TtsVoiceEntry("af_heart", "Heart (F)", "en"),
-                TtsVoiceEntry("am_michael", "Michael (M)", "en"),
+            sampleRateHz = 44_100,
+            approxSizeBytes = 167_006_755L,
+            sha256 = "e58351ed7149f290a54534538badd4077cdbe6fddc964b24d0bee870415d1514",
+            files = listOf(
+                "model.int8.onnx", "tokens.txt", "lexicon.txt",
+                "date.fst", "phone.fst", "number.fst",
             ),
-            license = "Apache-2.0",
+            requiredDirectories = listOf("dict"),
+            sourceUrl = "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-melo-tts-zh_en.tar.bz2",
+            runtimeParams = SherpaRuntimeParams.Tts.Vits(numThreads = 2),
+            voices = listOf(
+                TtsVoiceEntry("melo-zh-en", "Melo 中英女声", "zh"),
+            ),
+            license = "MIT",
         ),
         OfflineModelEntry(
-            id = "sherpa.matcha-en",
+            id = "sherpa.kitten-nano-en",
             kind = ModelKind.Tts,
-            displayName = mapOf("zh" to "Matcha-TTS 英文", "en" to "Matcha-TTS (English)"),
+            displayName = mapOf("zh" to "Kitten Nano 英文", "en" to "Kitten Nano (English)"),
             languages = setOf("en"),
             streaming = true,
-            sampleRateHz = 22_050,
-            approxSizeBytes = 80L * 1024 * 1024,
-            sha256 = "18e03e4c2d3497ca4bef342e795682cd32eefa7d37b6ff36266155f2ce30e5fe",
-            files = listOf("model-steps-3.onnx", "vocos-22khz-univ.onnx", "tokens.txt"),
-            sourceUrl = "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/matcha-icefall-en_US-ljspeech.tar.bz2",
-            runtimeParams = SherpaRuntimeParams.Tts.Matcha(numThreads = 2),
-            voices = listOf(TtsVoiceEntry("ljspeech", "LJSpeech (F)", "en")),
-            license = "MIT",
+            sampleRateHz = 24_000,
+            approxSizeBytes = 26_586_708L,
+            sha256 = "0345a8a2f4a710cb8f7912c9a731ded8b3e1e69b33a871efa95c2e64651518fe",
+            files = listOf("model.fp16.onnx", "voices.bin", "tokens.txt"),
+            requiredDirectories = listOf("espeak-ng-data"),
+            sourceUrl = "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kitten-nano-en-v0_2-fp16.tar.bz2",
+            runtimeParams = SherpaRuntimeParams.Tts.Kitten(numThreads = 2),
+            voices = listOf(
+                TtsVoiceEntry("expr-voice-2-f", "Kitten Female", "en"),
+            ),
+            license = "Apache-2.0",
         ),
     )
 
     fun byId(id: String): OfflineModelEntry? = all.firstOrNull { it.id == id }
 
     /**
-     * The STT+TTS model pair that backs a spoken LANGUAGE. zh uses the bilingual
-     * Paraformer (STT) + Kokoro (TTS); en uses Moonshine (STT) + Matcha (TTS).
+     * The STT+TTS model pair that backs a spoken language. Keep the packs small
+     * enough for onboarding over a mobile connection.
      */
     fun packFor(language: String): List<OfflineModelEntry> = when (language) {
-        "zh" -> listOf(byId("sherpa.paraformer-zh-en-stream")!!, byId("sherpa.kokoro-multi-zh-en")!!)
-        "en" -> listOf(byId("sherpa.moonshine-base-en")!!, byId("sherpa.matcha-en")!!)
+        "zh" -> listOf(byId("sherpa.zipformer-zh-14m-mobile")!!, byId("sherpa.melo-zh-en")!!)
+        "en" -> listOf(byId("sherpa.moonshine-tiny-en")!!, byId("sherpa.kitten-nano-en")!!)
         else -> emptyList()
     }
 }
@@ -132,16 +141,83 @@ data class VoicePack(val language: String, val title: String, val subtitle: Stri
 }
 
 val VOICE_PACKS = listOf(
-    VoicePack("zh", "中文（普通话）", "Paraformer 流式识别 + Kokoro 合成"),
-    VoicePack("en", "English", "Moonshine ASR + Matcha-TTS"),
+    VoicePack("zh", "中文（普通话）", "Zipformer 14M 流式识别 + MeloTTS"),
+    VoicePack("en", "English", "Moonshine Tiny ASR + Kitten TTS"),
 )
 
 /** Download lifecycle for one model (or an aggregate pack). */
 sealed interface ModelState {
     data object NotInstalled : ModelState
+    data class Queued(val bytes: Long, val total: Long) : ModelState
     data class Downloading(val bytes: Long, val total: Long) : ModelState
     data object Verifying : ModelState
     data object Extracting : ModelState
     data object Ready : ModelState
     data class Failed(val message: String) : ModelState
+}
+
+internal data class VoicePackProgress(
+    val state: ModelState,
+    val downloadedBytes: Long,
+    val totalBytes: Long,
+    val activeModel: OfflineModelEntry?,
+    val activeModelIndex: Int,
+    val nextModel: OfflineModelEntry?,
+)
+
+/** Combine the STT + TTS states into the progress shown for one language pack. */
+internal fun aggregatePackState(
+    states: Map<String, ModelState>,
+    pack: VoicePack,
+): ModelState = voicePackProgress(states, pack).state
+
+internal fun voicePackProgress(
+    states: Map<String, ModelState>,
+    pack: VoicePack,
+): VoicePackProgress {
+    val modelStates = pack.models.map { states[it.id] ?: ModelState.NotInstalled }
+    val total = pack.models.sumOf { model ->
+        when (val state = states[model.id]) {
+            is ModelState.Queued -> state.total.coerceAtLeast(model.approxSizeBytes)
+            is ModelState.Downloading -> state.total.coerceAtLeast(model.approxSizeBytes)
+            else -> model.approxSizeBytes
+        }
+    }
+    val bytes = pack.models.sumOf { model ->
+        when (val state = states[model.id]) {
+            is ModelState.Queued -> state.bytes
+            is ModelState.Downloading -> state.bytes
+            is ModelState.Verifying, is ModelState.Extracting, is ModelState.Ready -> model.approxSizeBytes
+            else -> 0L
+        }
+    }
+    val activeIndex = modelStates.indexOfFirst { state ->
+        state is ModelState.Downloading ||
+            state is ModelState.Verifying ||
+            state is ModelState.Extracting ||
+            state is ModelState.Failed
+    }.takeIf { it >= 0 } ?: modelStates.indexOfFirst { it is ModelState.Queued }
+    val activeState = modelStates.getOrNull(activeIndex)
+    val aggregateState = when {
+        modelStates.all { it is ModelState.Ready } -> ModelState.Ready
+        activeState is ModelState.Failed -> activeState
+        activeState is ModelState.Verifying -> ModelState.Verifying
+        activeState is ModelState.Extracting -> ModelState.Extracting
+        activeState is ModelState.Downloading -> ModelState.Downloading(bytes, total.coerceAtLeast(bytes))
+        activeState is ModelState.Queued -> ModelState.Queued(bytes, total.coerceAtLeast(bytes))
+        else -> ModelState.NotInstalled
+    }
+    val nextIndex = if (activeIndex >= 0) {
+        (activeIndex + 1 until pack.models.size).firstOrNull { modelStates[it] !is ModelState.Ready }
+    } else {
+        null
+    }
+    return VoicePackProgress(
+        state = aggregateState,
+        downloadedBytes = bytes,
+        totalBytes = total.coerceAtLeast(bytes),
+        activeModel = pack.models.getOrNull(activeIndex),
+        activeModelIndex = activeIndex,
+        nextModel = nextIndex?.let(pack.models::get),
+    )
 }

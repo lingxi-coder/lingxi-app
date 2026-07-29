@@ -712,8 +712,8 @@ pub fn parse_model_ref(input: &str, listings: &[ModelListing]) -> (String, Optio
 /// (Anthropic/native `claude-opus-4-8` dashes vs the GitHub Copilot proxy's
 /// `claude-opus-4.8` dots). Any provider/model not listed is non-curated;
 /// callers keep the user's current + recent models visible separately.
-/// OpenRouter is intentionally absent — an aggregator passthrough, so a
-/// connected user should pick a first-class provider for a curated set.
+/// OpenRouter is restricted to its auto/latest aliases so its several-hundred
+/// model passthrough catalog never floods the picker.
 ///
 /// Shared by the TUI picker (`build_model_entries`/`is_shown_model`) and the
 /// mobile/CLI listings so the whitelist has ONE source of truth.
@@ -731,13 +731,13 @@ pub fn is_curated_model(provider_id: &str, request_model: &str) -> bool {
         ),
         "openai" => matches!(request_model, "gpt-5.5" | "gpt-5.4" | "gpt-5.4-mini"),
         "openai-chatgpt" => matches!(request_model, "gpt-5.3-codex" | "gpt-5-codex"),
-        "deepseek" => matches!(
-            request_model,
-            "deepseek-chat" | "deepseek-reasoner" | "deepseek-v4-pro"
-        ),
+        "deepseek" => matches!(request_model, "deepseek-v4-flash" | "deepseek-v4-pro"),
         "gemini" => matches!(
             request_model,
-            "gemini-3.5-flash" | "gemini-3.1-pro-preview" | "gemini-3-pro-preview"
+            "gemini-3.6-flash"
+                | "gemini-3.5-flash"
+                | "gemini-3.5-flash-lite"
+                | "gemini-3.1-pro-preview"
         ),
         "github-copilot" => matches!(
             request_model,
@@ -752,16 +752,25 @@ pub fn is_curated_model(provider_id: &str, request_model: &str) -> bool {
         // The profile name is "glm-coding" (catalog presets); "zhipuai-coding-plan"
         // is only the vendored slice's filename.
         "glm-coding" => matches!(request_model, "glm-5.1" | "glm-5-turbo" | "glm-4.7"),
+        "openrouter" => matches!(
+            request_model,
+            "openrouter/auto"
+                | "~anthropic/claude-sonnet-latest"
+                | "~openai/gpt-latest"
+                | "~openai/gpt-mini-latest"
+                | "~google/gemini-flash-latest"
+        ),
         _ => false,
     }
 }
 
 /// Whether `provider_id` has a curated shortlist in [`is_curated_model`] (an
 /// explicit `match` arm). The `/model` picker trims curated-managed providers to
-/// their shortlist, but for a CONNECTED provider with no arm — an aggregator
-/// like OpenRouter, or a user's own catalog provider — there is no meaningful
-/// "latest few", so the picker shows all of that provider's models instead of
-/// hiding every one. Keep this arm set in lockstep with [`is_curated_model`].
+/// their shortlist, but for a connected custom provider with no arm there is no
+/// meaningful shared "latest few", so the picker keeps that provider's own
+/// catalog instead of hiding every entry. OpenRouter is deliberately managed
+/// here because exposing its full aggregator catalog overwhelms every picker.
+/// Keep this arm set in lockstep with [`is_curated_model`].
 #[must_use]
 pub fn provider_has_curated_list(provider_id: &str) -> bool {
     matches!(
@@ -775,6 +784,7 @@ pub fn provider_has_curated_list(provider_id: &str) -> bool {
             | "github-copilot"
             | "zai"
             | "glm-coding"
+            | "openrouter"
     )
 }
 
@@ -803,16 +813,16 @@ pub fn provider_fallback_order() -> &'static [&'static str] {
 /// The boot-default model for `provider_id` — the model a session lands on when
 /// the connected-provider fallback (or a future onboarding flow) picks that
 /// provider without an explicit user choice. For curated providers this is the
-/// first-listed id of the [`is_curated_model`] shortlist; OpenRouter (no
-/// curated list) gets its `auto` meta-router. `None` for unknown/user-defined
-/// providers — callers fall back to the provider's own first listed model.
+/// first-listed id of the [`is_curated_model`] shortlist; OpenRouter gets its
+/// curated `auto` meta-router. `None` for unknown/user-defined providers —
+/// callers fall back to the provider's own first listed model.
 #[must_use]
 pub fn provider_default_model(provider_id: &str) -> Option<&'static str> {
     Some(match provider_id {
         "anthropic" | "builtin" => "claude-sonnet-5",
         "openai" => "gpt-5.5",
         "openai-chatgpt" => "gpt-5.3-codex",
-        "deepseek" => "deepseek-chat",
+        "deepseek" => "deepseek-v4-flash",
         "gemini" => "gemini-3.5-flash",
         "github-copilot" => "claude-opus-4.8",
         "zai" | "glm-coding" => "glm-5.1",
@@ -821,8 +831,86 @@ pub fn provider_default_model(provider_id: &str) -> Option<&'static str> {
     })
 }
 
-/// Curate a flat list of model names for the no-arg/mobile listing surfaces
-/// (`ClientEvent::ModelList`, `/model` text command) that carry only `Vec<String>`.
+/// Build the stable model reference used by client model pickers.
+///
+/// A provider-qualified reference preserves routing identity when two providers
+/// expose the same wire model id. Bare ids remain supported by
+/// [`parse_model_ref`] for compatibility, but new listing surfaces should emit
+/// qualified references whenever a provider profile is known.
+#[must_use]
+pub fn qualified_model_ref(request_model: &str, provider_id: Option<&str>) -> String {
+    provider_id
+        .filter(|provider| !provider.is_empty())
+        .map_or_else(
+            || request_model.to_string(),
+            |provider| format!("{provider}/{request_model}"),
+        )
+}
+
+/// Curate provider-qualified model references for shared client listing
+/// surfaces (`ClientEvent::ModelList`, `/model` text command).
+///
+/// The result contains only the shared "latest and commonly used" shortlist,
+/// plus the active model so the picker can always represent its current value.
+/// Provider identity is never de-duplicated away: `openai/gpt-5.5` and
+/// `github-copilot/gpt-5.5` are distinct choices and route deterministically.
+///
+/// When `listings` is empty (library/stub callers with no routing catalog), the
+/// raw `available` list is preserved for backward compatibility.
+#[must_use]
+pub fn curated_model_refs(
+    listings: &[ModelListing],
+    available: &[String],
+    current: &str,
+    current_provider_id: Option<&str>,
+) -> Vec<String> {
+    if listings.is_empty() {
+        let mut models = available.to_vec();
+        if !current.is_empty() && current_provider_id.is_some() {
+            let current_ref = qualified_model_ref(current, current_provider_id);
+            if let Some(index) = models.iter().position(|model| model == current) {
+                models[index] = current_ref;
+            } else if !models.contains(&current_ref) {
+                models.insert(0, current_ref);
+            }
+        }
+        return models;
+    }
+
+    let inferred_current_provider = if current_provider_id.is_none() && !current.is_empty() {
+        let mut matches = listings
+            .iter()
+            .filter(|listing| listing.request_model == current)
+            .map(|listing| listing.provider_id.as_str());
+        let first = matches.next();
+        match (first, matches.next()) {
+            (Some(provider), None) => Some(provider),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let current_provider_id = current_provider_id.or(inferred_current_provider);
+
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    if !current.is_empty() {
+        let current_ref = qualified_model_ref(current, current_provider_id);
+        seen.insert(current_ref.clone());
+        out.push(current_ref);
+    }
+    for listing in listings {
+        if is_curated_model(&listing.provider_id, &listing.request_model) {
+            let model_ref = qualified_model_ref(&listing.request_model, Some(&listing.provider_id));
+            if seen.insert(model_ref.clone()) {
+                out.push(model_ref);
+            }
+        }
+    }
+    out
+}
+
+/// Curate a flat list of display names for legacy text-only listing callers.
 ///
 /// Mobile/CLI lack the TUI's per-provider availability maps, so this can't gate
 /// `[Connect]`; instead it trims the catalog to the [`is_curated_model`] short
@@ -912,6 +1000,18 @@ mod provider_boot_default_tests {
         assert_eq!(provider_default_model("groq"), None);
         assert_eq!(provider_default_model(""), None);
     }
+
+    #[test]
+    fn deepseek_defaults_to_current_v4_flash_and_hides_retired_ids() {
+        assert_eq!(
+            provider_default_model("deepseek"),
+            Some("deepseek-v4-flash")
+        );
+        assert!(is_curated_model("deepseek", "deepseek-v4-flash"));
+        assert!(is_curated_model("deepseek", "deepseek-v4-pro"));
+        assert!(!is_curated_model("deepseek", "deepseek-chat"));
+        assert!(!is_curated_model("deepseek", "deepseek-reasoner"));
+    }
 }
 
 #[cfg(test)]
@@ -983,7 +1083,10 @@ mod parse_model_ref_tests {
 
 #[cfg(test)]
 mod curated_model_tests {
-    use super::{curated_model_names, is_curated_model, ModelListing};
+    use super::{
+        curated_model_names, curated_model_refs, is_curated_model, qualified_model_ref,
+        ModelListing,
+    };
 
     fn listing(provider_id: &str, request_model: &str, display: &str) -> ModelListing {
         ModelListing {
@@ -1026,6 +1129,52 @@ mod curated_model_tests {
     fn empty_listings_falls_back_to_raw_available() {
         let available = vec!["a".to_string(), "b".to_string()];
         assert_eq!(curated_model_names(&[], &available, "a"), available);
+    }
+
+    #[test]
+    fn qualified_refs_keep_same_model_under_two_providers_distinct() {
+        let listings = vec![
+            listing("openai", "gpt-5.5", "GPT-5.5"),
+            listing("github-copilot", "gpt-5.5", "GPT-5.5"),
+            listing("openai", "gpt-4o", "GPT-4o"),
+        ];
+
+        let refs = curated_model_refs(
+            &listings,
+            &["gpt-5.5".to_string()],
+            "gpt-5.5",
+            Some("github-copilot"),
+        );
+
+        assert_eq!(refs[0], "github-copilot/gpt-5.5");
+        assert!(refs.contains(&"openai/gpt-5.5".to_string()));
+        assert_eq!(
+            refs.iter()
+                .filter(|model| model.as_str() == "github-copilot/gpt-5.5")
+                .count(),
+            1
+        );
+        assert!(!refs.contains(&"openai/gpt-4o".to_string()));
+    }
+
+    #[test]
+    fn qualified_ref_supports_provider_local_ids_with_slashes() {
+        assert_eq!(
+            qualified_model_ref("openai/gpt-5.5", Some("openrouter")),
+            "openrouter/openai/gpt-5.5"
+        );
+    }
+
+    #[test]
+    fn current_ref_infers_an_unambiguous_provider() {
+        let listings = vec![
+            listing("deepseek", "deepseek-v4-flash", "DeepSeek V4 Flash"),
+            listing("openai", "gpt-5.5", "GPT-5.5"),
+        ];
+
+        let refs = curated_model_refs(&listings, &[], "deepseek-v4-flash", None);
+
+        assert_eq!(refs[0], "deepseek/deepseek-v4-flash");
     }
 }
 

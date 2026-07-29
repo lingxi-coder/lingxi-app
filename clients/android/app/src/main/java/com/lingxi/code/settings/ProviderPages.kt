@@ -24,7 +24,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -50,7 +49,6 @@ import com.lingxi.code.model.ProviderKind
 import com.lingxi.code.model.ProviderPreset
 import com.lingxi.code.theme.LXFont
 import com.lingxi.code.theme.LingXiTheme
-import kotlinx.coroutines.launch
 
 /**
  * The three provider flows (LLM / web search / web fetch), ported 1:1 from the
@@ -73,6 +71,27 @@ private fun ProviderKind.blurb(): String = when (this) {
 /** Resolve the preset backing a provider (custom is the fallback for LLM). */
 private fun ProviderKind.preset(of: GenericProvider): ProviderPreset =
     presets.firstOrNull { it.id == of.preset } ?: presets.last()
+
+internal data class ProviderApplyUiState(
+    val label: String,
+    val enabled: Boolean,
+    val saveCredential: Boolean,
+)
+
+internal fun providerApplyUiState(
+    hasPendingConfiguration: Boolean,
+    hasCredentialDraft: Boolean,
+    busy: Boolean,
+): ProviderApplyUiState = ProviderApplyUiState(
+    label = when {
+        busy -> "应用中…"
+        hasCredentialDraft -> "保存并应用"
+        hasPendingConfiguration -> "应用"
+        else -> "已应用"
+    },
+    enabled = !busy && (hasCredentialDraft || hasPendingConfiguration),
+    saveCredential = hasCredentialDraft,
+)
 
 // MARK: - Provider list ------------------------------------------------------
 
@@ -294,7 +313,6 @@ fun ProviderEditPage(
     onPop: () -> Unit,
 ) {
     val t = LingXiTheme.palette
-    val scope = rememberCoroutineScope()
     val editing = state.providers(kind).firstOrNull { it.id == providerId }
     if (editing == null) {
         LaunchedEffect(providerId) { onPop() }
@@ -305,6 +323,8 @@ fun ProviderEditPage(
     var keyDraft by remember(providerId) { mutableStateOf("") }
     var removalMessage by remember(providerId) { mutableStateOf<String?>(null) }
     var removing by remember(providerId) { mutableStateOf(false) }
+    var applying by remember(providerId) { mutableStateOf(false) }
+    var credentialBusy by remember(providerId) { mutableStateOf(false) }
     var credentialMessage by remember(providerId, editing.credentialConfigured) {
         mutableStateOf(
             when {
@@ -317,10 +337,24 @@ fun ProviderEditPage(
         )
     }
     val builtInSupported = kind != ProviderKind.Llm || ProviderSettingsRepository.engineCredentialIdFor(editing) != null
+    val applyState = providerApplyUiState(
+        hasPendingConfiguration = providerId in state.pendingLlmProviderChanges,
+        hasCredentialDraft = keyDraft.isNotBlank(),
+        busy = applying || credentialBusy,
+    )
 
     Column(Modifier.fillMaxWidth()) {
         StatusBanner(status = editing.status) {
-            store.refreshProviderStatuses()
+            credentialMessage = "正在读取本机安全存储…"
+            store.refreshProviderStatuses { error ->
+                val refreshed = store.state.value.providers(kind).firstOrNull { it.id == providerId }
+                credentialMessage = when {
+                    error != null -> "刷新失败：$error"
+                    refreshed?.credentialConfigured == true ->
+                        "本地状态已刷新：凭据已在本机安全区配置；此操作不会联网验证 Key"
+                    else -> "本地状态已刷新：未找到已保存凭据"
+                }
+            }
         }
 
         FieldLabel("显示名称")
@@ -342,7 +376,11 @@ fun ProviderEditPage(
         FieldLabel("API Key")
         KeyField(
             value = keyDraft,
-            placeholder = if (editing.credentialConfigured) "留空保持已保存凭据不变" else preset.keyPrefix + "...",
+            placeholder = if (editing.credentialConfigured) {
+                preset.keyPrefix + "••••••••••••（已安全保存）"
+            } else {
+                preset.keyPrefix + "..."
+            },
             show = showKey,
             onToggleShow = { showKey = !showKey },
             onValueChange = { v -> keyDraft = v },
@@ -351,6 +389,7 @@ fun ProviderEditPage(
             when {
                 kind != ProviderKind.Llm -> "搜索/抓取 provider 仍是本地配置页；当前未接入真实 engine credential 协议。"
                 !builtInSupported -> "该预设当前不在 Android 内建 provider catalog 中；需后续 bridge/profile 扩展。"
+                editing.credentialConfigured -> "安全存储不会回传明文；输入新 Key 可覆盖当前凭据。"
                 else -> "凭据保存到引擎共享安全存储；Anthropic 还会镜像到当前启动兼容 key 槽。"
             },
         )
@@ -400,11 +439,29 @@ fun ProviderEditPage(
                     isLast = true,
                     trailing = {
                         ProviderTextAction(
-                            label = if (providerId in state.pendingLlmProviderChanges) "应用" else "已应用",
-                            enabled = providerId in state.pendingLlmProviderChanges,
+                            label = applyState.label,
+                            enabled = applyState.enabled,
                             onClick = {
-                                onReconnectEngine()
-                                store.markLlmConfigurationApplied()
+                                applying = true
+                                if (applyState.saveCredential) {
+                                    credentialMessage = "正在保存凭据并应用配置…"
+                                    store.saveProviderCredential(kind, providerId, keyDraft) { error ->
+                                        if (error != null) {
+                                            credentialMessage = "保存失败：$error"
+                                            applying = false
+                                        } else {
+                                            keyDraft = ""
+                                            credentialMessage = "凭据已安全保存，配置已应用"
+                                            onReconnectEngine()
+                                            store.markLlmConfigurationApplied()
+                                            applying = false
+                                        }
+                                    }
+                                } else {
+                                    onReconnectEngine()
+                                    store.markLlmConfigurationApplied()
+                                    applying = false
+                                }
                             },
                         )
                     },
@@ -427,17 +484,19 @@ fun ProviderEditPage(
                             fontWeight = FontWeight.Medium,
                             modifier = Modifier
                                 .clip(RoundedCornerShape(6.dp))
-                                .clickable(enabled = builtInSupported && keyDraft.isNotBlank()) {
-                                    scope.launch {
-                                        store.saveProviderCredential(kind, providerId, keyDraft) { error ->
-                                            credentialMessage =
-                                                error ?: "凭据已保存到引擎共享安全存储"
-                                            if (error == null) {
-                                                keyDraft = ""
-                                                onReconnectEngine()
-                                                store.markLlmConfigurationApplied()
-                                            }
+                                .clickable(
+                                    enabled = builtInSupported && keyDraft.isNotBlank() && !credentialBusy && !applying,
+                                ) {
+                                    credentialBusy = true
+                                    store.saveProviderCredential(kind, providerId, keyDraft) { error ->
+                                        credentialMessage =
+                                            error?.let { "保存失败：$it" } ?: "凭据已保存到引擎共享安全存储"
+                                        if (error == null) {
+                                            keyDraft = ""
+                                            onReconnectEngine()
+                                            store.markLlmConfigurationApplied()
                                         }
+                                        credentialBusy = false
                                     }
                                 }
                                 .padding(horizontal = 7.dp, vertical = 5.dp),
@@ -457,16 +516,18 @@ fun ProviderEditPage(
                             fontWeight = FontWeight.Medium,
                             modifier = Modifier
                                 .clip(RoundedCornerShape(6.dp))
-                                .clickable(enabled = editing.credentialConfigured && builtInSupported) {
-                                    scope.launch {
-                                        store.clearProviderCredential(kind, providerId) { error ->
-                                            credentialMessage =
-                                                error ?: "共享安全存储中的凭据已清除"
-                                            if (error == null) {
-                                                onReconnectEngine()
-                                                store.markLlmConfigurationApplied()
-                                            }
+                                .clickable(
+                                    enabled = editing.credentialConfigured && builtInSupported && !credentialBusy && !applying,
+                                ) {
+                                    credentialBusy = true
+                                    store.clearProviderCredential(kind, providerId) { error ->
+                                        credentialMessage =
+                                            error?.let { "清除失败：$it" } ?: "共享安全存储中的凭据已清除"
+                                        if (error == null) {
+                                            onReconnectEngine()
+                                            store.markLlmConfigurationApplied()
                                         }
+                                        credentialBusy = false
                                     }
                                 }
                                 .padding(horizontal = 7.dp, vertical = 5.dp),
@@ -594,6 +655,7 @@ private fun Badge(text: String, color: Color, strong: Boolean = false) {
 private fun StatusBanner(status: ConnStatus, onTest: () -> Unit) {
     val t = LingXiTheme.palette
     val dot = status.dot(t)
+    val refreshing = status == ConnStatus.Testing
 
     Row(
         verticalAlignment = Alignment.CenterVertically,
@@ -612,13 +674,15 @@ private fun StatusBanner(status: ConnStatus, onTest: () -> Unit) {
             modifier = Modifier.padding(start = 8.dp).weight(1f),
         )
         Text(
-            "刷新本地状态",
-            color = t.text2, fontSize = 12.sp, fontWeight = FontWeight.Medium,
+            if (refreshing) "刷新中…" else "刷新本地状态",
+            color = if (refreshing) t.text4 else t.text2,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium,
             modifier = Modifier
                 .clip(RoundedCornerShape(7.dp))
                 .background(t.windowBg)
                 .border(0.5.dp, t.border, RoundedCornerShape(7.dp))
-                .clickable(onClick = onTest)
+                .clickable(enabled = !refreshing, onClick = onTest)
                 .padding(horizontal = 10.dp, vertical = 6.dp),
         )
     }

@@ -259,16 +259,16 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             "event/model_list.json",
             ClientEvent::ModelList {
                 models: vec![
-                    "claude-opus-4-7".to_string(),
-                    "claude-sonnet-4-5".to_string(),
+                    "anthropic/claude-opus-4-8".to_string(),
+                    "openai/gpt-5.5".to_string(),
                 ],
-                current: "claude-opus-4-7".to_string(),
+                current: "anthropic/claude-opus-4-8".to_string(),
             },
         ),
         (
             "event/model_changed.json",
             ClientEvent::ModelChanged {
-                model: "claude-sonnet-4-5".to_string(),
+                model: "openai/gpt-5.5".to_string(),
             },
         ),
         (

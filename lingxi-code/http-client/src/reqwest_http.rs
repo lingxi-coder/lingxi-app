@@ -16,6 +16,7 @@ use futures_core::stream::Stream;
 use futures_util::sink::SinkExt;
 use futures_util::stream::StreamExt;
 use protocol::{HttpRequest, HttpResponse, SseEvent};
+use std::error::Error as StdError;
 use std::sync::{Arc, Mutex};
 use traits::http::{
     RawByteStream, RawByteStreamWithMeta, SseStream, SseStreamWithMeta, WebSocketConnection,
@@ -41,6 +42,11 @@ pub struct ReqwestHttp {
     /// [`HttpTransport::request_no_follow`] so a 3xx is surfaced to the caller
     /// verbatim (status + `Location`) — mirrors claude-code's `maxRedirects: 0`.
     no_redirect_client: reqwest::Client,
+    /// Whether connection failures include their nested reqwest/hyper cause
+    /// chain. Mobile enables this so DNS/TLS failures can be rendered as
+    /// actionable UI copy; the default stays `false` to preserve desktop/CLI
+    /// error text exactly.
+    detailed_connection_errors: bool,
 }
 
 impl ReqwestHttp {
@@ -51,6 +57,20 @@ impl ReqwestHttp {
     /// fatal startup error and the process should not continue.
     #[must_use]
     pub fn new() -> Self {
+        Self::build(false)
+    }
+
+    /// Build a transport that retains nested DNS/TCP/TLS failure details.
+    ///
+    /// This is an explicit mobile diagnostic mode. [`Self::new`] deliberately
+    /// keeps the legacy one-line reqwest message so desktop and CLI behavior do
+    /// not change when mobile opts into actionable network errors.
+    #[must_use]
+    pub fn new_with_detailed_connection_errors() -> Self {
+        Self::build(true)
+    }
+
+    fn build(detailed_connection_errors: bool) -> Self {
         // mTLS client identity + custom CA-trust (`CLAUDE_CODE_CLIENT_CERT` /
         // `_KEY` / `_KEY_PASSPHRASE` / `CERT_STORE`, `NODE_EXTRA_CA_CERTS`) is
         // read once here and applied identically to BOTH clients so a corporate
@@ -67,6 +87,7 @@ impl ReqwestHttp {
                 )
                 .build()
                 .expect("reqwest no-redirect client init"),
+            detailed_connection_errors,
         }
     }
 }
@@ -111,6 +132,28 @@ fn build_reqwest(client: &reqwest::Client, req: HttpRequest) -> reqwest::Request
         rb = rb.timeout(timeout);
     }
     rb
+}
+
+fn render_error_chain(error: &(dyn StdError + 'static)) -> String {
+    let mut messages = vec![error.to_string()];
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let message = cause.to_string();
+        if !message.is_empty() && !messages.iter().any(|seen| seen == &message) {
+            messages.push(message);
+        }
+        source = cause.source();
+    }
+    messages.join(": ")
+}
+
+fn map_reqwest_connection_error(error: reqwest::Error, detailed: bool) -> HttpError {
+    let message = if detailed {
+        render_error_chain(&error)
+    } else {
+        error.to_string()
+    };
+    HttpError::Connection(message)
 }
 
 fn websocket_url_for(url: &str) -> Result<Url, HttpError> {
@@ -337,7 +380,7 @@ impl HttpTransport for ReqwestHttp {
         let resp = build_reqwest(&self.client, req)
             .send()
             .await
-            .map_err(|e| HttpError::Connection(e.to_string()))?;
+            .map_err(|e| map_reqwest_connection_error(e, self.detailed_connection_errors))?;
         let status = resp.status().as_u16();
         let headers = resp
             .headers()
@@ -375,7 +418,7 @@ impl HttpTransport for ReqwestHttp {
         let resp = build_reqwest(&self.no_redirect_client, req)
             .send()
             .await
-            .map_err(|e| HttpError::Connection(e.to_string()))?;
+            .map_err(|e| map_reqwest_connection_error(e, self.detailed_connection_errors))?;
         let status = resp.status().as_u16();
         let headers = resp
             .headers()
@@ -402,7 +445,7 @@ impl HttpTransport for ReqwestHttp {
         let resp = build_reqwest(&self.client, req)
             .send()
             .await
-            .map_err(|e| HttpError::Connection(e.to_string()))?;
+            .map_err(|e| map_reqwest_connection_error(e, self.detailed_connection_errors))?;
         let status = resp.status().as_u16();
         if status >= 400 {
             // Surface the status to the caller — claude-code returns this as
@@ -443,7 +486,7 @@ impl HttpTransport for ReqwestHttp {
         let resp = build_reqwest(&self.client, req)
             .send()
             .await
-            .map_err(|e| HttpError::Connection(e.to_string()))?;
+            .map_err(|e| map_reqwest_connection_error(e, self.detailed_connection_errors))?;
         let status = resp.status().as_u16();
         // Capture headers (lowercased) BEFORE consuming the body, whether the
         // response is a success or an error — this is the key improvement over
@@ -487,7 +530,7 @@ impl HttpTransport for ReqwestHttp {
         let resp = build_reqwest(&self.client, req)
             .send()
             .await
-            .map_err(|e| HttpError::Connection(e.to_string()))?;
+            .map_err(|e| map_reqwest_connection_error(e, self.detailed_connection_errors))?;
         let status = resp.status().as_u16();
         if status >= 400 {
             let body = resp.text().await.unwrap_or_default();
@@ -495,9 +538,10 @@ impl HttpTransport for ReqwestHttp {
         }
         // Map reqwest's `Bytes` chunks to owned `Vec<u8>` for true incremental
         // streaming (AWS event-stream frames arrive across chunks).
-        let s = resp.bytes_stream().map(|r| {
+        let detailed = self.detailed_connection_errors;
+        let s = resp.bytes_stream().map(move |r| {
             r.map(|b| b.to_vec())
-                .map_err(|e| HttpError::Connection(e.to_string()))
+                .map_err(|e| map_reqwest_connection_error(e, detailed))
         });
         Ok(Box::pin(s))
     }
@@ -522,7 +566,7 @@ impl HttpTransport for ReqwestHttp {
         let resp = build_reqwest(&self.client, req)
             .send()
             .await
-            .map_err(|e| HttpError::Connection(e.to_string()))?;
+            .map_err(|e| map_reqwest_connection_error(e, self.detailed_connection_errors))?;
         let status = resp.status().as_u16();
         // Capture headers (lowercased) BEFORE consuming the body.
         let headers: Vec<(String, String)> = resp
@@ -550,9 +594,10 @@ impl HttpTransport for ReqwestHttp {
         }
 
         // Success: map reqwest's `Bytes` chunks to owned `Vec<u8>`.
-        let byte_stream = resp.bytes_stream().map(|r| {
+        let detailed = self.detailed_connection_errors;
+        let byte_stream = resp.bytes_stream().map(move |r| {
             r.map(|b| b.to_vec())
-                .map_err(|e| HttpError::Connection(e.to_string()))
+                .map_err(|e| map_reqwest_connection_error(e, detailed))
         });
         Ok(RawByteStreamWithMeta {
             status,
@@ -703,7 +748,7 @@ where
                 match s.next().await {
                     Some(Ok(bytes)) => buf.extend_from_slice(&bytes),
                     Some(Err(e)) => {
-                        return Some((Err(HttpError::Connection(e.to_string())), (s, buf)))
+                        return Some((Err(map_reqwest_connection_error(e, false)), (s, buf)))
                     }
                     None => return None,
                 }
@@ -765,7 +810,58 @@ pub(crate) fn find_event_boundary(buf: &BytesMut) -> Option<(usize, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fmt;
     use traits::http::SseStreamWithMeta;
+
+    #[derive(Debug)]
+    struct TestError {
+        message: &'static str,
+        source: Option<Box<TestError>>,
+    }
+
+    impl fmt::Display for TestError {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str(self.message)
+        }
+    }
+
+    impl StdError for TestError {
+        fn source(&self) -> Option<&(dyn StdError + 'static)> {
+            self.source
+                .as_deref()
+                .map(|source| source as &(dyn StdError + 'static))
+        }
+    }
+
+    #[test]
+    fn detailed_error_chain_retains_nested_dns_cause_without_duplicates() {
+        let error = TestError {
+            message: "error sending request for url",
+            source: Some(Box::new(TestError {
+                message: "client error (Connect)",
+                source: Some(Box::new(TestError {
+                    message: "client error (Connect)",
+                    source: Some(Box::new(TestError {
+                        message: "dns error: failed to lookup address information",
+                        source: None,
+                    })),
+                })),
+            })),
+        };
+
+        assert_eq!(
+            render_error_chain(&error),
+            "error sending request for url: client error (Connect): \
+             dns error: failed to lookup address information",
+        );
+    }
+
+    #[test]
+    fn detailed_connection_errors_are_opt_in_for_mobile() {
+        assert!(!ReqwestHttp::new().detailed_connection_errors);
+        let mobile = ReqwestHttp::new_with_detailed_connection_errors();
+        assert!(mobile.detailed_connection_errors);
+    }
 
     /// `ReqwestHttp::new()` must build BOTH clients — the default (follow) and
     /// the no-redirect override — so `request_no_follow` has its own

@@ -112,13 +112,14 @@ pub use mobile_linux::{
 };
 pub use notification::{NotificationError, NotificationRequest, NotificationService};
 pub use orchestrator::{
-    curated_model_names, is_curated_model, parse_model_ref, provider_default_model,
-    provider_fallback_order, provider_has_curated_list, ActiveGoalSnapshot, AgentInfo, CheckStatus,
-    CompactionSummary, ContextPressureBanner, ContextPressureLevel, ContextUsageCategory,
-    ContextUsageCategoryKind, ContextUsageSnapshot, CostSnapshot, DirectoryAddedHookSummary,
-    DoctorCheck, DoctorReport, DoctorSummary, ForkOutcome, HandleError, HookInfo, McpActionState,
-    McpServerInfo, McpStatus, McpToggleOutcome, MemoryEditorOutcome, ModelListing, ModelUsageRow,
-    OrchestratorHandle, OutputEvent, OutputStream, PlanSnapshot, RateLimitSnapshot, RecapOutcome,
+    curated_model_names, curated_model_refs, is_curated_model, parse_model_ref,
+    provider_default_model, provider_fallback_order, provider_has_curated_list,
+    qualified_model_ref, ActiveGoalSnapshot, AgentInfo, CheckStatus, CompactionSummary,
+    ContextPressureBanner, ContextPressureLevel, ContextUsageCategory, ContextUsageCategoryKind,
+    ContextUsageSnapshot, CostSnapshot, DirectoryAddedHookSummary, DoctorCheck, DoctorReport,
+    DoctorSummary, ForkOutcome, HandleError, HookInfo, McpActionState, McpServerInfo, McpStatus,
+    McpToggleOutcome, MemoryEditorOutcome, ModelListing, ModelUsageRow, OrchestratorHandle,
+    OutputEvent, OutputStream, PlanSnapshot, RateLimitSnapshot, RecapOutcome,
     RegisterRepoRootOutcome, RegisterRepoRootRequest, ResumeRuntimeSnapshot, RewindRowData,
     StatusSnapshot, TurnOutcome,
 };

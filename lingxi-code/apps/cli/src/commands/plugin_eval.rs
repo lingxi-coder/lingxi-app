@@ -499,6 +499,17 @@ struct AgentOutput {
     error: Option<String>,
 }
 
+#[derive(Debug)]
+struct ParsedAgentStream {
+    text: String,
+    cost_usd: f64,
+    turns: u64,
+    duration_seconds: f64,
+    tools_used: Vec<String>,
+    is_error: bool,
+    error_message: Option<String>,
+}
+
 struct RunTemp {
     path: PathBuf,
     keep: bool,
@@ -1027,64 +1038,140 @@ async fn run_agent(
         eprintln!("{stderr}");
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let frames: Vec<serde_json::Value> = stdout
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .collect();
-    let envelope = frames
-        .iter()
-        .rev()
-        .find(|value| value.get("type").and_then(serde_json::Value::as_str) == Some("result"))
-        .cloned();
-    let text = envelope
-        .as_ref()
-        .and_then(|value| value.get("result"))
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_else(|| stdout.trim())
-        .to_string();
-    let cost_usd = envelope
-        .as_ref()
-        .and_then(|value| value.get("total_cost_usd"))
-        .and_then(serde_json::Value::as_f64)
-        .unwrap_or(0.0);
-    let envelope_error = envelope
-        .as_ref()
-        .and_then(|value| value.get("is_error"))
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
-    let turns = envelope
-        .as_ref()
-        .and_then(|value| value.get("num_turns"))
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0);
-    let duration_seconds = envelope
-        .as_ref()
-        .and_then(|value| value.get("duration_ms"))
-        .and_then(serde_json::Value::as_u64)
-        .map_or(0.0, |millis| millis as f64 / 1_000.0);
-    let mut tools_used = Vec::new();
-    for frame in &frames {
-        collect_tool_names(frame, &mut tools_used);
-    }
     let trace_path = cwd.join("trace.jsonl");
     let persisted_trace = atomic_write(&trace_path, stdout.as_bytes()).is_ok();
-    let success = output.status.success() && !envelope_error;
+    let parsed = match parse_agent_stream_output(&stdout) {
+        Ok(parsed) => parsed,
+        Err(protocol_error) => {
+            let error = if stderr.is_empty() {
+                protocol_error
+            } else {
+                format!("{protocol_error}; stderr: {stderr}")
+            };
+            return AgentOutput {
+                success: false,
+                text: String::new(),
+                cost_usd: 0.0,
+                turns: 0,
+                duration_seconds: 0.0,
+                tools_used: Vec::new(),
+                trace_path: persisted_trace.then_some(trace_path),
+                error: Some(error),
+            };
+        }
+    };
+    let success = output.status.success() && !parsed.is_error;
     AgentOutput {
         success,
-        text,
-        cost_usd,
-        turns,
-        duration_seconds,
-        tools_used,
+        text: parsed.text,
+        cost_usd: parsed.cost_usd,
+        turns: parsed.turns,
+        duration_seconds: parsed.duration_seconds,
+        tools_used: parsed.tools_used,
         trace_path: persisted_trace.then_some(trace_path),
         error: (!success).then(|| {
             if stderr.is_empty() {
-                format!("eval agent exited with {}", output.status)
+                parsed
+                    .error_message
+                    .unwrap_or_else(|| format!("eval agent exited with {}", output.status))
             } else {
                 stderr
             }
         }),
     }
+}
+
+fn parse_agent_stream_output(stdout: &str) -> Result<ParsedAgentStream, String> {
+    let mut frames = Vec::new();
+    for (index, line) in stdout.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let frame = serde_json::from_str::<serde_json::Value>(line).map_err(|error| {
+            format!(
+                "invalid stream-json frame on line {}: {error}",
+                index.saturating_add(1)
+            )
+        })?;
+        frames.push(frame);
+    }
+
+    let result_indexes = frames
+        .iter()
+        .enumerate()
+        .filter_map(|(index, frame)| {
+            (frame.get("type").and_then(serde_json::Value::as_str) == Some("result"))
+                .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    if result_indexes.len() != 1 {
+        return Err(format!(
+            "eval agent stream must contain exactly one terminal result frame; found {}",
+            result_indexes.len()
+        ));
+    }
+    let result_index = result_indexes[0];
+    if result_index + 1 != frames.len() {
+        return Err("eval agent result frame must be terminal".to_string());
+    }
+    let envelope = &frames[result_index];
+    let is_error = envelope
+        .get("is_error")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| "eval agent result is missing boolean is_error".to_string())?;
+    let cost_usd = envelope
+        .get("total_cost_usd")
+        .and_then(serde_json::Value::as_f64)
+        .filter(|cost| cost.is_finite() && *cost >= 0.0)
+        .ok_or_else(|| {
+            "eval agent result is missing a finite non-negative total_cost_usd".to_string()
+        })?;
+    let turns = envelope
+        .get("num_turns")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| "eval agent result is missing integer num_turns".to_string())?;
+    let duration_ms = envelope
+        .get("duration_ms")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| "eval agent result is missing integer duration_ms".to_string())?;
+    let text = envelope
+        .get("result")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            is_error.then(|| {
+                envelope
+                    .get("errors")
+                    .and_then(serde_json::Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+        })
+        .ok_or_else(|| "eval agent result is missing string result".to_string())?;
+    let error_message = is_error.then(|| {
+        if text.is_empty() {
+            "eval agent reported an error".to_string()
+        } else {
+            text.clone()
+        }
+    });
+    let mut tools_used = Vec::new();
+    for frame in &frames {
+        collect_tool_names(frame, &mut tools_used);
+    }
+
+    Ok(ParsedAgentStream {
+        text,
+        cost_usd,
+        turns,
+        duration_seconds: duration_ms as f64 / 1_000.0,
+        tools_used,
+        is_error,
+        error_message,
+    })
 }
 
 async fn grade_output(
@@ -1399,32 +1486,128 @@ fn budget_reached(max: Option<f64>, cost: f64) -> bool {
     max.is_some_and(|limit| cost >= limit)
 }
 
+fn scaffold_sandbox_policy(cwd: &Path, deny_read: &[PathBuf]) -> serde_json::Value {
+    serde_json::json!({
+        "enabled": true,
+        "failIfUnavailable": true,
+        "allowUnsandboxedCommands": false,
+        "network": {
+            "allowedDomains": []
+        },
+        "filesystem": {
+            "allowWrite": [cwd.to_string_lossy()],
+            "denyRead": deny_read,
+            "allowRead": [cwd.to_string_lossy()]
+        }
+    })
+}
+
+fn scaffold_denied_read_paths(cwd: &Path) -> Vec<PathBuf> {
+    let mut denied = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        denied.extend(
+            [
+                ".ssh",
+                ".aws",
+                ".azure",
+                ".kube",
+                ".docker",
+                ".config/gcloud",
+                ".codex",
+                ".claude",
+                "Library/Keychains",
+            ]
+            .into_iter()
+            .map(|relative| home.join(relative))
+            .filter(|path| !path.starts_with(cwd)),
+        );
+        let global_config = home.join(branding::GLOBAL_CONFIG_FILE);
+        if !global_config.starts_with(cwd) {
+            denied.push(global_config);
+        }
+    }
+    let lingxi_home = crate::run::lingxi_home_dir();
+    if !lingxi_home.starts_with(cwd) && !denied.contains(&lingxi_home) {
+        denied.push(lingxi_home);
+    }
+    denied
+}
+
 async fn run_scaffold(script: &str, cwd: &Path) -> Result<(), String> {
     #[cfg(windows)]
-    let mut command = {
-        let mut command = tokio::process::Command::new("cmd");
-        command.args(["/C", script]);
-        command
-    };
+    {
+        let _ = (script, cwd);
+        return Err(
+            "scaffold scripts require a supported host sandbox; Windows is not supported"
+                .to_string(),
+        );
+    }
+
+    #[cfg(not(windows))]
+    let canonical_cwd = fs::canonicalize(cwd)
+        .map_err(|error| format!("failed to resolve scaffold root {}: {error}", cwd.display()))?;
+    #[cfg(not(windows))]
+    let platform = platform_posix::sandbox::host_platform().ok_or_else(|| {
+        "scaffold scripts require a supported host sandbox; this platform is unavailable"
+            .to_string()
+    })?;
+    #[cfg(not(windows))]
+    let deny_read = scaffold_denied_read_paths(&canonical_cwd);
+    #[cfg(not(windows))]
+    let policy = serde_json::from_value(scaffold_sandbox_policy(&canonical_cwd, &deny_read))
+        .map_err(|error| format!("failed to construct scaffold sandbox policy: {error}"))?;
+    #[cfg(not(windows))]
+    let runner = engine_desktop::new_live_sandbox_runner();
+    #[cfg(not(windows))]
+    let wrapped = runner
+        .wrap(
+            script,
+            &policy,
+            platform,
+            Some("/bin/sh"),
+            Some(&canonical_cwd),
+        )
+        .await
+        .map_err(|error| format!("failed to prepare scaffold sandbox: {error}"))?;
     #[cfg(not(windows))]
     let mut command = {
         let mut command = tokio::process::Command::new("/bin/sh");
-        command.args(["-c", script]);
+        command.args(["-c", &wrapped]);
         command
     };
+    #[cfg(not(windows))]
     command
-        .current_dir(cwd)
+        .current_dir(&canonical_cwd)
+        .env_clear()
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let output = tokio::time::timeout(
+    #[cfg(not(windows))]
+    for key in ["PATH", "LANG", "LC_ALL"] {
+        if let Some(value) = std::env::var_os(key) {
+            command.env(key, value);
+        }
+    }
+    #[cfg(not(windows))]
+    command
+        .env("HOME", &canonical_cwd)
+        .env("TMPDIR", &canonical_cwd);
+    #[cfg(not(windows))]
+    let output_result = tokio::time::timeout(
         Duration::from_secs(DEFAULT_TIMEOUT_SECONDS),
         command.output(),
     )
-    .await
-    .map_err(|_| "scaffold script timed out".to_string())?
-    .map_err(|error| format!("failed to run scaffold script: {error}"))?;
+    .await;
+    #[cfg(not(windows))]
+    runner.cleanup_after_command().await;
+    #[cfg(not(windows))]
+    runner.reset().await;
+    #[cfg(not(windows))]
+    let output = output_result
+        .map_err(|_| "scaffold script timed out".to_string())?
+        .map_err(|error| format!("failed to run scaffold script: {error}"))?;
+    #[cfg(not(windows))]
     if output.status.success() {
         Ok(())
     } else {
@@ -2828,6 +3011,86 @@ mod tests {
             "."
         ])
         .is_err());
+    }
+
+    #[test]
+    fn eval_agent_output_requires_one_terminal_result_frame() {
+        let missing =
+            parse_agent_stream_output("{\"type\":\"assistant\",\"message\":{\"content\":[]}}\n");
+        assert!(missing.unwrap_err().contains("terminal result"));
+
+        let malformed = parse_agent_stream_output("{not json}\n");
+        assert!(malformed.unwrap_err().contains("invalid stream-json"));
+
+        let duplicate = parse_agent_stream_output(
+            "{\"type\":\"result\",\"result\":\"a\",\"is_error\":false,\"duration_ms\":1,\"num_turns\":1,\"total_cost_usd\":0.1}\n\
+             {\"type\":\"result\",\"result\":\"b\",\"is_error\":false,\"duration_ms\":2,\"num_turns\":2,\"total_cost_usd\":0.2}\n",
+        );
+        assert!(duplicate.unwrap_err().contains("exactly one"));
+    }
+
+    #[test]
+    fn eval_agent_output_accepts_complete_terminal_result() {
+        let parsed = parse_agent_stream_output(
+            "{\"type\":\"assistant\",\"message\":{\"content\":[]}}\n\
+             {\"type\":\"result\",\"result\":\"done\",\"is_error\":false,\"duration_ms\":250,\"num_turns\":2,\"total_cost_usd\":0.25}\n",
+        )
+        .expect("valid stream");
+        assert_eq!(parsed.text, "done");
+        assert_eq!(parsed.turns, 2);
+        assert_eq!(parsed.duration_seconds, 0.25);
+        assert_eq!(parsed.cost_usd, 0.25);
+        assert!(!parsed.is_error);
+    }
+
+    #[test]
+    fn scaffold_policy_is_fail_closed_and_confined_to_run_root() {
+        let root = Path::new("/tmp/lingxi-eval-run");
+        let denied = vec![PathBuf::from("/home/user/.ssh")];
+        let policy = scaffold_sandbox_policy(root, &denied);
+        assert_eq!(policy["enabled"], true);
+        assert_eq!(policy["failIfUnavailable"], true);
+        assert_eq!(policy["allowUnsandboxedCommands"], false);
+        assert_eq!(policy["network"]["allowedDomains"], serde_json::json!([]));
+        assert_eq!(
+            policy["filesystem"]["allowWrite"],
+            serde_json::json!(["/tmp/lingxi-eval-run"])
+        );
+        assert_eq!(
+            policy["filesystem"]["allowRead"],
+            serde_json::json!(["/tmp/lingxi-eval-run"])
+        );
+        assert_eq!(
+            policy["filesystem"]["denyRead"],
+            serde_json::json!(["/home/user/.ssh"])
+        );
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[tokio::test]
+    async fn scaffold_runtime_writes_inside_root_and_denies_parent_escape() {
+        let temp = tempfile::tempdir().unwrap();
+        let run_root = temp.path().join("run");
+        fs::create_dir(&run_root).unwrap();
+
+        if let Err(error) = run_scaffold("printf ok > inside.txt", &run_root).await {
+            assert!(
+                error.contains("sandbox") || error.contains("unavailable"),
+                "sandbox must either enforce or fail closed: {error}"
+            );
+            return;
+        }
+        assert_eq!(
+            fs::read_to_string(run_root.join("inside.txt")).unwrap(),
+            "ok"
+        );
+
+        let escaped = temp.path().join("escaped.txt");
+        let error = run_scaffold("printf escaped > ../escaped.txt", &run_root)
+            .await
+            .expect_err("sandbox must deny writes outside the eval run root");
+        assert!(error.contains("scaffold script failed"));
+        assert!(!escaped.exists());
     }
 
     #[test]

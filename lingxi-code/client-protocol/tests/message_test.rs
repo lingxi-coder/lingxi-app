@@ -29,6 +29,11 @@ fn message_dto_round_trips() {
             MessageBlockDto::RedactedThinking {
                 data: "redacted-blob".to_string(),
             },
+            MessageBlockDto::CompactBoundary {
+                messages_before: 12,
+                messages_after: 3,
+                summary: "hidden summary".to_string(),
+            },
             MessageBlockDto::ToolUse {
                 id: "tu_01".to_string(),
                 tool: "Edit".to_string(),
@@ -51,19 +56,20 @@ fn message_dto_round_trips() {
     assert_eq!(json["blocks"][0]["type"], "text");
     assert_eq!(json["blocks"][1]["type"], "thinking");
     assert_eq!(json["blocks"][2]["type"], "redacted_thinking");
-    assert_eq!(json["blocks"][3]["type"], "tool_use");
-    assert_eq!(json["blocks"][4]["type"], "tool_result");
+    assert_eq!(json["blocks"][3]["type"], "compact_boundary");
+    assert_eq!(json["blocks"][4]["type"], "tool_use");
+    assert_eq!(json["blocks"][5]["type"], "tool_result");
     // Tool payloads are JSON Strings, not nested objects.
-    assert!(json["blocks"][3]["input_json"].is_string());
-    assert!(json["blocks"][4]["result_json"].is_string());
+    assert!(json["blocks"][4]["input_json"].is_string());
+    assert!(json["blocks"][5]["result_json"].is_string());
 
     let back: MessageDto = serde_json::from_value(json).expect("deserialize MessageDto");
     assert_eq!(back, msg);
 }
 
 /// The block-kind set equals the kinds the TUI scrollback renders:
-/// `Text | Thinking | RedactedThinking | ToolUse | ToolResult`. Structural
-/// parity anchor (plan F1-02).
+/// `Text | Thinking | RedactedThinking | CompactBoundary | ToolUse |
+/// ToolResult`. Structural parity anchor (plan F1-02).
 #[test]
 fn message_block_set_matches_tui_scrollback() {
     // Construct one of every block kind and collect the snake_case wire tags.
@@ -77,6 +83,11 @@ fn message_block_set_matches_tui_scrollback() {
         },
         MessageBlockDto::RedactedThinking {
             data: String::new(),
+        },
+        MessageBlockDto::CompactBoundary {
+            messages_before: 0,
+            messages_after: 0,
+            summary: String::new(),
         },
         MessageBlockDto::ToolUse {
             id: String::new(),
@@ -110,6 +121,7 @@ fn message_block_set_matches_tui_scrollback() {
             "text",
             "thinking",
             "redacted_thinking",
+            "compact_boundary",
             "tool_use",
             "tool_result"
         ],

@@ -1553,9 +1553,11 @@ impl ConversationOrchestrator {
         // Publish the session interactivity to the process-global flag (the port's
         // `getIsNonInteractiveSession()` analog) so prompt builders without a
         // `ToolUseContext` — e.g. the `AgentTool` fork gate — see the right mode.
-        // `is_non_interactive_session == !interactive_permissions` (turn_loop's
-        // own derivation).
-        traits::session_flags::set_non_interactive_session(!config.interactive_permissions);
+        // `is_non_interactive_session == !interactive_session`: interactive CLI
+        // prompt/request semantics are distinct from the permission-gate
+        // transport, so TUI/REPL sessions can carry interactive guidance even
+        // when `interactive_permissions` remains on the headless default.
+        traits::session_flags::set_non_interactive_session(!config.interactive_session);
         // Publish the session-scoped tool-search gate (Claude Code `$U()`) so the
         // request builder branches `tool_reference` normalization on the SESSION
         // decision, not on whether a given request's toolset carries a
@@ -2637,7 +2639,8 @@ impl ConversationOrchestrator {
     /// Task 2 (llm-client future-work batch 5): forward the API client's
     /// latest RAW per-window utilization snapshot to
     /// [`traits::OutputStream::emit_raw_utilization`] when it CHANGED since
-    /// the last emit and is non-empty.
+    /// the last emit. The empty snapshot is significant: it clears a
+    /// previously-rendered utilization window in downstream clients.
     ///
     /// Called immediately next to [`Self::emit_rate_limit_if_changed`] at
     /// both turn-driver seams (the batched/cancelable funnel in
@@ -2645,13 +2648,12 @@ impl ConversationOrchestrator {
     /// seam in `try_run_turn_streaming`), reading the same
     /// `self.api`-cached snapshot source.
     ///
-    /// Documented divergence: TS updates `rawUtilization` unconditionally on
-    /// every headers pass (`claudeAiLimits.ts:476` and the 429 path `:500`),
-    /// because it is module state polled by `getRawUtilization()`; our event
-    /// channel emits on change to avoid spamming the stream — the same
-    /// dedupe stance as [`Self::emit_rate_limit_if_changed`]. The EMPTY
-    /// snapshot is never emitted (TS clears raw state only via the
-    /// subscriber-gating path we don't model, `claudeAiLimits.ts:462`).
+    /// TS updates `rawUtilization` unconditionally on every headers pass
+    /// (`claudeAiLimits.ts:476` and the 429 path `:500`) because it is module
+    /// state polled by `getRawUtilization()`. Our event channel emits only on
+    /// change to avoid spamming the stream, while still forwarding the empty
+    /// snapshot as `(None, None, None, None)` so event-driven clients observe
+    /// the same state transition.
     ///
     /// Atomic-window invariant: each window contributes either both `Some`
     /// values or both `None` — guaranteed by construction, since
@@ -2660,9 +2662,6 @@ impl ConversationOrchestrator {
         let Some(raw) = self.api.last_raw_utilization() else {
             return;
         };
-        if raw == crate::model::rate_limit::RawUtilization::default() {
-            return;
-        }
         let mut last = self.last_emitted_raw_utilization.lock().await;
         if last.as_ref() == Some(&raw) {
             return;
@@ -8821,7 +8820,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                         let request_id = self.api.last_request_id();
                         crate::turn_loop::terminal_api_error_text(
                             &model,
-                            self.config.interactive_permissions,
+                            self.config.interactive_session,
                             other,
                             request_id.as_deref(),
                             pumped.stop_details.as_ref(),
@@ -9599,29 +9598,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // tools_block::format sorts alphabetically inside.
         let tool_names: Vec<String> = self.tools.all_names();
 
-        // Port of claude-code `tIo` (binary offset ~205825700):
-        //   let e = process.env.SHELL || "unknown",
-        //       t = e.includes("zsh") ? "zsh" : e.includes("bash") ? "bash" : e;
-        // i.e. the RAW $SHELL collapsed to "zsh"/"bash" by SUBSTRING (not the
-        // path basename), else the raw full $SHELL value verbatim; "unknown"
-        // when $SHELL is unset/empty. (`env_block` prepends the "Shell: "
-        // literal that `tIo` carries in its return value.) RESIDUAL #53b: the
-        // win32 PowerShell-primary branches (`Su()`/`tN()` availability probes)
-        // are not ported — LingXi has no PowerShell/Bash-tool probe at this
-        // site, so Windows falls through to `t` (tIo's `Shell: ${t}` else-arm).
-        let shell = {
-            let raw = std::env::var("SHELL")
-                .ok()
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "unknown".into());
-            if raw.contains("zsh") {
-                "zsh".into()
-            } else if raw.contains("bash") {
-                "bash".into()
-            } else {
-                raw
-            }
-        };
+        let shell = crate::prompt::env_meta::detect_shell();
 
         // DIV-1: worktree detection — `hf()!==null` in claude-code. Detect a
         // worktree by checking for the `gitdir` file that git creates in worktree
@@ -9675,6 +9652,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 Some(provider) => !provider.skill_entries().await.is_empty(),
                 None => false,
             },
+            is_interactive: self.config.interactive_session,
             // `# Memory` section gate (claude-code `tengu_moth_copse`, default
             // OFF): the memory feature is active iff a memory prefetch is wired
             // (`memory_prefetch.is_some()`), and the section points the model at
@@ -10030,16 +10008,9 @@ As you answer the user's questions, you can use the following context:\n\
     /// When `plansDirectory` is set: resolve it against the project root
     /// (absolute values are used verbatim, `path.resolve` semantics), normalize
     /// `.`/`..` lexically, and accept it only if it is WITHIN the project root
-    /// (`W5_`'s primary check `o === n || o.startsWith(n + sep)`). On rejection,
-    /// log the byte-exact error at `error` level (the raw setting value `${r}`)
-    /// and fall through to the default. The default is the rebranded
-    /// `<config-home>/plans/` (206's `~/.claude/plans/` under the
-    /// `$LINGXI_CONFIG_DIR ?? ~/.lingxi` config-home).
-    ///
-    /// RESIDUAL: `W5_`'s two hardening refinements — the protected-directory
-    /// guard (`Zht(Kt(),o)`) and the same-repo-root walk (`V7e`) — are NOT
-    /// ported; only the documented "must be within project root" containment is,
-    /// which is the observable behavior of the settings key.
+    /// (`W5_`'s primary check `o === n || o.startsWith(n + sep)`) and passes
+    /// the hardened protected-dir / same-repo-root checks. On rejection, fall
+    /// through to the default `<config-home>/plans/`.
     fn plans_dir(
         project_root: &std::path::Path,
         plans_directory: Option<&str>,
@@ -10056,8 +10027,12 @@ As you answer the user's questions, you can use the following context:\n\
             // `W5_` primary: `o === n || o.startsWith(n + sep)` — component-wise
             // prefix containment on the normalized paths (so a `../escape` that
             // popped above `root` is rejected).
-            if resolved.starts_with(&root) {
-                return resolved;
+            if confined_path_components(&root, &resolved).is_some() {
+                if plans_dir_passes_hardening(project_root, &root, &resolved) {
+                    return resolved;
+                }
+                tracing::warn!("plansDirectory rejected by hardening guard: {r}");
+                return Self::default_plans_dir();
             }
             tracing::error!("plansDirectory must be within project root: {r}");
         }
@@ -10236,13 +10211,14 @@ As you answer the user's questions, you can use the following context:\n\
                 if self.tools.find_by_name("TaskUpdate").is_none() {
                     return None;
                 }
+                let session_id = s.session_id;
                 s.turns_since_last_reminder = 0;
                 drop(s);
                 // Read the V2 task store outside the session lock.
                 let items: Vec<(String, engine::TodoState, String)> =
                     match &self.todo_reminder_tasks {
                         Some(provider) => provider
-                            .task_items()
+                            .task_items(session_id)
                             .await
                             .into_iter()
                             .map(|t| (t.id, t.status, t.subject))
@@ -11207,6 +11183,153 @@ DO NOT mention this to the user explicitly because they are already aware.\n</sy
     #[must_use]
     pub fn permission_mode(&self) -> Option<String> {
         self.perms.permission_mode()
+    }
+}
+
+const PROTECTED_PLANS_DIR_COMPONENTS: &[&str] = &[
+    ".git",
+    ".hg",
+    ".svn",
+    ".bzr",
+    ".jj",
+    ".sl",
+    ".claude",
+    ".lingxi",
+    ".cargo",
+    "node_modules",
+];
+
+fn normalize_guard_component(component: &std::ffi::OsStr) -> Option<String> {
+    let text = component
+        .to_str()?
+        .trim_end_matches(['.', ' '])
+        .to_ascii_lowercase();
+    (!text.is_empty()).then_some(text)
+}
+
+fn path_relative_components(
+    root: &std::path::Path,
+    candidate: &std::path::Path,
+    case_insensitive: bool,
+) -> Option<Vec<std::ffi::OsString>> {
+    let mut candidate_components = candidate.components();
+    for root_component in root.components() {
+        let candidate_component = candidate_components.next()?;
+        let equal = if case_insensitive {
+            root_component
+                .as_os_str()
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&candidate_component.as_os_str().to_string_lossy())
+        } else {
+            root_component == candidate_component
+        };
+        if !equal {
+            return None;
+        }
+    }
+    Some(
+        candidate_components
+            .map(|component| component.as_os_str().to_os_string())
+            .collect(),
+    )
+}
+
+fn confined_path_components(
+    root: &std::path::Path,
+    candidate: &std::path::Path,
+) -> Option<Vec<std::ffi::OsString>> {
+    path_relative_components(root, candidate, cfg!(windows))
+}
+
+fn plans_dir_has_protected_component(root: &std::path::Path, candidate: &std::path::Path) -> bool {
+    confined_path_components(root, candidate).is_none_or(|components| {
+        components.iter().any(|name| {
+            normalize_guard_component(name).is_some_and(|name| {
+                PROTECTED_PLANS_DIR_COMPONENTS
+                    .iter()
+                    .any(|protected| name == *protected)
+            })
+        })
+    })
+}
+
+fn deepest_existing_ancestor(path: &std::path::Path) -> Option<&std::path::Path> {
+    path.ancestors().find(|ancestor| ancestor.exists())
+}
+
+fn metadata_is_link_like(metadata: &std::fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        return metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+    }
+    #[cfg(not(windows))]
+    false
+}
+
+fn has_symlink_component_between(
+    root: &std::path::Path,
+    existing: &std::path::Path,
+) -> Option<bool> {
+    let mut current = root.to_path_buf();
+    for component in confined_path_components(root, existing)? {
+        current.push(component);
+        let meta = std::fs::symlink_metadata(&current).ok()?;
+        if metadata_is_link_like(&meta) {
+            return Some(true);
+        }
+    }
+    Some(false)
+}
+
+fn nearest_repo_root(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    path.ancestors()
+        .find(|ancestor| ancestor.join(".git").exists())
+        .and_then(|ancestor| std::fs::canonicalize(ancestor).ok())
+}
+
+fn plans_dir_passes_hardening(
+    project_root: &std::path::Path,
+    normalized_root: &std::path::Path,
+    normalized_candidate: &std::path::Path,
+) -> bool {
+    if plans_dir_has_protected_component(normalized_root, normalized_candidate) {
+        return false;
+    }
+
+    let canonical_root = match std::fs::canonicalize(project_root) {
+        Ok(path) => path,
+        Err(_) => return false,
+    };
+    let existing = match deepest_existing_ancestor(normalized_candidate) {
+        Some(path) => path,
+        None => return false,
+    };
+    if !existing.is_dir() {
+        return false;
+    }
+    if has_symlink_component_between(normalized_root, existing) != Some(false) {
+        return false;
+    }
+
+    let canonical_existing = match std::fs::canonicalize(existing) {
+        Ok(path) => path,
+        Err(_) => return false,
+    };
+    if confined_path_components(&canonical_root, &canonical_existing).is_none() {
+        return false;
+    }
+
+    let project_repo_root = nearest_repo_root(&canonical_root);
+    let candidate_repo_root = nearest_repo_root(&canonical_existing);
+    match (project_repo_root, candidate_repo_root) {
+        (Some(project), Some(candidate)) => project == candidate,
+        (None, None) => true,
+        _ => false,
     }
 }
 
@@ -12437,6 +12560,38 @@ mod turn_recovery_tests {
             )),
             "no swap ⇒ boot cwd, exactly as before: {sp}"
         );
+    }
+
+    #[tokio::test]
+    async fn interactive_session_flag_drives_prompt_and_session_flags() {
+        let prior = traits::session_flags::is_non_interactive_session();
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig {
+                interactive_permissions: false,
+                interactive_session: true,
+                ..OrchestratorConfig::default()
+            },
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+
+        assert!(
+            !traits::session_flags::is_non_interactive_session(),
+            "interactive-session composition must publish interactive session flags even when permission prompting stays headless"
+        );
+
+        let prompt = orch.build_system_prompt().await;
+        assert!(
+            prompt.contains("If you need the user to run a shell command themselves"),
+            "interactive CLI prompt guidance must follow the explicit interactive-session flag: {prompt}"
+        );
+
+        traits::session_flags::set_non_interactive_session(prior);
     }
 
     #[tokio::test]
@@ -17323,7 +17478,7 @@ mod todo_reminder_tests {
     struct StaticTasks(Vec<TaskReminderItem>);
     #[async_trait]
     impl TodoReminderTaskProvider for StaticTasks {
-        async fn task_items(&self) -> Vec<TaskReminderItem> {
+        async fn task_items(&self, _session_id: protocol::SessionId) -> Vec<TaskReminderItem> {
             self.0.clone()
         }
     }
@@ -18447,7 +18602,14 @@ mod main_thread_agent_tests {
 #[cfg(test)]
 mod plans_dir_tests {
     use super::*;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
+    use tempfile::TempDir;
+
+    fn repo_root() -> TempDir {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".git")).unwrap();
+        tmp
+    }
 
     #[test]
     fn none_setting_falls_back_to_default_config_home_plans() {
@@ -18467,16 +18629,18 @@ mod plans_dir_tests {
 
     #[test]
     fn relative_within_root_is_accepted_and_resolved() {
-        let root = Path::new("/home/u/project");
-        let got = ConversationOrchestrator::plans_dir(root, Some("docs/plans"));
-        assert_eq!(got, PathBuf::from("/home/u/project/docs/plans"));
+        let repo = repo_root();
+        let expected = repo.path().join("docs/plans");
+        let got = ConversationOrchestrator::plans_dir(repo.path(), Some("docs/plans"));
+        assert_eq!(got, expected);
     }
 
     #[test]
     fn dot_segments_normalize_but_stay_within_root() {
-        let root = Path::new("/home/u/project");
-        let got = ConversationOrchestrator::plans_dir(root, Some("./sub/../plans"));
-        assert_eq!(got, PathBuf::from("/home/u/project/plans"));
+        let repo = repo_root();
+        let expected = repo.path().join("plans");
+        let got = ConversationOrchestrator::plans_dir(repo.path(), Some("./sub/../plans"));
+        assert_eq!(got, expected);
     }
 
     #[test]
@@ -18499,17 +18663,21 @@ mod plans_dir_tests {
     fn absolute_inside_root_is_accepted() {
         // `path.resolve` uses an absolute value verbatim; if it happens to be
         // within the project root it is accepted.
-        let root = Path::new("/home/u/project");
-        let got = ConversationOrchestrator::plans_dir(root, Some("/home/u/project/plans"));
-        assert_eq!(got, PathBuf::from("/home/u/project/plans"));
+        let repo = repo_root();
+        let inside = repo.path().join("plans");
+        let got = ConversationOrchestrator::plans_dir(
+            repo.path(),
+            Some(inside.to_string_lossy().as_ref()),
+        );
+        assert_eq!(got, inside);
     }
 
     #[test]
     fn project_root_itself_is_within_root() {
         // `o === n` branch of W5_ — the plans dir equal to the root is accepted.
-        let root = Path::new("/home/u/project");
-        let got = ConversationOrchestrator::plans_dir(root, Some("."));
-        assert_eq!(got, PathBuf::from("/home/u/project"));
+        let repo = repo_root();
+        let got = ConversationOrchestrator::plans_dir(repo.path(), Some("."));
+        assert_eq!(got, repo.path());
     }
 
     #[test]
@@ -18522,11 +18690,75 @@ mod plans_dir_tests {
     }
 
     #[test]
+    fn windows_containment_comparison_is_case_insensitive() {
+        let relative = path_relative_components(
+            Path::new("/Repo/Project"),
+            Path::new("/repo/project/docs/plans"),
+            true,
+        )
+        .expect("Windows-style comparison should accept path casing differences");
+        assert_eq!(
+            relative,
+            vec![
+                std::ffi::OsString::from("docs"),
+                std::ffi::OsString::from("plans")
+            ]
+        );
+        assert!(
+            path_relative_components(
+                Path::new("/Repo/Project"),
+                Path::new("/repo/project-evil/plans"),
+                true,
+            )
+            .is_none(),
+            "component comparison must still reject sibling prefixes"
+        );
+    }
+
+    #[test]
+    fn protected_directory_component_is_rejected() {
+        let repo = repo_root();
+        let got = ConversationOrchestrator::plans_dir(repo.path(), Some(".git/plans"));
+        assert_eq!(got, ConversationOrchestrator::default_plans_dir());
+    }
+
+    #[test]
+    fn nested_repository_boundary_is_rejected() {
+        let repo = repo_root();
+        std::fs::create_dir_all(repo.path().join("nested/.git")).unwrap();
+        std::fs::create_dir_all(repo.path().join("nested/plans")).unwrap();
+        let got = ConversationOrchestrator::plans_dir(repo.path(), Some("nested/plans"));
+        assert_eq!(got, ConversationOrchestrator::default_plans_dir());
+    }
+
+    #[test]
+    fn existing_file_component_is_rejected() {
+        let repo = repo_root();
+        std::fs::write(repo.path().join("README.md"), "x").unwrap();
+        let got = ConversationOrchestrator::plans_dir(repo.path(), Some("README.md/plans"));
+        assert_eq!(got, ConversationOrchestrator::default_plans_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_component_is_rejected() {
+        let repo = repo_root();
+        let outside = TempDir::new().unwrap();
+        std::fs::create_dir_all(outside.path().join("plans")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), repo.path().join("linked")).unwrap();
+        let got = ConversationOrchestrator::plans_dir(repo.path(), Some("linked/plans"));
+        assert_eq!(got, ConversationOrchestrator::default_plans_dir());
+    }
+
+    #[test]
     fn plan_file_path_joins_uuid_md_under_resolved_dir() {
         let sid = SessionId::new();
-        let root = Path::new("/home/u/project");
-        let path = ConversationOrchestrator::plan_file_path(&sid, root, Some("docs/plans"));
-        let expected = format!("/home/u/project/docs/plans/{}.md", sid.as_uuid());
-        assert_eq!(path, expected);
+        let repo = repo_root();
+        let path = ConversationOrchestrator::plan_file_path(&sid, repo.path(), Some("docs/plans"));
+        let expected = repo
+            .path()
+            .join("docs/plans")
+            .join(format!("{}.md", sid.as_uuid()));
+        assert_eq!(path, expected.to_string_lossy());
     }
 }

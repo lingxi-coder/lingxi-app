@@ -386,8 +386,10 @@ pub struct ApiService {
     /// the raw snapshot in [`Self::pending_429`] and promotes it into this
     /// cache only when the turn dies on the 429 (via
     /// [`Self::promote_pending_429`]), never on a retried-then-recovered
-    /// attempt. Exposed via the `OrchestratorApiClient::last_raw_utilization`
-    /// override.
+    /// attempt. EMPTY snapshots are preserved too so a later headerless
+    /// success or terminal 429 can clear stale raw-window state exactly like
+    /// the TS module assignment. Exposed via the
+    /// `OrchestratorApiClient::last_raw_utilization` override.
     last_raw_utilization: Mutex<Option<RawUtilization>>,
     /// Limits-specific copy composed from the most recent 429 **error**
     /// response's unified headers.
@@ -934,22 +936,14 @@ impl ApiService {
     /// `getAPIProvider()==='firstParty' && querySource==='repl_main_thread'`).
     ///
     /// LingXi resolves the concrete provider downstream of this provider-agnostic
-    /// request builder and has no querySource allowlist, so — exactly like
-    /// [`Self::should_use_global_cache_scope`] — the feature is kept **dormant**:
-    /// it requires an explicit opt-in env (`LINGXI_CACHE_EDITING`), the
-    /// shared experimental-betas kill switch must not be set, AND the subscriber
-    /// (firstParty) signal must be present. Default: off → no `cache_edits` /
+    /// request builder and still lacks the rest of the Claude Code protocol:
+    /// the once-per-session `CACHE_EDITING_BETA_HEADER` latch and the cross-call
+    /// pinned-edits store. Because this partial path can mutate requests without
+    /// the required session/header contract, it is kept FAIL-CLOSED here even
+    /// when `LINGXI_CACHE_EDITING=1`. Default: off → no `cache_edits` /
     /// `cache_reference` ever emitted, so 3P traffic is byte-unchanged.
-    ///
-    /// PARITY-NOTE: the TS `useCachedMC` body also pushes the
-    /// `CACHE_EDITING_BETA_HEADER` once-per-session via the `cacheEditingHeaderLatched`
-    /// latch (claude.ts:1673) — session-latch machinery LingXi lacks; the
-    /// request-builder emission is ported, the beta-header latch is residual.
     fn should_use_cache_editing(&self) -> bool {
-        if cache_env_truthy("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS") {
-            return false;
-        }
-        cache_env_truthy("LINGXI_CACHE_EDITING") && self.effective_subscriber().is_subscriber
+        false
     }
 
     // ── Shared request build ─────────────────────────────────────────────────
@@ -2025,10 +2019,11 @@ impl ApiService {
     /// This closes the prior per-attempt-write divergence (a
     /// retried-then-recovered 429 no longer plants a rejected snapshot).
     ///
-    /// When the 429 yields NEITHER a gated `info` NOR any raw window, the
-    /// pending slot is cleared (`None`); the copy slot is likewise cleared
-    /// (the generic 429 surface applies) — TS only updates inside the gated
-    /// branch.
+    /// The staged slot is written on EVERY non-stale 429, even when both the
+    /// gated limits view and the raw windows are empty/default. That preserves
+    /// Claude Code's unconditional `rawUtilization = extractRawUtilization(...)`
+    /// assignment on terminal 429s, allowing a headerless rejection to clear a
+    /// previously non-empty raw snapshot.
     /// `body` is the 429's parsed JSON error body, when available — Task 5
     /// threads it through to [`crate::RateLimitInfo::from_429_error`] so the
     /// `Nqi(e)` `credits_required` / body-derived `overage_disabled_reason`
@@ -2081,14 +2076,9 @@ impl ApiService {
         if self.rate_limit_record_stale(ts_ms) {
             return;
         }
-        // Stage the snapshot whenever EITHER the limits gate passed OR raw
-        // windows are present. A 429 that yields neither clears the slot.
-        let staged = if info.is_some() || raw != RawUtilization::default() {
-            Some(Pending429 { info, raw })
-        } else {
-            None
-        };
-        *self.pending_429.lock().unwrap() = staged;
+        // Stage EVERY non-stale 429 so the terminal promote can also write the
+        // EMPTY raw snapshot and thereby clear stale raw-window state.
+        *self.pending_429.lock().unwrap() = Some(Pending429 { info, raw });
     }
 
     /// Discard any staged 429 snapshot. Called at drive entry and on success so
@@ -2110,14 +2100,13 @@ impl ApiService {
     /// `.take()`s [`Self::pending_429`]; when `Some`:
     /// - `info` `Some` → the forced-`rejected` limits snapshot replaces
     ///   `last_rate_limit`;
-    /// - `raw != RawUtilization::default()` → the raw per-window snapshot
+    /// - the raw per-window snapshot (including the EMPTY `{}` snapshot)
     ///   replaces `last_raw_utilization`.
     ///
-    /// Convention: the EMPTY raw snapshot is NEVER stored (the `last_raw…`
-    /// cache and the `emit_raw_utilization_if_changed` seam treat the empty
-    /// `{}` as "no windows" and skip it) — a documented divergence from TS,
-    /// which assigns `rawUtilization` unconditionally. Idempotent via
-    /// `.take()`: a second call after promotion is a no-op.
+    /// The orchestrator may still choose not to emit the EMPTY snapshot on its
+    /// event stream, but the client cache preserves it so stale state can be
+    /// cleared at the next seam that wants the exact current snapshot.
+    /// Idempotent via `.take()`: a second call after promotion is a no-op.
     fn promote_pending_429(&self) {
         let Some(pending) = self.pending_429.lock().unwrap().take() else {
             return;
@@ -2125,9 +2114,7 @@ impl ApiService {
         if let Some(info) = pending.info {
             *self.last_rate_limit.lock().unwrap() = Some(info);
         }
-        if pending.raw != RawUtilization::default() {
-            *self.last_raw_utilization.lock().unwrap() = Some(pending.raw);
-        }
+        *self.last_raw_utilization.lock().unwrap() = Some(pending.raw);
     }
 
     /// HTTP status code approximation for `emit_failed` (best-effort: only the

@@ -340,6 +340,21 @@ pub fn lower_conversation_message(message: &ConversationMessage) -> MessageDto {
                 .filter_map(crate::turn::lower_content_block)
                 .collect(),
         },
+        ConversationMessage::System {
+            subtype,
+            compact_metadata,
+            ..
+        } if subtype.as_deref() == Some("compact_boundary") => MessageDto {
+            role: "system".to_string(),
+            blocks: vec![MessageBlockDto::CompactBoundary {
+                messages_before: compact_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.messages_summarized)
+                    .unwrap_or_default(),
+                messages_after: 0,
+                summary: String::new(),
+            }],
+        },
         ConversationMessage::System { content, .. } => MessageDto {
             role: "system".to_string(),
             blocks: vec![MessageBlockDto::Text {
@@ -360,7 +375,47 @@ pub fn lower_conversation_message(message: &ConversationMessage) -> MessageDto {
 /// have produced.
 #[must_use]
 pub fn lower_transcript(history: &[ConversationMessage]) -> Vec<MessageDto> {
-    history.iter().map(lower_conversation_message).collect()
+    let mut transcript = Vec::with_capacity(history.len());
+    for message in history {
+        match message {
+            ConversationMessage::User {
+                content,
+                is_compact_summary: true,
+                ..
+            } => {
+                let summary = content
+                    .iter()
+                    .filter_map(|block| match block {
+                        protocol::ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let Some(MessageDto { blocks, .. }) = transcript.last_mut() else {
+                    continue;
+                };
+                let Some(MessageBlockDto::CompactBoundary {
+                    summary: accumulated,
+                    ..
+                }) = blocks.last_mut()
+                else {
+                    continue;
+                };
+                if !summary.is_empty() {
+                    if !accumulated.is_empty() {
+                        accumulated.push('\n');
+                    }
+                    accumulated.push_str(&summary);
+                }
+            }
+            ConversationMessage::User {
+                is_visible_in_transcript_only: true,
+                ..
+            } => {}
+            _ => transcript.push(lower_conversation_message(message)),
+        }
+    }
+    transcript
 }
 
 /// One lowered task-output chunk: the `(task_id, content, total_lines,
@@ -782,6 +837,36 @@ mod tests {
     #[test]
     fn lower_transcript_empty_history_is_empty() {
         assert!(lower_transcript(&[]).is_empty());
+    }
+
+    #[test]
+    fn lower_transcript_pairs_compact_boundary_with_hidden_summary() {
+        use protocol::{CompactBoundaryMetadata, CompactTrigger, MessageId};
+
+        let history = vec![
+            ConversationMessage::compact_boundary(
+                MessageId::new(),
+                "Conversation compacted".to_string(),
+                CompactBoundaryMetadata {
+                    trigger: CompactTrigger::Manual,
+                    messages_summarized: Some(6),
+                    ..Default::default()
+                },
+            ),
+            ConversationMessage::compact_summary(MessageId::new(), "internal summary".to_string()),
+        ];
+
+        let transcript = lower_transcript(&history);
+        assert_eq!(transcript.len(), 1);
+        assert_eq!(transcript[0].role, "system");
+        assert_eq!(
+            transcript[0].blocks,
+            vec![MessageBlockDto::CompactBoundary {
+                messages_before: 6,
+                messages_after: 0,
+                summary: "internal summary".to_string(),
+            }]
+        );
     }
 
     #[test]

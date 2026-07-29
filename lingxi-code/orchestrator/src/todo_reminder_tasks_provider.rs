@@ -12,21 +12,13 @@
 //!    `ToolUseContext` here), so skipped;
 //! 3. `LINGXI_TEAM_NAME` env (`zp()`, process-based teammate);
 //! 4. leader team name ([`traits::team_registry::leader_team_name`]);
-//! 5. session id fallback — see RESIDUAL below.
+//! 5. live orchestrator session id fallback.
 //!
 //! This is the SAME resolution the V2 `Task*` tools use ([`tool_task`]
-//! `resolve_task_list_id`) for levels 1/3/4, so the reminder reads the SAME
-//! on-disk task dir whenever a team / env list-id is active (the case where V2
-//! task management is actually in use).
-//!
-//! RESIDUAL: the orchestrator owns its `SessionState` internally
-//! (`SessionState::empty(SessionId::new(), …)`), and the composition root that
-//! constructs this provider does not see that session id. So this adapter does
-//! NOT implement the level-5 session-id fallback for a standalone session with
-//! no env/team list-id; in that case it reads the default-named store (empty
-//! unless `LINGXI_TASK_LIST_ID` was set), so the reminder renders with its
-//! base text only. V1 (`todo_reminder`, the default-when-tasks-disabled path)
-//! needs no provider and is unaffected.
+//! `resolve_task_list_id`) for levels 1/3/4 and now also level 5, so the
+//! reminder reads the SAME on-disk task dir the `Task*` tools use in both
+//! team/env-driven and standalone sessions. V1 (`todo_reminder`, the
+//! default-when-tasks-disabled path) needs no provider and is unaffected.
 
 use async_trait::async_trait;
 
@@ -45,28 +37,27 @@ impl TodoStoreReminderTasks {
         Self
     }
 
-    /// Resolve the active task-list id via the `KF()` precedence (levels 1/3/4;
-    /// see module docs). Returns `None` when no list id is resolvable at the
-    /// orchestrator seam (the level-5 session-id fallback is not available
-    /// here), in which case the reminder lists no tasks.
-    fn resolve_list_id() -> Option<String> {
+    /// Resolve the active task-list id via the `KF()` precedence, using the
+    /// live orchestrator session as the standalone fallback.
+    fn resolve_list_id(session_id: protocol::SessionId) -> String {
         // 1. Explicit env override.
         if let Some(explicit) = std::env::var_os("LINGXI_TASK_LIST_ID") {
             if !explicit.is_empty() {
-                return Some(explicit.to_string_lossy().into_owned());
+                return explicit.to_string_lossy().into_owned();
             }
         }
         // 3. `LINGXI_TEAM_NAME` env (process-based teammate; TS `getTeamName()`).
         if let Some(team) = std::env::var_os("LINGXI_TEAM_NAME") {
             if !team.is_empty() {
-                return Some(team.to_string_lossy().into_owned());
+                return team.to_string_lossy().into_owned();
             }
         }
         // 4. Leader team name (set by `TeamCreate`).
         if let Some(team) = traits::team_registry::leader_team_name().filter(|t| !t.is_empty()) {
-            return Some(team);
+            return team;
         }
-        None
+        // 5. Standalone session fallback.
+        session_id.to_string()
     }
 }
 
@@ -78,10 +69,8 @@ impl Default for TodoStoreReminderTasks {
 
 #[async_trait]
 impl TodoReminderTaskProvider for TodoStoreReminderTasks {
-    async fn task_items(&self) -> Vec<TaskReminderItem> {
-        let Some(list_id) = Self::resolve_list_id() else {
-            return Vec::new();
-        };
+    async fn task_items(&self, session_id: protocol::SessionId) -> Vec<TaskReminderItem> {
+        let list_id = Self::resolve_list_id(session_id);
         let store = tool_task::todo_store::TodoStore::for_list(&list_id);
         store
             .list()
@@ -99,25 +88,87 @@ impl TodoReminderTaskProvider for TodoStoreReminderTasks {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine::TodoState;
+    use tool_task::todo_store::{TodoStore, TodoTask};
+
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     #[tokio::test]
-    async fn no_list_id_yields_empty() {
-        // With no env/team list id, the provider lists nothing (the reminder
-        // renders base-text-only). Guarded against env interference by checking
-        // the unset path directly through the resolver.
+    async fn session_fallback_reads_standalone_store() {
+        let _g = ENV_LOCK.lock().await;
         let prev = std::env::var_os("LINGXI_TASK_LIST_ID");
         let prev_team = std::env::var_os("LINGXI_TEAM_NAME");
+        let prev_config_dir = std::env::var_os(branding::CONFIG_DIR_ENV);
         std::env::remove_var("LINGXI_TASK_LIST_ID");
         std::env::remove_var("LINGXI_TEAM_NAME");
-        // (leader_team_name is None in a fresh test process)
-        assert!(TodoStoreReminderTasks::resolve_list_id().is_none());
-        let items = TodoStoreReminderTasks::new().task_items().await;
-        assert!(items.is_empty());
+        traits::team_registry::clear_leader_team_name();
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::env::set_var(branding::CONFIG_DIR_ENV, temp.path());
+        let session_id = protocol::SessionId::new();
+        let store = TodoStore::for_list(&session_id.to_string());
+        let id = store
+            .create(TodoTask::new(
+                "ship fix".into(),
+                "wire reminder fallback".into(),
+                None,
+                serde_json::Map::new(),
+            ))
+            .await
+            .expect("task created");
+
+        let items = TodoStoreReminderTasks::new().task_items(session_id).await;
+        assert_eq!(
+            items,
+            vec![TaskReminderItem {
+                id,
+                status: TodoState::Pending,
+                subject: "ship fix".into(),
+            }]
+        );
+
         if let Some(v) = prev {
             std::env::set_var("LINGXI_TASK_LIST_ID", v);
+        } else {
+            std::env::remove_var("LINGXI_TASK_LIST_ID");
         }
         if let Some(v) = prev_team {
             std::env::set_var("LINGXI_TEAM_NAME", v);
+        } else {
+            std::env::remove_var("LINGXI_TEAM_NAME");
         }
+        if let Some(v) = prev_config_dir {
+            std::env::set_var(branding::CONFIG_DIR_ENV, v);
+        } else {
+            std::env::remove_var(branding::CONFIG_DIR_ENV);
+        }
+        traits::team_registry::clear_leader_team_name();
+    }
+
+    #[tokio::test]
+    async fn explicit_env_preserves_precedence_over_session_fallback() {
+        let _g = ENV_LOCK.lock().await;
+        let prev = std::env::var_os("LINGXI_TASK_LIST_ID");
+        let prev_team = std::env::var_os("LINGXI_TEAM_NAME");
+        std::env::set_var("LINGXI_TASK_LIST_ID", "explicit-list");
+        std::env::set_var("LINGXI_TEAM_NAME", "env-team");
+        traits::team_registry::set_leader_team_name("leader-team");
+
+        assert_eq!(
+            TodoStoreReminderTasks::resolve_list_id(protocol::SessionId::new()),
+            "explicit-list"
+        );
+
+        if let Some(v) = prev {
+            std::env::set_var("LINGXI_TASK_LIST_ID", v);
+        } else {
+            std::env::remove_var("LINGXI_TASK_LIST_ID");
+        }
+        if let Some(v) = prev_team {
+            std::env::set_var("LINGXI_TEAM_NAME", v);
+        } else {
+            std::env::remove_var("LINGXI_TEAM_NAME");
+        }
+        traits::team_registry::clear_leader_team_name();
     }
 }

@@ -5,6 +5,7 @@
 
 use assert_cmd::Command;
 use predicates::prelude::*;
+use session::session_path;
 
 /// Byte-parity with claude-code/commander: every usage error (unknown flag,
 /// invalid choice, missing arg, cross-flag gate) exits 1, NOT the BSD
@@ -195,4 +196,30 @@ fn from_pr_no_tui_empty_dir_exits_0() {
         .stdout(predicate::str::contains(
             "No conversations found to resume.",
         ));
+}
+
+#[test]
+fn session_id_collision_in_other_project_exits_1() {
+    let home = tempfile::tempdir().unwrap();
+    let source_project = tempfile::tempdir().unwrap();
+    let launch_project = tempfile::tempdir().unwrap();
+    let session_id = "11111111-2222-3333-4444-555555555555";
+    let transcript_path = session_path(
+        home.path(),
+        &source_project.path().display().to_string(),
+        session_id,
+    );
+    std::fs::create_dir_all(transcript_path.parent().unwrap()).unwrap();
+    std::fs::write(&transcript_path, "").unwrap();
+
+    Command::cargo_bin("lingxi-cli")
+        .unwrap()
+        .env("LINGXI_CONFIG_DIR", home.path())
+        .current_dir(launch_project.path())
+        .args(["--session-id", session_id, "hello"])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains(format!(
+            "Error: Session ID {session_id} is already in use."
+        )));
 }

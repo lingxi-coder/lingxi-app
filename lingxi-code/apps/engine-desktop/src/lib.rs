@@ -2305,6 +2305,32 @@ pub struct DesktopConfig {
         Option<tokio::sync::mpsc::Sender<tui_core::computer_access_bridge::ComputerAccessExchange>>,
 }
 
+/// Desktop session composition, independent from the permission-gate transport.
+///
+/// This is the session-mode signal the orchestrator uses for prompt/session
+/// semantics such as "interactive CLI" vs "headless/SDK". It is intentionally
+/// derived from the host composition shape, not from an arbitrary injected gate
+/// alone: a transport host can bind a live permission surface while still
+/// needing non-interactive session semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DesktopSessionComposition {
+    /// CLI TUI or interactive stdio REPL.
+    InteractiveCli,
+    /// Headless CLI execution (`--print` and other non-interactive CLI boots).
+    HeadlessCli,
+    /// Bridge/SDK transport session semantics.
+    Transport,
+}
+
+impl DesktopSessionComposition {
+    /// Whether this composition should expose interactive CLI prompt/request
+    /// semantics to the orchestrator.
+    #[must_use]
+    pub fn is_interactive_session(self) -> bool {
+        matches!(self, Self::InteractiveCli)
+    }
+}
+
 /// `--safe-mode` / `--bare` reduced-mode customization gates (M3, cc 2.1.198).
 ///
 /// Port of the binary's `Hc(feature, opts)` check (@209090235-ish minified:
@@ -2590,6 +2616,29 @@ impl Default for DesktopConfig {
             ask_user_question_tx: None,
             computer_access_tx: None,
         }
+    }
+}
+
+impl DesktopConfig {
+    /// Resolve the session composition for prompt/system-request semantics.
+    ///
+    /// The shared CLI base config starts headless and is promoted to
+    /// [`DesktopSessionComposition::InteractiveCli`] only when the TUI / stdio
+    /// REPL injects its interactive permission transport. The bridge/SDK path is
+    /// modeled separately: it may surface remote permission prompts while still
+    /// needing non-interactive session semantics.
+    #[must_use]
+    pub fn session_composition(&self) -> DesktopSessionComposition {
+        if !self.use_noop_permission_gate {
+            return DesktopSessionComposition::Transport;
+        }
+        if self.deny_unresolved_ask {
+            return DesktopSessionComposition::HeadlessCli;
+        }
+        if self.injected_permission_gate.is_some() {
+            return DesktopSessionComposition::InteractiveCli;
+        }
+        DesktopSessionComposition::HeadlessCli
     }
 }
 
@@ -3195,6 +3244,16 @@ pub struct DesktopRuntime {
     /// effect calls `add_root(...)` + `notify_roots_list_changed_all()` on it so
     /// every connected server's `roots/list` reflects the new working directory.
     pub mcp_registry: Arc<mcp::McpRegistry>,
+}
+
+/// Construct the live sandbox runner used by desktop composition roots.
+///
+/// Standalone CLI workflows such as `plugin eval --scaffold` use this factory
+/// so they receive the same runtime-backed filesystem and network enforcement
+/// as model-invoked shell tools without depending on the concrete runner crate.
+#[must_use]
+pub fn new_live_sandbox_runner() -> Arc<dyn tool_api::SandboxRunner> {
+    Arc::new(sandbox_runtime_runner::SandboxRuntimeRunner::new())
 }
 
 /// Errors surfaced while building a [`DesktopRuntime`].
@@ -5770,6 +5829,11 @@ pub async fn build(
 
     // (4) Orchestrator config from `cfg` (was `argv.model`).
     let mut orch_cfg = OrchestratorConfig::default();
+    let interactive_session = cfg.session_composition().is_interactive_session();
+    orch_cfg.interactive_session = interactive_session;
+    // Keep the legacy main-loop interactive bit aligned for CLI TUI / stdio
+    // REPL sessions until every remaining consumer reads `interactive_session`.
+    orch_cfg.interactive_permissions = interactive_session;
     // TPM-C: use the bare id produced by parse_model_ref (strips a profile/ prefix
     // so a qualified default_model like "openai/gpt-4o" never reaches the wire).
     orch_cfg.model.clone_from(&default_model_id);
@@ -7605,7 +7669,7 @@ pub async fn build(
         // temp-file cleanup, not a leaked process. When a host teardown seam is
         // added (the future-batch note on `fire_session_end`), call
         // `sandbox_runner.reset().await` there for the tidy socket/CA cleanup.
-        sandbox_runner: std::sync::Arc::new(sandbox_runtime_runner::SandboxRuntimeRunner::new()),
+        sandbox_runner: new_live_sandbox_runner(),
         permission_mode: cfg.permission_mode,
         // (#3 shell-expansion) The base policy for embedded `!`cmd`` bodies in
         // prompt commands (`/commit` …). When enforcement is on this is the SAME
@@ -9236,8 +9300,8 @@ pub async fn build(
 mod tests {
     use super::{
         build, desktop_tool_registry, model_deprecation_warning, parse_worktree_slash_action,
-        resolve_workflow_size_guideline, CoordinatorWiring, DesktopConfig, WorktreeSlashAction,
-        WORKTREE_SLASH_USAGE,
+        resolve_workflow_size_guideline, CoordinatorWiring, DesktopConfig,
+        DesktopSessionComposition, WorktreeSlashAction, WORKTREE_SLASH_USAGE,
     };
     use std::sync::Arc;
 
@@ -9747,6 +9811,38 @@ mod tests {
         };
         assert!(!custom.use_noop_permission_gate);
         let _ = format!("{custom:?}");
+    }
+
+    #[test]
+    fn desktop_session_composition_distinguishes_interactive_cli_from_headless_and_transport() {
+        let mut cfg = DesktopConfig::default();
+        assert_eq!(
+            cfg.session_composition(),
+            DesktopSessionComposition::HeadlessCli,
+            "the shared CLI/base config starts headless until an interactive host finishes wiring it"
+        );
+
+        cfg.injected_permission_gate = Some(Arc::new(permission::DenyOnAskGate));
+        assert_eq!(
+            cfg.session_composition(),
+            DesktopSessionComposition::InteractiveCli,
+            "TUI / interactive REPL promotion is explicit at the desktop composition seam"
+        );
+
+        cfg.deny_unresolved_ask = true;
+        assert_eq!(
+            cfg.session_composition(),
+            DesktopSessionComposition::HeadlessCli,
+            "an injected gate alone must not force interactive semantics onto a print session"
+        );
+
+        cfg.use_noop_permission_gate = false;
+        cfg.deny_unresolved_ask = false;
+        assert_eq!(
+            cfg.session_composition(),
+            DesktopSessionComposition::Transport,
+            "bridge/SDK hosts stay on transport semantics even if they wire a live permission surface"
+        );
     }
 
     #[test]

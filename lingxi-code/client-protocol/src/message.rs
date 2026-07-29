@@ -25,10 +25,10 @@ pub struct MessageDto {
 /// One block within a [`MessageDto`].
 ///
 /// The variant set is the structural parity anchor: it equals the block kinds
-/// the TUI scrollback renders (`Text | Thinking | RedactedThinking | ToolUse |
-/// ToolResult`). `#[non_exhaustive]` so a future block kind is additive (no
-/// major bump). Internally tagged on `type`, `snake_case` (the frozen serde
-/// convention, decision §0.1).
+/// the TUI scrollback renders (`Text | Thinking | RedactedThinking |
+/// CompactBoundary | ToolUse | ToolResult`). `#[non_exhaustive]` so a future
+/// block kind is additive (no major bump). Internally tagged on `type`,
+/// `snake_case` (the frozen serde convention, decision §0.1).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -52,6 +52,17 @@ pub enum MessageBlockDto {
     RedactedThinking {
         /// The opaque redacted payload.
         data: String,
+    },
+    /// A compaction boundary reconstructed during session resume. The summary is
+    /// hidden by default and may be revealed by clients in their expanded
+    /// history view.
+    CompactBoundary {
+        /// Message count before compaction, when recoverable from metadata.
+        messages_before: u32,
+        /// Message count after compaction, when recoverable from metadata.
+        messages_after: u32,
+        /// Full compact summary paired from the transcript-only summary row.
+        summary: String,
     },
     /// A tool invocation. `input_json` is the tool input lowered to a JSON
     /// **String** (decision §0.4).

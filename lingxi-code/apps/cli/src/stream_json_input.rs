@@ -381,9 +381,10 @@ fn parse_history_frame(frame: &Value) -> Option<HistoryInput> {
             if frame.get("subtype").and_then(Value::as_str) != Some("compact_boundary") {
                 return None;
             }
-            let compact_metadata: CompactBoundaryMetadata =
-                serde_json::from_value(camelize_json_keys(frame.get("compact_metadata")?.clone()))
-                    .ok()?;
+            let compact_metadata: CompactBoundaryMetadata = serde_json::from_value(
+                normalize_compact_metadata_keys(frame.get("compact_metadata")?.clone()),
+            )
+            .ok()?;
             Some(HistoryInput {
                 message: ConversationMessage::compact_boundary(
                     message_id,
@@ -397,7 +398,7 @@ fn parse_history_frame(frame: &Value) -> Option<HistoryInput> {
     }
 }
 
-fn camelize_json_keys(value: Value) -> Value {
+fn normalize_compact_metadata_keys(value: Value) -> Value {
     match value {
         Value::Object(object) => Value::Object(
             object
@@ -412,18 +413,42 @@ fn camelize_json_keys(value: Value) -> Value {
                             camel.extend(chars);
                         }
                     }
-                    (camel, camelize_json_keys(value))
+                    let value = if camel == "setAt" {
+                        normalize_system_time_keys(value)
+                    } else {
+                        normalize_compact_metadata_keys(value)
+                    };
+                    (camel, value)
                 })
                 .collect(),
         ),
         Value::Array(values) => Value::Array(
             values
                 .into_iter()
-                .map(camelize_json_keys)
+                .map(normalize_compact_metadata_keys)
                 .collect::<Vec<_>>(),
         ),
         scalar => scalar,
     }
+}
+
+fn normalize_system_time_keys(value: Value) -> Value {
+    let Value::Object(object) = value else {
+        return value;
+    };
+    Value::Object(
+        object
+            .into_iter()
+            .map(|(key, value)| {
+                let key = match key.as_str() {
+                    "secsSinceEpoch" => "secs_since_epoch".to_string(),
+                    "nanosSinceEpoch" => "nanos_since_epoch".to_string(),
+                    _ => key,
+                };
+                (key, value)
+            })
+            .collect(),
+    )
 }
 
 fn parse_assistant_content(content: Option<&Value>) -> Vec<ContentBlock> {
@@ -1094,6 +1119,29 @@ mod tests {
             bash,
             FrameAction::BashCommand(BashCommand { command }) if command == "printf hello"
         ));
+    }
+
+    #[test]
+    fn compact_boundary_history_preserves_camelized_active_goal() {
+        let action = process_line(
+            r#"{"type":"system","subtype":"compact_boundary","uuid":"11111111-1111-1111-1111-111111111111","compact_metadata":{"trigger":"manual","active_goal":{"condition":"finish","set_at":{"secs_since_epoch":1700000000,"nanos_since_epoch":0},"last_reason":"working"}}}"#,
+            &mut fresh_seen(),
+        )
+        .unwrap();
+        let FrameAction::History(HistoryInput {
+            message:
+                ConversationMessage::System {
+                    compact_metadata: Some(metadata),
+                    ..
+                },
+            ..
+        }) = action
+        else {
+            panic!("expected typed compact boundary");
+        };
+        let goal = metadata.active_goal.expect("active goal");
+        assert_eq!(goal.condition, "finish");
+        assert_eq!(goal.last_reason.as_deref(), Some("working"));
     }
 
     #[test]

@@ -54,8 +54,10 @@ pub struct TaskReminderItem {
 #[async_trait]
 pub trait TodoReminderTaskProvider: Send + Sync {
     /// Snapshot the current V2 task list (sorted by numeric id ascending, as
-    /// the store's `list()` already returns).
-    async fn task_items(&self) -> Vec<TaskReminderItem>;
+    /// the store's `list()` already returns). `session_id` is the live
+    /// orchestrator session, so providers can mirror the task tools' standalone
+    /// session fallback after env/team precedence is exhausted.
+    async fn task_items(&self, session_id: protocol::SessionId) -> Vec<TaskReminderItem>;
 }
 
 #[cfg(test)]
@@ -65,7 +67,7 @@ mod tests {
     struct StaticTasks(Vec<TaskReminderItem>);
     #[async_trait]
     impl TodoReminderTaskProvider for StaticTasks {
-        async fn task_items(&self) -> Vec<TaskReminderItem> {
+        async fn task_items(&self, _session_id: protocol::SessionId) -> Vec<TaskReminderItem> {
             self.0.clone()
         }
     }
@@ -77,6 +79,6 @@ mod tests {
             status: TodoState::Pending,
             subject: "x".into(),
         }]);
-        assert_eq!(p.task_items().await.len(), 1);
+        assert_eq!(p.task_items(protocol::SessionId::new()).await.len(), 1);
     }
 }

@@ -9,8 +9,8 @@
 /// (no leading/trailing whitespace; no LF.)
 pub const HEADER: &str = "You are LingXi, an agentic command-line coding assistant.";
 
-/// Section separator between header / `<env>` / `<memory>` /
-/// `<tools>` / footer. Two LFs (one blank line).
+/// Section separator between assembled prompt sections. Two LFs (one blank
+/// line); a model body may itself begin with an additional oracle-locked LF.
 pub const SECTION_SEP: &str = "\n\n";
 
 /// Final trailing newline appended once at the end of `assemble_system_prompt`.

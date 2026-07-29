@@ -58,6 +58,7 @@ fn env_block_marks_git_repo_true_but_emits_no_git_status_lines() {
         memory_files: Vec::new(),
         tool_names: Vec::new(),
         skills_available: false,
+        is_interactive: false,
         memory_dir: None,
         exclude_dynamic_sections: false,
     };
@@ -86,6 +87,7 @@ fn env_block_marks_git_repo_false_when_no_git_status() {
         memory_files: Vec::new(),
         tool_names: Vec::new(),
         skills_available: false,
+        is_interactive: false,
         memory_dir: None,
         exclude_dynamic_sections: false,
     };

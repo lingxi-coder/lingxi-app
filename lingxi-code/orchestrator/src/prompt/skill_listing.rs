@@ -12,6 +12,8 @@
 #![forbid(unsafe_code)]
 
 use async_trait::async_trait;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 /// Minimal per-skill view the formatter needs. The composition root builds
 /// these from `command_api::SlashCommand` so the orchestrator crate need not
@@ -72,9 +74,8 @@ fn skill_description(e: &SkillListingEntry) -> String {
         Some(w) if !w.is_empty() => format!("{} - {}", e.description, w),
         _ => e.description.clone(),
     };
-    if desc.chars().count() > MAX_LISTING_DESC_CHARS {
-        let kept: String = desc.chars().take(MAX_LISTING_DESC_CHARS - 1).collect();
-        format!("{kept}\u{2026}")
+    if string_width(&desc) > MAX_LISTING_DESC_CHARS {
+        truncate_to_width_ellipsis(&desc, MAX_LISTING_DESC_CHARS)
     } else {
         desc
     }
@@ -84,12 +85,45 @@ fn full_line(e: &SkillListingEntry) -> String {
     format!("- {}: {}", e.name, skill_description(e))
 }
 
+fn string_width(s: &str) -> usize {
+    UnicodeWidthStr::width(s)
+}
+
+fn truncate_to_width(s: &str, max_width: usize) -> String {
+    if string_width(s) <= max_width {
+        return s.to_string();
+    }
+    let mut used = 0;
+    let mut result = String::new();
+    for grapheme in s.graphemes(true) {
+        let width = string_width(grapheme);
+        if used + width > max_width {
+            break;
+        }
+        result.push_str(grapheme);
+        used += width;
+    }
+    result
+}
+
+fn truncate_to_width_ellipsis(s: &str, max_width: usize) -> String {
+    if string_width(s) <= max_width {
+        return s.to_string();
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+    if max_width == 1 {
+        return "\u{2026}".to_string();
+    }
+    let mut result = truncate_to_width(s, max_width - 1);
+    result.push('\u{2026}');
+    result
+}
+
 /// prompt.ts:70-171. Returns the listing body (no `<system-reminder>` wrapper);
 /// empty string when there are no entries.
 ///
-/// PARITY-NOTE: TS measures width with `stringWidth` (grapheme / East-Asian
-/// aware). This uses `chars().count()`, exact for ASCII descriptions and a
-/// close divergence only at the truncation boundary for wide/emoji text.
 #[must_use]
 pub fn format_within_budget(
     entries: &[SkillListingEntry],
@@ -102,7 +136,7 @@ pub fn format_within_budget(
 
     let full: Vec<String> = entries.iter().map(full_line).collect();
     let join_overhead = full.len().saturating_sub(1); // newlines between lines
-    let full_total: usize = full.iter().map(|l| l.chars().count()).sum::<usize>() + join_overhead;
+    let full_total: usize = full.iter().map(|l| string_width(l)).sum::<usize>() + join_overhead;
     if full_total <= budget {
         return full.join("\n");
     }
@@ -113,7 +147,7 @@ pub fn format_within_budget(
         .iter()
         .enumerate()
         .filter(|(_, e)| e.is_bundled)
-        .map(|(i, _)| full[i].chars().count() + 1) // +1 newline
+        .map(|(i, _)| string_width(&full[i]) + 1) // +1 newline
         .sum();
     let rest: Vec<usize> = (0..entries.len())
         .filter(|&i| !entries[i].is_bundled)
@@ -124,7 +158,7 @@ pub fn format_within_budget(
     let remaining = budget.saturating_sub(bundled_chars);
     let rest_name_overhead: usize = rest
         .iter()
-        .map(|&i| entries[i].name.chars().count() + "- ".len() + ": ".len())
+        .map(|&i| string_width(&entries[i].name) + "- ".len() + ": ".len())
         .sum::<usize>()
         + rest.len().saturating_sub(1); // newlines among rest
     let max_desc_len = remaining.saturating_sub(rest_name_overhead) / rest.len();
@@ -139,7 +173,7 @@ pub fn format_within_budget(
                 format!("- {}", e.name) // names-only fallback (prompt.ts:137-141)
             } else {
                 let d = skill_description(e);
-                let d: String = d.chars().take(max_desc_len).collect();
+                let d = truncate_to_width(&d, max_desc_len);
                 format!("- {}: {d}", e.name)
             }
         })
@@ -221,7 +255,37 @@ mod tests {
         let e = entry("x", &long, None, false);
         let d = skill_description(&e);
         assert_eq!(d.chars().count(), MAX_LISTING_DESC_CHARS);
+        assert_eq!(string_width(&d), MAX_LISTING_DESC_CHARS);
         assert!(d.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn description_cap_counts_cjk_by_display_width() {
+        let long = "中".repeat(200);
+        let e = entry("han", &long, None, false);
+        let d = skill_description(&e);
+        assert!(string_width(&d) <= MAX_LISTING_DESC_CHARS);
+        assert!(d.ends_with('\u{2026}'));
+        assert!(d.chars().all(|c| c == '中' || c == '\u{2026}'));
+    }
+
+    #[test]
+    fn description_cap_preserves_emoji_graphemes() {
+        let family = "👨‍👩‍👧‍👦";
+        let long = family.repeat(200);
+        let e = entry("emoji", &long, None, false);
+        let d = skill_description(&e);
+        let without_ellipsis = d.strip_suffix('\u{2026}').expect("ellipsis");
+        assert!(string_width(&d) <= MAX_LISTING_DESC_CHARS);
+        assert!(without_ellipsis
+            .graphemes(true)
+            .all(|grapheme| grapheme == family));
+    }
+
+    #[test]
+    fn ellipsis_truncation_respects_zero_and_one_column_budgets() {
+        assert_eq!(truncate_to_width_ellipsis("wide", 0), "");
+        assert_eq!(truncate_to_width_ellipsis("wide", 1), "\u{2026}");
     }
 
     #[test]
@@ -251,6 +315,19 @@ mod tests {
         assert!(body.contains("- user_b"));
         // Non-bundled descriptions are dropped under a tiny budget.
         assert!(!body.contains("Some user skill description"));
+    }
+
+    #[test]
+    fn budget_counts_cjk_descriptions_by_display_width() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("SLASH_COMMAND_TOOL_CHAR_BUDGET", "30");
+        let entries = vec![entry("han", "中".repeat(20).as_str(), None, false)];
+        let body = format_within_budget(&entries, Some(200_000));
+        std::env::remove_var("SLASH_COMMAND_TOOL_CHAR_BUDGET");
+
+        assert_ne!(body, full_line(&entries[0]));
+        assert_eq!(body, "- han: 中中中中中中中中中中中");
+        assert!(string_width(&body) <= 30);
     }
 
     #[test]

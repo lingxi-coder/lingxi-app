@@ -16,6 +16,7 @@ fn ctx_minimal() -> SystemPromptContext {
         memory_files: Vec::new(),
         tool_names: Vec::new(),
         skills_available: false,
+        is_interactive: false,
         memory_dir: None,
         exclude_dynamic_sections: false,
     }
@@ -38,9 +39,10 @@ fn minimal_assembly_no_memory_no_tools_no_footer() {
     assert!(!out.contains("Contents of "));
     assert!(!out.contains("<tools>"));
     assert!(!out.contains("Notes:"));
-    // GAP-2: # Context management is the last body section; it follows env block.
+    // Context management follows the env block; the default act-don't-rederive
+    // slot is the final 2.1.220 section.
     assert!(out.contains("# Context management"));
-    assert!(out.ends_with("you don't need to wrap up early or hand off mid-task."));
+    assert!(out.ends_with("give a recommendation, not an exhaustive survey"));
     // The `# Memory` section is OMITTED when memory_dir is None (default) —
     // byte-identical to a build without the memory feature.
     assert!(!out.contains("# Memory\n"));
@@ -49,21 +51,22 @@ fn minimal_assembly_no_memory_no_tools_no_footer() {
 
 #[test]
 fn memory_section_emitted_when_memory_dir_set() {
-    // 2.1.206 `# Memory` write-instructions section fires when the memory
-    // feature is active (memory_dir = Some, i.e. the prefetch is wired).
+    // The standard Claude profile receives the complete 2.1.220 auto-memory
+    // protocol when the memory feature is active.
     let mut c = ctx_minimal();
     c.memory_dir = Some(PathBuf::from("/home/u/.lingxi/memdir"));
     let out = assemble_system_prompt(&c);
     assert!(out.contains(
-        "# Memory\n\nYou have a persistent file-based memory at `/home/u/.lingxi/memdir`. This directory already exists \u{2014} write to it directly with the Write tool"
+        "# auto memory\n\nYou have a persistent, file-based memory system at `/home/u/.lingxi/memdir`. This directory already exists \u{2014} write to it directly with the Write tool"
     ));
-    assert!(out.contains("`MEMORY.md` is the index loaded into context each session"));
-    assert!(out.contains("code structure, past fixes, git history, LINGXI.md)"));
-    // Positioned as a dynamic post-env section, BEFORE `# Context management`.
+    assert!(out.contains("`MEMORY.md` is always loaded into your conversation context"));
+    assert!(out.contains("Anything already documented in LINGXI.md files."));
+    // The 2.1.220 dynamic order is session guidance → memory → environment →
+    // context management.
     let i_env = out.find("# Environment").expect("env");
-    let i_mem = out.find("# Memory\n").expect("memory");
+    let i_mem = out.find("# auto memory\n").expect("memory");
     let i_ctx = out.find("# Context management").expect("ctx-mgmt");
-    assert!(i_env < i_mem, "memory follows the env block");
+    assert!(i_mem < i_env, "memory precedes the env block");
     assert!(i_mem < i_ctx, "memory precedes context management");
 }
 
@@ -85,7 +88,7 @@ fn memory_files_are_not_spliced_into_the_prompt() {
     assert!(!out.contains("Contents of /proj/LINGXI.md"));
     assert!(!out.contains("<tools>"));
     assert!(!out.contains("Notes:"));
-    assert!(out.ends_with("you don't need to wrap up early or hand off mid-task."));
+    assert!(out.ends_with("give a recommendation, not an exhaustive survey"));
 }
 
 #[test]
@@ -103,12 +106,13 @@ fn section_order_locked_header_body_env() {
 #[test]
 fn double_lf_between_each_section() {
     let out = assemble_system_prompt(&ctx_minimal());
-    // After HEADER, before the static BODY — exactly `\n\n`, then the `Pym`
-    // opening paragraph.
+    // The cache splitter keeps HEADER as block 0 and the body as block 1.
+    // Claude's body block itself begins with LF, so the assembled boundary is
+    // the normal two-LF section separator plus that byte: exactly three LFs.
     let header_end = "You are LingXi, an agentic command-line coding assistant.";
     let after_header = &out[out.find(header_end).unwrap() + header_end.len()..];
     assert!(after_header.starts_with(
-        "\n\nYou are an interactive agent that helps users with software engineering tasks."
+        "\n\n\nYou are an interactive agent that helps users with software engineering tasks."
     ));
     // The env section follows the body, on its own `\n\n` boundary, opening with
     // the `# Environment` heading.
@@ -138,6 +142,7 @@ fn static_body_sections_present_and_ordered_between_header_and_env() {
     // claude-code `J0` emits 6 static sections + 2 dynamic before the env block
     // (text output, session guidance), plus context management AFTER the env block.
     let mut ctx = ctx_minimal();
+    ctx.is_interactive = true;
     ctx.tool_names = vec![
         "Read".into(),
         "Edit".into(),

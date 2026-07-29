@@ -4291,6 +4291,8 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "traits",
+ "unicode-segmentation",
+ "unicode-width 0.1.14",
  "uuid",
 ]
 
@@ -6631,6 +6633,7 @@ dependencies = [
  "mcp",
  "memory",
  "orchestrator",
+ "outputstyles",
  "permission",
  "platform-posix",
  "platform-posix-minimal",

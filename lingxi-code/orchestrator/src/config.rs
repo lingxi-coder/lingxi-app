@@ -89,6 +89,13 @@ pub struct OrchestratorConfig {
     #[serde(default)]
     pub interactive_permissions: bool,
 
+    /// Whether the main session should follow interactive CLI semantics for
+    /// prompt assembly, session flags, and request metadata. This is distinct
+    /// from [`Self::interactive_permissions`]: a host can surface permission
+    /// prompts remotely while still needing headless/SDK session semantics.
+    #[serde(default)]
+    pub interactive_session: bool,
+
     /// If `Some(id)`, the orchestrator was started via `--resume <id>` or
     /// `/resume <id>` (M5-08) and must replay messages from the on-disk
     /// JSONL before running the first turn. The same `id` is re-used for
@@ -333,6 +340,7 @@ impl Default for OrchestratorConfig {
             system_prompt_override: None,
             exclude_dynamic_system_prompt_sections: false,
             interactive_permissions: false,
+            interactive_session: false,
             resume_session_id: None,
             escalate_max_output_tokens: false,
             enable_token_budget: false,
@@ -390,6 +398,7 @@ mod tests {
             system_prompt_override: Some("custom".into()),
             exclude_dynamic_system_prompt_sections: false,
             interactive_permissions: true,
+            interactive_session: true,
             resume_session_id: None,
             escalate_max_output_tokens: true,
             enable_token_budget: true,
@@ -418,6 +427,7 @@ mod tests {
         assert_eq!(back.fallback_model.as_deref(), Some("claude-sonnet-4-6"));
         assert_eq!(back.system_prompt_override.as_deref(), Some("custom"));
         assert!(back.interactive_permissions);
+        assert!(back.interactive_session);
         assert!(back.resume_session_id.is_none());
         assert!(back.escalate_max_output_tokens);
         assert!(back.enable_token_budget);
@@ -514,6 +524,11 @@ mod tests {
     #[test]
     fn default_interactive_permissions_is_false() {
         assert!(!OrchestratorConfig::default().interactive_permissions);
+    }
+
+    #[test]
+    fn default_interactive_session_is_false() {
+        assert!(!OrchestratorConfig::default().interactive_session);
     }
 
     #[test]

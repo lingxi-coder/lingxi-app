@@ -15,6 +15,12 @@
       "data": "REDACTED_BASE64"
     },
     {
+      "type": "compact_boundary",
+      "messages_before": 12,
+      "messages_after": 3,
+      "summary": "hidden compact summary"
+    },
+    {
       "type": "tool_use",
       "id": "toolu_01",
       "tool": "Edit",

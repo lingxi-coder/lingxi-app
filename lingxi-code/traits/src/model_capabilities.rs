@@ -171,6 +171,9 @@ fn known_wrapper_suffix(suffix: &str) -> bool {
     if suffix.is_empty() || suffix == "-eap" {
         return true;
     }
+    if let Some(date) = suffix.strip_prefix('@') {
+        return date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit());
+    }
     if let Some(version) = suffix.strip_prefix("-v") {
         let mut parts = version.split(':');
         return parts
@@ -182,9 +185,36 @@ fn known_wrapper_suffix(suffix: &str) -> bool {
             && parts.next().is_none();
     }
     if let Some(date) = suffix.strip_prefix('-') {
-        return date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit());
+        if date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit()) {
+            return true;
+        }
+        if let Some((date, version)) = date.split_once("-v") {
+            let mut version_parts = version.split(':');
+            return date.len() == 8
+                && date.bytes().all(|b| b.is_ascii_digit())
+                && version_parts.next().is_some_and(|part| {
+                    !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit())
+                })
+                && version_parts.next().is_some_and(|part| {
+                    !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit())
+                })
+                && version_parts.next().is_none();
+        }
     }
     false
+}
+
+fn claude_transport_candidate(model_id: &str) -> Option<&str> {
+    if model_id.starts_with("claude-") {
+        return Some(model_id);
+    }
+    if let Some(candidate) = model_id.strip_prefix("anthropic.") {
+        return candidate.starts_with("claude-").then_some(candidate);
+    }
+    let (region, candidate) = model_id.split_once(".anthropic.")?;
+    matches!(region, "us" | "eu" | "apac" | "global")
+        .then_some(candidate)
+        .filter(|candidate| candidate.starts_with("claude-"))
 }
 
 /// Strip the decorations a model id can carry before a registry lookup:
@@ -196,9 +226,9 @@ pub fn normalize_model_id(model_id: &str) -> String {
     let bare = model_id.rsplit('/').next().unwrap_or(model_id);
     let bare = bare.split('[').next().unwrap_or(bare);
     let lower = bare.trim().to_ascii_lowercase();
-    let candidate = lower
-        .find("claude-")
-        .map_or(lower.as_str(), |start| &lower[start..]);
+    let Some(candidate) = claude_transport_candidate(&lower) else {
+        return lower;
+    };
     let without_eap = candidate.strip_suffix("-eap").unwrap_or(candidate);
     KNOWN_MODEL_IDS
         .iter()
@@ -386,11 +416,30 @@ mod tests {
             "claude-opus-5-eap",
             "openrouter/anthropic/claude-opus-5",
             "  claude-opus-5  ",
+            "claude-opus-5@20260728",
+            "us.anthropic.claude-opus-5-20260728-v1:0",
         ] {
             assert!(
                 has_capability(id, ModelCapability::LeanPrompt),
                 "{id} must resolve to claude-opus-5"
             );
+        }
+    }
+
+    #[test]
+    fn unrelated_claude_substrings_stay_on_the_full_harness() {
+        for id in [
+            "vendor-compat-claude-opus-5",
+            "not-anthropic.claude-opus-5",
+            "openrouter/vendor/vendor-compat-claude-opus-5",
+        ] {
+            assert_eq!(
+                normalize_model_id(id),
+                id.rsplit('/').next().unwrap(),
+                "{id}"
+            );
+            assert!(capabilities_for_loose(id).is_empty(), "{id}");
+            assert_eq!(prompt_profile_for(id), PromptProfile::FullHarness, "{id}");
         }
     }
 

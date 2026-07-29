@@ -32,6 +32,11 @@
 //!   [`apply_beta_header_with_auth`] (the binary's `VEe` push uses `iE()`
 //!   token-presence; LingXi already threads `is_subscriber`, so the existing
 //!   mechanism is preserved rather than duplicated).
+//! - **cache-editing beta/session latch** is intentionally absent here. Claude
+//!   Code arms cache editing only with an additional once-per-session beta
+//!   latch plus cross-call pinned state; LingXi's request mutator remains
+//!   fail-closed in `ApiService::should_use_cache_editing()` until that full
+//!   protocol is wired, so this assembler emits no cache-editing-specific beta.
 //! - The per-feature betas `effort` / `task-budgets` / `advisor-tool` /
 //!   `web-search` / `structured-outputs` are emitted by the binary ONLY when the
 //!   request carries that param (they live outside `xLr`, added at the

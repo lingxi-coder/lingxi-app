@@ -93,6 +93,7 @@ pub mod structured_output;
 use crate::argv::Argv;
 use clap::error::ErrorKind;
 use std::ffi::OsString;
+use std::path::Path;
 use std::sync::Arc;
 
 /// First missing required argument's bare name from a clap
@@ -121,6 +122,48 @@ fn ctx_string(e: &clap::Error, kind: clap::error::ContextKind) -> Option<String>
         clap::error::ContextValue::String(s) => Some(s.clone()),
         clap::error::ContextValue::Strings(v) => v.first().cloned(),
         _ => None,
+    }
+}
+
+/// Check for an occupied transcript id anywhere under the current config
+/// home's `projects/` store. Fresh `--session-id` launches/forks must fail
+/// before runtime construction instead of appending to an existing JSONL.
+///
+/// A missing store is an empty store. Every other I/O failure is surfaced so
+/// the caller fails closed instead of treating an unreadable store as proof
+/// that the id is unused.
+async fn session_id_exists_in_store(
+    config_home: &Path,
+    session_id: uuid::Uuid,
+) -> std::io::Result<bool> {
+    let projects_root = config_home.join("projects");
+    let mut entries = match tokio::fs::read_dir(&projects_root).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(std::io::Error::new(
+                error.kind(),
+                format!("failed to read {}: {error}", projects_root.display()),
+            ));
+        }
+    };
+    let file_name = format!("{session_id}.jsonl");
+    loop {
+        let Some(entry) = entries.next_entry().await.map_err(|error| {
+            std::io::Error::new(
+                error.kind(),
+                format!("failed to scan {}: {error}", projects_root.display()),
+            )
+        })?
+        else {
+            return Ok(false);
+        };
+        if !entry.file_type().await?.is_dir() {
+            continue;
+        }
+        if tokio::fs::try_exists(entry.path().join(&file_name)).await? {
+            return Ok(true);
+        }
     }
 }
 
@@ -684,10 +727,23 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
             eprintln!("Error: Invalid session ID. Must be a valid UUID.");
             return exit_codes::ARGV_ERROR;
         }
-        // (c) DEFERRED vs claude: the "Session ID <id> is already in use" check
-        //     (sessionIdExists) needs a cross-project session-store lookup; not
-        //     yet wired. A collision currently reuses the transcript path rather
-        //     than erroring.
+        // (c) A user-supplied fresh session id must not reuse any existing
+        //     transcript path, even from another project under the same config
+        //     home. Reject before runtime construction so no append/write path
+        //     is opened against the occupied JSONL.
+        if let Some(parsed_id) = protocol::SessionId::parse_prefixed(sid) {
+            match session_id_exists_in_store(&run::lingxi_home_dir(), parsed_id.as_uuid()).await {
+                Ok(true) => {
+                    eprintln!("Error: Session ID {sid} is already in use.");
+                    return exit_codes::ARGV_ERROR;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    eprintln!("Error: Unable to verify session ID uniqueness: {error}");
+                    return exit_codes::RUNTIME_ERROR;
+                }
+            }
+        }
     }
 
     // `--setting-sources <user,project,local>` token validation (claude-code
@@ -1411,6 +1467,52 @@ mod startup_notice_tests {
                 std::env::set_var(k, v);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod session_id_store_tests {
+    use super::session_id_exists_in_store;
+    use session::session_path;
+    use uuid::Uuid;
+
+    #[tokio::test]
+    async fn detects_existing_session_id_in_another_project_dir() {
+        let home = tempfile::tempdir().expect("config home");
+        let project_a = tempfile::tempdir().expect("project a");
+        let session_id = Uuid::parse_str("11111111-2222-3333-4444-555555555555").unwrap();
+        let transcript = session_path(
+            home.path(),
+            &project_a.path().display().to_string(),
+            &session_id.to_string(),
+        );
+        std::fs::create_dir_all(transcript.parent().expect("project dir")).expect("mkdir");
+        std::fs::write(&transcript, "").expect("write transcript");
+
+        assert!(
+            session_id_exists_in_store(home.path(), session_id)
+                .await
+                .expect("store scan"),
+            "cross-project transcript lookup should find occupied ids anywhere under config_home/projects"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_projects_store_is_empty() {
+        let home = tempfile::tempdir().expect("config home");
+        assert!(!session_id_exists_in_store(home.path(), Uuid::new_v4())
+            .await
+            .expect("missing projects store"));
+    }
+
+    #[tokio::test]
+    async fn unreadable_projects_store_fails_closed() {
+        let home = tempfile::tempdir().expect("config home");
+        std::fs::write(home.path().join("projects"), "not a directory").expect("sentinel file");
+        let error = session_id_exists_in_store(home.path(), Uuid::new_v4())
+            .await
+            .expect_err("invalid projects store must not be treated as empty");
+        assert_ne!(error.kind(), std::io::ErrorKind::NotFound);
     }
 }
 

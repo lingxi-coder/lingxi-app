@@ -578,10 +578,11 @@ pub use permission::gate::{
 ///
 /// **M5-05:** the trait surface moved to `lingxi-traits` but the impl
 /// stays here for back-compat with M5-02 / M5-04 tests that import
-/// `crate::test_support::NoOpPermissionGate`. Production wiring (M5-12
-/// CLI) chooses between this no-op and
-/// [`permission::InteractivePromptingGate`] based on
-/// [`crate::OrchestratorConfig::interactive_permissions`].
+/// `crate::test_support::NoOpPermissionGate`. Production composition chooses
+/// between this no-op and [`permission::InteractivePromptingGate`] before
+/// constructing the orchestrator; the separate
+/// [`crate::OrchestratorConfig::interactive_session`] flag controls
+/// prompt/request interactivity.
 pub struct NoOpPermissionGate;
 
 #[async_trait]

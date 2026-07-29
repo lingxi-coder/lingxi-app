@@ -784,10 +784,10 @@ mod tests {
     }
 
     #[test]
-    fn build_request_cache_editing_armed_stamps_refs_and_inserts_block() {
-        // Gate ARMED (subscriber + opt-in env): tool_results before the marker
-        // get cache_reference=tool_use_id, and injected new+pinned cache_edits
-        // are inserted with cross-block delete-ref dedup.
+    fn build_request_cache_editing_opt_in_remains_dormant_without_protocol() {
+        // Even with the old opt-in env set, the path stays fail-closed until
+        // the cache-editing beta/session latch and cross-call pinned state are
+        // implemented together.
         use crate::{CacheEdit, ContentBlock as LlmContentBlock};
         let _guard = CACHE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("DISABLE_PROMPT_CACHING");
@@ -837,54 +837,24 @@ mod tests {
             .expect("build_request");
         std::env::remove_var("LINGXI_CACHE_EDITING");
 
-        // (a) cache_reference stamped on the tool_result (it precedes the marker).
-        let mut stamped = 0;
+        // No cache_reference stamping and no cache_edits insertion anywhere.
         for m in &req.messages {
             for b in &m.content {
+                assert!(
+                    !matches!(b, LlmContentBlock::CacheEdits { .. }),
+                    "cache_edits remain unreachable until the full protocol is wired"
+                );
                 if let LlmContentBlock::ToolResult {
-                    tool_call_id,
-                    cache_reference,
-                    ..
+                    cache_reference, ..
                 } = b
                 {
-                    assert_eq!(cache_reference.as_deref(), Some(tool_call_id.as_str()));
-                    stamped += 1;
+                    assert_eq!(
+                        *cache_reference, None,
+                        "cache_reference must remain absent on the fail-closed path"
+                    );
                 }
             }
         }
-        assert_eq!(stamped, 1, "exactly one tool_result stamped");
-
-        // (b) collect every cache_edits delete ref across the whole request.
-        let mut refs: Vec<String> = vec![];
-        for m in &req.messages {
-            for b in &m.content {
-                if let LlmContentBlock::CacheEdits { edits } = b {
-                    for e in edits {
-                        let CacheEdit::Delete { cache_reference } = e;
-                        refs.push(cache_reference.clone());
-                    }
-                }
-            }
-        }
-        refs.sort();
-        // dedup: "dup" appears once (pinned wins, new collapses), plus p1 + n1.
-        assert_eq!(
-            refs,
-            vec!["dup".to_string(), "n1".to_string(), "p1".to_string()]
-        );
-
-        // (c) the pinned block landed in the tool_result user message, spliced
-        // immediately AFTER the tool_result block.
-        let pinned_msg = &req.messages[1];
-        let tr_pos = pinned_msg
-            .content
-            .iter()
-            .position(|b| matches!(b, LlmContentBlock::ToolResult { .. }))
-            .expect("tool_result present");
-        assert!(matches!(
-            pinned_msg.content[tr_pos + 1],
-            LlmContentBlock::CacheEdits { .. }
-        ));
     }
 
     // ── build_request profile threading (Unit B Task 5) ──────────────────────
@@ -3120,6 +3090,42 @@ mod tests {
         assert_eq!(raw.five_hour.map(|w| w.resets_at), Some(1_750_000_005));
         assert_eq!(raw.seven_day.map(|w| w.utilization), Some(0.77));
         assert_eq!(raw.seven_day.map(|w| w.resets_at), Some(1_750_000_007));
+    }
+
+    /// A terminal 429 with NO per-window quartet must still overwrite the raw
+    /// snapshot with the EMPTY parse so stale statusline state can be cleared.
+    #[test]
+    fn terminal_429_without_raw_headers_clears_raw_snapshot() {
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter(transport);
+
+        adapter.record_rate_limit_from_headers(
+            &BTreeMap::from([
+                (
+                    "anthropic-ratelimit-unified-5h-utilization".to_string(),
+                    "0.42".to_string(),
+                ),
+                (
+                    "anthropic-ratelimit-unified-5h-reset".to_string(),
+                    "1750000005".to_string(),
+                ),
+            ]),
+            "",
+        );
+        assert_ne!(
+            adapter.last_raw_utilization(),
+            Some(RawUtilization::default()),
+            "precondition: seed a non-empty raw snapshot first"
+        );
+
+        adapter.record_rate_limit_from_429(&BTreeMap::new(), None);
+        adapter.promote_pending_429();
+
+        assert_eq!(
+            adapter.last_raw_utilization(),
+            Some(RawUtilization::default()),
+            "terminal 429 must preserve the EMPTY raw snapshot to clear stale state"
+        );
     }
 
     /// A 429-with-headers that is RETRIED and then RECOVERS on a 200 must NOT

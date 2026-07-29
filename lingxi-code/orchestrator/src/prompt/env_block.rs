@@ -3,8 +3,8 @@
 //! platform, shell, OS version, model + cutoff, and the static model/CLI
 //! guidance lines.
 //!
-//! Byte-locked against claude-code v2.1.183 `Kym` (the `env_info_simple`
-//! body section, binary offset ~205822740). The MAIN prompt's
+//! Byte-locked against the clean-room Claude Code 2.1.220 `env_info_simple`
+//! section. The MAIN prompt's
 //! `getSystemPrompt` selects `Kym` (`env_info_simple`) when
 //! `excludeDynamicSections` is false. (In v2.1.183 the SUBAGENT path selected
 //! the static `zym` — model + cutoff only; as of v2.1.186 the subagent path
@@ -47,12 +47,12 @@ use crate::prompt::SystemPromptContext;
 use std::fmt::Write;
 
 /// Canonical model-id constants interpolated into the "most recent Claude
-/// models" static line. 2.1.198 (`hhc`): the line renders `latest_per_family`
-/// (`{fable: claude-fable-5, opus: claude-opus-4-8, sonnet: claude-sonnet-5,
+/// models" static line. 2.1.220 (`hhc`): the line renders `latest_per_family`
+/// (`{fable: claude-fable-5, opus: claude-opus-5, sonnet: claude-sonnet-5,
 /// haiku: claude-haiku-4-5}`) as `${display_name}: '${id}'` pairs, with
 /// haiku-4-5 special-cased to its dated id.
 const MODEL_ID_FABLE: &str = "claude-fable-5";
-const MODEL_ID_OPUS: &str = "claude-opus-4-8";
+const MODEL_ID_OPUS: &str = "claude-opus-5";
 const MODEL_ID_SONNET: &str = "claude-sonnet-5";
 const MODEL_ID_HAIKU: &str = "claude-haiku-4-5-20251001";
 
@@ -72,10 +72,15 @@ pub fn format(ctx: &SystemPromptContext) -> String {
     // Each subsequent element is one ` - ` bullet on its own line.
     // `cwd` uses display() — paths with non-UTF8 bytes get lossy-rendered
     // (claude-code is JS, always UTF-8).
+    // Node's `process.cwd()` reports the physical path (for example macOS
+    // `/var` resolves to `/private/var`). Canonicalize the already-existing
+    // session cwd for the same observable value, while retaining the supplied
+    // path if an unusual test/preview context is not materialized on disk.
+    let physical_cwd = ctx.cwd.canonicalize().unwrap_or_else(|_| ctx.cwd.clone());
     write!(
         &mut s,
         "\n - Primary working directory: {}",
-        ctx.cwd.display()
+        physical_cwd.display()
     )
     .unwrap();
 
@@ -130,8 +135,8 @@ pub fn format(ctx: &SystemPromptContext) -> String {
         write!(&mut s, "\n - Assistant knowledge cutoff is {cutoff}.").unwrap();
     }
 
-    // Static guidance lines — byte-verbatim vs the 2.1.198 binary (`hhc`):
-    // lead sentence "the Claude 5 family, Opus 4.8, and Haiku 4.5"; the Model
+    // Static guidance lines — byte-verbatim vs the 2.1.220 binary (`hhc`):
+    // lead sentence "the Claude 5 family and Haiku 4.5"; the Model
     // IDs render latest_per_family (fable, opus, sonnet→claude-sonnet-5,
     // haiku→dated id). The em-dash is U+2014.
     //
@@ -141,16 +146,16 @@ pub fn format(ctx: &SystemPromptContext) -> String {
     // `/model`; feeding THAT model "the most recent Claude models are … Fable 5:
     // 'claude-fable-5' …" both misinforms it and pollutes its self-identity (it
     // echoes claude-fable-5 when asked "what model are you"). Gate both
-    // Claude-specific lines on the active model being a Claude model; the model
-    // id is the reliable signal (anthropic / Bedrock `anthropic.claude-*` /
-    // Vertex / Copilot `claude-*` all contain "claude"). The Claude path stays
-    // byte-identical to claude-code.
-    let is_claude = ctx.model.to_ascii_lowercase().contains("claude");
+    // Claude-specific lines on the active model being a recognized Claude
+    // profile. Raw substring matching here previously polluted custom
+    // non-Claude model ids that merely contained `claude`.
+    let is_claude = traits::model_capabilities::prompt_profile_for(&ctx.model)
+        != traits::model_capabilities::PromptProfile::FullHarness;
     if is_claude {
         write!(
             &mut s,
-            "\n - The most recent Claude models are the Claude 5 family, Opus 4.8, and Haiku 4.5. \
-Model IDs \u{2014} Fable 5: '{MODEL_ID_FABLE}', Opus 4.8: '{MODEL_ID_OPUS}', \
+            "\n - The most recent Claude models are the Claude 5 family and Haiku 4.5. \
+Model IDs \u{2014} Fable 5: '{MODEL_ID_FABLE}', Opus 5: '{MODEL_ID_OPUS}', \
 Sonnet 5: '{MODEL_ID_SONNET}', Haiku 4.5: '{MODEL_ID_HAIKU}'. \
 When building AI applications, default to the latest and most capable Claude models."
         )
@@ -170,7 +175,7 @@ web app (claude.ai/code), and IDE extensions (VS Code, JetBrains).",
         s.push_str(
             "\n - Fast mode for LingXi uses Claude Opus with faster output \
 (it does not downgrade to a smaller model). It can be toggled with /fast and is \
-available on Opus 4.8/4.7.",
+available on Opus 5/4.8/4.7.",
         );
     }
 
@@ -198,6 +203,7 @@ mod tests {
             memory_files: Vec::new(),
             tool_names: Vec::new(),
             skills_available: false,
+            is_interactive: false,
             memory_dir: None,
             exclude_dynamic_sections: false,
         }
@@ -218,8 +224,8 @@ mod tests {
         assert!(!out.contains("Assistant knowledge cutoff"));
         // Static lines present, em-dash byte-exact.
         assert!(out.contains("Model IDs \u{2014} Fable 5: 'claude-fable-5'"));
-        assert!(out.contains("Opus 4.8: 'claude-opus-4-8'"));
-        assert!(out.ends_with("available on Opus 4.8/4.7."));
+        assert!(out.contains("Opus 5: 'claude-opus-5'"));
+        assert!(out.ends_with("available on Opus 5/4.8/4.7."));
     }
 
     #[test]

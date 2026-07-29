@@ -30,7 +30,7 @@
 //!   `\n\n`. The block carries NO trailing newline (the assembler joins it).
 #![forbid(unsafe_code)]
 
-use crate::prompt::env_meta::{knowledge_cutoff_for_model, marketing_name_for_model};
+use crate::prompt::env_meta::{detect_shell, knowledge_cutoff_for_model, marketing_name_for_model};
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
@@ -43,24 +43,6 @@ fn node_platform_name(rust_os: &str) -> &str {
         "macos" => "darwin",
         "windows" => "win32",
         other => other,
-    }
-}
-
-/// The bare shell value (`zsh`/`bash`/raw `$SHELL`), collapsed by substring —
-/// mirrors the main-prompt `tIo` shell detection (conversation.rs). `unknown`
-/// when `$SHELL` is unset.
-#[must_use]
-fn detect_shell() -> String {
-    let raw = std::env::var("SHELL")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "unknown".into());
-    if raw.contains("zsh") {
-        "zsh".into()
-    } else if raw.contains("bash") {
-        "bash".into()
-    } else {
-        raw
     }
 }
 

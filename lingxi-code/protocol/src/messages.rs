@@ -231,9 +231,10 @@ pub struct CompactActiveGoalState {
     /// User-supplied goal condition.
     pub condition: String,
     /// When the goal became active.
+    #[serde(alias = "setAt")]
     pub set_at: std::time::SystemTime,
     /// Most recent stop-time evaluation reason, when available.
-    #[serde(default)]
+    #[serde(default, alias = "lastReason")]
     pub last_reason: Option<String>,
 }
 
@@ -793,6 +794,26 @@ mod tests {
             serde_json::from_value::<ConversationMessage>(value).unwrap(),
             message
         );
+    }
+
+    #[test]
+    fn compact_active_goal_accepts_sdk_camel_case_fields() {
+        let metadata: CompactBoundaryMetadata = serde_json::from_value(serde_json::json!({
+            "trigger": "manual",
+            "activeGoal": {
+                "condition": "all checks pass",
+                "setAt": {
+                    "secs_since_epoch": 1_700_000_000_u64,
+                    "nanos_since_epoch": 0_u32
+                },
+                "lastReason": "still working"
+            }
+        }))
+        .expect("SDK camelCase active goal must deserialize");
+
+        let goal = metadata.active_goal.expect("active goal");
+        assert_eq!(goal.condition, "all checks pass");
+        assert_eq!(goal.last_reason.as_deref(), Some("still working"));
     }
 
     #[test]

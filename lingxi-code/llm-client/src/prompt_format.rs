@@ -13,8 +13,8 @@
 
 use crate::{CacheControl, CacheScope, SystemBlock};
 
-/// Opening literal of every assembled system prompt — byte-identical to
-/// claude-code `DEFAULT_PREFIX` (`constants/system.ts:10`).
+/// Opening literal of every assembled system prompt — LingXi's branded
+/// equivalent of Claude Code's `DEFAULT_PREFIX`.
 ///
 /// Private to this module: it is the formatting boundary the splitter
 /// uses to detect the prefix bucket, not a content constant exposed to
@@ -68,9 +68,9 @@ pub struct SplitOptions {
 ///
 /// LingXi assembles ONE concatenated string (see
 /// `assemble_system_prompt_with_style` in the orchestrator) whose
-/// leading section is exactly the [`HEADER`] literal — byte-identical
-/// to claude-code's `DEFAULT_PREFIX`, which is the single member of
-/// `CLI_SYSPROMPT_PREFIXES`. LingXi has no
+/// leading section is exactly the [`HEADER`] literal. It occupies the same
+/// cache bucket as Claude Code's `DEFAULT_PREFIX`, but intentionally uses
+/// LingXi's product identity. LingXi has no
 /// `x-anthropic-billing-header` attribution machinery (it is GrowthBook
 /// / Bun-attestation gated even in TS and is never emitted here), so
 /// the attribution bucket is permanently empty. The faithful split for

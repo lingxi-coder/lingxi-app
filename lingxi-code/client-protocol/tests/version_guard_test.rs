@@ -504,6 +504,11 @@ fn current_contract_index() -> ContractIndex {
     put("MessageBlockDto::RedactedThinking", "redacted_thinking");
     put("MessageBlockDto::RedactedThinking.data", "String");
 
+    put("MessageBlockDto::CompactBoundary", "compact_boundary");
+    put("MessageBlockDto::CompactBoundary.messages_before", "u32");
+    put("MessageBlockDto::CompactBoundary.messages_after", "u32");
+    put("MessageBlockDto::CompactBoundary.summary", "String");
+
     put("MessageBlockDto::ToolUse", "tool_use");
     put("MessageBlockDto::ToolUse.id", "String");
     put("MessageBlockDto::ToolUse.tool", "String");

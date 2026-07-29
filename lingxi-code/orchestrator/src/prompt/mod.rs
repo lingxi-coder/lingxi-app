@@ -1,6 +1,5 @@
-//! System prompt assembler — produces the byte-locked `LingXi` system
-//! prompt by concatenating header / `<env>` / `<memory>` / `<tools>` /
-//! footer sections. See plan M5-03 for the source-of-truth byte-locks.
+//! System prompt assembler for the model-specific Claude Code 2.1.220 prompt
+//! profiles and LingXi's complete non-Claude harness.
 //!
 //! Entry point: [`assemble_system_prompt`].
 #![forbid(unsafe_code)]
@@ -81,23 +80,18 @@ pub fn assemble_system_prompt(ctx: &SystemPromptContext) -> String {
 /// Assemble a system prompt, optionally injecting an active output-style
 /// section.
 ///
-/// Section order is LOCKED (claude-code v2.1.183 J0 / `getSystemPrompt`,
-/// interactive):
+/// Section order is locked to the clean-room Claude Code 2.1.220 oracle:
 ///
 /// 1. `HEADER`
-/// 2. static BODY — the six claude-code `J0` static sections (opening +
-///    `# System` + `# Doing tasks` + `# Executing actions with care` +
-///    `# Using your tools` + `# Tone and style`); see [`body_sections::format`].
-/// 3. `# Environment` markdown block — cwd / git-repo bool / platform / shell /
-///    OS version / model line / cutoff / static model+CLI guidance; see
-///    [`env_block::format`] (claude-code `Kym`).
-/// 4. `# Output Style: <name>` + body (elided when `output_style` is `None`).
+/// 2. model-selected body and session guidance
+/// 3. optional file-memory protocol
+/// 4. optional `# Environment` block
+/// 5. optional output style and background-session sections
+/// 6. context management and model-specific post-context sections
 ///
-/// NO memory section (R-P1c/R-P1d: LINGXI.md is an additional-context meta
-/// message, not a system-prompt section), NO `<tools>` block (tools reach the
-/// model via the wire `tools:` array), and NO `Notes:` FOOTER (R-P1b: the
-/// footer is subagent-only `H$t`). gitStatus is appended to the prompt by the
-/// caller as a trailing dynamic cache block (claude-code `WZa`), not here.
+/// LINGXI.md content remains an additional-context meta message rather than a
+/// system-prompt section. Tools travel in the wire `tools` array, and the
+/// `Notes:` footer remains subagent-only.
 ///
 /// Separator between sections is exactly `\n\n` (one blank line).
 ///
@@ -123,10 +117,9 @@ pub fn assemble_system_prompt_with_style(
     // byte-identical to before).
     push_section_separator(&mut s);
     let keep_coding = output_style.map_or(true, |s| s.keep_coding_instructions);
-    // `is_interactive` = true for the standard interactive CLI path (main assembler
-    // is always interactive). `has_agent_tool` and `fork_mode_enabled` are derived
-    // from the tool set and the LINGXI_FORK_SUBAGENT env var respectively.
-    // For the main assembler the fork mode is disabled by default.
+    // Session guidance differs between the interactive TUI and print/SDK
+    // paths. Keep that signal explicit in the context rather than assuming
+    // every caller is interactive.
     let has_agent = ctx.tool_names.iter().any(|t| t == "Agent");
     let fork_mode = std::env::var("LINGXI_FORK_SUBAGENT")
         .map(|v| !v.is_empty() && v != "0" && v != "false")
@@ -135,23 +128,12 @@ pub fn assemble_system_prompt_with_style(
         output_style.is_some(),
         keep_coding,
         &ctx.tool_names,
-        /* is_interactive = */ true,
+        /* is_interactive = */ ctx.is_interactive,
         /* has_agent_tool = */ has_agent,
         /* fork_mode_enabled = */ fork_mode,
         /* model = */ &ctx.model,
         /* skills_available = */ ctx.skills_available,
     ));
-
-    // `--exclude-dynamic-system-prompt-sections`: OMIT the per-machine env
-    // block (cwd / env / git / OS / shell) from the system prompt so the static
-    // prompt is identical across machines (prompt-cache reuse). The conversation
-    // re-emits the same env block in the first-user-message context reminder
-    // (`additional_context_message`) so the model still sees it. `false` (the
-    // default) keeps the block here — byte-identical to before this flag.
-    if !ctx.exclude_dynamic_sections {
-        push_section_separator(&mut s);
-        s.push_str(&env_block::format(ctx));
-    }
 
     // R-P1c/R-P1d: the LINGXI.md memory block is NO LONGER spliced into the
     // MAIN system prompt. claude-code v2.1.183 carries it as an additional-
@@ -166,47 +148,55 @@ pub fn assemble_system_prompt_with_style(
     // are 0 hits in the v2.1.181 binary). `ctx.tool_names` is kept on the context
     // for callers but is no longer rendered into the prompt.
 
+    // File-based-memory WRITE instructions. The pinned 2.1.220 order is
+    // session guidance → memory → environment. Lean Claude profiles use the
+    // compact `# Memory` protocol; standard Claude and non-Claude FullHarness
+    // profiles keep the complete `# auto memory` protocol.
+    if let Some(dir) = &ctx.memory_dir {
+        push_section_separator(&mut s);
+        s.push_str(&memory_section::render_for_profile(
+            &dir.to_string_lossy(),
+            traits::model_capabilities::prompt_profile_for(&ctx.model),
+        ));
+    }
+
+    // `--exclude-dynamic-system-prompt-sections`: OMIT the per-machine env
+    // block (cwd / env / git / OS / shell) from the system prompt so the static
+    // prompt is identical across machines (prompt-cache reuse). The conversation
+    // re-emits the same env block in the first-user-message context reminder.
+    if !ctx.exclude_dynamic_sections {
+        push_section_separator(&mut s);
+        s.push_str(&env_block::format(ctx));
+    }
+
     if let Some(style) = output_style {
         push_section_separator(&mut s);
         s.push_str(&output_style_section(style));
     }
 
     // (M8 cc2.1.198) `# Background Session` (`_ff()` @219583413) — bg jobs
-    // only (`LINGXI_SESSION_KIND=bg` + `LINGXI_JOB_DIR`); carries the
-    // isolate-into-worktree instruction and the 2.1.198 auto commit / push /
-    // draft-PR shipping directive. Binary position: after output_style,
-    // before scratchpad/context_management. Interactive sessions get `None`
-    // → byte-identical prompt. Env-read inline, same idiom as the
-    // `LINGXI_FORK_SUBAGENT` read above.
+    // only (`LINGXI_SESSION_KIND=bg` + `LINGXI_JOB_DIR`); binary position is
+    // after output style and before context management.
     if let Some(bg) = bg_session::from_env() {
         push_section_separator(&mut s);
         s.push_str(&bg);
     }
 
-    // `# Memory` (2.1.206) — the file-based-memory WRITE instructions. Emitted
-    // only when the memory feature is active (the prefetch is wired →
-    // `ctx.memory_dir` is `Some`); default `None` omits it, byte-identical to a
-    // build without memory. Dynamic post-env section, before context_management.
-    if let Some(dir) = &ctx.memory_dir {
-        push_section_separator(&mut s);
-        s.push_str(&memory_section::render(&dir.to_string_lossy()));
-    }
-
     // GAP-2: `# Context management` (iIm) — always, unconditional.
     // Binary cx() position: after env_info_simple + language + output_style +
-    // bg-session + scratchpad. In LingXi this is the LAST section, after
-    // the env block and the optional output-style section.
+    // bg-session + scratchpad. Model-specific post-context sections may follow.
     push_section_separator(&mut s);
     s.push_str(body_sections::CONTEXT_MANAGEMENT_SECTION);
 
+    // Model-specific 2.1.220 tail: act-don't-rederive for every profile,
+    // Opus-5 delivery/correction restrictions, or Fable/Mythos autonomous
+    // mitigation. These are after context management in the oracle.
+    for section in body_sections::post_context_sections(&ctx.model, output_style.is_some()) {
+        push_section_separator(&mut s);
+        s.push_str(&section);
+    }
+
     // R-P1b: NO `Notes:` FOOTER on the MAIN prompt.
-    // NOTE: `# Context management` is now the last section of the main prompt
-    // (no FOOTER, no Notes:). The prompt ends with its last line. claude-code's J0
-    // (`getSystemPrompt`, interactive) has no Notes footer — it lives only in
-    // the SUBAGENT assembler `H$t` (binary offset ~205826340), which LingXi
-    // handles separately in `agent/handle.rs`. `FOOTER` is still exported from
-    // `locked_templates` for that subagent path; the main assembler simply does
-    // not append it.
     s
 }
 
@@ -288,6 +278,10 @@ pub struct SystemPromptContext {
     /// claude-code `nz()`/skill-list non-empty. Gates the `# Session-specific
     /// guidance` Skill-invocation bullet (with the Skill tool present).
     pub skills_available: bool,
+    /// Whether this is the interactive TUI path. Print/SDK calls set this false,
+    /// which suppresses the `! <command>` session-guidance bullet exactly as in
+    /// Claude Code's non-interactive prompt.
+    pub is_interactive: bool,
     /// Resolved user-memdir path when the file-based memory feature is active
     /// (the memory prefetch is wired — claude-code `tengu_moth_copse`, default
     /// OFF). `Some(path)` emits the `# Memory` write-instructions section;
@@ -394,6 +388,7 @@ mod tests {
             memory_files: Vec::new(),
             tool_names: Vec::new(),
             skills_available: false,
+            is_interactive: false,
             memory_dir: None,
             exclude_dynamic_sections: false,
         };
@@ -446,6 +441,7 @@ mod tests {
             memory_files: Vec::new(),
             tool_names: vec!["Read".into(), "Write".into()],
             skills_available: false,
+            is_interactive: false,
             memory_dir: None,
             exclude_dynamic_sections: false,
         }
@@ -478,11 +474,11 @@ mod tests {
         let none = assemble_system_prompt_with_style(&ctx, None);
         assert_eq!(default, none);
         assert!(!default.contains("# Output Style:"));
-        // Spot-check the locked envelope: opens with HEADER; ends with the
-        // `# Context management` section's last line (no `Notes:` FOOTER — R-P1b).
+        // Spot-check the locked envelope: opens with HEADER and ends with the
+        // post-context act-don't-rederive slot (no `Notes:` footer).
         assert!(default.starts_with("You are LingXi, an agentic command-line coding assistant."));
         assert!(!default.contains("Notes:"));
-        assert!(default.ends_with("you don't need to wrap up early or hand off mid-task."));
+        assert!(default.ends_with("give a recommendation, not an exhaustive survey"));
     }
 
     #[test]
@@ -515,7 +511,8 @@ mod tests {
             i_style < i_ctx,
             "context management must come AFTER output-style"
         );
-        // The prompt now ends with context management, not the output-style body.
+        // An explicit style suppresses the default act-don't-rederive slot.
+        // Opus 4.7 has no other model tail, so context management is terminal.
         assert!(out.ends_with("you don't need to wrap up early or hand off mid-task."));
     }
 
@@ -535,7 +532,6 @@ mod tests {
         assert!(!out.contains("<tools>"));
         // The style is NOT the last section — context management follows.
         assert!(out.contains("# Output Style: Learning\nP"));
-        // GAP-2: context management is now the true last section.
         assert!(out.ends_with("you don't need to wrap up early or hand off mid-task."));
     }
 
@@ -557,16 +553,15 @@ mod tests {
         // The rest block now opens with the static BODY (the `Pym` opening
         // paragraph), which precedes the env block.
         assert!(blocks[1].text.starts_with(
-            "You are an interactive agent that helps users with software engineering tasks."
+            "\nYou are an interactive agent that helps users with software engineering tasks."
         ));
         assert!(blocks[1]
             .text
             .contains("\n\n# Environment\nYou have been invoked in the following environment: "));
-        // No `Notes:` FOOTER — the rest block ends with the `# Context management`
-        // section's last line (GAP-2 fix: context management is now appended after env).
+        // No `Notes:` footer; the model tail follows context management.
         assert!(!blocks[1].text.contains("Notes:"));
         assert!(blocks[1]
             .text
-            .ends_with("you don't need to wrap up early or hand off mid-task."));
+            .ends_with("give a recommendation, not an exhaustive survey"));
     }
 }

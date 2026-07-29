@@ -30,13 +30,12 @@
 //!   placeholder, the resume-time analog of codex's `replay_thread_item`
 //!   rendering a `Reasoning` item whose raw content is hidden.
 //!
-//! `System` messages and `Image` blocks are NOT replayed: `System` lines are
-//! reconstructed at runtime from settings + memory on resume (matching
-//! `orchestrator::resume::build_state_from_jsonl`, which skips `type:"system"`),
-//! and the persisted image block carries no scrollback id/metadata to render a
-//! faithful `[Image #N]` placeholder. Both are intentional, documented gaps —
-//! the common turn kinds (user/assistant text, tool-use, tool-result) replay in
-//! order.
+//! Ordinary `System` messages and `Image` blocks are NOT replayed: system lines
+//! are reconstructed at runtime from settings + memory on resume. The one
+//! exception is `subtype:"compact_boundary"`, which is paired with its following
+//! transcript-only compact-summary user message and reconstructed as one
+//! [`RenderedMessage::CompactBoundary`]. The hidden summary is never rendered as
+//! an ordinary user row.
 
 use protocol::{ContentBlock, ConversationMessage, ToolUseId};
 use std::collections::HashMap;
@@ -59,10 +58,32 @@ pub fn rebuild_messages(history: &[ConversationMessage]) -> Vec<RenderedMessage>
     let mut acc = ReplayAcc::default();
     for msg in history {
         match msg {
-            ConversationMessage::User { content, .. } => acc.push_user_blocks(content),
+            ConversationMessage::User {
+                content,
+                is_compact_summary,
+                is_visible_in_transcript_only,
+                ..
+            } => {
+                if *is_compact_summary {
+                    acc.attach_compact_summary(content);
+                } else if !*is_visible_in_transcript_only {
+                    acc.push_user_blocks(content);
+                }
+            }
             ConversationMessage::Assistant { content, .. } => acc.push_assistant_blocks(content),
-            // System lines are reconstructed at runtime (settings + memory),
-            // not replayed — see module docs + build_state_from_jsonl.
+            ConversationMessage::System {
+                subtype,
+                compact_metadata,
+                ..
+            } if subtype.as_deref() == Some("compact_boundary") => {
+                acc.push_compact_boundary(
+                    compact_metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.messages_summarized)
+                        .unwrap_or_default(),
+                );
+            }
+            // Ordinary system lines are reconstructed at runtime.
             ConversationMessage::System { .. } => {}
         }
     }
@@ -85,9 +106,38 @@ pub fn rebuild_from_jsonl(messages: &[session::jsonl::JsonlMessage]) -> Vec<Rend
     for m in messages {
         let blocks = decode_content_blocks(&m.message);
         match m.message_type.as_str() {
-            "user" => acc.push_user_blocks(&blocks),
+            "user" => {
+                let compact_summary = m
+                    .extra
+                    .get("isCompactSummary")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                let transcript_only = m
+                    .extra
+                    .get("isVisibleInTranscriptOnly")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                if compact_summary {
+                    acc.attach_compact_summary(&blocks);
+                } else if !transcript_only {
+                    acc.push_user_blocks(&blocks);
+                }
+            }
             "assistant" => acc.push_assistant_blocks(&blocks),
-            // system / attachment / summary / sidechain — not replayed.
+            "system"
+                if m.extra.get("subtype").and_then(serde_json::Value::as_str)
+                    == Some("compact_boundary") =>
+            {
+                let messages_before = m
+                    .extra
+                    .get("compactMetadata")
+                    .and_then(|metadata| metadata.get("messagesSummarized"))
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|count| u32::try_from(count).ok())
+                    .unwrap_or_default();
+                acc.push_compact_boundary(messages_before);
+            }
+            // ordinary system / attachment / summary / sidechain — not replayed.
             _ => {}
         }
     }
@@ -127,6 +177,47 @@ struct ReplayAcc {
 }
 
 impl ReplayAcc {
+    fn push_compact_boundary(&mut self, messages_before: u32) {
+        if matches!(
+            self.out.last(),
+            Some(RenderedMessage::CompactBoundary { .. })
+        ) {
+            return;
+        }
+        self.out.push(RenderedMessage::CompactBoundary {
+            messages_before,
+            messages_after: 0,
+            summary: String::new(),
+        });
+    }
+
+    fn attach_compact_summary(&mut self, content: &[ContentBlock]) {
+        let summary = content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        if summary.is_empty() {
+            return;
+        }
+        let Some(RenderedMessage::CompactBoundary {
+            summary: accumulated,
+            ..
+        }) = self.out.last_mut()
+        else {
+            // A torn/legacy transcript may contain the hidden summary without
+            // its boundary. It must remain hidden rather than leak as a user row.
+            return;
+        };
+        if !accumulated.is_empty() {
+            accumulated.push('\n');
+        }
+        accumulated.push_str(&summary);
+    }
+
     fn push_user_blocks(&mut self, content: &[ContentBlock]) {
         for block in content {
             push_user_block(block, &self.tool_inputs, &self.tool_names, &mut self.out);
@@ -514,6 +605,86 @@ mod tests {
         assert!(matches!(
             &out[0],
             RenderedMessage::UserText { body, .. } if body == "hi from jsonl"
+        ));
+    }
+
+    #[test]
+    fn typed_compact_history_replays_one_boundary_and_hides_summary_user_row() {
+        let metadata = protocol::CompactBoundaryMetadata {
+            trigger: protocol::CompactTrigger::Manual,
+            messages_summarized: Some(8),
+            ..Default::default()
+        };
+        let history = vec![
+            ConversationMessage::compact_boundary(
+                MessageId::new(),
+                "Conversation compacted".to_string(),
+                metadata,
+            ),
+            ConversationMessage::compact_summary(
+                MessageId::new(),
+                "private compact summary".to_string(),
+            ),
+            assistant_text("visible tail"),
+        ];
+
+        let out = rebuild_messages(&history);
+        assert_eq!(out.len(), 2);
+        assert!(matches!(
+            &out[0],
+            RenderedMessage::CompactBoundary {
+                messages_before: 8,
+                summary,
+                ..
+            } if summary == "private compact summary"
+        ));
+        assert!(matches!(
+            &out[1],
+            RenderedMessage::AssistantText { body, .. } if body == "visible tail"
+        ));
+    }
+
+    #[test]
+    fn jsonl_compact_summary_is_not_rendered_as_user_text() {
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let boundary: session::jsonl::JsonlMessage = serde_json::from_value(serde_json::json!({
+            "type": "system",
+            "uuid": uuid::Uuid::new_v4().to_string(),
+            "parentUuid": null,
+            "sessionId": session_id,
+            "timestamp": "2026-07-28T00:00:00.000Z",
+            "subtype": "compact_boundary",
+            "content": "Conversation compacted",
+            "level": "info",
+            "compactMetadata": {
+                "trigger": "manual",
+                "messagesSummarized": 4
+            }
+        }))
+        .expect("boundary");
+        let summary: session::jsonl::JsonlMessage = serde_json::from_value(serde_json::json!({
+            "type": "user",
+            "uuid": uuid::Uuid::new_v4().to_string(),
+            "parentUuid": boundary.uuid,
+            "sessionId": session_id,
+            "timestamp": "2026-07-28T00:00:01.000Z",
+            "cwd": "/tmp",
+            "version": "0.12.0",
+            "message": { "content": "hidden summary" },
+            "isVisibleInTranscriptOnly": true,
+            "isCompactSummary": true
+        }))
+        .expect("summary");
+
+        let out = rebuild_from_jsonl(&[boundary, summary]);
+        assert_eq!(out.len(), 1);
+        assert!(matches!(
+            &out[0],
+            RenderedMessage::CompactBoundary {
+                messages_before: 4,
+                summary,
+                ..
+            } if summary == "hidden summary"
         ));
     }
 

@@ -729,7 +729,7 @@ fn canonical_cost() -> CostDto {
 /// The `MessageDto` block set — ONE block of each `MessageBlockDto` kind, in the
 /// TUI scrollback render order. This is the block-set parity anchor (plan F1-02 /
 /// F1-08): the golden enumerates exactly `Text | Thinking | RedactedThinking |
-/// ToolUse | ToolResult`.
+/// CompactBoundary | ToolUse | ToolResult`.
 fn canonical_message() -> MessageDto {
     MessageDto {
         role: "assistant".to_string(),
@@ -743,6 +743,11 @@ fn canonical_message() -> MessageDto {
             },
             MessageBlockDto::RedactedThinking {
                 data: "REDACTED_BASE64".to_string(),
+            },
+            MessageBlockDto::CompactBoundary {
+                messages_before: 12,
+                messages_after: 3,
+                summary: "hidden compact summary".to_string(),
             },
             MessageBlockDto::ToolUse {
                 id: "toolu_01".to_string(),
@@ -898,8 +903,9 @@ fn every_client_error_variant_matches_golden() {
 }
 
 /// The `MessageDto` block set golden — the structural parity anchor: ONE block
-/// of each `MessageBlockDto` kind (`Text | Thinking | RedactedThinking | ToolUse
-/// | ToolResult`) in TUI scrollback order (plan F1-02 / F1-08).
+/// of each `MessageBlockDto` kind (`Text | Thinking | RedactedThinking |
+/// CompactBoundary | ToolUse | ToolResult`) in TUI scrollback order (plan
+/// F1-02 / F1-08).
 #[test]
 fn message_dto_block_set_matches_golden() {
     let mut failures = Vec::new();
@@ -910,7 +916,7 @@ fn message_dto_block_set_matches_golden() {
     );
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 
-    // Defence-in-depth: the canonical message enumerates exactly the five block
+    // Defence-in-depth: the canonical message enumerates exactly the six block
     // kinds the TUI scrollback renders, in render order — so the golden is the
     // full parity set, not a subset.
     let tags: Vec<&str> = canonical_message()
@@ -920,6 +926,7 @@ fn message_dto_block_set_matches_golden() {
             MessageBlockDto::Text { .. } => "text",
             MessageBlockDto::Thinking { .. } => "thinking",
             MessageBlockDto::RedactedThinking { .. } => "redacted_thinking",
+            MessageBlockDto::CompactBoundary { .. } => "compact_boundary",
             MessageBlockDto::ToolUse { .. } => "tool_use",
             MessageBlockDto::ToolResult { .. } => "tool_result",
             _ => "unknown",
@@ -931,6 +938,7 @@ fn message_dto_block_set_matches_golden() {
             "text",
             "thinking",
             "redacted_thinking",
+            "compact_boundary",
             "tool_use",
             "tool_result"
         ],

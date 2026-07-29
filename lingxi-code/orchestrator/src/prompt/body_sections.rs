@@ -1,5 +1,5 @@
-//! Static system-prompt BODY sections — byte-locked from claude-code
-//! v2.1.183 (`bin/claude.exe`, the `J0` system-prompt assembler).
+//! Model-specific system-prompt body sections, byte-locked from the clean-room
+//! Claude Code 2.1.220 oracle.
 //!
 //! claude-code's `J0(e,t,n,r)` returns, for the DEFAULT (non-simple) path
 //! (`o = Dh(t)` is false unless `LINGXI_SIMPLE_SYSTEM_PROMPT` is set),
@@ -17,20 +17,14 @@
 //!    available tool names).
 //! 6. `Uym()` — `# Tone and style` bulleted section.
 //!
-//! After these come the DYNAMIC sections (`...A`: memory, env, language,
-//! output_style, etc.) and finally the `Notes:` footer + `<env>` block. In
-//! claude-code the system prompt is a `string[]` joined by the API into one
-//! text block; LingXi assembles a single concatenated string. The dynamic
-//! flag-gated sections (anti_verbosity `Eym`, action_caution `Cym`,
-//! task_continuity `vym`, fable_identity, tool_param_json, investigate_first,
-//! session_guidance `Fym`, language, bg-session, scratchpad, context_management,
-//! brief, focus_mode, reproduce_verify, heron_brook, autonomy_append) are NOT
-//! ported here — they are incremental follow-ups (see verdict 46 `fix_steps`).
+//! The lean profile replaces these six sections with `# Harness`. Dynamic
+//! anti-verbosity, action-caution, identity and session-guidance slots are
+//! appended here; environment, memory and post-context slots are assembled by
+//! the parent module.
 //!
-//! The body block returned by [`format`] is the concatenation of the six static
-//! sections joined by a blank line (`\n\n`), with no leading or trailing
-//! newline; the assembler splices it between the HEADER and the env block with
-//! its standard section separators.
+//! The body block returned by [`format`] intentionally starts with one LF. That
+//! leading byte is part of Claude's second request block and is covered by the
+//! production manifest tests.
 #![forbid(unsafe_code)]
 
 /// Defensive-security / dual-use guidance — claude-code `zHo` (one literal,
@@ -112,49 +106,42 @@ Match responses to the task: a simple question gets a direct answer, not headers
 In code: default to writing no comments. Never write multi-paragraph docstrings or multi-line comment blocks \u{2014} one short line max. Don't create planning, decision, or analysis documents unless the user asks for them \u{2014} work from conversation context, not intermediate files.";
 
 /// The `anti_verbosity` slot (`cx()` key `"anti_verbosity"`) — claude-code
-/// `UJh(e)`. 2.1.206 made this a model-gated 3-way selector:
+/// `UJh(e)` in the pinned 2.1.220 build.
 ///
-/// 1. **Current-gen** models (`$Jh(t)`: the `LJh` table
-///    `opus>=4.8 / sonnet>=5 / fable>=5 / mythos>=5`, or the `h6l` basalt_cove
-///    server gate) → the `# Communicating with the user` section, with an
-///    `r`-variant (`BJh`) for fable-5/mythos-5.
-/// 2. **Lean** models (`zb(e)`) → a one-liner — NOT ported here (still folds
-///    into the fallback; tracked as a separate low-severity gap).
-/// 3. **Older** models → the `# Text output` section ([`TEXT_OUTPUT_SECTION`]).
+/// The final selector is profile-sensitive:
+/// - Fable 5 / Mythos 5 use `# Communicating with the user`.
+/// - Opus 5 / Opus 4.8 use the single code-style sentence.
+/// - standard Claude models and LingXi's non-Claude FullHarness use
+///   [`TEXT_OUTPUT_SECTION`].
 ///
-/// The `h6l` basalt_cove server gate can't be replicated locally, so only the
-/// deterministic `LJh` model-version arm is honored. The port default (Fable 5)
-/// takes arm 1 with `r = true`.
+/// Keep this on the shared capability/profile registry. Raw substring matching
+/// here previously let a model named `vendor-compat-claude-sonnet-5` inherit
+/// Claude-only prompt bytes despite resolving to `FullHarness`.
 #[must_use]
 fn anti_verbosity_section(model: &str) -> String {
-    if is_communicating_model(model) {
-        communicating_with_the_user_section(is_r_variant_model(model))
-    } else {
-        TEXT_OUTPUT_SECTION.to_string()
+    use traits::model_capabilities::{prompt_profile_for, PromptProfile};
+
+    match prompt_profile_for(model) {
+        PromptProfile::ClaudeLean if is_communicating_model(model) => {
+            communicating_with_the_user_section(true)
+        }
+        PromptProfile::ClaudeLean => {
+            "Write code that reads like the surrounding code: match its comment density, naming, and idiom."
+                .to_string()
+        }
+        PromptProfile::ClaudeStandard | PromptProfile::FullHarness => {
+            TEXT_OUTPUT_SECTION.to_string()
+        }
     }
 }
 
-/// `$Jh(t)` over the `LJh` table `[["opus",[4,8]],["sonnet",[5]],["fable",[5]],
-/// ["mythos",[5]]]`: the current-gen models that receive the
-/// `# Communicating with the user` section. Matched by canonical id substring
-/// (the port's `env_meta` idiom); the listed ids are exactly the first-party
-/// ids at/above each family threshold today.
+/// The two lean models that receive the long communicating section.
 #[must_use]
 pub(crate) fn is_communicating_model(model: &str) -> bool {
-    let m = model.to_ascii_lowercase();
-    m.contains("claude-fable-5")
-        || m.contains("claude-mythos-5")
-        || m.contains("claude-sonnet-5")
-        || m.contains("claude-opus-4-8")
-}
-
-/// `r = BJh(t) = $Be(t) && !(isBriefEnabled() || _et())`: the fable-5/mythos-5
-/// first-sentence + extra-paragraph variant. Brief-mode toggles are absent in
-/// the port (no brief mode), so `r` reduces to "is fable-5 or mythos-5".
-#[must_use]
-fn is_r_variant_model(model: &str) -> bool {
-    let m = model.to_ascii_lowercase();
-    m.contains("claude-fable-5") || m.contains("claude-mythos-5")
+    matches!(
+        traits::model_capabilities::normalize_model_id(model).as_str(),
+        "claude-fable-5" | "claude-mythos-5"
+    )
 }
 
 /// `# Communicating with the user` — claude-code `UJh` current-gen arm. The
@@ -214,8 +201,10 @@ fn session_guidance(
     has_agent_tool: bool,
     fork_mode_enabled: bool,
     skills_present: bool,
+    lean: bool,
+    has_bash: bool,
 ) -> Option<String> {
-    let mut bullets: Vec<&'static str> = Vec::with_capacity(3);
+    let mut bullets: Vec<String> = Vec::with_capacity(4);
 
     // Bullet 1: `! <command>` tip — fires when NOT `Hr()` (isInteractive=true
     // means the inner check `c?null:…` fires on the `c` = `Hr()` falsy branch,
@@ -233,7 +222,7 @@ fn session_guidance(
     // is typically false (not in "headless" mode), meaning the bullet fires.
     // We follow the audit spec: bullet present when is_interactive=true.
     if is_interactive {
-        bullets.push("If you need the user to run a shell command themselves (e.g., an interactive login like `gcloud auth login`), suggest they type `! <command>` in the prompt \u{2014} the `!` prefix runs the command in this session so its output lands directly in the conversation.");
+        bullets.push("If you need the user to run a shell command themselves (e.g., an interactive login like `gcloud auth login`), suggest they type `! <command>` in the prompt \u{2014} the `!` prefix runs the command in this session so its output lands directly in the conversation.".to_string());
     }
 
     // Bullet 2: Agent-tool delegation guidance — fires when Agent tool present
@@ -241,15 +230,23 @@ fn session_guidance(
     // `zHm(n)` = `!n&&…Kz()? fork_text : standard_text`. When `n=false`
     // (not isSimple) and `Kz()=false` (fork mode off, the default), the
     // standard (non-fork) bullet fires.
-    if has_agent_tool && !fork_mode_enabled {
-        bullets.push("Use the Agent tool with specialized agents when the task at hand matches the agent's description. Subagents are valuable for parallelizing independent queries or for protecting the main context window from excessive results, but they should not be used excessively when not needed. Importantly, avoid duplicating work that subagents are already doing - if you delegate research to a subagent, do not also perform the same searches yourself.");
+    if has_agent_tool && !fork_mode_enabled && !lean {
+        bullets.push("Use the Agent tool with specialized agents when the task at hand matches the agent's description. Subagents are valuable for parallelizing independent queries or for protecting the main context window from excessive results, but they should not be used excessively when not needed. Importantly, avoid duplicating work that subagents are already doing - if you delegate research to a subagent, do not also perform the same searches yourself.".to_string());
+        let direct_search = if has_bash {
+            "`find` or `grep` via the Bash tool"
+        } else {
+            "the Glob or Grep"
+        };
+        bullets.push(format!(
+            "For broad codebase exploration or research that'll take more than 3 queries, spawn Agent with subagent_type=Explore. Otherwise use {direct_search} directly."
+        ));
     }
 
     // Skill-invocation bullet (claude-code `nXh` `s&&!n` arm): fires when at
     // least one user-invocable skill exists AND the Skill tool is registered.
     // `${m_}` = the Skill tool name "Skill"; em-dash U+2014, ASCII apostrophe.
     if skills_present {
-        bullets.push("When the user types `/<skill-name>`, invoke it via Skill. Only use skills listed in the user-invocable skills section \u{2014} don't guess.");
+        bullets.push("When the user types `/<skill-name>`, invoke it via Skill. Only use skills listed in the user-invocable skills section \u{2014} don't guess.".to_string());
     }
 
     if bullets.is_empty() {
@@ -272,12 +269,12 @@ const TONE_AND_STYLE_SECTION: &str = concat!(
 /// Build the opening paragraph — claude-code `Pym(c)`. The single interpolation
 /// is the output-style clause: when an output style is active, the sentence ends
 /// "according to your \"Output Style\" below, …"; otherwise "with software
-/// engineering tasks.". `Pym` itself opens with a leading `\n` in the binary;
-/// here the leading newline is dropped because the assembler joins this block to
-/// the HEADER via its own `\n\n` separator (the net effect after the header
-/// separator is identical to the binary's prefix→body boundary).
+/// engineering tasks.". `Pym` itself opens with a leading `\n` in the binary.
+/// LingXi preserves that request-block byte at the [`format`] boundary rather
+/// than inside this section so both lean and standard profiles share it.
 /// `gMy` — the lean `# Harness` bullet-3 prefix (`itp(t,"lean")`).
 const LEAN_SYSTEM_TURNS: &str = "The system may send updates, reminders, or modifications to rules via mid-conversation system turns. These are system-controlled, unlike function results.";
+const LEAN_REMINDER_TAGS: &str = "`<system-reminder>` tags in messages and tool results are injected by the harness, not the user.";
 
 /// `cMy` — the pronouns paragraph. Emitted for EVERY model (`sD("pronouns",
 /// () => cMy)` carries no gate), lean or long.
@@ -341,6 +338,15 @@ fn has_opus_5_prompt_bundle(model: &str) -> bool {
 /// stop; that is not a transcription slip.
 const ACT_DONT_REDERIVE_SECTION: &str = "When you have enough information to act, act. Do not re-derive facts already established in the conversation, re-litigate a decision the user has already made, or narrate options you will not pursue. If you are weighing a choice, give a recommendation, not an exhaustive survey";
 
+/// The Fable-only identity paragraph in the pinned 2.1.220 prompt.
+const FABLE_IDENTITY_SECTION: &str = "This iteration of Claude is Claude Fable 5, the first model in Anthropic's new Claude 5 family and part of a new Mythos-class model tier that sits above Claude Opus in capability. Claude Fable 5 and Claude Mythos 5 share the same underlying model. Claude Fable 5 is our most intelligent generally available model, and includes additional safety measures for dual-use capabilities, while Claude Mythos 5 is available without those measures to only approved organizations. Fable 5 is the most advanced generally available Claude model. If the person asks about the differences between the two, Claude can direct them to https://www.anthropic.com/news/claude-fable-5-mythos-5 for more information.";
+
+/// Autonomous-session mitigation appended after context management for Fable
+/// and Mythos in the pinned 2.1.220 build.
+const FABLE_MYTHOS_MITIGATIONS: &str = "You are operating autonomously. The user is not watching in real time and cannot answer questions mid-task, so asking 'Want me to…?' or 'Shall I…?' will block the work. For reversible actions that follow from the original request, proceed without asking. Stop only for destructive actions or genuine scope changes the user must decide. Offering follow-ups after the task is done is fine; asking permission before doing the work is not.\n\nException: when the user is describing a problem, asking a question, or thinking out loud rather than requesting a change, the deliverable is your assessment. Report your findings and stop. Don't apply a fix until they ask for one.\n\nBefore ending your turn, check your last paragraph. If it is a plan, an analysis, a question, a list of next steps, or a promise about work you have not done ('I'll…', 'let me know when…'), do that work now with tool calls. That includes retrying after errors and gathering missing information yourself. Do not stop because the context or session is long. End your turn only when the task is complete or you are blocked on input only the user can provide.\n\nBefore running a command that changes system state — restarts, deletes, config edits — check that the evidence actually supports that specific action. A signal that pattern-matches to a known failure may have a different cause.";
+
+const OPUS_5_TERMINAL_RESTRICTIONS: &str = "Do not call the AgentTool unless the user requested it\nDo not use workflows or deep-research unless the user requested it";
+
 /// `CMy()` — the `act_dont_rederive` gate. `env ?? Ke("tengu_cedar_lantern",
 /// true)`: DEFAULT TRUE, so the section ships unless explicitly turned off.
 fn act_dont_rederive_enabled() -> bool {
@@ -364,26 +370,35 @@ fn act_dont_rederive_enabled() -> bool {
 /// This port previously implemented only the long arm, so a session on
 /// `claude-opus-5` / `claude-opus-4-8` / `claude-fable-5` / `claude-mythos-5`
 /// received a materially different system prompt from the oracle's.
-fn lean_body(output_style_active: bool) -> String {
+fn lean_body(output_style_active: bool, model: &str) -> String {
     let clause = if output_style_active {
         "according to your \"Output Style\" below, which describes how you should respond to user queries."
     } else {
         "with software engineering tasks."
     };
+    let system_turns = if traits::model_capabilities::normalize_model_id(model) == "claude-opus-4-8"
+    {
+        LEAN_REMINDER_TAGS
+    } else {
+        LEAN_SYSTEM_TURNS
+    };
     // NOTE: the lean opening deliberately omits the long arm's trailing
     // "Use the instructions below and the tools available to you to assist the
     // user." sentence — `wMy` does not carry it.
     format!(
-        "You are an interactive agent that helps users {clause}\n\
-\n\
-{ZHO}\n\
-\n\
-# Harness\n\
- - Text you output outside of tool use is displayed to the user as Github-flavored markdown in a terminal.\n\
- - Tools run behind a user-selected permission mode; a denied call means the user declined it \u{2014} adjust, don't retry verbatim.\n\
- - {LEAN_SYSTEM_TURNS} Hooks may intercept tool calls; treat hook output as user feedback.\n\
- - Prefer the dedicated file/search tools over shell commands when one fits. Independent tool calls can run in parallel in one response.\n\
- - Reference code as `file_path:line_number` \u{2014} it's clickable."
+        concat!(
+            "You are an interactive agent that helps users {clause}\n\n",
+            "{zho}\n\n",
+            "# Harness",
+            "\n - Text you output outside of tool use is displayed to the user as Github-flavored markdown in a terminal.",
+            "\n - Tools run behind a user-selected permission mode; a denied call means the user declined it \u{2014} adjust, don't retry verbatim.",
+            "\n - {system_turns} Hooks may intercept tool calls; treat hook output as user feedback.",
+            "\n - Prefer the dedicated file/search tools over shell commands when one fits. Independent tool calls can run in parallel in one response.",
+            "\n - Reference code as `file_path:line_number` \u{2014} it's clickable."
+        ),
+        clause = clause,
+        zho = ZHO,
+        system_turns = system_turns,
     )
 }
 
@@ -490,7 +505,7 @@ fn using_your_tools(tool_names: &[String]) -> Option<String> {
 ///   (`Kz()`). Suppresses the standard Agent-tool bullet in favour of the
 ///   fork variant (not implemented here; pass `false` for the default path).
 ///
-/// **Section order** (claude-code `J0` / `cx()` ordering, interactive path):
+/// **Pre-environment section order** (claude-code `J0` / `cx()` ordering):
 /// 1. Opening paragraph (`Pym`)
 /// 2. `# System` (`Oym`)
 /// 3. `# Doing tasks` (`Lym`, gated)
@@ -499,9 +514,9 @@ fn using_your_tools(tool_names: &[String]) -> Option<String> {
 /// 6. `# Tone and style` (`Uym`)
 /// 7. `# Text output` (`DHm` / `anti_verbosity`) — always for standard models
 /// 8. `# Session-specific guidance` (`jHm`) — when bullets non-empty
-/// 9. `# Context management` (`iIm`) — always
 ///
-/// The env block and subsequent dynamic sections are assembled by `mod.rs`.
+/// The memory/environment/output-style sections, context management, and
+/// model-specific tail are assembled by `mod.rs`.
 #[must_use]
 pub fn format(
     output_style_active: bool,
@@ -517,7 +532,7 @@ pub fn format(
     let lean = is_lean_prompt_model(model);
     if lean {
         // `o ? [wMy(c,t)] : [...six]` — ONE section replaces all six statics.
-        sections.push(lean_body(output_style_active));
+        sections.push(lean_body(output_style_active, model));
     } else {
         sections.push(opening_paragraph(output_style_active));
         sections.push(SYSTEM_SECTION.to_string());
@@ -543,21 +558,11 @@ pub fn format(
     if lean {
         sections.push(action_caution_section(model));
     }
-    // GAP-3: `# Session-specific guidance` (jHm) — when bullets non-empty.
-    // Binary position: after anti_verbosity, before env_info_simple.
-    // `act_dont_rederive` (`AMy`): `CMy()` is `env ?? Ke("tengu_cedar_lantern",
-    // TRUE)` — note the default is TRUE, unlike the `SQt` family below. So this
-    // is emitted for EVERY model unless explicitly disabled.
-    if act_dont_rederive_enabled() {
-        sections.push(ACT_DONT_REDERIVE_SECTION.to_string());
-    }
-    // `delivering_work_max` (`RMy`) and `overcorrection` (`kMy`) both gate on
-    // `SQt(...)`, whose only default-true term is `tXn` = the model carries
-    // `opus_5_prompt_bundle`. Everything else in `SQt` is an env var or a
-    // gate defaulting FALSE, so on this build the capability is the condition.
-    if has_opus_5_prompt_bundle(model) {
-        sections.push(DELIVERING_WORK_SECTION.to_string());
-        sections.push(CORRECTIONS_SECTION.to_string());
+    if traits::model_capabilities::has_capability(
+        model,
+        traits::model_capabilities::ModelCapability::Fable5Mitigations,
+    ) {
+        sections.push(FABLE_IDENTITY_SECTION.to_string());
     }
     // NOTE: `task_continuity` (`sMy`) is deliberately NOT ported. Its gate is
     // `function tBc(e){return!1}` — hard-disabled in 2.1.220, so the oracle
@@ -569,6 +574,8 @@ pub fn format(
         has_agent_tool,
         fork_mode_enabled,
         skills_available && has_skill_tool,
+        lean,
+        tool_names.iter().any(|t| t == "Bash"),
     ) {
         sections.push(sg);
     }
@@ -576,7 +583,33 @@ pub fn format(
     // in claude-code's cx() ordering (after env_info_simple, language, output_style,
     // etc.). It is assembled in `mod.rs` `assemble_system_prompt_with_style`, NOT
     // here. Only the pre-env dynamic sections live in body_sections::format().
-    sections.join("\n\n")
+    format!("\n{}", sections.join("\n\n"))
+}
+
+/// Render sections that the 2.1.220 oracle places after
+/// [`CONTEXT_MANAGEMENT_SECTION`].
+#[must_use]
+pub fn post_context_sections(model: &str, output_style_active: bool) -> Vec<String> {
+    let mut sections = Vec::with_capacity(3);
+    // `act_dont_rederive` is part of the default style. Claude Code suppresses
+    // it when an explicit output style is active, while retaining the
+    // model-specific delivery/correction or autonomy tail.
+    if !output_style_active && act_dont_rederive_enabled() {
+        sections.push(ACT_DONT_REDERIVE_SECTION.to_string());
+    }
+
+    if has_opus_5_prompt_bundle(model) {
+        sections.push(DELIVERING_WORK_SECTION.to_string());
+        sections.push(format!(
+            "{CORRECTIONS_SECTION}\n\n{OPUS_5_TERMINAL_RESTRICTIONS}"
+        ));
+    } else if matches!(
+        traits::model_capabilities::normalize_model_id(model).as_str(),
+        "claude-fable-5" | "claude-mythos-5"
+    ) {
+        sections.push(FABLE_MYTHOS_MITIGATIONS.to_string());
+    }
+    sections
 }
 
 #[cfg(test)]
@@ -704,26 +737,17 @@ mod tests {
     /// lean model.
     #[test]
     fn delivering_work_and_corrections_are_opus_5_only() {
-        let o5 = format(false, true, &[], true, false, false, "claude-opus-5", false);
+        let o5 = post_context_sections("claude-opus-5", false).join("\n\n");
         assert!(o5.contains("# Delivering work"), "opus-5 must get it");
         assert!(o5.contains("# Corrections"), "opus-5 must get it");
         // Lean, but WITHOUT the opus-5 bundle:
         for m in ["claude-opus-4-8", "claude-fable-5"] {
-            let p = format(false, true, &[], true, false, false, m, false);
+            let p = post_context_sections(m, false).join("\n\n");
             assert!(!p.contains("# Delivering work"), "{m} must NOT get it");
             assert!(!p.contains("# Corrections"), "{m} must NOT get it");
         }
         // ...and not on the long arm either.
-        let long = format(
-            false,
-            true,
-            &[],
-            true,
-            false,
-            false,
-            "claude-opus-4-7",
-            false,
-        );
+        let long = post_context_sections("claude-opus-4-7", false).join("\n\n");
         assert!(!long.contains("# Delivering work"));
     }
 
@@ -747,12 +771,22 @@ mod tests {
     #[test]
     fn act_dont_rederive_defaults_on_for_every_model() {
         for m in ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"] {
-            let p = format(false, true, &[], true, false, false, m, false);
+            let p = post_context_sections(m, false).join("\n\n");
             assert!(
                 p.contains("When you have enough information to act, act."),
                 "{m} must carry act_dont_rederive"
             );
         }
+    }
+
+    #[test]
+    fn explicit_output_style_suppresses_act_dont_rederive_only() {
+        let default_tail = post_context_sections("claude-opus-5", false).join("\n\n");
+        let styled_tail = post_context_sections("claude-opus-5", true).join("\n\n");
+        assert!(default_tail.contains("When you have enough information to act"));
+        assert!(!styled_tail.contains("When you have enough information to act"));
+        assert!(styled_tail.contains("# Delivering work"));
+        assert!(styled_tail.contains("# Corrections"));
     }
 
     /// `task_continuity`'s gate is `function tBc(e){return!1}` — hard-disabled
@@ -1022,8 +1056,8 @@ mod tests {
             !body.contains("# Context management"),
             "context management must NOT be in the pre-env body block"
         );
-        // No leading/trailing newline; blank-line joins between sections.
-        assert!(!body.starts_with('\n'));
+        // The provider-visible body block retains the oracle's leading LF.
+        assert!(body.starts_with('\n'));
         assert!(!body.ends_with('\n'));
         assert!(body.contains("local files.\n\n# System"));
         assert!(body.contains("context window.\n\n# Doing tasks"));
@@ -1063,31 +1097,22 @@ mod tests {
     // ---- 2.1.206: anti_verbosity `UJh` model gating ----
 
     #[test]
-    fn communicating_model_gate_matches_ljh_table() {
-        // Current-gen ($Jh / LJh): opus>=4.8, sonnet>=5, fable>=5, mythos>=5.
+    fn communicating_model_gate_is_the_fable_mythos_lean_pair() {
+        for m in ["claude-fable-5", "claude-mythos-5"] {
+            assert!(is_communicating_model(m), "communicating: {m}");
+        }
         for m in [
             "claude-opus-4-8",
             "claude-opus-4-8-20260101[1m]",
             "claude-sonnet-5",
-            "claude-fable-5",
-            "claude-mythos-5",
-        ] {
-            assert!(is_communicating_model(m), "current-gen: {m}");
-        }
-        // Older models → fallback (# Text output).
-        for m in [
             "claude-opus-4-7",
             "claude-sonnet-4-5",
             "claude-haiku-4-5",
             "gpt-4o",
+            "vendor-compat-claude-fable-5",
         ] {
-            assert!(!is_communicating_model(m), "older: {m}");
+            assert!(!is_communicating_model(m), "not communicating: {m}");
         }
-        // r-variant (BJh): fable-5 / mythos-5 only.
-        assert!(is_r_variant_model("claude-fable-5"));
-        assert!(is_r_variant_model("claude-mythos-5"));
-        assert!(!is_r_variant_model("claude-opus-4-8"));
-        assert!(!is_r_variant_model("claude-sonnet-5"));
     }
 
     #[test]
@@ -1105,20 +1130,19 @@ mod tests {
     }
 
     #[test]
-    fn communicating_section_non_r_variant() {
-        // Sonnet-5 / Opus-4.8 → r = false: long first sentence, NO extra
-        // final-message paragraph.
-        for m in ["claude-sonnet-5", "claude-opus-4-8"] {
-            let s = anti_verbosity_section(m);
-            assert!(
-                s.starts_with("# Communicating with the user\n\nYour text output is what the user reads between tool calls; they usually can't see"),
-                "{m}"
+    fn opus_lean_models_use_the_single_code_style_sentence() {
+        for m in ["claude-opus-5", "claude-opus-4-8"] {
+            assert_eq!(
+                anti_verbosity_section(m),
+                "Write code that reads like the surrounding code: match its comment density, naming, and idiom."
             );
-            assert!(
-                !s.contains("Text you write between tool calls may not be shown to the user."),
-                "{m}: r-only paragraph must be absent"
-            );
-            assert!(s.contains("Lead with the outcome."), "{m}");
+        }
+    }
+
+    #[test]
+    fn sonnet_5_standard_and_non_claude_full_harness_use_text_output() {
+        for m in ["claude-sonnet-5", "vendor-compat-claude-sonnet-5"] {
+            assert_eq!(anti_verbosity_section(m), TEXT_OUTPUT_SECTION, "{m}");
         }
     }
 
@@ -1168,7 +1192,7 @@ mod tests {
     #[test]
     fn session_guidance_both_bullets_interactive_with_agent() {
         // Standard interactive session + Agent tool + no fork mode.
-        let sg = session_guidance(true, true, false, false).expect("present");
+        let sg = session_guidance(true, true, false, false, false, true).expect("present");
         assert!(sg.starts_with("# Session-specific guidance\n"));
         // Bullet 1: ! <command> tip.
         assert!(sg.contains("suggest they type `! <command>` in the prompt \u{2014}"));
@@ -1181,7 +1205,7 @@ mod tests {
     #[test]
     fn session_guidance_no_agent_only_command_tip() {
         // Interactive + no Agent tool → only bullet 1.
-        let sg = session_guidance(true, false, false, false).expect("present");
+        let sg = session_guidance(true, false, false, false, false, true).expect("present");
         assert!(sg.contains("suggest they type `! <command>`"));
         assert!(!sg.contains("Use the Agent tool with specialized"));
     }
@@ -1189,7 +1213,7 @@ mod tests {
     #[test]
     fn session_guidance_not_interactive_with_agent() {
         // Not interactive + Agent tool → only bullet 2.
-        let sg = session_guidance(false, true, false, false).expect("present");
+        let sg = session_guidance(false, true, false, false, false, true).expect("present");
         assert!(!sg.contains("suggest they type `! <command>`"));
         assert!(sg.contains("Use the Agent tool with specialized"));
     }
@@ -1197,14 +1221,15 @@ mod tests {
     #[test]
     fn session_guidance_none_when_no_bullets() {
         // Not interactive + no Agent tool → None.
-        assert!(session_guidance(false, false, false, false).is_none());
+        assert!(session_guidance(false, false, false, false, false, true).is_none());
     }
 
     #[test]
     fn session_guidance_fork_mode_suppresses_agent_bullet() {
         // When fork mode enabled, the standard Agent bullet is suppressed.
         // The ! <command> bullet still fires (is_interactive=true).
-        let sg = session_guidance(true, true, true, false).expect("still has ! bullet");
+        let sg =
+            session_guidance(true, true, true, false, false, true).expect("still has ! bullet");
         assert!(sg.contains("suggest they type `! <command>`"));
         // Standard Agent bullet absent; fork variant not yet implemented.
         assert!(!sg.contains("Use the Agent tool with specialized"));
@@ -1214,7 +1239,7 @@ mod tests {
     fn session_guidance_skill_bullet_when_skills_present() {
         // `s && !n`: skills exist AND Skill tool present -> the Skill bullet
         // (after the ! tip and the Agent bullet). Em-dash U+2014.
-        let sg = session_guidance(true, true, false, true).expect("present");
+        let sg = session_guidance(true, true, false, true, false, true).expect("present");
         assert!(sg.contains("When the user types `/<skill-name>`, invoke it via Skill. Only use skills listed in the user-invocable skills section \u{2014} don't guess."));
         // Ordering: after the Agent-delegation bullet.
         assert!(
@@ -1226,10 +1251,10 @@ mod tests {
     #[test]
     fn session_guidance_no_skill_bullet_when_absent() {
         // skills_present=false -> no Skill bullet.
-        let sg = session_guidance(true, true, false, false).expect("present");
+        let sg = session_guidance(true, true, false, false, false, true).expect("present");
         assert!(!sg.contains("invoke it via Skill"));
         // And it can be the SOLE bullet when only skills are present.
-        let only = session_guidance(false, false, false, true).expect("skill-only");
+        let only = session_guidance(false, false, false, true, false, true).expect("skill-only");
         assert!(only.contains("invoke it via Skill"));
         assert!(!only.contains("suggest they type `! <command>`"));
         assert!(!only.contains("Use the Agent tool with specialized"));

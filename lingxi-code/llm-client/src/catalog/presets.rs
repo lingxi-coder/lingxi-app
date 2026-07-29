@@ -37,6 +37,8 @@ struct Preset {
 
 const OPENROUTER: &str = include_str!("../../data/models-dev/openrouter.json");
 const DEEPSEEK: &str = include_str!("../../data/models-dev/deepseek.json");
+const KIMI: &str = include_str!("../../data/models-dev/kimi.json");
+const KIMI_CODE: &str = include_str!("../../data/models-dev/kimi-code.json");
 const GLM_CODING: &str = include_str!("../../data/models-dev/zhipuai-coding-plan.json");
 const ZAI: &str = include_str!("../../data/models-dev/zai.json");
 const OPENAI: &str = include_str!("../../data/models-dev/openai.json");
@@ -67,6 +69,34 @@ fn presets() -> Vec<Preset> {
             },
             credential_env: Some("DEEPSEEK_API_KEY"),
             slice_json: DEEPSEEK,
+        },
+        // Kimi Open Platform (China): OpenAI-compatible Chat Completions wire
+        // with bearer API-key auth. Keep the stable user-facing profile id
+        // `kimi` even though models.dev calls this source `moonshotai-cn`.
+        Preset {
+            profile_name: "kimi",
+            base_url: "https://api.moonshot.cn/v1",
+            protocol: ProtocolFamily::OpenAiChat,
+            auth: AuthStrategy::ApiKey,
+            provider_id: ProviderId::OpenAICompatible {
+                name: "kimi".to_string(),
+            },
+            credential_env: Some("MOONSHOT_API_KEY"),
+            slice_json: KIMI,
+        },
+        // Kimi Code is a distinct membership-backed service. Its API keys,
+        // model ids, quotas, and endpoint are not interchangeable with the
+        // pay-as-you-go Kimi Open Platform profile above.
+        Preset {
+            profile_name: "kimi-code",
+            base_url: "https://api.kimi.com/coding/v1",
+            protocol: ProtocolFamily::OpenAiChat,
+            auth: AuthStrategy::ApiKey,
+            provider_id: ProviderId::OpenAICompatible {
+                name: "kimi-code".to_string(),
+            },
+            credential_env: Some("KIMI_API_KEY"),
+            slice_json: KIMI_CODE,
         },
         // GLM coding plan: Anthropic-compatible endpoint (reuses AnthropicMessagesCodec).
         // The snapshot's api points at /api/coding/paas/v4 (OpenAI-style); we override.
@@ -247,7 +277,7 @@ mod tests {
     #[test]
     fn every_preset_yields_expected_model_counts() {
         let catalog = builtin_presets();
-        assert_eq!(catalog.providers.len(), 8);
+        assert_eq!(catalog.providers.len(), 10);
         let count = |name: &str| {
             catalog
                 .providers
@@ -258,6 +288,8 @@ mod tests {
         // Exact counts guard against a truncated/partial re-vendor of a slice.
         assert_eq!(count("openrouter"), 341);
         assert_eq!(count("deepseek"), 4);
+        assert_eq!(count("kimi"), 10);
+        assert_eq!(count("kimi-code"), 4);
         assert_eq!(count("glm-coding"), 6);
         assert_eq!(count("zai"), 13);
         // openai sheds the two codex-exclusive ids (gpt-5-codex, gpt-5.3-codex)

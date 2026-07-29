@@ -304,6 +304,8 @@ object EngineModelCatalog {
         "openai-chatgpt" to "OpenAI (ChatGPT)",
         "gemini" to "Google Gemini",
         "deepseek" to "DeepSeek",
+        "kimi" to "Kimi",
+        "kimi-code" to "Kimi Code",
         "openrouter" to "OpenRouter",
         "github-copilot" to "GitHub Copilot",
         "zai" to "Z.AI",
@@ -418,6 +420,29 @@ object EngineModelCatalog {
                 thinking = "Thinking",
                 contextWindow = "1M 上下文",
                 parameterSize = "1.6T / 49B 激活",
+            )
+            "kimi-k3" -> ModelMetadata(
+                thinking = "Thinking",
+                contextWindow = "1M 上下文",
+                maxOutput = "128K 输出",
+            )
+            "kimi-k2.7-code",
+            "kimi-k2.7-code-highspeed",
+            "kimi-k2.6",
+            -> ModelMetadata(
+                thinking = "Thinking",
+                contextWindow = "256K 上下文",
+            )
+            "k3" -> ModelMetadata(
+                thinking = "Thinking",
+                contextWindow = "最高 1M 上下文",
+            )
+            "k3-256k",
+            "kimi-for-coding",
+            "kimi-for-coding-highspeed",
+            -> ModelMetadata(
+                thinking = "Thinking",
+                contextWindow = "256K 上下文",
             )
             "claude-sonnet-5",
             "claude-sonnet-4-6",

@@ -503,7 +503,7 @@ class ProviderSettingsRepository(
         private fun usesBuiltInProfile(provider: GenericProvider): Boolean {
             val preset = ProviderKind.Llm.presets.firstOrNull { it.id == provider.preset }
                 ?: return false
-            if (provider.preset !in setOf("anthropic", "openai", "google", "deepseek", "openrouter")) {
+            if (provider.preset !in setOf("anthropic", "openai", "google", "deepseek", "kimi", "kimi-code", "openrouter")) {
                 return false
             }
             return provider.url.isBlank() ||
@@ -513,7 +513,7 @@ class ProviderSettingsRepository(
         private fun providerType(provider: GenericProvider): String? = when (provider.preset) {
             "anthropic" -> "anthropic"
             "google" -> "gemini"
-            "openai", "deepseek", "openrouter", "qwen", "custom" -> "openai"
+            "openai", "deepseek", "kimi", "kimi-code", "openrouter", "qwen", "custom" -> "openai"
             else -> null
         }
 

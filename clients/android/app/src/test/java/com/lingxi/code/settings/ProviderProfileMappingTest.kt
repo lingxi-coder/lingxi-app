@@ -19,6 +19,26 @@ class ProviderProfileMappingTest {
     }
 
     @Test
+    fun kimiCatalogEndpoint_usesStableBuiltInCredentialId() {
+        val provider = provider(
+            preset = "kimi",
+            url = "https://api.moonshot.cn/v1",
+        )
+
+        assertEquals("kimi", ProviderSettingsRepository.engineCredentialIdFor(provider))
+    }
+
+    @Test
+    fun kimiCodeCatalogEndpoint_isSeparateFromOpenPlatform() {
+        val provider = provider(
+            preset = "kimi-code",
+            url = "https://api.kimi.com/coding/v1",
+        )
+
+        assertEquals("kimi-code", ProviderSettingsRepository.engineCredentialIdFor(provider))
+    }
+
+    @Test
     fun customEndpoint_usesPersistedRowIdSoAccountsDoNotCollide() {
         val provider = provider(
             id = "l_custom_42",

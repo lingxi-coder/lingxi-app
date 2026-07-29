@@ -13,6 +13,7 @@ use serde_json::Value;
 #[allow(missing_docs)]
 pub struct OpenAiChatCodec {
     base_url: String,
+    profile_name: Option<String>,
 }
 
 impl OpenAiChatCodec {
@@ -21,11 +22,40 @@ impl OpenAiChatCodec {
     pub fn new(base_url: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into(),
+            profile_name: None,
         }
+    }
+
+    /// Attach the provider profile name so compatible providers with
+    /// provider-specific extensions can opt into them without relying on URL
+    /// matching (which would fail for user-configured proxies).
+    #[must_use]
+    pub fn with_profile_name(mut self, profile_name: impl Into<String>) -> Self {
+        self.profile_name = Some(profile_name.into());
+        self
     }
 
     fn chat_completions_url(&self) -> String {
         format!("{}/chat/completions", self.base_url.trim_end_matches('/'))
+    }
+
+    fn is_kimi_profile(&self) -> bool {
+        matches!(self.profile_name.as_deref(), Some("kimi" | "kimi-code"))
+    }
+
+    fn kimi_reasoning_effort(&self, request: &LlmRequest) -> Option<&'static str> {
+        if !self.is_kimi_profile()
+            || !matches!(request.model.as_str(), "kimi-k3" | "k3" | "k3-256k")
+        {
+            return None;
+        }
+
+        match request.effort.as_ref().and_then(Value::as_str) {
+            Some("low" | "minimum" | "light") => Some("low"),
+            Some("high" | "medium") => Some("high"),
+            Some("max" | "xhigh" | "ultra") => Some("max"),
+            _ => None,
+        }
     }
 
     fn deepseek_legacy_model(&self, model: &str) -> Option<(&'static str, &'static str)> {
@@ -45,10 +75,10 @@ impl WireCodec for OpenAiChatCodec {
     fn encode_request(&self, request: &LlmRequest) -> Result<ProviderRequest, LlmError> {
         reject_unsupported_content_blocks(request)?;
 
-        // chat-completions reasoning is driven by the model id (e.g. deepseek-reasoner,
-        // GLM, openrouter o-series), not by a per-request budget field — there is no
-        // wire slot for it here. So the resolved reasoning intent is intentionally not
-        // serialized: we drop any `request.reasoning` budget gracefully rather than error.
+        // The provider-neutral numeric reasoning budget has no portable
+        // chat-completions wire slot, so `request.reasoning` is still dropped
+        // gracefully. Provider-specific controls such as Kimi's string-valued
+        // `reasoning_effort` are encoded explicitly below.
 
         let mut messages = Vec::new();
 
@@ -62,7 +92,13 @@ impl WireCodec for OpenAiChatCodec {
             messages.push(serde_json::json!({"role": "system", "content": text}));
         }
 
-        messages.extend(request.messages.iter().flat_map(encode_message));
+        let preserve_reasoning_content = self.is_kimi_profile();
+        messages.extend(
+            request
+                .messages
+                .iter()
+                .flat_map(|message| encode_message(message, preserve_reasoning_content)),
+        );
 
         let mut body = serde_json::Map::new();
         let legacy_deepseek = self.deepseek_legacy_model(&request.model);
@@ -88,6 +124,12 @@ impl WireCodec for OpenAiChatCodec {
         }
         if let Some(top_p) = request.top_p {
             body.insert("top_p".to_string(), Value::from(top_p));
+        }
+        if let Some(effort) = self.kimi_reasoning_effort(request) {
+            body.insert(
+                "reasoning_effort".to_string(),
+                Value::String(effort.to_string()),
+            );
         }
         if !request.stop_sequences.is_empty() {
             body.insert(
@@ -434,8 +476,9 @@ impl OpenAiStreamDecoder {
     }
 }
 
-fn encode_message(message: &crate::Message) -> Vec<Value> {
+fn encode_message(message: &crate::Message, preserve_reasoning_content: bool) -> Vec<Value> {
     let mut text = String::new();
+    let mut reasoning_content = String::new();
     let mut media_parts: Vec<Value> = Vec::new();
     let mut tool_calls = Vec::new();
     let mut messages = Vec::new();
@@ -507,10 +550,18 @@ fn encode_message(message: &crate::Message) -> Vec<Value> {
                     },
                 }));
             }
-            // Reasoning / RedactedThinking are skipped so they are omitted from the
-            // outgoing `messages`: chat-completions APIs reject reasoning_content as
-            // input, so a Reasoning block carried over from a prior turn's history must
-            // not be serialized back.
+            ContentBlock::Reasoning {
+                text: reasoning_text,
+                ..
+            } if preserve_reasoning_content && message.role == "assistant" => {
+                if !reasoning_content.is_empty() {
+                    reasoning_content.push('\n');
+                }
+                reasoning_content.push_str(reasoning_text);
+            }
+            // Most chat-completions providers reject reasoning_content as input.
+            // Kimi profiles opt into preserved thinking above; redacted thinking
+            // never has a portable OpenAI-compatible representation.
             ContentBlock::Reasoning { .. }
             | ContentBlock::RedactedThinking { .. }
             | ContentBlock::ServerToolUse { .. }
@@ -531,6 +582,23 @@ fn encode_message(message: &crate::Message) -> Vec<Value> {
     }
     if !tool_calls.is_empty() {
         messages.push(assistant_tool_call_message(&message.role, &tool_calls));
+    }
+    if !reasoning_content.is_empty() {
+        if let Some(Value::Object(assistant)) = messages
+            .iter_mut()
+            .find(|value| value.get("role").and_then(Value::as_str) == Some("assistant"))
+        {
+            assistant.insert(
+                "reasoning_content".to_string(),
+                Value::String(reasoning_content),
+            );
+        } else {
+            messages.push(serde_json::json!({
+                "role": "assistant",
+                "content": null,
+                "reasoning_content": reasoning_content,
+            }));
+        }
     }
     messages
 }
@@ -910,6 +978,62 @@ mod tests {
             !serialized.contains("reasoning_content"),
             "no reasoning_content key"
         );
+    }
+
+    #[test]
+    fn kimi_reasoning_effort_uses_top_level_provider_field() {
+        let codec = OpenAiChatCodec::new("https://proxy.example/v1").with_profile_name("kimi-code");
+
+        for (configured, expected) in [
+            ("low", "low"),
+            ("minimum", "low"),
+            ("medium", "high"),
+            ("high", "high"),
+            ("xhigh", "max"),
+            ("max", "max"),
+        ] {
+            let mut request = LlmRequest::new("k3");
+            request.effort = Some(Value::String(configured.to_string()));
+            let encoded = codec.encode_request(&request).expect("encode Kimi K3");
+            assert_eq!(
+                encoded.body_json["reasoning_effort"], expected,
+                "{configured} must map to Kimi's supported effort vocabulary"
+            );
+        }
+
+        let mut non_k3 = LlmRequest::new("kimi-for-coding");
+        non_k3.effort = Some(Value::String("high".to_string()));
+        let encoded = codec.encode_request(&non_k3).expect("encode Kimi K2.7");
+        assert!(
+            encoded.body_json.get("reasoning_effort").is_none(),
+            "K2.7 Code uses its fixed thinking mode, not K3 reasoning_effort"
+        );
+    }
+
+    #[test]
+    fn kimi_preserves_reasoning_content_in_assistant_history() {
+        let mut request = LlmRequest::new("kimi-k2.7-code");
+        request.messages.push(Message {
+            role: "assistant".to_string(),
+            content: vec![
+                ContentBlock::Reasoning {
+                    text: "preserved thought".to_string(),
+                    signature: None,
+                },
+                ContentBlock::Text {
+                    text: "final answer".to_string(),
+                    cache_control: None,
+                },
+            ],
+        });
+
+        let codec = OpenAiChatCodec::new("https://proxy.example/v1").with_profile_name("kimi");
+        let encoded = codec.encode_request(&request).expect("encode Kimi history");
+        assert_eq!(
+            encoded.body_json["messages"][0]["reasoning_content"],
+            "preserved thought"
+        );
+        assert_eq!(encoded.body_json["messages"][0]["content"], "final answer");
     }
 
     /// (c) Non-streaming decode of a message carrying `reasoning_content` yields a

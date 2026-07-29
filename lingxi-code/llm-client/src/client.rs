@@ -1316,9 +1316,10 @@ fn build_codec(provider: &crate::ProviderProfile) -> Result<Box<dyn WireCodec>, 
         crate::ProtocolFamily::AnthropicMessages => Ok(Box::new(
             crate::AnthropicMessagesCodec::new(provider.base_url.clone(), ANTHROPIC_VERSION),
         )),
-        crate::ProtocolFamily::OpenAiChat => Ok(Box::new(crate::OpenAiChatCodec::new(
-            provider.base_url.clone(),
-        ))),
+        crate::ProtocolFamily::OpenAiChat => Ok(Box::new(
+            crate::OpenAiChatCodec::new(provider.base_url.clone())
+                .with_profile_name(provider.profile_name.clone()),
+        )),
         crate::ProtocolFamily::GeminiGenerateContent => {
             Ok(Box::new(crate::GeminiCodec::new(provider.base_url.clone())))
         }

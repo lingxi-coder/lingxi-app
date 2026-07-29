@@ -215,8 +215,8 @@ mod tests {
     #[test]
     fn merges_anthropic_and_presets() {
         let out = assemble(anthropic_only_inputs());
-        // anthropic + 8 built-in presets (incl. gemini).
-        assert_eq!(out.client_config.providers.len(), 9);
+        // anthropic + 10 built-in presets (incl. Kimi Open Platform and Code).
+        assert_eq!(out.client_config.providers.len(), 11);
         let names: Vec<&str> = out
             .client_config
             .providers
@@ -226,6 +226,8 @@ mod tests {
         assert!(names.contains(&"anthropic"));
         assert!(names.contains(&"openrouter"));
         assert!(names.contains(&"deepseek"));
+        assert!(names.contains(&"kimi"));
+        assert!(names.contains(&"kimi-code"));
         assert!(names.contains(&"glm-coding"));
         assert!(names.contains(&"zai"));
         assert!(names.contains(&"openai"));
@@ -256,6 +258,48 @@ mod tests {
         assert_eq!(cs.profile_name, "openrouter");
         assert_eq!(cs.env_var.as_deref(), Some("OPENROUTER_API_KEY"));
         assert_eq!(cs.kind, CredentialKind::ApiKey);
+
+        let kimi = out
+            .client_config
+            .providers
+            .iter()
+            .find(|p| p.profile_name == "kimi")
+            .unwrap();
+        assert_eq!(kimi.base_url, "https://api.moonshot.cn/v1");
+        assert_eq!(kimi.protocol, llm_client::ProtocolFamily::OpenAiChat);
+        assert_eq!(
+            kimi.credential,
+            CredentialConfig::Static {
+                id: "kimi".to_string()
+            }
+        );
+        let kimi_source = out
+            .credential_sources
+            .iter()
+            .find(|c| c.credential_id == "kimi")
+            .unwrap();
+        assert_eq!(kimi_source.env_var.as_deref(), Some("MOONSHOT_API_KEY"));
+        assert_eq!(kimi_source.kind, CredentialKind::ApiKey);
+
+        let kimi_code = out
+            .client_config
+            .providers
+            .iter()
+            .find(|p| p.profile_name == "kimi-code")
+            .unwrap();
+        assert_eq!(kimi_code.base_url, "https://api.kimi.com/coding/v1");
+        assert_eq!(
+            kimi_code.credential,
+            CredentialConfig::Static {
+                id: "kimi-code".to_string()
+            }
+        );
+        let kimi_code_source = out
+            .credential_sources
+            .iter()
+            .find(|c| c.credential_id == "kimi-code")
+            .unwrap();
+        assert_eq!(kimi_code_source.env_var.as_deref(), Some("KIMI_API_KEY"));
     }
 
     #[test]

@@ -30,6 +30,7 @@ function modelLabel(requestModel: string): string {
       case 'gpt': return 'GPT';
       case 'glm': return 'GLM';
       case 'deepseek': return 'DeepSeek';
+      case 'kimi': return 'Kimi';
       case 'gemini': return 'Gemini';
       case 'claude': return 'Claude';
       default: return part.charAt(0).toUpperCase() + part.slice(1);

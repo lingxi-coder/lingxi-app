@@ -30,6 +30,16 @@ export const PROVIDERS: readonly ProviderDefinition[] = [
     defaultModel: 'deepseek/deepseek-chat', available: true,
   },
   {
+    id: 'kimi', label: 'Kimi', description: 'Moonshot AI models', popular: true,
+    authMethod: 'api_key', keyLabel: 'Kimi API key', keyPlaceholder: 'sk-…',
+    defaultModel: 'kimi/kimi-k3', available: true,
+  },
+  {
+    id: 'kimi-code', label: 'Kimi Code', description: 'Coding membership models', popular: true,
+    authMethod: 'api_key', keyLabel: 'Kimi Code API key', keyPlaceholder: 'sk-…',
+    defaultModel: 'kimi-code/kimi-for-coding', available: true,
+  },
+  {
     id: 'gemini', label: 'Google Gemini', description: 'Gemini models', popular: true,
     authMethod: 'api_key', keyLabel: 'Gemini API key', keyPlaceholder: 'AIza…',
     defaultModel: 'gemini/gemini-2.5-flash', available: true,

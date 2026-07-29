@@ -732,6 +732,14 @@ pub fn is_curated_model(provider_id: &str, request_model: &str) -> bool {
         "openai" => matches!(request_model, "gpt-5.5" | "gpt-5.4" | "gpt-5.4-mini"),
         "openai-chatgpt" => matches!(request_model, "gpt-5.3-codex" | "gpt-5-codex"),
         "deepseek" => matches!(request_model, "deepseek-v4-flash" | "deepseek-v4-pro"),
+        "kimi" => matches!(
+            request_model,
+            "kimi-k3" | "kimi-k2.7-code" | "kimi-k2.7-code-highspeed" | "kimi-k2.6"
+        ),
+        "kimi-code" => matches!(
+            request_model,
+            "k3" | "k3-256k" | "kimi-for-coding" | "kimi-for-coding-highspeed"
+        ),
         "gemini" => matches!(
             request_model,
             "gemini-3.6-flash"
@@ -780,6 +788,8 @@ pub fn provider_has_curated_list(provider_id: &str) -> bool {
             | "openai"
             | "openai-chatgpt"
             | "deepseek"
+            | "kimi"
+            | "kimi-code"
             | "gemini"
             | "github-copilot"
             | "zai"
@@ -802,6 +812,8 @@ pub fn provider_fallback_order() -> &'static [&'static str] {
         "openai",
         "openai-chatgpt",
         "deepseek",
+        "kimi",
+        "kimi-code",
         "gemini",
         "github-copilot",
         "zai",
@@ -823,6 +835,8 @@ pub fn provider_default_model(provider_id: &str) -> Option<&'static str> {
         "openai" => "gpt-5.5",
         "openai-chatgpt" => "gpt-5.3-codex",
         "deepseek" => "deepseek-v4-flash",
+        "kimi" => "kimi-k3",
+        "kimi-code" => "kimi-for-coding",
         "gemini" => "gemini-3.5-flash",
         "github-copilot" => "claude-opus-4.8",
         "zai" | "glm-coding" => "glm-5.1",
@@ -1011,6 +1025,18 @@ mod provider_boot_default_tests {
         assert!(is_curated_model("deepseek", "deepseek-v4-pro"));
         assert!(!is_curated_model("deepseek", "deepseek-chat"));
         assert!(!is_curated_model("deepseek", "deepseek-reasoner"));
+    }
+
+    #[test]
+    fn kimi_profiles_use_accessible_defaults_and_curate_current_agent_models() {
+        assert_eq!(provider_default_model("kimi"), Some("kimi-k3"));
+        assert!(is_curated_model("kimi", "kimi-k3"));
+        assert!(is_curated_model("kimi", "kimi-k2.7-code"));
+        assert!(is_curated_model("kimi", "kimi-k2.6"));
+        assert!(!is_curated_model("kimi", "kimi-k2-thinking"));
+        assert_eq!(provider_default_model("kimi-code"), Some("kimi-for-coding"));
+        assert!(is_curated_model("kimi-code", "k3"));
+        assert!(is_curated_model("kimi-code", "kimi-for-coding"));
     }
 }
 

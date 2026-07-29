@@ -74,6 +74,8 @@ const providerEnvironmentVariables: Readonly<Record<string, string>> = {
   anthropic: 'ANTHROPIC_API_KEY',
   openai: 'OPENAI_API_KEY',
   deepseek: 'DEEPSEEK_API_KEY',
+  kimi: 'MOONSHOT_API_KEY',
+  'kimi-code': 'KIMI_API_KEY',
   gemini: 'GEMINI_API_KEY',
   openrouter: 'OPENROUTER_API_KEY',
   zai: 'ZAI_API_KEY',

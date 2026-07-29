@@ -512,6 +512,8 @@ fn provider_label(profile_name: &str) -> &str {
         "anthropic" => "Anthropic",
         "openrouter" => "OpenRouter",
         "deepseek" => "DeepSeek",
+        "kimi" => "Kimi",
+        "kimi-code" => "Kimi Code",
         "glm-coding" => "GLM (coding)",
         "zai" => "Z.AI",
         "openai" => "OpenAI",
@@ -828,6 +830,8 @@ mod tests {
         };
         assert_eq!(label_for("openrouter").as_deref(), Some("OpenRouter"));
         assert_eq!(label_for("deepseek").as_deref(), Some("DeepSeek"));
+        assert_eq!(label_for("kimi").as_deref(), Some("Kimi"));
+        assert_eq!(label_for("kimi-code").as_deref(), Some("Kimi Code"));
         assert_eq!(label_for("glm-coding").as_deref(), Some("GLM (coding)"));
         assert_eq!(
             label_for("github-copilot").as_deref(),

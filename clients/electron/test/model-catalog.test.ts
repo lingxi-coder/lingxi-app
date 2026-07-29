@@ -5,6 +5,7 @@ import {
   groupModelReferences,
   modelReference,
 } from '../src/renderer/bridge/modelCatalog';
+import { providerById } from '../src/shared/providers';
 
 test('groups only the curated qualified references supplied by the engine', () => {
   const references = [
@@ -59,4 +60,22 @@ test('does not duplicate repeated engine entries or invent fallback models', () 
     ['deepseek/deepseek-chat'],
   );
   assert.deepEqual(groupModelReferences([]), []);
+});
+
+test('renders Kimi provider and model labels from qualified engine references', () => {
+  const [group] = groupModelReferences(['kimi/kimi-k3']);
+
+  assert.equal(group?.providerLabel, 'Kimi');
+  assert.equal(group?.models[0]?.label, 'Kimi K3');
+});
+
+test('keeps Kimi Code separate from the pay-as-you-go Kimi provider', () => {
+  const groups = groupModelReferences(['kimi/kimi-k3', 'kimi-code/k3']);
+
+  assert.deepEqual(groups.map((group) => group.providerLabel), ['Kimi', 'Kimi Code']);
+  assert.deepEqual(groups.map((group) => group.models[0]?.label), ['Kimi K3', 'K3']);
+});
+
+test('defaults Kimi Code to the model available on every membership tier', () => {
+  assert.equal(providerById('kimi-code')?.defaultModel, 'kimi-code/kimi-for-coding');
 });

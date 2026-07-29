@@ -147,6 +147,8 @@ fn connect_display_meta(profile_name: &str) -> DisplayMeta {
         ),
         ("gemini", "Google Gemini", "Gemini models", true),
         ("deepseek", "DeepSeek", "Chat / Reasoner", true),
+        ("kimi", "Kimi", "Moonshot AI models", true),
+        ("kimi-code", "Kimi Code", "Coding membership models", true),
         (
             "openrouter",
             "OpenRouter",
@@ -501,6 +503,8 @@ mod t3_tests {
             "Sign in with GitHub"
         );
         assert_eq!(provider_label("anthropic"), "Anthropic");
+        assert_eq!(provider_label("kimi"), "Kimi");
+        assert_eq!(provider_label("kimi-code"), "Kimi Code");
         assert_eq!(provider_label("brand-new-provider"), "Brand New Provider");
     }
 
@@ -549,6 +553,8 @@ mod reducer_tests {
         auth.insert("github-copilot".to_string(), "copilot_device".to_string());
         auth.insert("gemini".to_string(), "api_key".to_string());
         auth.insert("deepseek".to_string(), "api_key".to_string());
+        auth.insert("kimi".to_string(), "api_key".to_string());
+        auth.insert("kimi-code".to_string(), "api_key".to_string());
         auth.insert("openrouter".to_string(), "api_key".to_string());
         auth.insert("zai".to_string(), "api_key".to_string());
         auth.insert("glm-coding".to_string(), "api_key".to_string());
@@ -725,6 +731,8 @@ mod render_tests {
             ("github-copilot", "copilot_device"),
             ("gemini", "api_key"),
             ("deepseek", "api_key"),
+            ("kimi", "api_key"),
+            ("kimi-code", "api_key"),
             ("openrouter", "api_key"),
             ("zai", "api_key"),
             ("glm-coding", "api_key"),
@@ -734,7 +742,7 @@ mod render_tests {
         .collect();
         let st = ConnectPickerState::from_connectable(&auth, &BTreeMap::new());
         let n = st.rows.len();
-        assert_eq!(n, 9);
+        assert_eq!(n, 11);
         let items = st
             .visible_lines()
             .into_iter()

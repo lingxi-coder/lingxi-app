@@ -169,6 +169,20 @@ import XCTest
             XCTAssertEqual(item.reference, "openrouter/openai/gpt-5.5")
         }
 
+        func testModelDisplayUsesStableKimiLabels() {
+            let sections = ModelDisplay.sections(for: ["kimi/kimi-k3", "kimi-code/k3"])
+
+            XCTAssertEqual(sections.first?.name, "Kimi")
+            XCTAssertEqual(sections.first?.models.first?.name, "Kimi K3")
+            XCTAssertEqual(sections.first?.models.first?.shortName, "K3")
+            XCTAssertEqual(sections.last?.name, "Kimi Code")
+            XCTAssertEqual(sections.last?.models.first?.name, "K3")
+            XCTAssertEqual(
+                Presets.llm.first(where: { $0.id == "kimi-code" })?.models.first,
+                "kimi-for-coding"
+            )
+        }
+
         /// End-to-end, KEYLESS:  build the engine, submit a prompt, and assert a
         /// terminal engine event is delivered to the listener over UniFFI.
         ///

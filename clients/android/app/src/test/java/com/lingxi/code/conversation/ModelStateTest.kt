@@ -142,6 +142,7 @@ class ModelStateTest {
         assertEquals("Claude Sonnet 4", EngineModelCatalog.displayName("claude-sonnet-4-20250514"))
         assertEquals("GPT 5.2", EngineModelCatalog.displayName("openai/gpt-5.2"))
         assertEquals("DeepSeek V3.2", EngineModelCatalog.displayName("deepseek/deepseek-v3.2"))
+        assertEquals("Kimi K3", EngineModelCatalog.displayName("kimi/kimi-k3"))
     }
 
     @Test
@@ -156,6 +157,8 @@ class ModelStateTest {
     fun providerDisplayName_hasStableBrands_andCustomFallback() {
         assertEquals("OpenAI", EngineModelCatalog.providerDisplayName("openai"))
         assertEquals("DeepSeek", EngineModelCatalog.providerDisplayName("deepseek"))
+        assertEquals("Kimi", EngineModelCatalog.providerDisplayName("kimi"))
+        assertEquals("Kimi Code", EngineModelCatalog.providerDisplayName("kimi-code"))
         assertEquals("GitHub Copilot", EngineModelCatalog.providerDisplayName("github-copilot"))
         assertEquals("Team Proxy", EngineModelCatalog.providerDisplayName("team-proxy"))
     }

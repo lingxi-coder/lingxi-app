@@ -3460,6 +3460,8 @@ fn provider_profile_label(profile_name: &str) -> String {
         "anthropic" => "Anthropic".to_string(),
         "openrouter" => "OpenRouter".to_string(),
         "deepseek" => "DeepSeek".to_string(),
+        "kimi" => "Kimi".to_string(),
+        "kimi-code" => "Kimi Code".to_string(),
         "glm-coding" => "GLM (coding)".to_string(),
         "zai" => "Z.AI".to_string(),
         "openai" => "OpenAI".to_string(),
@@ -11344,6 +11346,8 @@ mod tests {
         assert_eq!(super::provider_profile_label("anthropic"), "Anthropic");
         assert_eq!(super::provider_profile_label("openrouter"), "OpenRouter");
         assert_eq!(super::provider_profile_label("deepseek"), "DeepSeek");
+        assert_eq!(super::provider_profile_label("kimi"), "Kimi");
+        assert_eq!(super::provider_profile_label("kimi-code"), "Kimi Code");
         assert_eq!(super::provider_profile_label("glm-coding"), "GLM (coding)");
         assert_eq!(
             super::provider_profile_label("github-copilot"),

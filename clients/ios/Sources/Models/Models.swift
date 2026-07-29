@@ -138,6 +138,8 @@ enum ModelDisplay {
         case "openai": return "OpenAI"
         case "openai-chatgpt": return "OpenAI (ChatGPT)"
         case "deepseek": return "DeepSeek"
+        case "kimi": return "Kimi"
+        case "kimi-code": return "Kimi Code"
         case "gemini": return "Google Gemini"
         case "github-copilot": return "GitHub Copilot"
         case "zai": return "Z.AI"
@@ -169,6 +171,14 @@ enum ModelDisplay {
         case "gpt-5-codex": return "GPT-5 Codex"
         case "deepseek-v4-flash": return "DeepSeek V4 Flash"
         case "deepseek-v4-pro": return "DeepSeek V4 Pro"
+        case "kimi-k3": return "Kimi K3"
+        case "kimi-k2.7-code": return "Kimi K2.7 Code"
+        case "kimi-k2.7-code-highspeed": return "Kimi K2.7 Code HighSpeed"
+        case "kimi-k2.6": return "Kimi K2.6"
+        case "k3": return "K3"
+        case "k3-256k": return "K3 256K"
+        case "kimi-for-coding": return "Kimi For Coding"
+        case "kimi-for-coding-highspeed": return "Kimi For Coding HighSpeed"
         case "gemini-3.6-flash": return "Gemini 3.6 Flash"
         case "gemini-3.5-flash": return "Gemini 3.5 Flash"
         case "gemini-3.5-flash-lite": return "Gemini 3.5 Flash Lite"
@@ -185,6 +195,7 @@ enum ModelDisplay {
                     case "gpt": return "GPT"
                     case "glm": return "GLM"
                     case "deepseek": return "DeepSeek"
+                    case "kimi": return "Kimi"
                     case "gemini": return "Gemini"
                     case "claude": return "Claude"
                     default:
@@ -215,6 +226,7 @@ enum ModelDisplay {
         if l.hasPrefix("gpt-") { return modelName(for: displayId) }
         if l.hasPrefix("gemini-") { return modelName(for: displayId).replacingOccurrences(of: "Gemini ", with: "") }
         if l.hasPrefix("deepseek-") { return modelName(for: displayId).replacingOccurrences(of: "DeepSeek ", with: "") }
+        if l.hasPrefix("kimi-") { return modelName(for: displayId).replacingOccurrences(of: "Kimi ", with: "") }
         if l.hasPrefix("glm-") { return modelName(for: displayId) }
         return displayId.isEmpty ? "默认" : displayId
     }
@@ -229,6 +241,10 @@ enum ModelDisplay {
             return Color(srgb: 0.1326, 0.7261, 0.5350)
         case "deepseek":
             return Color(srgb: 0.6451, 0.5662, 1.0000)
+        case "kimi":
+            return Color(srgb: 0.4340, 0.5865, 1.0000)
+        case "kimi-code":
+            return Color(srgb: 0.2784, 0.6980, 0.9490)
         case "gemini":
             return Color(srgb: 0.3503, 0.6649, 0.9741)
         case "github-copilot":

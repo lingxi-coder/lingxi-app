@@ -75,7 +75,7 @@ class SettingsMockTest {
 
     @Test
     fun presetCatalogs_haveExpectedCounts() {
-        assertEquals(7, Presets.llm.size)
+        assertEquals(9, Presets.llm.size)
         assertEquals(5, Presets.search.size)
         assertEquals(4, Presets.fetch.size)
         assertEquals(3, Presets.voice.size)
@@ -99,6 +99,28 @@ class SettingsMockTest {
         assertEquals(
             listOf("deepseek-v4-flash", "deepseek-v4-pro"),
             deepSeek.models,
+        )
+    }
+
+    @Test
+    fun kimiPreset_usesOfficialEndpointAndCuratedModels() {
+        val kimi = Presets.llm.single { it.id == "kimi" }
+
+        assertEquals("https://api.moonshot.cn/v1", kimi.defaultUrl)
+        assertEquals(
+            listOf("kimi-k3", "kimi-k2.7-code", "kimi-k2.7-code-highspeed", "kimi-k2.6"),
+            kimi.models,
+        )
+    }
+
+    @Test
+    fun kimiCodePreset_usesDistinctMembershipEndpointAndModels() {
+        val kimiCode = Presets.llm.single { it.id == "kimi-code" }
+
+        assertEquals("https://api.kimi.com/coding/v1", kimiCode.defaultUrl)
+        assertEquals(
+            listOf("kimi-for-coding", "k3", "k3-256k", "kimi-for-coding-highspeed"),
+            kimiCode.models,
         )
     }
 

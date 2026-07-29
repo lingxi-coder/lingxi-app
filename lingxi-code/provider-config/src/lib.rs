@@ -32,6 +32,6 @@ mod smoke_tests {
     #[test]
     fn links_llm_client() {
         let cat = llm_client::builtin_presets();
-        assert_eq!(cat.providers.len(), 8);
+        assert_eq!(cat.providers.len(), 10);
     }
 }

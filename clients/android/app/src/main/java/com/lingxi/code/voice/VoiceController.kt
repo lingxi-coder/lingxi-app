@@ -27,8 +27,11 @@ import com.lingxi.code.voice.audio.SystemTextToSpeechTts
 import com.lingxi.code.vision.AndroidCameraAdapter
 import com.lingxi.code.share.AndroidShareAdapter
 import com.lingxi.code.notify.AndroidNotificationAdapter
+import com.lingxi.code.project.ProjectWorkspace
 import com.lingxi.code.clipboard.AndroidClipboardAdapter
 import com.lingxi.code.secure.AndroidSecureStorageAdapter
+import com.lingxi.code.settings.LinuxRuntimeBridge
+import com.lingxi.code.settings.LinuxRuntimeMode
 import com.lingxi.code.voice.recorder.AndroidVoiceAdapter
 import com.lingxi.code.voice.audio.RealtimeSpeechCallbacks
 import com.lingxi.code.voice.audio.RealtimeSpeechSession
@@ -87,6 +90,8 @@ fun buildVoiceEngine(
     model: String = "",
     providerProfilesJson: String = "{}",
     routingJson: String? = null,
+    projectWorkspace: ProjectWorkspace? = null,
+    linuxRuntimeMode: LinuxRuntimeMode = LinuxRuntimeMode.Legacy,
     onEvent: suspend (ClientEvent) -> Unit = { event ->
         Log.d(TAG, "engine event: ${event::class.simpleName}")
     },
@@ -146,11 +151,16 @@ fun buildVoiceEngine(
                 apiKey = apiKey,
                 model = model,
                 appFilesRoot = appContext.filesDir.absolutePath,
+                projectCwd = projectWorkspace?.hostPath,
                 providerConfig = AndroidProviderConfigFfi(
                     providerProfilesJson = providerProfilesJson,
                     routingJson = routingJson,
                 ),
-                mobileLinux = null,
+                mobileLinux = LinuxRuntimeBridge.configForWorkspace(
+                    context = appContext,
+                    mode = linuxRuntimeMode,
+                    workspace = projectWorkspace,
+                ),
             ),
             listener = listener,
             stt = stt,

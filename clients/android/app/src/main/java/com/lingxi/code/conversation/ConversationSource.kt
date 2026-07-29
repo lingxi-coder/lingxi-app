@@ -21,7 +21,9 @@ import com.lingxi.code.model.Role
 import com.lingxi.code.model.SessionCatalog
 import com.lingxi.code.secure.SecureKeyStore
 import com.lingxi.code.settings.ProviderSettingsRepository
+import com.lingxi.code.project.ProjectWorkspace
 import com.lingxi.code.secure.resolveEngineCredentials
+import com.lingxi.code.settings.LinuxRuntimeMode
 import com.lingxi.code.voice.buildVoiceEngine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -713,7 +715,11 @@ class EngineConversationSource private constructor(
          * Build the engine + register the event-bridging listener, or return an
          * explicit unavailable source when the engine is not usable.
          */
-        fun create(context: Context): ConversationSource {
+        fun create(
+            context: Context,
+            projectWorkspace: ProjectWorkspace? = null,
+            linuxRuntimeMode: LinuxRuntimeMode = LinuxRuntimeMode.Legacy,
+        ): ConversationSource {
             // Callback ingress is non-blocking and lossless. A dedicated pump may
             // suspend behind a slow collector without ever stalling Rust's event
             // callback or dropping assistant text / terminal events.
@@ -767,6 +773,8 @@ class EngineConversationSource private constructor(
                 model = creds.model.ifBlank { providerLaunch.defaultModel },
                 providerProfilesJson = providerLaunch.providerProfilesJson,
                 routingJson = providerLaunch.routingJson,
+                projectWorkspace = projectWorkspace,
+                linuxRuntimeMode = linuxRuntimeMode,
                 onEvent = { event ->
                     // The OUT-OF-BAND state paths: fold model catalog + session
                     // catalog + live-resume events into the StateFlows the picker /

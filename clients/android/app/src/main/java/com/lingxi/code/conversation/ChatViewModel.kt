@@ -23,6 +23,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * Immutable UI state for the conversation surface. Hoisted out of the
@@ -126,6 +128,8 @@ class ChatViewModel(
     private val savedState: SavedStateHandle? = null,
     private var sourceGeneration: Int = 0,
 ) : ViewModel() {
+    /** Provider reconnect token is independent from workspace-source swaps. */
+    private var reconnectGeneration: Int = sourceGeneration
 
     private val _state = MutableStateFlow(
         run {
@@ -160,6 +164,8 @@ class ChatViewModel(
      */
     private val _sessions = MutableStateFlow(EngineSessionState.loading())
     val sessions: StateFlow<EngineSessionState> = _sessions.asStateFlow()
+    private val _sourceProjectId = MutableStateFlow<String?>(null)
+    val sourceProjectId: StateFlow<String?> = _sourceProjectId.asStateFlow()
 
     /** Permission and MCP state mirrored from the same source this ViewModel owns. */
     private val _pendingPermission = MutableStateFlow(source.pendingPermission.value)
@@ -194,6 +200,9 @@ class ChatViewModel(
 
     /** Parent job for all out-of-band flows of the currently owned source. */
     private var sourceBindingJob: Job? = null
+
+    /** Serializes Project/global Source transactions across rapid drawer taps. */
+    private val workspaceSwitchMutex = Mutex()
 
     /** Monotonic reply-stream generation used to reject stale turn events. */
     private var turnToken: Long = 0L
@@ -285,7 +294,7 @@ class ChatViewModel(
         generation: Int,
         createSource: () -> ConversationSource,
     ) {
-        if (generation <= sourceGeneration) return
+        if (generation <= reconnectGeneration) return
 
         val replacement = createSource()
         if (replacement is UnavailableConversationSource) {
@@ -302,7 +311,8 @@ class ChatViewModel(
             return
         }
         val previous = source
-        sourceGeneration = generation
+        reconnectGeneration = generation
+        sourceGeneration++
 
         abandonLocalTurn()?.cancel()
         explicitCancellation?.cancel()
@@ -324,6 +334,116 @@ class ChatViewModel(
             newSession = visibleSession.id == "new",
             status = if (visibleSession.id == "new") "正在重新连接…" else "正在恢复会话…",
         )
+    }
+
+    /**
+     * Transactionally replace the Android engine when the active Project
+     * workspace changes. The replacement is built before the current source is
+     * touched; a failed build therefore leaves the current Project/session live.
+     */
+    suspend fun switchWorkspaceSource(
+        projectId: String?,
+        target: SessionRef = SessionRef(id = "new", title = "新对话"),
+        newSession: Boolean = target.id == "new",
+        replacePendingTransition: Boolean = false,
+        createSource: () -> ConversationSource,
+        persistSelection: suspend () -> Unit = {},
+        onCommitted: () -> Unit = {},
+    ): Boolean = workspaceSwitchMutex.withLock {
+        if (_state.value.streaming ||
+            (_state.value.sessionTransitioning && !replacePendingTransition)
+        ) {
+            _state.update {
+                it.copy(
+                    error = ChatError(
+                        message = "请先停止当前任务，再切换项目。",
+                        kind = ChatErrorKind.GENERIC,
+                    ),
+                )
+            }
+            return@withLock false
+        }
+        val replacement = runCatching(createSource).getOrElse { error ->
+            _state.update {
+                it.copy(
+                    error = ChatError(
+                        message = "项目引擎创建失败：${error.message ?: error::class.simpleName}",
+                        kind = classifyError(error.message.orEmpty()),
+                    ),
+                )
+            }
+            return@withLock false
+        }
+        if (replacement is UnavailableConversationSource) {
+            replacement.close()
+            _state.update {
+                it.copy(
+                    error = ChatError(
+                        message = "项目引擎创建失败：${replacement.reason}",
+                        kind = classifyError(replacement.reason),
+                    ),
+                )
+            }
+            return@withLock false
+        }
+
+        val persisted = runCatching { persistSelection() }
+        if (persisted.isFailure) {
+            replacement.close()
+            val error = persisted.exceptionOrNull()
+            _state.update {
+                it.copy(
+                    error = ChatError(
+                        message = "无法保存活动项目：${error?.message ?: error?.let { it::class.simpleName }}",
+                        kind = classifyError(error?.message.orEmpty()),
+                    ),
+                )
+            }
+            return@withLock false
+        }
+
+        if (replacePendingTransition && _state.value.sessionTransitioning) {
+            abandonPendingSessionTransition()
+        }
+
+        val previous = source
+        sourceGeneration++
+        sourceBindingJob?.cancel()
+        source = replacement
+        _sourceProjectId.value = projectId
+        _sessions.value = EngineSessionState.loading()
+        _pendingPermission.value = null
+        _mcpServers.value = emptyList()
+        bindSource()
+        onCommitted()
+        previous.close()
+        beginSessionTransition(
+            target = target,
+            newSession = newSession,
+            status = if (newSession) "正在新建项目会话…" else "正在恢复项目会话…",
+        )
+        true
+    }
+
+    private fun abandonPendingSessionTransition() {
+        sessionToken++
+        sessionTransitionJob?.cancel()
+        sessionTransitionJob = null
+        pendingResumeId = null
+        pendingNewSession = false
+        _state.update {
+            it.copy(
+                sessionTransitioning = false,
+                sessionReady = false,
+                statusLine = null,
+            )
+        }
+    }
+
+    fun reportHostError(message: String) {
+        _state.update {
+            it.copy(error = ChatError(message, classifyError(message)))
+        }
     }
 
     suspend fun approvePermission(requestId: ULong, response: PermissionResponseDto) {

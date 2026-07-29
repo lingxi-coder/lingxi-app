@@ -270,12 +270,26 @@ internal fun ProjectsSection(
     activeSession: String,
     openProjects: Set<String>,
     onToggleProject: (String) -> Unit,
-    onSelectSession: (SessionRef) -> Unit,
+    onSelectSession: (String, SessionRef) -> Unit,
+    onNewSession: (String) -> Unit,
+    onCreateProject: () -> Unit,
+    onReimportProject: (String) -> Unit,
+    onExportProject: (String) -> Unit,
+    onReauthorizeProject: (String) -> Unit,
+    statusMessage: String? = null,
 ) {
     Column(
         verticalArrangement = Arrangement.spacedBy(6.dp),
         modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
     ) {
+        if (statusMessage != null) {
+            Text(
+                text = statusMessage,
+                color = LingXiTheme.palette.accent,
+                fontSize = 11.5f.sp,
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 4.dp),
+            )
+        }
         projects.forEach { project ->
             ProjectRow(
                 project = project,
@@ -283,9 +297,21 @@ internal fun ProjectsSection(
                 activeSession = activeSession,
                 onToggle = { onToggleProject(project.id) },
                 onSelectSession = onSelectSession,
+                onNewSession = { onNewSession(project.id) },
+                onReimport = { onReimportProject(project.id) },
+                onExport = { onExportProject(project.id) },
+                onReauthorize = { onReauthorizeProject(project.id) },
             )
         }
-        DashedButton(label = "新建项目")
+        if (projects.isEmpty()) {
+            Text(
+                text = "暂无项目。创建后，工作文件会保存在 Android 应用目录中。",
+                color = LingXiTheme.palette.text4,
+                fontSize = 12.sp,
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+            )
+        }
+        DashedButton(label = "新建或导入项目", onClick = onCreateProject)
     }
 }
 
@@ -295,7 +321,11 @@ private fun ProjectRow(
     isOpen: Boolean,
     activeSession: String,
     onToggle: () -> Unit,
-    onSelectSession: (SessionRef) -> Unit,
+    onSelectSession: (String, SessionRef) -> Unit,
+    onNewSession: () -> Unit,
+    onReimport: () -> Unit,
+    onExport: () -> Unit,
+    onReauthorize: () -> Unit,
 ) {
     val t = LingXiTheme.palette
     val hasActive = project.sessions.any { it.id == activeSession }
@@ -366,16 +396,50 @@ private fun ProjectRow(
                             project = project,
                             session = session,
                             active = session.id == activeSession,
-                            onClick = { onSelectSession(SessionRef(session.id, session.title)) },
+                            onClick = {
+                                onSelectSession(project.id, SessionRef(session.id, session.title))
+                            },
                         )
                     }
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(5.dp),
-                        modifier = Modifier.padding(start = 16.dp, end = 12.dp).padding(vertical = 7.dp),
+                        modifier = Modifier
+                            .clickable(onClick = onNewSession)
+                            .padding(start = 16.dp, end = 12.dp)
+                            .padding(vertical = 7.dp),
                     ) {
                         LXIcon(name = LXIconName.Plus, size = 11.dp, color = t.text4, stroke = 2f)
                         Text("新会话", color = t.text4, fontSize = 12.5f.sp)
+                    }
+                    if (project.storageKind == "saf-mirror") {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(14.dp),
+                            modifier = Modifier.padding(start = 16.dp, end = 12.dp, bottom = 8.dp),
+                        ) {
+                            Text(
+                                text = if (project.syncState == "外部目录授权失效") {
+                                    "重新授权"
+                                } else {
+                                    "重新导入"
+                                },
+                                color = t.accent,
+                                fontSize = 11.5f.sp,
+                                modifier = Modifier.clickable(
+                                    onClick = if (project.syncState == "外部目录授权失效") {
+                                        onReauthorize
+                                    } else {
+                                        onReimport
+                                    },
+                                ),
+                            )
+                            Text(
+                                text = "同步回外部",
+                                color = t.accent,
+                                fontSize = 11.5f.sp,
+                                modifier = Modifier.clickable(onClick = onExport),
+                            )
+                        }
                     }
                 }
             }
@@ -542,7 +606,7 @@ private fun StatusDot(enabled: Boolean) {
 
 /** The dashed "新建…" footer button at the bottom of projects/crons. */
 @Composable
-internal fun DashedButton(label: String) {
+internal fun DashedButton(label: String, onClick: () -> Unit = {}) {
     val t = LingXiTheme.palette
     val shape = RoundedCornerShape(10.dp)
     Row(
@@ -554,7 +618,7 @@ internal fun DashedButton(label: String) {
             .padding(top = 10.dp)
             .clip(shape)
             .dashedBorder(t.border, cornerRadius = 10f)
-            .clickable {}
+            .clickable(onClick = onClick)
             .padding(11.dp),
     ) {
         LXIcon(name = LXIconName.Plus, size = 13.dp, color = t.text3, stroke = 2f)

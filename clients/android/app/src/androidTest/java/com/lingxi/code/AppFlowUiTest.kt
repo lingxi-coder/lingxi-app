@@ -56,23 +56,22 @@ class AppFlowUiTest {
     fun drawer_switchesBetweenChatsProjectsAndCrons() {
         openDrawer()
 
-        // Default tab is 对话: the seeded "work" chat is visible.
-        rule.onNodeWithText("重装 LingXi").assertIsDisplayed()
-
-        // Switch to 项目 → a project name from the mock data appears.
+        // Project is backed by the real filesystem repository. A clean install
+        // starts empty but always exposes the create/import action.
         rule.onNodeWithTag(UiTags.drawerTab(DrawerSection.Projects.key)).performClick()
         rule.waitForIdle()
-        rule.onNodeWithText("灵犀 OS 设计").assertIsDisplayed()
+        rule.onNodeWithText("新建或导入项目").assertIsDisplayed()
 
-        // Switch to 定时 → a cron title appears.
+        // Cron is also a production collection: clean install is explicitly
+        // empty rather than populated with prototype rows.
         rule.onNodeWithTag(UiTags.drawerTab(DrawerSection.Crons.key)).performClick()
         rule.waitForIdle()
-        rule.onNodeWithText("每日晨报").assertIsDisplayed()
+        rule.onNodeWithText("暂无定时任务").assertIsDisplayed()
 
-        // Back to 对话 → the chat is shown again.
+        // Back to 对话 → the real engine catalog surface is still reachable.
         rule.onNodeWithTag(UiTags.drawerTab(DrawerSection.Chats.key)).performClick()
         rule.waitForIdle()
-        rule.onNodeWithText("重装 LingXi").assertIsDisplayed()
+        rule.onNodeWithTag(UiTags.drawerTab(DrawerSection.Chats.key)).assertIsDisplayed()
     }
 
     // --- 2. settings push-nav + system back -------------------------------

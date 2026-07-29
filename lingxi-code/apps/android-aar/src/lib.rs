@@ -213,8 +213,72 @@ pub struct AndroidEngineLaunchConfigFfi {
     pub api_key: String,
     pub model: String,
     pub app_files_root: String,
+    /// Optional Android Project workspace. When present it must resolve to
+    /// `<app_files_root>/projects/<lowercase UUID>/workspace`; global `.lingxi`
+    /// state continues to live under `app_files_root`.
+    pub project_cwd: Option<String>,
     pub provider_config: Option<AndroidProviderConfigFfi>,
     pub mobile_linux: Option<AndroidMobileLinuxConfigFfi>,
+}
+
+#[cfg(feature = "uniffi")]
+fn android_project_cwd(
+    app_files_root: &str,
+    project_cwd: Option<&str>,
+) -> Result<std::path::PathBuf, MobileEngineError> {
+    let app_root = std::path::Path::new(app_files_root)
+        .canonicalize()
+        .map_err(|error| {
+            MobileEngineError::Internal(format!("Android app files root is unavailable: {error}"))
+        })?;
+    let Some(project_cwd) = project_cwd else {
+        return Ok(app_root);
+    };
+    let workspace = std::path::Path::new(project_cwd)
+        .canonicalize()
+        .map_err(|error| {
+            MobileEngineError::Internal(format!(
+                "Android Project workspace is unavailable: {error}"
+            ))
+        })?;
+    let relative = workspace.strip_prefix(&app_root).map_err(|_| {
+        MobileEngineError::Internal(
+            "Android Project workspace must remain inside the app files directory".to_string(),
+        )
+    })?;
+    let components: Vec<_> = relative
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(value) => value.to_str(),
+            _ => None,
+        })
+        .collect();
+    let valid = components.len() == 3
+        && components[0] == "projects"
+        && is_lowercase_uuid(components[1])
+        && components[2] == "workspace"
+        && workspace.is_dir();
+    if !valid {
+        return Err(MobileEngineError::Internal(
+            "Android Project workspace must match filesDir/projects/<lowercase UUID>/workspace"
+                .to_string(),
+        ));
+    }
+    Ok(workspace)
+}
+
+#[cfg(feature = "uniffi")]
+fn is_lowercase_uuid(value: &str) -> bool {
+    if value.len() != 36 || value != value.to_ascii_lowercase() {
+        return false;
+    }
+    value.chars().enumerate().all(|(index, character)| {
+        if matches!(index, 8 | 13 | 18 | 23) {
+            character == '-'
+        } else {
+            character.is_ascii_hexdigit()
+        }
+    })
 }
 
 /// FFI rootfs lifecycle state.
@@ -3048,6 +3112,7 @@ pub fn build_android_engine(
             api_key,
             model,
             app_files_root,
+            project_cwd: None,
             provider_config: None,
             mobile_linux: None,
         },
@@ -3092,11 +3157,14 @@ pub fn build_android_engine_with_mobile_linux(
         api_key,
         model,
         app_files_root,
+        project_cwd,
         provider_config,
         mobile_linux,
     } = config;
     let listener: Arc<dyn ClientEventListener> =
         Arc::new(AndroidListenerBridge { inner: listener });
+    #[cfg(not(target_os = "android"))]
+    let _ = project_cwd;
     #[cfg(target_os = "android")]
     {
         use platform_android::{AndroidPlatform, AndroidPlatformInputs};
@@ -3105,8 +3173,9 @@ pub fn build_android_engine_with_mobile_linux(
         // bundled-shell bootstrap (which must run BEFORE `shell_cfg` is built +
         // moved) needs it to stage the applet symlink farm under it.
         let app_files_root_str = app_files_root.clone();
+        let cwd = android_project_cwd(&app_files_root, project_cwd.as_deref())?;
         let mut cfg = MobileConfig {
-            cwd: std::path::PathBuf::from(&app_files_root),
+            cwd,
             lingxi_home: std::path::PathBuf::from(&app_files_root).join(branding::DOT_DIR),
             // P0.2: production injects the real LINGXI.md hierarchy provider so the
             // orchestrator loads `<cwd>/LINGXI.md` + `<lingxi_home>/LINGXI.md` into
@@ -4295,6 +4364,57 @@ mod tests {
                 "gate must be disabled when {label} is false"
             );
         }
+    }
+
+    #[test]
+    fn android_project_cwd_accepts_only_managed_workspace_shape() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("lingxi-android-project-{nonce}"));
+        let project_id = "12345678-1234-4abc-8def-1234567890ab";
+        let workspace = root.join("projects").join(project_id).join("workspace");
+        std::fs::create_dir_all(&workspace).expect("create project fixture");
+
+        let legacy = super::android_project_cwd(root.to_str().expect("utf8"), None)
+            .expect("missing project cwd preserves the legacy app root");
+        assert_eq!(legacy, root.canonicalize().expect("canonical root"));
+
+        let resolved = super::android_project_cwd(
+            root.to_str().expect("utf8"),
+            Some(workspace.to_str().expect("utf8")),
+        )
+        .expect("managed project workspace is accepted");
+        assert_eq!(
+            resolved,
+            workspace.canonicalize().expect("canonical workspace")
+        );
+
+        let malformed = root.join("projects").join("user-name").join("workspace");
+        std::fs::create_dir_all(&malformed).expect("create malformed fixture");
+        assert!(
+            super::android_project_cwd(
+                root.to_str().expect("utf8"),
+                Some(malformed.to_str().expect("utf8")),
+            )
+            .is_err(),
+            "user-controlled names must never become project directories"
+        );
+
+        let outside = std::env::temp_dir().join(format!("lingxi-outside-project-{nonce}"));
+        std::fs::create_dir_all(&outside).expect("create outside fixture");
+        assert!(
+            super::android_project_cwd(
+                root.to_str().expect("utf8"),
+                Some(outside.to_str().expect("utf8")),
+            )
+            .is_err(),
+            "workspaces outside filesDir must fail closed"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(outside);
     }
 
     /// P4-T10: the FFI → `AndroidGitToolCtx` mapping yields `enabled = false`

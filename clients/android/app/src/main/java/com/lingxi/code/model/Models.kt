@@ -48,6 +48,8 @@ data class Project(
     val color: Color,
     val desc: String,
     val sessions: List<ProjectSession>,
+    val storageKind: String = "internal",
+    val syncState: String = "",
 )
 
 data class Cron(

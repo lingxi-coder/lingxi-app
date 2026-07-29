@@ -13,6 +13,7 @@ import com.lingxi.code.bindings.androidMobileLinuxShutdown
 import com.lingxi.code.bindings.androidMobileLinuxStatus
 import com.lingxi.code.bindings.androidMobileLinuxVerifyRootfs
 import com.lingxi.code.bindings.buildAndroidMobileLinuxRuntimeHandle
+import com.lingxi.code.project.ProjectWorkspace
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -54,17 +55,25 @@ object LinuxRuntimeBridge {
 
     private fun abi(): String = Build.SUPPORTED_ABIS.firstOrNull() ?: "unknown"
 
-    private fun config(context: Context, mode: LinuxRuntimeMode): AndroidMobileLinuxConfigFfi {
-        val workspaceID = stableWorkspaceId(context)
+    fun configForWorkspace(
+        context: Context,
+        mode: LinuxRuntimeMode,
+        workspace: ProjectWorkspace? = null,
+    ): AndroidMobileLinuxConfigFfi {
+        val workspaceID = workspace?.projectId ?: stableWorkspaceId(context)
+        val hostPath = workspace?.hostPath ?: workspaceHostPath(context, workspaceID)
         return mobileLinuxConfig(
             managedRoot = managedRoot(context),
-            workspaceHostPath = workspaceHostPath(context, workspaceID),
+            workspaceHostPath = hostPath,
             stableWorkspaceId = workspaceID,
             abi = abi(),
             mode = mode,
             authorizationFile = authorizationFile(context),
         )
     }
+
+    private fun config(context: Context, mode: LinuxRuntimeMode): AndroidMobileLinuxConfigFfi =
+        configForWorkspace(context, mode)
 
     @Synchronized
     private fun runtime(config: AndroidMobileLinuxConfigFfi): AndroidMobileLinuxRuntimeHandle {

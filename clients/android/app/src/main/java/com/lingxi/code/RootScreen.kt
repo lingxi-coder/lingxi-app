@@ -27,6 +27,8 @@ import androidx.lifecycle.createSavedStateHandle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import com.lingxi.code.conversation.ChatScreen
 import com.lingxi.code.conversation.ChatViewModel
 import com.lingxi.code.conversation.ComposerAttachment
@@ -35,8 +37,23 @@ import com.lingxi.code.conversation.PermissionPromptDialog
 import com.lingxi.code.connectivity.rememberOnlineState
 import com.lingxi.code.connectivity.shouldShowOfflineBanner
 import com.lingxi.code.drawer.DrawerContent
+import com.lingxi.code.drawer.DrawerProductionData
 import com.lingxi.code.drawer.rememberDrawerUiState
+import com.lingxi.code.model.EngineSessionState
 import com.lingxi.code.model.ModelProviderStatus
+import com.lingxi.code.model.SessionCatalogPhase
+import com.lingxi.code.model.SessionRef
+import com.lingxi.code.model.SessionRow
+import com.lingxi.code.project.ConflictResolution
+import com.lingxi.code.project.CreateProjectDialog
+import com.lingxi.code.project.LocalProjectWorkspace
+import com.lingxi.code.project.ProjectConflictDialog
+import com.lingxi.code.project.ProjectErrorDialog
+import com.lingxi.code.project.ProjectOperationKind
+import com.lingxi.code.project.ProjectSnapshot
+import com.lingxi.code.project.ProjectStore
+import com.lingxi.code.project.ProjectStoreState
+import com.lingxi.code.project.toDrawerProject
 import com.lingxi.code.settings.ProviderSettingsRepository
 import com.lingxi.code.settings.SettingsStore
 import com.lingxi.code.theme.LingXiTheme
@@ -93,6 +110,11 @@ fun RootScreen(
     viewModel: ChatViewModel? = null,
 ) {
     val context = LocalContext.current
+    val projectStore: ProjectStore = viewModel(
+        key = "projects",
+        factory = ProjectStore.factory(context),
+    )
+    val projectState by projectStore.state.collectAsState()
 
     // The Activity-scoped ViewModel owns the one native engine source. This is
     // important across configuration changes: Compose is recreated, while the
@@ -104,7 +126,12 @@ fun RootScreen(
         factory = viewModelFactory {
             initializer {
                 ChatViewModel(
-                    source = EngineConversationSource.create(appContext),
+                    source = EngineConversationSource.create(
+                        context = appContext,
+                        projectWorkspace = projectState.activeProject?.workspace,
+                        linuxRuntimeMode = settingsStore?.state?.value?.linuxRuntime?.selectedMode
+                            ?: com.lingxi.code.settings.LinuxRuntimeMode.Legacy,
+                    ),
                     savedState = createSavedStateHandle(),
                     sourceGeneration = reconnectToken,
                 )
@@ -114,7 +141,12 @@ fun RootScreen(
     LaunchedEffect(chatViewModel, reconnectToken) {
         if (viewModel == null) {
             chatViewModel.ensureSource(reconnectToken) {
-                EngineConversationSource.create(appContext)
+                EngineConversationSource.create(
+                    context = appContext,
+                    projectWorkspace = projectState.activeProject?.workspace,
+                    linuxRuntimeMode = settingsStore?.state?.value?.linuxRuntime?.selectedMode
+                        ?: com.lingxi.code.settings.LinuxRuntimeMode.Legacy,
+                )
             }
         }
     }
@@ -124,6 +156,7 @@ fun RootScreen(
     // model catalog). The drawer renders its loading / empty / error states
     // directly and never falls back to mock sessions.
     val sessionState by chatViewModel.sessions.collectAsState()
+    val sourceProjectId by chatViewModel.sourceProjectId.collectAsState()
     val drawerUi = rememberDrawerUiState()
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
@@ -250,6 +283,237 @@ fun RootScreen(
 
     fun closeDrawer() = scope.launch { drawerState.close() }
 
+    suspend fun switchEngineScope(
+        project: ProjectSnapshot?,
+        target: SessionRef?,
+        newSession: Boolean,
+        replacePendingTransition: Boolean = false,
+    ): Boolean {
+        val destination = target ?: SessionRef("new", "新对话")
+        var persisted: ProjectStoreState? = null
+        return chatViewModel.switchWorkspaceSource(
+            projectId = project?.record?.id,
+            target = destination,
+            newSession = newSession,
+            replacePendingTransition = replacePendingTransition,
+            createSource = {
+                EngineConversationSource.create(
+                    context = appContext,
+                    projectWorkspace = project?.workspace,
+                    linuxRuntimeMode = settingsState.linuxRuntime.selectedMode,
+                )
+            },
+            persistSelection = {
+                persisted = projectStore.persistActive(project?.record?.id)
+            },
+            onCommitted = {
+                projectStore.publishActive(checkNotNull(persisted))
+                drawerUi.selectSession(destination.id)
+            },
+        )
+    }
+
+    // Recover the last active Project after process start. The Activity-scoped
+    // ChatViewModel survives rotation, so sourceProjectId prevents a needless
+    // rebuild on configuration changes. A process-restored global Resume is
+    // explicitly superseded only after the Project Source and active index are
+    // both ready, so the wrong cwd never becomes authoritative.
+    LaunchedEffect(
+        projectState.loading,
+        projectState.activeProjectId,
+        sourceProjectId,
+    ) {
+        val project = projectState.activeProject
+        if (
+            !projectState.loading &&
+                project != null &&
+                sourceProjectId == null
+        ) {
+            val last = project.record.lastActiveSessionId
+                ?.let { id -> project.sessions.firstOrNull { it.sessionId == id } }
+                ?.let { SessionRef(it.sessionId, it.title) }
+            switchEngineScope(
+                project = project,
+                target = last,
+                newSession = last == null,
+                replacePendingTransition = true,
+            )
+        }
+    }
+
+    // The current Source's SessionList is authoritative for its own scope.
+    // Cache global rows separately so the 对话 tab remains available while a
+    // Project engine is active.
+    LaunchedEffect(
+        sourceProjectId,
+        sessionState.phase,
+        sessionState.rows,
+        state.session.id,
+        state.sessionReady,
+        state.isNew,
+    ) {
+        if (sessionState.phase == SessionCatalogPhase.Ready) {
+            val provisionalSessionMayNotBeListed =
+                sourceProjectId != null &&
+                    state.isNew &&
+                    (
+                        state.session.id == "new" ||
+                            sessionState.rows.none { it.uuid == state.session.id }
+                        )
+            if (!provisionalSessionMayNotBeListed) {
+                runCatching { projectStore.syncEngineSessions(sourceProjectId, sessionState.rows) }
+                    .onFailure { chatViewModel.reportHostError("会话索引保存失败：${it.message}") }
+            }
+        }
+    }
+    // SessionStarted is emitted before an empty session necessarily has a
+    // file-backed SessionList row. Persist that confirmed id immediately, then
+    // wait until the first turn finishes before asking the authoritative catalog
+    // to replace the provisional row.
+    LaunchedEffect(
+        sourceProjectId,
+        state.session.id,
+        state.sessionReady,
+        state.isNew,
+    ) {
+        val projectId = sourceProjectId
+        if (
+            projectId != null &&
+            state.sessionReady &&
+            state.isNew &&
+            state.session.id != "new"
+        ) {
+            runCatching {
+                projectStore.recordStartedSession(
+                    projectId = projectId,
+                    sessionId = state.session.id,
+                    title = state.session.title,
+                )
+            }.onFailure {
+                chatViewModel.reportHostError("新会话索引保存失败：${it.message}")
+            }
+        }
+    }
+    LaunchedEffect(
+        sourceProjectId,
+        state.session.id,
+        state.sessionReady,
+        state.isNew,
+        state.streaming,
+    ) {
+        if (
+            state.sessionReady &&
+            state.session.id != "new" &&
+            !state.isNew &&
+            !state.streaming
+        ) {
+            chatViewModel.refreshSessions()
+        }
+    }
+    LaunchedEffect(
+        sourceProjectId,
+        state.session.id,
+        state.sessionReady,
+        projectState.projects,
+    ) {
+        val projectId = sourceProjectId ?: return@LaunchedEffect
+        if (
+            state.sessionReady &&
+            projectState.projects.firstOrNull { it.record.id == projectId }
+                ?.sessions
+                ?.any { it.sessionId == state.session.id } == true
+        ) {
+            runCatching { projectStore.markActiveSession(projectId, state.session.id) }
+        }
+    }
+
+    val globalDrawerSessions = if (sourceProjectId == null) {
+        sessionState
+    } else {
+        EngineSessionState.ready(
+            projectState.globalSessions.map { cached ->
+                SessionRow(
+                    uuid = cached.sessionId,
+                    title = cached.title,
+                    messageCount = cached.messageCount,
+                    relativeTime = cached.relativeTime,
+                )
+            },
+        )
+    }
+    val drawerProductionData = DrawerProductionData(
+        workspaces = listOf(LocalProjectWorkspace),
+        projects = projectState.projects.map { it.toDrawerProject() },
+        crons = emptyList(),
+        projectStatusMessage = projectState.operation?.message,
+    )
+    LaunchedEffect(Unit) {
+        if (drawerUi.activeWs.isBlank()) drawerUi.selectWorkspace(LocalProjectWorkspace.id)
+    }
+
+    var showCreateProject by remember { mutableStateOf(false) }
+    var pendingImportName by remember { mutableStateOf<String?>(null) }
+    var pendingReauthorizeProjectId by remember { mutableStateOf<String?>(null) }
+    var dismissedConflictSignature by remember { mutableStateOf<String?>(null) }
+    val activeProjectSyncing =
+        projectState.operation?.let { operation ->
+            operation.projectId == sourceProjectId &&
+                operation.kind in setOf(
+                    ProjectOperationKind.Reimport,
+                    ProjectOperationKind.Export,
+                    ProjectOperationKind.ResolveConflicts,
+                )
+        } == true
+    fun runConversationAction(action: () -> Unit) {
+        if (activeProjectSyncing) {
+            chatViewModel.reportHostError("项目正在同步，请等待同步完成。")
+        } else {
+            action()
+        }
+    }
+    fun runProjectSync(projectId: String, action: () -> Unit): Boolean {
+        val activeProjectIsExecuting =
+            projectId == sourceProjectId && (state.streaming || state.sessionTransitioning)
+        if (activeProjectIsExecuting) {
+            chatViewModel.reportHostError("请先停止当前任务，再同步项目。")
+            return false
+        }
+        action()
+        return true
+    }
+    val conflictSignature = projectState.conflicts
+        .takeIf { it.isNotEmpty() }
+        ?.joinToString("|") { "${it.projectId}:${it.relativePath}" }
+    val visibleProjectConflicts =
+        if (conflictSignature != null && conflictSignature != dismissedConflictSignature) {
+            projectState.conflicts
+        } else {
+            emptyList()
+        }
+    LaunchedEffect(conflictSignature) {
+        if (conflictSignature == null) dismissedConflictSignature = null
+    }
+    val importProjectLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree(),
+    ) { uri ->
+        val name = pendingImportName
+        val reauthorizeProjectId = pendingReauthorizeProjectId
+        pendingImportName = null
+        pendingReauthorizeProjectId = null
+        if (uri != null && name != null) {
+            scope.launch {
+                runCatching { projectStore.importSaf(name, uri) }
+                    .onSuccess { created ->
+                        if (switchEngineScope(created, null, true)) closeDrawer()
+                }
+            }
+        } else if (uri != null && reauthorizeProjectId != null) {
+            runProjectSync(reauthorizeProjectId) {
+                projectStore.reauthorize(reauthorizeProjectId, uri)
+            }
+        }
+    }
+
     Box(modifier = modifier.fillMaxSize()) {
         ModalNavigationDrawer(
             modifier = Modifier.fillMaxSize(),
@@ -273,16 +537,72 @@ fun RootScreen(
                             onOpenSettings()
                         },
                         onClose = { closeDrawer() },
-                        engineSessions = sessionState,
+                        engineSessions = globalDrawerSessions,
                         onResumeSession = { uuid ->
-                            // Tapping a real session: highlight it locally AND ask
-                            // the engine to resume it (ResumeSession). The local
-                            // select keeps the UI honest even before the engine's
-                            // SessionResumed lands.
-                            drawerUi.selectSession(uuid)
-                            sessionState.rows.firstOrNull { it.uuid == uuid }
-                                ?.let { chatViewModel.resumeSession(it) }
-                            closeDrawer()
+                            globalDrawerSessions.rows.firstOrNull { it.uuid == uuid }?.let { row ->
+                                if (sourceProjectId == null) {
+                                    drawerUi.selectSession(uuid)
+                                    chatViewModel.resumeSession(row)
+                                } else {
+                                    scope.launch {
+                                        if (
+                                            switchEngineScope(
+                                                null,
+                                                SessionRef(row.uuid, row.title),
+                                                false,
+                                            )
+                                        ) {
+                                            closeDrawer()
+                                        }
+                                    }
+                                }
+                                if (sourceProjectId == null) closeDrawer()
+                            }
+                        },
+                        productionData = drawerProductionData,
+                        onCreateProject = { showCreateProject = true },
+                        onSelectProjectSession = { projectId, ref ->
+                            val project = projectState.projects.firstOrNull {
+                                it.record.id == projectId
+                            } ?: return@DrawerContent
+                            val switched = if (sourceProjectId == projectId) {
+                                drawerUi.selectSession(ref.id)
+                                chatViewModel.openSession(ref)
+                                true
+                            } else {
+                                scope.launch {
+                                    if (switchEngineScope(project, ref, false)) closeDrawer()
+                                }
+                                false
+                            }
+                            if (switched) closeDrawer()
+                        },
+                        onNewProjectSession = { projectId ->
+                            val project = projectState.projects.firstOrNull {
+                                it.record.id == projectId
+                            } ?: return@DrawerContent
+                            val switched = if (sourceProjectId == projectId) {
+                                chatViewModel.startNewSession()
+                                true
+                            } else {
+                                scope.launch {
+                                    if (switchEngineScope(project, null, true)) closeDrawer()
+                                }
+                                false
+                            }
+                            if (switched) closeDrawer()
+                        },
+                        onReimportProject = { projectId ->
+                            runProjectSync(projectId) { projectStore.reimport(projectId) }
+                        },
+                        onExportProject = { projectId ->
+                            runProjectSync(projectId) { projectStore.export(projectId) }
+                        },
+                        onReauthorizeProject = { projectId ->
+                            runProjectSync(projectId) {
+                                pendingReauthorizeProjectId = projectId
+                                importProjectLauncher.launch(null)
+                            }
                         },
                     )
                 }
@@ -296,11 +616,11 @@ fun RootScreen(
             ) {
                 ChatScreen(
                     state = state,
-                    onSend = chatViewModel::send,
+                    onSend = { text -> runConversationAction { chatViewModel.send(text) } },
                     // "新对话": reset the local transcript immediately AND tell the
                     // engine to begin a new session (NewSession). For the mock the
                     // engine call is a no-op, so this still behaves like newChat.
-                    onNewChat = chatViewModel::startNewSession,
+                    onNewChat = { runConversationAction(chatViewModel::startNewSession) },
                     onSelectModel = chatViewModel::selectModel,
                     isDark = isDark,
                     onToggleTheme = onToggleTheme,
@@ -332,7 +652,9 @@ fun RootScreen(
                     // composer uses; the ConnectivityManager callback keeps the
                     // banner's visibility honest (it auto-clears once a validated
                     // network returns, regardless of this tap).
-                    onRetryOffline = { chatViewModel.resendLast() },
+                    onRetryOffline = {
+                        runConversationAction { chatViewModel.resendLast() }
+                    },
                     modelSetupRequired = modelSetupRequired,
                     onOpenModelSettings = onOpenModelSettings,
                     modelProviderStatuses = modelProviderStatuses,
@@ -353,7 +675,7 @@ fun RootScreen(
             voiceLang = voiceLang,
             streaming = state.streaming,
             assistantText = orbAssistantText,
-            onSend = { chatViewModel.send(it) },
+            onSend = { text -> runConversationAction { chatViewModel.send(text) } },
             onCancel = { chatViewModel.cancel() },
             onListen = orbListen,
             onClose = { flowActive = false },
@@ -371,6 +693,55 @@ fun RootScreen(
             onDeny = { requestId ->
                 scope.launch { chatViewModel.denyPermission(requestId) }
             },
+        )
+
+        CreateProjectDialog(
+            visible = showCreateProject,
+            onDismiss = { showCreateProject = false },
+            onCreateInternal = { name ->
+                showCreateProject = false
+                scope.launch {
+                    runCatching { projectStore.createInternal(name) }
+                        .onSuccess { created ->
+                            if (switchEngineScope(created, null, true)) closeDrawer()
+                        }
+                }
+            },
+            onChooseExternal = { name ->
+                showCreateProject = false
+                pendingImportName = name
+                importProjectLauncher.launch(null)
+            },
+        )
+        ProjectConflictDialog(
+            conflicts = visibleProjectConflicts,
+            onKeepExternal = {
+                val projectId = projectState.conflicts.first().projectId
+                if (
+                    runProjectSync(projectId) {
+                        projectStore.resolveConflicts(projectId, ConflictResolution.KeepExternal)
+                    }
+                ) {
+                    dismissedConflictSignature = conflictSignature
+                }
+            },
+            onKeepInternal = {
+                val projectId = projectState.conflicts.first().projectId
+                if (
+                    runProjectSync(projectId) {
+                        projectStore.resolveConflicts(projectId, ConflictResolution.KeepInternal)
+                    }
+                ) {
+                    dismissedConflictSignature = conflictSignature
+                }
+            },
+            onDismiss = {
+                dismissedConflictSignature = conflictSignature
+            },
+        )
+        ProjectErrorDialog(
+            message = projectState.errorMessage,
+            onDismiss = projectStore::clearError,
         )
     }
 }

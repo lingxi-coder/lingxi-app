@@ -46,8 +46,12 @@ class ChatViewModelReducerTest {
 
     /** A source that supplies an empty transcript and never streams (reduce is driven directly). */
     private class StubSource : ConversationSource {
+        var closed = false
         override fun initialMessages(): List<Message> = emptyList()
         override fun submit(text: String): Flow<ReplyEvent> = emptyFlow()
+        override fun close() {
+            closed = true
+        }
     }
 
     /**
@@ -79,6 +83,7 @@ class ChatViewModelReducerTest {
         val active = MutableStateFlow<ActivatedSession?>(null)
         private val never = MutableSharedFlow<ReplyEvent>()
         var submitCount = 0
+        var closed = false
 
         override fun submit(text: String): Flow<ReplyEvent> {
             submitCount++
@@ -98,6 +103,10 @@ class ChatViewModelReducerTest {
 
         override suspend fun newSession() {
             operations += "new"
+        }
+
+        override fun close() {
+            closed = true
         }
     }
 
@@ -327,6 +336,95 @@ class ChatViewModelReducerTest {
         val vm = ChatViewModel(src)
         vm.cancel()
         assertEquals("no cancel sent when no turn in flight", 0, src.cancelCount)
+    }
+
+    @Test
+    fun workspaceSwitchBuildFailureKeepsCurrentSourceAlive() = runTest(dispatcher) {
+        val original = StubSource()
+        val vm = ChatViewModel(original)
+
+        val switched = vm.switchWorkspaceSource(
+            projectId = "10000000-0000-4000-8000-000000000001",
+            createSource = { UnavailableConversationSource("PRoot 授权阻塞") },
+        )
+
+        assertFalse(switched)
+        assertFalse("the current source must survive replacement build failure", original.closed)
+        assertNull(vm.sourceProjectId.value)
+        assertTrue(vm.state.value.error!!.message.contains("PRoot 授权阻塞"))
+    }
+
+    @Test
+    fun workspaceSwitchClosesOldSourceAndStartsRealNewSession() = runTest(dispatcher) {
+        val original = StubSource()
+        val replacement = SessionControlSource()
+        val vm = ChatViewModel(original)
+        val projectId = "10000000-0000-4000-8000-000000000001"
+
+        val switched = vm.switchWorkspaceSource(
+            projectId = projectId,
+            createSource = { replacement },
+        )
+        runCurrent()
+
+        assertTrue(switched)
+        assertTrue(original.closed)
+        assertEquals(projectId, vm.sourceProjectId.value)
+        assertEquals(listOf("new"), replacement.operations)
+    }
+
+    @Test
+    fun workspaceSwitchPersistenceFailureKeepsCurrentSourceAlive() = runTest(dispatcher) {
+        val original = StubSource()
+        val replacement = SessionControlSource()
+        val vm = ChatViewModel(original)
+
+        val switched = vm.switchWorkspaceSource(
+            projectId = "10000000-0000-4000-8000-000000000001",
+            createSource = { replacement },
+            persistSelection = { error("injected index write failure") },
+        )
+
+        assertFalse(switched)
+        assertFalse("the current source must survive persistence failure", original.closed)
+        assertTrue("the uncommitted replacement must be released", replacement.closed)
+        assertNull(vm.sourceProjectId.value)
+        assertTrue(vm.state.value.error!!.message.contains("index write failure"))
+    }
+
+    @Test
+    fun projectRecoveryReplacesWrongInitialResumeAfterProcessDeath() = runTest(dispatcher) {
+        val savedState = SavedStateHandle(
+            mapOf(
+                "chat.session.id" to "project-session",
+                "chat.session.title" to "项目会话",
+                "chat.isNew" to false,
+            ),
+        )
+        val wrongGlobalSource = SessionControlSource()
+        val projectSource = SessionControlSource()
+        val vm = ChatViewModel(wrongGlobalSource, savedState)
+        runCurrent()
+
+        assertTrue(vm.state.value.sessionTransitioning)
+        assertEquals(listOf("resume:project-session"), wrongGlobalSource.operations)
+
+        val switched = vm.switchWorkspaceSource(
+            projectId = "10000000-0000-4000-8000-000000000001",
+            target = SessionRef("project-session", "项目会话"),
+            newSession = false,
+            replacePendingTransition = true,
+            createSource = { projectSource },
+        )
+        runCurrent()
+
+        assertTrue(switched)
+        assertTrue(wrongGlobalSource.closed)
+        assertEquals(listOf("resume:project-session"), projectSource.operations)
+        assertEquals(
+            "10000000-0000-4000-8000-000000000001",
+            vm.sourceProjectId.value,
+        )
     }
 
     @Test

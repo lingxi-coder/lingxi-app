@@ -65,6 +65,7 @@ data class DrawerProductionData(
     val workspaces: List<Workspace>? = null,
     val projects: List<Project>? = null,
     val crons: List<Cron>? = null,
+    val projectStatusMessage: String? = null,
 )
 
 /**
@@ -98,6 +99,12 @@ fun DrawerContent(
     onResumeSession: (String) -> Unit = { onSelectSession(SessionRef(it, it)) },
     /** Real project/cron/workspace collections. Null collections render unavailable. */
     productionData: DrawerProductionData = DrawerProductionData(),
+    onCreateProject: () -> Unit = {},
+    onSelectProjectSession: (String, SessionRef) -> Unit = { _, session -> onSelectSession(session) },
+    onNewProjectSession: (String) -> Unit = {},
+    onReimportProject: (String) -> Unit = {},
+    onExportProject: (String) -> Unit = {},
+    onReauthorizeProject: (String) -> Unit = {},
 ) {
     val t = LingXiTheme.palette
 
@@ -164,13 +171,18 @@ fun DrawerContent(
 
                 DrawerSection.Projects -> when {
                     projects == null -> DrawerCollectionState("项目数据源尚未接入")
-                    projects.isEmpty() -> DrawerCollectionState("暂无项目")
                     else -> ProjectsSection(
                         projects = projects,
                         activeSession = ui.activeSession,
                         openProjects = ui.openProjects,
                         onToggleProject = ui::toggleProject,
-                        onSelectSession = onSelectSession,
+                        onSelectSession = onSelectProjectSession,
+                        onNewSession = onNewProjectSession,
+                        onCreateProject = onCreateProject,
+                        onReimportProject = onReimportProject,
+                        onExportProject = onExportProject,
+                        onReauthorizeProject = onReauthorizeProject,
+                        statusMessage = productionData.projectStatusMessage,
                     )
                 }
 

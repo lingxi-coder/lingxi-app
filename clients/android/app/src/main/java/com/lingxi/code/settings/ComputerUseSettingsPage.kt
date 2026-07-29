@@ -34,18 +34,25 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import com.lingxi.code.components.LXToggle
 import com.lingxi.code.computeruse.ComputerUseCaptureMode
+import com.lingxi.code.computeruse.ComputerUseConfiguration
 import com.lingxi.code.computeruse.ComputerUseFeatureProvider
 import com.lingxi.code.computeruse.ComputerUseGrant
 import com.lingxi.code.computeruse.ComputerUseSessionState
 import com.lingxi.code.computeruse.ComputerUseTier
+import com.lingxi.code.model.VoiceConfig
 import com.lingxi.code.theme.LingXiTheme
 
 @Composable
-fun ComputerUseSettingsPage() {
+fun ComputerUseSettingsPage(
+    voice: VoiceConfig,
+    onOpenAudioSettings: () -> Unit,
+) {
     val context = LocalContext.current
     val feature = ComputerUseFeatureProvider
     val state by feature.state.collectAsState()
+    val configuration by feature.configuration.collectAsState()
     val apps = remember { feature.listLaunchableApps(context) }
     val selected = remember {
         mutableStateMapOf<String, ComputerUseTier>().apply {
@@ -54,6 +61,12 @@ fun ComputerUseSettingsPage() {
     }
     var search by remember { mutableStateOf("") }
     var pendingStart by remember { mutableStateOf<List<ComputerUseGrant>?>(null) }
+    var microphoneGranted by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+                PackageManager.PERMISSION_GRANTED,
+        )
+    }
     val projectionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
     ) { result ->
@@ -72,6 +85,19 @@ fun ComputerUseSettingsPage() {
     val notificationLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { }
+    val microphoneLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        microphoneGranted = granted
+        val current = feature.configuration.value
+        if (current.listenEnabled != granted) {
+            updateComputerUseConfiguration(
+                context = context,
+                feature = feature,
+                configuration = current.copy(listenEnabled = granted),
+            )
+        }
+    }
     val t = LingXiTheme.palette
     val active = state.sessionState != ComputerUseSessionState.Inactive
     val filteredApps = apps.filter {
@@ -117,6 +143,130 @@ fun ComputerUseSettingsPage() {
             ) {
                 Text(if (state.serviceEnabled) "检查系统服务设置" else "启用无障碍服务")
             }
+        }
+
+        SettingsSection(
+            label = "音频能力",
+            footer = "音频只在用户已启动的 Computer Use 会话中可用。听写文本和播报内容不会写入审计记录；临时听写结果也不会进入会话历史。",
+        ) {
+            SettingsRow(
+                label = "允许 Agent 听取语音",
+                sub = if (microphoneGranted) {
+                    "android_use.listen · 麦克风已授权"
+                } else {
+                    "启用后仍需用户授予系统麦克风权限"
+                },
+                chevron = false,
+            ) {
+                LXToggle(
+                    checked = configuration.listenEnabled,
+                    onCheckedChange = { enabled ->
+                        if (enabled && !microphoneGranted) {
+                            microphoneLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                        } else {
+                            updateComputerUseConfiguration(
+                                context = context,
+                                feature = feature,
+                                configuration = configuration.copy(listenEnabled = enabled),
+                            )
+                        }
+                    },
+                )
+            }
+            Column(
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(
+                        "最长单次听取",
+                        color = t.text,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Text(
+                        "${configuration.maxListenSeconds} 秒",
+                        color = t.text3,
+                        fontSize = 13.sp,
+                    )
+                }
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    listOf(5, 15, 30, 60).forEach { seconds ->
+                        FilterChip(
+                            selected = configuration.maxListenSeconds == seconds,
+                            onClick = {
+                                updateComputerUseConfiguration(
+                                    context,
+                                    feature,
+                                    configuration.copy(maxListenSeconds = seconds),
+                                )
+                            },
+                            label = { Text("${seconds}s") },
+                            modifier = Modifier.weight(1f).sizeIn(minHeight = 48.dp),
+                        )
+                    }
+                }
+            }
+            SettingsRow(
+                label = "允许 Agent 语音播报",
+                sub = "android_use.speak · Android 系统 TTS",
+                chevron = false,
+            ) {
+                LXToggle(
+                    checked = configuration.speakEnabled,
+                    onCheckedChange = { enabled ->
+                        updateComputerUseConfiguration(
+                            context,
+                            feature,
+                            configuration.copy(speakEnabled = enabled),
+                        )
+                    },
+                )
+            }
+            SettingsRow(
+                label = "听写与播报设置",
+                sub = "${voiceLanguageLabel(voice.inputLanguage)} · ${voice.speed}x · ${voice.voiceId.ifBlank { "default" }}",
+                value = "打开",
+                isLast = true,
+                onTap = onOpenAudioSettings,
+            )
+        }
+
+        SettingsSection(
+            label = "执行边界",
+            footer = "后台能力不会绕过会话授权：停止会话、锁屏、服务断开或超时会取消排队动作和正在进行的音频。",
+        ) {
+            SettingsRow(
+                label = "Agent 工具",
+                value = "android_use",
+                chevron = false,
+            )
+            SettingsRow(
+                label = "后台执行",
+                sub = "仅活动会话内；Cron/WorkManager 不会自行创建授权",
+                value = "允许",
+                chevron = false,
+            )
+            SettingsRow(
+                label = "会话限制",
+                sub = "30 分钟无操作停止",
+                value = "最长 2 小时",
+                chevron = false,
+            )
+            SettingsRow(
+                label = "高风险操作",
+                sub = "发送、发布、拨号、删除等每次确认",
+                value = "强制",
+                chevron = false,
+                isLast = true,
+            )
         }
 
         if (!active) {
@@ -168,6 +318,7 @@ fun ComputerUseSettingsPage() {
                                     selected = selected[app.packageName] == tier,
                                     onClick = { selected[app.packageName] = tier },
                                     label = { Text(tier.label()) },
+                                    modifier = Modifier.sizeIn(minHeight = 48.dp),
                                 )
                             }
                         }
@@ -238,6 +389,21 @@ fun ComputerUseSettingsPage() {
             Text("清除本地 Computer Use 审计记录")
         }
     }
+}
+
+private fun updateComputerUseConfiguration(
+    context: android.content.Context,
+    feature: com.lingxi.code.computeruse.ComputerUseFeature,
+    configuration: ComputerUseConfiguration,
+) {
+    feature.updateConfiguration(context, configuration)
+}
+
+private fun voiceLanguageLabel(language: String): String = when (language) {
+    "zh-CN" -> "中文"
+    "en-US" -> "English"
+    "ja-JP" -> "日本語"
+    else -> "自动识别"
 }
 
 private fun ComputerUseTier.label(): String = when (this) {

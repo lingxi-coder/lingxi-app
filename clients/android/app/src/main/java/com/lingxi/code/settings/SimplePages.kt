@@ -2,12 +2,15 @@ package com.lingxi.code.settings
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -115,14 +118,9 @@ fun NotificationsPage(notifs: NotifConfig, onChange: (NotifConfig) -> Unit) {
 // MARK: - Input -------------------------------------------------------------
 @Composable
 fun InputPage() {
-    var autoSend by remember { mutableStateOf(true) }
     var smartSugg by remember { mutableStateOf(true) }
     var fromHistory by remember { mutableStateOf(true) }
     Column(Modifier.fillMaxWidth()) {
-        SettingsSection(label = "语音输入") {
-            SettingsRow(label = "按住说话识别语言", value = "自动", onTap = {})
-            SettingsRow(label = "松开后自动发送", chevron = false, isLast = true) { LXToggle(checked = autoSend, onCheckedChange = { autoSend = it }) }
-        }
         SettingsSection(label = "候选词") {
             SettingsRow(label = "启用智能候选", chevron = false) { LXToggle(checked = smartSugg, onCheckedChange = { smartSugg = it }) }
             SettingsRow(label = "基于历史会话", chevron = false, isLast = true) { LXToggle(checked = fromHistory, onCheckedChange = { fromHistory = it }) }
@@ -181,13 +179,12 @@ fun LanguagePage(language: String, onSelect: (String) -> Unit) {
     }
 }
 
-// MARK: - Voice TTS ---------------------------------------------------------
+// MARK: - Voice input and output --------------------------------------------
 /**
- * Voice / TTS settings — the Android analog of the iOS `VoicePage`. Picks the
- * synthesis provider preset, exposes an API-key field for the non-system
- * presets, and edits the speech rate + auto-play toggle. Backed by the hoisted
- * [SettingsStore]'s [com.lingxi.code.model.VoiceConfig] via [SettingsStore.setVoice]
- * so changes persist for the session (consistent with the other settings pages).
+ * Shared voice settings for chat and Direct-build Computer Use. Changes are
+ * persisted by [SettingsStore] and read by the Android Computer Use audio host
+ * at call time, so an Agent listen/speak call uses the same language, voice and
+ * speed selected here.
  *
  * @param voice the live voice config (preset / speed / auto-play).
  * @param onChange writes a mutated config back into the store.
@@ -195,34 +192,91 @@ fun LanguagePage(language: String, onSelect: (String) -> Unit) {
 @Composable
 fun VoicePage(voice: VoiceConfig, onChange: (VoiceConfig) -> Unit) {
     val t = LingXiTheme.palette
-    val preset = Presets.voice.firstOrNull { it.id == voice.preset }
-    // API key is a local, non-persisted field (keys never live in the mock
-    // settings state — they belong in the SecureKeyStore), matching the iOS
-    // page's @State apiKey. Reset per preset so switching providers clears it.
-    var apiKey by remember(voice.preset) { mutableStateOf("") }
 
     Column(Modifier.fillMaxWidth()) {
-        SettingsSection(label = "语音合成 TTS") {
+        SettingsSection(
+            label = "听 · 语音识别",
+            footer = "聊天麦克风和 Computer Use 的 listen 动作共用此设置。麦克风权限只可由用户在前台授予。",
+        ) {
             RadioList(
-                options = Presets.voice.map { RadioOption(it.id, it.name, it.sub) },
+                options = listOf(
+                    RadioOption("system", "Android 系统语音识别", "使用设备当前的识别服务"),
+                ),
+                selected = voice.inputProvider,
+                onSelect = { onChange(voice.copy(inputProvider = it)) },
+            )
+            Column(
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(
+                        "识别语言",
+                        color = t.text,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Text(
+                        voiceLanguageLabel(voice.inputLanguage),
+                        color = t.text3,
+                        fontSize = 13.sp,
+                    )
+                }
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    listOf("auto", "zh-CN", "en-US", "ja-JP").forEach { language ->
+                        Text(
+                            text = voiceLanguageShortLabel(language),
+                            color = if (voice.inputLanguage == language) t.accent else t.text3,
+                            fontSize = 12.sp,
+                            modifier = Modifier
+                                .clip(CircleShape)
+                                .background(
+                                    if (voice.inputLanguage == language) {
+                                        t.accent.tint(0.14f)
+                                    } else {
+                                        t.surfaceActive
+                                    },
+                                )
+                                .clickable { onChange(voice.copy(inputLanguage = language)) }
+                                .weight(1f)
+                                .sizeIn(minHeight = 48.dp)
+                                .padding(horizontal = 6.dp, vertical = 7.dp),
+                        )
+                    }
+                }
+            }
+        }
+
+        SettingsSection(
+            label = "说 · 语音合成",
+            footer = "AI 回复自动播放和 Computer Use 的 speak 动作共用输出声音与语速。",
+        ) {
+            RadioList(
+                options = Presets.voice
+                    .filter { it.id == "system" }
+                    .map { RadioOption(it.id, it.name, it.sub) },
                 selected = voice.preset,
                 onSelect = { onChange(voice.copy(preset = it)) },
             )
-        }
-
-        if (preset != null && preset.id != "system") {
-            SettingsSection(label = "API 配置", footer = "密钥仅本地存储。") {
+            if (voice.preset == "system") {
                 Box(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp)) {
                     SettingsField(
-                        value = apiKey,
-                        onValueChange = { apiKey = it },
-                        placeholder = "API Key (${preset.name})",
+                        value = voice.voiceId,
+                        onValueChange = { onChange(voice.copy(voiceId = it)) },
+                        placeholder = "系统 voice id（default）",
                     )
                 }
             }
         }
 
-        SettingsSection(label = "选项", footer = "自动播放：AI 回复完成后立即朗读。") {
+        SettingsSection(label = "播放选项", footer = "自动播放：AI 回复完成后立即朗读。") {
             SettingsRow(
                 label = "语速",
                 value = String.format("%.1fx", voice.speed),
@@ -261,6 +315,20 @@ fun VoicePage(voice: VoiceConfig, onChange: (VoiceConfig) -> Unit) {
  */
 fun snapVoiceSpeed(raw: Float): Float =
     (Math.round(raw * 10f) / 10f).coerceIn(0.5f, 2.0f)
+
+private fun voiceLanguageLabel(language: String): String = when (language) {
+    "zh-CN" -> "简体中文"
+    "en-US" -> "English"
+    "ja-JP" -> "日本語"
+    else -> "自动"
+}
+
+private fun voiceLanguageShortLabel(language: String): String = when (language) {
+    "zh-CN" -> "中文"
+    "en-US" -> "EN"
+    "ja-JP" -> "日本語"
+    else -> "自动"
+}
 
 // MARK: - Placeholder (A7/A8 seam) ------------------------------------------
 /**

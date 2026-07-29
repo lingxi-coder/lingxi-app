@@ -13,14 +13,20 @@ class VoiceSettingsRepository(context: Context) {
         Context.MODE_PRIVATE,
     )
 
-    fun load(): VoiceConfig = VoiceConfig(
-        inputProvider = preferences.getString(KEY_INPUT_PROVIDER, "system") ?: "system",
-        inputLanguage = preferences.getString(KEY_INPUT_LANGUAGE, "auto") ?: "auto",
-        preset = preferences.getString(KEY_OUTPUT_PROVIDER, "system") ?: "system",
-        voiceId = preferences.getString(KEY_VOICE, "default") ?: "default",
-        speed = preferences.getFloat(KEY_SPEED, 1.0f).coerceIn(0.5f, 2.0f),
-        autoPlay = preferences.getBoolean(KEY_AUTO_PLAY, false),
-    )
+    fun load(): VoiceConfig {
+        val storedVoice = preferences.getString(KEY_VOICE, "default") ?: "default"
+        return VoiceConfig(
+            inputProvider = "system",
+            inputLanguage = preferences.getString(KEY_INPUT_LANGUAGE, "auto") ?: "auto",
+            // Android currently has one real STT/TTS implementation. Do not
+            // resurrect legacy cloud-provider rows that never had a working
+            // credential or transport behind them.
+            preset = "system",
+            voiceId = storedVoice.takeUnless { it == "zh-CN-XiaoxiaoNeural" } ?: "default",
+            speed = preferences.getFloat(KEY_SPEED, 1.0f).coerceIn(0.5f, 2.0f),
+            autoPlay = preferences.getBoolean(KEY_AUTO_PLAY, false),
+        )
+    }
 
     fun save(config: VoiceConfig) {
         preferences.edit()

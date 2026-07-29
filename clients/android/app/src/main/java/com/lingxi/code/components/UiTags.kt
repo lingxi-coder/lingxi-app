@@ -65,6 +65,9 @@ object UiTags {
     /** The drawer's editable search field that filters the section lists. */
     const val DRAWER_SEARCH = "tag.drawerSearch"
 
+    /** The persistent drawer shortcut that opens the full-screen Android shell. */
+    const val DRAWER_TERMINAL = "tag.drawerTerminal"
+
     /** The dismissible offline banner shown in the chat scaffold when offline. */
     const val OFFLINE_BANNER = "tag.offlineBanner"
 

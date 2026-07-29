@@ -71,8 +71,10 @@ class AudioFocusController(
                 .setOnAudioFocusChangeListener(focusListener)
                 .setAcceptsDelayedFocusGain(false)
                 .build()
-            focusRequest = req
-            am.requestAudioFocus(req) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+            val granted =
+                am.requestAudioFocus(req) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+            focusRequest = req.takeIf { granted }
+            granted
         } else {
             @Suppress("DEPRECATION")
             val rc = am.requestAudioFocus(

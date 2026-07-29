@@ -1,5 +1,6 @@
 package com.lingxi.code.computeruse
 
+import android.Manifest
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -8,6 +9,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.Handler
@@ -15,6 +17,7 @@ import android.os.IBinder
 import android.os.Looper
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
+import androidx.core.content.ContextCompat
 import com.lingxi.code.MainActivity
 import com.lingxi.code.R
 
@@ -57,17 +60,16 @@ class ComputerUseSessionService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-        val foregroundType = if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
-        } else {
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+        if (!refreshForegroundNotification()) {
+            ComputerUseFeatureProvider.failAndStop(
+                this,
+                "Computer Use 前台服务无法启用所需的控制或麦克风类型",
+            )
+            return START_NOT_STICKY
         }
-        ServiceCompat.startForeground(
-            this,
-            NOTIFICATION_ID,
-            buildNotification(),
-            foregroundType,
-        )
+        if (intent?.action == ACTION_REFRESH_FOREGROUND_TYPES) {
+            return START_NOT_STICKY
+        }
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
             val resultCode = intent?.getIntExtra(EXTRA_PROJECTION_RESULT_CODE, Int.MIN_VALUE)
                 ?: Int.MIN_VALUE
@@ -111,10 +113,49 @@ class ComputerUseSessionService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    private fun buildNotification() = NotificationCompat.Builder(this, CHANNEL_ID)
+    private fun refreshForegroundNotification(): Boolean {
+        val microphoneReady = shouldActivateMicrophoneForegroundService(
+            listenEnabled = ComputerUseFeatureProvider.isListenConfigured(),
+            microphoneGranted =
+                ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
+                    PackageManager.PERMISSION_GRANTED,
+        )
+        val foregroundType = when {
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.R ->
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE ->
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            else -> 0
+        } or if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && microphoneReady) {
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+        } else {
+            0
+        }
+        return runCatching {
+            ServiceCompat.startForeground(
+                this,
+                NOTIFICATION_ID,
+                buildNotification(microphoneReady),
+                foregroundType,
+            )
+        }.onSuccess {
+            ComputerUseFeatureProvider.onForegroundTypesUpdated(microphoneReady)
+        }.onFailure {
+            ComputerUseFeatureProvider.onForegroundTypesUpdated(false)
+        }.isSuccess
+    }
+
+    private fun buildNotification(microphoneReady: Boolean) =
+        NotificationCompat.Builder(this, CHANNEL_ID)
         .setSmallIcon(R.mipmap.ic_launcher_foreground)
         .setContentTitle("Computer Use 正在控制设备")
-        .setContentText("仅允许本次会话选中的应用。点击可返回灵犀。")
+        .setContentText(
+            if (microphoneReady) {
+                "仅允许所选应用；本会话已允许语音听取。点击可返回灵犀。"
+            } else {
+                "仅允许本次会话选中的应用。点击可返回灵犀。"
+            },
+        )
         .setOngoing(true)
         .setSilent(true)
         .setCategory(NotificationCompat.CATEGORY_SERVICE)
@@ -156,11 +197,20 @@ class ComputerUseSessionService : Service() {
     companion object {
         internal const val ACTION_START = "com.lingxi.code.computeruse.START"
         internal const val ACTION_STOP = "com.lingxi.code.computeruse.STOP"
+        internal const val ACTION_REFRESH_FOREGROUND_TYPES =
+            "com.lingxi.code.computeruse.REFRESH_FOREGROUND_TYPES"
         internal const val EXTRA_PROJECTION_RESULT_CODE = "projection_result_code"
         internal const val EXTRA_PROJECTION_DATA = "projection_data"
         internal const val IDLE_TIMEOUT_MS = 30 * 60 * 1000L
         internal const val MAX_SESSION_MS = 2 * 60 * 60 * 1000L
         private const val CHANNEL_ID = "computer_use_session"
         private const val NOTIFICATION_ID = 0x4355
+
+        internal fun refreshForegroundTypes(context: Context) {
+            context.startService(
+                Intent(context, ComputerUseSessionService::class.java)
+                    .setAction(ACTION_REFRESH_FOREGROUND_TYPES),
+            )
+        }
     }
 }

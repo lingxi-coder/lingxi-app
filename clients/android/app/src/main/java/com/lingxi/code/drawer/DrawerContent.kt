@@ -76,7 +76,8 @@ data class DrawerProductionData(
  *
  * State is hoisted into [DrawerUiState]; selecting a chat/session calls
  * [onSelectSession] (which the root shell uses to close the drawer and switch
- * the conversation), and the account row calls [onOpenSettings].
+ * the conversation), the terminal shortcut calls [onOpenTerminal], and the
+ * account row calls [onOpenSettings].
  *
  * Layout mirrors the prototype top-to-bottom: status-bar offset → header →
  * workspace pills → search → section tabs → scrolling section body → account
@@ -89,6 +90,7 @@ fun DrawerContent(
     onOpenSettings: () -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
+    onOpenTerminal: () -> Unit = {},
     /**
      * The engine's REAL resumable sessions (out-of-band catalog). The 对话 tab
      * renders this state directly, including loading / empty / error, and never
@@ -199,6 +201,7 @@ fun DrawerContent(
             }
         }
 
+        TerminalShortcut(onClick = onOpenTerminal)
         AccountRow(onClick = onOpenSettings)
     }
 }
@@ -422,7 +425,46 @@ private fun DrawerCollectionState(message: String) {
     )
 }
 
-// MARK: - account -----------------------------------------------------------
+// MARK: - shortcuts / account -----------------------------------------------
+
+@Composable
+private fun TerminalShortcut(onClick: () -> Unit) {
+    val t = LingXiTheme.palette
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag(UiTags.DRAWER_TERMINAL)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 26.dp, vertical = 12.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(36.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(t.accent.copy(alpha = 0.14f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            LXIcon(
+                name = LXIconName.Terminal,
+                size = 20.dp,
+                color = t.accent,
+                stroke = 1.7f,
+            )
+        }
+        Column(modifier = Modifier.weight(1f)) {
+            Text("终端", color = t.text, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+            Text("Android Shell", color = t.text4, fontSize = 11.5f.sp)
+        }
+        LXIcon(
+            name = LXIconName.ChevronR,
+            size = 16.dp,
+            color = t.text4,
+            stroke = 1.6f,
+        )
+    }
+}
 
 @Composable
 private fun AccountRow(onClick: () -> Unit) {

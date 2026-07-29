@@ -2,6 +2,8 @@
 # The Rust cdylib .so (per-ABI, ~20MB each) and the uniffi-bindgen Kotlin
 # bindings are build outputs, not source — mirrors clients/ios's Generated/.
 app/src/main/jniLibs/
+app/src/direct/jniLibs/
+app/src/play/jniLibs/
 app/src/main/java/com/lingxi/code/bindings/
 
 .gradle/

@@ -10,6 +10,8 @@ import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.suspendCancellableCoroutine
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.FutureTask
 import kotlin.coroutines.resume
 
 interface RealtimeSpeechCallbacks {
@@ -67,14 +69,16 @@ class SystemSpeechRecognizerStt(private val context: Context) : SttProvider {
                 retriable = false,
             )
         }
-        if (!SpeechRecognizer.isRecognitionAvailable(context)) {
-            return SttResult.Err(
-                code = "no_provider_configured",
-                message = "Device has no SpeechRecognizer service installed.",
-                retriable = false,
-            )
+        return runOnMainThread {
+            if (!SpeechRecognizer.isRecognitionAvailable(context)) {
+                return@runOnMainThread SttResult.Err(
+                    code = "no_provider_configured",
+                    message = "Device has no SpeechRecognizer service installed.",
+                    retriable = false,
+                )
+            }
+            startRecognition(language)
         }
-        return runOnMainThread { startRecognition(language) }
     }
 
     private suspend fun startRecognition(language: String?): SttResult =
@@ -89,8 +93,10 @@ class SystemSpeechRecognizerStt(private val context: Context) : SttProvider {
             }
             recognizer.setRecognitionListener(SimpleListener(recognizer, cont))
             cont.invokeOnCancellation {
-                runCatching { recognizer.cancel() }
-                runCatching { recognizer.destroy() }
+                runOnMainThreadAsync {
+                    runCatching { recognizer.cancel() }
+                    runCatching { recognizer.destroy() }
+                }
             }
             recognizer.startListening(intent)
         }
@@ -98,13 +104,16 @@ class SystemSpeechRecognizerStt(private val context: Context) : SttProvider {
     fun openRealtimeSession(
         language: String?,
         callbacks: RealtimeSpeechCallbacks,
-    ): RealtimeSpeechSession {
+    ): RealtimeSpeechSession = runOnMainThreadBlocking {
         check(SpeechRecognizer.isRecognitionAvailable(context)) {
             "Device has no SpeechRecognizer service installed."
         }
         val recognizer = SpeechRecognizer.createSpeechRecognizer(context)
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(
+                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM,
+            )
             if (!language.isNullOrBlank()) {
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE, language)
             }
@@ -112,13 +121,11 @@ class SystemSpeechRecognizerStt(private val context: Context) : SttProvider {
         }
         val listener = RealtimeListener(recognizer, callbacks)
         recognizer.setRecognitionListener(listener)
-        runOnMainThreadSync {
-            recognizer.startListening(intent)
-        }
-        return object : RealtimeSpeechSession {
-            override fun stop() = runOnMainThreadSync { listener.stop() }
-            override fun cancel() = runOnMainThreadSync { listener.cancel() }
-            override fun close() = runOnMainThreadSync { listener.close() }
+        recognizer.startListening(intent)
+        object : RealtimeSpeechSession {
+            override fun stop() = runOnMainThreadBlocking { listener.stop() }
+            override fun cancel() = runOnMainThreadBlocking { listener.cancel() }
+            override fun close() = runOnMainThreadBlocking { listener.close() }
         }
     }
 
@@ -134,11 +141,29 @@ class SystemSpeechRecognizerStt(private val context: Context) : SttProvider {
         }
     }
 
-    private fun runOnMainThreadSync(block: () -> Unit) {
+    private fun runOnMainThreadAsync(block: () -> Unit) {
         if (Looper.myLooper() == Looper.getMainLooper()) {
             block()
         } else {
             Handler(Looper.getMainLooper()).post(block)
+        }
+    }
+
+    private fun <T> runOnMainThreadBlocking(block: () -> T): T {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            return block()
+        }
+        val task = FutureTask(block)
+        check(Handler(Looper.getMainLooper()).post(task)) {
+            "Android main thread is unavailable"
+        }
+        return try {
+            task.get()
+        } catch (error: ExecutionException) {
+            throw error.cause ?: error
+        } catch (error: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw IllegalStateException("Interrupted while waiting for Android main thread", error)
         }
     }
 

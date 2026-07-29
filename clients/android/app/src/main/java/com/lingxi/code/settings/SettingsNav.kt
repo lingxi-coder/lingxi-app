@@ -59,7 +59,7 @@ object SettingsRoutes {
 object SettingsTitles {
     const val MAIN = "设置"
     const val ACCOUNT = "账户"
-    const val VOICE = "语音 TTS"
+    const val VOICE = "语音与音频"
     const val APPEARANCE = "外观"
     const val LANGUAGE = "语言"
     const val NOTIFICATIONS = "通知"

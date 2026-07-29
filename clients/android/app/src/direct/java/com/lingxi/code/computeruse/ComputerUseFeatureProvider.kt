@@ -24,6 +24,7 @@ import com.lingxi.code.bindings.AndroidComputerUseHost
 import com.lingxi.code.bindings.AndroidScreenshotFfi
 import com.lingxi.code.settings.VoiceSettingsRepository
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -81,6 +82,9 @@ object ComputerUseFeatureProvider : ComputerUseFeature, AndroidComputerUseHost {
 
     @Volatile
     private var audioController: ComputerUseAudioController? = null
+
+    @Volatile
+    private var microphoneForegroundReady = false
 
     @Volatile
     private var approvalDeferred: CompletableDeferred<Boolean>? = null
@@ -265,11 +269,29 @@ object ComputerUseFeatureProvider : ComputerUseFeature, AndroidComputerUseHost {
         configuration: ComputerUseConfiguration,
     ) {
         attach(context, emergencyStop ?: {})
+        val previous = mutableConfiguration.value
         val sanitized = configuration.copy(
             maxListenSeconds = configuration.maxListenSeconds.coerceIn(5, 60),
         )
         settingsStore?.save(sanitized)
         mutableConfiguration.value = sanitized
+        if (
+            previous.listenEnabled != sanitized.listenEnabled &&
+            mutableState.value.sessionState in setOf(
+                ComputerUseSessionState.Starting,
+                ComputerUseSessionState.Active,
+                ComputerUseSessionState.AwaitingApproval,
+            )
+        ) {
+            runCatching { ComputerUseSessionService.refreshForegroundTypes(context) }
+                .onFailure { error ->
+                    microphoneForegroundReady = false
+                    mutableState.value = mutableState.value.copy(
+                        lastError = error.message
+                            ?: "无法更新 Computer Use 麦克风前台服务状态",
+                    )
+                }
+        }
     }
 
     override fun openAccessibilitySettings(context: Context) {
@@ -366,6 +388,7 @@ object ComputerUseFeatureProvider : ComputerUseFeature, AndroidComputerUseHost {
 
     internal fun onServiceDestroyed() {
         projectionCapture = null
+        microphoneForegroundReady = false
         val wasActive = mutableState.value.sessionState != ComputerUseSessionState.Inactive
         if (!stopping && wasActive) {
             emergencyStop?.invoke()
@@ -379,6 +402,12 @@ object ComputerUseFeatureProvider : ComputerUseFeature, AndroidComputerUseHost {
     }
 
     internal fun hasInMemoryGrants(): Boolean = synchronized(grantLock) { grants.isNotEmpty() }
+
+    internal fun isListenConfigured(): Boolean = mutableConfiguration.value.listenEnabled
+
+    internal fun onForegroundTypesUpdated(microphoneReady: Boolean) {
+        microphoneForegroundReady = microphoneReady
+    }
 
     internal fun lastInteractionMs(): Long = lastInteractionAt.get()
 
@@ -398,6 +427,7 @@ object ComputerUseFeatureProvider : ComputerUseFeature, AndroidComputerUseHost {
             )
             .putNullable("detail", current.lastError)
             .put("audio_listen_enabled", mutableConfiguration.value.listenEnabled)
+            .put("audio_microphone_foreground_ready", microphoneForegroundReady)
             .put("audio_speak_enabled", mutableConfiguration.value.speakEnabled)
             .putNullable(
                 "audio_input_language",
@@ -547,6 +577,11 @@ object ComputerUseFeatureProvider : ComputerUseFeature, AndroidComputerUseHost {
                 "麦克风权限未授予；请先在灵犀前台允许麦克风权限",
             )
         }
+        if (!microphoneForegroundReady) {
+            throw AndroidComputerUseFfiException.PermissionDenied(
+                "麦克风前台服务尚未就绪；请在灵犀前台重新启用听取权限",
+            )
+        }
         val request = JSONObject(requestJson)
         val voiceConfig = VoiceSettingsRepository(context).load()
         val language = request.optString("language")
@@ -561,7 +596,13 @@ object ComputerUseFeatureProvider : ComputerUseFeature, AndroidComputerUseHost {
                 "Computer Use audio controller is unavailable"
             }.listen(language, timeoutMs)
             touch()
-            audit.append("device_audio", "listen", "sensitive", "session-setting", "completed")
+            audit.append(
+                "device_audio",
+                "listen",
+                ComputerUseRisk.Normal,
+                "session-setting",
+                "completed",
+            )
             JSONObject()
                 .put("text", result.text)
                 .putNullable("language", result.language)
@@ -570,6 +611,8 @@ object ComputerUseFeatureProvider : ComputerUseFeature, AndroidComputerUseHost {
                 .toString()
         } catch (_: TimeoutCancellationException) {
             throw AndroidComputerUseFfiException.Timeout("语音听取超时")
+        } catch (error: CancellationException) {
+            throw error
         } catch (error: AndroidComputerUseFfiException) {
             throw error
         } catch (error: Throwable) {
@@ -607,11 +650,21 @@ object ComputerUseFeatureProvider : ComputerUseFeature, AndroidComputerUseHost {
                 "Computer Use audio controller is unavailable"
             }.speak(text, voice, speed)
             touch()
-            audit.append("device_audio", "speak", "low", "session-setting", "completed")
+            audit.append(
+                "device_audio",
+                "speak",
+                ComputerUseRisk.Normal,
+                "session-setting",
+                "completed",
+            )
             JSONObject()
                 .put("completed", result.completed)
                 .put("duration_ms", result.durationMs)
                 .toString()
+        } catch (_: TimeoutCancellationException) {
+            throw AndroidComputerUseFfiException.Timeout("语音播报超时")
+        } catch (error: CancellationException) {
+            throw error
         } catch (error: AndroidComputerUseFfiException) {
             throw error
         } catch (error: Throwable) {
@@ -1265,6 +1318,8 @@ object ComputerUseFeatureProvider : ComputerUseFeature, AndroidComputerUseHost {
     }
 
     private fun finishStoppedState(reason: String) {
+        audioController?.stop()
+        microphoneForegroundReady = false
         clearGrants()
         projectionCapture = null
         val error = mutableState.value.lastError ?: if (reason in setOf("user", "tool-stop")) {

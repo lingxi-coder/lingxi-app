@@ -81,9 +81,9 @@ fun MainSettingsPage(
             )
             SettingsRow(
                 icon = LXIconName.Mic, iconColor = Color(red = 0.8018f, green = 0.4038f, blue = 0.8909f),
-                label = "语音 TTS",
-                sub = Presets.voice.firstOrNull { it.id == state.voice.preset }?.name,
-                value = if (state.voice.preset == "system") "免费" else "已配置",
+                label = "语音与音频",
+                sub = "系统听写 · ${Presets.voice.firstOrNull { it.id == state.voice.preset }?.name ?: "系统语音"}",
+                value = voiceLanguageSummary(state.voice.inputLanguage),
                 isLast = true,
                 onTap = { navController.navigate(SettingsRoutes.VOICE) },
             )
@@ -196,6 +196,13 @@ fun MainSettingsPage(
             modifier = Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 4.dp),
         )
     }
+}
+
+private fun voiceLanguageSummary(language: String): String = when (language) {
+    "zh-CN" -> "中文"
+    "en-US" -> "English"
+    "ja-JP" -> "日本語"
+    else -> "自动"
 }
 
 /**

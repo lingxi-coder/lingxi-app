@@ -3,7 +3,11 @@
 
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!-- Repeated in the Direct source set so lint can validate the microphone
+         FGS permission pair before manifest merging. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
     <queries>
         <intent>
@@ -29,7 +33,7 @@
         <service
             android:name=".computeruse.ComputerUseSessionService"
             android:exported="false"
-            android:foregroundServiceType="mediaProjection|specialUse"
+            android:foregroundServiceType="mediaProjection|microphone|specialUse"
             android:stopWithTask="false">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"

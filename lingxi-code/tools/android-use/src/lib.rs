@@ -194,6 +194,19 @@ fn action_result(data: Value) -> ToolCallResult {
     }
 }
 
+fn ephemeral_audio_result(mut data: Value) -> ToolCallResult {
+    if let Some(object) = data.as_object_mut() {
+        object.insert(EPHEMERAL_MARKER.into(), Value::Bool(true));
+        object.insert(
+            "summary".into(),
+            Value::String(
+                "Temporary Android microphone transcript omitted from session persistence.".into(),
+            ),
+        );
+    }
+    action_result(data)
+}
+
 fn screenshot_result(screenshot: traits::AndroidScreenshot) -> Result<ToolCallResult, ToolError> {
     let original_size = u64::try_from(screenshot.png_bytes.len()).unwrap_or(u64::MAX);
     let processed = tool_api::util::image_budget::process_image(screenshot.png_bytes)
@@ -449,7 +462,7 @@ impl Tool for AndroidUseTool {
                     .and_then(Value::as_str)
                     .filter(|value| !value.trim().is_empty() && *value != "auto")
                     .map(str::to_string);
-                Ok(action_result(json!(self
+                Ok(ephemeral_audio_result(json!(self
                     .automation
                     .listen(AndroidAudioListenRequest {
                         language,
@@ -667,6 +680,24 @@ mod tests {
             INPUT_SCHEMA["properties"]["actions"]["maxItems"],
             MAX_ANDROID_UI_BATCH
         );
+    }
+
+    #[test]
+    fn audio_actions_have_bounded_inputs_and_ephemeral_transcripts() {
+        assert_eq!(
+            INPUT_SCHEMA["properties"]["listen_timeout_ms"]["maximum"],
+            MAX_ANDROID_AUDIO_LISTEN_MS
+        );
+        assert!(ACTIONS.contains(&"listen"));
+        assert!(ACTIONS.contains(&"speak"));
+        assert!(ACTIONS.contains(&"stop_audio"));
+
+        let result = ephemeral_audio_result(json!({"text":"private words"}));
+        assert_eq!(result.data[EPHEMERAL_MARKER], true);
+        assert_eq!(result.data["text"], "private words");
+        assert!(result.data["summary"]
+            .as_str()
+            .is_some_and(|summary| summary.contains("omitted")));
     }
 
     #[test]

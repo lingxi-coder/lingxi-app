@@ -63,6 +63,11 @@ data class ComputerUseConfiguration(
     val maxListenSeconds: Int = 15,
 )
 
+internal fun shouldActivateMicrophoneForegroundService(
+    listenEnabled: Boolean,
+    microphoneGranted: Boolean,
+): Boolean = listenEnabled && microphoneGranted
+
 interface ComputerUseFeature {
     val available: Boolean
     val state: StateFlow<ComputerUseUiState>

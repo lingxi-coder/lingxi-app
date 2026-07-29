@@ -215,7 +215,12 @@ fun SettingsHost(
                     )
                 }
                 page(SettingsRoutes.COMPUTER_USE) {
-                    ComputerUseSettingsPage()
+                    ComputerUseSettingsPage(
+                        voice = state.voice,
+                        onOpenAudioSettings = {
+                            navController.navigate(SettingsRoutes.VOICE)
+                        },
+                    )
                 }
                 page(SettingsRoutes.MCP_EDIT) {
                     val id = it.arguments?.getString("id") ?: ""

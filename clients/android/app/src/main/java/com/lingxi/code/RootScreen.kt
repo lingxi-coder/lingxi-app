@@ -641,6 +641,10 @@ fun RootScreen(
                             closeDrawer()
                             onOpenSettings()
                         },
+                        onOpenTerminal = {
+                            closeDrawer()
+                            onOpenTerminal("interactive", null)
+                        },
                         onClose = { closeDrawer() },
                         engineSessions = globalDrawerSessions,
                         onResumeSession = { uuid ->

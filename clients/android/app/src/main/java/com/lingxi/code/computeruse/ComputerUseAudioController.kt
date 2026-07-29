@@ -18,7 +18,6 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlin.coroutines.CoroutineContext
 import kotlin.math.max
@@ -34,6 +33,15 @@ internal data class ComputerUseSpeechResult(
     val completed: Boolean,
     val durationMs: Long,
 )
+
+internal fun audioPlaybackTimeoutMs(frameCount: Int, sampleRate: Int): Long {
+    val safeSampleRate = sampleRate.coerceAtLeast(1)
+    val expectedMs = (
+        frameCount.coerceAtLeast(0).toLong() * 1_000L + safeSampleRate - 1
+        ) / safeSampleRate
+    return (expectedMs + PLAYBACK_TIMEOUT_GRACE_MS)
+        .coerceIn(PLAYBACK_TIMEOUT_GRACE_MS, MAX_PLAYBACK_TIMEOUT_MS)
+}
 
 /**
  * Short-lived microphone/TTS bridge for the Direct Computer Use host.
@@ -98,15 +106,20 @@ internal class ComputerUseAudioController(context: Context) {
     }
 
     fun stop() {
+        val job: Job?
+        val track: AudioTrack?
         synchronized(stateLock) {
-            activeJob?.cancel()
-            activeTrack?.let { track ->
-                runCatching { track.pause() }
-                runCatching { track.flush() }
-                runCatching { track.stop() }
-                runCatching { track.release() }
-            }
+            job = activeJob
+            track = activeTrack
+            activeJob = null
             activeTrack = null
+        }
+        job?.cancel()
+        track?.let {
+            runCatching { it.pause() }
+            runCatching { it.flush() }
+            runCatching { it.stop() }
+            runCatching { it.release() }
         }
     }
 
@@ -121,7 +134,6 @@ internal class ComputerUseAudioController(context: Context) {
 
     private suspend fun playPcm(pcm: ByteArray, sampleRate: Int) {
         val frameCount = pcm.size / 2
-        val durationMs = ((frameCount * 1_000L) / sampleRate.coerceAtLeast(1)).coerceAtLeast(1)
         val minBuffer = AudioTrack.getMinBufferSize(
             sampleRate,
             AudioFormat.CHANNEL_OUT_MONO,
@@ -144,8 +156,6 @@ internal class ComputerUseAudioController(context: Context) {
             .setBufferSizeInBytes(max(minBuffer, minOf(pcm.size, sampleRate * 2)))
             .setTransferMode(AudioTrack.MODE_STREAM)
             .build()
-        check(track.state == AudioTrack.STATE_INITIALIZED) { "Android audio output is unavailable" }
-
         val focus = AudioFocusController(
             appContext,
             object : AudioFocusListener {
@@ -162,24 +172,36 @@ internal class ComputerUseAudioController(context: Context) {
                 }
             },
         )
-        check(focus.register()) { "another app owns audio focus" }
-        synchronized(stateLock) { activeTrack = track }
         try {
+            check(track.state == AudioTrack.STATE_INITIALIZED) {
+                "Android audio output is unavailable"
+            }
+            check(focus.register()) { "another app owns audio focus" }
+            synchronized(stateLock) { activeTrack = track }
             track.play()
-            withContext(kotlinx.coroutines.Dispatchers.IO) {
+            withTimeout(audioPlaybackTimeoutMs(frameCount, sampleRate)) {
                 var offset = 0
                 while (offset < pcm.size) {
                     val written = track.write(
                         pcm,
                         offset,
                         pcm.size - offset,
-                        AudioTrack.WRITE_BLOCKING,
+                        AudioTrack.WRITE_NON_BLOCKING,
                     )
-                    check(written > 0) { "Android audio output failed ($written)" }
-                    offset += written
+                    check(written >= 0) { "Android audio output failed ($written)" }
+                    if (written == 0) {
+                        delay(AUDIO_WRITE_RETRY_MS)
+                    } else {
+                        offset += written
+                    }
+                }
+                while (track.playbackHeadPosition.toLong() < frameCount) {
+                    val remainingFrames = frameCount - track.playbackHeadPosition.toLong()
+                    val remainingMs = (remainingFrames * 1_000L) /
+                        sampleRate.coerceAtLeast(1)
+                    delay(remainingMs.coerceIn(10, 100))
                 }
             }
-            delay(durationMs + 50)
         } finally {
             focus.unregister()
             synchronized(stateLock) {
@@ -205,3 +227,7 @@ internal class ComputerUseAudioController(context: Context) {
         }
     }
 }
+
+private const val AUDIO_WRITE_RETRY_MS = 10L
+private const val PLAYBACK_TIMEOUT_GRACE_MS = 5_000L
+private const val MAX_PLAYBACK_TIMEOUT_MS = 10 * 60 * 1_000L

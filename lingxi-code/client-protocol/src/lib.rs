@@ -20,6 +20,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod ask_user_question;
 pub mod commands;
 pub mod computer_access;
 pub mod error;

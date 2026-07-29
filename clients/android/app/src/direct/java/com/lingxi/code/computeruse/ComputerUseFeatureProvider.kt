@@ -22,6 +22,7 @@ import com.lingxi.code.R
 import com.lingxi.code.bindings.AndroidComputerUseFfiException
 import com.lingxi.code.bindings.AndroidComputerUseHost
 import com.lingxi.code.bindings.AndroidScreenshotFfi
+import com.lingxi.code.settings.VoiceSettingsRepository
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -31,6 +32,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.TimeoutCancellationException
 import org.json.JSONArray
 import org.json.JSONObject
 import java.nio.ByteBuffer
@@ -50,6 +52,7 @@ object ComputerUseFeatureProvider : ComputerUseFeature, AndroidComputerUseHost {
 
     private val mutableState = MutableStateFlow(ComputerUseUiState())
     private val mutableApproval = MutableStateFlow<ComputerUseApproval?>(null)
+    private val mutableConfiguration = MutableStateFlow(ComputerUseConfiguration())
     private val generation = AtomicLong(1)
     private val lastEventAt = AtomicLong(System.currentTimeMillis())
     private val lastInteractionAt = AtomicLong(System.currentTimeMillis())
@@ -74,6 +77,12 @@ object ComputerUseFeatureProvider : ComputerUseFeature, AndroidComputerUseHost {
     private var auditStore: ComputerUseAuditStore? = null
 
     @Volatile
+    private var settingsStore: ComputerUseSettingsStore? = null
+
+    @Volatile
+    private var audioController: ComputerUseAudioController? = null
+
+    @Volatile
     private var approvalDeferred: CompletableDeferred<Boolean>? = null
 
     @Volatile
@@ -87,10 +96,19 @@ object ComputerUseFeatureProvider : ComputerUseFeature, AndroidComputerUseHost {
     override val available: Boolean = true
     override val state: StateFlow<ComputerUseUiState> = mutableState
     override val pendingApproval: StateFlow<ComputerUseApproval?> = mutableApproval
+    override val configuration: StateFlow<ComputerUseConfiguration> = mutableConfiguration
 
     override fun attach(context: Context, onEmergencyStop: () -> Unit) {
         applicationContext = context.applicationContext
         if (auditStore == null) auditStore = ComputerUseAuditStore(context.applicationContext)
+        if (settingsStore == null) {
+            settingsStore = ComputerUseSettingsStore(context.applicationContext).also {
+                mutableConfiguration.value = it.load()
+            }
+        }
+        if (audioController == null) {
+            audioController = ComputerUseAudioController(context.applicationContext)
+        }
         emergencyStop = onEmergencyStop
         refreshServiceStatus()
     }
@@ -221,6 +239,7 @@ object ComputerUseFeatureProvider : ComputerUseFeature, AndroidComputerUseHost {
         mutableApproval.value = null
         emergencyStop?.invoke()
         accessibility?.cancelPendingGestures()
+        audioController?.stop()
         context.applicationContext.stopService(
             Intent(context, ComputerUseSessionService::class.java),
         )
@@ -239,6 +258,18 @@ object ComputerUseFeatureProvider : ComputerUseFeature, AndroidComputerUseHost {
     override fun clearAudit(context: Context) {
         attach(context, emergencyStop ?: {})
         audit.clear()
+    }
+
+    override fun updateConfiguration(
+        context: Context,
+        configuration: ComputerUseConfiguration,
+    ) {
+        attach(context, emergencyStop ?: {})
+        val sanitized = configuration.copy(
+            maxListenSeconds = configuration.maxListenSeconds.coerceIn(5, 60),
+        )
+        settingsStore?.save(sanitized)
+        mutableConfiguration.value = sanitized
     }
 
     override fun openAccessibilitySettings(context: Context) {
@@ -366,6 +397,20 @@ object ComputerUseFeatureProvider : ComputerUseFeature, AndroidComputerUseHost {
                 current.expiresAtMs?.minus(System.currentTimeMillis())?.coerceAtLeast(0),
             )
             .putNullable("detail", current.lastError)
+            .put("audio_listen_enabled", mutableConfiguration.value.listenEnabled)
+            .put("audio_speak_enabled", mutableConfiguration.value.speakEnabled)
+            .putNullable(
+                "audio_input_language",
+                applicationContext?.let { VoiceSettingsRepository(it).load().inputLanguage },
+            )
+            .putNullable(
+                "audio_voice",
+                applicationContext?.let { VoiceSettingsRepository(it).load().voiceId },
+            )
+            .put(
+                "audio_speed",
+                applicationContext?.let { VoiceSettingsRepository(it).load().speed } ?: 1.0f,
+            )
             .toString()
     }
 
@@ -482,6 +527,103 @@ object ComputerUseFeatureProvider : ComputerUseFeature, AndroidComputerUseHost {
         } catch (_: kotlinx.coroutines.TimeoutCancellationException) {
             throw AndroidComputerUseFfiException.Timeout("等待条件超时")
         }
+    }
+
+    override suspend fun listenJson(requestJson: String): String {
+        requireActive()
+        val config = mutableConfiguration.value
+        if (!config.listenEnabled) {
+            throw AndroidComputerUseFfiException.PermissionDenied(
+                "请先在 Computer Use 设置中启用“允许听取环境语音”",
+            )
+        }
+        val context = applicationContext
+            ?: throw AndroidComputerUseFfiException.SessionInactive()
+        if (
+            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            throw AndroidComputerUseFfiException.PermissionDenied(
+                "麦克风权限未授予；请先在灵犀前台允许麦克风权限",
+            )
+        }
+        val request = JSONObject(requestJson)
+        val voiceConfig = VoiceSettingsRepository(context).load()
+        val language = request.optString("language")
+            .takeIf { it.isNotBlank() && it != "null" }
+            ?: voiceConfig.inputLanguage.takeUnless { it == "auto" }
+        val timeoutMs = request.optLong(
+            "timeout_ms",
+            config.maxListenSeconds * 1_000L,
+        ).coerceIn(1_000L, config.maxListenSeconds * 1_000L)
+        return try {
+            val result = requireNotNull(audioController) {
+                "Computer Use audio controller is unavailable"
+            }.listen(language, timeoutMs)
+            touch()
+            audit.append("device_audio", "listen", "sensitive", "session-setting", "completed")
+            JSONObject()
+                .put("text", result.text)
+                .putNullable("language", result.language)
+                .putNullable("confidence", result.confidence)
+                .put("duration_ms", result.durationMs)
+                .toString()
+        } catch (_: TimeoutCancellationException) {
+            throw AndroidComputerUseFfiException.Timeout("语音听取超时")
+        } catch (error: AndroidComputerUseFfiException) {
+            throw error
+        } catch (error: Throwable) {
+            throw AndroidComputerUseFfiException.Other(
+                error.message ?: "语音听取失败",
+            )
+        }
+    }
+
+    override suspend fun speakJson(requestJson: String): String {
+        requireActive()
+        if (!mutableConfiguration.value.speakEnabled) {
+            throw AndroidComputerUseFfiException.PermissionDenied(
+                "请先在 Computer Use 设置中启用“允许语音播报”",
+            )
+        }
+        val context = applicationContext
+            ?: throw AndroidComputerUseFfiException.SessionInactive()
+        val request = JSONObject(requestJson)
+        val text = request.optString("text")
+        if (text.isBlank() || text.length > 4_000) {
+            throw AndroidComputerUseFfiException.Other("语音播报文本长度必须为 1–4000 字符")
+        }
+        val voiceConfig = VoiceSettingsRepository(context).load()
+        val voice = request.optString("voice")
+            .takeIf { it.isNotBlank() && it != "null" }
+            ?: voiceConfig.voiceId
+        val speed = if (request.has("speed") && !request.isNull("speed")) {
+            request.optDouble("speed", voiceConfig.speed.toDouble()).toFloat()
+        } else {
+            voiceConfig.speed
+        }.coerceIn(0.5f, 2.0f)
+        return try {
+            val result = requireNotNull(audioController) {
+                "Computer Use audio controller is unavailable"
+            }.speak(text, voice, speed)
+            touch()
+            audit.append("device_audio", "speak", "low", "session-setting", "completed")
+            JSONObject()
+                .put("completed", result.completed)
+                .put("duration_ms", result.durationMs)
+                .toString()
+        } catch (error: AndroidComputerUseFfiException) {
+            throw error
+        } catch (error: Throwable) {
+            throw AndroidComputerUseFfiException.Other(
+                error.message ?: "语音播报失败",
+            )
+        }
+    }
+
+    override suspend fun stopAudio() {
+        requireActive()
+        audioController?.stop()
     }
 
     override suspend fun stop() {

@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   assertCommandAllowedDuringTurn,
   isAllowedIpcSender,
+  validateAskUserQuestionAnswers,
   validateBridgeLockfile,
   validateClientCommand,
   validateComputerAccessResponse,
@@ -32,6 +33,21 @@ test('only the bounded Desktop command surface passes the runtime allowlist', ()
   assert.throws(
     () => validateClientCommand({ type: 'refresh_listings', which: [{ type: 'status' }, { type: 'doctor' }, { type: 'slash_commands' }, { type: 'status' }] }),
     /invalid listing selection/,
+  );
+});
+
+test('AskUserQuestion answers are bounded non-empty string maps', () => {
+  assert.deepEqual(
+    validateAskUserQuestionAnswers({ 'Choose a mode': 'Safe, Fast' }),
+    { 'Choose a mode': 'Safe, Fast' },
+  );
+  assert.throws(() => validateAskUserQuestionAnswers({}), /invalid AskUserQuestion answers/);
+  assert.throws(() => validateAskUserQuestionAnswers({ Question: '   ' }), /invalid AskUserQuestion answer/);
+  assert.throws(
+    () => validateAskUserQuestionAnswers(Object.fromEntries(
+      Array.from({ length: 5 }, (_, index) => [`Question ${index}`, 'Answer']),
+    )),
+    /invalid AskUserQuestion answers/,
   );
 });
 

@@ -494,6 +494,30 @@ pub trait PermissionGate: Send + Sync {
         self.check_after_hook_allow(name, input).await
     }
 
+    /// Rich-outcome variant of [`Self::check_after_hook_allow_ctx`].
+    ///
+    /// A rule-evaluating gate may need to re-enter an interactive permission
+    /// transport after a hook allow. If that transport rewrites the tool input,
+    /// the rewrite must reach the dispatcher just like it does on the ordinary
+    /// permission path. The default preserves the frozen trait behavior by
+    /// projecting the existing two-valued decision into an outcome without a
+    /// rewrite.
+    async fn check_after_hook_allow_outcome_ctx(
+        &self,
+        name: &str,
+        input: &Value,
+        ctx: &PermissionCheckContext,
+    ) -> PermissionOutcome {
+        match self.check_after_hook_allow_ctx(name, input, ctx).await {
+            PermissionDecision::Allow => PermissionOutcome::Allow {
+                updated_input: None,
+                permission_updates: Vec::new(),
+                decision_classification: None,
+            },
+            PermissionDecision::Deny { reason } => PermissionOutcome::Deny { reason },
+        }
+    }
+
     /// The PERMISSION-REQUEST-hook twin of [`Self::check_after_hook_allow`].
     ///
     /// claude-code has TWO hook-allow resolvers and they differ in what an

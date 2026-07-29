@@ -142,7 +142,22 @@ pub async fn run_subagent(
     // `<dot>/agents/*.md` with a `hooks:` block. 2.1.217 registered
     // unconditionally; 2.1.218 skips + logs + counts instead.
     let frontmatter_cleanup = match &ctx.hook_executor {
-        Some(he) if !ctx.agent_definition.frontmatter_hooks.is_empty() => {
+        Some(_)
+            if !ctx.agent_definition.frontmatter_hooks.is_empty()
+                && ctx.strict_plugin_only_hooks
+                && !crate::mcp_servers::plugin_trusted_source(ctx.agent_definition.source) =>
+        {
+            tracing::warn!(
+                agent = %ctx.agent_definition.agent_type,
+                "Skipping agent frontmatter hooks: strictPluginOnlyCustomization locks hooks to plugin-only sources"
+            );
+            None
+        }
+        Some(he)
+            if !ctx.agent_definition.frontmatter_hooks.is_empty()
+                && (!ctx.strict_plugin_only_hooks
+                    || crate::mcp_servers::plugin_trusted_source(ctx.agent_definition.source)) =>
+        {
             let cwd = ctx
                 .cwd
                 .clone()
@@ -617,10 +632,8 @@ async fn build_preload_messages(ctx: &SubagentContext) -> Vec<protocol::Conversa
                     // Leading metadata text block + the loaded content blocks
                     // (claude `createUserMessage({ content: [metadata, ...content],
                     // isMeta: true })`). LingXi's `ConversationMessage::User` has
-                    // no `isMeta` flag (the meta-ness is a UI concern claude uses
-                    // for rendering "Skill(name)"); the model-facing bytes — the
-                    // metadata block then the skill content — are what matter for
-                    // parity, and those are preserved here.
+                    // marks the message meta so last-user-query selection and UI
+                    // rendering never mistake a preload for user intent.
                     let mut blocks: Vec<ContentBlock> = Vec::with_capacity(1 + load.content.len());
                     blocks.push(ContentBlock::Text {
                         text: format_skill_loading_metadata(&load.display_name),
@@ -629,7 +642,7 @@ async fn build_preload_messages(ctx: &SubagentContext) -> Vec<protocol::Conversa
                     out.push(ConversationMessage::User {
                         id: MessageId::new(),
                         content: blocks,
-                        is_meta: false,
+                        is_meta: true,
                         is_compact_summary: false,
                         is_visible_in_transcript_only: false,
                     });

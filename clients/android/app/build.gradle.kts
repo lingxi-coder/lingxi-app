@@ -20,6 +20,11 @@ android {
         versionName = "0.1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        ndk {
+            // MobileLinux/PTY/legacy shell artifacts are release-gated for
+            // exactly these two architectures.
+            abiFilters += listOf("arm64-v8a", "x86_64")
+        }
         vectorDrawables {
             useSupportLibrary = true
         }
@@ -117,6 +122,19 @@ android {
     }
 }
 
+listOf("play", "direct").forEach { distribution ->
+    val capitalized = distribution.replaceFirstChar(Char::uppercaseChar)
+    tasks.register<Exec>("verify${capitalized}MobileLinuxNative") {
+        group = "verification"
+        description = "Verify MobileLinux ELF artifacts for both supported ABIs ($distribution)."
+        commandLine(
+            rootProject.file("scripts/verify-mobile-linux-native.sh").absolutePath,
+            "--variant",
+            distribution,
+        )
+    }
+}
+
 dependencies {
     val composeBom = platform("androidx.compose:compose-bom:2026.05.00")
     implementation(composeBom)
@@ -158,6 +176,11 @@ dependencies {
     // DataStore (preferences) for persisted theme / accent
     implementation("androidx.datastore:datastore-preferences:1.2.1")
 
+    // Persistent Android cron execution. AlarmManager only provides the precise
+    // wake-up signal; WorkManager owns network constraints, retries, process
+    // recovery, and the serialized execution queue.
+    implementation("androidx.work:work-runtime-ktx:2.11.2")
+
     // Offline voice models: tar.bz2 extraction for the sherpa-onnx packs the
     // setup wizard downloads (pure-Java bzip2 + tar; no native dependency).
     implementation("org.apache.commons:commons-compress:1.27.1")
@@ -184,6 +207,7 @@ dependencies {
     androidTestImplementation("androidx.test.ext:junit:1.3.0")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.7.0")
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")
+    androidTestImplementation("androidx.work:work-testing:2.11.2")
 
     // Debug tooling
     debugImplementation("androidx.compose.ui:ui-tooling")

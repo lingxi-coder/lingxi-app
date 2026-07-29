@@ -15,6 +15,7 @@
 //! `serde_json::Value` lowering happens in `client-adapter`, NOT here
 //! (decision §0.4).
 
+use crate::ask_user_question::AskUserQuestionRequestDto;
 use crate::listings::{
     AgentDto, AuthStateDto, CoordinatorWorkerDto, DoctorReportDto, HookDto, McpServerDto,
     MemoryEntryDto, SessionRowDto, SlashCommandDto, StatusSnapshotDto, TaskRowDto, TaskStatusDto,
@@ -53,6 +54,23 @@ pub enum ClientEvent {
         message: String,
         /// Whether clients should render the notice with error severity.
         is_error: bool,
+    },
+
+    /// An interactive `AskUserQuestion` questionnaire is waiting for the
+    /// client. The answer is returned through
+    /// [`ClientCommand::AnswerAskUserQuestion`](crate::commands::ClientCommand::AnswerAskUserQuestion).
+    AskUserQuestion {
+        /// Correlated request payload.
+        request: AskUserQuestionRequestDto,
+    },
+
+    /// A previously-emitted interactive `AskUserQuestion` prompt is no longer
+    /// pending on the engine side (answered, cancelled, or auto-continued).
+    /// Clients should drop any local UI for `request_id` and stop replaying it
+    /// on reload.
+    AskUserQuestionResolved {
+        /// Correlator with the earlier [`Self::AskUserQuestion`] payload.
+        request_id: u64,
     },
 
     // ── Live-turn streaming events (F1-03) ────────────────────────────────

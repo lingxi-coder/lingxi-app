@@ -108,6 +108,58 @@ class ProjectRepositoryInstrumentedTest {
     }
 
     @Test
+    fun globalSessionStartedIsIndexedBeforeEngineCatalogContainsIt() {
+        val repository = ProjectRepository(testRoot)
+        val uuid = "19587a33-0725-48db-abca-8a2aed345f6b"
+
+        val state = repository.recordStartedSession(
+            projectId = null,
+            sessionId = "sess:$uuid",
+            title = "新对话",
+        )
+
+        assertEquals(uuid, state.globalSessions.single().sessionId)
+        assertEquals(0, state.globalSessions.single().messageCount)
+        assertEquals(
+            uuid,
+            ProjectRepository(testRoot).load().globalSessions.single().sessionId,
+        )
+    }
+
+    @Test
+    fun multipleEmptySessionsRemainIndexedAndKeepTheirStableIds() {
+        val repository = ProjectRepository(testRoot)
+        val project = repository.createInternal("空会话清理")
+        val first = "19587a33-0725-48db-abca-8a2aed345f6b"
+        val second = "29587a33-0725-48db-abca-8a2aed345f6b"
+
+        repository.recordStartedSession(project.record.id, first, "旧空会话")
+        val state = repository.recordStartedSession(project.record.id, second, "新会话")
+
+        val restored = state.projects.single()
+        assertEquals(listOf(second, first), restored.sessions.map { it.sessionId })
+        assertEquals(listOf(0, 0), restored.sessions.map { it.messageCount })
+        assertEquals(second, restored.record.lastActiveSessionId)
+    }
+
+    @Test
+    fun legacyPrefixedSessionIndexLoadsAsBareUuid() {
+        val repository = ProjectRepository(testRoot)
+        val project = repository.createInternal("旧版索引")
+        val uuid = "19587a33-0725-48db-abca-8a2aed345f6b"
+
+        repository.recordStartedSession(
+            projectId = project.record.id,
+            sessionId = "sess:$uuid",
+            title = "旧版会话",
+        )
+
+        val restored = ProjectRepository(testRoot).load().projects.single()
+        assertEquals(uuid, restored.sessions.single().sessionId)
+        assertEquals(uuid, restored.record.lastActiveSessionId)
+    }
+
+    @Test
     fun failedAtomicManifestWriteRollsBackNewProjectDirectory() {
         val id = "20000000-0000-4000-8000-000000000001"
         val writer = ProjectAtomicWriter { target, _, _ ->

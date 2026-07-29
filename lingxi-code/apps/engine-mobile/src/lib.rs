@@ -24,6 +24,7 @@ use command_core::{
 use skill_api::SkillRegistry;
 use std::sync::Arc;
 use tool_api::{BuiltinToolContext, ToolRegistry};
+use tool_ui::ask_user_question::AskUserQuestionResolver;
 use traits::{AuthHandle, OrchestratorHandle};
 
 // F3-03: the shared mobile session-host module — `MobileConfig` +
@@ -46,8 +47,9 @@ mod skill_loader;
 #[cfg(feature = "uniffi")]
 pub use host::{
     build_mobile, build_mobile_engine, build_mobile_engine_inner, build_mobile_inner,
-    parse_mobile_provider_config_json, MobileBuildError, MobileConfig, MobileEngineError,
-    MobileEngineHandle, MobileRuntime,
+    parse_mobile_provider_config_json, CronDueOccurrenceDto, CronFireStatusDto, CronTaskDto,
+    FiredCronJobDto, MobileBuildError, MobileConfig, MobileCronStoreHandle, MobileEngineError,
+    MobileEngineHandle, MobileRuntime, ProviderConnectionTestDto,
 };
 
 // F3-06: the host-only walking-skeleton support — a portable fake `Platform`
@@ -110,7 +112,7 @@ pub fn mobile_tool_registry(ctx: BuiltinToolContext) -> ToolRegistry {
 /// build. The FFI host instead calls [`register_mobile_tools_with_skill_loader`]
 /// to wire a disk-backed loader (audit fix #14).
 pub fn register_mobile_tools(reg: &mut ToolRegistry, ctx: BuiltinToolContext) {
-    register_mobile_non_skill_tools(reg, ctx.clone());
+    register_mobile_non_skill_tools_with_ask_resolver(reg, ctx.clone(), None);
     // Skill tool with the hermetic `EmptySkillLoader` (no on-disk discovery).
     tool_skill::register_all(reg, ctx);
 }
@@ -127,16 +129,23 @@ pub fn register_mobile_tools_with_skill_loader(
     ctx: BuiltinToolContext,
     skill_loader: Arc<dyn tool_skill::skill::SkillLoader>,
 ) {
-    register_mobile_non_skill_tools(reg, ctx.clone());
+    register_mobile_non_skill_tools_with_ask_resolver(reg, ctx.clone(), None);
     reg.register_builtin(Arc::new(tool_skill::SkillTool::with_loader(
         ctx,
         skill_loader,
     )));
 }
 
-/// Every mobile tool EXCEPT `Skill` (whose loader differs by build). Builtin wire
-/// order is locale-sorted at enumeration time, so registration order is immaterial.
-fn register_mobile_non_skill_tools(reg: &mut ToolRegistry, ctx: BuiltinToolContext) {
+/// Every mobile tool EXCEPT `Skill` (whose loader differs by build). Builtin
+/// wire order is locale-sorted at enumeration time, so registration order is
+/// immaterial. Hosts that surface a live questionnaire bridge inject a custom
+/// `AskUserQuestion` resolver here so the registry never contains duplicate
+/// same-name builtins.
+fn register_mobile_non_skill_tools_with_ask_resolver(
+    reg: &mut ToolRegistry,
+    ctx: BuiltinToolContext,
+    ask_resolver: Option<Arc<dyn AskUserQuestionResolver>>,
+) {
     // ----- cross-platform subset (also linked by engine-desktop) -----------
     tool_file::register_all(reg, ctx.clone());
     tool_task::register_all(reg, ctx.clone());
@@ -151,7 +160,10 @@ fn register_mobile_non_skill_tools(reg: &mut ToolRegistry, ctx: BuiltinToolConte
     // result text says so (see schedule_cron.rs `scheduler_active`). RemoteTrigger
     // is independent of the local scheduler (it triggers a cloud-side run).
     tool_cron::register_all(reg, ctx.clone());
-    tool_ui::register_all(reg, ctx.clone());
+    match ask_resolver {
+        Some(resolver) => tool_ui::register_all_with_ask_resolver(reg, ctx.clone(), resolver),
+        None => tool_ui::register_all(reg, ctx.clone()),
+    }
     // ----- mobile-exclusive tools ------------------------------------------
     // camera / voice / speech / notification / clipboard / share, folded into
     // the single `tool-mobile` crate.
@@ -177,6 +189,25 @@ pub fn mobile_tool_registry_with_skill_loader(
     reg
 }
 
+#[cfg(feature = "uniffi")]
+#[must_use]
+/// FFI host variant of [`mobile_tool_registry_with_skill_loader`] that installs
+/// a live `AskUserQuestion` resolver exactly once, preserving builtin lookup
+/// order while keeping the disk-backed `Skill` loader.
+pub fn mobile_tool_registry_with_skill_loader_and_ask_resolver(
+    ctx: BuiltinToolContext,
+    skill_loader: Arc<dyn tool_skill::skill::SkillLoader>,
+    ask_resolver: Arc<dyn AskUserQuestionResolver>,
+) -> ToolRegistry {
+    let mut reg = ToolRegistry::new();
+    register_mobile_non_skill_tools_with_ask_resolver(&mut reg, ctx.clone(), Some(ask_resolver));
+    reg.register_builtin(Arc::new(tool_skill::SkillTool::with_loader(
+        ctx,
+        skill_loader,
+    )));
+    reg
+}
+
 /// Register Android Computer Use only when both the Direct-build Cargo feature
 /// and a live native host are present. Play builds pass no host and compile
 /// without the feature. Direct foreground and headless engines intentionally
@@ -191,6 +222,93 @@ pub fn register_android_ui_automation(
     }
     #[cfg(not(feature = "android-computer-use"))]
     let _ = (reg, automation);
+}
+
+#[cfg(test)]
+mod android_ui_registration_tests {
+    use super::register_android_ui_automation;
+    use async_trait::async_trait;
+    use std::sync::Arc;
+    use traits::{
+        AndroidAccessRequest, AndroidAction, AndroidActionResult, AndroidAppInfo,
+        AndroidAutomationError, AndroidAutomationStatus, AndroidNodeQuery, AndroidScreenshot,
+        AndroidUiAutomation, AndroidUiNode, AndroidUiSnapshot, AndroidWaitCondition,
+    };
+
+    struct StubAutomation;
+
+    fn unsupported<T>() -> Result<T, AndroidAutomationError> {
+        Err(AndroidAutomationError::Unsupported("test stub".into()))
+    }
+
+    #[async_trait]
+    impl AndroidUiAutomation for StubAutomation {
+        async fn status(&self) -> Result<AndroidAutomationStatus, AndroidAutomationError> {
+            unsupported()
+        }
+
+        async fn request_access(
+            &self,
+            _request: AndroidAccessRequest,
+        ) -> Result<Vec<AndroidAppInfo>, AndroidAutomationError> {
+            unsupported()
+        }
+
+        async fn list_granted_apps(&self) -> Result<Vec<AndroidAppInfo>, AndroidAutomationError> {
+            unsupported()
+        }
+
+        async fn screenshot(&self) -> Result<AndroidScreenshot, AndroidAutomationError> {
+            unsupported()
+        }
+
+        async fn ui_tree(&self) -> Result<AndroidUiSnapshot, AndroidAutomationError> {
+            unsupported()
+        }
+
+        async fn find_nodes(
+            &self,
+            _query: AndroidNodeQuery,
+        ) -> Result<Vec<AndroidUiNode>, AndroidAutomationError> {
+            unsupported()
+        }
+
+        async fn inspect_node(
+            &self,
+            _node_id: String,
+        ) -> Result<AndroidUiNode, AndroidAutomationError> {
+            unsupported()
+        }
+
+        async fn perform(
+            &self,
+            _action: AndroidAction,
+        ) -> Result<AndroidActionResult, AndroidAutomationError> {
+            unsupported()
+        }
+
+        async fn wait_for(
+            &self,
+            _condition: AndroidWaitCondition,
+            _timeout_ms: u64,
+        ) -> Result<AndroidActionResult, AndroidAutomationError> {
+            unsupported()
+        }
+
+        async fn stop(&self) -> Result<(), AndroidAutomationError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn registration_follows_the_direct_feature_gate() {
+        let mut registry = tool_api::ToolRegistry::new();
+        register_android_ui_automation(&mut registry, Some(Arc::new(StubAutomation)));
+        #[cfg(feature = "android-computer-use")]
+        assert!(registry.find_by_name("android_use").is_some());
+        #[cfg(not(feature = "android-computer-use"))]
+        assert!(registry.find_by_name("android_use").is_none());
+    }
 }
 
 /// Assemble the mobile builtin **skill** registry.
@@ -232,4 +350,93 @@ pub fn mobile_command_registry(
     // unimplemented stubs. Register real mobile handlers on `reg` directly here
     // when implemented.
     reg
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use std::collections::HashMap;
+    use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
+    use tool_api::tool_trait::{ToolError, ToolStaticContext};
+    use traits::process::ProcessOutput;
+
+    struct NoopSkillLoader;
+
+    #[async_trait]
+    impl tool_skill::skill::SkillLoader for NoopSkillLoader {
+        async fn load(
+            &self,
+            _name: &str,
+        ) -> Result<Option<tool_skill::skill::SkillDescriptor>, ToolError> {
+            Ok(None)
+        }
+    }
+
+    struct FirstAnswerResolver;
+
+    #[async_trait]
+    impl AskUserQuestionResolver for FirstAnswerResolver {
+        async fn resolve(
+            &self,
+            questions: &[tool_ui::ask_user_question::Question],
+            _non_interactive: bool,
+        ) -> Result<HashMap<String, String>, ToolError> {
+            Ok(questions
+                .iter()
+                .filter_map(|question| {
+                    question
+                        .options
+                        .first()
+                        .map(|option| (question.question.clone(), option.label.clone()))
+                })
+                .collect())
+        }
+    }
+
+    fn dummy_out() -> ProcessOutput {
+        ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        }
+    }
+
+    #[cfg(feature = "uniffi")]
+    #[tokio::test]
+    async fn custom_mobile_ask_resolver_does_not_duplicate_builtin() {
+        let registry = mobile_tool_registry_with_skill_loader_and_ask_resolver(
+            shell_test_ctx(dummy_out()),
+            Arc::new(NoopSkillLoader),
+            Arc::new(FirstAnswerResolver),
+        );
+        let tools = registry.available_tools(&ToolStaticContext::default());
+        let ask_count = tools
+            .iter()
+            .filter(|tool| tool.name() == tool_ui::ask_user_question::ASK_USER_QUESTION_TOOL_NAME)
+            .count();
+        assert_eq!(ask_count, 1);
+        let ask = registry
+            .find_by_name(tool_ui::ask_user_question::ASK_USER_QUESTION_TOOL_NAME)
+            .expect("AskUserQuestion registered");
+        let result = ask
+            .call(
+                serde_json::json!({
+                    "questions": [{
+                        "question": "Pick one?",
+                        "header": "Choice",
+                        "options": [
+                            { "label": "Alpha", "description": "first" },
+                            { "label": "Beta", "description": "second" }
+                        ]
+                    }]
+                }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("custom resolver should answer");
+        assert_eq!(result.data["answers"]["Pick one?"].as_str(), Some("Alpha"));
+    }
 }

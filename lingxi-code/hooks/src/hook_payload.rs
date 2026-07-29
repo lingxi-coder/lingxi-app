@@ -943,12 +943,10 @@ pub struct ElicitationResultPayload {
     /// Name of the MCP server that requested elicitation (wire `mcp_server_name`,
     /// required). Sourced from `HookEvent::ElicitationResult.server_name`.
     pub mcp_server_name: String,
-    /// Server-assigned elicitation ID (optional). Not yet threaded through
-    /// `HookEvent::ElicitationResult` — defaults to `None`.
+    /// Server-assigned elicitation ID (optional).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub elicitation_id: Option<String>,
-    /// Presentation mode (`form` / `url`), if specified (optional). Not yet
-    /// threaded through `HookEvent::ElicitationResult` — defaults to `None`.
+    /// Presentation mode (`form` / `url`), if specified (optional).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub mode: Option<crate::events::ElicitationMode>,
     /// User's response action (required): `"accept"` / `"decline"` / `"cancel"`.

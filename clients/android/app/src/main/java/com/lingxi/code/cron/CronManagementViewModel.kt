@@ -3,126 +3,82 @@ package com.lingxi.code.cron
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.lingxi.code.bindings.CronTaskDto
-import com.lingxi.code.bindings.MobileEngineHandle
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withContext
-
-/** Render state for the cron management screen. */
-data class CronUiState(
-    val loading: Boolean = true,
-    val jobs: List<CronTaskDto> = emptyList(),
-    /** `false` when no API key is configured (the engine can't be built). */
-    val engineAvailable: Boolean = true,
-    /** `false` when exact alarms are not permitted (Android 12 revoked). */
-    val canScheduleExact: Boolean = true,
-)
 
 /**
- * Drives the cron management screen. Builds a transient headless
- * [MobileEngineHandle] (the cron FFI is cheap file I/O over the same
- * `scheduled_tasks.json` the background service uses) and exposes
- * list/create/delete, re-arming the exact alarm after any mutation so a new or
- * removed job's schedule takes effect immediately. The handle is released in
- * [onCleared].
+ * UI adapter for the process-wide Android cron repository.
+ *
+ * Task CRUD is storage-only and therefore remains available before an API key
+ * is configured. A provider is required only when WorkManager actually executes
+ * a task.
  */
 class CronManagementViewModel(app: Application) : AndroidViewModel(app) {
+    private val repository = AndroidCronRepository.get(app)
 
-    private val _state = MutableStateFlow(CronUiState())
-    val state: StateFlow<CronUiState> = _state.asStateFlow()
-
-    private var handle: MobileEngineHandle? = null
-
-    /** Serializes handle construction so two coroutines can't each build (and leak)
-     *  a native engine when `handle` is still null. */
-    private val handleMutex = Mutex()
+    val state: StateFlow<AndroidCronRepositoryState> = repository.state
 
     init {
-        refresh()
+        repository.refresh()
     }
 
-    private fun ctx() = getApplication<Application>().applicationContext
-
-    private suspend fun ensureHandle(): MobileEngineHandle? = handleMutex.withLock {
-        handle ?: withContext(Dispatchers.Default) { HeadlessEngineFactory.build(ctx()) }
-            .also { handle = it }
-    }
-
-    /** Reload the cron list + exact-alarm permission state. */
     fun refresh() {
+        repository.refresh()
+    }
+
+    fun reconcile(reason: String = "ui") {
         viewModelScope.launch {
-            _state.value = _state.value.copy(
-                loading = true,
-                canScheduleExact = CronAlarmScheduler.canScheduleExact(ctx()),
-            )
-            val engine = ensureHandle()
-            if (engine == null) {
-                _state.value = _state.value.copy(
-                    loading = false,
-                    engineAvailable = false,
-                    jobs = emptyList(),
-                )
-                return@launch
-            }
-            val jobs = runCatching { engine.cronList() }.getOrDefault(emptyList())
-            _state.value = _state.value.copy(loading = false, engineAvailable = true, jobs = jobs)
+            runCatching { repository.reconcile(reason) }
         }
     }
 
-    /**
-     * Create a job. `onResult(null)` on success, `onResult(message)` on a
-     * validation / write failure (e.g. a malformed cron expression).
-     */
-    fun create(cron: String, prompt: String, recurring: Boolean, onResult: (String?) -> Unit) {
+    fun create(
+        scopeId: String,
+        cron: String,
+        prompt: String,
+        recurring: Boolean,
+        onResult: (String?) -> Unit,
+    ) {
         viewModelScope.launch {
-            val engine = ensureHandle()
-            if (engine == null) {
-                onResult("引擎不可用（未配置 API Key）")
-                return@launch
-            }
-            val error = try {
-                engine.cronCreate(cron.trim(), prompt.trim(), recurring)
-                null
-            } catch (t: Throwable) {
-                t.message ?: "创建失败"
-            }
-            if (error == null) {
-                armFrom(engine)
-                refresh()
-            }
+            val error = runCatching {
+                repository.create(scopeId, cron, prompt, recurring)
+            }.exceptionOrNull()?.message
             onResult(error)
         }
     }
 
-    /** Delete a job by id, then re-arm the next alarm. */
-    fun delete(id: String) {
+    fun update(
+        scopeId: String,
+        taskId: String,
+        cron: String,
+        prompt: String,
+        recurring: Boolean,
+        onResult: (String?) -> Unit,
+    ) {
         viewModelScope.launch {
-            val engine = ensureHandle() ?: return@launch
-            runCatching { engine.cronDelete(id) }
-            armFrom(engine)
-            refresh()
+            val error = runCatching {
+                repository.update(scopeId, taskId, cron, prompt, recurring)
+            }.exceptionOrNull()?.message
+            onResult(error)
         }
     }
 
-    /** Arm the next exact alarm using the handle we already hold (no rebuild). */
-    private suspend fun armFrom(engine: MobileEngineHandle) {
-        val nextMs = runCatching { engine.nextCronFireTime() }.getOrNull()
-        if (nextMs == null) {
-            CronAlarmScheduler.cancel(ctx())
-        } else {
-            CronAlarmScheduler.arm(ctx(), nextMs.toLong())
+    fun delete(scopeId: String, taskId: String, onResult: (String?) -> Unit = {}) {
+        viewModelScope.launch {
+            val result = runCatching { repository.delete(scopeId, taskId) }
+            onResult(
+                result.exceptionOrNull()?.message
+                    ?: if (result.getOrDefault(false)) null else "任务不存在或已经删除",
+            )
         }
     }
 
-    override fun onCleared() {
-        runCatching { handle?.destroy() }
-        handle = null
-        super.onCleared()
+    fun runNow(scopeId: String, taskId: String, onResult: (String?) -> Unit = {}) {
+        viewModelScope.launch {
+            val error = runCatching { repository.runNow(scopeId, taskId) }
+                .exceptionOrNull()
+                ?.message
+            onResult(error)
+        }
     }
 }

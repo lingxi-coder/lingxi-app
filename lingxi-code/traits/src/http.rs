@@ -4,6 +4,7 @@
 use async_trait::async_trait;
 use futures_core::stream::Stream;
 use protocol::{HttpRequest, HttpResponse, SseEvent};
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use thiserror::Error;
@@ -103,6 +104,19 @@ pub struct WebSocketConnectionWithMeta {
     pub connection: Box<dyn WebSocketConnection>,
 }
 
+/// Vetted DNS override for a request that must connect to pre-resolved
+/// addresses instead of performing a fresh lookup inside the HTTP transport.
+///
+/// The original request URL stays intact so HTTP Host and TLS SNI still use the
+/// logical domain while the socket connection is pinned to these addresses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedAddressOverride {
+    /// Lowercase logical hostname from the request URL.
+    pub domain: String,
+    /// Pre-vetted socket addresses the transport must use for the connection.
+    pub addrs: Vec<SocketAddr>,
+}
+
 /// Reusable WebSocket connection abstraction for provider protocols that send
 /// one request text frame followed by one JSON-event stream.
 #[async_trait]
@@ -144,6 +158,24 @@ impl Stream for OnceBytes {
 pub trait HttpTransport: Send + Sync {
     /// Send a request and await the full response.
     async fn request(&self, req: HttpRequest) -> Result<HttpResponse, HttpError>;
+
+    /// Send a request using pre-vetted DNS answers for the logical hostname.
+    ///
+    /// Transports that can pin the connection must override this method. The
+    /// default fails closed whenever an override is supplied so a wrapper or
+    /// platform backend cannot silently discard the SSRF guard's DNS result.
+    async fn request_with_resolved_addrs(
+        &self,
+        req: HttpRequest,
+        resolved: Option<ResolvedAddressOverride>,
+    ) -> Result<HttpResponse, HttpError> {
+        if resolved.is_some() {
+            return Err(HttpError::InvalidRequest(
+                "HTTP transport does not support pre-resolved address pinning".to_string(),
+            ));
+        }
+        self.request(req).await
+    }
 
     /// Send a request WITHOUT following redirects: a 3xx is surfaced to the caller as
     /// `Ok(status=3xx)` with its `Location` header intact (so callers like WebFetch can
@@ -342,6 +374,23 @@ mod tests {
             body_bytes: None,
             timeout: None,
         }
+    }
+
+    #[tokio::test]
+    async fn pre_resolved_address_default_fails_closed() {
+        let err = OneShot
+            .request_with_resolved_addrs(
+                get_req(),
+                Some(ResolvedAddressOverride {
+                    domain: "x.local".to_string(),
+                    addrs: vec!["93.184.216.34:80".parse().unwrap()],
+                }),
+            )
+            .await
+            .expect_err("transport must not silently discard a vetted DNS override");
+        assert!(
+            matches!(err, HttpError::InvalidRequest(ref message) if message.contains("pre-resolved"))
+        );
     }
 
     /// The default `stream_sse_with_meta` wraps `stream_sse` with status 200

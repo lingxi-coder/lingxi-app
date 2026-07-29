@@ -411,6 +411,7 @@ fn fresh_subagent_ctx() -> SubagentContext {
         schema: None,
         budget: None,
         hook_executor: None,
+        strict_plugin_only_hooks: false,
         skill_loader: None,
         hook_session_id: protocol::SessionId::nil(),
         hook_cwd: std::path::PathBuf::new(),

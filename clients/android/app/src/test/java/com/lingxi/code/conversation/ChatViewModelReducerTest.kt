@@ -101,6 +101,11 @@ class ChatViewModelReducerTest {
             resumeFailure?.let { throw it }
         }
 
+        override suspend fun resumeEmptySession(uuid: String, title: String) {
+            operations += "resume-empty:$uuid"
+            resumeFailure?.let { throw it }
+        }
+
         override suspend fun newSession() {
             operations += "new"
         }
@@ -575,6 +580,20 @@ class ChatViewModelReducerTest {
         vm.send("must not reach the wrong engine session")
         assertEquals(0, src.submitCount)
         assertTrue(vm.state.value.messages.isEmpty())
+    }
+
+    @Test
+    fun zeroMessageSessionUsesExplicitEmptyResumeAndKeepsItsId() = runTest(dispatcher) {
+        val src = SessionControlSource()
+        val vm = ChatViewModel(src)
+        val uuid = "19587a33-0725-48db-abca-8a2aed345f6b"
+
+        vm.resumeSession(SessionRow(uuid, "空会话", 0, "刚刚"))
+        runCurrent()
+
+        assertEquals(listOf("resume-empty:$uuid"), src.operations)
+        assertEquals(uuid, vm.state.value.session.id)
+        assertTrue(vm.state.value.sessionTransitioning)
     }
 
     // --- SavedStateHandle persistence / restore --------------------------

@@ -30,6 +30,7 @@ pub use push_notification::PushNotificationTool;
 pub use send_message::SendMessageTool;
 pub use sleep::SleepTool;
 pub use synthetic_output::SyntheticOutputTool;
+pub use tui_core::ask_user_question_bridge::AskUserQuestionExchange;
 
 use std::sync::Arc;
 /// Register the UI tools against `reg` (the full set, including the builtin

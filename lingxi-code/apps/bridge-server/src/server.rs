@@ -49,7 +49,9 @@ use bridge::{
     version_compatible, BridgeRequest, BridgeResponse, BridgeWireError, Capabilities, ClientHello,
     FramePump, FrameSink, ServerHello, BRIDGE_PROTOCOL_VERSION,
 };
-use client_adapter::{ClientEventSink, ComputerAccessRequestSink, PermissionRequestSink};
+use client_adapter::{
+    BridgeAskUserQuestionBroker, ClientEventSink, ComputerAccessRequestSink, PermissionRequestSink,
+};
 use client_protocol::commands::{ClientCommand, ImageRefDto};
 use client_protocol::computer_access::{ComputerAccessRequestDto, ComputerAccessResponseDto};
 use client_protocol::events::ClientEvent;
@@ -59,6 +61,7 @@ use msgqueue::{
     QueuedCommandContent, TelemetryQueueRecorder,
 };
 use tokio::sync::Mutex;
+use tui_core::ask_user_question_bridge::AskUserQuestionExchange;
 use tui_core::computer_access_bridge::ComputerAccessExchange;
 
 use client_adapter::AdapterPermissionGate;
@@ -194,6 +197,8 @@ pub struct BridgeConnection {
     /// new [`ClientCommand`] variants are then silently dropped, exactly like
     /// an unrouted command with no [`CommandRouter`] bound.
     computer_access_broker: Option<Arc<BridgeComputerAccessBroker>>,
+    /// Connection-scoped broker for `AskUserQuestion` UI exchanges.
+    ask_user_question_broker: Option<Arc<BridgeAskUserQuestionBroker>>,
     driver: Option<Arc<dyn TurnDriver>>,
     /// The full command-routing seam (F2-08). When bound, every
     /// non-turn/non-permission [`ClientCommand`] (model, listings, slash, tasks,
@@ -339,6 +344,7 @@ impl BridgeConnection {
             tool_names: Arc::new(Mutex::new(HashMap::new())),
             gate: None,
             computer_access_broker: None,
+            ask_user_question_broker: None,
             driver: None,
             router: None,
             handshaken: Arc::new(AtomicBool::new(false)),
@@ -415,6 +421,20 @@ impl BridgeConnection {
         let run_loop = broker.clone();
         tokio::spawn(async move { run_loop.run(rx).await });
         self.computer_access_broker = Some(broker);
+        self
+    }
+
+    /// Attach the connection's interactive `AskUserQuestion` broker and start
+    /// draining the same channel whose sender is installed in `DesktopConfig`.
+    #[must_use]
+    pub fn bind_ask_user_question(
+        mut self,
+        broker: Arc<BridgeAskUserQuestionBroker>,
+        rx: tokio::sync::mpsc::Receiver<AskUserQuestionExchange>,
+    ) -> Self {
+        let run_loop = broker.clone();
+        tokio::spawn(async move { run_loop.run(rx).await });
+        self.ask_user_question_broker = Some(broker);
         self
     }
 
@@ -593,6 +613,15 @@ impl BridgeConnection {
             }
             ClientCommand::DenyComputerAccess { request_id } => {
                 self.deny_computer_access(request_id).await;
+            }
+            ClientCommand::AnswerAskUserQuestion {
+                request_id,
+                answers,
+            } => {
+                self.resolve_ask_user_question(request_id, answers).await;
+            }
+            ClientCommand::CancelAskUserQuestion { request_id } => {
+                self.cancel_ask_user_question(request_id).await;
             }
             // A slash command may be a `type: "prompt"` command (`/loop`,
             // Markdown/Plugin): claude-code injects its expanded prompt as the
@@ -781,6 +810,30 @@ impl BridgeConnection {
             );
         }
     }
+
+    async fn resolve_ask_user_question(&self, request_id: u64, answers: HashMap<String, String>) {
+        let Some(broker) = self.ask_user_question_broker.as_ref() else {
+            return;
+        };
+        if !broker.resolve(request_id, answers).await {
+            tracing::debug!(
+                request_id,
+                "bridge-server: resolve for unknown / already-resolved AskUserQuestion id"
+            );
+        }
+    }
+
+    async fn cancel_ask_user_question(&self, request_id: u64) {
+        let Some(broker) = self.ask_user_question_broker.as_ref() else {
+            return;
+        };
+        if !broker.cancel(request_id).await {
+            tracing::debug!(
+                request_id,
+                "bridge-server: cancel for unknown / already-resolved AskUserQuestion id"
+            );
+        }
+    }
 }
 
 #[async_trait]
@@ -901,6 +954,15 @@ impl BridgeConnection {
                 tracing::debug!(
                     drained,
                     "bridge-server: drained parked computer-access requests on close"
+                );
+            }
+        }
+        if let Some(broker) = self.ask_user_question_broker.as_ref() {
+            let drained = broker.drain().await;
+            if drained > 0 {
+                tracing::debug!(
+                    drained,
+                    "bridge-server: drained parked AskUserQuestion requests on close"
                 );
             }
         }

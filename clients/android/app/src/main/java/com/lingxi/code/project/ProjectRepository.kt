@@ -1,5 +1,6 @@
 package com.lingxi.code.project
 
+import com.lingxi.code.model.canonicalSessionId
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -193,36 +194,43 @@ internal class ProjectRepository(
      *
      * The engine's SessionList is file-backed, so a SessionStarted event can
      * precede the new empty session appearing in that listing. Keeping this
-     * small, idempotent row makes the Project recoverable immediately; the next
-     * authoritative SessionList replaces it after the first turn is persisted.
+     * small, idempotent row makes the Project or global conversation recoverable
+     * immediately; the next authoritative SessionList replaces it after the
+     * first turn is persisted.
      */
     fun recordStartedSession(
-        projectId: String,
+        projectId: String?,
         sessionId: String,
         title: String,
     ): ProjectStoreState {
-        validateProjectId(projectId)
-        require(sessionId.isNotBlank()) { "session id cannot be blank" }
-        val snapshot = loadProject(projectId)
+        val canonicalId = canonicalSessionId(sessionId)
+        require(canonicalId.isNotBlank()) { "session id cannot be blank" }
+        val snapshot = projectId?.let {
+            validateProjectId(it)
+            loadProject(it)
+        }
+        val sessions = snapshot?.sessions ?: load().globalSessions
         val timestamp = now()
-        val existing = snapshot.sessions.firstOrNull { it.sessionId == sessionId }
+        val existing = sessions.firstOrNull { it.sessionId == canonicalId }
         val started = ProjectSessionSummary(
-            sessionId = sessionId,
+            sessionId = canonicalId,
             title = title.ifBlank { existing?.title ?: "新对话" },
             messageCount = existing?.messageCount ?: 0,
             relativeTime = "刚刚",
             updatedAtEpochMillis = timestamp,
         )
-        writeSessions(
-            projectId,
-            listOf(started) + snapshot.sessions.filterNot { it.sessionId == sessionId },
-        )
-        writeProject(
-            snapshot.record.copy(
-                updatedAtEpochMillis = timestamp,
-                lastActiveSessionId = sessionId,
-            ),
-        )
+        val updated = listOf(started) + sessions.filterNot { it.sessionId == canonicalId }
+        if (projectId == null) {
+            writeSessionFile(File(projectsRoot, GLOBAL_SESSION_INDEX_FILE), updated)
+        } else {
+            writeSessions(projectId, updated)
+            writeProject(
+                requireNotNull(snapshot).record.copy(
+                    updatedAtEpochMillis = timestamp,
+                    lastActiveSessionId = canonicalId,
+                ),
+            )
+        }
         return load()
     }
 
@@ -369,7 +377,8 @@ internal class ProjectRepository(
             sourceTreeUri = json.optNullableString("sourceTreeUri"),
             sourceDisplayName = json.optNullableString("sourceDisplayName"),
             lastSyncAtEpochMillis = json.optNullableLong("lastSyncAtEpochMillis"),
-            lastActiveSessionId = json.optNullableString("lastActiveSessionId"),
+            lastActiveSessionId = json.optNullableString("lastActiveSessionId")
+                ?.let(::canonicalSessionId),
             syncState = runCatching {
                 ProjectSyncState.valueOf(json.getString("syncState"))
             }.getOrElse { ProjectSyncState.Error },
@@ -400,7 +409,7 @@ internal class ProjectRepository(
         require(json.getInt("version") == 1)
         return json.getJSONArray("sessions").objectList().map { row ->
             ProjectSessionSummary(
-                sessionId = row.getString("sessionId"),
+                sessionId = canonicalSessionId(row.getString("sessionId")),
                 title = row.getString("title"),
                 messageCount = row.getInt("messageCount"),
                 relativeTime = row.getString("relativeTime"),

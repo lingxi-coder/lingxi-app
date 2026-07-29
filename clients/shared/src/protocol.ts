@@ -52,6 +52,28 @@ export interface ImageRefDto {
   base64: string;
 }
 
+/** One declared answer choice for an interactive questionnaire. */
+export interface AskOptionDto {
+  label: string;
+  description: string;
+  preview?: string;
+}
+
+/** One question in an interactive `AskUserQuestion` request. */
+export interface AskQuestionDto {
+  question: string;
+  header: string;
+  options: AskOptionDto[];
+  multi_select: boolean;
+}
+
+/** A connection-scoped interactive questionnaire emitted by the engine. */
+export interface AskUserQuestionRequestDto {
+  request_id: number;
+  questions: AskQuestionDto[];
+  timeout_secs?: number;
+}
+
 /** Reply for {@link RunSlashCommand} (commands.rs `CommandResultDto`). */
 export interface CommandResultDto {
   display: string;
@@ -97,6 +119,9 @@ export type ClientCommand =
   // ── `computer` tool request_access resolution ───────────────────────────────
   | { type: 'approve_computer_access'; request_id: number; response: ComputerAccessResponseDto }
   | { type: 'deny_computer_access'; request_id: number }
+  // ── `AskUserQuestion` resolution ───────────────────────────────────────────
+  | { type: 'answer_ask_user_question'; request_id: number; answers: Record<string, string> }
+  | { type: 'cancel_ask_user_question'; request_id: number }
   // ── Provider credentials (authenticated local bridge only) ──────────────────
   | { type: 'list_provider_credentials'; operation_id: number; provider_ids: string[] }
   | { type: 'set_provider_credential'; operation_id: number; provider_id: string; credential: string }
@@ -424,6 +449,8 @@ export type ClientEvent =
   // ── Error ─────────────────────────────────────────────────────────────────
   | { type: 'error'; kind: ErrorKindDto; message: string }
   | { type: 'system_notice'; message: string; is_error: boolean }
+  | { type: 'ask_user_question'; request: AskUserQuestionRequestDto }
+  | { type: 'ask_user_question_resolved'; request_id: number }
   // ── Live-turn streaming events ──────────────────────────────────────────────
   | { type: 'text_delta'; text: string }
   | { type: 'tool_use_started'; id: string; tool: string; input_json: string }

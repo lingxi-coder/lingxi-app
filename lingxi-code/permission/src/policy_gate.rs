@@ -290,21 +290,19 @@ impl PolicyPermissionGate {
     /// (`ask_with_mode(Default)`) is filtered out below — leaving exactly the
     /// rule + safety walks. The session's real mode is still returned for
     /// auto-mode bookkeeping.
-    /// Shared impl behind [`PermissionGate::check_after_hook_allow`] +
-    /// [`PermissionGate::check_after_hook_allow_ctx`]. The `lin` re-check of a
+    /// Shared impl behind [`PermissionGate::check_after_hook_allow`] and its
+    /// rich-outcome counterpart. The `lin` re-check of a
     /// hook `allow`: deny rule → deny; ask rule/safety → delegate to the inner
     /// transport (prompt / headless deny) carrying the dispatch context (real
     /// tool_use_id) enriched with the ask's serialized `decision_reason`, so the
     /// stdio `can_use_tool` is byte-faithful (was a fresh UUID + no reason); no
-    /// verdict → the hook's allow stands. (A host allow's `updatedInput` is still
-    /// flattened by this seam's 2-valued return — a documented residual; honoring
-    /// it needs a `PermissionOutcome`-returning hook-allow path.)
+    /// verdict → the hook's allow stands.
     async fn check_after_hook_allow_impl(
         &self,
         name: &str,
         input: &Value,
         ctx: &PermissionCheckContext,
-    ) -> PermissionDecision {
+    ) -> PermissionOutcome {
         let (mode, verdict) = self.rule_or_safety_verdict(name, input);
         match verdict {
             Some(PermissionResult::Deny {
@@ -317,7 +315,7 @@ impl PolicyPermissionGate {
                     target: "permission",
                     "Hook returned 'allow' for {name}, but deny rule overrides: {msg}"
                 );
-                PermissionDecision::Deny { reason: msg }
+                PermissionOutcome::Deny { reason: msg }
             }
             Some(PermissionResult::Ask {
                 ref reason,
@@ -349,20 +347,43 @@ impl PolicyPermissionGate {
                 }
                 match self.inner.check_with_context(name, input, &ctx2).await {
                     PermissionOutcome::Allow {
-                        permission_updates, ..
+                        updated_input,
+                        permission_updates,
+                        decision_classification,
                     } => {
                         if !permission_updates.is_empty() {
                             self.apply_permission_updates(&permission_updates);
                         }
-                        PermissionDecision::Allow
+                        PermissionOutcome::Allow {
+                            updated_input,
+                            permission_updates,
+                            // This branch exists only because the resolver
+                            // required an interactive ask. A host that omits
+                            // the optional classification still represents a
+                            // temporary user grant, not a standing hook allow.
+                            decision_classification: decision_classification.or(Some(
+                                traits::permission_gate::ToolDecisionClassification::UserTemporary,
+                            )),
+                        }
                     }
-                    PermissionOutcome::Deny { reason } => PermissionDecision::Deny { reason },
+                    PermissionOutcome::Deny { reason } => PermissionOutcome::Deny { reason },
                 }
             }
             _ => {
                 self.record_auto_mode_non_deny(mode);
-                PermissionDecision::Allow
+                PermissionOutcome::Allow {
+                    updated_input: None,
+                    permission_updates: Vec::new(),
+                    decision_classification: None,
+                }
             }
+        }
+    }
+
+    fn flatten_permission_outcome(outcome: PermissionOutcome) -> PermissionDecision {
+        match outcome {
+            PermissionOutcome::Allow { .. } => PermissionDecision::Allow,
+            PermissionOutcome::Deny { reason } => PermissionDecision::Deny { reason },
         }
     }
 
@@ -1129,8 +1150,10 @@ impl PermissionGate for PolicyPermissionGate {
     /// is honoured. Feeding the mode-backstop ask in here instead would deny
     /// almost every hook-rescued call.
     async fn check_after_hook_allow(&self, name: &str, input: &Value) -> PermissionDecision {
-        self.check_after_hook_allow_impl(name, input, &PermissionCheckContext::default())
-            .await
+        Self::flatten_permission_outcome(
+            self.check_after_hook_allow_impl(name, input, &PermissionCheckContext::default())
+                .await,
+        )
     }
 
     async fn check_after_hook_allow_ctx(
@@ -1139,6 +1162,15 @@ impl PermissionGate for PolicyPermissionGate {
         input: &Value,
         ctx: &PermissionCheckContext,
     ) -> PermissionDecision {
+        Self::flatten_permission_outcome(self.check_after_hook_allow_impl(name, input, ctx).await)
+    }
+
+    async fn check_after_hook_allow_outcome_ctx(
+        &self,
+        name: &str,
+        input: &Value,
+        ctx: &PermissionCheckContext,
+    ) -> PermissionOutcome {
         self.check_after_hook_allow_impl(name, input, ctx).await
     }
 

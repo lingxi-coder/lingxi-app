@@ -107,3 +107,33 @@ test('bootstrap reports CLI/TUI credentials discovered by the shared engine stor
     encryptionAvailable: true,
   });
 });
+
+test('bootstrap replays pending AskUserQuestion requests after a renderer reload', () => {
+  const diagnostics = new DiagnosticBuffer();
+  const settings = {
+    getWorkspace: () => '/workspace',
+    getTrust: () => ({ trusted: true, fingerprint: 'fingerprint' }),
+    getPublic: () => ({ version: 1, recentWorkspaces: ['/workspace'] }),
+    credentialMetadata: () => ({ configured: false, encryptionAvailable: false }),
+    providerCredentialMetadataFor: () => [],
+  };
+  const bridge = {
+    connectionState: { status: 'connected' as const },
+    pendingAskUserQuestions: [{
+      request_id: 7,
+      questions: [{
+        question: 'Choose a mode',
+        header: 'Mode',
+        options: [{ label: 'Safe', description: 'Keep safeguards enabled' }],
+        multi_select: false,
+      }],
+      timeout_secs: 60,
+    }],
+    turnActive: false,
+  };
+  const host = new HostController(settings as any, bridge as any, diagnostics);
+
+  const bootstrap = (host as any).bootstrap();
+
+  assert.deepEqual(bootstrap.pendingAskUserQuestions, bridge.pendingAskUserQuestions);
+});

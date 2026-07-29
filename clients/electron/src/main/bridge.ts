@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 import type { IpcMainInvokeEvent, WebContents } from 'electron';
 import {
+  type AskUserQuestionRequestDto,
   BridgeClient,
   type ClientCommand,
   type ClientEvent,
@@ -18,6 +19,7 @@ import { buildBridgeArguments, buildBridgeEnvironment, buildCredentialEnvelope, 
 import {
   assertCommandAllowedDuringTurn,
   validateClientCommand,
+  validateAskUserQuestionAnswers,
   validateBridgeLockfile,
   validateComputerAccessResponse,
   validateOptionalTurnId,
@@ -31,6 +33,8 @@ export const CH_APPROVE = 'lingxi:approve';
 export const CH_DENY = 'lingxi:deny';
 export const CH_APPROVE_COMPUTER_ACCESS = 'lingxi:approveComputerAccess';
 export const CH_DENY_COMPUTER_ACCESS = 'lingxi:denyComputerAccess';
+export const CH_ANSWER_ASK_USER_QUESTION = 'lingxi:answerAskUserQuestion';
+export const CH_CANCEL_ASK_USER_QUESTION = 'lingxi:cancelAskUserQuestion';
 export const CH_CANCEL = 'lingxi:cancel';
 export const CH_COMMAND = 'lingxi:command';
 export const CH_CONNECTION_STATE = 'lingxi:connectionState';
@@ -98,9 +102,14 @@ interface PendingCredentialOperation {
   timer: NodeJS.Timeout;
 }
 
+interface PendingAskUserQuestionRequest {
+  request: AskUserQuestionRequestDto;
+}
+
 const SERVER_BIN_NAME = process.platform === 'win32' ? 'bridge-server.exe' : 'bridge-server';
 const MAX_PENDING_PERMISSIONS = 1_000;
 const MAX_PENDING_COMPUTER_ACCESS = 1_000;
+const MAX_PENDING_ASK_USER_QUESTION = 1_000;
 const require = createRequire(import.meta.url);
 const electronModule = require('electron');
 const ipcMain = (typeof electronModule === 'string' ? undefined : electronModule.ipcMain) ?? {
@@ -210,6 +219,8 @@ export class BridgeManager {
   private lastRuntimeVersions: BridgeRuntimeVersions | undefined;
   private readonly pendingPermissionIds = new Set<number>();
   private readonly pendingComputerAccessIds = new Set<number>();
+  private readonly pendingAskUserQuestionIds = new Set<number>();
+  private readonly pendingAskUserQuestionRequests = new Map<number, PendingAskUserQuestionRequest>();
   private readonly targets = new Map<WebContents, Set<string>>();
   private readonly diagnostics: DiagnosticBuffer;
 
@@ -241,13 +252,25 @@ export class BridgeManager {
     return this.lastRuntimeVersions ? { ...this.lastRuntimeVersions } : undefined;
   }
 
+  get pendingAskUserQuestions(): readonly AskUserQuestionRequestDto[] {
+    return [...this.pendingAskUserQuestionRequests.values()].map((entry) => entry.request);
+  }
+
   registerWindow(webContents: WebContents, rendererUrl: string): void {
     const origin = urlOrigin(rendererUrl);
     if (!origin) throw new Error('invalid renderer URL');
     const origins = this.targets.get(webContents) ?? new Set<string>();
     origins.add(origin);
     this.targets.set(webContents, origins);
+    for (const pending of this.pendingAskUserQuestionRequests.values()) {
+      webContents.send(CH_EVENT, { type: 'ask_user_question', request: pending.request });
+    }
     webContents.once('destroyed', () => this.targets.delete(webContents));
+  }
+
+  private clearPendingAskUserQuestion(requestId: number): void {
+    this.pendingAskUserQuestionRequests.delete(requestId);
+    this.pendingAskUserQuestionIds.delete(requestId);
   }
 
   async start(): Promise<void> {
@@ -579,6 +602,24 @@ export class BridgeManager {
         try { this.opts.onModelChanged?.(event.model); }
         catch (error) { this.diagnostics.add('warn', 'host', error); }
       }
+      if (event.type === 'ask_user_question') {
+        const requestId = event.request.request_id;
+        if (
+          !this.pendingAskUserQuestionIds.has(requestId)
+          && this.pendingAskUserQuestionIds.size >= MAX_PENDING_ASK_USER_QUESTION
+        ) {
+          this.diagnostics.add('warn', 'bridge', 'AskUserQuestion request limit reached');
+          return;
+        }
+        this.clearPendingAskUserQuestion(requestId);
+        this.pendingAskUserQuestionIds.add(requestId);
+        this.pendingAskUserQuestionRequests.set(requestId, {
+          request: event.request,
+        });
+      }
+      if (event.type === 'ask_user_question_resolved') {
+        this.clearPendingAskUserQuestion(event.request_id);
+      }
       this.broadcast(CH_EVENT, event);
     });
     client.on('permission', (request: PermissionRequest) => {
@@ -695,6 +736,21 @@ export class BridgeManager {
       this.requireClient().denyComputerAccess(id);
       this.pendingComputerAccessIds.delete(id);
     });
+    ipcMain.handle(CH_ANSWER_ASK_USER_QUESTION, (event: IpcMainInvokeEvent, requestId: unknown, answers: unknown) => {
+      this.assertSender(event);
+      const id = validateRequestId(requestId);
+      const validatedAnswers = validateAskUserQuestionAnswers(answers);
+      if (!this.pendingAskUserQuestionIds.has(id)) throw new Error('AskUserQuestion request is not pending');
+      this.requireClient().answerAskUserQuestion(id, validatedAnswers);
+      this.clearPendingAskUserQuestion(id);
+    });
+    ipcMain.handle(CH_CANCEL_ASK_USER_QUESTION, (event: IpcMainInvokeEvent, requestId: unknown) => {
+      this.assertSender(event);
+      const id = validateRequestId(requestId);
+      if (!this.pendingAskUserQuestionIds.has(id)) throw new Error('AskUserQuestion request is not pending');
+      this.requireClient().cancelAskUserQuestion(id);
+      this.clearPendingAskUserQuestion(id);
+    });
     ipcMain.handle(CH_CANCEL, (event: IpcMainInvokeEvent, turnId: unknown) => {
       this.assertSender(event);
       this.requireClient().cancel(validateOptionalTurnId(turnId));
@@ -713,6 +769,7 @@ export class BridgeManager {
     if (!this.ipcRegistered) return;
     for (const channel of [
       CH_SEND_PROMPT, CH_APPROVE, CH_DENY, CH_APPROVE_COMPUTER_ACCESS, CH_DENY_COMPUTER_ACCESS,
+      CH_ANSWER_ASK_USER_QUESTION, CH_CANCEL_ASK_USER_QUESTION,
       CH_CANCEL, CH_COMMAND, CH_CONNECTION_STATE,
     ]) {
       ipcMain.removeHandler(channel);
@@ -788,6 +845,9 @@ export class BridgeManager {
     ++this.generation;
     this.pendingPermissionIds.clear();
     this.pendingComputerAccessIds.clear();
+    for (const requestId of [...this.pendingAskUserQuestionIds]) {
+      this.clearPendingAskUserQuestion(requestId);
+    }
     for (const pending of this.pendingCredentialOperations.values()) {
       clearTimeout(pending.timer);
       pending.reject(new Error('bridge credential operation was interrupted'));

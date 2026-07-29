@@ -102,6 +102,7 @@ struct RecordingHandler {
     spawns: AtomicUsize,
     killed: StdMutex<Vec<String>>,
     cleanup_count: Option<Arc<AtomicUsize>>,
+    kill_failures_remaining: AtomicUsize,
 }
 impl RecordingHandler {
     fn new(task_type: TaskType, task_id: &str) -> Arc<Self> {
@@ -111,6 +112,7 @@ impl RecordingHandler {
             spawns: AtomicUsize::new(0),
             killed: StdMutex::new(Vec::new()),
             cleanup_count: None,
+            kill_failures_remaining: AtomicUsize::new(0),
         })
     }
     fn with_cleanup_counter(
@@ -124,7 +126,11 @@ impl RecordingHandler {
             spawns: AtomicUsize::new(0),
             killed: StdMutex::new(Vec::new()),
             cleanup_count: Some(cleanup_count),
+            kill_failures_remaining: AtomicUsize::new(0),
         })
+    }
+    fn fail_next_kill(&self) {
+        self.kill_failures_remaining.store(1, Ordering::SeqCst);
     }
     fn spawn_count(&self) -> usize {
         self.spawns.load(Ordering::SeqCst)
@@ -158,6 +164,15 @@ impl Task for RecordingHandler {
         })
     }
     async fn kill(&self, task_id: &str, _ctx: TaskContext) -> Result<(), TaskError> {
+        if self
+            .kill_failures_remaining
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Err(TaskError::Internal("transient kill failure".into()));
+        }
         self.killed.lock().unwrap().push(task_id.to_string());
         Ok(())
     }
@@ -446,6 +461,39 @@ async fn spawn_records_handle_for_kill() {
         vec![id.clone()],
         "registry.kill dispatched to the handler's kill with the handler id"
     );
+}
+
+#[tokio::test]
+async fn failed_handler_kill_preserves_route_and_cleanup_for_retry() {
+    let (_d, mut registry) = make_registry();
+    let cleanup_count = Arc::new(AtomicUsize::new(0));
+    let handler = RecordingHandler::with_cleanup_counter(
+        TaskType::InProcessTeammate,
+        "tretrykill",
+        cleanup_count.clone(),
+    );
+    handler.fail_next_kill();
+    registry.register_handler(TaskType::InProcessTeammate, handler.clone());
+
+    let id = registry
+        .spawn(
+            TaskType::InProcessTeammate,
+            teammate_input(),
+            "retryable".into(),
+        )
+        .await
+        .unwrap();
+
+    assert!(registry.kill(&id).await.is_err());
+    assert_eq!(cleanup_count.load(Ordering::SeqCst), 0);
+    assert!(
+        registry.is_alive(&id).await,
+        "a failed owner kill must keep the task routable"
+    );
+
+    registry.kill(&id).await.unwrap();
+    assert_eq!(handler.killed_ids(), vec![id]);
+    assert_eq!(cleanup_count.load(Ordering::SeqCst), 1);
 }
 
 // ---- T04: TeamSpawnSeam impl on TaskRegistry ---------------------------

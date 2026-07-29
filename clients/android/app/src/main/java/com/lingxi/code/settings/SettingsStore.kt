@@ -49,16 +49,16 @@ data class SettingsUiState(
     val autoUpdate: Boolean = true,
 ) {
     /**
-     * True when chat cannot name an enabled LLM model yet.
-     *
-     * Credential status refresh is deliberately not part of this predicate:
-     * secure-storage discovery is asynchronous, while the persisted provider
-     * row already records the user's model choice. This avoids briefly sending
-     * configured users back to setup on every cold start.
+     * True until an enabled LLM has both a selected model and a credential that
+     * secure storage has confirmed. A persisted provider row only describes a
+     * draft configuration; it must never make chat present a usable model when
+     * its API key is absent.
      */
     val needsLlmSetup: Boolean
         get() = llmProviders.none { provider ->
-            provider.enabled && provider.model.isNotBlank()
+            provider.enabled &&
+                provider.model.isNotBlank() &&
+                provider.credentialConfigured
         }
 
     /** Providers for a [ProviderKind] (used by A7's list page). */
@@ -71,6 +71,7 @@ data class SettingsUiState(
 
 class SettingsStore(
     private val providerRepo: ProviderSettingsRepository? = null,
+    private val voiceRepo: VoiceSettingsRepository? = null,
 ) : ViewModel() {
     private val _state = MutableStateFlow(
         providerRepo?.loadProviderState()?.let { (llm, search, fetch) ->
@@ -78,8 +79,9 @@ class SettingsStore(
                 llmProviders = llm,
                 searchProviders = search,
                 fetchProviders = fetch,
+                voice = voiceRepo?.load() ?: VoiceConfig(),
             )
-        } ?: SettingsUiState()
+        } ?: SettingsUiState(voice = voiceRepo?.load() ?: VoiceConfig())
     )
     val state: StateFlow<SettingsUiState> = _state.asStateFlow()
 
@@ -100,7 +102,10 @@ class SettingsStore(
     fun setTelemetry(on: Boolean) = _state.update { it.copy(telemetry = on) }
     fun setAutoUpdate(on: Boolean) = _state.update { it.copy(autoUpdate = on) }
     fun setNotifs(notifs: NotifConfig) = _state.update { it.copy(notifs = notifs) }
-    fun setVoice(voice: VoiceConfig) = _state.update { it.copy(voice = voice) }
+    fun setVoice(voice: VoiceConfig) {
+        voiceRepo?.save(voice)
+        _state.update { it.copy(voice = voice) }
+    }
     @Synchronized
     fun setLinuxRuntimeMode(mode: LinuxRuntimeMode) {
         val current = _state.value
@@ -281,6 +286,108 @@ class SettingsStore(
         }
     }
 
+    fun testProviderConnection(
+        kind: ProviderKind,
+        id: String,
+        credentialOverride: String?,
+        onDone: (ProviderConnectionTestResult) -> Unit,
+    ) {
+        val repo = providerRepo
+            ?: return onDone(
+                ProviderConnectionTestResult(
+                    connected = false,
+                    reachable = false,
+                    authenticated = false,
+                    modelAvailable = false,
+                    httpStatus = null,
+                    latencyMs = 0,
+                    message = "Provider 连接服务不可用",
+                    usedStoredCredential = credentialOverride.isNullOrBlank(),
+                ),
+            )
+        val provider = _state.value.providers(kind).firstOrNull { it.id == id }
+            ?: return onDone(
+                ProviderConnectionTestResult(
+                    connected = false,
+                    reachable = false,
+                    authenticated = false,
+                    modelAvailable = false,
+                    httpStatus = null,
+                    latencyMs = 0,
+                    message = "Provider 不存在",
+                    usedStoredCredential = credentialOverride.isNullOrBlank(),
+                ),
+            )
+        if (kind != ProviderKind.Llm) {
+            return onDone(
+                ProviderConnectionTestResult(
+                    connected = false,
+                    reachable = false,
+                    authenticated = false,
+                    modelAvailable = false,
+                    httpStatus = null,
+                    latencyMs = 0,
+                    message = "当前仅支持测试 LLM Provider",
+                    usedStoredCredential = credentialOverride.isNullOrBlank(),
+                ),
+            )
+        }
+        _state.update { current ->
+            current.copy(
+                llmProviders = current.llmProviders.map {
+                    if (it.id == id) it.copy(status = ConnStatus.Testing) else it
+                },
+            )
+        }
+        viewModelScope.launch {
+            val result = repo.testConnection(provider, credentialOverride)
+            val stillSameConfiguration = _state.value.llmProviders
+                .firstOrNull { it.id == id }
+                ?.let {
+                    it.url.trim() == provider.url.trim() &&
+                        it.model.trim() == provider.model.trim()
+                } == true
+            if (stillSameConfiguration) {
+                _state.update { current ->
+                    current.copy(
+                        llmProviders = current.llmProviders.map {
+                            if (it.id == id) {
+                                it.copy(status = if (result.connected) ConnStatus.Connected else ConnStatus.Error)
+                            } else {
+                                it
+                            }
+                        },
+                    )
+                }
+                if (result.usedStoredCredential) {
+                    repo.persistProviders(ProviderKind.Llm, _state.value.llmProviders)
+                }
+                onDone(result)
+            } else {
+                markProviderConnectionUnverified(kind, id)
+                onDone(
+                    result.copy(
+                        connected = false,
+                        message = "配置已在测试期间变化，请重新测试",
+                    ),
+                )
+            }
+        }
+    }
+
+    fun markProviderConnectionUnverified(kind: ProviderKind, id: String) {
+        val providers = _state.value.providers(kind).map { provider ->
+            if (provider.id == id && provider.status in setOf(ConnStatus.Connected, ConnStatus.Error, ConnStatus.Testing)) {
+                provider.copy(
+                    status = if (provider.credentialConfigured) ConnStatus.Configured else ConnStatus.Idle,
+                )
+            } else {
+                provider
+            }
+        }
+        setProviders(kind, providers)
+    }
+
     fun saveProviderCredential(
         kind: ProviderKind,
         id: String,
@@ -369,7 +476,11 @@ class SettingsStore(
             object : ViewModelProvider.Factory {
                 override fun <T : ViewModel> create(modelClass: Class<T>): T {
                     @Suppress("UNCHECKED_CAST")
-                    return SettingsStore(ProviderSettingsRepository(context.applicationContext)) as T
+                    val appContext = context.applicationContext
+                    return SettingsStore(
+                        providerRepo = ProviderSettingsRepository(appContext),
+                        voiceRepo = VoiceSettingsRepository(appContext),
+                    ) as T
                 }
             }
     }

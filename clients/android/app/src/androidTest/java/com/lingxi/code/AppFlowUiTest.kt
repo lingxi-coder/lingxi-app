@@ -7,13 +7,21 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.lingxi.code.components.UiTags
 import com.lingxi.code.drawer.DrawerSection
-import org.junit.Rule
+import com.lingxi.code.theme.AppearanceStore
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.RuleChain
+import org.junit.rules.TestRule
 import org.junit.runner.RunWith
+import org.junit.runner.Description
+import org.junit.runners.model.Statement
 
 /**
  * Instrumented Compose UI tests for the app shell — drawer tab switching,
@@ -32,8 +40,14 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class AppFlowUiTest {
 
+    private val composeRule = createAndroidComposeRule<MainActivity>()
+
     @get:Rule
-    val rule = createAndroidComposeRule<MainActivity>()
+    val rules: RuleChain = RuleChain
+        .outerRule(SkipOnboardingRule())
+        .around(composeRule)
+
+    private val rule get() = composeRule
 
     @Suppress("DEPRECATION")
     @Test
@@ -42,6 +56,14 @@ class AppFlowUiTest {
             WindowManager.LayoutParams.SOFT_INPUT_MASK_ADJUST
 
         assertEquals(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE, adjustMode)
+    }
+
+    @Test
+    fun conversation_doesNotShowPrototypeWorkflowTabs() {
+        rule.onNodeWithText("理解需求").assertDoesNotExist()
+        rule.onNodeWithText("检索 Claude iOS").assertDoesNotExist()
+        rule.onNodeWithText("抽屉/侧栏组件").assertDoesNotExist()
+        rule.onNodeWithText("语音模式集成").assertDoesNotExist()
     }
 
     /** Open the 对话/项目/定时 drawer via the conversation top-bar hamburger. */
@@ -55,6 +77,9 @@ class AppFlowUiTest {
     @Test
     fun drawer_switchesBetweenChatsProjectsAndCrons() {
         openDrawer()
+
+        rule.onNodeWithText("知识库").assertDoesNotExist()
+        rule.onNodeWithText("记忆").assertDoesNotExist()
 
         // Project is backed by the real filesystem repository. A clean install
         // starts empty but always exposes the create/import action.
@@ -85,9 +110,11 @@ class AppFlowUiTest {
         rule.waitForIdle()
         // Root settings title.
         rule.onNodeWithText("设置").assertIsDisplayed()
+        rule.onNodeWithText("知识库").assertDoesNotExist()
+        rule.onNodeWithText("记忆").assertDoesNotExist()
 
         // Push to 外观 (Appearance).
-        rule.onNodeWithText("外观").performClick()
+        rule.onNodeWithText("外观").performScrollTo().performClick()
         rule.waitForIdle()
         // The Appearance page shows its 主题 section + theme radios.
         rule.onNodeWithText("主题").assertIsDisplayed()
@@ -107,25 +134,64 @@ class AppFlowUiTest {
         openDrawer()
         rule.onNodeWithText("Yuxin Yang").performClick()
         rule.waitForIdle()
-        rule.onNodeWithText("外观").performClick()
+        rule.onNodeWithText("外观").performScrollTo().performClick()
         rule.waitForIdle()
 
         // Toggle theme to 浅色 (light); the radio + live preview remain present.
-        rule.onNodeWithText("浅色").performClick()
+        rule.onNodeWithText("浅色").performScrollTo().performClick()
         rule.waitForIdle()
         rule.onNodeWithText("浅色").assertIsDisplayed()
 
         // Pick a non-default accent swatch (玫红); the grid stays rendered.
-        rule.onNodeWithText("玫红").performClick()
+        rule.onNodeWithText("玫红").performScrollTo().performClick()
         rule.waitForIdle()
         rule.onNodeWithText("玫红").assertIsDisplayed()
 
         // Flip back to 深色 (dark) — the toggle round-trips without crashing.
-        rule.onNodeWithText("深色").performClick()
+        rule.onNodeWithText("深色").performScrollTo().performClick()
         rule.waitForIdle()
         rule.onNodeWithText("深色").assertIsDisplayed()
 
         // The page is still the Appearance page after the toggles.
-        rule.onAllNodesWithText("密度")[0].assertIsDisplayed()
+        rule.onAllNodesWithText("密度")[0].performScrollTo().assertIsDisplayed()
     }
+}
+
+/**
+ * App-flow tests target the conversation/drawer shell, not the first-run wizard.
+ * Prepare DataStore before [MainActivity] launches, then restore the prior value
+ * afterward. Notification permission remains granted on the debug test install:
+ * revoking it while instrumentation is attached makes Android kill the target
+ * process and abort the remaining test class.
+ */
+private class SkipOnboardingRule : TestRule {
+    override fun apply(base: Statement, description: Description): Statement =
+        object : Statement() {
+            override fun evaluate() {
+                val instrumentation = androidx.test.platform.app.InstrumentationRegistry
+                    .getInstrumentation()
+                val context = instrumentation.targetContext
+                val store = AppearanceStore(context)
+                val wasDone = runBlocking { store.prefs.first().setupDone }
+                val notificationPermission = android.Manifest.permission.POST_NOTIFICATIONS
+                val hadNotificationPermission =
+                    android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.TIRAMISU ||
+                        androidx.core.content.ContextCompat.checkSelfPermission(
+                            context,
+                            notificationPermission,
+                        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                if (!wasDone) runBlocking { store.setSetupDone(true) }
+                if (!hadNotificationPermission) {
+                    instrumentation.uiAutomation.grantRuntimePermission(
+                        context.packageName,
+                        notificationPermission,
+                    )
+                }
+                try {
+                    base.evaluate()
+                } finally {
+                    if (!wasDone) runBlocking { store.setSetupDone(false) }
+                }
+            }
+        }
 }

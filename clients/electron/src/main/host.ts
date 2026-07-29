@@ -2,6 +2,7 @@ import { createRequire } from 'node:module';
 import type { IpcMainInvokeEvent, WebContents } from 'electron';
 import { writeFileSync } from 'node:fs';
 
+import type { AskUserQuestionRequestDto } from '@lingxi/bridge-client';
 import type { BridgeManager, ConnectionState } from './bridge.js';
 import { WorkspaceFileSearch } from './file-search.js';
 import { canonicalWorkspace, DiagnosticBuffer, sanitizeDiagnostic, type DiagnosticEntry, type PublicSettings } from './host-utils.js';
@@ -54,6 +55,7 @@ export interface BootstrapState {
   workspace: WorkspaceMetadata;
   credential: CredentialMetadata;
   providerCredentials?: ProviderCredentialMetadata[];
+  pendingAskUserQuestions?: AskUserQuestionRequestDto[];
   connection: ConnectionState;
   diagnostics: DiagnosticEntry[];
 }
@@ -261,11 +263,13 @@ export class HostController {
   }
 
   private bootstrap(): BootstrapState {
+    const pendingAskUserQuestions = this.bridge.pendingAskUserQuestions ?? [];
     return {
       settings: this.settings.getPublic(),
       workspace: this.workspace(),
       credential: this.credentialSnapshot(),
       providerCredentials: this.providerCredentialSnapshot(),
+      ...(pendingAskUserQuestions.length > 0 ? { pendingAskUserQuestions: [...pendingAskUserQuestions] } : {}),
       connection: this.bridge.connectionState,
       diagnostics: this.diagnostics.snapshot(),
     };

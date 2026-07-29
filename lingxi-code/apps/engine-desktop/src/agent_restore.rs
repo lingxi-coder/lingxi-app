@@ -14,8 +14,6 @@
 //! here on its COLD path: there is no live task record in a fresh process, so
 //! the on-disk provenance marker is the only witness to the fork's identity.
 
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use traits::fork_resume_gate::ForkResumeGate;
 use traits::parked_agent_store::ParkedAgentStore;
@@ -61,8 +59,7 @@ impl ParkedAgentStore for DesktopParkedAgentStore {
 /// What a restore attempt concluded for one agent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RestoreOutcome {
-    /// Re-spawned; carries the NEW agent id (a rebuilt runner is a new pool
-    /// instance — its identity on disk is the row's id, which the caller keeps).
+    /// Re-spawned under the persisted stable agent id.
     Restored(protocol::AgentId),
     /// The forked-skill resume gate refused it. Carries the refusal, which is
     /// the same byte-exact message a live resume would surface.
@@ -93,11 +90,13 @@ pub async fn restore_parked_agents(
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
         let id = row.agent_id;
-        // COLD gate: a fresh process has no live task record, so the fork's
-        // identity is corroborated against the on-disk provenance marker.
-        // Passing `None` is what selects that path — see
-        // `session::forked_skill::check_scoping_provenance`.
-        if let Err(refusal) = gate.check_resume(id, None).await {
+        // The parked row IS the cold process's durable task record. Pass its
+        // fork identity so the gate checks row ↔ scoping equality; ordinary
+        // agents still pass `None` and use the marker witness when applicable.
+        if let Err(refusal) = gate
+            .check_resume(id, row.request.forked_skill_name.as_deref())
+            .await
+        {
             out.push((id, RestoreOutcome::Refused(refusal)));
             continue;
         }
@@ -116,7 +115,7 @@ pub async fn restore_parked_agents(
         // hooks for a run that began in another process.
         request.resumed_history = Some(history);
         request.prompt = String::new();
-        match spawner.spawn_async(request, inherit.clone()).await {
+        match spawner.restore_async(id, request, inherit.clone()).await {
             Ok(launch) => out.push((id, RestoreOutcome::Restored(launch.agent_id))),
             Err(e) => out.push((id, RestoreOutcome::Failed(e.to_string()))),
         }
@@ -128,6 +127,7 @@ pub async fn restore_parked_agents(
 mod tests {
     use super::*;
     use session::agent_rows::{write_row, ParkedAgentRow};
+    use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
     use traits::subagent_spawn::{
         AsyncLaunch, SelectedAgentMeta, SubagentListingEntry, SubagentResult, SubagentSpawnError,
@@ -203,6 +203,22 @@ mod tests {
             }
             Ok(AsyncLaunch {
                 agent_id: protocol::AgentId::new(),
+                output_file: "/tmp/a.output".into(),
+            })
+        }
+
+        async fn restore_async(
+            &self,
+            agent_id: protocol::AgentId,
+            request: SubagentSpawnRequest,
+            _i: SubagentInheritance,
+        ) -> Result<AsyncLaunch, SubagentSpawnError> {
+            self.seen.lock().unwrap().push(request);
+            if self.fail {
+                return Err(SubagentSpawnError::Runtime("pool full".into()));
+            }
+            Ok(AsyncLaunch {
+                agent_id,
                 output_file: "/tmp/a.output".into(),
             })
         }
@@ -315,7 +331,7 @@ mod tests {
         let outcomes = restore_parked_agents(dir.path(), &spawner, &Gate(None), &inherit()).await;
 
         assert_eq!(outcomes.len(), 1);
-        assert!(matches!(outcomes[0].1, RestoreOutcome::Restored(_)));
+        assert_eq!(outcomes[0].1, RestoreOutcome::Restored(id));
         let seen = spawner.seen.lock().unwrap();
         let req = seen.first().expect("spawned");
         assert_eq!(

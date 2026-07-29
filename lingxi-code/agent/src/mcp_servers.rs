@@ -97,7 +97,7 @@ pub fn agent_mcp_specs_to_scoped_configs(
 
 /// claude `wke`: sources exempt from the strict plugin-only MCP lock —
 /// `new Set(["plugin","policySettings","built-in","builtin","bundled"])`.
-fn plugin_trusted_source(source: AgentSource) -> bool {
+pub(crate) fn plugin_trusted_source(source: AgentSource) -> bool {
     matches!(
         source,
         AgentSource::Plugin | AgentSource::PolicySettings | AgentSource::BuiltIn

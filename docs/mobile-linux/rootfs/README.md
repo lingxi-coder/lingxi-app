@@ -1,21 +1,20 @@
-# Alpine 3.24.1 mobile rootfs pipeline
+# Alpine 3.21.3 Android rootfs pipeline
 
-This directory defines the license-clean packaging contract for the future
-mobile Linux rootfs. It does not ship or embed any GPL runtime code; it only
-describes how a reviewed Alpine payload must be produced and verified once the
-required written authorization exists.
+This directory defines the reproducible evidence contract for the Android
+MobileLinux rootfs. Release archives come from the official Alpine mirrors and
+must match `docs/mobile-linux/mobile-linux-pins.json`.
 
 Pinned distribution baseline:
 
-- Alpine release: `3.24.1`
-- Repository branch: `v3.24`
+- Alpine release: `3.21.3`
+- Repository branch: `v3.21`
 - Supported targets:
   - `android-proot` / `android` / `arm64`
   - `android-proot` / `android` / `x86_64`
-  - `ios-ish` / `ios` / `arm64`
 
 Fixed primary package set:
 
+- `apk-tools`
 - `busybox`
 - `git`
 - `openssh-client`
@@ -24,11 +23,13 @@ Fixed primary package set:
 
 Policy decisions:
 
-- `apk` must be disabled in the shipped rootfs. No `apk` binary, no `pip`,
-  `pip3`, `npm`, or `npx`, and no writable repository configuration may remain.
-- BusyBox applets must use hardlinks, not symlinks. At minimum `/bin/sh` must
-  be a hardlink to `/bin/busybox`.
-- The packaged archive format is `tar.zst`.
+- The interactive, user-opened terminal retains `apk` and networking so the
+  user can explicitly install packages.
+- Agent-initiated networking, package installation, and external-mount writes
+  remain controlled by the host permission gate; PRoot is not a security
+  boundary.
+- The source archive format is Alpine's official `tar.gz`. Gradle packages it
+  uncompressed so its bytes continue to match the pinned digest.
 - The rootfs manifest allowlist must hash every shipped ELF executable,
   interpreter, and shared library that remains in the release archive.
 - The release evidence set must include:
@@ -41,20 +42,15 @@ Policy decisions:
 
 Recommended build flow:
 
-1. Build or assemble an extracted Alpine 3.24.1 rootfs in a temporary workdir
-   using only official Alpine `v3.24` repositories.
-2. Remove/disable package-manager binaries and repository config from the final
-   rootfs.
-3. Materialize BusyBox applets as hardlinks instead of symlinks.
-4. Run:
-   `lingxi-code/scripts/mobile-linux/package-rootfs-release.sh`
-5. Commit only reviewed evidence under `docs/mobile-linux/rootfs/current/` and
-   `docs/mobile-linux/sbom/current/`.
-6. Enable `LINGXI_MOBILE_LINUX_ENABLED=1` only after the authorization gate and
-   CI policy gates pass.
+1. Download both official Alpine 3.21.3 minirootfs archives named in the pin
+   manifest and verify SHA-256 before extraction or modification.
+2. Produce the complete package/license inventory and immutable content digest.
+3. Generate `rootfs-manifest.json` and `rootfs.spdx.json` for each ABI.
+4. Stage only through `clients/android/scripts/stage-mobile-linux-assets.sh`.
+5. Publish the archives, evidence, and corresponding source together.
 
-Schema v1 manifests are intentionally rejected: they lack the immutable file
-inventory required to detect non-ELF runtime tampering.
+Schema v1 manifests are intentionally rejected because they lack the immutable
+file inventory required to detect runtime tampering.
 
 Tooling:
 

@@ -19,6 +19,7 @@ import com.lingxi.code.model.EngineSessionState
 import com.lingxi.code.model.Message
 import com.lingxi.code.model.Role
 import com.lingxi.code.model.SessionCatalog
+import com.lingxi.code.model.canonicalSessionId
 import com.lingxi.code.secure.SecureKeyStore
 import com.lingxi.code.settings.ProviderSettingsRepository
 import com.lingxi.code.project.ProjectWorkspace
@@ -150,6 +151,17 @@ interface ConversationSource {
      * [activeSessionState] so the ViewModel rehydrates the prior conversation.
      */
     suspend fun resumeSession(uuid: String) {}
+
+    /**
+     * Resume a confirmed zero-message session while preserving its UUID.
+     *
+     * This separate proof is required only for mobile upgrades whose Project
+     * index predates the engine's empty-session JSONL anchor. Implementations
+     * without that migration concern fall back to the normal resume path.
+     */
+    suspend fun resumeEmptySession(uuid: String, title: String) {
+        resumeSession(uuid)
+    }
 
     /**
      * The engine's REAL MCP server listing (out-of-band, sibling of [modelState]).
@@ -317,12 +329,12 @@ fun McpServerDto.toMcpServer(): MCPServer {
  */
 fun sessionActivationFrom(event: ClientEvent): ActivatedSession? = when (event) {
     is ClientEvent.SessionStarted -> ActivatedSession(
-        sessionId = event.sessionId,
+        sessionId = canonicalSessionId(event.sessionId),
         transcript = emptyList(),
         kind = SessionActivationKind.Started,
     )
     is ClientEvent.SessionResumed -> ActivatedSession(
-        sessionId = event.sessionId,
+        sessionId = canonicalSessionId(event.sessionId),
         transcript = event.messages.map(::messageDtoToMessage),
         kind = SessionActivationKind.Resumed,
     )
@@ -388,6 +400,9 @@ sealed interface ReplyEvent {
     /** Tool activity worth surfacing in the status row (start / result / failure). */
     data class ToolActivity(val label: String) : ReplyEvent
 
+    /** Correlated shell lifecycle update rendered as an expandable terminal card. */
+    data class ShellTool(val update: ShellToolUpdate) : ReplyEvent
+
     /** A terminal error to surface (engine `Error`, or a build/submit failure). */
     data class Error(val message: String) : ReplyEvent
 
@@ -414,10 +429,28 @@ fun clientEventToReply(event: ClientEvent): ReplyEvent? = when (event) {
     is ClientEvent.TurnStarted -> ReplyEvent.Thinking
     is ClientEvent.TextDelta -> ReplyEvent.Delta(event.text)
     is ClientEvent.ThinkingDelta -> ReplyEvent.Thinking
-    is ClientEvent.ToolUseStarted -> ReplyEvent.ToolActivity("调用工具 ${event.tool}…")
+    is ClientEvent.ToolUseStarted ->
+        if (isShellTool(event.tool)) {
+            ReplyEvent.ShellTool(shellStarted(event.id, event.inputJson))
+        } else {
+            ReplyEvent.ToolActivity("调用工具 ${event.tool}…")
+        }
+    is ClientEvent.ToolHeartbeat ->
+        if (isShellTool(event.tool)) {
+            ReplyEvent.ShellTool(
+                ShellToolUpdate.Heartbeat(event.id, event.elapsedMs.toLong()),
+            )
+        } else {
+            ReplyEvent.ToolActivity("工具 ${event.tool} 运行中…")
+        }
     is ClientEvent.ToolUseResult ->
-        if (event.isError) ReplyEvent.ToolActivity("工具 ${event.tool} 失败")
-        else ReplyEvent.ToolActivity("工具 ${event.tool} 完成")
+        if (isShellTool(event.tool)) {
+            ReplyEvent.ShellTool(shellFinished(event.id, event.resultJson, event.isError))
+        } else if (event.isError) {
+            ReplyEvent.ToolActivity("工具 ${event.tool} 失败")
+        } else {
+            ReplyEvent.ToolActivity("工具 ${event.tool} 完成")
+        }
     is ClientEvent.MessageComplete -> event.message
         ?.let { ReplyEvent.Completed(messageDtoToMessage(it)) }
         ?: ReplyEvent.End
@@ -604,7 +637,20 @@ class EngineConversationSource private constructor(
         // Propagate command failures: the ViewModel must keep the composer gated
         // and surface an explicit session error instead of pretending the locally
         // selected transcript was resumed.
-        handle.submit(ClientCommand.ResumeSession(sessionId = uuid, cwd = null))
+        handle.submit(
+            ClientCommand.ResumeSession(
+                sessionId = canonicalSessionId(uuid),
+                cwd = null,
+            ),
+        )
+    }
+
+    override suspend fun resumeEmptySession(uuid: String, title: String) {
+        if (uuid.isBlank()) return
+        handle.resumeEmptySession(
+            sessionId = canonicalSessionId(uuid),
+            title = title.ifBlank { "新对话" },
+        )
     }
 
     override suspend fun newSession() {

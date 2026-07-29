@@ -209,11 +209,23 @@ impl Tool for ShellMobileTool {
                  `mapfile`/`readarray`.\n\n",
             ));
         }
-        prompt.push_str(
-            "This shell is DENY-NET: it has no network access. Network commands \
-             (curl/wget/ssh/git clone/fetch/pull/push) are refused — use the Git tool \
-             for remote git operations; local git (status/diff/commit/log) works here.\n\n",
-        );
+        if self
+            .ctx
+            .mobile_shell()
+            .is_some_and(|shell| shell.force_platform_sandbox)
+        {
+            prompt.push_str(
+                "This Alpine guest may use the network only after the Android \
+                 permission gate approves the shell invocation. Interactive users \
+                 may install packages with `apk add`; agent calls remain permission-gated.\n\n",
+            );
+        } else {
+            prompt.push_str(
+                "This shell is DENY-NET: it has no network access. Network commands \
+                 (curl/wget/ssh/git clone/fetch/pull/push) are refused — use the Git tool \
+                 for remote git operations; local git works here.\n\n",
+            );
+        }
         prompt.push_str(
             "Commands run rooted at the workspace directory. Output is captured and \
              truncated if very large.\n\n",
@@ -273,8 +285,14 @@ impl Tool for ShellMobileTool {
         // 2. Refuse network-intent commands BEFORE building/running anything —
         // the shell is deny-net, so this is a clean advisory instead of a
         // confusing seccomp EPERM.
-        if let Some(advice) = net_intent::network_intent(&command) {
-            return Err(ToolError::InvalidInput(advice));
+        let mobile_linux_guest = self
+            .ctx
+            .mobile_shell()
+            .is_some_and(|shell| shell.force_platform_sandbox);
+        if !mobile_linux_guest {
+            if let Some(advice) = net_intent::network_intent(&command) {
+                return Err(ToolError::InvalidInput(advice));
+            }
         }
 
         let shell_path = self
@@ -298,7 +316,14 @@ impl Tool for ShellMobileTool {
 
         // 4. Build the deny-net default policy (D10: deny-net ALWAYS).
         let policy = SandboxPolicy {
-            network: NetworkPolicy::Disabled,
+            // The adapter permission gate has already authorized this tool call.
+            // Legacy retains strict deny-net; MobileLinux maps approved calls to
+            // the guest network so `apk add` and explicit network work function.
+            network: if mobile_linux_guest {
+                NetworkPolicy::Allowed
+            } else {
+                NetworkPolicy::Disabled
+            },
             writable_paths: vec![],
             denied_paths: vec![],
             allow_subprocess: true,

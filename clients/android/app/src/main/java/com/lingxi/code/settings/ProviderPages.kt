@@ -325,6 +325,8 @@ fun ProviderEditPage(
     var removing by remember(providerId) { mutableStateOf(false) }
     var applying by remember(providerId) { mutableStateOf(false) }
     var credentialBusy by remember(providerId) { mutableStateOf(false) }
+    var connectionBusy by remember(providerId) { mutableStateOf(false) }
+    var connectionMessage by remember(providerId) { mutableStateOf<String?>(null) }
     var credentialMessage by remember(providerId, editing.credentialConfigured) {
         mutableStateOf(
             when {
@@ -340,20 +342,35 @@ fun ProviderEditPage(
     val applyState = providerApplyUiState(
         hasPendingConfiguration = providerId in state.pendingLlmProviderChanges,
         hasCredentialDraft = keyDraft.isNotBlank(),
-        busy = applying || credentialBusy,
+        busy = applying || credentialBusy || connectionBusy,
     )
 
     Column(Modifier.fillMaxWidth()) {
-        StatusBanner(status = editing.status) {
-            credentialMessage = "正在读取本机安全存储…"
-            store.refreshProviderStatuses { error ->
-                val refreshed = store.state.value.providers(kind).firstOrNull { it.id == providerId }
-                credentialMessage = when {
-                    error != null -> "刷新失败：$error"
-                    refreshed?.credentialConfigured == true ->
-                        "本地状态已刷新：凭据已在本机安全区配置；此操作不会联网验证 Key"
-                    else -> "本地状态已刷新：未找到已保存凭据"
+        StatusBanner(
+            status = editing.status,
+            message = connectionMessage,
+            actionLabel = if (kind == ProviderKind.Llm) "测试连接" else "暂不支持",
+            enabled = kind == ProviderKind.Llm &&
+                builtInSupported &&
+                !connectionBusy &&
+                !credentialBusy &&
+                !applying,
+        ) {
+            val testedDraft = keyDraft.trim()
+            connectionBusy = true
+            connectionMessage = "正在连接 Provider 并校验模型…"
+            store.testProviderConnection(kind, providerId, testedDraft.takeIf { it.isNotEmpty() }) { result ->
+                if (keyDraft.trim() == testedDraft) {
+                    connectionMessage = result.message + if (result.connected && !result.usedStoredCredential) {
+                        " · 当前 Key 尚未保存"
+                    } else {
+                        ""
+                    }
+                } else {
+                    store.markProviderConnectionUnverified(kind, providerId)
+                    connectionMessage = "API Key 已变化，请重新测试"
                 }
+                connectionBusy = false
             }
         }
 
@@ -368,7 +385,11 @@ fun ProviderEditPage(
         FieldLabel("API 地址")
         SettingsField(
             value = editing.url,
-            onValueChange = { v -> store.updateProvider(kind, providerId) { it.copy(url = v) } },
+            onValueChange = { v ->
+                connectionMessage = null
+                store.updateProvider(kind, providerId) { it.copy(url = v) }
+                store.markProviderConnectionUnverified(kind, providerId)
+            },
             placeholder = preset.defaultUrl,
         )
         FieldHint("默认 `${preset.defaultUrl.ifEmpty { "—" }}` · 可填代理 / 镜像")
@@ -383,7 +404,13 @@ fun ProviderEditPage(
             },
             show = showKey,
             onToggleShow = { showKey = !showKey },
-            onValueChange = { v -> keyDraft = v },
+            onValueChange = { v ->
+                if (v != keyDraft) {
+                    connectionMessage = null
+                    store.markProviderConnectionUnverified(kind, providerId)
+                }
+                keyDraft = v
+            },
         )
         FieldHint(
             when {
@@ -410,13 +437,21 @@ fun ProviderEditPage(
                     models = preset.models,
                     selected = editing.model,
                     accent = preset.color,
-                    onSelect = { m -> store.updateProvider(kind, providerId) { it.copy(model = m) } },
+                    onSelect = { m ->
+                        connectionMessage = null
+                        store.updateProvider(kind, providerId) { it.copy(model = m) }
+                        store.markProviderConnectionUnverified(kind, providerId)
+                    },
                 )
             } else {
                 FieldLabel("模型 ID")
                 SettingsField(
                     value = editing.model,
-                    onValueChange = { v -> store.updateProvider(kind, providerId) { it.copy(model = v) } },
+                    onValueChange = { v ->
+                        connectionMessage = null
+                        store.updateProvider(kind, providerId) { it.copy(model = v) }
+                        store.markProviderConnectionUnverified(kind, providerId)
+                    },
                     placeholder = "llama-3.3-70b",
                     modifier = Modifier.padding(bottom = 14.dp),
                 )
@@ -485,7 +520,11 @@ fun ProviderEditPage(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(6.dp))
                                 .clickable(
-                                    enabled = builtInSupported && keyDraft.isNotBlank() && !credentialBusy && !applying,
+                                    enabled = builtInSupported &&
+                                        keyDraft.isNotBlank() &&
+                                        !credentialBusy &&
+                                        !applying &&
+                                        !connectionBusy,
                                 ) {
                                     credentialBusy = true
                                     store.saveProviderCredential(kind, providerId, keyDraft) { error ->
@@ -517,7 +556,11 @@ fun ProviderEditPage(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(6.dp))
                                 .clickable(
-                                    enabled = editing.credentialConfigured && builtInSupported && !credentialBusy && !applying,
+                                    enabled = editing.credentialConfigured &&
+                                        builtInSupported &&
+                                        !credentialBusy &&
+                                        !applying &&
+                                        !connectionBusy,
                                 ) {
                                     credentialBusy = true
                                     store.clearProviderCredential(kind, providerId) { error ->
@@ -647,15 +690,17 @@ private fun Badge(text: String, color: Color, strong: Boolean = false) {
     )
 }
 
-/**
- * Credential status is read from the engine's shared encrypted store. Refresh
- * never manufactures a successful network result.
- */
 @Composable
-private fun StatusBanner(status: ConnStatus, onTest: () -> Unit) {
+private fun StatusBanner(
+    status: ConnStatus,
+    message: String?,
+    actionLabel: String,
+    enabled: Boolean,
+    onTest: () -> Unit,
+) {
     val t = LingXiTheme.palette
     val dot = status.dot(t)
-    val refreshing = status == ConnStatus.Testing
+    val testing = status == ConnStatus.Testing
 
     Row(
         verticalAlignment = Alignment.CenterVertically,
@@ -668,21 +713,37 @@ private fun StatusBanner(status: ConnStatus, onTest: () -> Unit) {
             .padding(horizontal = 12.dp, vertical = 10.dp),
     ) {
         PulsingDot(color = dot, pulsing = status == ConnStatus.Testing)
+        Column(
+            modifier = Modifier
+                .padding(start = 8.dp, end = 8.dp)
+                .weight(1f),
+        ) {
+            Text(
+                status.label,
+                color = t.text2,
+                fontSize = 12.5f.sp,
+                fontWeight = FontWeight.Medium,
+            )
+            if (!message.isNullOrBlank()) {
+                Text(
+                    message,
+                    color = if (status == ConnStatus.Error) t.danger else t.text3,
+                    fontSize = 10.5f.sp,
+                    lineHeight = 14.sp,
+                    modifier = Modifier.padding(top = 2.dp),
+                )
+            }
+        }
         Text(
-            status.label,
-            color = t.text2, fontSize = 12.5f.sp, fontWeight = FontWeight.Medium,
-            modifier = Modifier.padding(start = 8.dp).weight(1f),
-        )
-        Text(
-            if (refreshing) "刷新中…" else "刷新本地状态",
-            color = if (refreshing) t.text4 else t.text2,
+            if (testing) "测试中…" else actionLabel,
+            color = if (enabled && !testing) t.text2 else t.text4,
             fontSize = 12.sp,
             fontWeight = FontWeight.Medium,
             modifier = Modifier
                 .clip(RoundedCornerShape(7.dp))
                 .background(t.windowBg)
                 .border(0.5.dp, t.border, RoundedCornerShape(7.dp))
-                .clickable(enabled = !refreshing, onClick = onTest)
+                .clickable(enabled = enabled && !testing, onClick = onTest)
                 .padding(horizontal = 10.dp, vertical = 6.dp),
         )
     }

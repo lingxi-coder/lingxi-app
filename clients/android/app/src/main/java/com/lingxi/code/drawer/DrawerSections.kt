@@ -508,18 +508,32 @@ private fun SessionRow(
 // MARK: - 定时 (crons) -------------------------------------------------------
 
 @Composable
-internal fun CronsSection(crons: List<Cron>) {
+internal fun CronsSection(
+    crons: List<Cron>,
+    onOpenCron: (String) -> Unit,
+    onCreateCron: () -> Unit,
+) {
     Column(
         verticalArrangement = Arrangement.spacedBy(6.dp),
         modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
     ) {
-        crons.forEach { cron -> CronCard(cron) }
-        DashedButton(label = "新建定时任务")
+        if (crons.isEmpty()) {
+            Text(
+                text = "暂无定时任务",
+                color = LingXiTheme.palette.text4,
+                fontSize = 12.sp,
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+            )
+        }
+        crons.forEach { cron ->
+            CronCard(cron = cron, onClick = { onOpenCron(cron.id) })
+        }
+        DashedButton(label = "新建定时任务", onClick = onCreateCron)
     }
 }
 
 @Composable
-private fun CronCard(cron: Cron) {
+private fun CronCard(cron: Cron, onClick: () -> Unit) {
     val t = LingXiTheme.palette
     Column(
         modifier = Modifier
@@ -528,6 +542,7 @@ private fun CronCard(cron: Cron) {
             .background(t.surface)
             .border(0.5.dp, t.border, RoundedCornerShape(12.dp))
             .alpha(if (cron.enabled) 1f else 0.55f)
+            .clickable(onClick = onClick)
             .padding(horizontal = 14.dp, vertical = 12.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -540,12 +555,6 @@ private fun CronCard(cron: Cron) {
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
-            )
-            LXIcon(
-                name = if (cron.enabled) LXIconName.Pause else LXIconName.Play,
-                size = 13.dp,
-                color = t.text4,
-                stroke = 1.8f,
             )
         }
         Spacer(Modifier.height(5.dp))

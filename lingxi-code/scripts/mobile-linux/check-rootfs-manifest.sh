@@ -42,6 +42,9 @@ required = {
     "platform",
     "abi",
     "rootfs_version",
+    "content_sha256",
+    "sbom_filename",
+    "source_pins_filename",
     "archive",
     "packages",
     "executable_allowlist",
@@ -78,6 +81,15 @@ if data["platform"] == "ios" and data["abi"] != "arm64":
     sys.exit(1)
 if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9._-]+)?", data["rootfs_version"]):
     print("rootfs_version must look like semver", file=sys.stderr)
+    sys.exit(1)
+if not re.fullmatch(r"[a-f0-9]{64}", str(data["content_sha256"])):
+    print("content_sha256 must be 64 lowercase hex chars", file=sys.stderr)
+    sys.exit(1)
+if data["sbom_filename"] != "rootfs.spdx.json":
+    print("sbom_filename must be rootfs.spdx.json", file=sys.stderr)
+    sys.exit(1)
+if data["source_pins_filename"] != "mobile-linux-pins.json":
+    print("source_pins_filename must be mobile-linux-pins.json", file=sys.stderr)
     sys.exit(1)
 
 archive = data["archive"]
@@ -123,12 +135,12 @@ for package in packages:
         sys.exit(1)
     package_names.add(package["name"])
 
-required_packages = {"busybox", "git", "openssh-client", "python3", "ca-certificates"}
+required_packages = {"apk-tools", "busybox", "git", "openssh-client", "python3", "ca-certificates"}
 missing_packages = required_packages - package_names
 if missing_packages:
     print(f"fixed toolset packages missing: {sorted(missing_packages)}", file=sys.stderr)
     sys.exit(1)
-forbidden_packages = {"apk-tools", "py3-pip", "nodejs", "npm"} & package_names
+forbidden_packages = {"py3-pip", "nodejs", "npm"} & package_names
 if forbidden_packages:
     print(f"forbidden package-manager packages present: {sorted(forbidden_packages)}", file=sys.stderr)
     sys.exit(1)

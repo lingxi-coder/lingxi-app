@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
 FIXED_PRIMARY_PACKAGES = [
+    "apk-tools",
     "busybox",
     "git",
     "openssh-client",
@@ -23,17 +24,14 @@ FIXED_PRIMARY_PACKAGES = [
 ]
 
 FORBIDDEN_PACKAGE_MANAGER_PATHS = [
-    "/bin/apk",
-    "/sbin/apk",
-    "/usr/bin/apk",
-    "/usr/sbin/apk",
     "/usr/bin/pip",
     "/usr/bin/pip3",
     "/usr/bin/npm",
     "/usr/bin/npx",
 ]
 
-WELL_KNOWN_REPOSITORY_PATHS = [
+REQUIRED_INTERACTIVE_PACKAGE_MANAGER_PATHS = [
+    "/sbin/apk",
     "/etc/apk/repositories",
 ]
 
@@ -201,7 +199,7 @@ def parse_apk_installed(installed_path: pathlib.Path) -> List[PackageRecord]:
     missing = sorted(set(FIXED_PRIMARY_PACKAGES) - names)
     if missing:
         fail(f"fixed primary packages missing from APK installed database: {missing}")
-    forbidden = sorted(names & {"apk-tools", "py3-pip", "nodejs", "npm"})
+    forbidden = sorted(names & {"py3-pip", "nodejs", "npm"})
     if forbidden:
         fail(f"forbidden package-manager packages present in rootfs: {forbidden}")
     return sorted(packages, key=lambda package: package.name)
@@ -239,10 +237,14 @@ def validate_rootfs_tree(root: pathlib.Path) -> List[PackageRecord]:
     if os.stat(busybox).st_ino != os.stat(sh_path).st_ino:
         fail("/bin/sh must be a hardlink to /bin/busybox")
 
-    for forbidden in FORBIDDEN_PACKAGE_MANAGER_PATHS + WELL_KNOWN_REPOSITORY_PATHS:
+    for forbidden in FORBIDDEN_PACKAGE_MANAGER_PATHS:
         candidate = root / forbidden.lstrip("/")
         if candidate.exists() or candidate.is_symlink():
             fail(f"forbidden package-manager artifact present in rootfs: {forbidden}")
+    for required in REQUIRED_INTERACTIVE_PACKAGE_MANAGER_PATHS:
+        candidate = root / required.lstrip("/")
+        if not candidate.exists() or candidate.is_symlink():
+            fail(f"interactive package-manager artifact missing or symlinked: {required}")
 
     for current_root, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
         current_dir = pathlib.Path(current_root)
@@ -316,7 +318,14 @@ def collect_allowlist(root: pathlib.Path) -> List[dict]:
                     "size_bytes": path.stat().st_size,
                 }
             )
-    required = {"/bin/busybox", "/bin/sh", "/usr/bin/git", "/usr/bin/ssh", "/usr/bin/python3"}
+    required = {
+        "/bin/busybox",
+        "/bin/sh",
+        "/sbin/apk",
+        "/usr/bin/git",
+        "/usr/bin/ssh",
+        "/usr/bin/python3",
+    }
     present = {entry["path"] for entry in entries}
     missing = sorted(required - present)
     if missing:
@@ -390,6 +399,9 @@ def generate_manifest(args: argparse.Namespace) -> None:
         "platform": args.platform,
         "abi": args.abi,
         "rootfs_version": args.rootfs_version,
+        "content_sha256": hashlib.sha256(canonical_json_bytes(immutable_files)).hexdigest(),
+        "sbom_filename": "rootfs.spdx.json",
+        "source_pins_filename": "mobile-linux-pins.json",
         "archive": {
             "filename": args.archive_filename,
             "sha256": args.archive_sha256,
@@ -465,17 +477,18 @@ def generate_lock(args: argparse.Namespace) -> None:
     lock = {
         "schema_version": 1,
         "alpine": {
-            "version": "3.24.1",
-            "branch": "v3.24",
+            "version": "3.21.3",
+            "branch": "v3.21",
             "repositories": [
-                "https://dl-cdn.alpinelinux.org/alpine/v3.24/main",
-                "https://dl-cdn.alpinelinux.org/alpine/v3.24/community",
+                "https://dl-cdn.alpinelinux.org/alpine/v3.21/main",
+                "https://dl-cdn.alpinelinux.org/alpine/v3.21/community",
             ],
         },
         "policy": {
-            "archive_format": "tar.zst",
+            "archive_format": "tar.gz",
             "busybox_applet_strategy": "hardlink",
-            "apk_disabled": True,
+            "apk_disabled": False,
+            "interactive_package_install_allowed": True,
             "forbidden_package_manager_paths": FORBIDDEN_PACKAGE_MANAGER_PATHS,
             "fixed_primary_packages": FIXED_PRIMARY_PACKAGES,
         },
@@ -518,17 +531,19 @@ def validate_lock(args: argparse.Namespace) -> None:
     alpine = lock.get("alpine")
     if not isinstance(alpine, dict):
         fail("rootfs lock missing alpine block")
-    if alpine.get("version") != "3.24.1" or alpine.get("branch") != "v3.24":
-        fail("rootfs lock must pin Alpine 3.24.1 / v3.24")
+    if alpine.get("version") != "3.21.3" or alpine.get("branch") != "v3.21":
+        fail("rootfs lock must pin Alpine 3.21.3 / v3.21")
     policy = lock.get("policy")
     if not isinstance(policy, dict):
         fail("rootfs lock missing policy block")
-    if policy.get("archive_format") != "tar.zst":
-        fail("rootfs lock must pin tar.zst archive format")
+    if policy.get("archive_format") != "tar.gz":
+        fail("rootfs lock must pin tar.gz archive format")
     if policy.get("busybox_applet_strategy") != "hardlink":
         fail("rootfs lock must require hardlink BusyBox applets")
-    if policy.get("apk_disabled") is not True:
-        fail("rootfs lock must require apk_disabled=true")
+    if policy.get("apk_disabled") is not False:
+        fail("rootfs lock must require apk_disabled=false")
+    if policy.get("interactive_package_install_allowed") is not True:
+        fail("rootfs lock must allow interactive package installation")
     if policy.get("fixed_primary_packages") != FIXED_PRIMARY_PACKAGES:
         fail("rootfs lock fixed_primary_packages diverged")
     if policy.get("forbidden_package_manager_paths") != FORBIDDEN_PACKAGE_MANAGER_PATHS:
@@ -635,7 +650,7 @@ def verify_archive(args: argparse.Namespace) -> None:
                 fail(f"FIFO entries are forbidden in rootfs archive: {rel}")
             if member.mode & stat.S_ISUID or member.mode & stat.S_ISGID:
                 fail(f"suid/sgid entries are forbidden in rootfs archive: {rel}")
-            if rel in FORBIDDEN_PACKAGE_MANAGER_PATHS or rel in WELL_KNOWN_REPOSITORY_PATHS:
+            if rel in FORBIDDEN_PACKAGE_MANAGER_PATHS:
                 fail(f"forbidden package-manager artifact present in archive: {rel}")
             if member.issym():
                 if any(rel.startswith(prefix) for prefix in BINARY_SYMLINK_FORBIDDEN_PREFIXES):
@@ -657,6 +672,10 @@ def verify_archive(args: argparse.Namespace) -> None:
         fail("archive missing /bin/busybox")
     if "bin/sh" not in seen_paths:
         fail("archive missing /bin/sh")
+    if "sbin/apk" not in seen_paths:
+        fail("archive missing /sbin/apk")
+    if "etc/apk/repositories" not in seen_paths:
+        fail("archive missing /etc/apk/repositories")
 
     hardlink_pairs = {frozenset((path, link)) for path, link in hardlinks}
     if frozenset(("bin/sh", "bin/busybox")) not in hardlink_pairs:

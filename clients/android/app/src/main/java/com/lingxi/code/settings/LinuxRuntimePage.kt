@@ -27,6 +27,7 @@ fun LinuxRuntimePage(
     state: SettingsUiState,
     store: SettingsStore,
     modifier: Modifier = Modifier,
+    onOpenTerminal: ((LinuxRuntimeTerminalLaunchRequest) -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -45,13 +46,13 @@ fun LinuxRuntimePage(
         modifier = modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(0.dp),
     ) {
-        Blurb("Android phase-1 只接入运行时管理面板。未取得额外书面授权时，Mobile Linux 后端不会被链接进商店构建；当前 shell 仍走 legacy Minijail 路径。")
+        Blurb("Mobile Linux 使用受管 Alpine rootfs 与 Android PRoot 后端。选择该模式后，运行时错误会直接显示，不会静默回退到 Legacy。")
 
         SettingsSection(label = "后端选择") {
             RadioList(
                 options = listOf(
                     RadioOption(LinuxRuntimeMode.Legacy.name, "Legacy", "继续使用现有 Minijail + shell 执行层"),
-                    RadioOption(LinuxRuntimeMode.MobileLinux.name, "Mobile Linux", "预留 Android PRoot + Alpine 运行时接缝"),
+                    RadioOption(LinuxRuntimeMode.MobileLinux.name, "Mobile Linux", "使用 Android PRoot + Alpine 运行时"),
                 ),
                 selected = runtime.selectedMode.name,
                 onSelect = { next ->
@@ -95,8 +96,19 @@ fun LinuxRuntimePage(
 
         SettingsSection(
             label = "维护",
-            footer = "商店版不提供 Alpine / pip / npm 动态原生包安装入口。verify / repair / reset 在 phase-1 中仅返回受控状态，不会改动用户项目、会话或密钥。",
+            footer = "安装、修复和重置只作用于受管 rootfs；外部工作区、会话与密钥不会被删除。",
         ) {
+            ActionRow(
+                title = "安装 rootfs",
+                action = LinuxRuntimeAction.Install,
+                busy = runtime.busyAction == LinuxRuntimeAction.Install,
+                enabled = runtime.installAllowed && runtime.busyAction == null,
+                onClick = {
+                    scope.launch {
+                        runLinuxRuntimeAction(context, store, LinuxRuntimeAction.Install, runtime.selectedMode)
+                    }
+                },
+            )
             ActionRow(
                 title = "启动 runtime",
                 action = LinuxRuntimeAction.Boot,
@@ -171,7 +183,7 @@ fun LinuxRuntimePage(
                 label = "终端入口",
                 sub = when (runtime.terminal.status) {
                     LinuxRuntimeTerminalStatus.Disabled -> "当前构建未提供可用 PTY 运行时"
-                    LinuxRuntimeTerminalStatus.Idle -> "可创建 PTY 终端会话；宿主终端视图待接入"
+                    LinuxRuntimeTerminalStatus.Idle -> "可创建 PTY 终端会话"
                     LinuxRuntimeTerminalStatus.Starting -> "终端会话启动中"
                     LinuxRuntimeTerminalStatus.Active -> "存在运行中的 PTY 会话"
                 },
@@ -188,8 +200,15 @@ fun LinuxRuntimePage(
                 title = "新建终端",
                 action = LinuxRuntimeAction.OpenTerminal,
                 busy = runtime.busyAction == LinuxRuntimeAction.OpenTerminal,
-                enabled = false,
-                onClick = {},
+                enabled = runtime.canOpenTerminal && onOpenTerminal != null && runtime.busyAction == null,
+                onClick = {
+                    onOpenTerminal?.invoke(
+                        LinuxRuntimeTerminalLaunchRequest(
+                            sessionId = runtime.terminal.sessionId ?: java.util.UUID.randomUUID().toString(),
+                            initCommand = runtime.terminal.commandDraft,
+                        ),
+                    )
+                },
             )
             SettingsRow(
                 label = "外部目录挂载",
@@ -219,6 +238,19 @@ fun LinuxRuntimePage(
         }
 
         SettingsSection(label = "后台任务与挂载") {
+            runtime.tasks.firstOrNull { it.stoppable }?.let { task ->
+                ActionRow(
+                    title = "停止 ${task.label}",
+                    action = LinuxRuntimeAction.StopTask,
+                    busy = runtime.busyAction == LinuxRuntimeAction.StopTask,
+                    enabled = runtime.busyAction == null,
+                    onClick = {
+                        scope.launch {
+                            stopLinuxRuntimeTask(context, store, runtime.selectedMode, task.id)
+                        }
+                    },
+                )
+            }
             ActionRow(
                 title = "刷新任务",
                 action = LinuxRuntimeAction.RefreshTasks,
@@ -234,7 +266,7 @@ fun LinuxRuntimePage(
                 title = "刷新挂载视图",
                 action = LinuxRuntimeAction.RefreshMounts,
                 busy = runtime.busyAction == LinuxRuntimeAction.RefreshMounts,
-                enabled = runtime.busyAction == null,
+                enabled = runtime.canManageMounts && runtime.busyAction == null,
                 onClick = {
                     scope.launch {
                         runLinuxRuntimeAction(context, store, LinuxRuntimeAction.RefreshMounts, runtime.selectedMode)
@@ -315,6 +347,7 @@ private suspend fun runLinuxRuntimeAction(
     try {
         val snapshot = when (action) {
             LinuxRuntimeAction.Refresh -> LinuxRuntimeBridge.load(context, mode)
+            LinuxRuntimeAction.Install -> LinuxRuntimeBridge.install(context, mode)
             LinuxRuntimeAction.Verify -> LinuxRuntimeBridge.verify(context, mode)
             LinuxRuntimeAction.Repair -> LinuxRuntimeBridge.repair(context, mode)
             LinuxRuntimeAction.Reset -> LinuxRuntimeBridge.reset(context, mode)
@@ -323,8 +356,40 @@ private suspend fun runLinuxRuntimeAction(
             LinuxRuntimeAction.RefreshTasks -> LinuxRuntimeBridge.refreshTasks(context, mode)
             LinuxRuntimeAction.RefreshMounts -> LinuxRuntimeBridge.load(context, mode)
             LinuxRuntimeAction.OpenTerminal -> LinuxRuntimeBridge.load(context, mode)
+            LinuxRuntimeAction.StopTask -> LinuxRuntimeBridge.refreshTasks(context, mode)
         }
         store.completeLinuxRuntimeAction(action, mode, snapshot)
+    } catch (cancelled: CancellationException) {
+        store.cancelLinuxRuntimeAction(action, mode)
+        throw cancelled
+    } catch (error: Exception) {
+        store.failLinuxRuntimeAction(
+            action = action,
+            mode = mode,
+            message = error.message ?: error::class.java.simpleName,
+        )
+    }
+}
+
+private suspend fun stopLinuxRuntimeTask(
+    context: Context,
+    store: SettingsStore,
+    mode: LinuxRuntimeMode,
+    taskId: String,
+) {
+    val action = LinuxRuntimeAction.StopTask
+    if (!store.tryBeginLinuxRuntimeAction(action, mode)) return
+    try {
+        LinuxRuntimeBridge.killProcess(
+            context = context,
+            mode = mode,
+            handle = com.lingxi.code.bindings.MobileLinuxProcessHandleFfi(taskId),
+        )
+        store.completeLinuxRuntimeAction(
+            action,
+            mode,
+            LinuxRuntimeBridge.refreshTasks(context, mode).copy(lastAction = action),
+        )
     } catch (cancelled: CancellationException) {
         store.cancelLinuxRuntimeAction(action, mode)
         throw cancelled

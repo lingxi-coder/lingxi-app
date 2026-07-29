@@ -18,6 +18,7 @@
 
 pub mod capabilities;
 pub mod config;
+pub mod mobile_linux;
 pub mod policy;
 pub mod process;
 pub mod receipt;
@@ -25,6 +26,7 @@ pub mod sandbox;
 
 pub use capabilities::{AndroidSandboxCapabilities, CapabilityCache};
 pub use config::AndroidShellConfig;
+pub use mobile_linux::{AndroidProotRuntime, AndroidProotRuntimeConfig};
 pub use policy::{
     build_shell_env, plan_from_policy, AndroidSandboxPlan, ExecTarget, NetProfile, ProcessCleanup,
     Rlimit, RlimitResource, SeccompRef,
@@ -164,43 +166,50 @@ impl AndroidPlatform {
             }
             (MobileLinuxRuntimeMode::Legacy, runtime) => runtime,
         };
+        let unavailable_mobile_linux_shell = |reason: String| {
+            let runtime: Arc<dyn MobileLinuxRuntime> =
+                Arc::new(UnavailableMobileLinuxRuntime::unavailable(
+                    SandboxBackend::AndroidProot,
+                    MobileLinuxRuntimeMode::MobileLinux,
+                    "android",
+                    "unknown",
+                    reason,
+                ));
+            let sandbox_result = if workspace_valid {
+                MobileLinuxSandbox::new(
+                    runtime.clone(),
+                    default_mobile_linux_mounts(&workspace_root, &workspace_id),
+                )
+            } else {
+                Err(SandboxError::Unavailable(
+                    "invalid mobile-linux workspace mount configuration".to_string(),
+                ))
+            };
+            let sandbox: Arc<dyn Sandbox> = match sandbox_result {
+                Ok(sandbox) => Arc::new(sandbox),
+                Err(error) => {
+                    let runtime: Arc<dyn MobileLinuxRuntime> =
+                        Arc::new(UnavailableMobileLinuxRuntime::unavailable(
+                            SandboxBackend::AndroidProot,
+                            MobileLinuxRuntimeMode::MobileLinux,
+                            "android",
+                            "unknown",
+                            format!("mobile-linux shell unavailable: {error}"),
+                        ));
+                    Arc::new(
+                        MobileLinuxSandbox::new(runtime, Vec::new())
+                            .expect("empty mobile-linux mount set must be valid"),
+                    )
+                }
+            };
+            let process: Arc<dyn ProcessRunner> = Arc::new(MobileLinuxProcessRunner::new(runtime));
+            (process, sandbox)
+        };
         let (process, sandbox, shell_caps, effective_mobile_linux_runtime) = match (
             mobile_linux_mode,
             mobile_linux_runtime.clone(),
             inputs.shell,
         ) {
-            (MobileLinuxRuntimeMode::MobileLinux, Some(runtime), _) => {
-                let sandbox_result = if workspace_valid {
-                    MobileLinuxSandbox::new(
-                        runtime.clone(),
-                        default_mobile_linux_mounts(&workspace_root, &workspace_id),
-                    )
-                } else {
-                    Err(SandboxError::Unavailable(
-                        "invalid mobile-linux workspace mount configuration".to_string(),
-                    ))
-                };
-                let (runtime, sandbox): (Arc<dyn MobileLinuxRuntime>, Arc<dyn Sandbox>) =
-                    match sandbox_result {
-                        Ok(sandbox) => (runtime, Arc::new(sandbox)),
-                        Err(error) => {
-                            let unavailable: Arc<dyn MobileLinuxRuntime> =
-                                Arc::new(UnavailableMobileLinuxRuntime::unavailable(
-                                    SandboxBackend::AndroidProot,
-                                    MobileLinuxRuntimeMode::MobileLinux,
-                                    "android",
-                                    "unknown",
-                                    format!("invalid mobile-linux workspace mount: {error}"),
-                                ));
-                            let sandbox = MobileLinuxSandbox::new(unavailable.clone(), Vec::new())
-                                .expect("empty mobile-linux mount set must be valid");
-                            (unavailable, Arc::new(sandbox))
-                        }
-                    };
-                let process: Arc<dyn ProcessRunner> =
-                    Arc::new(MobileLinuxProcessRunner::new(runtime.clone()));
-                (process, sandbox, None, Some(runtime))
-            }
             (_, _, Some(shell_cfg)) => {
                 let caps = Arc::new(crate::capabilities::CapabilityCache::new());
                 let process: Arc<dyn ProcessRunner> = Arc::new(
@@ -210,6 +219,13 @@ impl AndroidPlatform {
                     crate::sandbox::AndroidMinijailSandbox::new(shell_cfg, caps.clone()),
                 );
                 (process, sandbox, Some(caps), mobile_linux_runtime)
+            }
+            (MobileLinuxRuntimeMode::MobileLinux, _, None) => {
+                let (process, sandbox) = unavailable_mobile_linux_shell(
+                    "agent shell is disabled in mobile-linux mode because Android PRoot does not enforce host Minijail policies; direct PTY/rootfs APIs remain available"
+                        .to_string(),
+                );
+                (process, sandbox, None, mobile_linux_runtime)
             }
             (_, _, None) => (
                 Arc::new(PosixProcess::new()) as Arc<dyn ProcessRunner>,

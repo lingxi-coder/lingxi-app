@@ -3639,11 +3639,17 @@ impl ChatWidget {
                 true,
             );
         };
-        let outcome = self.run_core_command(
-            "reload-skills",
-            args,
-            &command_core::reload_skills::ReloadSkillsHandler::new(registry),
-        );
+        let handler = match registry.try_read() {
+            Ok(registry) => registry.get_handler("reload-skills"),
+            Err(_) => None,
+        };
+        let Some(handler) = handler else {
+            return self.show_system_text(
+                "/reload-skills is unavailable (configured handler missing)",
+                true,
+            );
+        };
+        let outcome = self.run_core_command("reload-skills", args, handler.as_ref());
         // The reload mutated the live registry in place; re-snapshot so a skill
         // added/changed/removed on disk this session is reflected in the
         // completion popup (and dispatch routing) immediately.

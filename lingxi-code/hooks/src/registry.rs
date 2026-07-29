@@ -130,6 +130,10 @@ pub struct HookRegistry {
     /// runAgent.ts finally). Iterated by [`Self::match_event`] / [`Self::has_hooks_for`]
     /// so an agent's frontmatter hooks actually fire while it runs.
     frontmatter: HashMap<AgentId, Vec<HookDefinition>>,
+    /// Whether a frontmatter bucket belongs to a real subagent. Buckets
+    /// registered with `is_agent == false` are main-thread/session buckets;
+    /// real subagent buckets are eligible only for their exact owner.
+    frontmatter_is_agent: HashMap<AgentId, bool>,
 }
 
 impl HookRegistry {
@@ -141,6 +145,7 @@ impl HookRegistry {
             plugin: HashMap::new(),
             session_named: HashMap::new(),
             frontmatter: HashMap::new(),
+            frontmatter_is_agent: HashMap::new(),
         }
     }
 
@@ -236,6 +241,7 @@ impl HookRegistry {
         if hooks.is_empty() {
             return;
         }
+        self.frontmatter_is_agent.insert(agent_id, is_agent);
         let bucket = self.frontmatter.entry(agent_id).or_default();
         for hook in hooks {
             let mut hook = hook.clone();
@@ -257,6 +263,7 @@ impl HookRegistry {
     /// `clearSessionHooks(rootSetAppState, agentId)`, runAgent.ts finally).
     /// Returns the number of hooks dropped.
     pub fn clear_agent_hooks(&mut self, agent_id: AgentId) -> usize {
+        self.frontmatter_is_agent.remove(&agent_id);
         self.frontmatter
             .remove(&agent_id)
             .map_or(0, |hooks| hooks.len())
@@ -342,7 +349,7 @@ impl HookRegistry {
     /// in-process [`crate::HookExecutor::Builtin`] hooks (the analogue of TS
     /// `callback` / `function` hooks) ignore it.
     #[must_use]
-    pub fn match_event(&self, event: &HookEvent, _ctx: &HookContext) -> Vec<&HookDefinition> {
+    pub fn match_event(&self, event: &HookEvent, ctx: &HookContext) -> Vec<&HookDefinition> {
         let et = event.event_type();
         // Comma-mode (`atf`) widens the simple-pattern matcher (comma-separated
         // lists + the v2.1.195 hyphen) for this event type — claude
@@ -392,16 +399,38 @@ impl HookRegistry {
         for hooks in self.plugin.values() {
             matched.extend(hooks.iter().filter(keep));
         }
-        if let Some(hooks) = self.session_named.get(&_ctx.session_id) {
+        if let Some(hooks) = self.session_named.get(&ctx.session_id) {
             matched.extend(hooks.values().filter(keep));
         }
-        // Agent-scoped frontmatter hooks (registered via `register_agent_hooks`
-        // for the lifetime of a running subagent) fire alongside source/plugin
-        // hooks. claude scopes these by agent id, but matching here is over the
-        // event/matcher only — the registration lifetime (register on start,
-        // clear on stop) is what bounds them to the right agent.
-        for hooks in self.frontmatter.values() {
-            matched.extend(hooks.iter().filter(keep));
+        // Frontmatter hooks are ownership-scoped, not merely lifetime-scoped.
+        // A real subagent bucket may fire only when this dispatch carries that
+        // exact `agent_id`; main-thread/session buckets (`is_agent == false`)
+        // remain eligible only for main-thread dispatches (`agent_id == None`).
+        match ctx.agent_id {
+            Some(agent_id) => {
+                if self
+                    .frontmatter_is_agent
+                    .get(&agent_id)
+                    .copied()
+                    .unwrap_or(false)
+                {
+                    if let Some(hooks) = self.frontmatter.get(&agent_id) {
+                        matched.extend(hooks.iter().filter(keep));
+                    }
+                }
+            }
+            None => {
+                for (agent_id, hooks) in &self.frontmatter {
+                    if !self
+                        .frontmatter_is_agent
+                        .get(agent_id)
+                        .copied()
+                        .unwrap_or(true)
+                    {
+                        matched.extend(hooks.iter().filter(keep));
+                    }
+                }
+            }
         }
         matched.sort_by(|a, b| b.priority.cmp(&a.priority));
         drop_http_for_session_events(matched, &et)
@@ -466,25 +495,20 @@ impl HookRegistry {
         matched
     }
 
-    /// Like [`Self::match_event`] but with the frontmatter bucket scoped to
-    /// `exclude_agent_id` OMITTED (source / plugin / every OTHER agent's
-    /// frontmatter bucket still match).
+    /// Match global hooks for an event whose owning agent already fired its own
+    /// frontmatter bucket in-child.
     ///
     /// This is the orchestrator-chokepoint twin of [`Self::match_event_agent_scoped`]:
     /// the child runner fires a subagent's OWN frontmatter `Stop`→`SubagentStop`
     /// hooks in-child (agent-scoped, claude `runAgent`), so the chokepoint must
-    /// fire the COMPLEMENT — session / plugin `SubagentStop` hooks — WITHOUT
-    /// re-firing the child's frontmatter ones (which the runner already covered).
-    /// Excluding by id makes that deterministic regardless of whether
-    /// `clear_agent_hooks` has run yet (the runner clears the bucket after the
-    /// terminal event, which races the chokepoint fire). When the excluded agent
-    /// registered no frontmatter hooks (the common case, and every
-    /// `FakeAgentTool` fixture), this is byte-identical to [`Self::match_event`].
+    /// fire session/plugin hooks without re-firing the child's bucket. Other
+    /// concurrently-live agents' frontmatter hooks are excluded too: they do
+    /// not own this event.
     #[must_use]
     pub fn match_event_excluding_agent(
         &self,
         event: &HookEvent,
-        exclude_agent_id: AgentId,
+        _exclude_agent_id: AgentId,
     ) -> Vec<&HookDefinition> {
         let et = event.event_type();
         // Comma-mode (`atf`) widens the simple-pattern matcher (comma-separated
@@ -524,14 +548,6 @@ impl HookRegistry {
         let mut matched: Vec<&HookDefinition> =
             self.sources.values().flatten().filter(keep).collect();
         for hooks in self.plugin.values() {
-            matched.extend(hooks.iter().filter(keep));
-        }
-        // Every frontmatter bucket EXCEPT the excluded agent's own (the runner
-        // fires that one in-child, agent-scoped).
-        for (aid, hooks) in &self.frontmatter {
-            if *aid == exclude_agent_id {
-                continue;
-            }
             matched.extend(hooks.iter().filter(keep));
         }
         matched.sort_by(|a, b| b.priority.cmp(&a.priority));
@@ -957,12 +973,18 @@ mod all_hooks_tests {
                 status: "completed".into(),
                 agent_type: String::new(),
             },
-            &HookContext::default(),
+            &HookContext {
+                agent_id: Some(agent),
+                ..Default::default()
+            },
         );
         assert_eq!(on_subagent_stop.len(), 1, "Stop retargeted to SubagentStop");
         let on_stop = r.match_event(
             &HookEvent::Stop { reason: "x".into() },
-            &HookContext::default(),
+            &HookContext {
+                agent_id: Some(agent),
+                ..Default::default()
+            },
         );
         assert!(on_stop.is_empty(), "no longer fires on plain Stop");
     }
@@ -1073,7 +1095,7 @@ mod all_hooks_tests {
 
     #[test]
     fn agent_scoped_hooks_fire_via_match_event() {
-        // The frontmatter bucket is iterated by match_event so agent hooks fire.
+        // The frontmatter bucket fires only in the owning agent context.
         let mut r = HookRegistry::new();
         let agent = AgentId::new();
         r.register_agent_hooks(
@@ -1087,9 +1109,35 @@ mod all_hooks_tests {
                 tool_input: serde_json::json!({}),
                 tool_use_id: protocol::ToolUseId::new(),
             },
-            &HookContext::default(),
+            &HookContext {
+                agent_id: Some(agent),
+                ..Default::default()
+            },
         );
         assert_eq!(matched.len(), 1, "frontmatter hook fires");
+
+        let parent = r.match_event(
+            &HookEvent::PreToolUse {
+                tool_name: "Bash".into(),
+                tool_input: serde_json::json!({}),
+                tool_use_id: protocol::ToolUseId::new(),
+            },
+            &HookContext::default(),
+        );
+        assert!(parent.is_empty(), "subagent hook must not leak to parent");
+
+        let sibling = r.match_event(
+            &HookEvent::PreToolUse {
+                tool_name: "Bash".into(),
+                tool_input: serde_json::json!({}),
+                tool_use_id: protocol::ToolUseId::new(),
+            },
+            &HookContext {
+                agent_id: Some(AgentId::new()),
+                ..Default::default()
+            },
+        );
+        assert!(sibling.is_empty(), "subagent hook must not leak to sibling");
     }
 
     #[test]
@@ -1132,21 +1180,25 @@ mod all_hooks_tests {
             "only agent a's own frontmatter SubagentStop fires: {names:?}"
         );
 
-        // The general match_event DOES see the session + agent-a hook (3 total
-        // here: a-stop, b-stop also fire on SubagentStop event-type, session-stop),
-        // confirming the scoped variant is strictly narrower.
-        let all = r.match_event(&ev, &HookContext::default());
-        assert!(
-            all.len() >= scoped.len(),
-            "agent-scoped match is a subset of the general match"
+        // The general agent-context matcher sees global hooks plus agent a's
+        // bucket, but never sibling b's bucket.
+        let all = r.match_event(
+            &ev,
+            &HookContext {
+                agent_id: Some(a),
+                ..Default::default()
+            },
         );
+        let all_names: Vec<&str> = all.iter().map(|hook| hook.name.as_str()).collect();
+        assert!(all_names.contains(&"a-stop"));
+        assert!(all_names.contains(&"session-stop"));
+        assert!(!all_names.contains(&"b-stop"));
     }
 
     #[test]
-    fn match_event_excluding_agent_omits_only_the_excluded_frontmatter() {
-        // R7: the chokepoint SubagentStop fires the COMPLEMENT of the runner's
-        // agent-scoped fire — session/plugin + every OTHER agent's frontmatter,
-        // but NOT the excluded child's own frontmatter SubagentStop.
+    fn match_event_excluding_agent_omits_all_agent_frontmatter() {
+        // The chokepoint fires global hooks only. Each agent's own frontmatter
+        // hook is fired in-child; sibling buckets never own this event.
         let mut r = HookRegistry::new();
         let a = AgentId::new();
         let b = AgentId::new();
@@ -1156,7 +1208,7 @@ mod all_hooks_tests {
             &[hk("a-stop", HookEventType::Stop, HookSource::FrontMatter)],
             true,
         );
-        // b's frontmatter Stop→SubagentStop — a DIFFERENT agent, still fires.
+        // b's frontmatter Stop→SubagentStop must not fire for agent a.
         r.register_agent_hooks(
             b,
             &[hk("b-stop", HookEventType::Stop, HookSource::FrontMatter)],
@@ -1182,13 +1234,22 @@ mod all_hooks_tests {
         names.sort_unstable();
         assert_eq!(
             names,
-            vec!["b-stop", "session-stop"],
-            "excludes ONLY agent a's frontmatter; session + agent b still fire: {names:?}"
+            vec!["session-stop"],
+            "only global hooks fire at the chokepoint: {names:?}"
         );
 
-        // Sanity: the general match still sees all three (a included).
-        let all = r.match_event(&ev, &HookContext::default());
-        assert_eq!(all.len(), 3, "general match sees a-stop too");
+        // General agent-context matching includes the owner but not the sibling.
+        let all = r.match_event(
+            &ev,
+            &HookContext {
+                agent_id: Some(a),
+                ..Default::default()
+            },
+        );
+        let all_names: Vec<&str> = all.iter().map(|hook| hook.name.as_str()).collect();
+        assert!(all_names.contains(&"a-stop"));
+        assert!(all_names.contains(&"session-stop"));
+        assert!(!all_names.contains(&"b-stop"));
     }
 
     #[test]

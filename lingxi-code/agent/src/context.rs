@@ -187,6 +187,10 @@ pub struct SubagentContext {
     /// runner skips SubagentStart firing + frontmatter-hook registration, keeping
     /// the child's history byte-identical to legacy.
     pub hook_executor: Option<Arc<hooks::HookExecutorImpl>>,
+    /// Managed `strictPluginOnlyCustomization:["hooks"]` decision captured by
+    /// the composition root. When true, user/project definitions may not
+    /// register command-capable frontmatter hooks.
+    pub strict_plugin_only_hooks: bool,
     /// Skill loader the runner uses to preload the agent definition's
     /// frontmatter `skills:` into the child's initial messages (claude
     /// `runAgent.ts:577-646`). A leaf-trait seam (see [`traits::skill_loader`])

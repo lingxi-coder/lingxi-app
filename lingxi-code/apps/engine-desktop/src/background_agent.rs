@@ -115,6 +115,78 @@ impl BackgroundAgentSpawner {
                 SubagentSpawnError::Runtime(format!("failed to persist forked-skill scoping: {e}"))
             })
     }
+
+    /// Shared async launch body. Fresh launches mint an id; cold restores pass
+    /// the persisted one so transcript, mailbox, and parked-row identities stay
+    /// stable across the process boundary.
+    async fn spawn_async_with_id(
+        &self,
+        agent_id: AgentId,
+        request: SubagentSpawnRequest,
+        inherit: SubagentInheritance,
+    ) -> Result<AsyncLaunch, SubagentSpawnError> {
+        let description = request.description.clone().unwrap_or_default();
+
+        // A forked skill's permission scoping lands on disk before the worker.
+        // Rewriting the same validated sidecars during restore is idempotent and
+        // keeps the crash-safety ordering identical to a fresh launch.
+        self.persist_fork_scoping(agent_id, &request).await?;
+
+        let task_id = self
+            .registry
+            .spawn(
+                TaskType::LocalAgent,
+                TaskSpawnInput::LocalAgent {
+                    agent_id,
+                    subagent_type: request.subagent_type.clone(),
+                    prompt: request.prompt.clone(),
+                    is_backgrounded: true,
+                    tool_use_id: request.tool_use_id.clone(),
+                    creator_teammate_name: request.creator_teammate_name.clone(),
+                    creator_team_name: request.creator_team_name.clone(),
+                    spawn_request: Some(request.clone()),
+                    inheritance: Some(inherit),
+                },
+                description,
+            )
+            .await
+            .map_err(|e| SubagentSpawnError::Runtime(e.to_string()))?;
+
+        let mailbox = Arc::new(TeammateMailbox::new(agent_id));
+        self.mailbox_router
+            .register(agent_id, mailbox.clone())
+            .await;
+        if let Some(name) = request.name.as_deref() {
+            self.mailbox_router.register_name(name, agent_id).await;
+        }
+
+        let seam: Arc<dyn TeamSpawnSeam> = self.registry.clone();
+        let router = self.mailbox_router.clone();
+        let pump_task_id = task_id.clone();
+        let pump = Box::pin(async move {
+            run_teammate_pump(mailbox, pump_task_id, seam).await;
+            router.unregister(&agent_id).await;
+        });
+        if let Err(e) = self.runtime.spawn("bg-agent-pump", pump).await {
+            self.mailbox_router.unregister(&agent_id).await;
+            let _ = self.registry.kill(&task_id).await;
+            return Err(SubagentSpawnError::Runtime(format!(
+                "failed to start background agent pump: {e}"
+            )));
+        }
+
+        let output_file = self
+            .registry
+            .output_manager
+            .path_for(&task_id)
+            .map(|p| p.to_string_lossy().into_owned())
+            .map_err(|e| SubagentSpawnError::Runtime(e.to_string()))?;
+
+        Ok(AsyncLaunch {
+            agent_id,
+            output_file,
+        })
+    }
 }
 
 #[async_trait]
@@ -156,90 +228,17 @@ impl SubagentSpawner for BackgroundAgentSpawner {
         request: SubagentSpawnRequest,
         inherit: SubagentInheritance,
     ) -> Result<AsyncLaunch, SubagentSpawnError> {
-        // The advertised id (the `SendMessage` routing key / mailbox key). The
-        // handler's persistent runner uses its OWN pool agent id internally;
-        // routing is mailbox→task_id→handler-map, so the two need not match.
-        let agent_id = AgentId::new();
-        let description = request.description.clone().unwrap_or_default();
-
-        // 0. A forked skill's permission scoping lands on disk BEFORE the agent
-        //    exists. The reverse order would leave a window in which a running
-        //    fork has no scoping record, and the resume gate reads a missing
-        //    record as a refusal — so a crash there would strand the agent.
-        self.persist_fork_scoping(agent_id, &request).await?;
-
-        // 1. Spawn the BACKGROUNDED LocalAgent → the persistent handler worker.
-        let task_id = self
-            .registry
-            .spawn(
-                TaskType::LocalAgent,
-                TaskSpawnInput::LocalAgent {
-                    agent_id,
-                    subagent_type: request.subagent_type.clone(),
-                    prompt: request.prompt.clone(),
-                    is_backgrounded: true,
-                    // Stamp the originating tool_use_id so the task-notification
-                    // carries `<tool-use-id>` (claude-code parity).
-                    tool_use_id: request.tool_use_id.clone(),
-                    creator_teammate_name: request.creator_teammate_name.clone(),
-                    creator_team_name: request.creator_team_name.clone(),
-                    // LocalAgent is a lifecycle wrapper, not a second spawn
-                    // surface: retain every resolved Agent option verbatim.
-                    spawn_request: Some(request.clone()),
-                    // Preserve the immediate parent registry + budget Arcs so
-                    // nested/background agents retain recursion and accounting
-                    // semantics rather than falling back to root handles.
-                    inheritance: Some(inherit),
-                },
-                description,
-            )
+        self.spawn_async_with_id(AgentId::new(), request, inherit)
             .await
-            .map_err(|e| SubagentSpawnError::Runtime(e.to_string()))?;
+    }
 
-        // 2. Register the mailbox (+ optional name) so SendMessage can reach it.
-        let mailbox = Arc::new(TeammateMailbox::new(agent_id));
-        self.mailbox_router
-            .register(agent_id, mailbox.clone())
-            .await;
-        if let Some(name) = request.name.as_deref() {
-            self.mailbox_router.register_name(name, agent_id).await;
-        }
-
-        // 3. Start the mailbox→runner pump (the injectUserMessageToTeammate
-        //    bridge): drains the mailbox into registry.send_message(task_id).
-        //    The pump now RETURNS once the backgrounded agent reaches a terminal
-        //    state (via the seam's `is_alive` liveness re-check); wrap it so that
-        //    on return the mailbox + name index are unregistered — otherwise a
-        //    terminated agent leaks its route and a later `SendMessage` silently
-        //    queues into an undrained inbox. This mirrors claude-code tearing
-        //    down async-agent state on termination.
-        let seam: Arc<dyn TeamSpawnSeam> = self.registry.clone();
-        let router = self.mailbox_router.clone();
-        let pump_task_id = task_id.clone();
-        let pump = Box::pin(async move {
-            run_teammate_pump(mailbox, pump_task_id, seam).await;
-            router.unregister(&agent_id).await;
-        });
-        if let Err(e) = self.runtime.spawn("bg-agent-pump", pump).await {
-            self.mailbox_router.unregister(&agent_id).await;
-            let _ = self.registry.kill(&task_id).await;
-            return Err(SubagentSpawnError::Runtime(format!(
-                "failed to start background agent pump: {e}"
-            )));
-        }
-
-        // The spool the handler already allocated (deterministic from task_id).
-        let output_file = self
-            .registry
-            .output_manager
-            .path_for(&task_id)
-            .map(|p| p.to_string_lossy().into_owned())
-            .map_err(|e| SubagentSpawnError::Runtime(e.to_string()))?;
-
-        Ok(AsyncLaunch {
-            agent_id,
-            output_file,
-        })
+    async fn restore_async(
+        &self,
+        agent_id: AgentId,
+        request: SubagentSpawnRequest,
+        inherit: SubagentInheritance,
+    ) -> Result<AsyncLaunch, SubagentSpawnError> {
+        self.spawn_async_with_id(agent_id, request, inherit).await
     }
 }
 

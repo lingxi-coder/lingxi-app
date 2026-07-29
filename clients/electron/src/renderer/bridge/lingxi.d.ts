@@ -1,4 +1,5 @@
 import type {
+  AskUserQuestionRequestDto,
   ClientCommand,
   ClientEvent,
   ComputerAccessRequestDto,
@@ -51,6 +52,7 @@ export interface BootstrapState {
   workspace: WorkspaceMetadata;
   credential: CredentialMetadata;
   providerCredentials?: ProviderCredentialMetadata[];
+  pendingAskUserQuestions?: AskUserQuestionRequestDto[];
   connection: ConnectionState;
   diagnostics: DiagnosticEntry[];
 }
@@ -85,6 +87,8 @@ export interface LingxiApi {
   deny(requestId: number): Promise<void>;
   approveComputerAccess(requestId: number, response: ComputerAccessResponseDto): Promise<void>;
   denyComputerAccess(requestId: number): Promise<void>;
+  answerAskUserQuestion(requestId: number, answers: Record<string, string>): Promise<void>;
+  cancelAskUserQuestion(requestId: number): Promise<void>;
   openSystemSettings(pane: SystemSettingsPane): Promise<void>;
   cancel(turnId?: number): Promise<void>;
   command(command: AllowedClientCommand): Promise<void>;

@@ -79,9 +79,11 @@ pub mod worktree;
 
 pub use android_ui::{
     AndroidAccessRequest, AndroidAccessTier, AndroidAction, AndroidActionResult, AndroidAppInfo,
-    AndroidAutomationError, AndroidAutomationSessionState, AndroidAutomationStatus,
-    AndroidCaptureMode, AndroidGlobalAction, AndroidNodeQuery, AndroidRect, AndroidScreenshot,
-    AndroidUiAutomation, AndroidUiNode, AndroidUiSnapshot, AndroidWaitCondition,
+    AndroidAudioListenRequest, AndroidAudioSpeakRequest, AndroidAudioSpeakResult,
+    AndroidAudioTranscript, AndroidAutomationError, AndroidAutomationSessionState,
+    AndroidAutomationStatus, AndroidCaptureMode, AndroidGlobalAction, AndroidNodeQuery,
+    AndroidRect, AndroidScreenshot, AndroidUiAutomation, AndroidUiNode, AndroidUiSnapshot,
+    AndroidWaitCondition, MAX_ANDROID_AUDIO_LISTEN_MS, MAX_ANDROID_AUDIO_SPEAK_CHARS,
     MAX_ANDROID_UI_BATCH, MAX_ANDROID_UI_DEPTH, MAX_ANDROID_UI_NODES, MAX_ANDROID_UI_WAIT_MS,
 };
 pub use auth::{AuthError, AuthHandle, LoginInfo};
@@ -100,7 +102,7 @@ pub use effect_handler::EffectHandler;
 pub use file_history_sink::FileHistorySink;
 pub use filesystem::{FileContent, FileEvent, FileEventKind, FileSystem, FlockGuard, FsError};
 pub use http::{
-    HttpError, HttpTransport, RawByteStreamWithMeta, WebSocketConnection,
+    HttpError, HttpTransport, RawByteStreamWithMeta, ResolvedAddressOverride, WebSocketConnection,
     WebSocketConnectionWithMeta, WebSocketMessageStream, WebSocketMessageStreamWithMeta,
 };
 pub use lsp::{

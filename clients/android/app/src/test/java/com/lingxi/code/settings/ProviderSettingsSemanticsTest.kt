@@ -26,12 +26,26 @@ class ProviderSettingsSemanticsTest {
     }
 
     @Test
-    fun selectedProviderModel_satisfiesModelSetupBeforeCredentialRefreshCompletes() {
+    fun selectedProviderModel_withoutCredential_stillRequiresSetup() {
         val state = SettingsUiState(
             llmProviders = listOf(
                 provider().copy(
                     credentialConfigured = false,
                     status = ConnStatus.Idle,
+                ),
+            ),
+        )
+
+        assertTrue(state.needsLlmSetup)
+    }
+
+    @Test
+    fun enabledProviderModel_withStoredCredential_satisfiesSetup() {
+        val state = SettingsUiState(
+            llmProviders = listOf(
+                provider().copy(
+                    credentialConfigured = true,
+                    status = ConnStatus.Configured,
                 ),
             ),
         )
@@ -135,6 +149,40 @@ class ProviderSettingsSemanticsTest {
                 original,
                 original.copy(enabled = false),
             ),
+        )
+    }
+
+    @Test
+    fun editingTestedConfiguration_returnsStatusToCredentialBaseline() {
+        val store = SettingsStore()
+        val id = store.addProvider(ProviderKind.Llm, "deepseek")
+        store.updateProvider(ProviderKind.Llm, id) {
+            it.copy(
+                credentialConfigured = true,
+                status = ConnStatus.Connected,
+            )
+        }
+
+        store.markProviderConnectionUnverified(ProviderKind.Llm, id)
+
+        val updated = store.state.value.llmProviders.single { it.id == id }
+        assertEquals(ConnStatus.Configured, updated.status)
+        assertTrue(updated.credentialConfigured)
+    }
+
+    @Test
+    fun editingDraftWithoutSavedCredential_returnsStatusToUnverified() {
+        val store = SettingsStore()
+        val id = store.addProvider(ProviderKind.Llm, "deepseek")
+        store.updateProvider(ProviderKind.Llm, id) {
+            it.copy(status = ConnStatus.Error)
+        }
+
+        store.markProviderConnectionUnverified(ProviderKind.Llm, id)
+
+        assertEquals(
+            ConnStatus.Idle,
+            store.state.value.llmProviders.single { it.id == id }.status,
         )
     }
 

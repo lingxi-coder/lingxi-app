@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
 import type {
+  AskUserQuestionRequestDto,
   ClientCommand,
   ClientEvent,
   ComputerAccessRequestDto,
@@ -13,6 +14,8 @@ const CH_APPROVE = 'lingxi:approve';
 const CH_DENY = 'lingxi:deny';
 const CH_APPROVE_COMPUTER_ACCESS = 'lingxi:approveComputerAccess';
 const CH_DENY_COMPUTER_ACCESS = 'lingxi:denyComputerAccess';
+const CH_ANSWER_ASK_USER_QUESTION = 'lingxi:answerAskUserQuestion';
+const CH_CANCEL_ASK_USER_QUESTION = 'lingxi:cancelAskUserQuestion';
 const CH_CANCEL = 'lingxi:cancel';
 const CH_COMMAND = 'lingxi:command';
 const CH_CONNECTION_STATE = 'lingxi:connectionState';
@@ -85,6 +88,7 @@ export interface BootstrapState {
   workspace: WorkspaceMetadata;
   credential: CredentialMetadata;
   providerCredentials?: ProviderCredentialMetadata[];
+  pendingAskUserQuestions?: AskUserQuestionRequestDto[];
   connection: ConnectionState;
   diagnostics: DiagnosticEntry[];
 }
@@ -120,6 +124,8 @@ export interface LingxiApi {
   deny(requestId: number): Promise<void>;
   approveComputerAccess(requestId: number, response: ComputerAccessResponseDto): Promise<void>;
   denyComputerAccess(requestId: number): Promise<void>;
+  answerAskUserQuestion(requestId: number, answers: Record<string, string>): Promise<void>;
+  cancelAskUserQuestion(requestId: number): Promise<void>;
   openSystemSettings(pane: SystemSettingsPane): Promise<void>;
   cancel(turnId?: number): Promise<void>;
   /** Only the bounded Desktop model/session/task/slash surface is accepted by the main process. */
@@ -162,6 +168,8 @@ const api: LingxiApi = {
   deny: (requestId) => ipcRenderer.invoke(CH_DENY, requestId) as Promise<void>,
   approveComputerAccess: (requestId, response) => ipcRenderer.invoke(CH_APPROVE_COMPUTER_ACCESS, requestId, response) as Promise<void>,
   denyComputerAccess: (requestId) => ipcRenderer.invoke(CH_DENY_COMPUTER_ACCESS, requestId) as Promise<void>,
+  answerAskUserQuestion: (requestId, answers) => ipcRenderer.invoke(CH_ANSWER_ASK_USER_QUESTION, requestId, answers) as Promise<void>,
+  cancelAskUserQuestion: (requestId) => ipcRenderer.invoke(CH_CANCEL_ASK_USER_QUESTION, requestId) as Promise<void>,
   openSystemSettings: (pane) => ipcRenderer.invoke(CH_OPEN_SYSTEM_SETTINGS, pane) as Promise<void>,
   cancel: (turnId) => ipcRenderer.invoke(CH_CANCEL, turnId) as Promise<void>,
   command: (command) => ipcRenderer.invoke(CH_COMMAND, command) as Promise<void>,

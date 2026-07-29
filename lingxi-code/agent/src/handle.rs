@@ -151,6 +151,9 @@ pub struct PoolSubagentSpawner {
     /// exists. Unfilled (the default / tests) ⇒ the child runner skips the
     /// SubagentStart fire + frontmatter-hook registration (byte-identical legacy).
     hook_executor: Arc<std::sync::OnceLock<Arc<hooks::HookExecutorImpl>>>,
+    /// Managed hook-slot lock, filled by the composition root after settings
+    /// policy resolution. Unfilled means the legacy permissive default.
+    strict_plugin_only_hooks: Arc<std::sync::OnceLock<bool>>,
     /// Skill loader handed to every child runner via
     /// [`SubagentContext::skill_loader`] so the runner can preload the agent
     /// definition's frontmatter `skills:` (claude runAgent.ts:577-646). A leaf
@@ -255,6 +258,7 @@ impl PoolSubagentSpawner {
             model_restriction: None,
             session_provider_first_party: true,
             hook_executor: Arc::new(std::sync::OnceLock::new()),
+            strict_plugin_only_hooks: Arc::new(std::sync::OnceLock::new()),
             skill_loader: Arc::new(std::sync::OnceLock::new()),
             hook_session_id: protocol::SessionId::nil(),
             hook_cwd: std::path::PathBuf::new(),
@@ -469,6 +473,13 @@ impl PoolSubagentSpawner {
     #[must_use]
     pub fn hook_executor_handle(&self) -> Arc<std::sync::OnceLock<Arc<hooks::HookExecutorImpl>>> {
         self.hook_executor.clone()
+    }
+
+    /// Return the set-once managed hook-policy cell. The composition root fills
+    /// this after loading managed settings but before any child can spawn.
+    #[must_use]
+    pub fn strict_plugin_only_hooks_handle(&self) -> Arc<std::sync::OnceLock<bool>> {
+        self.strict_plugin_only_hooks.clone()
     }
 
     /// Builder: set the skill loader immediately (tests). The boot path uses
@@ -865,6 +876,7 @@ impl PoolSubagentSpawner {
             // cells (None when unfilled — tests / minimal builds). `hook_session_id`
             // / `hook_cwd` carry the boot-set values.
             hook_executor: None,
+            strict_plugin_only_hooks: false,
             skill_loader: None,
             hook_session_id: protocol::SessionId::nil(),
             hook_cwd: std::path::PathBuf::new(),
@@ -1040,6 +1052,11 @@ impl PoolSubagentSpawner {
         // G4/G5: thread the runner's hook executor + skill loader + hook context
         // seed from the set-once cells (None ⇒ runner skips those steps).
         ctx.hook_executor = self.hook_executor.get().cloned();
+        ctx.strict_plugin_only_hooks = self
+            .strict_plugin_only_hooks
+            .get()
+            .copied()
+            .unwrap_or(false);
         ctx.skill_loader = self.skill_loader.get().cloned();
         ctx.hook_session_id = self.hook_session_id;
         ctx.hook_cwd = self.hook_cwd.clone();

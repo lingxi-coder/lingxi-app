@@ -66,7 +66,9 @@ use traits::Platform;
 // SAME types so iOS and Android cannot drift (plan F3-04).
 #[cfg(feature = "uniffi")]
 pub use engine_mobile::{
-    ClientEventListener, MobileConfig, MobileEngineError, MobileEngineHandle, PermissionRequestSink,
+    ClientEventListener, CronDueOccurrenceDto, CronFireStatusDto, CronTaskDto, FiredCronJobDto,
+    MobileConfig, MobileCronStoreHandle, MobileEngineError, MobileEngineHandle,
+    PermissionRequestSink, ProviderConnectionTestDto,
 };
 
 /// The foreign (Kotlin) capability objects + config needed to build an
@@ -180,9 +182,9 @@ pub struct AndroidMobileLinuxConfigFfi {
     pub rootfs_version: String,
     /// Expected rootfs archive sha256, if known.
     pub archive_sha256: Option<String>,
-    /// Optional path to the written distribution authorization. It is accepted
-    /// only when its digest matches the build-pinned
-    /// `LINGXI_MOBILE_LINUX_AUTHORIZATION_SHA256`.
+    /// Retained for wire compatibility with phase-1 hosts. GPL distribution is
+    /// now an explicit Android product decision, so this path is informational
+    /// and is no longer a runtime capability gate.
     pub authorization_file: Option<String>,
 }
 
@@ -279,6 +281,31 @@ fn is_lowercase_uuid(value: &str) -> bool {
             character.is_ascii_hexdigit()
         }
     })
+}
+
+/// Build the lightweight Android scheduled-task store without constructing an
+/// LLM client or reading any Provider credential. The same managed-workspace
+/// validation as [`build_android_engine_with_mobile_linux`] is applied before
+/// the handle can read or mutate a task file.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn build_android_cron_store(
+    app_files_root: String,
+    project_cwd: Option<String>,
+) -> Result<Arc<MobileCronStoreHandle>, MobileEngineError> {
+    use platform_posix_minimal::{PosixClock, PosixFileSystem};
+
+    let cwd = android_project_cwd(&app_files_root, project_cwd.as_deref())?;
+    let app_root = std::path::Path::new(&app_files_root)
+        .canonicalize()
+        .map_err(|error| {
+            MobileEngineError::Internal(format!("Android app files root is unavailable: {error}"))
+        })?;
+    Ok(Arc::new(MobileCronStoreHandle::new(
+        cwd,
+        Arc::new(PosixFileSystem::new(app_root)),
+        Arc::new(PosixClock::new()),
+    )))
 }
 
 /// FFI rootfs lifecycle state.
@@ -655,37 +682,6 @@ fn rootfs_state_to_ffi(state: traits::RootfsState) -> MobileLinuxRootfsStateFfi 
         traits::RootfsState::Unsupported => MobileLinuxRootfsStateFfi::Unsupported,
         traits::RootfsState::BlockedByLicense => MobileLinuxRootfsStateFfi::BlockedByLicense,
     }
-}
-
-#[cfg(feature = "uniffi")]
-fn mobile_linux_authorization_verified(path: Option<&String>) -> bool {
-    use sha2::{Digest, Sha256};
-
-    let Some(expected) = option_env!("LINGXI_MOBILE_LINUX_AUTHORIZATION_SHA256") else {
-        return false;
-    };
-    if expected.len() != 64
-        || !expected
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return false;
-    }
-    let Some(path) = path else {
-        return false;
-    };
-    let path = std::path::Path::new(path);
-    let Ok(metadata) = std::fs::symlink_metadata(path) else {
-        return false;
-    };
-    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 1024 * 1024 {
-        return false;
-    }
-    let Ok(bytes) = std::fs::read(path) else {
-        return false;
-    };
-    let actual = format!("{:x}", Sha256::digest(bytes));
-    actual == expected
 }
 
 #[cfg(feature = "uniffi")]
@@ -1404,40 +1400,26 @@ fn android_mobile_linux_status_from_config(
                 last_error: Some("legacy backend selected".to_string()),
             }
         }
-        Some(cfg) => {
-            let auth_present = mobile_linux_authorization_verified(cfg.authorization_file.as_ref());
-            let (state, message) = if auth_present {
-                (
-                    MobileLinuxRootfsStateFfi::Unsupported,
-                    "authorization present, but Android PRoot runtime is not linked in this build",
-                )
-            } else {
-                (
-                    MobileLinuxRootfsStateFfi::BlockedByLicense,
-                    "missing additional written authorization for PRoot/iSH redistribution",
-                )
-            };
-            MobileLinuxStatusFfi {
-                state,
-                backend: "android-proot".to_string(),
-                mode: MobileLinuxRuntimeModeFfi::MobileLinux,
-                platform: "android".to_string(),
-                abi: cfg.abi.clone(),
-                version: Some(cfg.rootfs_version.clone()),
-                managed_root: Some(cfg.managed_root.clone()),
-                active_root: None,
-                staged_root: None,
-                archive_sha256: cfg.archive_sha256.clone(),
-                installed_size_bytes: None,
-                writable_guest_paths: vec![
-                    "/root".to_string(),
-                    "/tmp".to_string(),
-                    "/var/tmp".to_string(),
-                    configured_workspace_guest_path(cfg),
-                ],
-                last_error: Some(message.to_string()),
-            }
-        }
+        Some(cfg) => MobileLinuxStatusFfi {
+            state: MobileLinuxRootfsStateFfi::Unsupported,
+            backend: "android-proot".to_string(),
+            mode: MobileLinuxRuntimeModeFfi::MobileLinux,
+            platform: "android".to_string(),
+            abi: cfg.abi.clone(),
+            version: Some(cfg.rootfs_version.clone()),
+            managed_root: Some(cfg.managed_root.clone()),
+            active_root: None,
+            staged_root: None,
+            archive_sha256: cfg.archive_sha256.clone(),
+            installed_size_bytes: None,
+            writable_guest_paths: vec![
+                "/root".to_string(),
+                "/tmp".to_string(),
+                "/var/tmp".to_string(),
+                configured_workspace_guest_path(cfg),
+            ],
+            last_error: Some("Android PRoot runtime is not linked in this build".to_string()),
+        },
     }
 }
 
@@ -1449,25 +1431,54 @@ fn android_mobile_linux_runtime(
     if matches!(cfg.mode, MobileLinuxRuntimeModeFfi::Legacy) {
         return None;
     }
-    let auth_present = mobile_linux_authorization_verified(cfg.authorization_file.as_ref());
-    let runtime = if auth_present {
-        traits::UnavailableMobileLinuxRuntime::unavailable(
+    #[cfg(target_os = "android")]
+    {
+        use std::collections::HashMap;
+        use std::sync::{LazyLock, Mutex};
+
+        static RUNTIMES: LazyLock<Mutex<HashMap<String, Arc<dyn traits::MobileLinuxRuntime>>>> =
+            LazyLock::new(|| Mutex::new(HashMap::new()));
+        let key = format!(
+            "{}|{}|{}|{}",
+            cfg.managed_root,
+            cfg.abi,
+            cfg.rootfs_version,
+            cfg.archive_sha256.as_deref().unwrap_or_default(),
+        );
+        if let Some(runtime) = RUNTIMES
+            .lock()
+            .expect("Android MobileLinux runtime registry")
+            .get(&key)
+            .cloned()
+        {
+            return Some(runtime);
+        }
+        let runtime = platform_android::AndroidProotRuntime::new(
+            platform_android::AndroidProotRuntimeConfig {
+                managed_root: std::path::PathBuf::from(&cfg.managed_root),
+                abi: cfg.abi.clone(),
+                rootfs_version: cfg.rootfs_version.clone(),
+                archive_sha256: cfg.archive_sha256.clone(),
+            },
+        );
+        let runtime = Arc::new(runtime) as Arc<dyn traits::MobileLinuxRuntime>;
+        RUNTIMES
+            .lock()
+            .expect("Android MobileLinux runtime registry")
+            .insert(key, runtime.clone());
+        return Some(runtime);
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let runtime = traits::UnavailableMobileLinuxRuntime::unavailable(
             traits::SandboxBackend::AndroidProot,
             traits::MobileLinuxRuntimeMode::MobileLinux,
             "android",
             cfg.abi.clone(),
-            "authorization present, but Android PRoot runtime is not linked in this build",
-        )
-    } else {
-        traits::UnavailableMobileLinuxRuntime::blocked(
-            traits::SandboxBackend::AndroidProot,
-            traits::MobileLinuxRuntimeMode::MobileLinux,
-            "android",
-            cfg.abi.clone(),
-            "missing additional written authorization for PRoot/iSH redistribution",
-        )
-    };
-    Some(Arc::new(runtime) as Arc<dyn traits::MobileLinuxRuntime>)
+            "Android PRoot runtime requires an Android target",
+        );
+        Some(Arc::new(runtime) as Arc<dyn traits::MobileLinuxRuntime>)
+    }
 }
 
 #[cfg(feature = "uniffi")]
@@ -1499,26 +1510,17 @@ fn android_mobile_linux_capability_from_config(
                 rootfs_integrity: false,
             }
         }
-        Some(cfg) => {
-            let auth_present = mobile_linux_authorization_verified(cfg.authorization_file.as_ref());
-            MobileLinuxCapabilityFfi {
-                available: false,
-                backend: "android-proot".to_string(),
-                mode: MobileLinuxRuntimeModeFfi::MobileLinux,
-                reason: Some(if auth_present {
-                    "authorization present, but Android PRoot runtime is not linked in this build"
-                        .to_string()
-                } else {
-                    "missing additional written authorization for PRoot/iSH redistribution"
-                        .to_string()
-                }),
-                streaming_output: false,
-                background_processes: false,
-                pty: false,
-                bind_mounts: false,
-                rootfs_integrity: false,
-            }
-        }
+        Some(cfg) => MobileLinuxCapabilityFfi {
+            available: false,
+            backend: "android-proot".to_string(),
+            mode: MobileLinuxRuntimeModeFfi::MobileLinux,
+            reason: Some("Android PRoot runtime is not linked in this build".to_string()),
+            streaming_output: false,
+            background_processes: false,
+            pty: false,
+            bind_mounts: false,
+            rootfs_integrity: false,
+        },
     }
 }
 
@@ -2883,6 +2885,10 @@ pub trait AndroidComputerUseHost: Send + Sync {
         condition_json: String,
         timeout_ms: u64,
     ) -> Result<String, AndroidComputerUseFfiError>;
+    async fn listen_json(&self, request_json: String)
+        -> Result<String, AndroidComputerUseFfiError>;
+    async fn speak_json(&self, request_json: String) -> Result<String, AndroidComputerUseFfiError>;
+    async fn stop_audio(&self) -> Result<(), AndroidComputerUseFfiError>;
     async fn stop(&self) -> Result<(), AndroidComputerUseFfiError>;
 }
 
@@ -3049,6 +3055,39 @@ impl traits::AndroidUiAutomation for AndroidComputerUseBridge {
             .await
             .map_err(computer_use_error_from_ffi)?;
         decode_computer_use_json(value)
+    }
+
+    async fn listen(
+        &self,
+        request: traits::AndroidAudioListenRequest,
+    ) -> Result<traits::AndroidAudioTranscript, traits::AndroidAutomationError> {
+        let request = encode_computer_use_json(&request)?;
+        let value = self
+            .inner
+            .listen_json(request)
+            .await
+            .map_err(computer_use_error_from_ffi)?;
+        decode_computer_use_json(value)
+    }
+
+    async fn speak(
+        &self,
+        request: traits::AndroidAudioSpeakRequest,
+    ) -> Result<traits::AndroidAudioSpeakResult, traits::AndroidAutomationError> {
+        let request = encode_computer_use_json(&request)?;
+        let value = self
+            .inner
+            .speak_json(request)
+            .await
+            .map_err(computer_use_error_from_ffi)?;
+        decode_computer_use_json(value)
+    }
+
+    async fn stop_audio(&self) -> Result<(), traits::AndroidAutomationError> {
+        self.inner
+            .stop_audio()
+            .await
+            .map_err(computer_use_error_from_ffi)
     }
 
     async fn stop(&self) -> Result<(), traits::AndroidAutomationError> {
@@ -3531,6 +3570,23 @@ pub fn build_android_engine_with_mobile_linux(
         // at this point. The probe is independent of the engine runtime, so we
         // spin up a transient current-thread runtime just for this one call and
         // drop it immediately — clean and correct (option (b) per the plan).
+        if matches!(
+            mobile_linux_mode,
+            traits::MobileLinuxRuntimeMode::MobileLinux
+        ) {
+            if let Some(shell_cfg) = shell_cfg_for_gate.as_ref() {
+                cfg.android_shell = Some(tool_api::AndroidShellToolCtx::mobile_linux_guest(
+                    shell_cfg.enable_shell && shell_cfg.secrets_gate_satisfied(),
+                    vec![
+                        "sh".to_string(),
+                        "apk".to_string(),
+                        "git".to_string(),
+                        "python3".to_string(),
+                    ],
+                    Some("Alpine BusyBox".to_string()),
+                ));
+            }
+        }
         if let Some(cache) = android_platform.shell_capability_cache() {
             let probe_rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -4744,7 +4800,7 @@ mod tests {
     }
 
     #[test]
-    fn mobile_linux_selected_without_authorization_is_blocked() {
+    fn mobile_linux_selected_is_not_blocked_by_distribution_license() {
         let capability = super::android_mobile_linux_capability_from_config(Some(
             &super::AndroidMobileLinuxConfigFfi {
                 mode: super::MobileLinuxRuntimeModeFfi::MobileLinux,
@@ -4764,8 +4820,9 @@ mod tests {
         ));
         let reason = capability
             .reason
-            .expect("blocked capability carries reason");
-        assert!(reason.contains("authorization"));
+            .expect("unavailable capability carries reason");
+        assert!(!reason.contains("authorization"));
+        assert!(reason.contains("not linked"));
     }
 
     #[test]

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type {
+  AskUserQuestionRequestDto,
   ClientEvent,
   ComputerAccessRequestDto,
   ComputerAccessResponseDto,
@@ -45,6 +46,7 @@ export interface UseBridge {
   readonly running: boolean;
   readonly pendingPermission: PermissionRequest | null;
   readonly pendingComputerAccess: ComputerAccessRequestDto | null;
+  readonly pendingAskUserQuestion: AskUserQuestionRequestDto | null;
   readonly error: string | null;
   clearError(): void;
   sendPrompt(text: string): Promise<void>;
@@ -54,6 +56,8 @@ export interface UseBridge {
   deny(requestId: number): Promise<void>;
   approveComputerAccess(requestId: number, response: ComputerAccessResponseDto): Promise<void>;
   denyComputerAccess(requestId: number): Promise<void>;
+  answerAskUserQuestion(requestId: number, answers: Record<string, string>): Promise<void>;
+  cancelAskUserQuestion(requestId: number): Promise<void>;
   openSystemSettings(pane: SystemSettingsPane): Promise<void>;
   pickWorkspace(): Promise<WorkspaceMetadata | null>;
   selectRecentWorkspace(path: string): Promise<WorkspaceMetadata>;
@@ -103,13 +107,19 @@ export function resetBridgeRuntimeState(): {
   desktop: DesktopState;
   permissionQueue: PermissionRequest[];
   computerAccessQueue: ComputerAccessRequestDto[];
+  askUserQuestionQueue: AskUserQuestionRequestDto[];
 } {
   return {
     conversation: emptyConversation(),
     desktop: emptyDesktopState(),
     permissionQueue: [],
     computerAccessQueue: [],
+    askUserQuestionQueue: [],
   };
+}
+
+function pendingAskQueueFromBootstrap(snapshot: BootstrapState): AskUserQuestionRequestDto[] {
+  return snapshot.pendingAskUserQuestions ? [...snapshot.pendingAskUserQuestions] : [];
 }
 
 export function useBridge(): UseBridge {
@@ -123,6 +133,7 @@ export function useBridge(): UseBridge {
   const [desktop, setDesktop] = useState<DesktopState>(emptyDesktopState);
   const [permissionQueue, setPermissionQueue] = useState<PermissionRequest[]>([]);
   const [computerAccessQueue, setComputerAccessQueue] = useState<ComputerAccessRequestDto[]>([]);
+  const [askUserQuestionQueue, setAskUserQuestionQueue] = useState<AskUserQuestionRequestDto[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   const capture = useCallback((cause: unknown) => {
@@ -137,6 +148,7 @@ export function useBridge(): UseBridge {
     setDesktop(next.desktop);
     setPermissionQueue(next.permissionQueue);
     setComputerAccessQueue(next.computerAccessQueue);
+    setAskUserQuestionQueue(next.askUserQuestionQueue);
   }, []);
 
   const requestTaskList = useCallback(async () => {
@@ -149,6 +161,15 @@ export function useBridge(): UseBridge {
     }
   }, [capture, host]);
 
+  const dropPendingAskUserQuestion = useCallback((requestId: number) => {
+    setAskUserQuestionQueue((previous) => previous.filter((entry) => entry.request_id !== requestId));
+  }, []);
+
+  const applyBootstrap = useCallback((snapshot: BootstrapState) => {
+    setBootstrap(snapshot);
+    setAskUserQuestionQueue(pendingAskQueueFromBootstrap(snapshot));
+  }, []);
+
   useEffect(() => {
     if (!host) {
       setLoading(false);
@@ -159,6 +180,15 @@ export function useBridge(): UseBridge {
     const offEvent = host.onEvent((event: ClientEvent) => {
       setConversation((previous) => reduceEvent(previous, event));
       setDesktop((previous) => reduceDesktopEvent(previous, event));
+      if (event.type === 'ask_user_question') {
+        setAskUserQuestionQueue((previous) => [
+          ...previous.filter((entry) => entry.request_id !== event.request.request_id),
+          event.request,
+        ]);
+      }
+      if (event.type === 'ask_user_question_resolved') {
+        dropPendingAskUserQuestion(event.request_id);
+      }
       if (event.type === 'error') setError(event.message);
     });
     const offState = host.onConnectionStateChanged((state) => {
@@ -169,12 +199,13 @@ export function useBridge(): UseBridge {
       } else if (shouldClearPendingPermissions(state)) {
         setPermissionQueue([]);
         setComputerAccessQueue([]);
+        setAskUserQuestionQueue([]);
       }
       if (state.status === 'error') setError(state.message);
       if (state.status === 'disconnected' && state.reason) setError(state.reason);
       if (state.status === 'connected') {
         void host.bootstrap()
-          .then((snapshot) => setBootstrap(snapshot))
+          .then((snapshot) => applyBootstrap(snapshot))
           .catch((cause: unknown) => setError(messageFrom(cause)));
       }
     });
@@ -193,7 +224,7 @@ export function useBridge(): UseBridge {
 
     void host.bootstrap()
       .then((snapshot) => {
-        setBootstrap(snapshot);
+        applyBootstrap(snapshot);
         setConnection(snapshot.connection);
       })
       .catch((cause: unknown) => setError(messageFrom(cause)))
@@ -205,7 +236,7 @@ export function useBridge(): UseBridge {
       offPermission();
       offComputerAccess();
     };
-  }, [host]);
+  }, [applyBootstrap, dropPendingAskUserQuestion, host]);
 
   useEffect(() => {
     if (!host || connection.status !== 'connected' || !bootstrap?.workspace.trusted) return;
@@ -301,6 +332,22 @@ export function useBridge(): UseBridge {
       dropPendingComputerAccess(requestId);
     } catch (cause) { capture(cause); }
   }, [capture, dropPendingComputerAccess, host]);
+
+  const answerAskUserQuestion = useCallback(async (requestId: number, answers: Record<string, string>) => {
+    if (!host) return;
+    try {
+      await host.answerAskUserQuestion(requestId, answers);
+      dropPendingAskUserQuestion(requestId);
+    } catch (cause) { capture(cause); }
+  }, [capture, dropPendingAskUserQuestion, host]);
+
+  const cancelAskUserQuestion = useCallback(async (requestId: number) => {
+    if (!host) return;
+    try {
+      await host.cancelAskUserQuestion(requestId);
+      dropPendingAskUserQuestion(requestId);
+    } catch (cause) { capture(cause); }
+  }, [capture, dropPendingAskUserQuestion, host]);
 
   const openSystemSettings = useCallback(async (pane: SystemSettingsPane) => {
     if (!host) return;
@@ -462,6 +509,7 @@ export function useBridge(): UseBridge {
     running: conversation.running,
     pendingPermission: permissionQueue[0] ?? null,
     pendingComputerAccess: computerAccessQueue[0] ?? null,
+    pendingAskUserQuestion: askUserQuestionQueue[0] ?? null,
     error,
     clearError: () => setError(null),
     sendPrompt,
@@ -471,6 +519,8 @@ export function useBridge(): UseBridge {
     deny,
     approveComputerAccess,
     denyComputerAccess,
+    answerAskUserQuestion,
+    cancelAskUserQuestion,
     openSystemSettings,
     pickWorkspace,
     selectRecentWorkspace,

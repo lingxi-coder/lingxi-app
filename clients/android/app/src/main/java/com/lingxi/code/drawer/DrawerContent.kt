@@ -79,8 +79,8 @@ data class DrawerProductionData(
  * the conversation), and the account row calls [onOpenSettings].
  *
  * Layout mirrors the prototype top-to-bottom: status-bar offset → header →
- * workspace pills → search → section tabs → scrolling section body →
- * knowledge/memory shortcuts → account row.
+ * workspace pills → search → section tabs → scrolling section body → account
+ * row.
  */
 @Composable
 fun DrawerContent(
@@ -105,6 +105,8 @@ fun DrawerContent(
     onReimportProject: (String) -> Unit = {},
     onExportProject: (String) -> Unit = {},
     onReauthorizeProject: (String) -> Unit = {},
+    onOpenCron: (String) -> Unit = {},
+    onCreateCron: () -> Unit = {},
 ) {
     val t = LingXiTheme.palette
 
@@ -188,13 +190,15 @@ fun DrawerContent(
 
                 DrawerSection.Crons -> when {
                     crons == null -> DrawerCollectionState("定时任务数据源尚未接入")
-                    crons.isEmpty() -> DrawerCollectionState("暂无定时任务")
-                    else -> CronsSection(crons = crons)
+                    else -> CronsSection(
+                        crons = crons,
+                        onOpenCron = onOpenCron,
+                        onCreateCron = onCreateCron,
+                    )
                 }
             }
         }
 
-        Shortcuts()
         AccountRow(onClick = onOpenSettings)
     }
 }
@@ -418,41 +422,7 @@ private fun DrawerCollectionState(message: String) {
     )
 }
 
-// MARK: - shortcuts + account ----------------------------------------------
-
-@Composable
-private fun Shortcuts() {
-    val t = LingXiTheme.palette
-    Row(
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-        modifier = Modifier
-            .fillMaxWidth()
-            .topBorder(t.border)
-            .padding(horizontal = 12.dp)
-            .padding(top = 4.dp),
-    ) {
-        Shortcut(LXIconName.Book, "知识库", 24, Modifier.weight(1f))
-        Shortcut(LXIconName.Brain, "记忆", 42, Modifier.weight(1f))
-    }
-}
-
-@Composable
-private fun Shortcut(icon: LXIconName, label: String, count: Int, modifier: Modifier = Modifier) {
-    val t = LingXiTheme.palette
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        modifier = modifier
-            .clip(RoundedCornerShape(10.dp))
-            .clickable {}
-            .padding(horizontal = 14.dp, vertical = 11.dp),
-    ) {
-        LXIcon(name = icon, size = 15.dp, color = t.text3, stroke = 1.7f)
-        Text(label, color = t.text3, fontSize = 13.5f.sp, fontWeight = FontWeight.Medium)
-        Spacer(Modifier.weight(1f))
-        Text(count.toString(), color = t.text4, fontSize = 11.5f.sp)
-    }
-}
+// MARK: - account -----------------------------------------------------------
 
 @Composable
 private fun AccountRow(onClick: () -> Unit) {

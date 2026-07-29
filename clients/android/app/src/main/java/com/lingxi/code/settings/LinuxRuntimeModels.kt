@@ -27,6 +27,7 @@ enum class LinuxRuntimeMode(val title: String) {
 
 enum class LinuxRuntimeAction(val label: String) {
     Refresh("刷新"),
+    Install("安装"),
     Verify("校验"),
     Repair("修复"),
     Reset("重置"),
@@ -35,6 +36,7 @@ enum class LinuxRuntimeAction(val label: String) {
     OpenTerminal("新建终端"),
     RefreshTasks("刷新任务"),
     RefreshMounts("刷新挂载"),
+    StopTask("停止任务"),
 }
 
 enum class LinuxRuntimeTerminalStatus { Disabled, Idle, Starting, Active }
@@ -72,6 +74,11 @@ data class LinuxRuntimeTerminalUiState(
     val transcript: List<String> = listOf("当前构建未接入可用 PTY 运行时。"),
 )
 
+data class LinuxRuntimeTerminalLaunchRequest(
+    val sessionId: String,
+    val initCommand: String,
+)
+
 data class LinuxRuntimeUiState(
     val selectedMode: LinuxRuntimeMode = LinuxRuntimeMode.Legacy,
     val backend: String = "android-minijail",
@@ -81,6 +88,8 @@ data class LinuxRuntimeUiState(
     val installedSizeBytes: Long? = null,
     val available: Boolean = false,
     val terminalSupported: Boolean = false,
+    val mountSupported: Boolean = false,
+    val installAllowed: Boolean = false,
     val verifyAllowed: Boolean = false,
     val repairAllowed: Boolean = false,
     val resetAllowed: Boolean = false,
@@ -104,8 +113,9 @@ data class LinuxRuntimeUiState(
             else -> "不可用"
         }
 
-    val canOpenTerminal: Boolean get() = terminalSupported && available
-    val canManageMounts: Boolean get() = available
+    val canOpenTerminal: Boolean
+        get() = terminalSupported && available && rootfsState == MobileLinuxRootfsStateFfi.READY
+    val canManageMounts: Boolean get() = mountSupported && available
     val canInspectTasks: Boolean get() = available
 }
 
@@ -135,8 +145,12 @@ fun mobileLinuxConfig(
         workspaceHostPath = workspaceHostPath,
         stableWorkspaceId = stableWorkspaceId,
         abi = abi,
-        rootfsVersion = "1.0.0",
-        archiveSha256 = null,
+        rootfsVersion = "3.21.3",
+        archiveSha256 = when (abi) {
+            "arm64-v8a" -> "ead8a4b37867bd19e7417dd078748e2312c0aea364403d96758d63ea8ff261ea"
+            "x86_64" -> "1a694899e406ce55d32334c47ac0b2efb6c06d7e878102d1840892ad44cd5239"
+            else -> null
+        },
         authorizationFile = authorizationFile,
     )
 
@@ -169,6 +183,9 @@ fun linuxRuntimeUiStateFrom(
         installedSizeBytes = status.installedSizeBytes?.toLong(),
         available = capability.available,
         terminalSupported = capability.pty,
+        mountSupported = capability.bindMounts,
+        installAllowed = mode == LinuxRuntimeMode.MobileLinux &&
+            status.state == MobileLinuxRootfsStateFfi.MISSING,
         verifyAllowed = capability.rootfsIntegrity,
         repairAllowed = capability.rootfsIntegrity,
         resetAllowed = capability.rootfsIntegrity,
@@ -207,14 +224,22 @@ fun linuxRuntimeUiStateFrom(
             )
         },
         terminal = LinuxRuntimeTerminalUiState(
-            status = if (capability.pty && capability.available) {
+            status = if (
+                capability.pty &&
+                capability.available &&
+                status.state == MobileLinuxRootfsStateFfi.READY
+            ) {
                 LinuxRuntimeTerminalStatus.Idle
             } else {
                 LinuxRuntimeTerminalStatus.Disabled
             },
             transcript = listOf(
-                if (capability.pty && capability.available) {
-                    "终端入口已就绪，等待宿主接入真实 PTY 会话。"
+                if (
+                    capability.pty &&
+                    capability.available &&
+                    status.state == MobileLinuxRootfsStateFfi.READY
+                ) {
+                    "终端入口已就绪。"
                 } else {
                     "当前构建未接入可用 PTY 运行时。"
                 },

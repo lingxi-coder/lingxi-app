@@ -10,6 +10,9 @@
     "platform",
     "abi",
     "rootfs_version",
+    "content_sha256",
+    "sbom_filename",
+    "source_pins_filename",
     "archive",
     "packages",
     "executable_allowlist",
@@ -81,6 +84,16 @@
     "rootfs_version": {
       "type": "string",
       "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][A-Za-z0-9._-]+)?$"
+    },
+    "content_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "sbom_filename": {
+      "const": "rootfs.spdx.json"
+    },
+    "source_pins_filename": {
+      "const": "mobile-linux-pins.json"
     },
     "archive": {
       "type": "object",

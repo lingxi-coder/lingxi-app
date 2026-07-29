@@ -1593,7 +1593,10 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
 /// orchestrator's pure `build_background_tasks` / `build_session_crons` builders.
 struct RegistryStopHookSnapshot {
     registry: Arc<dyn traits::task_registry::TaskRegistryHandle>,
-    current_cwd: Arc<std::sync::Mutex<std::path::PathBuf>>,
+    /// Cron storage is anchored to the session's project root. A Bash `cd`
+    /// changes hook payload cwd, but must not silently switch which project's
+    /// durable schedules appear in Stop hooks.
+    project_root: std::path::PathBuf,
 }
 
 #[async_trait::async_trait]
@@ -1617,12 +1620,7 @@ impl orchestrator::StopHookSnapshotProvider for RegistryStopHookSnapshot {
         // + parse it (a missing/garbage file ⇒ no crons, matching claude's
         // unreadable-file-as-empty contract) and map each task into the builder's
         // neutral input.
-        let root = self
-            .current_cwd
-            .lock()
-            .map(|g| g.clone())
-            .unwrap_or_default();
-        let path = cron::tasks_file::scheduled_tasks_path(&root);
+        let path = cron::tasks_file::scheduled_tasks_path(&self.project_root);
         let body = std::fs::read_to_string(&path).unwrap_or_default();
         let doc = cron::tasks_file::parse_tasks(&body);
         let mut inputs: Vec<orchestrator::CronSnapshotInput> = doc
@@ -3795,6 +3793,23 @@ fn load_merged_hooks_restricted(project_dir: &std::path::Path) -> bool {
             eff.settings.disable_all_hooks.unwrap_or(false)
                 || eff.settings.allow_managed_hooks_only.unwrap_or(false)
         })
+        .unwrap_or(false)
+}
+
+/// Resolve the effective `disableAllHooks` value for the executor's runner-head
+/// kill switch. Unlike the `/goal` restriction helper above, this returns only
+/// the setting that suppresses every hook, including hooks registered after
+/// boot.
+fn load_merged_disable_all_hooks(project_dir: &std::path::Path) -> bool {
+    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+    let inputs = engine::settings::LoadInputs {
+        env: &env,
+        project_dir,
+        defaults: engine::settings::schema::SettingsJson::default(),
+    };
+    engine::settings::Settings::load(inputs)
+        .ok()
+        .and_then(|eff| eff.settings.disable_all_hooks)
         .unwrap_or(false)
 }
 
@@ -6056,6 +6071,8 @@ pub async fn build(
     // to fill once the `HookExecutorImpl` (5.25) and shared command registry exist
     // (same cycle-break as the tool-registry / agent-catalog cells above).
     let subagent_hook_executor_cell = subagent_spawner_concrete.hook_executor_handle();
+    let subagent_strict_plugin_hooks_cell =
+        subagent_spawner_concrete.strict_plugin_only_hooks_handle();
     let subagent_skill_loader_cell = subagent_spawner_concrete.skill_loader_handle();
     // FIX 1 (subagent pool): grab the set-once tool-wide-deny-names cell BEFORE
     // boxing, to fill once the permission policy is built (same cycle-break as
@@ -6176,6 +6193,8 @@ pub async fn build(
     ));
     let strict_plugin_only_mcp =
         strict_plugin_policy.is_locked(plugin::PluginComponent::McpServers);
+    let strict_plugin_only_hooks = strict_plugin_policy.is_locked(plugin::PluginComponent::Hooks);
+    let _ = subagent_strict_plugin_hooks_cell.set(strict_plugin_only_hooks);
     let mut mcp_configs = mcp::load_mcp_servers(&project_mcp_path, &global_mcp_path, &cwd);
     // CLI `--mcp-config` servers: highest precedence — override a discovered
     // server of the same name, else append. (With `--strict-mcp-config` the host
@@ -6752,6 +6771,7 @@ pub async fn build(
             http.clone(),
             hook_runtime as Arc<dyn traits::RuntimeSpawner>,
         )
+        .with_policy_disable_all_hooks(load_merged_disable_all_hooks(&cwd))
         .with_http_hook_policy(http_hook_urls, http_hook_env_vars)
         .with_process_runner(
             Arc::new(PosixProcess::new()) as Arc<dyn traits::ProcessRunner>,
@@ -7139,6 +7159,8 @@ pub async fn build(
     let teammate_tool_registry_cell = teammate_handler.tool_registry_handle();
     let teammate_skill_loader_cell = teammate_handler.skill_loader_handle();
     let teammate_tool_wide_deny_cell = teammate_handler.tool_wide_deny_names_handle();
+    let teammate_strict_plugin_hooks_cell = teammate_handler.strict_plugin_only_hooks_handle();
+    let _ = teammate_strict_plugin_hooks_cell.set(strict_plugin_only_hooks);
     task_registry_inner.register_handler(
         tasks::TaskType::InProcessTeammate,
         Arc::new(teammate_handler),
@@ -7890,11 +7912,13 @@ pub async fn build(
     // so a child agent runner can preload its frontmatter `skills:` (claude
     // runAgent.ts:577-646). First fill wins; the registry is filled at (6) before
     // any spawn fires, so the loader never reads the empty registry.
-    let skill_loader_arc: Arc<dyn traits::skill_loader::SkillLoader> =
-        Arc::new(agent_skill_loader::AgentSkillLoader::new(
+    let skill_loader_arc: Arc<dyn traits::skill_loader::SkillLoader> = Arc::new(
+        agent_skill_loader::AgentSkillLoader::new(
             shared_command_registry.clone(),
             Some(skill_session_id),
-        ));
+        )
+        .with_shell_expansion(tool_skill::build_prompt_shell_provider(&tool_ctx)),
+    );
     let _ = subagent_skill_loader_cell.set(skill_loader_arc.clone());
     // Same skills-preload loader for the in-process teammate (full parity).
     let _ = teammate_skill_loader_cell.set(skill_loader_arc);
@@ -7919,7 +7943,6 @@ pub async fn build(
     // Clone for the Stop/SubagentStop hook snapshot provider (it locates the
     // project-root cron file via the live cwd); the original cell is moved into
     // `.with_current_cwd(...)` below.
-    let current_cwd_cell_for_snapshot = current_cwd_cell.clone();
     // Watcher-rebind half of claude-code's `onCwdChanged`: a late-bound rebinder
     // handed to the `CwdChanged` firer NOW, its inner cell filled after the
     // file-changed watcher spawns below (the firer is built before the watcher).
@@ -8235,6 +8258,44 @@ pub async fn build(
         let _ = teammate_tool_wide_deny_cell.set(deny.clone());
     }
 
+    // Cold resume: rebuild parked background agents only after every dependency
+    // they inherit is live (tool registry, permission gate, budget, agent
+    // catalog, skill resolver, and LocalAgent handler). The restore spawner
+    // preserves each persisted agent id, so transcript paths and SendMessage
+    // routes remain stable instead of leaving a stale row beside a new agent.
+    if cfg.session_id_override.is_some() {
+        let restore_inheritance = traits::subagent_spawn::SubagentInheritance {
+            tool_invoker: Arc::new(
+                tool_api::tool_invoker_impl::RegistryToolInvoker::new(tools.clone())
+                    .with_gate(perms.clone()),
+            ),
+            budget: budget_enforcer.clone(),
+        };
+        for (agent_id, outcome) in agent_restore::restore_parked_agents(
+            &main_subagents_dir,
+            subagent_spawner.as_ref(),
+            fork_resume_gate.as_ref(),
+            &restore_inheritance,
+        )
+        .await
+        {
+            match outcome {
+                agent_restore::RestoreOutcome::Restored(restored_id) => {
+                    tracing::info!(%agent_id, %restored_id, "restored parked background agent");
+                }
+                agent_restore::RestoreOutcome::Refused(reason) => {
+                    tracing::warn!(%agent_id, %reason, "refused parked background agent restore");
+                }
+                agent_restore::RestoreOutcome::EmptyTranscript => {
+                    tracing::warn!(%agent_id, "parked agent transcript is empty; restore skipped");
+                }
+                agent_restore::RestoreOutcome::Failed(error) => {
+                    tracing::warn!(%agent_id, %error, "parked background agent restore failed");
+                }
+            }
+        }
+    }
+
     // Clone `cwd` for the settings watcher before it is moved into the
     // orchestrator constructor below.
     let watch_cwd = cwd.clone();
@@ -8445,7 +8506,7 @@ pub async fn build(
         // (claude's tool-use-context `s` gate).
         .with_stop_hook_snapshot(Arc::new(RegistryStopHookSnapshot {
             registry: task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>,
-            current_cwd: current_cwd_cell_for_snapshot,
+            project_root: watch_cwd.clone(),
         }))
         // Finding #73: supply the V2 task list to the per-turn `task_reminder`
         // (the default variant when tasks are enabled). Reads the file-backed
@@ -8995,13 +9056,11 @@ pub async fn build(
             //   `if(e?.hooks && (!uA("hooks") || g9e(e.source))) o_n(e.hooks)`.
             // `uA("hooks")` is the `strictPluginOnlyCustomization` policy (NOT
             // `disableAllHooks` — that gate lives at hook DISPATCH, on the
-            // executor's `policy_disable_all_hooks`). LingXi does not wire
-            // `strictPluginOnlyCustomization`, so `uA("hooks")` is always
-            // `false` and the gate reduces to "register when the agent declares
-            // hooks"; the `g9e` trusted-source arm ([`agent_source_is_trusted`],
-            // the byte-faithful `qXh` set) is a structural port for when that
-            // policy lands. `is_agent=false` keeps `Stop` as `Stop` (this is the
-            // MAIN thread, not a subagent — no `Stop`→`SubagentStop` retarget).
+            // executor's `policy_disable_all_hooks`). The immutable managed
+            // policy snapshot was resolved beside the MCP gate above; when the
+            // hooks slot is locked, only a trusted/plugin-owned source may
+            // install command-capable frontmatter hooks. `is_agent=false` keeps
+            // `Stop` as `Stop` (this is the MAIN thread, not a subagent).
             // Registered BEFORE the `fire_session_start("startup")` call below so
             // a SessionStart frontmatter hook fires with the agent applied. The
             // orchestrator owns the bucket identity so an in-place resume can
@@ -9013,10 +9072,8 @@ pub async fn build(
             // live main-thread hooks:
             //   `let t=!VR("hooks")||J0e(e.source), r=mvo(e);
             //    if(t&&r){b1r(e.hooks);return} if(t&&!r)hvo(e,"mainThread"); b1r(void 0)`
-            // NOTE the pre-existing `strict_plugin_only_hooks` arm is inert
-            // (`uA("hooks")` unwired ⇒ `false` ⇒ `(!false || …)` is ALWAYS true),
-            // so before 2.1.218 this site had no effective gate at all.
-            let strict_plugin_only_hooks = false; // `uA("hooks")` — unwired in LingXi.
+            // The same immutable gate is also threaded into subagent contexts
+            // below so the main-thread and child registration paths agree.
             if !frontmatter_hooks.is_empty()
                 && (!strict_plugin_only_hooks || agent_source_is_trusted(source))
             {
@@ -10848,14 +10905,8 @@ mod tests {
     /// worktree-tmux-launch plan Task 3, boot-level integration test: driving
     /// the FULL `build()` (a real git repo + the real `PosixWorktreeManager`
     /// `build()` unconditionally wires) with `cfg.worktree_launch` set must
-    /// leave the LIVE session cwd inside the created worktree. There is no
-    /// direct `DesktopRuntime` accessor for `session_cwd`/`worktree_session`
-    /// (they are consumed into the orchestrator + tool registry), so this
-    /// observes the swap the same way the running system does: through
-    /// `ConversationOrchestrator::assemble_system_prompt_preview()`, whose
-    /// `Primary working directory:` line re-derives from the SAME
-    /// `Arc<SessionCwd>` every turn (see `build_prompt_context`'s doc comment).
-    /// The unit tests above already cover `worktree_session`'s exact shape.
+    /// leave the LIVE session cwd inside the created worktree. The unit tests
+    /// above already cover `worktree_session`'s exact shape.
     #[tokio::test]
     async fn worktree_launch_flag_creates_and_enters_worktree_at_boot() {
         let (tmp, mut cfg) = test_config(true);
@@ -10877,14 +10928,10 @@ mod tests {
             "create_worktree must have materialized {expected_path:?} on disk"
         );
 
-        let sys = rt.orchestrator.assemble_system_prompt_preview().await;
-        assert!(
-            sys.contains(&format!(
-                "Primary working directory: {}",
-                expected_path.display()
-            )),
-            "the LIVE session cwd the system prompt re-derives every turn must be \
-             the boot-launched worktree: {sys}"
+        assert_eq!(
+            rt.session_cwd.cwd(),
+            expected_path,
+            "the live session cwd must be the boot-launched worktree"
         );
     }
 
@@ -10912,13 +10959,10 @@ mod tests {
             !tmp.path().join(".lingxi").join("worktrees").exists(),
             "no --worktree flag must never create a worktrees dir"
         );
-        let sys = rt.orchestrator.assemble_system_prompt_preview().await;
-        assert!(
-            sys.contains(&format!(
-                "Primary working directory: {}",
-                tmp.path().display()
-            )),
-            "no --worktree flag must leave the plain boot cwd as the live session cwd: {sys}"
+        assert_eq!(
+            rt.session_cwd.cwd(),
+            tmp.path(),
+            "no --worktree flag must leave the plain boot cwd as the live session cwd"
         );
     }
 

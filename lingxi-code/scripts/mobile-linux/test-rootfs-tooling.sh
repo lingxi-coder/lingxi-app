@@ -10,7 +10,7 @@ trap 'rm -rf "${tmp_root}"' EXIT
 export SOURCE_DATE_EPOCH=0
 
 fixture_root="${tmp_root}/rootfs"
-mkdir -p "${fixture_root}/bin" "${fixture_root}/usr/bin" "${fixture_root}/usr/lib" "${fixture_root}/lib/apk/db" "${fixture_root}/tmp" "${fixture_root}/var/tmp" "${fixture_root}/workspace" "${fixture_root}/root"
+mkdir -p "${fixture_root}/bin" "${fixture_root}/sbin" "${fixture_root}/usr/bin" "${fixture_root}/usr/lib" "${fixture_root}/lib/apk/db" "${fixture_root}/etc/apk" "${fixture_root}/tmp" "${fixture_root}/var/tmp" "${fixture_root}/workspace" "${fixture_root}/root"
 
 python3 - <<'PY' "${fixture_root}"
 import os
@@ -27,6 +27,7 @@ def write_elf(path: pathlib.Path, payload: bytes) -> None:
 
 write_elf(root / "bin" / "busybox", b"busybox")
 os.link(root / "bin" / "busybox", root / "bin" / "sh")
+write_elf(root / "sbin" / "apk", b"apk")
 write_elf(root / "usr" / "bin" / "git", b"git")
 write_elf(root / "usr" / "bin" / "ssh", b"ssh")
 write_elf(root / "usr" / "bin" / "python3", b"python3")
@@ -36,7 +37,13 @@ write_elf(root / "usr" / "lib" / "libpython3.12.so.1.0", b"libpython")
     "# immutable stdlib fixture\n",
     encoding="utf-8",
 )
+(root / "etc" / "apk" / "repositories").write_text(
+    "https://dl-cdn.alpinelinux.org/alpine/v3.21/main\n"
+    "https://dl-cdn.alpinelinux.org/alpine/v3.21/community\n",
+    encoding="utf-8",
+)
 (root / "lib" / "apk" / "db" / "installed").write_text(
+    "P:apk-tools\nV:2.14-r0\nA:arm64\nL:GPL-2.0-only\n\n"
     "P:busybox\nV:1.0-r0\nA:arm64\nL:GPL-2.0-only\n\n"
     "P:git\nV:2.0-r0\nA:arm64\nL:GPL-2.0-only\n\n"
     "P:openssh-client\nV:9.0-r0\nA:arm64\nL:BSD-2-Clause\n\n"
@@ -60,7 +67,7 @@ python3 "${tool}" generate-manifest \
   --platform android \
   --abi arm64 \
   --rootfs-version 1.0.0 \
-  --archive-filename alpine-rootfs-android-arm64-v1.0.0.tar.zst \
+  --archive-filename alpine-rootfs-android-arm64-v1.0.0.tar.gz \
   --archive-sha256 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
   --archive-size 123 \
   --output "${manifest_path}"
@@ -123,18 +130,17 @@ if python3 "${tool}" verify-tree --root "${fixture_root}"; then
 fi
 rm -f "${fixture_root}/bin/sh.symlink-test"
 
-touch "${fixture_root}/usr/bin/apk"
-chmod 0755 "${fixture_root}/usr/bin/apk"
+mv "${fixture_root}/sbin/apk" "${fixture_root}/sbin/apk.disabled"
 if python3 "${tool}" verify-tree --root "${fixture_root}"; then
-  echo "expected verify-tree to fail when apk is present" >&2
+  echo "expected verify-tree to fail when apk is missing" >&2
   exit 1
 fi
-rm -f "${fixture_root}/usr/bin/apk"
+mv "${fixture_root}/sbin/apk.disabled" "${fixture_root}/sbin/apk"
 
 release1="${tmp_root}/release-1"
 release2="${tmp_root}/release-2"
-archive1="${tmp_root}/release-1/rootfs.tar.zst"
-archive2="${tmp_root}/release-2/rootfs.tar.zst"
+archive1="${tmp_root}/release-1/rootfs.tar.gz"
+archive2="${tmp_root}/release-2/rootfs.tar.gz"
 
 bash "${packager}" "${fixture_root}" android-proot android arm64 1.0.0 "${archive1}" "${release1}"
 bash "${packager}" "${fixture_root}" android-proot android arm64 1.0.0 "${archive2}" "${release2}"

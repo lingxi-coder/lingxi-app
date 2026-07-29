@@ -4,6 +4,10 @@ import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.lingxi.code.bindings.PermissionResponseDto
+import com.lingxi.code.bindings.MobileLinuxEventFfi
+import com.lingxi.code.bindings.MobileLinuxEventKindFfi
+import com.lingxi.code.bindings.MobileLinuxTaskSnapshotFfi
+import com.lingxi.code.bindings.MobileLinuxTaskStateFfi
 import com.lingxi.code.model.EngineModelCatalog
 import com.lingxi.code.model.EngineModelState
 import com.lingxi.code.model.EngineSessionState
@@ -13,6 +17,7 @@ import com.lingxi.code.model.ModelOption
 import com.lingxi.code.model.Role
 import com.lingxi.code.model.SessionRef
 import com.lingxi.code.model.SessionRow
+import com.lingxi.code.model.canonicalSessionId
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Deferred
@@ -59,6 +64,8 @@ data class ChatState(
      * this dim line — they surface in [error] as a persistent banner.
      */
     val statusLine: String? = null,
+    /** Live/completed shell calls for the current session, keyed by task id. */
+    val shellTools: List<ShellToolCardState> = emptyList(),
     /**
      * A persistent, dismissible turn error. Unlike [statusLine] (which the next
      * tool-activity event overwrites and a turn clears), this survives until the
@@ -206,6 +213,7 @@ class ChatViewModel(
 
     /** Monotonic reply-stream generation used to reject stale turn events. */
     private var turnToken: Long = 0L
+    private var lastRuntimeEventSequence: ULong = 0u
 
     /** Monotonic session-operation generation used to reject stale failures. */
     private var sessionToken: Long = 0L
@@ -236,6 +244,7 @@ class ChatViewModel(
             beginSessionTransition(
                 target = _state.value.session,
                 newSession = false,
+                resumeEmpty = _state.value.isNew,
                 status = "正在恢复会话…",
             )
         }
@@ -332,6 +341,7 @@ class ChatViewModel(
         beginSessionTransition(
             target = visibleSession,
             newSession = visibleSession.id == "new",
+            resumeEmpty = visibleSession.id != "new" && _state.value.isNew,
             status = if (visibleSession.id == "new") "正在重新连接…" else "正在恢复会话…",
         )
     }
@@ -345,6 +355,7 @@ class ChatViewModel(
         projectId: String?,
         target: SessionRef = SessionRef(id = "new", title = "新对话"),
         newSession: Boolean = target.id == "new",
+        resumeEmpty: Boolean = false,
         replacePendingTransition: Boolean = false,
         createSource: () -> ConversationSource,
         persistSelection: suspend () -> Unit = {},
@@ -420,6 +431,7 @@ class ChatViewModel(
         beginSessionTransition(
             target = target,
             newSession = newSession,
+            resumeEmpty = resumeEmpty,
             status = if (newSession) "正在新建项目会话…" else "正在恢复项目会话…",
         )
         true
@@ -518,16 +530,23 @@ class ChatViewModel(
                 sessionTransitioning = false,
                 sessionReady = true,
                 statusLine = null,
+                shellTools = emptyList(),
                 error = null,
             )
         }
     }
 
     /** Switch to another session through the real engine. */
-    fun openSession(ref: SessionRef) {
-        if (ref.id.isBlank() || ref.id == "new") return
-        if (_state.value.sessionReady && _state.value.session.id == ref.id) return
-        beginSessionTransition(ref, newSession = false, status = "正在恢复会话…")
+    fun openSession(ref: SessionRef, empty: Boolean = false) {
+        val canonicalRef = ref.copy(id = canonicalSessionId(ref.id))
+        if (canonicalRef.id.isBlank() || canonicalRef.id == "new") return
+        if (_state.value.sessionReady && _state.value.session.id == canonicalRef.id) return
+        beginSessionTransition(
+            canonicalRef,
+            newSession = false,
+            resumeEmpty = empty,
+            status = "正在恢复会话…",
+        )
     }
 
     /** Start a fresh chat through the real engine. */
@@ -575,6 +594,7 @@ class ChatViewModel(
     private fun beginSessionTransition(
         target: SessionRef,
         newSession: Boolean,
+        resumeEmpty: Boolean = false,
         status: String,
     ) {
         // Do not enqueue a second ambiguous Resume/New while the first command
@@ -590,11 +610,12 @@ class ChatViewModel(
             it.copy(
                 session = target,
                 messages = emptyList(),
-                isNew = newSession,
+                isNew = newSession || resumeEmpty,
                 streaming = false,
                 sessionTransitioning = true,
                 sessionReady = false,
                 statusLine = status,
+                shellTools = emptyList(),
                 error = null,
             )
         }
@@ -603,7 +624,11 @@ class ChatViewModel(
                 explicitCancellation?.await()?.getOrThrow()
                 explicitCancellation = null
                 cancelEngineTurn(detachedTurn)
-                if (newSession) source.newSession() else source.resumeSession(target.id)
+                when {
+                    newSession -> source.newSession()
+                    resumeEmpty -> source.resumeEmptySession(target.id, target.title)
+                    else -> source.resumeSession(target.id)
+                }
                 // Success here means the command was accepted. sessionReady remains
                 // false until SessionStarted/SessionResumed is observed.
             } catch (cancelled: CancellationException) {
@@ -660,7 +685,10 @@ class ChatViewModel(
      * orphaned-turn guard holds.
      */
     fun resumeSession(row: SessionRow) {
-        openSession(SessionRef(id = row.uuid, title = row.title))
+        openSession(
+            SessionRef(id = row.uuid, title = row.title),
+            empty = row.messageCount == 0,
+        )
     }
 
     /**
@@ -806,6 +834,48 @@ class ChatViewModel(
 
             is ReplyEvent.ToolActivity -> _state.update { it.copy(statusLine = event.label) }
 
+            is ReplyEvent.ShellTool -> _state.update { current ->
+                val sessionId = current.session.id
+                val update = event.update
+                val existing = current.shellTools.firstOrNull { it.taskId == update.taskId }
+                val replacement = when (update) {
+                    is ShellToolUpdate.Started -> ShellToolCardState(
+                        sessionId = sessionId,
+                        taskId = update.taskId,
+                        command = update.command,
+                        cwd = update.cwd,
+                    )
+                    is ShellToolUpdate.Heartbeat -> existing
+                        ?.takeIf { it.sessionId == sessionId }
+                        ?.copy(durationMs = update.elapsedMs)
+                    is ShellToolUpdate.Finished -> existing
+                        ?.takeIf { it.sessionId == sessionId }
+                        ?.copy(
+                            stdout = update.stdout,
+                            stderr = update.stderr,
+                            exitCode = update.exitCode,
+                            durationMs = update.elapsedMs ?: existing.durationMs,
+                            status = update.status,
+                            truncated = update.truncated,
+                        )
+                }
+                if (replacement == null) {
+                    current
+                } else {
+                    current.copy(
+                        statusLine = when (replacement.status) {
+                            ShellToolStatus.Running -> "Shell 运行中…"
+                            ShellToolStatus.Completed -> "Shell 完成"
+                            ShellToolStatus.Failed -> "Shell 失败"
+                            ShellToolStatus.TimedOut -> "Shell 超时"
+                            ShellToolStatus.Cancelled -> "Shell 已取消"
+                        },
+                        shellTools = current.shellTools
+                            .filterNot { it.taskId == replacement.taskId } + replacement,
+                    )
+                }
+            }
+
             is ReplyEvent.Error -> {
                 streamingIndex = null
                 turnJob = null
@@ -841,6 +911,81 @@ class ChatViewModel(
                 turnJob = null
                 _state.update { it.copy(streaming = false) }
             }
+        }
+    }
+
+    /**
+     * Fold the shared Rust MobileLinux event stream into the live shell card.
+     * The sequence and current session checks make polling/reconnect idempotent;
+     * once a card is terminal no later output/status can mutate it.
+     */
+    fun reduceMobileLinuxEvent(
+        event: MobileLinuxEventFfi,
+        snapshot: MobileLinuxTaskSnapshotFfi? = null,
+    ) {
+        if (event.sequence <= lastRuntimeEventSequence) return
+        lastRuntimeEventSequence = event.sequence
+        val taskId = event.taskId ?: return
+        _state.update { current ->
+            val direct = current.shellTools.firstOrNull { it.taskId == taskId }
+            val correlated = direct ?: snapshot?.command?.let { command ->
+                current.shellTools.lastOrNull {
+                    it.status == ShellToolStatus.Running &&
+                        (command.contains(it.command) || it.command.contains(command))
+                }
+            }
+            val terminal = correlated?.status in setOf(
+                ShellToolStatus.Completed,
+                ShellToolStatus.Failed,
+                ShellToolStatus.TimedOut,
+                ShellToolStatus.Cancelled,
+            )
+            if (terminal) return@update current
+            // A runtime task must correlate to a shell ToolUseStarted in this
+            // conversation. Uncorrelated tasks may belong to a prior session or
+            // the interactive terminal and must not leak into the chat card.
+            val base = correlated ?: return@update current
+            if (base.sessionId != current.session.id) return@update current
+            val updated = when (event.kind) {
+                MobileLinuxEventKindFfi.TASK_STATUS_CHANGED -> base.copy(
+                    taskId = taskId,
+                    exitCode = event.exitCode,
+                    durationMs = snapshot?.let {
+                        val start = it.startedAtMs
+                        val finish = it.finishedAtMs
+                        if (start != null && finish != null) {
+                            finish.toLong() - start.toLong()
+                        } else {
+                            base.durationMs
+                        }
+                    } ?: base.durationMs,
+                    status = when (event.status ?: snapshot?.status) {
+                        MobileLinuxTaskStateFfi.COMPLETED -> ShellToolStatus.Completed
+                        MobileLinuxTaskStateFfi.FAILED -> ShellToolStatus.Failed
+                        MobileLinuxTaskStateFfi.TIMED_OUT -> ShellToolStatus.TimedOut
+                        MobileLinuxTaskStateFfi.CANCELLED -> ShellToolStatus.Cancelled
+                        else -> ShellToolStatus.Running
+                    },
+                )
+                MobileLinuxEventKindFfi.STDOUT_LINE -> base.copy(
+                    taskId = taskId,
+                    stdout = base.stdout + event.text.orEmpty() + "\n",
+                )
+                MobileLinuxEventKindFfi.STDERR_CHUNK -> base.copy(
+                    taskId = taskId,
+                    stderr = base.stderr + event.data
+                        ?.toString(Charsets.UTF_8)
+                        .orEmpty(),
+                )
+                else -> return@update current
+            }
+            current.copy(
+                shellTools = current.shellTools
+                    .filterNot {
+                        it.taskId == taskId ||
+                            it.taskId == correlated.taskId
+                    } + updated,
+            )
         }
     }
 

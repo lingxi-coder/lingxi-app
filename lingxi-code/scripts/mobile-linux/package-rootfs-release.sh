@@ -27,8 +27,8 @@ if ! command -v python3 >/dev/null 2>&1; then
   exit 1
 fi
 
-if ! command -v zstd >/dev/null 2>&1 || ! command -v tar >/dev/null 2>&1; then
-  echo "zstd is required to package a rootfs release" >&2
+if ! command -v gzip >/dev/null 2>&1 || ! command -v tar >/dev/null 2>&1; then
+  echo "gzip and tar are required to package a rootfs release" >&2
   exit 1
 fi
 
@@ -54,7 +54,7 @@ python3 "${tool}" build-archive \
   --output "${tmp_tar}" \
   --source-date-epoch "${SOURCE_DATE_EPOCH:-0}"
 python3 "${tool}" verify-archive --archive "${tmp_tar}"
-zstd -19 -T1 -q --force "${tmp_tar}" -o "${archive_output}"
+gzip -n -9 -c "${tmp_tar}" > "${archive_output}"
 cleanup
 trap - EXIT
 

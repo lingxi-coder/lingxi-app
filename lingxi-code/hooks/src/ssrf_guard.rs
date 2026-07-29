@@ -1,14 +1,16 @@
 //! SSRF guard for `HookExecutor::Http` requests (spec §9.7).
 //!
-//! Blocks loopback, RFC1918 private ranges, and non-`http(s)` schemes by
-//! default. DNS resolution is intentionally deferred to M2 (platform DNS
-//! resolver); the IP-literal check here catches `http://127.0.0.1/` style
-//! escape attempts. An optional allow-list of host strings can be supplied
-//! to lock outbound traffic down further.
+//! Blocks loopback, private/link-local ranges, and non-`http(s)` schemes by
+//! default. The async validation path resolves hostnames before dispatch so a
+//! name that resolves to a protected address cannot bypass literal-IP checks.
 
 use std::collections::HashSet;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
+
+use async_trait::async_trait;
 use thiserror::Error;
+use traits::ResolvedAddressOverride;
 
 /// Outbound URL validator used by the HTTP hook executor.
 ///
@@ -19,6 +21,25 @@ pub struct SsrfGuard {
     allowed_schemes: HashSet<String>,
     blocked_cidrs: Vec<IpRange>,
     allowed_hosts: Option<HashSet<String>>,
+    resolver: Arc<dyn DnsResolver>,
+}
+
+#[async_trait]
+pub(crate) trait DnsResolver: Send + Sync {
+    async fn lookup_host(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>, String>;
+}
+
+#[derive(Debug, Default)]
+struct TokioDnsResolver;
+
+#[async_trait]
+impl DnsResolver for TokioDnsResolver {
+    async fn lookup_host(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
+        tokio::net::lookup_host((host, port))
+            .await
+            .map(|iter| iter.collect())
+            .map_err(|err| err.to_string())
+    }
 }
 
 /// An inclusive IPv4/IPv6 address range used to express blocked CIDR-like
@@ -43,7 +64,7 @@ pub enum SsrfError {
     /// URL contained an IP literal that fell inside a blocked range.
     #[error("ip blocked: {0}")]
     IpBlocked(IpAddr),
-    /// DNS resolution failed (reserved for M2; not produced by M1.4).
+    /// DNS resolution failed.
     #[error("dns resolution failed: {0}")]
     DnsFailed(String),
     /// URL string could not be parsed.
@@ -64,8 +85,6 @@ impl SsrfGuard {
         // IPv4 link-local (169.254/16) which includes the cloud-metadata
         // service at 169.254.169.254. M5-06 added 169.254/16 because M5-06
         // routes hooks to public endpoints — link-local must be blocked.
-        // IPv6 unique-local (`fc00::/7`) and link-local (`fe80::/10`) are
-        // added in M2 alongside the platform DNS resolver.
         let blocked = vec![
             IpRange {
                 start: "10.0.0.0".parse().unwrap(),
@@ -89,13 +108,36 @@ impl SsrfGuard {
                 start: "169.254.0.0".parse().unwrap(),
                 end: "169.254.255.255".parse().unwrap(),
             },
+            IpRange {
+                start: "::1".parse().unwrap(),
+                end: "::1".parse().unwrap(),
+            },
+            IpRange {
+                start: "fc00::".parse().unwrap(),
+                end: "fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff".parse().unwrap(),
+            },
+            IpRange {
+                start: "fe80::".parse().unwrap(),
+                end: "febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff".parse().unwrap(),
+            },
         ];
 
         Self {
             allowed_schemes,
             blocked_cidrs: blocked,
             allowed_hosts: None,
+            resolver: Arc::new(TokioDnsResolver),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_resolver<R>(resolver: R) -> Self
+    where
+        R: DnsResolver + 'static,
+    {
+        let mut guard = Self::with_defaults();
+        guard.resolver = Arc::new(resolver);
+        guard
     }
 
     /// Validate `url` against the configured policy.
@@ -114,20 +156,67 @@ impl SsrfGuard {
                 ));
             }
         }
-        // IP literal check (no DNS yet — that lands in M2 with the platform
-        // DNS resolver). A host like "127.0.0.1" parses as `IpAddr`; a
-        // hostname like "localhost" does not, so we accept it here and the
-        // platform resolver will catch loopback resolutions later.
-        if let Some(host) = parsed.host_str() {
-            if let Ok(ip) = host.parse::<IpAddr>() {
-                if self
-                    .blocked_cidrs
-                    .iter()
-                    .any(|r| ip >= r.start && ip <= r.end)
-                {
-                    return Err(SsrfError::IpBlocked(ip));
-                }
+        if let Some(host) = parsed.host() {
+            match host {
+                url::Host::Ipv4(ip) => self.check_ip(IpAddr::V4(ip))?,
+                url::Host::Ipv6(ip) => self.check_ip(IpAddr::V6(ip))?,
+                url::Host::Domain(_) => {}
             }
+        }
+        Ok(())
+    }
+
+    /// Validate `url` and resolve every hostname address before dispatch.
+    ///
+    /// A mixed public/private DNS answer is rejected in full rather than
+    /// allowing the HTTP transport to pick a protected address.
+    pub async fn check_url_resolved(&self, url: &str) -> Result<(), SsrfError> {
+        self.resolve_url(url).await.map(|_| ())
+    }
+
+    /// Resolve `url` through the configured DNS policy and return a vetted
+    /// transport override for domain hosts.
+    ///
+    /// IP-literal URLs are still validated, but return `None` because there is
+    /// no hostname lookup to pin.
+    pub async fn resolve_url(
+        &self,
+        url: &str,
+    ) -> Result<Option<ResolvedAddressOverride>, SsrfError> {
+        self.check_url(url)?;
+        let parsed = url::Url::parse(url).map_err(|e| SsrfError::UrlParseFailed(e.to_string()))?;
+        let Some(url::Host::Domain(host)) = parsed.host() else {
+            return Ok(None);
+        };
+        let port = parsed
+            .port_or_known_default()
+            .ok_or_else(|| SsrfError::DnsFailed("URL has no resolvable port".into()))?;
+        let addresses = self
+            .resolver
+            .lookup_host(host, port)
+            .await
+            .map_err(SsrfError::DnsFailed)?;
+        if addresses.is_empty() {
+            return Err(SsrfError::DnsFailed(
+                "hostname returned no addresses".into(),
+            ));
+        }
+        for address in &addresses {
+            self.check_ip(address.ip())?;
+        }
+        Ok(Some(ResolvedAddressOverride {
+            domain: host.to_ascii_lowercase(),
+            addrs: addresses,
+        }))
+    }
+
+    fn check_ip(&self, ip: IpAddr) -> Result<(), SsrfError> {
+        if self
+            .blocked_cidrs
+            .iter()
+            .any(|range| ip >= range.start && ip <= range.end)
+        {
+            return Err(SsrfError::IpBlocked(ip));
         }
         Ok(())
     }
@@ -136,11 +225,102 @@ impl SsrfGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct StaticResolver {
+        answers: Mutex<HashMap<(String, u16), Result<Vec<SocketAddr>, String>>>,
+    }
+
+    impl StaticResolver {
+        fn with_answer(host: &str, port: u16, addrs: Vec<SocketAddr>) -> Self {
+            let mut answers = HashMap::new();
+            answers.insert((host.to_string(), port), Ok(addrs));
+            Self {
+                answers: Mutex::new(answers),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl DnsResolver for StaticResolver {
+        async fn lookup_host(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
+            self.answers
+                .lock()
+                .unwrap()
+                .get(&(host.to_string(), port))
+                .cloned()
+                .unwrap_or_else(|| Err(format!("missing resolver answer for {host}:{port}")))
+        }
+    }
 
     #[test]
     fn blocks_localhost_ip() {
         let g = SsrfGuard::with_defaults();
         assert!(g.check_url("http://127.0.0.1/").is_err());
+    }
+
+    #[test]
+    fn blocks_ipv6_local_ranges() {
+        let g = SsrfGuard::with_defaults();
+        assert!(g.check_url("http://[::1]/").is_err());
+        assert!(g.check_url("http://[fc00::1]/").is_err());
+        assert!(g.check_url("http://[fe80::1]/").is_err());
+    }
+
+    #[tokio::test]
+    async fn blocks_hostname_resolving_to_loopback() {
+        let g = SsrfGuard::with_defaults();
+        assert!(g.check_url_resolved("http://localhost/").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn documentation_domains_are_not_exempt_from_resolution_policy() {
+        let g = SsrfGuard::with_test_resolver(StaticResolver::with_answer(
+            "hook.example.com",
+            443,
+            vec!["127.0.0.1:443".parse().unwrap()],
+        ));
+        assert!(g
+            .check_url_resolved("https://hook.example.com/pre")
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn resolve_url_returns_vetted_transport_override() {
+        let g = SsrfGuard::with_test_resolver(StaticResolver::with_answer(
+            "hooks.example.com",
+            8443,
+            vec!["93.184.216.34:8443".parse().unwrap()],
+        ));
+        let override_addrs = g
+            .resolve_url("https://hooks.example.com:8443/webhook")
+            .await
+            .expect("public domain should pass")
+            .expect("domain host should return override");
+        assert_eq!(override_addrs.domain, "hooks.example.com");
+        assert_eq!(
+            override_addrs.addrs,
+            vec!["93.184.216.34:8443".parse().unwrap()]
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_url_rejects_mixed_private_answers() {
+        let g = SsrfGuard::with_test_resolver(StaticResolver::with_answer(
+            "hooks.example.com",
+            443,
+            vec![
+                "93.184.216.34:443".parse().unwrap(),
+                "127.0.0.1:443".parse().unwrap(),
+            ],
+        ));
+        assert!(g
+            .resolve_url("https://hooks.example.com/webhook")
+            .await
+            .is_err());
     }
 
     #[test]

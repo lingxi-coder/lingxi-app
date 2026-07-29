@@ -11,10 +11,12 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.core.content.ContextCompat
+import androidx.core.content.pm.PackageInfoCompat
 import com.lingxi.code.bindings.AndroidEventListener
 import com.lingxi.code.bindings.AndroidEngineLaunchConfigFfi
 import com.lingxi.code.bindings.AndroidPermissionSink
 import com.lingxi.code.bindings.AndroidProviderConfigFfi
+import com.lingxi.code.bindings.AndroidShellConfigFfi
 import com.lingxi.code.bindings.ClientEvent
 import com.lingxi.code.bindings.MobileEngineHandle
 import com.lingxi.code.bindings.PermissionRequest
@@ -145,6 +147,22 @@ fun buildVoiceEngine(
             onPermission(request)
         }
     }
+    val shellWorkspace = projectWorkspace?.hostPath
+        ?.let { java.io.File(it) }
+        ?: java.io.File(appContext.filesDir, "shell/workspaces/default")
+    if (!shellWorkspace.exists() && !shellWorkspace.mkdirs()) {
+        Log.w(TAG, "Unable to create shell workspace at ${shellWorkspace.absolutePath}")
+    }
+    val packageInfo = runCatching {
+        appContext.packageManager.getPackageInfo(appContext.packageName, 0)
+    }.getOrNull()
+    val writableRoots = buildList {
+        add(appContext.filesDir.absolutePath)
+        add(appContext.cacheDir.absolutePath)
+        add(appContext.codeCacheDir.absolutePath)
+        add(appContext.noBackupFilesDir.absolutePath)
+        projectWorkspace?.hostPath?.let(::add)
+    }.distinct()
     return try {
         buildAndroidEngineWithMobileLinux(
             config = AndroidEngineLaunchConfigFfi(
@@ -172,12 +190,29 @@ fun buildVoiceEngine(
             notifications = notifications,
             clipboard = clipboard,
             permissions = permissions,
-            // Direct injects the active, user-authorized host. Play returns null,
-            // so android_use is absent from that distribution.
+            // Direct builds inject the user-started Accessibility/MediaProjection
+            // controller. Play builds return null, so `android_use` is absent.
             computerUse = ComputerUseFeatureProvider.engineHost(),
-            // P1: shell/sandbox config not surfaced in the app UI yet — null
-            // keeps shell support fully absent (spec r3 registration gate).
-            shell = null,
+            // This single registration seam selects the ProcessRunner supplied
+            // by AndroidPlatform: MobileLinux when explicitly selected, or the
+            // bundled minijail/mksh/toybox backend in Legacy mode. MobileLinux
+            // probe failures remain visible and never downgrade silently.
+            shell = AndroidShellConfigFfi(
+                nativeLibraryDir = appContext.applicationInfo.nativeLibraryDir,
+                shellWorkspaceRoot = shellWorkspace.absolutePath,
+                appCacheRoot = appContext.cacheDir.absolutePath,
+                packageName = appContext.packageName,
+                packageVersionCode = packageInfo
+                    ?.let(PackageInfoCompat::getLongVersionCode)
+                    ?: 0L,
+                appWritableRoots = writableRoots,
+                enableShell = true,
+                secretsInKeystore = true,
+                // Shell-visible workspace data is an advertised capability of
+                // this Android distribution. Sensitive invocations still flow
+                // through AndroidPermissionSink.
+                shellDataExposureAccepted = true,
+            ),
             // P4: Git-tool config not surfaced in the app UI yet — null keeps
             // Git support fully absent (spec P4 §G5 registration gate).
             git = null,

@@ -41,7 +41,7 @@ class ProviderProfileMappingTest {
     }
 
     @Test
-    fun engineLaunchConfig_emitsOnlyEnabledProfilesInMobileAllowlist() {
+    fun engineLaunchConfig_emitsOnlyConfiguredEnabledProfilesInMobileAllowlist() {
         val enabled = provider(
             id = "l_openai",
             preset = "openai",
@@ -52,13 +52,19 @@ class ProviderProfileMappingTest {
             preset = "deepseek",
             url = "https://api.deepseek.com",
         ).copy(enabled = false)
+        val missingCredential = provider(
+            id = "l_anthropic",
+            preset = "anthropic",
+            url = "https://api.anthropic.com",
+        ).copy(credentialConfigured = false)
 
         val allowlist = ProviderSettingsRepository.mobileEnabledProfileNames(
-            listOf(enabled, disabled),
+            listOf(enabled, disabled, missingCredential),
         )
 
-        assertTrue("enabled builtin is retained", "openai" in allowlist)
+        assertTrue("configured enabled builtin is retained", "openai" in allowlist)
         assertFalse("disabled builtin is excluded", "deepseek" in allowlist)
+        assertFalse("provider without a credential is excluded", "anthropic" in allowlist)
     }
 
     @Test
@@ -111,5 +117,6 @@ class ProviderProfileMappingTest {
         model = "model",
         status = ConnStatus.Idle,
         enabled = true,
+        credentialConfigured = true,
     )
 }

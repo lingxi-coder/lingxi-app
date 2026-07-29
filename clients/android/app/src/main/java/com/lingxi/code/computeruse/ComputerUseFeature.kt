@@ -57,10 +57,17 @@ data class ComputerUseApproval(
     val expiresAtMs: Long,
 )
 
+data class ComputerUseConfiguration(
+    val listenEnabled: Boolean = false,
+    val speakEnabled: Boolean = true,
+    val maxListenSeconds: Int = 15,
+)
+
 interface ComputerUseFeature {
     val available: Boolean
     val state: StateFlow<ComputerUseUiState>
     val pendingApproval: StateFlow<ComputerUseApproval?>
+    val configuration: StateFlow<ComputerUseConfiguration>
 
     fun attach(context: Context, onEmergencyStop: () -> Unit)
 
@@ -81,6 +88,8 @@ interface ComputerUseFeature {
     fun resolveApproval(id: String, allowed: Boolean)
 
     fun clearAudit(context: Context)
+
+    fun updateConfiguration(context: Context, configuration: ComputerUseConfiguration)
 
     fun openAccessibilitySettings(context: Context)
 

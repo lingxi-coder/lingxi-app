@@ -19,8 +19,9 @@ use protocol::{HttpRequest, HttpResponse, SseEvent};
 use std::error::Error as StdError;
 use std::sync::{Arc, Mutex};
 use traits::http::{
-    RawByteStream, RawByteStreamWithMeta, SseStream, SseStreamWithMeta, WebSocketConnection,
-    WebSocketConnectionWithMeta, WebSocketMessageStream, WebSocketMessageStreamWithMeta,
+    RawByteStream, RawByteStreamWithMeta, ResolvedAddressOverride, SseStream, SseStreamWithMeta,
+    WebSocketConnection, WebSocketConnectionWithMeta, WebSocketMessageStream,
+    WebSocketMessageStreamWithMeta,
 };
 use traits::{HttpError, HttpTransport};
 use url::Url;
@@ -47,6 +48,9 @@ pub struct ReqwestHttp {
     /// actionable UI copy; the default stays `false` to preserve desktop/CLI
     /// error text exactly.
     detailed_connection_errors: bool,
+    /// Snapshot of the TLS / CA settings so per-request DNS pinning can build a
+    /// client with identical trust and mTLS material.
+    tls: crate::tls_config::TlsSettings,
 }
 
 impl ReqwestHttp {
@@ -88,7 +92,60 @@ impl ReqwestHttp {
                 .build()
                 .expect("reqwest no-redirect client init"),
             detailed_connection_errors,
+            tls,
         }
+    }
+
+    fn client_for_resolved_request(
+        &self,
+        resolved: &ResolvedAddressOverride,
+        no_redirect: bool,
+    ) -> Result<reqwest::Client, HttpError> {
+        let mut builder = reqwest::Client::builder();
+        if no_redirect {
+            builder = builder.redirect(reqwest::redirect::Policy::none());
+        }
+        self.tls
+            .apply_to_builder(builder)
+            .resolve_to_addrs(&resolved.domain, &resolved.addrs)
+            .build()
+            .map_err(|err| HttpError::InvalidRequest(err.to_string()))
+    }
+
+    async fn send_request(
+        &self,
+        req: HttpRequest,
+        resolved: Option<ResolvedAddressOverride>,
+        no_redirect: bool,
+    ) -> Result<HttpResponse, HttpError> {
+        let client = match resolved.as_ref() {
+            Some(resolved) if !resolved.addrs.is_empty() => {
+                self.client_for_resolved_request(resolved, no_redirect)?
+            }
+            _ if no_redirect => self.no_redirect_client.clone(),
+            _ => self.client.clone(),
+        };
+        let resp = build_reqwest(&client, req)
+            .send()
+            .await
+            .map_err(|e| map_reqwest_connection_error(e, self.detailed_connection_errors))?;
+        let status = resp.status().as_u16();
+        let headers = resp
+            .headers()
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+            .collect();
+        let raw = resp
+            .bytes()
+            .await
+            .map_err(|e| HttpError::InvalidResponse(e.to_string()))?;
+        let body = String::from_utf8_lossy(&raw).into_owned();
+        Ok(HttpResponse {
+            status,
+            headers,
+            body,
+            body_bytes: raw.to_vec(),
+        })
     }
 }
 
@@ -165,7 +222,7 @@ fn websocket_url_for(url: &str) -> Result<Url, HttpError> {
         other => {
             return Err(HttpError::InvalidRequest(format!(
                 "unsupported websocket URL scheme: {other}"
-            )))
+            )));
         }
     };
     url.set_scheme(scheme).map_err(|_| {
@@ -377,32 +434,15 @@ impl WebSocketConnection for ReqwestResponsesWebSocketConnection {
 #[async_trait]
 impl HttpTransport for ReqwestHttp {
     async fn request(&self, req: HttpRequest) -> Result<HttpResponse, HttpError> {
-        let resp = build_reqwest(&self.client, req)
-            .send()
-            .await
-            .map_err(|e| map_reqwest_connection_error(e, self.detailed_connection_errors))?;
-        let status = resp.status().as_u16();
-        let headers = resp
-            .headers()
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
-            .collect();
-        // Read the wire bytes ONCE and keep them intact. `body` is the lossy
-        // UTF-8 view (all existing String consumers unchanged); `body_bytes`
-        // carries the raw bytes so a binary body (PDF/image/invalid-UTF8)
-        // survives byte-identically to consumers such as WebFetch's artifact
-        // persist. Mirrors claude-code's `responseType:"arraybuffer"`.
-        let raw = resp
-            .bytes()
-            .await
-            .map_err(|e| HttpError::InvalidResponse(e.to_string()))?;
-        let body = String::from_utf8_lossy(&raw).into_owned();
-        Ok(HttpResponse {
-            status,
-            headers,
-            body,
-            body_bytes: raw.to_vec(),
-        })
+        self.send_request(req, None, false).await
+    }
+
+    async fn request_with_resolved_addrs(
+        &self,
+        req: HttpRequest,
+        resolved: Option<ResolvedAddressOverride>,
+    ) -> Result<HttpResponse, HttpError> {
+        self.send_request(req, resolved, false).await
     }
 
     /// Override that sends via the [`Self::no_redirect_client`]
@@ -415,30 +455,7 @@ impl HttpTransport for ReqwestHttp {
     /// Response mapping is identical to [`Self::request`]; only the client (and
     /// thus the redirect policy) differs.
     async fn request_no_follow(&self, req: HttpRequest) -> Result<HttpResponse, HttpError> {
-        let resp = build_reqwest(&self.no_redirect_client, req)
-            .send()
-            .await
-            .map_err(|e| map_reqwest_connection_error(e, self.detailed_connection_errors))?;
-        let status = resp.status().as_u16();
-        let headers = resp
-            .headers()
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
-            .collect();
-        // Raw bytes preserved alongside the lossy `body` (see `request`): the
-        // WebFetch redirect loop drives this method, so binary bodies must
-        // reach the caller byte-exact for the artifact-persist path.
-        let raw = resp
-            .bytes()
-            .await
-            .map_err(|e| HttpError::InvalidResponse(e.to_string()))?;
-        let body = String::from_utf8_lossy(&raw).into_owned();
-        Ok(HttpResponse {
-            status,
-            headers,
-            body,
-            body_bytes: raw.to_vec(),
-        })
+        self.send_request(req, None, true).await
     }
 
     async fn stream_sse(&self, req: HttpRequest) -> Result<SseStream, HttpError> {
@@ -748,7 +765,7 @@ where
                 match s.next().await {
                     Some(Ok(bytes)) => buf.extend_from_slice(&bytes),
                     Some(Err(e)) => {
-                        return Some((Err(map_reqwest_connection_error(e, false)), (s, buf)))
+                        return Some((Err(map_reqwest_connection_error(e, false)), (s, buf)));
                     }
                     None => return None,
                 }
@@ -956,6 +973,70 @@ mod tests {
             "Location header must be preserved for the caller's redirect policy"
         );
         assert_ne!(resp.body, "FOLLOWED", "must NOT have followed to /landing");
+    }
+
+    #[tokio::test]
+    async fn request_with_resolved_addrs_pins_connection_and_preserves_host_header() {
+        use axum::extract::State;
+        use axum::http::HeaderMap;
+        use axum::routing::get;
+        use axum::Router;
+        use protocol::HttpMethod;
+        use std::net::SocketAddr;
+        use std::sync::Arc;
+        use tokio::net::TcpListener;
+        use traits::ResolvedAddressOverride;
+
+        async fn handler(
+            State(host_seen): State<Arc<Mutex<Option<String>>>>,
+            headers: HeaderMap,
+        ) -> &'static str {
+            let host = headers
+                .get("host")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string);
+            *host_seen.lock().unwrap() = host;
+            "PINNED"
+        }
+
+        let host_seen = Arc::new(Mutex::new(None));
+        let app = Router::new()
+            .route("/pinned", get(handler))
+            .with_state(host_seen.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let transport = ReqwestHttp::new();
+        let logical_host = "hooks.example.invalid";
+        let req = HttpRequest {
+            method: HttpMethod::Get,
+            url: format!("http://{logical_host}:{}/pinned", addr.port()),
+            headers: vec![],
+            body: None,
+            body_bytes: None,
+            timeout: Some(std::time::Duration::from_secs(5)),
+        };
+        let resp = transport
+            .request_with_resolved_addrs(
+                req,
+                Some(ResolvedAddressOverride {
+                    domain: logical_host.to_string(),
+                    addrs: vec![SocketAddr::new(addr.ip(), addr.port())],
+                }),
+            )
+            .await
+            .expect("resolved override should connect without DNS");
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.body, "PINNED");
+        let expected_host = format!("{logical_host}:{}", addr.port());
+        assert_eq!(
+            host_seen.lock().unwrap().as_deref(),
+            Some(expected_host.as_str()),
+            "HTTP Host must remain the logical hostname even when the socket is pinned"
+        );
     }
 
     /// `ReqwestHttp::stream_sse_with_meta` must capture the real status and headers

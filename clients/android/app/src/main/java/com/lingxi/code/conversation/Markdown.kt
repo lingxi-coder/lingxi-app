@@ -11,7 +11,7 @@ package com.lingxi.code.conversation
  * plain JVM (see `MarkdownParserTest`). The Compose renderer lives in
  * `MessageBubble.kt` and consumes [MdBlock] / [MdInline].
  *
- * Non-goals: headings, blockquotes, tables, links, nested lists, emphasis with
+ * Non-goals: headings, blockquotes, tables, nested lists, emphasis with
  * `_underscores_`. Anything unrecognized degrades to literal paragraph text, so
  * the renderer is never wrong — only less rich.
  */
@@ -44,6 +44,9 @@ sealed interface MdInline {
 
     /** `` `inline code` ``. */
     data class Code(val text: String) : MdInline
+
+    /** `[label](url)`; the renderer decides which schemes are actionable. */
+    data class Link(val label: String, val url: String) : MdInline
 }
 
 private val BULLET_RE = Regex("""^\s*[-*+]\s+(.*)$""")
@@ -156,6 +159,26 @@ fun parseInline(text: String): List<MdInline> {
     while (i < text.length) {
         val c = text[i]
         when {
+            // markdown link — keep parsing deliberately shallow and total
+            c == '[' -> {
+                val labelEnd = text.indexOf(']', i + 1)
+                val urlStart = labelEnd.takeIf { it >= 0 }
+                    ?.takeIf { it + 1 < text.length && text[it + 1] == '(' }
+                    ?.plus(2)
+                val urlEnd = urlStart?.let { text.indexOf(')', it) } ?: -1
+                if (labelEnd < 0 || urlStart == null || urlEnd < 0) {
+                    plain.append(c)
+                    i++
+                } else {
+                    flushPlain()
+                    out += MdInline.Link(
+                        label = text.substring(i + 1, labelEnd),
+                        url = text.substring(urlStart, urlEnd),
+                    )
+                    i = urlEnd + 1
+                }
+            }
+
             // inline code — literal until the next backtick
             c == '`' -> {
                 val close = text.indexOf('`', i + 1)

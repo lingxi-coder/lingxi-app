@@ -10,16 +10,10 @@
 //! can preload skills WITHOUT the `agent` crate depending on `commands-core`
 //! (the leaf [`traits::skill_loader`] seam breaks that cycle).
 //!
-//! DOCUMENTED APPROXIMATION (flagged): claude's `getPromptForCommand('', ctx)`
-//! runs the FULL skill-body pipeline — `$ARGUMENTS`/`$N` argument substitution
-//! (here: empty args), `${LINGXI_SKILL_DIR}`/`${LINGXI_SESSION_ID}` token
-//! replacement, AND embedded `!command` shell expansion. This loader applies the
-//! empty-args argument substitution and the `${LINGXI_SESSION_ID}` token (carried
-//! on the descriptor) but does NOT run shell `!command` expansion or
-//! `${LINGXI_SKILL_DIR}` substitution — those live in the `Skill` tool's shell
-//! substrate, unreachable from this composition-root adapter without re-plumbing
-//! the tool. The model still receives the skill's prompt body; full shell
-//! expansion parity is a follow-up.
+//! The production composition root injects the same prompt-shell provider used
+//! by the Skill tool and slash dispatcher, so preloads run the complete empty-
+//! args pipeline: argument substitution, skill/session token replacement, then
+//! policy-gated embedded `!command` expansion.
 
 use std::sync::Arc;
 
@@ -34,6 +28,9 @@ pub struct AgentSkillLoader {
     /// Per-session id substituted for `${LINGXI_SESSION_ID}` in the skill body
     /// (claude `getSessionId()`); `None` leaves the token un-substituted.
     session_id: Option<String>,
+    /// Shared shell-expansion provider. `None` keeps hermetic tests free of
+    /// process execution; production always wires the live provider.
+    shell_expansion: Option<Arc<dyn command_api::ShellExpansionProvider>>,
 }
 
 impl AgentSkillLoader {
@@ -45,7 +42,18 @@ impl AgentSkillLoader {
         Self {
             registry,
             session_id,
+            shell_expansion: None,
         }
+    }
+
+    /// Use the same policy-gated shell expansion as the Skill tool.
+    #[must_use]
+    pub fn with_shell_expansion(
+        mut self,
+        provider: Arc<dyn command_api::ShellExpansionProvider>,
+    ) -> Self {
+        self.shell_expansion = Some(provider);
+        self
     }
 
     /// Resolve `skill_name` to a registered command name, mirroring claude
@@ -77,10 +85,10 @@ impl AgentSkillLoader {
     /// Build the skill's content blocks from a resolved markdown/plugin command.
     /// Returns `None` for non-prompt commands (builtin / MCP — claude's
     /// `skill.type !== 'prompt'` skip). Applies empty-args `$ARGUMENTS`/`$N`
-    /// substitution + the `${LINGXI_SESSION_ID}` token (see the module-level
-    /// approximation note for what is intentionally NOT expanded).
-    fn to_skill_load(&self, cmd: &SlashCommand, display_name: &str) -> Option<SkillLoad> {
-        let (frontmatter, prompt_template) = match &cmd.kind {
+    /// substitution, skill/session token replacement, and policy-gated
+    /// embedded shell expansion.
+    async fn to_skill_load(&self, cmd: &SlashCommand, display_name: &str) -> Option<SkillLoad> {
+        let (frontmatter, prompt_template, dynamic) = match &cmd.kind {
             SlashCommandKind::Markdown {
                 frontmatter,
                 prompt_template,
@@ -90,24 +98,16 @@ impl AgentSkillLoader {
                 frontmatter,
                 prompt_template,
                 ..
-            } => (frontmatter, prompt_template),
+            } => (frontmatter, prompt_template.clone(), false),
             // Bundled programmatic skill (`/loop`): prompt-typed, but the body is
             // produced by the dynamic builder with empty args (claude
             // `getPromptForCommand('')`). `${LINGXI_SESSION_ID}` still applies.
             SlashCommandKind::Bundled {
+                frontmatter,
                 prompt_fn: Some(builder),
-                ..
             } => {
                 let body = builder.build("");
-                let body = match &self.session_id {
-                    Some(sid) => body.replace("${LINGXI_SESSION_ID}", sid),
-                    None => body,
-                };
-                return Some(SkillLoad {
-                    display_name: display_name.to_string(),
-                    progress_message: None,
-                    content: vec![ContentBlock::Text { text: body }],
-                });
+                (frontmatter, body, true)
             }
             // Builtin / MCP / inert-bundled commands are not prompt-based skills
             // (claude `skill.type !== 'prompt'`).
@@ -117,18 +117,56 @@ impl AgentSkillLoader {
         };
         // Empty-args argument substitution (claude `getPromptForCommand('', …)`;
         // matches the `Skill` tool's call: `Some(""), append=true`).
-        let body = command_api::substitute_arguments_faithful(
-            prompt_template,
-            Some(""),
-            true,
-            &frontmatter.argument_names,
-        )
-        .unwrap_or_else(|_| prompt_template.clone());
+        let body = if dynamic {
+            prompt_template
+        } else {
+            command_api::substitute_arguments_faithful(
+                &prompt_template,
+                Some(""),
+                true,
+                &frontmatter.argument_names,
+            )
+            .unwrap_or(prompt_template)
+        };
+        let mut body = body;
+        if let Some(skill_root) = cmd.skill_root.as_ref() {
+            let root = skill_root.to_string_lossy();
+            let root = if cfg!(windows) {
+                root.replace('\\', "/")
+            } else {
+                root.into_owned()
+            };
+            body = body.replace("${LINGXI_SKILL_DIR}", &root);
+        }
         // `${LINGXI_SESSION_ID}` token (claude step 3, runs regardless of source).
-        let body = match &self.session_id {
+        let mut body = match &self.session_id {
             Some(sid) => body.replace("${LINGXI_SESSION_ID}", sid),
             None => body,
         };
+        if let Some(provider) = &self.shell_expansion {
+            let shell_ctx = provider.build(
+                frontmatter.allowed_tools.as_deref().unwrap_or(&[]),
+                frontmatter.shell,
+            );
+            body = match command_api::execute_shell_commands_in_prompt(
+                &body,
+                &shell_ctx,
+                &format!("/{display_name}"),
+                frontmatter.shell,
+            )
+            .await
+            {
+                Ok(expanded) => expanded,
+                Err(error) => {
+                    tracing::warn!(
+                        skill = display_name,
+                        %error,
+                        "could not expand preloaded agent skill"
+                    );
+                    return None;
+                }
+            };
+        }
         Some(SkillLoad {
             display_name: display_name.to_string(),
             // The descriptor's frontmatter `model` is unrelated to progressMessage;
@@ -145,11 +183,12 @@ impl SkillLoader for AgentSkillLoader {
     async fn resolve_and_load(&self, skill_name: &str, agent_type: &str) -> Option<SkillLoad> {
         let reg = self.registry.read().await;
         let resolved = Self::resolve_name(&reg, skill_name, agent_type)?;
-        let cmd = reg.resolve(&resolved)?;
+        let cmd = reg.resolve(&resolved)?.clone();
+        drop(reg);
         // claude passes the ORIGINAL `skillName` (the frontmatter entry) to
         // `formatSkillLoadingMetadata` (runAgent.ts:634), so the loading-metadata
         // block shows the name as authored, not the resolved/qualified name.
-        self.to_skill_load(cmd, skill_name)
+        self.to_skill_load(&cmd, skill_name).await
     }
 }
 

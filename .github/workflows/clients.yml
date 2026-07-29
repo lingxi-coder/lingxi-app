@@ -35,9 +35,6 @@ jobs:
   # allowlist, and store-policy scan before either mobile build can proceed.
   mobile-linux-policy:
     runs-on: ubuntu-latest
-    env:
-      LINGXI_MOBILE_LINUX_ENABLED: ${{ vars.LINGXI_MOBILE_LINUX_ENABLED || '0' }}
-      LINGXI_MOBILE_LINUX_AUTHORIZATION_SHA256: ${{ vars.LINGXI_MOBILE_LINUX_AUTHORIZATION_SHA256 || '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -126,7 +123,7 @@ jobs:
       # the newest installed NDK.
       - name: Install Android NDK
         run: |
-          sdkmanager --install "ndk;27.2.12479018"
+          sdkmanager --install "ndk;27.2.12479018" "cmake;3.22.1"
           echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/27.2.12479018" >> "$GITHUB_ENV"
 
       # Gradle build cache + dependency cache (also provisions Gradle itself).
@@ -134,14 +131,20 @@ jobs:
 
       # Build the gitignored integration artifacts (libandroid_aar.so per ABI +
       # Kotlin UniFFI bindings) that the Gradle project links against.
-      - name: Build Play and Direct JNI libs + UniFFI bindings
+      - name: Verify pinned MobileLinux sources and release metadata
         run: |
-          bash clients/android/scripts/build-jni.sh --variant play
-          bash clients/android/scripts/build-jni.sh --variant direct
+          bash clients/android/scripts/verify-mobile-linux-pins.sh
+          bash lingxi-code/scripts/mobile-linux/test-rootfs-tooling.sh
+          python3 -m json.tool docs/mobile-linux/sbom/mobile-linux.spdx.json >/dev/null
+
+      - name: Build Store and Full native runtimes from source
+        run: |
+          bash clients/android/scripts/build-mobile-linux-native.sh --variant play
+          bash clients/android/scripts/build-mobile-linux-native.sh --variant direct
 
       # Unit tests + debug APK + androidTest APK. The androidTest APK is what
       # the emulator job (job 3) installs and runs.
-      - name: Gradle — Play/Direct tests and APKs
+      - name: Gradle — Store/Full tests and APKs
         working-directory: clients/android
         run: |
           ./gradlew \
@@ -191,7 +194,7 @@ jobs:
 
       - name: Install Android NDK
         run: |
-          sdkmanager --install "ndk;27.2.12479018"
+          sdkmanager --install "ndk;27.2.12479018" "cmake;3.22.1"
           echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/27.2.12479018" >> "$GITHUB_ENV"
 
       - uses: gradle/actions/setup-gradle@v4
@@ -199,8 +202,8 @@ jobs:
       # Rebuild jniLibs in THIS job — emulator-runner runs in the same job, but
       # this job never ran job 2's build steps, so the artifacts must be made
       # here too before the on-device test compiles the engine.
-      - name: Build Play JNI libs + UniFFI bindings
-        run: bash clients/android/scripts/build-jni.sh --variant play
+      - name: Build Store native runtime from source
+        run: bash clients/android/scripts/build-mobile-linux-native.sh --variant play
 
       # api-level 30 (>= minSdk 26), x86_64 + google_apis for KVM-accelerated
       # boot. force-avd-creation + the headless/no-window emulator options are

@@ -184,7 +184,6 @@ fun SkillDetailPage(
 
         // Required permissions ------------------------------------------------
         SettingsSection(label = "所需权限") {
-            SettingsRow(label = "读取知识库", chevron = false)
             SettingsRow(label = "调用 LLM", chevron = false)
             SettingsRow(label = "访问 MCP · GitHub", chevron = false, isLast = true)
         }

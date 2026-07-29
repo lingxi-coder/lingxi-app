@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="mobile_linux_distribution_channel">store</string>
+    <bool name="mobile_linux_full_distribution">false</bool>
+    <bool name="high_risk_native_offloads_available">false</bool>
+</resources>

@@ -43,18 +43,27 @@ class SystemTextToSpeechTts(private val context: Context) : TtsProvider {
         voice: String?,
         keyProvider: suspend () -> String?,
     ): Flow<ByteArray> = flow {
-        val (pcm, _) = renderToPcm(text)
+        val (pcm, _) = renderToPcm(text, voice = voice)
         if (pcm.isNotEmpty()) emit(pcm)
     }
 
     /** Returns (pcmBytes, sampleRateHz) so callers can drive AudioTrack correctly. */
-    suspend fun renderToPcm(text: String): Pair<ByteArray, Int> {
+    suspend fun renderToPcm(
+        text: String,
+        voice: String? = null,
+        speed: Float = 1.0f,
+    ): Pair<ByteArray, Int> {
         if (text.isBlank()) return ByteArray(0) to capabilities.sampleRateHz
         val wavFile = File(context.cacheDir, "tts/sys-${UUID.randomUUID()}.wav").also {
             it.parentFile?.mkdirs()
         }
         val tts = awaitTtsInit()
         try {
+            tts.setSpeechRate(speed.coerceIn(0.5f, 2.0f))
+            voice
+                ?.takeUnless { it == "default" }
+                ?.let { voiceId -> tts.voices?.firstOrNull { it.name == voiceId } }
+                ?.let { tts.voice = it }
             val utterance = "lingxi-${UUID.randomUUID()}"
             val status = synthesizeToFile(tts, text, utterance, wavFile)
             if (status != TextToSpeech.SUCCESS) return ByteArray(0) to capabilities.sampleRateHz

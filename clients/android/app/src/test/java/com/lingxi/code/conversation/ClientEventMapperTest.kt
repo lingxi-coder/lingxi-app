@@ -60,12 +60,19 @@ class ClientEventMapperTest {
     // --- tool activity ----------------------------------------------------
 
     @Test
-    fun toolUseStarted_mapsToToolActivity_withToolName() {
+    fun shellToolUseStarted_mapsToStructuredCardUpdate() {
         val r = clientEventToReply(
-            ClientEvent.ToolUseStarted(id = "t1", tool = "bash", inputJson = "{}"),
+            ClientEvent.ToolUseStarted(
+                id = "t1",
+                tool = "bash",
+                inputJson = """{"command":"echo ok","cwd":"/workspace"}""",
+            ),
         )
-        assertTrue(r is ReplyEvent.ToolActivity)
-        assertTrue((r as ReplyEvent.ToolActivity).label.contains("bash"))
+        assertTrue(r is ReplyEvent.ShellTool)
+        val started = (r as ReplyEvent.ShellTool).update as ShellToolUpdate.Started
+        assertEquals("t1", started.taskId)
+        assertEquals("echo ok", started.command)
+        assertEquals("/workspace", started.cwd)
     }
 
     @Test

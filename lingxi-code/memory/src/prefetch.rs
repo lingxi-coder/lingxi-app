@@ -71,6 +71,31 @@ impl PendingMemoryPrefetch {
             None => Vec::new(),
         }
     }
+
+    /// Non-consuming readiness probe used by the turn loop to keep selector
+    /// latency off the model-call critical path.
+    ///
+    /// `oneshot::Receiver::try_recv` consumes a ready value, so this method
+    /// immediately re-buffers it in a fresh one-shot for [`Self::take`].
+    #[must_use]
+    pub fn is_ready(&self) -> bool {
+        let Ok(mut guard) = self.rx.try_lock() else {
+            return false;
+        };
+        match guard.as_mut() {
+            Some(rx) => match rx.try_recv() {
+                Ok(value) => {
+                    let (tx, replacement) = oneshot::channel();
+                    let _ = tx.send(value);
+                    *guard = Some(replacement);
+                    true
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => true,
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => false,
+            },
+            None => true,
+        }
+    }
 }
 
 impl MemoryPrefetch {
@@ -102,9 +127,8 @@ impl MemoryPrefetch {
     /// Construct a prefetcher that resolves to a PRE-SELECTED surfaced set,
     /// bypassing the selector body. Used by a composition root that has already
     /// picked the relevant memories, and by the orchestrator's surfacing tests
-    /// to drive `relevant_memory_reminder_message` deterministically. The
-    /// runtime is still required (the background task carries the result through
-    /// the same one-shot channel) but no selector is needed.
+    /// to drive `relevant_memory_reminder_message` deterministically. The result
+    /// is buffered before [`Self::start`] returns; no selector is needed.
     #[must_use]
     pub fn with_fixed_result(
         runtime: Arc<dyn RuntimeSpawner>,
@@ -133,15 +157,7 @@ impl MemoryPrefetch {
         let (tx, rx) = oneshot::channel();
 
         if let Some(fixed) = self.fixed_result.clone() {
-            let _ = self
-                .runtime
-                .spawn(
-                    "memory-prefetch",
-                    Box::pin(async move {
-                        let _ = tx.send(fixed);
-                    }),
-                )
-                .await;
+            let _ = tx.send(fixed);
             return PendingMemoryPrefetch {
                 rx: tokio::sync::Mutex::new(Some(rx)),
             };

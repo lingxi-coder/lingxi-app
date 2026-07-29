@@ -82,6 +82,22 @@ export function validateComputerAccessResponse(value: unknown): ComputerAccessRe
   };
 }
 
+/** Validate the bounded answer map returned by the questionnaire dialog. */
+export function validateAskUserQuestionAnswers(value: unknown): Record<string, string> {
+  const input = object(value);
+  const entries = Object.entries(input);
+  if (entries.length === 0 || entries.length > 4) {
+    throw new Error('invalid AskUserQuestion answers');
+  }
+  const answers: Record<string, string> = {};
+  for (const [question, answerValue] of entries) {
+    const answer = string(answerValue, 'AskUserQuestion answer', 16 * 1024);
+    if (answer.trim().length === 0) throw new Error('invalid AskUserQuestion answer');
+    answers[string(question, 'AskUserQuestion question', 16 * 1024)] = answer;
+  }
+  return answers;
+}
+
 export function validateBridgeLockfile(
   value: unknown,
   expectedPid: number,

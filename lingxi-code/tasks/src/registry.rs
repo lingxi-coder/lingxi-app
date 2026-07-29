@@ -1074,17 +1074,26 @@ impl TaskRegistry {
         // mechanism. The cleanup hook is a fallback/drop-owner hook; running it
         // first can remove the handler's worker record before `Task::kill` gets a
         // chance to cancel the live runtime work.
-        let cleanup = self.cleanups.lock().await.remove(task_id_ref);
         // Handler-spawned path: dispatch teardown to the owning handler.
-        let spawned_type = self.spawned.write().await.remove(task_id_ref);
+        // Read the routing entry without consuming it. A failed handler kill is
+        // retryable; removing the route/cleanup before the awaited call would
+        // strand a still-running task with no way to stop it.
+        let spawned_type = self.spawned.read().await.get(task_id_ref).copied();
         if let Some(task_type) = spawned_type {
-            if let Some(handler) = self.handlers.get(&task_type) {
-                let ctx = TaskContext {
-                    fs: self.fs.clone(),
-                    runtime: self.runtime.clone(),
-                };
-                handler.kill(task_id_ref, ctx).await?;
-            }
+            let handler = self
+                .handlers
+                .get(&task_type)
+                .ok_or(TaskError::UnknownType)?;
+            let ctx = TaskContext {
+                fs: self.fs.clone(),
+                runtime: self.runtime.clone(),
+            };
+            handler.kill(task_id_ref, ctx).await?;
+            // Commit the routing teardown only after the owner confirms the
+            // process is stopped. A concurrent terminal transition is harmless:
+            // removals are idempotent and the status guard below preserves it.
+            self.spawned.write().await.remove(task_id_ref);
+            let cleanup = self.cleanups.lock().await.remove(task_id_ref);
             // Reflect the kill in the tracked state for any variant the M1
             // surface can write; the handler's status sink drives the rest.
             // Reverse-race guard: a task that already reached a terminal status
@@ -1114,6 +1123,7 @@ impl TaskRegistry {
             return Ok(());
         }
 
+        let cleanup = self.cleanups.lock().await.remove(task_id_ref);
         let mut handles = self.handles.lock().await;
         if let Some(h) = handles.remove(task_id_ref) {
             self.runtime

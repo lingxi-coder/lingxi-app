@@ -56,6 +56,22 @@ class MarkdownParserTest {
         assertEquals(listOf(MdInline.Text("")), parseInline(""))
     }
 
+    @Test
+    fun inline_terminalDeepLink_keepsLingxiProtocolAndLabel() {
+        assertEquals(
+            listOf(
+                MdInline.Text("run "),
+                MdInline.Link(
+                    label = "in terminal",
+                    url = "lingxi://open_terminal?sessionId=s1&initCommand=ls",
+                ),
+            ),
+            parseInline(
+                "run [in terminal](lingxi://open_terminal?sessionId=s1&initCommand=ls)",
+            ),
+        )
+    }
+
     // --- paragraphs -------------------------------------------------------
 
     @Test

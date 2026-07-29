@@ -2164,15 +2164,13 @@ fn build_lifecycle_envelope_body(
         //   elicitation_id?:string, mode?:enum(["form","url"]),
         //   action:enum(["accept","decline","cancel"]),
         //   content?:record(string,unknown)}`.
-        // The `action` and `content` fields are extracted from the
-        // `HookEvent::ElicitationResult.result` JSON blob (the complete
-        // elicitation response). `elicitation_id` and `mode` are not yet
-        // threaded through `HookEvent::ElicitationResult` — defaulted to `None`
-        // per the B1 default-fill convention. Uses `createBaseHookInput
-        // (permissionMode)` (same as `Elicitation`), so permission_mode IS
-        // threaded.
+        // The `action` and `content` fields are extracted from the complete
+        // result JSON; id and mode retain the originating elicitation identity.
+        // Uses `createBaseHookInput(permissionMode)` (same as `Elicitation`).
         HookEvent::ElicitationResult {
             server_name,
+            elicitation_id,
+            mode,
             result,
         } => {
             // Extract `action` from the result JSON. The binary schema requires
@@ -2196,8 +2194,8 @@ fn build_lifecycle_envelope_body(
                 agent_type: b.agent_type,
                 effort: b.effort,
                 mcp_server_name: server_name.clone(),
-                elicitation_id: None,
-                mode: None,
+                elicitation_id: elicitation_id.clone(),
+                mode: *mode,
                 action,
                 content,
             };

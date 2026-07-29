@@ -29,6 +29,7 @@ pub enum WriterError {
 /// the orchestrator wants it; the spec only mandates in-process for M5-07).
 pub struct JsonlWriter {
     path: PathBuf,
+    active_path: std::sync::RwLock<PathBuf>,
     fs: Arc<dyn FileSystem>,
     lock: Mutex<()>,
 }
@@ -41,6 +42,7 @@ impl JsonlWriter {
     #[must_use]
     pub fn new(path: PathBuf, fs: Arc<dyn FileSystem>) -> Self {
         Self {
+            active_path: std::sync::RwLock::new(path.clone()),
             path,
             fs,
             lock: Mutex::new(()),
@@ -53,6 +55,31 @@ impl JsonlWriter {
         &self.path
     }
 
+    /// Returns the path currently receiving appends.
+    ///
+    /// Most runtimes keep the initial path for the writer's entire lifetime.
+    /// Mobile keeps one orchestrator alive across `NewSession` and
+    /// `ResumeSession`, so it retargets the writer after the session transition.
+    #[must_use]
+    pub fn active_path(&self) -> PathBuf {
+        self.active_path
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Atomically switch subsequent appends to another session transcript.
+    ///
+    /// The append mutex makes the boundary explicit: an append already in
+    /// progress finishes on the previous file before this method returns.
+    pub async fn retarget(&self, path: PathBuf) {
+        let _g = self.lock.lock().await;
+        *self
+            .active_path
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = path;
+    }
+
     /// Append one JSONL line — `serde_json::to_string(msg) + "\n"`.
     ///
     /// Creates the parent directory on first call. The `FileSystem` trait
@@ -63,8 +90,9 @@ impl JsonlWriter {
     pub async fn append(&self, msg: &JsonlMessage) -> Result<(), WriterError> {
         let _g = self.lock.lock().await;
         let line = serde_json::to_string(msg)?;
-        let path_str = self.path.to_str().expect("session paths are UTF-8");
-        if let Some(parent) = self.path.parent() {
+        let path = self.active_path();
+        let path_str = path.to_str().expect("session paths are UTF-8");
+        if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() && !parent.exists() {
                 // Sync std::fs is fine here — we already hold the in-process
                 // mutex and parent-dir creation is a one-shot syscall.
@@ -112,8 +140,9 @@ impl JsonlWriter {
     ) -> Result<(), WriterError> {
         let line = serde_json::to_string(value)?;
         let _g = self.lock.lock().await;
-        let path_str = self.path.to_str().expect("session paths are UTF-8");
-        if let Some(parent) = self.path.parent() {
+        let path = self.active_path();
+        let path_str = path.to_str().expect("session paths are UTF-8");
+        if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() && !parent.exists() {
                 #[cfg(unix)]
                 {
@@ -146,6 +175,26 @@ impl JsonlWriter {
             "type": "custom-title",
             "customTitle": custom_title,
             "sessionId": session_id,
+        });
+        self.append_side_record(&value).await
+    }
+
+    /// Persist a mobile-created zero-message session before its first turn.
+    ///
+    /// The record deliberately remains a `custom-title` side record so the
+    /// existing session catalog can list it with `message_count == 0`, while the
+    /// versioned marker lets the mobile host distinguish a genuine empty session
+    /// from an arbitrary metadata-only/corrupt transcript.
+    pub async fn append_mobile_empty_session(
+        &self,
+        session_id: &str,
+        title: &str,
+    ) -> Result<(), WriterError> {
+        let value = serde_json::json!({
+            "type": "custom-title",
+            "customTitle": title,
+            "sessionId": session_id,
+            "mobileEmptySession": 1,
         });
         self.append_side_record(&value).await
     }
@@ -237,8 +286,9 @@ impl JsonlWriter {
     async fn append_side_record(&self, value: &serde_json::Value) -> Result<(), WriterError> {
         let line = serde_json::to_string(value)?;
         let _g = self.lock.lock().await;
-        let path_str = self.path.to_str().expect("session paths are UTF-8");
-        if let Some(parent) = self.path.parent() {
+        let path = self.active_path();
+        let path_str = path.to_str().expect("session paths are UTF-8");
+        if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() && !parent.exists() {
                 #[cfg(unix)]
                 {
@@ -266,6 +316,37 @@ impl JsonlWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn retarget_moves_subsequent_appends_to_the_new_session_file() {
+        let tmp =
+            std::env::temp_dir().join(format!("lingxi-writer-retarget-{}", std::process::id(),));
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+        let first = tmp.join("11111111-2222-3333-4444-555555555555.jsonl");
+        let second = tmp.join("66666666-7777-4888-8999-aaaaaaaaaaaa.jsonl");
+        let fs: Arc<dyn FileSystem> =
+            Arc::new(platform_posix::fs::PosixFileSystem::new(tmp.clone()));
+        let writer = JsonlWriter::new(first.clone(), fs);
+
+        writer
+            .append_custom_title("11111111-2222-3333-4444-555555555555", "first")
+            .await
+            .expect("append first title");
+        writer.retarget(second.clone()).await;
+        writer
+            .append_custom_title("66666666-7777-4888-8999-aaaaaaaaaaaa", "second")
+            .await
+            .expect("append second title");
+
+        assert_eq!(writer.active_path(), second);
+        assert!(std::fs::read_to_string(first)
+            .unwrap()
+            .contains("\"first\""));
+        assert!(std::fs::read_to_string(second)
+            .unwrap()
+            .contains("\"second\""));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     /// The `/rename` write path emits a `custom-title` line whose `sessionId`
     /// is the BARE uuid passed in (the `<uuid>.jsonl` stem the loader keys
@@ -295,6 +376,33 @@ mod tests {
         assert_eq!(value["type"], "custom-title");
         assert_eq!(value["customTitle"], "My Title");
         assert_eq!(value["sessionId"], session_id);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn append_mobile_empty_session_writes_versioned_catalog_anchor() {
+        let tmp = std::env::temp_dir()
+            .join(format!("lingxi-writer-mobile-empty-{}", std::process::id(),));
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+        let session_id = "11111111-2222-3333-4444-555555555555";
+        let session_path = tmp.join(format!("{session_id}.jsonl"));
+        let fs: Arc<dyn FileSystem> =
+            Arc::new(platform_posix::fs::PosixFileSystem::new(tmp.clone()));
+        let writer = JsonlWriter::new(session_path.clone(), fs);
+
+        writer
+            .append_mobile_empty_session(session_id, "新对话")
+            .await
+            .expect("append mobile empty-session anchor");
+
+        let raw = std::fs::read_to_string(&session_path).expect("read back");
+        let value: serde_json::Value =
+            serde_json::from_str(raw.trim()).expect("line parses as json");
+        assert_eq!(value["type"], "custom-title");
+        assert_eq!(value["customTitle"], "新对话");
+        assert_eq!(value["sessionId"], session_id);
+        assert_eq!(value["mobileEmptySession"], 1);
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

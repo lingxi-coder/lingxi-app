@@ -76,6 +76,7 @@ fun SettingsHost(
     onClose: () -> Unit = {},
     onReplayOnboarding: () -> Unit = {},
     onReconnectEngine: () -> Unit = {},
+    onOpenTerminal: (LinuxRuntimeTerminalLaunchRequest) -> Unit = {},
 ) {
     val context = LocalContext.current
     val resolvedStore: SettingsStore =
@@ -125,11 +126,6 @@ fun SettingsHost(
                 }
                 page(SettingsRoutes.ACCOUNT) { AccountPage() }
 
-                // 记忆与知识 (A6)
-                page(SettingsRoutes.KNOWLEDGE) { KnowledgePage() }
-                page(SettingsRoutes.MEMORY) { MemoryPage() }
-                page(SettingsRoutes.WORKFLOWS) { WorkflowsPage() }
-
                 // 应用 (A6)
                 page(SettingsRoutes.APPEARANCE) {
                     AppearancePage(store = appearanceStore, isDark = isDark, accentId = accentId)
@@ -144,6 +140,7 @@ fun SettingsHost(
 
                 // 隐私与安全 (A6)
                 page(SettingsRoutes.PRIVACY) { PrivacyPage() }
+                page(SettingsRoutes.OPEN_SOURCE) { OpenSourceLicensesPage() }
 
                 // 智能 — providers (A7) + voice TTS editor
                 page(SettingsRoutes.VOICE) {
@@ -211,7 +208,11 @@ fun SettingsHost(
                     )
                 }
                 page(SettingsRoutes.LINUX_RUNTIME) {
-                    LinuxRuntimePage(state = state, store = resolvedStore)
+                    LinuxRuntimePage(
+                        state = state,
+                        store = resolvedStore,
+                        onOpenTerminal = onOpenTerminal,
+                    )
                 }
                 page(SettingsRoutes.COMPUTER_USE) {
                     ComputerUseSettingsPage()
@@ -226,7 +227,19 @@ fun SettingsHost(
                     )
                 }
                 page(SettingsRoutes.DREAM) { DreamPage(state = state, store = resolvedStore) }
-                page(SettingsRoutes.CRON) { com.lingxi.code.cron.CronScreen() }
+                page(SettingsRoutes.CRON) {
+                    com.lingxi.code.cron.CronScreen()
+                }
+                page(SettingsRoutes.CRON_TASK) { entry ->
+                    com.lingxi.code.cron.CronScreen(
+                        initialTaskKey = entry.arguments?.getString("task"),
+                    )
+                }
+                page(SettingsRoutes.CRON_RUN) { entry ->
+                    com.lingxi.code.cron.CronScreen(
+                        initialRunId = entry.arguments?.getString("run"),
+                    )
+                }
             }
         }
     }
@@ -259,20 +272,21 @@ private fun titleFor(entry: androidx.navigation.NavBackStackEntry?, state: Setti
         null, SettingsRoutes.MAIN -> SettingsTitles.MAIN
         SettingsRoutes.ACCOUNT -> SettingsTitles.ACCOUNT
         SettingsRoutes.VOICE -> SettingsTitles.VOICE
-        SettingsRoutes.KNOWLEDGE -> SettingsTitles.KNOWLEDGE
-        SettingsRoutes.MEMORY -> SettingsTitles.MEMORY
-        SettingsRoutes.WORKFLOWS -> SettingsTitles.WORKFLOWS
         SettingsRoutes.APPEARANCE -> SettingsTitles.APPEARANCE
         SettingsRoutes.LANGUAGE -> SettingsTitles.LANGUAGE
         SettingsRoutes.NOTIFICATIONS -> SettingsTitles.NOTIFICATIONS
         SettingsRoutes.INPUT -> SettingsTitles.INPUT
         SettingsRoutes.PRIVACY -> SettingsTitles.PRIVACY
+        SettingsRoutes.OPEN_SOURCE -> SettingsTitles.OPEN_SOURCE
         SettingsRoutes.SKILLS -> SettingsTitles.SKILLS
         SettingsRoutes.MCP_LIST -> SettingsTitles.MCP
         SettingsRoutes.LINUX_RUNTIME -> SettingsTitles.LINUX_RUNTIME
         SettingsRoutes.COMPUTER_USE -> SettingsTitles.COMPUTER_USE
         SettingsRoutes.DREAM -> SettingsTitles.DREAM
-        SettingsRoutes.CRON -> SettingsTitles.CRON
+        SettingsRoutes.CRON,
+        SettingsRoutes.CRON_TASK,
+        SettingsRoutes.CRON_RUN,
+        -> SettingsTitles.CRON
         SettingsRoutes.PROVIDER_LIST -> providerKindArg(entry).title
         SettingsRoutes.PROVIDER_PICKER -> "添加${providerKindArg(entry).title}"
         SettingsRoutes.PROVIDER_EDIT -> {

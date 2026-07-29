@@ -83,8 +83,10 @@ data class MCPServer(
 )
 
 data class VoiceConfig(
+    val inputProvider: String = "system",
+    val inputLanguage: String = "auto",
     val preset: String = "system",
-    val voiceId: String = "zh-CN-XiaoxiaoNeural",
+    val voiceId: String = "default",
     val speed: Float = 1.0f,
     val autoPlay: Boolean = false,
 )

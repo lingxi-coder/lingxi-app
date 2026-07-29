@@ -26,6 +26,13 @@
          and returns PermissionDenied when not granted. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- Native offloads: the shared permission gate must authorize each call
+         before these Android runtime permissions are requested or consumed. -->
+    <uses-permission android:name="android.permission.READ_CALENDAR" />
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+
     <!-- Connectivity layer: ACCESS_NETWORK_STATE backs the dismissible offline
          banner driven by ConnectivityManager.NetworkCallback. Read-only — it only
          observes whether a validated network is available; it never hard-blocks. -->
@@ -36,25 +43,11 @@
          getaddrinfo is denied by netd ("No address associated with hostname"). -->
     <uses-permission android:name="android.permission.INTERNET" />
 
-    <!-- Cron scheduling layer. The desktop runs a long-lived tick loop; a phone
-         cannot, so cron jobs fire from an exact AlarmManager alarm that wakes a
-         foreground service to run the due jobs through a headless engine.
-         USE_EXACT_ALARM (Android 13+) grants exact alarms for this core scheduling
-         feature with no user prompt and no revocation; SCHEDULE_EXACT_ALARM covers
-         Android 12 (31-32), where it is user-revocable (we gate + fall back to an
-         inexact alarm). RECEIVE_BOOT_COMPLETED re-arms the next alarm after a
-         reboot / app update (alarms don't survive either). WAKE_LOCK keeps the
-         fired turn running if the device idles. The fired turn builds an engine
-         and does network LLM/tool work — far past a BroadcastReceiver's ~10s
-         budget — so it runs in a `dataSync` foreground service. -->
-    <uses-permission
-        android:name="android.permission.SCHEDULE_EXACT_ALARM"
-        android:maxSdkVersion="32" />
-    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+    <!-- Exact alarms are user-authorized. They only wake a receiver; persistent
+         execution, network waiting and retry are delegated to WorkManager. When
+         permission is denied a single 15-minute watchdog remains active. -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
-    <uses-permission android:name="android.permission.WAKE_LOCK" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
     <uses-feature
         android:name="android.hardware.camera"
@@ -80,12 +73,21 @@
             android:name=".MainActivity"
             android:exported="true"
             android:label="@string/app_name"
-            android:screenOrientation="portrait"
             android:theme="@style/Theme.LingXiCode"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+
+                <data
+                    android:host="open_terminal"
+                    android:scheme="lingxi" />
             </intent-filter>
         </activity>
 
@@ -110,26 +112,19 @@
             android:name=".cron.CronAlarmReceiver"
             android:exported="false" />
 
-        <!-- Cron: re-arm the next alarm after reboot / app replacement. Exported
-             so the system can deliver BOOT_COMPLETED; guarded by the permission +
-             the intent-filter actions. It ONLY arms the alarm (never starts the
-             foreground service — Android 14 forbids that from a boot receiver). -->
+        <!-- Cron reconciliation after lifecycle and wall-clock changes. This
+             receiver only enqueues WorkManager work; it never opens an engine. -->
         <receiver
             android:name=".cron.CronBootReceiver"
-            android:exported="true"
-            android:permission="android.permission.RECEIVE_BOOT_COMPLETED">
+            android:exported="false">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.TIME_SET" />
+                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+                <action android:name="android.app.action.SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED" />
             </intent-filter>
         </receiver>
-
-        <!-- Cron: the headless engine run for a fired job. `dataSync` = a bounded
-             network sync-like task. Not exported. -->
-        <service
-            android:name=".cron.CronRunService"
-            android:exported="false"
-            android:foregroundServiceType="dataSync" />
 
     </application>
 

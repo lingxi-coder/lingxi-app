@@ -402,18 +402,14 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         // The headless bridge has no interactive /fork or /resume-as-background
         // surface, so it wires no background-session forker seam.
         bg_session_forker: None,
-        // AskUserQuestion needs a mounted TUI bottom pane. The Electron bridge
-        // is headless from the Rust runtime's perspective, so leave the
-        // session-scoped resolver unwired instead of creating an orphaned
-        // channel whose questions can never be answered.
+        // Placeholder — `assemble_with_provider_keys` installs the
+        // connection-scoped AskUserQuestion broker once the event sink exists.
         ask_user_question_tx: None,
         // Placeholder — `resolve_desktop_config` has no live connection to
         // build a sink from yet. `assemble_with_provider_keys` overwrites this
         // to `Some(sender)` once the `BridgeConnection` (and therefore its
         // `computer_access_sink()`) exists, wiring the Electron-facing
-        // `BridgeComputerAccessBroker`. Unlike `ask_user_question_tx` (which
-        // has no Electron-facing counterpart yet and stays `None` end to end),
-        // this one is a two-phase assignment, not a permanent no-op.
+        // `BridgeComputerAccessBroker`.
         computer_access_tx: None,
         // M10: the bridge-server does not start a coordinator session by
         // default (threading this from session metadata is a follow-up).
@@ -600,6 +596,13 @@ pub async fn assemble_with_provider_keys(
     let computer_access_broker = Arc::new(client_adapter::BridgeComputerAccessBroker::new(
         connection.computer_access_sink(),
     ));
+    let (ask_user_question_tx, ask_user_question_rx) = tokio::sync::mpsc::channel::<
+        tui_core::ask_user_question_bridge::AskUserQuestionExchange,
+    >(8);
+    cfg.ask_user_question_tx = Some(ask_user_question_tx);
+    let ask_user_question_broker = Arc::new(client_adapter::BridgeAskUserQuestionBroker::new(
+        connection.event_sink(),
+    ));
 
     let runtime = build(cfg, output, permission_sink)
         .await
@@ -709,7 +712,8 @@ pub async fn assemble_with_provider_keys(
     let connection = connection
         .bind(gate, driver)
         .bind_router(router)
-        .bind_computer_access(computer_access_broker, computer_access_rx);
+        .bind_computer_access(computer_access_broker, computer_access_rx)
+        .bind_ask_user_question(ask_user_question_broker, ask_user_question_rx);
     Ok(BoundServer {
         connection,
         runtime,

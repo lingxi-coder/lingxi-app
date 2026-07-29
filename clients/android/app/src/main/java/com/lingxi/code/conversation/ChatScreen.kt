@@ -11,11 +11,13 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imeNestedScroll
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
@@ -56,11 +58,10 @@ import com.lingxi.code.theme.LingXiTheme
 /**
  * The conversation surface — the Android analog of the iOS `ChatView`.
  *
- * Composes the top bar (menu / title / theme-toggle / new-chat), the
- * [WorkflowBar], a scrolling message list (with the streaming "thinking" dots
- * row and the new-chat empty state), and the [Composer]. The conversation
- * itself is owned by [state]; user intents are hoisted to the caller's
- * [ChatViewModel] via the callbacks.
+ * Composes the top bar (menu / title / theme-toggle / new-chat), a scrolling
+ * message list (with the streaming "thinking" dots row and the new-chat empty
+ * state), and the [Composer]. The conversation itself is owned by [state]; user
+ * intents are hoisted to the caller's [ChatViewModel] via the callbacks.
  *
  * @param onOpenDrawer opens the 对话/项目/定时 drawer (wired by the root shell).
  * @param isDark current appearance, drives the sun/moon toggle glyph.
@@ -102,14 +103,16 @@ fun ChatScreen(
     modelProviderStatuses: List<ModelProviderStatus> = emptyList(),
     /** Opens the matching provider editor, or the provider list for null. */
     onOpenProviderSettings: (String?) -> Unit = { onOpenModelSettings() },
+    /** Opens the full-screen terminal with [initCommand] prefilled, not run. */
+    onOpenTerminal: (sessionId: String, initCommand: String) -> Unit = { _, _ -> },
 ) {
     val t = LingXiTheme.palette
     val listState = rememberLazyListState()
 
     // Auto-scroll to the latest turn / when streaming toggles (mirrors the iOS
     // ScrollViewReader.scrollTo("bottom")).
-    LaunchedEffect(state.messages.size, state.streaming) {
-        val count = state.messages.size + if (state.streaming) 1 else 0
+    LaunchedEffect(state.messages.size, state.shellTools.size, state.streaming) {
+        val count = state.messages.size + state.shellTools.size + if (state.streaming) 1 else 0
         if (count > 0) listState.animateScrollToItem(count - 1)
     }
 
@@ -135,11 +138,11 @@ fun ChatScreen(
                 onToggleTheme = onToggleTheme,
                 onNewChat = onNewChat,
             )
-            WorkflowBar()
             MessageList(
                 state = state,
                 listState = listState,
                 onShare = onShare,
+                onOpenTerminal = onOpenTerminal,
                 modifier = Modifier.weight(1f),
             )
             OfflineBanner(
@@ -254,16 +257,20 @@ private fun IconButton(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun MessageList(
     state: ChatState,
     listState: androidx.compose.foundation.lazy.LazyListState,
     onShare: (String) -> Unit = {},
+    onOpenTerminal: (sessionId: String, initCommand: String) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier,
 ) {
     LazyColumn(
         state = listState,
-        modifier = modifier.fillMaxWidth(),
+        modifier = modifier
+            .fillMaxWidth()
+            .imeNestedScroll(),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(
             start = 16.dp, end = 16.dp, top = 18.dp, bottom = 8.dp,
         ),
@@ -272,7 +279,28 @@ private fun MessageList(
             item(key = "empty") { EmptyState() }
         }
         items(state.messages, key = { it.id }) { m ->
-            MessageBubble(message = m, onShare = onShare)
+            MessageBubble(
+                message = m,
+                onShare = onShare,
+                onOpenLink = { link ->
+                    val uri = runCatching { android.net.Uri.parse(link) }.getOrNull()
+                    if (uri?.scheme == "lingxi" && uri.host == "open_terminal") {
+                        onOpenTerminal(
+                            uri.getQueryParameter("sessionId")
+                                ?.takeIf(String::isNotBlank)
+                                ?: state.session.id,
+                            uri.getQueryParameter("initCommand").orEmpty(),
+                        )
+                    }
+                },
+            )
+        }
+        items(state.shellTools, key = { "shell-${it.taskId}" }) { shell ->
+            ShellToolCard(
+                state = shell,
+                onOpenTerminal = onOpenTerminal,
+                modifier = Modifier.padding(vertical = 4.dp),
+            )
         }
         if (state.streaming) {
             item(key = "streaming") { StreamingRow() }

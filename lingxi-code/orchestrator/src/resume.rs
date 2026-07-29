@@ -233,7 +233,13 @@ fn build_state_from_jsonl(
     let mut last_uuid: Option<Uuid> = None;
     let mut ultracode_state = tool_workflow::UltracodeState::default();
     for m in messages {
-        let msg_uuid = Uuid::parse_str(&m.uuid).unwrap_or_else(|_| Uuid::nil());
+        let Ok(msg_uuid) = Uuid::parse_str(&m.uuid) else {
+            tracing::warn!(
+                message_type = %m.message_type,
+                "skipping transcript row with malformed UUID"
+            );
+            continue;
+        };
         match m.message_type.as_str() {
             "user" => {
                 let content_blocks = extract_content_blocks(&m.message);

@@ -99,7 +99,7 @@ class ProjectStore private constructor(
             }
         }
 
-    suspend fun recordStartedSession(projectId: String, sessionId: String, title: String) {
+    suspend fun recordStartedSession(projectId: String?, sessionId: String, title: String) {
         withContext(Dispatchers.IO) {
             repositoryMutex.withLock {
                 publishRepositoryState(

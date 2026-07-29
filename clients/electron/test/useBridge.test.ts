@@ -18,6 +18,7 @@ test('bridge spawning requests a full renderer reset', () => {
   assert.deepEqual(reset.desktop, emptyDesktopState());
   assert.deepEqual(reset.permissionQueue, []);
   assert.deepEqual(reset.computerAccessQueue, []);
+  assert.deepEqual(reset.askUserQuestionQueue, []);
 });
 
 test('pending permission ui is cleared across restart and disconnect states', () => {

@@ -89,9 +89,9 @@ struct ReloadSkillsRoots {
 pub struct ReloadSkillsHandler {
     registry: Arc<RwLock<CommandRegistry>>,
     roots: ReloadSkillsRoots,
-    /// `Ql()` — the CLI `--safe-mode` flag (`CustomizationGates.safe_mode` at
-    /// the composition root). Purely a display concern: it does not gate
-    /// whether the reload itself runs, only the trailing note on the message.
+    /// `Ql()` — the CLI `--safe-mode` flag. When set, the skill partition stays
+    /// empty: reload may invalidate stale entries but must not rediscover
+    /// on-disk customization that boot intentionally disabled.
     safe_mode: bool,
 }
 
@@ -222,15 +222,17 @@ impl BuiltinCommandHandler for ReloadSkillsHandler {
         {
             let mut reg = self.registry.write().await;
             reg.unregister_loaded_from("skills");
-            crate::custom_commands::load_and_register_skill_commands_with_roots(
-                &mut reg,
-                &self.roots.cwd,
-                &self.roots.lingxi_home,
-                self.roots.managed_dir.as_deref(),
-                &self.roots.home,
-                &self.roots.additional_skill_dirs,
-            )
-            .await;
+            if !self.safe_mode {
+                crate::custom_commands::load_and_register_skill_commands_with_roots(
+                    &mut reg,
+                    &self.roots.cwd,
+                    &self.roots.lingxi_home,
+                    self.roots.managed_dir.as_deref(),
+                    &self.roots.home,
+                    &self.roots.additional_skill_dirs,
+                )
+                .await;
+            }
         }
 
         // `s = await ZR(n)`, `i = new Set(s.map(name))` — snapshot after reload.
@@ -490,7 +492,7 @@ mod tests {
         );
         assert_eq!(
             run(&h).await,
-            "Reloaded skills: 2 skills available (2 added) (custom skills are disabled in safe mode)"
+            "Reloaded skills: 0 skills available (no changes) (custom skills are disabled in safe mode)"
         );
         fs::remove_dir_all(root).ok();
     }

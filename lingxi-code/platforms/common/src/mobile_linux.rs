@@ -497,11 +497,11 @@ impl Sandbox for MobileLinuxSandbox {
             available: capability.available,
             reason: capability.reason,
             features: SandboxFeatures {
-                network_isolation: capability.available,
-                fs_readonly: capability.rootfs_integrity,
+                network_isolation: false,
+                fs_readonly: false,
                 fs_readwrite_paths: capability.bind_mounts,
                 process_limit: false,
-                no_new_privileges: matches!(capability.backend, SandboxBackend::AndroidProot),
+                no_new_privileges: false,
             },
         }
     }
@@ -2551,7 +2551,7 @@ mod tests {
                     background_processes: true,
                     pty: true,
                     bind_mounts: true,
-                    rootfs_integrity: true,
+                    rootfs_integrity: false,
                 },
                 last_run: Mutex::new(Vec::new()),
                 last_background: Mutex::new(Vec::new()),
@@ -2788,6 +2788,20 @@ mod tests {
         assert_eq!(plan.request.cwd.as_deref(), Some("/workspace/project"));
         assert_eq!(plan.request.network, traits::NetworkPolicy::Disabled);
         assert_eq!(plan.request.mounts.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn mobile_linux_sandbox_probe_does_not_overclaim_enforcement() {
+        let runtime: Arc<dyn MobileLinuxRuntime> =
+            Arc::new(MockRuntime::new(SandboxBackend::AndroidProot));
+        let sandbox = MobileLinuxSandbox::new(runtime, Vec::new()).expect("sandbox");
+
+        let capability = sandbox.probe_capability().await;
+        assert!(capability.available);
+        assert!(!capability.features.network_isolation);
+        assert!(!capability.features.fs_readonly);
+        assert!(!capability.features.no_new_privileges);
+        assert!(capability.features.fs_readwrite_paths);
     }
 
     #[test]

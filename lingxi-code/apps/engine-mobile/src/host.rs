@@ -42,7 +42,9 @@ use client_adapter::{
     AdapterOutputStream, AdapterPermissionGate, ClientEventListener, ListenerSink,
     PermissionRequestSink, TurnWrapper,
 };
-use client_protocol::commands::{ClientCommand, ListingKindDto as ProtocolListingKind};
+use client_protocol::commands::{
+    ClientCommand, ListingKindDto as ProtocolListingKind, ProviderCredentialSecretDto,
+};
 use client_protocol::error::ClientError;
 use client_protocol::events::ClientEvent;
 use client_protocol::permission::{
@@ -51,6 +53,7 @@ use client_protocol::permission::{
 use command_api::model::BuiltinCommandHandler;
 use command_api::parse_slash_command;
 use command_api::RegistrySlashDispatcher;
+use cron::CronJobFirer;
 use llm_client::oauth::anthropic::client::ClaudeAiOAuthClient;
 use llm_client::oauth::anthropic::config::ClaudeAiOAuthConfig;
 use llm_client::oauth::anthropic::handle::OAuthHandle;
@@ -67,7 +70,7 @@ use permission::gate::PermissionGate;
 use permission::PermissionMode;
 use sandbox::runtime_config::{Platform as SandboxPlatform, SandboxRuntimeConfig};
 use secret::CredentialManager;
-use tokio::sync::{Mutex, Notify, RwLock};
+use tokio::sync::{mpsc, Mutex, Notify, RwLock};
 use tokio_util::sync::CancellationToken;
 use tool_api::AnthropicRequestBuilder;
 use tool_api::BuiltinToolContext;
@@ -77,12 +80,14 @@ use traits::http::{
     WebSocketConnectionWithMeta, WebSocketMessageStreamWithMeta,
 };
 use traits::{
-    AuthHandle, HttpTransport, MobileLinuxCapability, MobileLinuxRuntime, MobileLinuxRuntimeMode,
-    OrchestratorHandle, OutputStream, Platform, RootfsState, RootfsStatus, SlashCommandDispatcher,
+    AuthHandle, Clock, FileSystem, HttpTransport, MobileLinuxCapability, MobileLinuxRuntime,
+    MobileLinuxRuntimeMode, OrchestratorHandle, OutputStream, Platform, RootfsState, RootfsStatus,
+    SlashCommandDispatcher,
 };
 
 use crate::{
-    mobile_command_registry, mobile_tool_registry_with_skill_loader, register_android_ui_automation,
+    mobile_command_registry, mobile_tool_registry_with_skill_loader,
+    mobile_tool_registry_with_skill_loader_and_ask_resolver, register_android_ui_automation,
 };
 
 /// A sized newtype over the platform's `Arc<dyn HttpTransport>`.
@@ -101,6 +106,13 @@ impl HttpTransport for DynHttp {
         req: protocol::HttpRequest,
     ) -> Result<protocol::HttpResponse, HttpError> {
         self.0.request(req).await
+    }
+    async fn request_with_resolved_addrs(
+        &self,
+        req: protocol::HttpRequest,
+        resolved: Option<traits::ResolvedAddressOverride>,
+    ) -> Result<protocol::HttpResponse, HttpError> {
+        self.0.request_with_resolved_addrs(req, resolved).await
     }
     async fn stream_sse(&self, req: protocol::HttpRequest) -> Result<SseStream, HttpError> {
         self.0.stream_sse(req).await
@@ -176,6 +188,10 @@ pub struct MobileConfig {
     pub lingxi_home: std::path::PathBuf,
     /// Model id the build defaults to (`OrchestratorConfig.model`).
     pub default_model: String,
+    /// Whether the selected mobile workspace has passed the host trust flow.
+    /// Defaults false so `/goal` and other hook-backed persistent behaviors fail
+    /// closed until the Android/iOS host explicitly records trust.
+    pub workspace_trusted: bool,
     /// Settings-declared `providers` block as raw JSON, fed verbatim to
     /// `llm_client::ClientConfig` via `build()`. `None` ⟶ built-in profiles only.
     pub provider_profiles: Option<std::collections::BTreeMap<String, serde_json::Value>>,
@@ -223,6 +239,7 @@ impl std::fmt::Debug for MobileConfig {
             .field("cwd", &self.cwd)
             .field("lingxi_home", &self.lingxi_home)
             .field("default_model", &self.default_model)
+            .field("workspace_trusted", &self.workspace_trusted)
             .field("provider_profiles", &self.provider_profiles)
             .field("routing", &self.routing)
             .field("android_shell", &self.android_shell)
@@ -248,6 +265,7 @@ impl Default for MobileConfig {
             cwd: std::path::PathBuf::from("."),
             lingxi_home: std::path::PathBuf::new(),
             default_model: crate::MobileEngineConfig::default().default_model,
+            workspace_trusted: false,
             provider_profiles: None,
             routing: None,
             android_shell: None,
@@ -352,6 +370,12 @@ pub struct MobileRuntime {
     /// synthesize boundary events (`TurnStarted` / `MessageComplete`) and emit
     /// listing replies, so everything rides one outbound channel.
     pub event_sink: Arc<dyn client_adapter::ClientEventSink>,
+    /// The session transcript writer shared with the orchestrator.
+    ///
+    /// Mobile keeps one orchestrator alive while New/Resume changes the active
+    /// session, so the command path retargets this writer to the new UUID before
+    /// another turn can begin.
+    pub session_writer: Arc<session::jsonl::writer::JsonlWriter>,
     /// Whether the wired secure-storage backend can actually PERSIST credentials
     /// (i.e. is a real OS Keychain/Keystore, `is_encrypted() == true`). Mobile
     /// currently wires the non-persisting `PlainTextSecureStorage` stub, so this
@@ -369,6 +393,37 @@ pub struct MobileRuntime {
     /// Mobile-only Linux userspace runtime seam (Android PRoot / iOS iSH),
     /// when the platform wires one. `None` preserves the pre-migration state.
     pub mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
+}
+
+/// Non-secret result of testing one provider endpoint from the mobile engine.
+///
+/// The engine performs the request so an already-saved credential never has to
+/// cross back into Swift/Kotlin. A caller may supply an unsaved draft credential
+/// for a one-off test; it is used only for this request and is never persisted.
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderConnectionTestDto {
+    /// The endpoint authenticated successfully and the selected model is usable
+    /// (or the provider returned no machine-readable model catalog).
+    pub connected: bool,
+    /// A server returned an HTTP response, even if authentication or the model
+    /// check failed.
+    pub reachable: bool,
+    /// Authentication passed. This remains false when a rate limiter or proxy
+    /// rejected the request before credentials could be verified.
+    pub authenticated: bool,
+    /// Whether the selected model appeared in a recognized model-list payload.
+    pub model_available: bool,
+    /// HTTP status when the provider responded.
+    pub http_status: Option<u16>,
+    /// End-to-end request duration, rounded down to milliseconds.
+    pub latency_ms: u64,
+    /// Log-safe user-facing detail. Provider response bodies and credentials are
+    /// deliberately excluded.
+    pub message: String,
+    /// True when the credential came from the shared encrypted store; false for
+    /// a one-off draft supplied by the settings form.
+    pub used_stored_credential: bool,
 }
 
 /// Lowered rootfs lifecycle state for the foreign host.
@@ -779,6 +834,26 @@ pub async fn build_mobile_inner(
     permission_sink: Arc<dyn PermissionRequestSink>,
     streaming_override: Option<Arc<dyn StreamingApiClient>>,
 ) -> Result<MobileRuntime, MobileBuildError> {
+    build_mobile_inner_with_ask(
+        cfg,
+        platform,
+        listener,
+        permission_sink,
+        streaming_override,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_lines)]
+async fn build_mobile_inner_with_ask(
+    cfg: MobileConfig,
+    platform: Arc<dyn Platform>,
+    listener: Arc<dyn ClientEventListener>,
+    permission_sink: Arc<dyn PermissionRequestSink>,
+    streaming_override: Option<Arc<dyn StreamingApiClient>>,
+    ask_user_question_tx: Option<tokio::sync::mpsc::Sender<tool_ui::AskUserQuestionExchange>>,
+) -> Result<MobileRuntime, MobileBuildError> {
     let cwd = cfg.cwd.clone();
 
     // (1) OS handles from the aggregate `Platform` (NOT a concrete posix type —
@@ -786,6 +861,16 @@ pub async fn build_mobile_inner(
     let http = platform.http();
     let clock = platform.clock();
     let fs = platform.filesystem();
+    let main_session_id = protocol::SessionId::new();
+    let main_session_uuid = main_session_id.as_uuid().to_string();
+    let session_writer = Arc::new(session::jsonl::writer::JsonlWriter::new(
+        orchestrator::transcript_paths::main_transcript_path(
+            &cfg.lingxi_home,
+            &cwd.to_string_lossy(),
+            &main_session_uuid,
+        ),
+        fs.clone(),
+    ));
     let mobile_linux = platform.mobile_linux();
     let mobile_linux_capability = match mobile_linux.as_ref() {
         Some(runtime) => Some(runtime.probe_capability().await),
@@ -1228,6 +1313,8 @@ pub async fn build_mobile_inner(
     // seam, so read the keys directly like the `skipWebFetchPreflight` path.
     let mut allowed_http_hook_urls: Option<Vec<String>> = None;
     let mut http_hook_allowed_env_vars: Option<Vec<String>> = None;
+    let mut disable_all_hooks = false;
+    let mut hooks_restricted = false;
     let concat_dedup_str_array =
         |acc: &mut Option<Vec<String>>, val: Option<&serde_json::Value>| {
             let Some(arr) = val.and_then(serde_json::Value::as_array) else {
@@ -1255,6 +1342,18 @@ pub async fn build_mobile_inner(
                 ),
             }
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+                if let Some(value) = v
+                    .get("disableAllHooks")
+                    .and_then(serde_json::Value::as_bool)
+                {
+                    disable_all_hooks = value;
+                }
+                if let Some(value) = v
+                    .get("allowManagedHooksOnly")
+                    .and_then(serde_json::Value::as_bool)
+                {
+                    hooks_restricted = value;
+                }
                 concat_dedup_str_array(&mut allowed_http_hook_urls, v.get("allowedHttpHookUrls"));
                 concat_dedup_str_array(
                     &mut http_hook_allowed_env_vars,
@@ -1288,6 +1387,7 @@ pub async fn build_mobile_inner(
             Arc::new(platform_posix_minimal::PosixRuntime::new())
                 as Arc<dyn traits::RuntimeSpawner>,
         )
+        .with_policy_disable_all_hooks(disable_all_hooks)
         .with_process_runner(process.clone(), sandbox.clone())
         .with_prompt_runner(Arc::new(orchestrator::ApiClientHookPromptRunner::new(
             api_client.clone(),
@@ -1427,10 +1527,16 @@ pub async fn build_mobile_inner(
             mobile_linux_capability.as_ref(),
         )
         .and_then(|_| cfg.mobile_git_secret().cloned()),
-        // The V2 task tools' BLOCKING TaskCreated/TaskCompleted hooks are a
-        // desktop composition-root wiring; mobile leaves them unwired (the tool
-        // path is then non-blocking, matching the registry firer behavior).
-        task_lifecycle_hooks: None,
+        // Mobile uses the same blocking TaskCreated/TaskCompleted hook contract
+        // as desktop. The transcript path is unavailable before the session is
+        // mounted, so it remains empty; cwd and policy are still enforced.
+        task_lifecycle_hooks: Some(Arc::new(
+            orchestrator::OrchestratorTaskLifecycleHookFirer::new(
+                hooks.clone(),
+                cwd.clone(),
+                std::path::PathBuf::new(),
+            ),
+        )),
     };
     // #5 invariant: mobile has no live sandbox runtime, so sandboxing must stay
     // unavailable — otherwise `should_use_sandbox` would route commands through
@@ -1467,7 +1573,20 @@ pub async fn build_mobile_inner(
     // `should_use_sandbox` short-circuits to `NoSandbox` and the expansion runs
     // via the plain `ProcessRunner` — consistent with mobile's own Bash tool.
     let shell_expansion_provider = tool_skill::build_prompt_shell_provider(&tool_ctx);
-    let mut tools = mobile_tool_registry_with_skill_loader(tool_ctx, skill_loader);
+    let mut tools = if let Some(tx) = ask_user_question_tx {
+        let timeout = tool_ui::ask_user_question::AskUserQuestionTimeout::parse_or_default(
+            tool_ctx.ask_user_question_timeout.as_deref(),
+        );
+        mobile_tool_registry_with_skill_loader_and_ask_resolver(
+            tool_ctx,
+            skill_loader,
+            Arc::new(tool_ui::ask_user_question::TuiBridgeResolver::new(
+                timeout, tx,
+            )),
+        )
+    } else {
+        mobile_tool_registry_with_skill_loader(tool_ctx, skill_loader)
+    };
     register_android_ui_automation(&mut tools, platform.android_ui_automation());
     let tools = Arc::new(tools);
 
@@ -1538,6 +1657,8 @@ pub async fn build_mobile_inner(
         // `cwd` is reused below by the batch-8 registration, so clone here.
         cwd.clone(),
     )
+    .with_session_id(main_session_id)
+    .with_jsonl_writer(session_writer.clone())
     // P0.2: attach the SAME `HookRegistry` the executor reads so `list_hooks`
     // reports the loaded settings hooks (the executor fires against it; this
     // exposes it for inspection — mobile sibling of desktop's
@@ -1548,6 +1669,8 @@ pub async fn build_mobile_inner(
     // `getTranscriptPathForSession`) even though no `JsonlWriter` is wired —
     // mobile sibling of desktop's `.with_config_home(cfg.lingxi_home.clone())`.
     .with_config_home(cfg.lingxi_home.clone())
+    .with_workspace_trusted(cfg.workspace_trusted)
+    .with_hooks_restricted(hooks_restricted || disable_all_hooks)
     // Audit fix (#15): the orchestrator shares the ONE AnalyticsBus (so its
     // events ride the same sink as the ApiService + tools) + the session
     // CostTracker (desktop parity; accumulates the running session cost total).
@@ -1687,6 +1810,7 @@ pub async fn build_mobile_inner(
         permission_gate: adapter_gate,
         listener,
         event_sink,
+        session_writer,
         oauth_supported,
         credentials,
         mobile_linux,
@@ -1774,6 +1898,8 @@ pub struct MobileEngineHandle {
     /// [`AdapterPermissionGate::resolve`] (needed for the `AllowAlways` rule
     /// append). The mobile analog of bridge-server's `FramePermissionSink` map.
     tool_names: Arc<Mutex<HashMap<u64, String>>>,
+    /// Correlates interactive `AskUserQuestion` events with inbound answers.
+    ask_user_question_broker: Arc<client_adapter::BridgeAskUserQuestionBroker>,
     /// Number of builtin mobile skills assembled (the M8 smoke signal, retained
     /// so the existing Swift/Kotlin smoke test keeps working).
     skill_count: usize,
@@ -1851,6 +1977,15 @@ impl ActiveTurn {
 }
 
 impl MobileEngineHandle {
+    /// Return a credential-free view over this handle's validated cron store.
+    pub async fn cron_store(&self) -> Arc<MobileCronStoreHandle> {
+        Arc::new(MobileCronStoreHandle::new(
+            self.firer_cfg.cwd.clone(),
+            self.firer_platform.filesystem(),
+            self.firer_platform.clock(),
+        ))
+    }
+
     /// Number of builtin mobile skills assembled. (Under `uniffi`:
     /// `#[uniffi::export]`.)
     #[must_use]
@@ -1941,6 +2076,169 @@ impl MobileEngineHandle {
             .is_some_and(|turn| turn.cancel.is_cancelled())
     }
 
+    async fn retarget_session_writer(&self, session_id: protocol::SessionId, cwd: &str) {
+        let path = orchestrator::transcript_paths::main_transcript_path(
+            &self.lingxi_home,
+            cwd,
+            &session_id.as_uuid().to_string(),
+        );
+        self.inner.session_writer.retarget(path).await;
+    }
+
+    async fn has_mobile_empty_session_anchor(&self, session_id: uuid::Uuid, cwd: &str) -> bool {
+        let path = session::jsonl::session_path(&self.lingxi_home, cwd, &session_id.to_string());
+        let Some(path) = path.to_str() else {
+            return false;
+        };
+        let Ok(file) = self.fs.read_file(path, None, None).await else {
+            return false;
+        };
+        let expected_session_id = session_id.to_string();
+        file.content.lines().any(|line| {
+            serde_json::from_str::<serde_json::Value>(line)
+                .ok()
+                .is_some_and(|value| {
+                    value.get("type").and_then(serde_json::Value::as_str) == Some("custom-title")
+                        && value.get("sessionId").and_then(serde_json::Value::as_str)
+                            == Some(expected_session_id.as_str())
+                        && value
+                            .get("mobileEmptySession")
+                            .and_then(serde_json::Value::as_u64)
+                            == Some(1)
+                })
+        })
+    }
+
+    async fn persist_mobile_empty_session_anchor(
+        &self,
+        session_id: uuid::Uuid,
+        cwd: &str,
+        title: &str,
+    ) -> Result<(), ClientError> {
+        let path = session::jsonl::session_path(&self.lingxi_home, cwd, &session_id.to_string());
+        let writer = session::jsonl::JsonlWriter::new(path, self.fs.clone());
+        writer
+            .append_mobile_empty_session(
+                &session_id.to_string(),
+                if title.is_empty() { "新对话" } else { title },
+            )
+            .await
+            .map_err(|error| ClientError::Internal {
+                message: format!("persist empty session failed: {error}"),
+            })
+    }
+
+    async fn resume_session_impl(
+        &self,
+        session_id: String,
+        cwd: Option<String>,
+        empty_bootstrap_title: Option<String>,
+    ) -> Result<(), ClientError> {
+        if self.active_cancel.lock().await.is_some() {
+            return Err(ClientError::Rejected {
+                message: "cannot resume while a turn is in flight".into(),
+            });
+        }
+
+        let canonical_session_id = session_id.strip_prefix("sess:").unwrap_or(&session_id);
+        let uuid =
+            uuid::Uuid::parse_str(canonical_session_id).map_err(|error| ClientError::Rejected {
+                message: format!("resume: malformed session id {session_id:?}: {error}"),
+            })?;
+        let cwd = cwd.unwrap_or_else(|| self.session_cwd.clone());
+
+        match orchestrator::replay_session_state(&self.lingxi_home, &cwd, uuid, self.fs.clone())
+            .await
+        {
+            Ok(replayed) => {
+                let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
+                handle
+                    .resume_session(
+                        protocol::SessionId::from_uuid(uuid),
+                        replayed.state.history.clone(),
+                        replayed.last_message_uuid.map(|id| id.to_string()),
+                        replayed
+                            .state
+                            .active_goal
+                            .clone()
+                            .map(|goal| traits::ActiveGoalSnapshot {
+                                condition: goal.condition,
+                                set_at: goal.set_at,
+                                last_reason: goal.last_reason,
+                            }),
+                        replayed.handle_runtime_snapshot(),
+                    )
+                    .await
+                    .map_err(|error| ClientError::Internal {
+                        message: format!("resume_session failed: {error}"),
+                    })?;
+                self.retarget_session_writer(protocol::SessionId::from_uuid(uuid), &cwd)
+                    .await;
+                let messages = client_adapter::lowering::lower_transcript(&replayed.state.history);
+                self.event_sink
+                    .emit(ClientEvent::SessionResumed {
+                        session_id: uuid.to_string(),
+                        messages,
+                    })
+                    .await;
+                Ok(())
+            }
+            Err(error) => {
+                let is_empty = matches!(
+                    &error,
+                    orchestrator::resume::ResumeError::Loader(
+                        session::jsonl::LoaderError::EmptyDirectory
+                    )
+                );
+                let is_missing = matches!(
+                    &error,
+                    orchestrator::resume::ResumeError::Loader(
+                        session::jsonl::LoaderError::SessionNotFound { .. }
+                    )
+                );
+                let has_anchor = is_empty && self.has_mobile_empty_session_anchor(uuid, &cwd).await;
+                let may_bootstrap = empty_bootstrap_title.is_some() && (is_empty || is_missing);
+                if !has_anchor && !may_bootstrap {
+                    return Err(ClientError::Rejected {
+                        message: format!("resume: session {session_id} not resumable: {error}"),
+                    });
+                }
+
+                if !has_anchor {
+                    self.persist_mobile_empty_session_anchor(
+                        uuid,
+                        &cwd,
+                        empty_bootstrap_title.as_deref().unwrap_or("新对话"),
+                    )
+                    .await?;
+                }
+
+                let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
+                handle
+                    .resume_session(
+                        protocol::SessionId::from_uuid(uuid),
+                        Vec::new(),
+                        None,
+                        None,
+                        traits::ResumeRuntimeSnapshot::default(),
+                    )
+                    .await
+                    .map_err(|resume_error| ClientError::Internal {
+                        message: format!("resume empty session failed: {resume_error}"),
+                    })?;
+                self.retarget_session_writer(protocol::SessionId::from_uuid(uuid), &cwd)
+                    .await;
+                self.event_sink
+                    .emit(ClientEvent::SessionResumed {
+                        session_id: uuid.to_string(),
+                        messages: Vec::new(),
+                    })
+                    .await;
+                Ok(())
+            }
+        }
+    }
+
     /// Reserve the connection's single turn slot without replacing its owner.
     async fn reserve_turn(&self) -> Result<Arc<ActiveTurn>, ClientError> {
         let mut active = self.active_cancel.lock().await;
@@ -2014,6 +2312,22 @@ impl MobileEngineHandle {
 // SAME method body.
 #[cfg_attr(feature = "uniffi", uniffi::export(async_runtime = "tokio"))]
 impl MobileEngineHandle {
+    /// Resume a confirmed zero-message mobile session without changing its UUID.
+    ///
+    /// Android persists `SessionStarted` immediately in its Project index. Older
+    /// versions did so before the engine wrote any JSONL file, so this explicit
+    /// entrypoint is the migration-safe proof that a missing transcript is an
+    /// intended empty session rather than lost conversation data. If a valid
+    /// transcript now exists, it is replayed normally instead of being cleared.
+    pub async fn resume_empty_session(
+        &self,
+        session_id: String,
+        title: String,
+    ) -> Result<(), ClientError> {
+        self.resume_session_impl(session_id, None, Some(title))
+            .await
+    }
+
     /// Submit one [`ClientCommand`] to the engine (plan F3-05).
     ///
     /// This is the mobile analog of the bridge-server's inbound frame dispatch
@@ -2053,9 +2367,11 @@ impl MobileEngineHandle {
     ///   `orchestrator::replay_session_state`, adopt it into the running
     ///   orchestrator with `OrchestratorHandle::resume_session`, and confirm with a
     ///   `SessionResumed { session_id, messages }` carrying the full restored
-    ///   transcript (lowered via `client_adapter::lowering::lower_transcript`). A
-    ///   missing / corrupt / malformed session is honestly `Rejected` — we never
-    ///   emit a false `SessionResumed`.
+    ///   transcript (lowered via `client_adapter::lowering::lower_transcript`).
+    ///   An explicitly anchored mobile zero-message session restores with an empty
+    ///   transcript and the same UUID. Other missing, corrupt, or malformed
+    ///   sessions are honestly `Rejected` — we never emit a false
+    ///   `SessionResumed`.
     ///
     /// Remaining host-driven / reserved commands (the task commands — mobile binds
     /// no `TaskRegistry`) are accepted and no-op'd (the `#[non_exhaustive]` enum
@@ -2110,6 +2426,31 @@ impl MobileEngineHandle {
             ClientCommand::DenyPermission { request_id } => {
                 self.resolve_permission(request_id, PermissionResponseDto::Deny)
                     .await;
+                Ok(())
+            }
+            ClientCommand::AnswerAskUserQuestion {
+                request_id,
+                answers,
+            } => {
+                if !self
+                    .ask_user_question_broker
+                    .resolve(request_id, answers)
+                    .await
+                {
+                    tracing::debug!(
+                        request_id,
+                        "mobile: resolve for unknown / already-resolved AskUserQuestion id"
+                    );
+                }
+                Ok(())
+            }
+            ClientCommand::CancelAskUserQuestion { request_id } => {
+                if !self.ask_user_question_broker.cancel(request_id).await {
+                    tracing::debug!(
+                        request_id,
+                        "mobile: cancel for unknown / already-resolved AskUserQuestion id"
+                    );
+                }
                 Ok(())
             }
 
@@ -2373,6 +2714,8 @@ impl MobileEngineHandle {
                     .map_err(|e| ClientError::Internal {
                         message: format!("clear_session failed: {e}"),
                     })?;
+                self.retarget_session_writer(handle.current_session_id().await, &self.session_cwd)
+                    .await;
                 self.event_sink.emit(ClientEvent::SessionEnded).await;
                 Ok(())
             }
@@ -2423,6 +2766,16 @@ impl MobileEngineHandle {
                     .map_err(|e| ClientError::Internal {
                         message: format!("new session (clear_session) failed: {e}"),
                     })?;
+                let new_session_id = handle.current_session_id().await;
+                self.retarget_session_writer(new_session_id, &self.session_cwd)
+                    .await;
+                self.inner
+                    .session_writer
+                    .append_mobile_empty_session(&new_session_id.as_uuid().to_string(), "新对话")
+                    .await
+                    .map_err(|error| ClientError::Internal {
+                        message: format!("new session anchor failed: {error}"),
+                    })?;
                 if let Some(model) = model {
                     let listings = handle.list_model_listings().await;
                     let (model_id, profile) = traits::parse_model_ref(&model, &listings);
@@ -2433,7 +2786,11 @@ impl MobileEngineHandle {
                             message: format!("new session model switch failed: {e}"),
                         })?;
                 }
-                let session_id = handle.current_session_id().await.to_string();
+                // Mobile clients persist this value as the resumable catalog key.
+                // `SessionId::Display` is presentation-oriented (`sess:<uuid>`),
+                // while the JSONL filename and ResumeSession contract use the
+                // bare UUID. Never leak the display prefix into persisted state.
+                let session_id = new_session_id.as_uuid().to_string();
                 self.event_sink
                     .emit(ClientEvent::SessionStarted { session_id })
                     .await;
@@ -2447,89 +2804,13 @@ impl MobileEngineHandle {
             // it into the RUNNING orchestrator IN PLACE (named id + replayed
             // history + JSONL parent-uuid chain pointer), and emit a
             // `SessionResumed` carrying the full restored transcript so the client
-            // renders the rehydrated conversation atomically. A missing / corrupt /
-            // malformed session is honestly `Rejected` — a session that is not
-            // resumable is genuinely not resumable, so we reject rather than emit a
-            // FALSE `SessionResumed`.
+            // renders the rehydrated conversation atomically. An explicitly
+            // anchored mobile zero-message session restores with an empty
+            // transcript and the same UUID. Other missing, corrupt, or malformed
+            // sessions are honestly `Rejected`, so we never emit a FALSE
+            // `SessionResumed`.
             ClientCommand::ResumeSession { session_id, cwd } => {
-                // (a) Reject mid-turn (same contract as `ClearSession` /
-                // `NewSession`): a resume must not race an in-flight turn.
-                let mid_turn = self.active_cancel.lock().await.is_some();
-                if mid_turn {
-                    return Err(ClientError::Rejected {
-                        message: "cannot resume while a turn is in flight".into(),
-                    });
-                }
-
-                // (b) Parse the named session id as a `Uuid`. A malformed id is
-                // honestly rejected (not faked) — there is no session to adopt.
-                let uuid = match uuid::Uuid::parse_str(&session_id) {
-                    Ok(u) => u,
-                    Err(e) => {
-                        return Err(ClientError::Rejected {
-                            message: format!("resume: malformed session id {session_id:?}: {e}"),
-                        });
-                    }
-                };
-
-                // (c) cwd: use the command's override if Some, else the
-                // connection's session cwd (the project-dir key the loader walks).
-                let cwd = cwd.unwrap_or_else(|| self.session_cwd.clone());
-
-                // (d) Load + validate the on-disk JSONL. A SessionNotFound /
-                // ChainBroken / SessionIdMismatch / Io / Parse / EmptyDirectory is
-                // genuinely not resumable — reject carrying the loader's message
-                // (HONEST: we never emit a false SessionResumed for a missing /
-                // corrupt session).
-                let replayed = match orchestrator::replay_session_state(
-                    &self.lingxi_home,
-                    &cwd,
-                    uuid,
-                    self.fs.clone(),
-                )
-                .await
-                {
-                    Ok(r) => r,
-                    Err(e) => {
-                        return Err(ClientError::Rejected {
-                            message: format!("resume: session {session_id} not resumable: {e}"),
-                        });
-                    }
-                };
-
-                // (e) Adopt the replayed session INTO the running orchestrator
-                // (named id + history + JSONL chain pointer), then confirm with a
-                // `SessionResumed` carrying the full restored transcript.
-                let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
-                handle
-                    .resume_session(
-                        protocol::SessionId::from_uuid(uuid),
-                        replayed.state.history.clone(),
-                        replayed.last_message_uuid.map(|u| u.to_string()),
-                        replayed
-                            .state
-                            .active_goal
-                            .clone()
-                            .map(|goal| traits::ActiveGoalSnapshot {
-                                condition: goal.condition,
-                                set_at: goal.set_at,
-                                last_reason: goal.last_reason,
-                            }),
-                        replayed.handle_runtime_snapshot(),
-                    )
-                    .await
-                    .map_err(|e| ClientError::Internal {
-                        message: format!("resume_session failed: {e}"),
-                    })?;
-
-                let messages = client_adapter::lowering::lower_transcript(&replayed.state.history);
-                self.event_sink
-                    .emit(ClientEvent::SessionResumed {
-                        session_id: uuid.to_string(),
-                        messages,
-                    })
-                    .await;
-                Ok(())
+                self.resume_session_impl(session_id, cwd, None).await
             }
 
             // ── Host-driven / reserved in the foundation ────────────────────
@@ -2546,6 +2827,100 @@ impl MobileEngineHandle {
                 Ok(())
             }
         }
+    }
+
+    /// Test a provider endpoint without exposing a stored credential to the
+    /// foreign host or mutating the live engine configuration.
+    ///
+    /// The request uses each provider's model-list endpoint because it verifies
+    /// DNS/TLS, authentication, and the selected model without consuming
+    /// inference tokens. An optional draft credential takes precedence over the
+    /// secure-store value and is never persisted.
+    pub async fn test_provider_connection(
+        &self,
+        provider_id: String,
+        provider_preset: String,
+        api_base: String,
+        model: String,
+        credential_override: Option<ProviderCredentialSecretDto>,
+    ) -> ProviderConnectionTestDto {
+        if !provider_id_is_valid(&provider_id) {
+            return provider_connection_failure("Provider 标识无效", false, false, None, 0, false);
+        }
+
+        let draft = credential_override
+            .as_ref()
+            .map(ProviderCredentialSecretDto::expose_secret)
+            .filter(|value| !value.trim().is_empty());
+        let used_stored_credential = draft.is_none();
+        let credential = if let Some(value) = draft {
+            value.to_string()
+        } else {
+            match self.inner.credentials.get_provider_key(&provider_id).await {
+                Ok(Some(secret)) => secret.expose_secret().clone(),
+                Ok(None) => {
+                    return provider_connection_failure(
+                        "请先输入或保存 API Key",
+                        false,
+                        false,
+                        None,
+                        0,
+                        true,
+                    );
+                }
+                Err(_) => {
+                    return provider_connection_failure(
+                        "无法读取本机安全存储中的 API Key",
+                        false,
+                        false,
+                        None,
+                        0,
+                        true,
+                    );
+                }
+            }
+        };
+        if credential.len() > 16_384 || credential.contains('\0') {
+            return provider_connection_failure(
+                "API Key 格式无效",
+                false,
+                false,
+                None,
+                0,
+                used_stored_credential,
+            );
+        }
+
+        let endpoint = match provider_models_endpoint(&api_base, &provider_preset) {
+            Ok(endpoint) => endpoint,
+            Err(message) => {
+                return provider_connection_failure(
+                    message,
+                    false,
+                    false,
+                    None,
+                    0,
+                    used_stored_credential,
+                );
+            }
+        };
+        let request = protocol::HttpRequest {
+            method: protocol::HttpMethod::Get,
+            url: endpoint,
+            headers: provider_connection_headers(&provider_preset, &credential),
+            body: None,
+            body_bytes: None,
+            timeout: Some(PROVIDER_CONNECTION_TIMEOUT),
+        };
+        let started = std::time::Instant::now();
+        let response = self.firer_platform.http().request(request).await;
+        let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        classify_provider_connection_response(
+            response,
+            model.trim(),
+            latency_ms,
+            used_stored_credential,
+        )
     }
 
     /// The tokio runtime [`tokio::runtime::Id`] (as a string token) this async
@@ -2846,25 +3221,230 @@ fn provider_id_is_valid(value: &str) -> bool {
         })
 }
 
+const PROVIDER_CONNECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+fn provider_models_endpoint(api_base: &str, provider_preset: &str) -> Result<String, &'static str> {
+    let base = api_base.trim().trim_end_matches('/');
+    if base.is_empty() {
+        return Err("请填写 API 地址");
+    }
+    if !(base.starts_with("https://") || base.starts_with("http://")) {
+        return Err("API 地址必须以 https:// 或 http:// 开头");
+    }
+    if base
+        .chars()
+        .any(|ch| ch.is_whitespace() || matches!(ch, '#' | '?'))
+        || base.split_once("://").is_some_and(|(_, authority)| {
+            authority
+                .split('/')
+                .next()
+                .is_some_and(|host| host.contains('@'))
+        })
+    {
+        return Err("API 地址格式无效");
+    }
+
+    if base.ends_with("/models") {
+        return Ok(base.to_string());
+    }
+    if let Some(prefix) = base.strip_suffix("/chat/completions") {
+        return Ok(format!("{prefix}/models"));
+    }
+    if provider_preset == "anthropic" && !base.ends_with("/v1") {
+        return Ok(format!("{base}/v1/models"));
+    }
+    Ok(format!("{base}/models"))
+}
+
+fn provider_connection_headers(provider_preset: &str, credential: &str) -> Vec<(String, String)> {
+    let mut headers = vec![("accept".to_string(), "application/json".to_string())];
+    match provider_preset {
+        "anthropic" => {
+            headers.push(("x-api-key".to_string(), credential.to_string()));
+            headers.push(("anthropic-version".to_string(), "2023-06-01".to_string()));
+        }
+        "google" => {
+            headers.push(("x-goog-api-key".to_string(), credential.to_string()));
+        }
+        _ => {
+            headers.push(("authorization".to_string(), format!("Bearer {credential}")));
+        }
+    }
+    headers
+}
+
+fn provider_connection_failure(
+    message: impl Into<String>,
+    reachable: bool,
+    authenticated: bool,
+    http_status: Option<u16>,
+    latency_ms: u64,
+    used_stored_credential: bool,
+) -> ProviderConnectionTestDto {
+    ProviderConnectionTestDto {
+        connected: false,
+        reachable,
+        authenticated,
+        model_available: false,
+        http_status,
+        latency_ms,
+        message: message.into(),
+        used_stored_credential,
+    }
+}
+
+fn provider_model_ids(body: &str) -> Option<Vec<String>> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let entries = value
+        .get("data")
+        .or_else(|| value.get("models"))?
+        .as_array()?;
+    Some(
+        entries
+            .iter()
+            .filter_map(|entry| {
+                entry
+                    .get("id")
+                    .or_else(|| entry.get("name"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(|id| id.strip_prefix("models/").unwrap_or(id).to_string())
+            })
+            .collect(),
+    )
+}
+
+fn classify_provider_connection_response(
+    response: Result<protocol::HttpResponse, HttpError>,
+    model: &str,
+    latency_ms: u64,
+    used_stored_credential: bool,
+) -> ProviderConnectionTestDto {
+    match response {
+        Ok(response) if (200..300).contains(&response.status) => {
+            let model_ids = provider_model_ids(&response.body);
+            let model_available = model.is_empty()
+                || model_ids
+                    .as_ref()
+                    .is_some_and(|ids| ids.iter().any(|id| id == model));
+            match model_ids {
+                Some(_) if !model_available => provider_connection_failure(
+                    format!("连接与认证成功，但模型 `{model}` 不在可用列表中"),
+                    true,
+                    true,
+                    Some(response.status),
+                    latency_ms,
+                    used_stored_credential,
+                ),
+                Some(_) => ProviderConnectionTestDto {
+                    connected: true,
+                    reachable: true,
+                    authenticated: true,
+                    model_available: true,
+                    http_status: Some(response.status),
+                    latency_ms,
+                    message: format!("连接成功 · {latency_ms} ms"),
+                    used_stored_credential,
+                },
+                None => ProviderConnectionTestDto {
+                    connected: true,
+                    reachable: true,
+                    authenticated: true,
+                    model_available: false,
+                    http_status: Some(response.status),
+                    latency_ms,
+                    message: format!("连接与认证成功 · {latency_ms} ms（未能校验模型列表）"),
+                    used_stored_credential,
+                },
+            }
+        }
+        Ok(response) => {
+            classify_provider_connection_status(response.status, latency_ms, used_stored_credential)
+        }
+        Err(HttpError::Status { status, .. }) => {
+            classify_provider_connection_status(status, latency_ms, used_stored_credential)
+        }
+        Err(HttpError::Timeout(_)) => provider_connection_failure(
+            "连接超时，请检查网络或 API 地址",
+            false,
+            false,
+            None,
+            latency_ms,
+            used_stored_credential,
+        ),
+        Err(HttpError::Connection(_)) => provider_connection_failure(
+            "无法连接服务，请检查网络、DNS、TLS 或 API 地址",
+            false,
+            false,
+            None,
+            latency_ms,
+            used_stored_credential,
+        ),
+        Err(HttpError::InvalidRequest(_)) => provider_connection_failure(
+            "API 地址或请求配置无效",
+            false,
+            false,
+            None,
+            latency_ms,
+            used_stored_credential,
+        ),
+        Err(HttpError::InvalidResponse(_)) => provider_connection_failure(
+            "服务响应格式无效",
+            true,
+            false,
+            None,
+            latency_ms,
+            used_stored_credential,
+        ),
+        Err(HttpError::Cancelled) => provider_connection_failure(
+            "连接测试已取消",
+            false,
+            false,
+            None,
+            latency_ms,
+            used_stored_credential,
+        ),
+    }
+}
+
+fn classify_provider_connection_status(
+    status: u16,
+    latency_ms: u64,
+    used_stored_credential: bool,
+) -> ProviderConnectionTestDto {
+    let (message, authenticated) = match status {
+        400 | 422 => ("服务可达，但请求格式不受支持", false),
+        401 => ("认证失败，请检查 API Key", false),
+        402 => ("认证成功，但账户余额不足", true),
+        403 => ("服务拒绝访问，请检查 Key 权限", false),
+        404 => ("服务可达，但模型列表端点不存在；请检查 API 地址", false),
+        429 => ("服务可达，但请求频率已达上限，请稍后重试", false),
+        500..=599 => ("Provider 服务暂时不可用，请稍后重试", false),
+        _ => ("Provider 返回了无法识别的响应", false),
+    };
+    provider_connection_failure(
+        message,
+        true,
+        authenticated,
+        Some(status),
+        latency_ms,
+        used_stored_credential,
+    )
+}
+
 // ───────────────────────────────────────────────────────────────────────────
 // Cron firing — the Android background-scheduler bridge.
 //
 // The desktop `cron::CronScheduler` 60s tick loop is unavailable on mobile (no
 // long-lived daemon, and the mobile engine binds no `TaskRegistry` / subagent
-// spawner). Instead the Android foreground service — woken by an exact
-// `AlarmManager` alarm — calls `run_due_cron_now()` to evaluate
-// `<cwd>/.lingxi/scheduled_tasks.json` ONCE and fire whatever is due, then
-// `next_cron_fire_time()` to arm the next alarm. Due-detection + bookkeeping is
-// `cron::run_due` (1:1 with the desktop tick loop); firing is a fresh, throwaway
-// orchestrator turn. Permission strategy is claude-code parity: the fired turn
-// inherits the session permission context via the orchestrator's existing
-// `PolicyPermissionGate` (settings rules + defaultMode) — no special escalation.
+// spawner). Android WorkManager calls the single-occurrence methods below after
+// AlarmManager or the 15-minute watchdog wakes it. Due-detection and
+// bookkeeping remain in the shared cron store; firing is a fresh, throwaway
+// orchestrator turn. Durable allow rules still apply, while any permission that
+// would require foreground interaction is denied immediately.
 // ───────────────────────────────────────────────────────────────────────────
 
-/// Per-job wall-clock budget for a fired cron turn. A turn that parks (e.g. on a
-/// permission `Ask` with no interactive answerer in a headless run) is abandoned
-/// after this so the firing pass makes progress — faithful to claude-code's
-/// "never silently escalate for cron" stance (a prompting tool ends the job).
+/// Per-job wall-clock budget for a fired cron turn. This remains a second
+/// safety limit beneath WorkManager's outer lifecycle budget.
 const CRON_TURN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
 
 /// Terminal status of one fired cron job, lowered for the foreign host.
@@ -2892,6 +3472,9 @@ pub struct FiredCronJobDto {
     pub result_text: Option<String>,
     /// Terminal status.
     pub status: CronFireStatusDto,
+    /// Whether the failure is safe to retry automatically (HTTP 429/5xx and
+    /// transport failures). Successful runs always report `false`.
+    pub retryable: bool,
 }
 
 /// A persisted cron job lowered for the Android management UI.
@@ -2914,6 +3497,21 @@ pub struct CronTaskDto {
     pub next_fire_ms: Option<u64>,
     /// Human-readable schedule (e.g. "every day at 9:00am").
     pub human: String,
+    /// Whether Android may schedule this task. Recurring schedules must have a
+    /// minimum interval of 15 minutes; one-shot schedules are exempt.
+    pub mobile_supported: bool,
+    /// Stable explanation when [`Self::mobile_supported`] is false.
+    pub unsupported_reason: Option<String>,
+}
+
+/// One due task occurrence lowered for WorkManager dispatch.
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CronDueOccurrenceDto {
+    /// Stable persisted task id.
+    pub task_id: String,
+    /// The task's computed (possibly missed) fire instant in epoch milliseconds.
+    pub scheduled_at_ms: u64,
 }
 
 /// A discarding [`ClientEventListener`] that captures only assistant text, so a
@@ -2932,16 +3530,19 @@ impl ClientEventListener for CapturingListener {
     }
 }
 
-/// A no-op [`PermissionRequestSink`]: a headless cron turn has no interactive
-/// answerer, so an outbound request is dropped (it parks until the throwaway gate
-/// is dropped, which fail-closed resolves it `Deny`). The core
-/// allow/deny/defaultMode policy still binds via the orchestrator's
-/// `PolicyPermissionGate` — pre-allowed tools run (claude-code parity).
-struct NoopPermissionSink;
+/// A headless cron turn has no foreground answerer. Requests are forwarded to a
+/// local channel and resolved `Deny` immediately, so a background job never
+/// parks for the normal five-minute interactive timeout. Existing durable
+/// allow-rules still short-circuit before a request is emitted.
+struct ImmediateDenyPermissionSink {
+    sender: mpsc::UnboundedSender<PermissionRequestDto>,
+}
 
 #[async_trait]
-impl PermissionRequestSink for NoopPermissionSink {
-    async fn emit_request(&self, _request: PermissionRequestDto) {}
+impl PermissionRequestSink for ImmediateDenyPermissionSink {
+    async fn emit_request(&self, request: PermissionRequestDto) {
+        let _ = self.sender.send(request);
+    }
 }
 
 /// A [`cron::CronJobFirer`] that runs a due job as a FRESH, throwaway
@@ -2961,7 +3562,10 @@ impl cron::CronJobFirer for MobileTurnFirer {
         let listener: Arc<dyn ClientEventListener> = Arc::new(CapturingListener {
             text: captured.clone(),
         });
-        let sink: Arc<dyn PermissionRequestSink> = Arc::new(NoopPermissionSink);
+        let (permission_tx, mut permission_rx) = mpsc::unbounded_channel();
+        let sink: Arc<dyn PermissionRequestSink> = Arc::new(ImmediateDenyPermissionSink {
+            sender: permission_tx,
+        });
         let rt = build_mobile_inner(
             self.cfg.clone(),
             self.platform.clone(),
@@ -2972,12 +3576,25 @@ impl cron::CronJobFirer for MobileTurnFirer {
         .await
         .map_err(|e| e.to_string())?;
 
+        let gate = rt.permission_gate.clone();
+        let deny_requests = tokio::spawn(async move {
+            while let Some(request) = permission_rx.recv().await {
+                let tool_name = match &request.kind {
+                    PermissionKindDto::ToolUseConfirm { tool_name, .. } => tool_name.as_str(),
+                    _ => "",
+                };
+                let _ = gate
+                    .resolve(request.request_id, PermissionResponseDto::Deny, tool_name)
+                    .await;
+            }
+        });
         let run = rt.orchestrator.run_turn_streaming(prompt);
         let result = match tokio::time::timeout(CRON_TURN_TIMEOUT, run).await {
             Ok(Ok(_outcome)) => Ok(captured.lock().await.clone()),
             Ok(Err(e)) => Err(e.to_string()),
             Err(_) => Err("cron turn timed out".to_string()),
         };
+        deny_requests.abort();
         // `rt` drops here → the throwaway session + its permission gate tear down.
         result
     }
@@ -3000,6 +3617,331 @@ fn task_next_fire_ms(
     // fire. A raw `next_match_after` here omitted Claude Code's recurring jitter,
     // making the displayed time disagree with the armed alarm by up to 30 min.
     cron::next_fire_epoch_ms_for_task(id, cron, created_at_ms, last_fired_at_ms, recurring, now)
+}
+
+const MOBILE_MIN_RECURRING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+fn cron_field_values(field: &cron::CronField, min: u32, max: u32) -> Option<Vec<u32>> {
+    let values = match field {
+        cron::CronField::Any => (min..=max).collect(),
+        cron::CronField::Exact(value) => vec![*value],
+        cron::CronField::Step(step) if *step > 0 => {
+            (min..=max).filter(|value| value % step == 0).collect()
+        }
+        cron::CronField::Step(_) => return None,
+        cron::CronField::Range(start, end) if start <= end => (*start..=*end).collect(),
+        cron::CronField::Range(_, _) => return None,
+        cron::CronField::List(values) if !values.is_empty() => values.clone(),
+        cron::CronField::List(_) => return None,
+    };
+    if values.iter().all(|value| (min..=max).contains(value)) {
+        Some(values)
+    } else {
+        None
+    }
+}
+
+/// Android's recurring-work contract: a valid five-field cron expression whose
+/// closest two wall-clock occurrences are at least fifteen minutes apart.
+/// One-shot tasks still validate field ranges but are not interval-limited.
+fn mobile_cron_schedule_error(cron_expr: &str, recurring: bool) -> Option<String> {
+    let expression = match cron::parse_cron(cron_expr) {
+        Ok(expression) => expression,
+        Err(error) => return Some(format!("invalid cron expression: {error}")),
+    };
+    let invalid_field = || Some("cron expression contains an out-of-range field".to_string());
+    let Some(minutes) = cron_field_values(&expression.minute, 0, 59) else {
+        return invalid_field();
+    };
+    let Some(hours) = cron_field_values(&expression.hour, 0, 23) else {
+        return invalid_field();
+    };
+    if cron_field_values(&expression.dom, 1, 31).is_none()
+        || cron_field_values(&expression.month, 1, 12).is_none()
+        || cron_field_values(&expression.dow, 0, 6).is_none()
+    {
+        return invalid_field();
+    }
+    if !recurring {
+        return None;
+    }
+
+    let mut minute_of_day = Vec::with_capacity(minutes.len() * hours.len());
+    for hour in hours {
+        for minute in &minutes {
+            minute_of_day.push(hour * 60 + minute);
+        }
+    }
+    minute_of_day.sort_unstable();
+    minute_of_day.dedup();
+    if minute_of_day.is_empty() {
+        return Some("cron expression has no valid fire time".to_string());
+    }
+    if minute_of_day.len() > 1 {
+        let min_gap = minute_of_day
+            .windows(2)
+            .map(|pair| pair[1] - pair[0])
+            .chain(std::iter::once(
+                24 * 60 - minute_of_day[minute_of_day.len() - 1] + minute_of_day[0],
+            ))
+            .min()
+            .unwrap_or(24 * 60);
+        if std::time::Duration::from_secs(u64::from(min_gap) * 60) < MOBILE_MIN_RECURRING_INTERVAL {
+            return Some("Android recurring tasks must be at least 15 minutes apart".to_string());
+        }
+    }
+    None
+}
+
+fn cron_task_dto(task: cron::CronTask, now: std::time::SystemTime) -> CronTaskDto {
+    let recurring = task.recurring.unwrap_or(false);
+    let unsupported_reason = mobile_cron_schedule_error(&task.cron, recurring);
+    CronTaskDto {
+        human: tool_cron::schedule_cron::cron_to_human(&task.cron),
+        next_fire_ms: task_next_fire_ms(
+            &task.id,
+            &task.cron,
+            task.created_at,
+            task.last_fired_at,
+            recurring,
+            now,
+        ),
+        id: task.id,
+        cron: task.cron,
+        prompt: task.prompt,
+        created_at_ms: task.created_at,
+        last_fired_at_ms: task.last_fired_at,
+        recurring,
+        mobile_supported: unsupported_reason.is_none(),
+        unsupported_reason,
+    }
+}
+
+fn cron_failure_is_retryable(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    [
+        "429",
+        "rate limit",
+        "transport error",
+        "connection failed",
+        "temporarily unavailable",
+        "timed out",
+        "timeout",
+        "dns",
+        "http 5",
+        "status 5",
+        "server error",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+fn fired_cron_dto(task: &cron::CronTask, result: Result<String, String>) -> FiredCronJobDto {
+    match result {
+        Ok(text) => FiredCronJobDto {
+            id: task.id.clone(),
+            prompt: task.prompt.clone(),
+            result_text: Some(text),
+            status: CronFireStatusDto::Ok,
+            retryable: false,
+        },
+        Err(message) => FiredCronJobDto {
+            id: task.id.clone(),
+            prompt: task.prompt.clone(),
+            result_text: None,
+            retryable: cron_failure_is_retryable(&message),
+            status: CronFireStatusDto::Failed { message },
+        },
+    }
+}
+
+async fn read_cron_tasks(fs: &dyn FileSystem, cwd: &std::path::Path) -> cron::ScheduledTasks {
+    cron::read_tasks_body(fs, cwd)
+        .await
+        .map(|body| cron::parse_tasks(&body))
+        .unwrap_or_default()
+}
+
+/// Lightweight, credential-free scheduled-task store used by Android UI and
+/// reconciliation workers. It owns only the validated workspace root plus the
+/// platform filesystem/clock; constructing it never builds an LLM client.
+#[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
+pub struct MobileCronStoreHandle {
+    cwd: std::path::PathBuf,
+    fs: Arc<dyn FileSystem>,
+    clock: Arc<dyn Clock>,
+}
+
+impl MobileCronStoreHandle {
+    #[must_use]
+    pub fn new(cwd: std::path::PathBuf, fs: Arc<dyn FileSystem>, clock: Arc<dyn Clock>) -> Self {
+        Self { cwd, fs, clock }
+    }
+}
+
+#[cfg_attr(feature = "uniffi", uniffi::export(async_runtime = "tokio"))]
+impl MobileCronStoreHandle {
+    pub async fn list(&self) -> Vec<CronTaskDto> {
+        let now = self.clock.now();
+        read_cron_tasks(self.fs.as_ref(), &self.cwd)
+            .await
+            .tasks
+            .into_iter()
+            .map(|task| cron_task_dto(task, now))
+            .collect()
+    }
+
+    pub async fn create(
+        &self,
+        cron_expr: String,
+        prompt: String,
+        recurring: bool,
+    ) -> Result<CronTaskDto, MobileEngineError> {
+        if let Some(error) = mobile_cron_schedule_error(&cron_expr, recurring) {
+            return Err(MobileEngineError::Internal(error));
+        }
+        let _process_guard = cron::lock_cron_file().await;
+        let _file_guard = cron::lock_scheduled_tasks(self.fs.as_ref(), &self.cwd)
+            .await
+            .map_err(|error| {
+                MobileEngineError::Internal(format!("lock scheduled_tasks.json: {error}"))
+            })?;
+        let mut document = read_cron_tasks(self.fs.as_ref(), &self.cwd).await;
+        let now = self.clock.now();
+        let now_ms = now
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as u64)
+            .unwrap_or(0);
+        let task = cron::CronTask {
+            id: tool_cron::schedule_cron::generate_cron_task_id(),
+            cron: cron_expr,
+            prompt,
+            created_at: now_ms,
+            last_fired_at: None,
+            recurring: Some(recurring),
+            permanent: None,
+        };
+        document.tasks.push(task.clone());
+        cron::write_tasks_body(
+            self.fs.as_ref(),
+            &self.cwd,
+            &cron::serialize_tasks(&document),
+        )
+        .await
+        .map_err(|error| {
+            MobileEngineError::Internal(format!("write scheduled_tasks.json: {error}"))
+        })?;
+        Ok(cron_task_dto(task, now))
+    }
+
+    pub async fn update(
+        &self,
+        id: String,
+        cron_expr: String,
+        prompt: String,
+        recurring: bool,
+    ) -> Result<CronTaskDto, MobileEngineError> {
+        if let Some(error) = mobile_cron_schedule_error(&cron_expr, recurring) {
+            return Err(MobileEngineError::Internal(error));
+        }
+        let _process_guard = cron::lock_cron_file().await;
+        let _file_guard = cron::lock_scheduled_tasks(self.fs.as_ref(), &self.cwd)
+            .await
+            .map_err(|error| {
+                MobileEngineError::Internal(format!("lock scheduled_tasks.json: {error}"))
+            })?;
+        let mut document = read_cron_tasks(self.fs.as_ref(), &self.cwd).await;
+        let now = self.clock.now();
+        let now_ms = now
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as u64)
+            .unwrap_or(0);
+        let task = document
+            .tasks
+            .iter_mut()
+            .find(|task| task.id == id)
+            .ok_or(MobileEngineError::NotFound)?;
+        task.cron = cron_expr;
+        task.prompt = prompt;
+        task.recurring = Some(recurring);
+        task.created_at = now_ms;
+        task.last_fired_at = None;
+        let updated = task.clone();
+        cron::write_tasks_body(
+            self.fs.as_ref(),
+            &self.cwd,
+            &cron::serialize_tasks(&document),
+        )
+        .await
+        .map_err(|error| {
+            MobileEngineError::Internal(format!("write scheduled_tasks.json: {error}"))
+        })?;
+        Ok(cron_task_dto(updated, now))
+    }
+
+    pub async fn delete(&self, id: String) -> bool {
+        let _process_guard = cron::lock_cron_file().await;
+        let Ok(_file_guard) = cron::lock_scheduled_tasks(self.fs.as_ref(), &self.cwd).await else {
+            return false;
+        };
+        let mut document = read_cron_tasks(self.fs.as_ref(), &self.cwd).await;
+        let previous_len = document.tasks.len();
+        document.tasks.retain(|task| task.id != id);
+        previous_len != document.tasks.len()
+            && cron::write_tasks_body(
+                self.fs.as_ref(),
+                &self.cwd,
+                &cron::serialize_tasks(&document),
+            )
+            .await
+            .is_ok()
+    }
+
+    pub async fn next_fire_time(&self) -> Option<u64> {
+        self.list()
+            .await
+            .into_iter()
+            .filter(|task| task.mobile_supported)
+            .filter_map(|task| task.next_fire_ms)
+            .min()
+    }
+
+    pub async fn due_occurrences(&self, now_ms: u64) -> Vec<CronDueOccurrenceDto> {
+        self.list()
+            .await
+            .into_iter()
+            .filter(|task| task.mobile_supported)
+            .filter_map(|task| {
+                task.next_fire_ms
+                    .filter(|scheduled_at_ms| *scheduled_at_ms <= now_ms)
+                    .map(|scheduled_at_ms| CronDueOccurrenceDto {
+                        task_id: task.id,
+                        scheduled_at_ms,
+                    })
+            })
+            .collect()
+    }
+
+    pub fn validate_schedule(&self, cron_expr: String, recurring: bool) -> Option<String> {
+        mobile_cron_schedule_error(&cron_expr, recurring)
+    }
+}
+
+fn finalize_cron_occurrence(
+    document: &mut cron::ScheduledTasks,
+    task_id: &str,
+    completed_at_ms: u64,
+) {
+    let remove = document
+        .tasks
+        .iter()
+        .find(|task| task.id == task_id)
+        .is_some_and(|task| !task.recurring.unwrap_or(false));
+    if remove {
+        document.tasks.retain(|task| task.id != task_id);
+    } else if let Some(task) = document.tasks.iter_mut().find(|task| task.id == task_id) {
+        task.last_fired_at = Some(completed_at_ms);
+    }
 }
 
 // The cron FFI surface — async UniFFI exports driven on the handle-owned runtime
@@ -3032,6 +3974,10 @@ impl MobileEngineHandle {
             id: f.id,
             prompt: f.prompt,
             result_text: f.result_text,
+            retryable: matches!(
+                &f.status,
+                cron::FireStatus::Failed(message) if cron_failure_is_retryable(message)
+            ),
             status: match f.status {
                 cron::FireStatus::Ok => CronFireStatusDto::Ok,
                 cron::FireStatus::Failed(message) => CronFireStatusDto::Failed { message },
@@ -3044,45 +3990,25 @@ impl MobileEngineHandle {
     /// or `None` if there are no jobs / none ever fire again. The Android
     /// scheduler arms its next exact alarm at this instant.
     pub async fn next_cron_fire_time(&self) -> Option<u64> {
-        let path = cron::tasks_file::scheduled_tasks_path(&self.firer_cfg.cwd);
-        cron::next_fire_epoch_ms(
-            &path,
+        MobileCronStoreHandle::new(
+            self.firer_cfg.cwd.clone(),
             self.firer_platform.filesystem(),
             self.firer_platform.clock(),
         )
+        .next_fire_time()
         .await
     }
 
     /// List the persisted cron jobs for the management UI (each with its computed
     /// next fire + human schedule). A missing / unparseable file lists nothing.
     pub async fn cron_list(&self) -> Vec<CronTaskDto> {
-        let fs = self.firer_platform.filesystem();
-        let Ok(content) = cron::tasks_file::read_tasks_body(fs.as_ref(), &self.firer_cfg.cwd).await
-        else {
-            return Vec::new();
-        };
-        let now = self.firer_platform.clock().now();
-        cron::tasks_file::parse_tasks(&content)
-            .tasks
-            .into_iter()
-            .map(|t| CronTaskDto {
-                human: tool_cron::schedule_cron::cron_to_human(&t.cron),
-                next_fire_ms: task_next_fire_ms(
-                    &t.id,
-                    &t.cron,
-                    t.created_at,
-                    t.last_fired_at,
-                    t.recurring.unwrap_or(false),
-                    now,
-                ),
-                id: t.id,
-                cron: t.cron,
-                prompt: t.prompt,
-                created_at_ms: t.created_at,
-                last_fired_at_ms: t.last_fired_at,
-                recurring: t.recurring.unwrap_or(false),
-            })
-            .collect()
+        MobileCronStoreHandle::new(
+            self.firer_cfg.cwd.clone(),
+            self.firer_platform.filesystem(),
+            self.firer_platform.clock(),
+        )
+        .list()
+        .await
     }
 
     /// Create a durable cron job from the UI: validate the expression, mint a
@@ -3098,80 +4024,158 @@ impl MobileEngineHandle {
         prompt: String,
         recurring: bool,
     ) -> Result<CronTaskDto, MobileEngineError> {
-        cron::parse_cron(&cron_expr)
-            .map_err(|e| MobileEngineError::Internal(format!("invalid cron expression: {e}")))?;
-        let fs = self.firer_platform.filesystem();
-        // Serialize against a concurrent firing pass's write-back (lost-update guard).
-        let _process_guard = cron::lock_cron_file().await;
-        let _file_guard = cron::tasks_file::lock_scheduled_tasks(fs.as_ref(), &self.firer_cfg.cwd)
-            .await
-            .map_err(|e| MobileEngineError::Internal(format!("lock scheduled_tasks.json: {e}")))?;
-        let mut doc =
-            match cron::tasks_file::read_tasks_body(fs.as_ref(), &self.firer_cfg.cwd).await {
-                Ok(body) => cron::tasks_file::parse_tasks(&body),
-                Err(_) => cron::tasks_file::ScheduledTasks::default(),
-            };
-        let now = self.firer_platform.clock().now();
-        let now_ms = now
-            .duration_since(std::time::SystemTime::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        let task = cron::tasks_file::CronTask {
-            id: tool_cron::schedule_cron::generate_cron_task_id(),
-            cron: cron_expr,
-            prompt,
-            created_at: now_ms,
-            last_fired_at: None,
-            recurring: Some(recurring),
-            permanent: None,
-        };
-        doc.tasks.push(task.clone());
-        cron::tasks_file::write_tasks_body(
-            fs.as_ref(),
-            &self.firer_cfg.cwd,
-            &cron::tasks_file::serialize_tasks(&doc),
+        MobileCronStoreHandle::new(
+            self.firer_cfg.cwd.clone(),
+            self.firer_platform.filesystem(),
+            self.firer_platform.clock(),
         )
+        .create(cron_expr, prompt, recurring)
         .await
-        .map_err(|e| MobileEngineError::Internal(format!("write scheduled_tasks.json: {e}")))?;
-        Ok(CronTaskDto {
-            human: tool_cron::schedule_cron::cron_to_human(&task.cron),
-            next_fire_ms: task_next_fire_ms(&task.id, &task.cron, now_ms, None, recurring, now),
-            id: task.id,
-            cron: task.cron,
-            prompt: task.prompt,
-            created_at_ms: task.created_at,
-            last_fired_at_ms: None,
-            recurring,
-        })
+    }
+
+    /// Edit a task in place while preserving its stable id.
+    pub async fn cron_update(
+        &self,
+        id: String,
+        cron_expr: String,
+        prompt: String,
+        recurring: bool,
+    ) -> Result<CronTaskDto, MobileEngineError> {
+        MobileCronStoreHandle::new(
+            self.firer_cfg.cwd.clone(),
+            self.firer_platform.filesystem(),
+            self.firer_platform.clock(),
+        )
+        .update(id, cron_expr, prompt, recurring)
+        .await
     }
 
     /// Delete a cron job by id. Returns `true` iff a job was removed.
     pub async fn cron_delete(&self, id: String) -> bool {
+        MobileCronStoreHandle::new(
+            self.firer_cfg.cwd.clone(),
+            self.firer_platform.filesystem(),
+            self.firer_platform.clock(),
+        )
+        .delete(id)
+        .await
+    }
+
+    /// Run one scheduled occurrence exactly once across duplicate alarm/worker
+    /// deliveries. A retryable transport failure intentionally leaves the
+    /// occurrence unacknowledged so WorkManager can retry it.
+    pub async fn run_cron_task_if_due(
+        &self,
+        task_id: String,
+        scheduled_at_ms: u64,
+    ) -> Option<FiredCronJobDto> {
         let fs = self.firer_platform.filesystem();
-        // Serialize against a concurrent firing pass's write-back (lost-update guard).
         let _process_guard = cron::lock_cron_file().await;
-        let Ok(_file_guard) =
-            cron::tasks_file::lock_scheduled_tasks(fs.as_ref(), &self.firer_cfg.cwd).await
+        let _file_guard = cron::lock_scheduled_tasks(fs.as_ref(), &self.firer_cfg.cwd)
+            .await
+            .ok()?;
+        let mut document = read_cron_tasks(fs.as_ref(), &self.firer_cfg.cwd).await;
+        let now = self.firer_platform.clock().now();
+        let now_ms = now
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as u64)
+            .unwrap_or(0);
+        let task = document
+            .tasks
+            .iter()
+            .find(|task| task.id == task_id)?
+            .clone();
+        let recurring = task.recurring.unwrap_or(false);
+        if mobile_cron_schedule_error(&task.cron, recurring).is_some() {
+            return None;
+        }
+        let expected = task_next_fire_ms(
+            &task.id,
+            &task.cron,
+            task.created_at,
+            task.last_fired_at,
+            recurring,
+            now,
+        )?;
+        if expected != scheduled_at_ms || scheduled_at_ms > now_ms {
+            return None;
+        }
+
+        let firer = MobileTurnFirer {
+            cfg: self.firer_cfg.clone(),
+            platform: self.firer_platform.clone(),
+        };
+        let fired = fired_cron_dto(&task, firer.fire(&task.id, &task.prompt).await);
+        if !fired.retryable {
+            finalize_cron_occurrence(&mut document, &task.id, now_ms);
+            let _ = cron::write_tasks_body(
+                fs.as_ref(),
+                &self.firer_cfg.cwd,
+                &cron::serialize_tasks(&document),
+            )
+            .await;
+        }
+        Some(fired)
+    }
+
+    /// Mark a retry-exhausted occurrence complete without running it again.
+    pub async fn acknowledge_cron_occurrence(&self, task_id: String, scheduled_at_ms: u64) -> bool {
+        let fs = self.firer_platform.filesystem();
+        let _process_guard = cron::lock_cron_file().await;
+        let Ok(_file_guard) = cron::lock_scheduled_tasks(fs.as_ref(), &self.firer_cfg.cwd).await
         else {
             return false;
         };
-        let Ok(content) = cron::tasks_file::read_tasks_body(fs.as_ref(), &self.firer_cfg.cwd).await
-        else {
+        let mut document = read_cron_tasks(fs.as_ref(), &self.firer_cfg.cwd).await;
+        let now = self.firer_platform.clock().now();
+        let now_ms = now
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as u64)
+            .unwrap_or(0);
+        let Some(task) = document.tasks.iter().find(|task| task.id == task_id) else {
             return false;
         };
-        let mut doc = cron::tasks_file::parse_tasks(&content);
-        let before = doc.tasks.len();
-        doc.tasks.retain(|t| t.id != id);
-        if doc.tasks.len() == before {
+        let expected = task_next_fire_ms(
+            &task.id,
+            &task.cron,
+            task.created_at,
+            task.last_fired_at,
+            task.recurring.unwrap_or(false),
+            now,
+        );
+        if expected != Some(scheduled_at_ms) || scheduled_at_ms > now_ms {
             return false;
         }
-        cron::tasks_file::write_tasks_body(
+        finalize_cron_occurrence(&mut document, &task_id, now_ms);
+        cron::write_tasks_body(
             fs.as_ref(),
             &self.firer_cfg.cwd,
-            &cron::tasks_file::serialize_tasks(&doc),
+            &cron::serialize_tasks(&document),
         )
         .await
         .is_ok()
+    }
+
+    /// Execute a task immediately without moving its recurring/one-shot anchor.
+    pub async fn run_cron_task_now(&self, task_id: String) -> Option<FiredCronJobDto> {
+        let fs = self.firer_platform.filesystem();
+        let _process_guard = cron::lock_cron_file().await;
+        let _file_guard = cron::lock_scheduled_tasks(fs.as_ref(), &self.firer_cfg.cwd)
+            .await
+            .ok()?;
+        let task = read_cron_tasks(fs.as_ref(), &self.firer_cfg.cwd)
+            .await
+            .tasks
+            .into_iter()
+            .find(|task| task.id == task_id)?;
+        let firer = MobileTurnFirer {
+            cfg: self.firer_cfg.clone(),
+            platform: self.firer_platform.clone(),
+        };
+        Some(fired_cron_dto(
+            &task,
+            firer.fire(&task.id, &task.prompt).await,
+        ))
     }
 }
 
@@ -3252,18 +4256,28 @@ pub fn build_mobile_engine_inner(
 
     // `build_mobile` is async; drive it on the owned runtime so any spawned work
     // it does is owned by this handle's runtime, not an ambient one.
+    let (ask_user_question_tx, ask_user_question_rx) =
+        tokio::sync::mpsc::channel::<tool_ui::AskUserQuestionExchange>(8);
     let inner = runtime
-        .block_on(build_mobile_inner(
+        .block_on(build_mobile_inner_with_ask(
             cfg,
             platform,
             listener,
             recording_sink,
             streaming_override,
+            Some(ask_user_question_tx),
         ))
         .map_err(|e| MobileEngineError::Internal(e.to_string()))?;
 
     let skill_count = crate::mobile_skill_registry().len();
     let event_sink = inner.event_sink.clone();
+    let ask_user_question_broker = Arc::new(client_adapter::BridgeAskUserQuestionBroker::new(
+        event_sink.clone(),
+    ));
+    {
+        let broker = ask_user_question_broker.clone();
+        runtime.spawn(async move { broker.run(ask_user_question_rx).await });
+    }
 
     Ok(Arc::new(MobileEngineHandle {
         runtime,
@@ -3271,6 +4285,7 @@ pub fn build_mobile_engine_inner(
         event_sink,
         active_cancel: Arc::new(Mutex::new(None)),
         tool_names,
+        ask_user_question_broker,
         skill_count,
         lingxi_home,
         session_cwd,
@@ -3288,7 +4303,10 @@ mod tests {
     use async_trait::async_trait;
     use client_adapter::{ClientEventListener, PermissionRequestSink};
 
-    use super::{build_mobile, MobileConfig};
+    use super::{
+        build_mobile, classify_provider_connection_response, mobile_cron_schedule_error,
+        provider_models_endpoint, MobileConfig, MobileCronStoreHandle,
+    };
     // F3-06: the off-device host shim now lives in `crate::test_support` (the
     // single, non-drifting definition shared with the `skeleton_test.rs`
     // integration test). The in-crate F3-03/F3-05 unit tests reuse it. The
@@ -3298,6 +4316,125 @@ mod tests {
         test_config, CollectingPermissionSink as RecordingPermissionSink, FakeListener,
         HostFakePlatform,
     };
+
+    #[test]
+    fn android_recurring_schedule_enforces_fifteen_minute_floor() {
+        assert!(mobile_cron_schedule_error("*/5 * * * *", true).is_some());
+        assert!(mobile_cron_schedule_error("0,10 * * * *", true).is_some());
+        assert!(mobile_cron_schedule_error("*/15 * * * *", true).is_none());
+        assert!(mobile_cron_schedule_error("0 * * * *", true).is_none());
+        assert!(mobile_cron_schedule_error("* * * * *", false).is_none());
+        assert!(mobile_cron_schedule_error("61 * * * *", false).is_some());
+    }
+
+    #[test]
+    fn provider_connection_uses_provider_specific_model_endpoint() {
+        assert_eq!(
+            Ok("https://api.deepseek.com/models".to_string()),
+            provider_models_endpoint("https://api.deepseek.com/", "deepseek"),
+        );
+        assert_eq!(
+            Ok("https://api.openai.com/v1/models".to_string()),
+            provider_models_endpoint("https://api.openai.com/v1", "openai"),
+        );
+        assert_eq!(
+            Ok("https://api.anthropic.com/v1/models".to_string()),
+            provider_models_endpoint("https://api.anthropic.com", "anthropic"),
+        );
+        assert!(provider_models_endpoint("file:///tmp/provider", "custom").is_err());
+        assert!(provider_models_endpoint("https://key@example.com/v1", "custom").is_err());
+    }
+
+    #[test]
+    fn provider_connection_requires_selected_model_in_recognized_catalog() {
+        let connected = classify_provider_connection_response(
+            Ok(protocol::HttpResponse {
+                status: 200,
+                headers: Vec::new(),
+                body: r#"{"object":"list","data":[{"id":"deepseek-v4-flash"}]}"#.to_string(),
+                body_bytes: Vec::new(),
+            }),
+            "deepseek-v4-flash",
+            42,
+            true,
+        );
+        assert!(connected.connected);
+        assert!(connected.authenticated);
+        assert!(connected.model_available);
+        assert_eq!(Some(200), connected.http_status);
+        assert!(connected.used_stored_credential);
+
+        let missing = classify_provider_connection_response(
+            Ok(protocol::HttpResponse {
+                status: 200,
+                headers: Vec::new(),
+                body: r#"{"models":[{"name":"models/gemini-2.5-flash"}]}"#.to_string(),
+                body_bytes: Vec::new(),
+            }),
+            "gemini-2.5-pro",
+            9,
+            false,
+        );
+        assert!(!missing.connected);
+        assert!(missing.authenticated);
+        assert!(!missing.model_available);
+        assert!(!missing.used_stored_credential);
+    }
+
+    #[test]
+    fn provider_connection_maps_auth_failure_without_echoing_response_body() {
+        let result = classify_provider_connection_response(
+            Err(traits::HttpError::Status {
+                status: 401,
+                body: "secret-bearing upstream response".to_string(),
+            }),
+            "deepseek-v4-flash",
+            18,
+            true,
+        );
+
+        assert!(!result.connected);
+        assert!(result.reachable);
+        assert!(!result.authenticated);
+        assert_eq!(Some(401), result.http_status);
+        assert!(!result.message.contains("upstream"));
+        assert!(!result.message.contains("secret"));
+    }
+
+    #[tokio::test]
+    async fn lightweight_cron_store_crud_and_due_occurrence_need_no_engine() {
+        use platform_posix_minimal::{PosixClock, PosixFileSystem};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(temp.path().join(branding::DOT_DIR)).expect("state dir");
+        let store = MobileCronStoreHandle::new(
+            temp.path().to_path_buf(),
+            Arc::new(PosixFileSystem::new(temp.path().to_path_buf())),
+            Arc::new(PosixClock::new()),
+        );
+
+        let created = store
+            .create("* * * * *".to_string(), "hello".to_string(), false)
+            .await
+            .expect("one-shot creation");
+        assert_eq!(1, store.list().await.len());
+        let updated = store
+            .update(
+                created.id.clone(),
+                "*/15 * * * *".to_string(),
+                "updated".to_string(),
+                true,
+            )
+            .await
+            .expect("recurring update");
+        assert_eq!("updated", updated.prompt);
+        let due = store
+            .due_occurrences(updated.next_fire_ms.expect("next fire").saturating_add(1))
+            .await;
+        assert_eq!(created.id, due[0].task_id);
+        assert!(store.delete(created.id).await);
+        assert!(store.list().await.is_empty());
+    }
 
     /// In-memory encrypted store used to exercise post-boot provider credential
     /// writes without involving a platform keychain.
@@ -4333,6 +5470,7 @@ mod tests {
                 .expect("submit(NewSession) ok");
 
             let after = oh.current_session_id().await.to_string();
+            let after_uuid = oh.current_session_id().await.as_uuid().to_string();
             assert_ne!(before, after, "NewSession must mint a fresh session id");
 
             let events = drained(&listener).await;
@@ -4342,9 +5480,124 @@ mod tests {
             });
             assert_eq!(
                 started.expect("a SessionStarted event must be emitted"),
-                after,
-                "SessionStarted must carry the new connection session id"
+                after_uuid,
+                "SessionStarted must carry the bare resumable UUID"
             );
+
+            let path =
+                session::jsonl::session_path(&handle.lingxi_home, &handle.session_cwd, &after_uuid);
+            let raw = std::fs::read_to_string(path).expect("new session anchor exists");
+            let anchor: serde_json::Value =
+                serde_json::from_str(raw.trim()).expect("anchor is valid json");
+            assert_eq!(anchor["sessionId"], after_uuid);
+            assert_eq!(anchor["mobileEmptySession"], 1);
+
+            handle
+                .submit(ClientCommand::ListSessions { limit: None })
+                .await
+                .expect("list anchored empty session");
+            let events = drained(&listener).await;
+            let row = events.iter().rev().find_map(|event| match event {
+                Ev::SessionList { sessions } => {
+                    sessions.iter().find(|row| row.uuid == after_uuid).cloned()
+                }
+                _ => None,
+            });
+            let row = row.expect("anchored empty session must be listed");
+            assert_eq!(row.message_count, 0);
+        });
+    }
+
+    #[test]
+    fn submit_resume_session_restores_anchored_empty_session_with_same_uuid() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, listener) = build_submit_handle(tmp.path());
+
+        handle.runtime().block_on(async {
+            use traits::OrchestratorHandle;
+
+            handle
+                .submit(ClientCommand::NewSession {
+                    cwd: None,
+                    model: None,
+                })
+                .await
+                .expect("create anchored empty session");
+            let expected = handle
+                .inner()
+                .orchestrator
+                .current_session_id()
+                .await
+                .as_uuid()
+                .to_string();
+
+            handle
+                .submit(ClientCommand::ResumeSession {
+                    session_id: expected.clone(),
+                    cwd: None,
+                })
+                .await
+                .expect("anchored empty session resumes");
+
+            assert_eq!(
+                handle
+                    .inner()
+                    .orchestrator
+                    .current_session_id()
+                    .await
+                    .as_uuid()
+                    .to_string(),
+                expected,
+            );
+            let events = drained(&listener).await;
+            assert!(events.iter().any(|event| matches!(
+                event,
+                Ev::SessionResumed {
+                    session_id,
+                    messages,
+                } if session_id == &expected && messages.is_empty()
+            )));
+        });
+    }
+
+    #[test]
+    fn resume_empty_session_bootstraps_legacy_project_index_uuid() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, listener) = build_submit_handle(tmp.path());
+        let expected = "dddddddd-4444-4444-8444-dddddddddddd";
+
+        handle.runtime().block_on(async {
+            use traits::OrchestratorHandle;
+
+            handle
+                .resume_empty_session(expected.into(), "旧空会话".into())
+                .await
+                .expect("legacy indexed empty session resumes");
+
+            assert_eq!(
+                handle
+                    .inner()
+                    .orchestrator
+                    .current_session_id()
+                    .await
+                    .as_uuid()
+                    .to_string(),
+                expected,
+            );
+            let path =
+                session::jsonl::session_path(&handle.lingxi_home, &handle.session_cwd, expected);
+            let raw = std::fs::read_to_string(path).expect("migration anchor exists");
+            assert!(raw.contains("\"mobileEmptySession\":1"));
+            assert!(raw.contains("旧空会话"));
+
+            let events = drained(&listener).await;
+            assert!(events.iter().any(|event| matches!(
+                event,
+                Ev::SessionResumed {
+                    session_id,
+                    messages,
+                } if session_id == expected && messages.is_empty()
+            )));
         });
     }
 
@@ -4466,6 +5719,41 @@ mod tests {
                 oh.current_session_id().await.as_uuid().to_string(),
                 file_uuid,
                 "resume must adopt the named session id on the live orchestrator"
+            );
+        });
+    }
+
+    /// Older Android builds persisted `SessionId::Display` (`sess:<uuid>`) in
+    /// their Project session index. The mobile resume boundary accepts that
+    /// legacy spelling once, but emits the canonical bare UUID so the client can
+    /// rewrite its cache without carrying the prefix forward.
+    #[test]
+    fn submit_resume_session_accepts_legacy_display_prefix() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (file_uuid, seeded_count) = seed_replay_valid_session(tmp.path());
+        let (handle, listener) = build_submit_handle(tmp.path());
+
+        handle.runtime().block_on(async {
+            handle
+                .submit(ClientCommand::ResumeSession {
+                    session_id: format!("sess:{file_uuid}"),
+                    cwd: None,
+                })
+                .await
+                .expect("legacy prefixed session id must resume");
+
+            let events = drained(&listener).await;
+            let resumed = events.iter().find_map(|event| match event {
+                Ev::SessionResumed {
+                    session_id,
+                    messages,
+                } => Some((session_id.clone(), messages.len())),
+                _ => None,
+            });
+            assert_eq!(
+                resumed,
+                Some((file_uuid, seeded_count)),
+                "legacy input must be confirmed with a bare UUID"
             );
         });
     }

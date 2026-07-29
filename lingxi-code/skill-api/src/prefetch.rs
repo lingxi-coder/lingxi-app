@@ -205,9 +205,9 @@ impl SkillDiscoveryPrefetch {
     /// Construct a prefetcher that resolves to a PRE-SELECTED set, bypassing the
     /// source body. Used by a composition root that has already selected the
     /// relevant skills out of band, and by the orchestrator's surfacing tests to
-    /// drive `skill_discovery_reminder_message` deterministically. The runtime is
-    /// still required (the result rides the same one-shot channel) but no source
-    /// is needed. Analog of `MemoryPrefetch::with_fixed_result`.
+    /// drive `skill_discovery_reminder_message` deterministically. The result is
+    /// buffered before [`Self::start`] returns; no source is needed. Analog of
+    /// `MemoryPrefetch::with_fixed_result`.
     #[must_use]
     pub fn with_fixed_result(
         runtime: Arc<dyn RuntimeSpawner>,
@@ -254,15 +254,7 @@ impl SkillDiscoveryPrefetch {
         }
 
         if let Some(fixed) = self.fixed_result.clone() {
-            let _ = self
-                .runtime
-                .spawn(
-                    "skill-discovery-prefetch",
-                    Box::pin(async move {
-                        let _ = tx.send(fixed);
-                    }),
-                )
-                .await;
+            let _ = tx.send(fixed);
             return PendingSkillDiscoveryPrefetch {
                 rx: tokio::sync::Mutex::new(Some(rx)),
             };

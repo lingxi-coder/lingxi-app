@@ -1,6 +1,7 @@
 package com.lingxi.code
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -14,6 +15,7 @@ import com.lingxi.code.share.ShareController
 import com.lingxi.code.notify.NotificationController
 import com.lingxi.code.clipboard.ClipboardController
 import com.lingxi.code.voice.recorder.RecorderController
+import com.lingxi.code.offload.NativeOffloadRuntime
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
@@ -22,12 +24,14 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.key
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -37,6 +41,9 @@ import com.lingxi.code.settings.SettingsHost
 import com.lingxi.code.settings.SettingsRoutes
 import com.lingxi.code.settings.SettingsStore
 import com.lingxi.code.model.ProviderKind
+import com.lingxi.code.terminal.MobileLinuxTerminalGateway
+import com.lingxi.code.terminal.TerminalRoute
+import com.lingxi.code.terminal.TerminalRouteArgs
 import com.lingxi.code.theme.AppearancePrefs
 import com.lingxi.code.theme.AppearanceStore
 import com.lingxi.code.theme.LingXiTheme
@@ -53,7 +60,15 @@ import kotlinx.coroutines.launch
  * in [RootScreen] and let the Appearance page mutate the same store.
  */
 class MainActivity : ComponentActivity() {
+    private val pendingCronRunId = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
+    private val pendingTerminalArgs =
+        kotlinx.coroutines.flow.MutableStateFlow<TerminalRouteArgs?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
+        pendingCronRunId.value = intent.getStringExtra(
+            com.lingxi.code.cron.CronNotifications.EXTRA_CRON_RUN_ID,
+        )
+        pendingTerminalArgs.value = intent.terminalRouteArgs()
         // Register the camera/picker launchers before the Activity is STARTED and
         // hand them to the process-global CameraController, which the UniFFI
         // AndroidCamera adapter drives across the FFI seam (the device-vision
@@ -105,6 +120,10 @@ class MainActivity : ComponentActivity() {
         // (engine-driven through tool-clipboard; no UI affordance). No manifest
         // permission is required for clipboard access.
         ClipboardController.attach(applicationContext)
+        // One flavor-resolved native-offload host. Protected operations remain
+        // fail-closed until the engine's existing permission chain authorizes
+        // the invocation; Direct and Play expose different compile-time catalogs.
+        NativeOffloadRuntime.attach(applicationContext)
         // Offline voice-model downloader — process-global so a language-pack
         // download started in the setup wizard survives leaving that step.
         com.lingxi.code.voice.offline.VoiceModelDownloader.attach(applicationContext)
@@ -138,6 +157,8 @@ class MainActivity : ComponentActivity() {
             val settingsStore: SettingsStore =
                 viewModel(factory = SettingsStore.factory(applicationContext))
             val settingsState by settingsStore.state.collectAsState()
+            val requestedCronRunId by pendingCronRunId.collectAsState()
+            val requestedTerminalArgs by pendingTerminalArgs.collectAsState()
             val scope = rememberCoroutineScope()
             val prefs by store.prefs.collectAsState(initial = AppearancePrefs())
             val darkTheme = when (prefs.themeMode) {
@@ -153,6 +174,53 @@ class MainActivity : ComponentActivity() {
             // Monotonic across configuration changes: rotation must not turn a
             // prior reconnect generation back into zero and rebuild a live engine.
             var engineReconnect by rememberSaveable { mutableIntStateOf(0) }
+            var engineRuntimeMode by rememberSaveable {
+                mutableStateOf(settingsState.linuxRuntime.selectedMode.name)
+            }
+            var terminalOpen by rememberSaveable { mutableStateOf(false) }
+            var terminalSessionId by rememberSaveable { mutableStateOf("interactive") }
+            var terminalInitCommand by rememberSaveable { mutableStateOf<String?>(null) }
+            var terminalLaunchGeneration by rememberSaveable { mutableIntStateOf(0) }
+            val openTerminal: (String, String?) -> Unit = { sessionId, initCommand ->
+                terminalSessionId = sessionId.ifBlank { "interactive" }
+                terminalInitCommand = initCommand
+                terminalLaunchGeneration += 1
+                terminalOpen = true
+                settingsOpen = false
+            }
+            LaunchedEffect(requestedCronRunId) {
+                requestedCronRunId?.let { runId ->
+                    settingsInitialRoute = SettingsRoutes.cronRun(runId)
+                    settingsOpen = true
+                    pendingCronRunId.value = null
+                }
+            }
+            LaunchedEffect(requestedTerminalArgs) {
+                requestedTerminalArgs?.let {
+                    openTerminal(it.sessionId, it.initCommand)
+                    pendingTerminalArgs.value = null
+                }
+            }
+            LaunchedEffect(settingsState.linuxRuntime.selectedMode) {
+                val selected = settingsState.linuxRuntime.selectedMode
+                if (engineRuntimeMode != selected.name) {
+                    if (engineRuntimeMode ==
+                        com.lingxi.code.settings.LinuxRuntimeMode.MobileLinux.name
+                    ) {
+                        runCatching {
+                            com.lingxi.code.settings.LinuxRuntimeBridge.shutdown(
+                                applicationContext,
+                                com.lingxi.code.settings.LinuxRuntimeMode.MobileLinux,
+                            )
+                        }
+                    }
+                    engineRuntimeMode = selected.name
+                    // Replacing the retained conversation source closes the old
+                    // engine; runtime shutdown above reaps its PTYs/background jobs.
+                    engineReconnect += 1
+                    terminalOpen = false
+                }
+            }
 
             LingXiTheme(darkTheme = darkTheme, accentId = prefs.accentId) {
                 Box(Modifier.fillMaxSize()) {
@@ -177,6 +245,11 @@ class MainActivity : ComponentActivity() {
                                 ?: SettingsRoutes.providerList(ProviderKind.Llm.name)
                             settingsOpen = true
                         },
+                        onOpenCronSettings = { taskKey ->
+                            settingsInitialRoute = SettingsRoutes.cron(taskKey)
+                            settingsOpen = true
+                        },
+                        onOpenTerminal = openTerminal,
                         modelSetupRequired = settingsState.needsLlmSetup,
                         assistantName = prefs.assistantName,
                         inputDialog = prefs.inputDialog,
@@ -211,6 +284,9 @@ class MainActivity : ComponentActivity() {
                                 engineReconnect += 1
                                 settingsOpen = false
                             },
+                            onOpenTerminal = {
+                                openTerminal(it.sessionId, it.initCommand)
+                            },
                         )
                     }
 
@@ -235,6 +311,41 @@ class MainActivity : ComponentActivity() {
                             }
                         },
                     )
+
+                    AnimatedVisibility(
+                        visible = terminalOpen,
+                        enter = slideInVertically(initialOffsetY = { it }),
+                        exit = slideOutVertically(targetOffsetY = { it }),
+                    ) {
+                        key(terminalLaunchGeneration) {
+                            val terminalGateway = remember(
+                                terminalLaunchGeneration,
+                                settingsState.linuxRuntime.selectedMode,
+                            ) {
+                                MobileLinuxTerminalGateway(
+                                    applicationContext,
+                                    settingsState.linuxRuntime.selectedMode,
+                                )
+                            }
+                            TerminalRoute(
+                                args = TerminalRouteArgs(
+                                    sessionId = terminalSessionId,
+                                    initCommand = terminalInitCommand,
+                                ),
+                                instanceKey = terminalLaunchGeneration.toString(),
+                                gateway = terminalGateway,
+                                onBack = { terminalOpen = false },
+                                onOpenUrl = { url ->
+                                    val uri = runCatching { android.net.Uri.parse(url) }.getOrNull()
+                                    if (uri?.scheme in setOf("http", "https")) {
+                                        runCatching {
+                                            startActivity(Intent(Intent.ACTION_VIEW, uri))
+                                        }
+                                    }
+                                },
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -248,6 +359,27 @@ class MainActivity : ComponentActivity() {
         RecorderController.detach()
         NotificationController.detach()
         ClipboardController.detach()
+        NativeOffloadRuntime.detach()
         super.onDestroy()
     }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        pendingCronRunId.value = intent.getStringExtra(
+            com.lingxi.code.cron.CronNotifications.EXTRA_CRON_RUN_ID,
+        )
+        pendingTerminalArgs.value = intent.terminalRouteArgs()
+    }
+}
+
+private fun Intent.terminalRouteArgs(): TerminalRouteArgs? {
+    val uri = data ?: return null
+    if (uri.scheme != "lingxi" || uri.host != "open_terminal") return null
+    return TerminalRouteArgs(
+        sessionId = uri.getQueryParameter("sessionId")
+            ?.takeIf(String::isNotBlank)
+            ?: "interactive",
+        initCommand = uri.getQueryParameter("initCommand"),
+    )
 }

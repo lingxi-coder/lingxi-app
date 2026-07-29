@@ -14,9 +14,10 @@ use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use traits::{
-    AndroidAccessRequest, AndroidAccessTier, AndroidAction, AndroidAutomationError,
-    AndroidGlobalAction, AndroidNodeQuery, AndroidUiAutomation, AndroidWaitCondition,
-    MAX_ANDROID_UI_BATCH, MAX_ANDROID_UI_WAIT_MS,
+    AndroidAccessRequest, AndroidAccessTier, AndroidAction, AndroidAudioListenRequest,
+    AndroidAudioSpeakRequest, AndroidAutomationError, AndroidGlobalAction, AndroidNodeQuery,
+    AndroidUiAutomation, AndroidWaitCondition, MAX_ANDROID_AUDIO_LISTEN_MS,
+    MAX_ANDROID_AUDIO_SPEAK_CHARS, MAX_ANDROID_UI_BATCH, MAX_ANDROID_UI_WAIT_MS,
 };
 
 use tool_api::context::ToolUseContext;
@@ -61,6 +62,9 @@ const ACTIONS: &[&str] = &[
     "open_app",
     "wait_for",
     "wait_idle",
+    "listen",
+    "speak",
+    "stop_audio",
     "batch",
 ];
 
@@ -98,6 +102,14 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
             "query": { "type": "object" },
             "condition": { "type": "object" },
             "timeout_ms": { "type": "integer", "minimum": 1, "maximum": MAX_ANDROID_UI_WAIT_MS },
+            "listen_timeout_ms": {
+                "type": "integer",
+                "minimum": 1000,
+                "maximum": MAX_ANDROID_AUDIO_LISTEN_MS
+            },
+            "language": { "type": "string", "maxLength": 64 },
+            "voice": { "type": "string", "maxLength": 128 },
+            "speed": { "type": "number", "minimum": 0.5, "maximum": 2.0 },
             "actions": {
                 "type": "array",
                 "items": { "type": "object" },
@@ -282,7 +294,7 @@ impl Tool for AndroidUseTool {
     }
 
     async fn prompt(&self, _: &PromptOptions) -> String {
-        "Observe and operate an Android device through a user-started, per-app authorized session. Prefer accessibility node IDs over coordinates; re-observe after UI changes. Protected and high-risk surfaces are enforced by the Android host.".into()
+        "Observe and operate an Android device through a user-started, per-app authorized session. The same session may listen through the microphone or speak through Android TTS only when those audio capabilities are enabled in Settings. Prefer accessibility node IDs over coordinates; re-observe after UI changes. Protected and high-risk surfaces are enforced by the Android host.".into()
     }
 
     async fn validate_input(
@@ -425,6 +437,58 @@ impl Tool for AndroidUseTool {
                     .wait_for(AndroidWaitCondition::Idle { quiet_ms }, timeout)
                     .await
                     .map_err(map_err)?)))
+            }
+            "listen" => {
+                let timeout_ms = input
+                    .get("listen_timeout_ms")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(15_000)
+                    .clamp(1_000, MAX_ANDROID_AUDIO_LISTEN_MS);
+                let language = input
+                    .get("language")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty() && *value != "auto")
+                    .map(str::to_string);
+                Ok(action_result(json!(self
+                    .automation
+                    .listen(AndroidAudioListenRequest {
+                        language,
+                        timeout_ms,
+                    })
+                    .await
+                    .map_err(map_err)?)))
+            }
+            "speak" => {
+                let text = input
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| ToolError::InvalidInput("`speak` requires `text`".into()))?;
+                if text.is_empty() || text.chars().count() > MAX_ANDROID_AUDIO_SPEAK_CHARS {
+                    return Err(ToolError::InvalidInput(format!(
+                        "`speak` text must contain 1..={MAX_ANDROID_AUDIO_SPEAK_CHARS} characters"
+                    )));
+                }
+                let speed = input
+                    .get("speed")
+                    .and_then(Value::as_f64)
+                    .map(|value| value.clamp(0.5, 2.0) as f32);
+                Ok(action_result(json!(self
+                    .automation
+                    .speak(AndroidAudioSpeakRequest {
+                        text: text.to_string(),
+                        voice: input
+                            .get("voice")
+                            .and_then(Value::as_str)
+                            .filter(|value| !value.trim().is_empty())
+                            .map(str::to_string),
+                        speed,
+                    })
+                    .await
+                    .map_err(map_err)?)))
+            }
+            "stop_audio" => {
+                self.automation.stop_audio().await.map_err(map_err)?;
+                Ok(action_result(json!({ "stopped": true })))
             }
             "batch" => {
                 let actions = input

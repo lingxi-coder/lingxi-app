@@ -1,0 +1,160 @@
+{
+  "schemaVersion": 1,
+  "_comment": "Adapted from OpenMinis commit 9cf3a855 under GPL-3.0-only. Single Android source of truth for BusyBox ash Bashism detection. Patterns use the common ICU/java.util.regex subset, contain no nested quantifiers, and are matched line by line after heredoc bodies are removed. tier: S = silently wrong, E = loud error, T1 = explicit Bash reference.",
+  "rules": [
+    {
+      "name": "bash-shebang",
+      "tier": "T1",
+      "pattern": "^#!.*\\bbash\\b",
+      "behaviorNote": "Script declares a Bash interpreter; without Bash installed the kernel reports 'not found'.",
+      "fixHint": "Use `#!/bin/sh` and remove Bash-only syntax, or let LingXi install Bash."
+    },
+    {
+      "name": "bash-invoke",
+      "tier": "T1",
+      "pattern": "^(?!#!)(.*(?:[;&|]\\s*|\\$\\(\\s*|\\b(?:sudo|exec|nohup|time)\\s+))?bash\\b",
+      "behaviorNote": "Bash is invoked as a command (command-head position only; `grep bash` does not match).",
+      "fixHint": "Invoke `sh` if the target script is POSIX, or let LingXi install Bash."
+    },
+    {
+      "name": "arith-command",
+      "tier": "S",
+      "pattern": "(?<!\\$)\\(\\(",
+      "behaviorNote": "BusyBox sh parses (( )) as nested subshells and runs the expression as a command; conditionals can silently take the wrong branch.",
+      "fixHint": "Use `[ \"$x\" -gt 5 ]` for comparisons or `x=$((x + 1))` for arithmetic assignment."
+    },
+    {
+      "name": "compound-assign",
+      "tier": "S",
+      "pattern": "\\b[A-Za-z_][A-Za-z0-9_]*\\+=",
+      "behaviorNote": "BusyBox sh treats `x+=1` as a command; the variable is never updated.",
+      "fixHint": "Use `x=$((x + n))`, `s=\"${s}suffix\"`, or positional parameters."
+    },
+    {
+      "name": "brace-range",
+      "tier": "S",
+      "pattern": "\\{-?[0-9]{1,10}\\.\\.-?[0-9]{1,10}(\\.\\.-?[0-9]{1,10})?\\}|\\{[A-Za-z]\\.\\.[A-Za-z]\\}",
+      "behaviorNote": "BusyBox sh does not brace-expand; `{1..3}` is passed through literally without an error.",
+      "fixHint": "Write the list out or use `$(seq 1 3)` for numeric ranges."
+    },
+    {
+      "name": "printf-v",
+      "tier": "S",
+      "pattern": "\\bprintf\\s+-v\\b",
+      "behaviorNote": "BusyBox printf has no -v; the variable is never assigned.",
+      "fixHint": "Use command substitution: `var=$(printf 'fmt' args)`."
+    },
+    {
+      "name": "array-def",
+      "tier": "E",
+      "pattern": "\\b[A-Za-z_][A-Za-z0-9_]*=\\(",
+      "behaviorNote": "Arrays are unsupported; `a=(1 2 3)` is a syntax error.",
+      "fixHint": "Use a space-separated string or positional parameters."
+    },
+    {
+      "name": "array-expand",
+      "tier": "E",
+      "pattern": "\\$\\{#?[A-Za-z_][A-Za-z0-9_]*\\[",
+      "behaviorNote": "`${a[@]}` and `${#a[@]}` are bad substitutions in BusyBox sh.",
+      "fixHint": "Use `\"$@\"` and `$#`, or iterate a space-separated string."
+    },
+    {
+      "name": "process-subst",
+      "tier": "E",
+      "pattern": "<\\(|>\\(",
+      "behaviorNote": "Process substitution fails because the expected file descriptor cannot be opened.",
+      "fixHint": "Write command output to temporary files before comparing it."
+    },
+    {
+      "name": "c-for",
+      "tier": "E",
+      "pattern": "\\bfor\\s+\\(\\(",
+      "behaviorNote": "C-style for loops are a syntax error.",
+      "fixHint": "Use a while loop and POSIX arithmetic expansion."
+    },
+    {
+      "name": "case-conv",
+      "tier": "E",
+      "pattern": "\\$\\{[A-Za-z_][A-Za-z0-9_]*[\\^,]",
+      "behaviorNote": "`${x^^}` and `${x,,}` case conversion are bad substitutions.",
+      "fixHint": "Use `tr a-z A-Z` or `tr A-Z a-z`."
+    },
+    {
+      "name": "indirect-ref",
+      "tier": "E",
+      "pattern": "\\$\\{![A-Za-z_]",
+      "behaviorNote": "`${!name}` indirect expansion is a bad substitution.",
+      "fixHint": "Use carefully validated `eval` input, or redesign the lookup."
+    },
+    {
+      "name": "pipe-amp",
+      "tier": "E",
+      "pattern": "\\|&",
+      "behaviorNote": "`cmd |& next` is a syntax error.",
+      "fixHint": "Use `cmd 2>&1 | next`."
+    },
+    {
+      "name": "local-opt",
+      "tier": "E",
+      "pattern": "\\blocal\\s+-[A-Za-z]",
+      "behaviorNote": "`local -x v=1` fails; plain `local` works.",
+      "fixHint": "Use `local v=1; export v`."
+    },
+    {
+      "name": "mapfile",
+      "tier": "E",
+      "pattern": "\\b(?:mapfile|readarray)\\b",
+      "behaviorNote": "mapfile and readarray are not available.",
+      "fixHint": "Use `while IFS= read -r line; do ...; done < file`."
+    },
+    {
+      "name": "select-in",
+      "tier": "E",
+      "pattern": "^\\s*select\\s+[A-Za-z_][A-Za-z0-9_]*\\s+in\\b",
+      "behaviorNote": "`select x in ...` menus are a syntax error.",
+      "fixHint": "Print a numbered list and read the choice."
+    },
+    {
+      "name": "extglob",
+      "tier": "E",
+      "pattern": "@\\(",
+      "behaviorNote": "Extended glob patterns such as `@(a|b)` are a syntax error.",
+      "fixHint": "Use a case statement or separate globs."
+    },
+    {
+      "name": "declare",
+      "tier": "E",
+      "pattern": "(^|[;&|]\\s*)declare\\b",
+      "behaviorNote": "`declare` is unavailable and the variable is not assigned.",
+      "fixHint": "Assign directly; use case or key=value records instead of associative arrays."
+    },
+    {
+      "name": "export-f",
+      "tier": "E",
+      "pattern": "\\bexport\\s+-f\\b",
+      "behaviorNote": "`export -f` is an illegal option.",
+      "fixHint": "Define the function in the invoked script or extract it to a script file."
+    },
+    {
+      "name": "here-string",
+      "tier": "E",
+      "pattern": "<<<",
+      "behaviorNote": "Here-strings are an unexpected redirection.",
+      "fixHint": "Use `printf '%s\\n' \"$s\" | cmd`."
+    },
+    {
+      "name": "read-a",
+      "tier": "E",
+      "pattern": "\\bread\\b[^\\n]{0,120}\\s-a\\b",
+      "behaviorNote": "`read -a arr` is an illegal option.",
+      "fixHint": "Use fixed variables or `set -- $line` for positional parameters."
+    },
+    {
+      "name": "coproc",
+      "tier": "E",
+      "pattern": "(^|[;&|]\\s*)coproc\\b",
+      "behaviorNote": "`coproc` is unavailable.",
+      "fixHint": "Use a named pipe with a background process."
+    }
+  ]
+}

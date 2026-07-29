@@ -12,6 +12,17 @@
 use client_protocol::events::{ClientEvent, CostDto, TurnOutcomeDto};
 use client_protocol::message::{MessageBlockDto, MessageDto};
 
+#[test]
+fn ask_user_question_resolved_round_trips() {
+    let ev = ClientEvent::AskUserQuestionResolved { request_id: 9 };
+    let json = serde_json::to_value(&ev).expect("serialize AskUserQuestionResolved");
+    assert_eq!(json["type"], "ask_user_question_resolved");
+    assert_eq!(json["request_id"], 9);
+    let back: ClientEvent =
+        serde_json::from_value(json).expect("deserialize AskUserQuestionResolved");
+    assert_eq!(back, ev);
+}
+
 /// `TextDelta` — 1:1 `OutputStream::emit_text`. Carries plain assistant text.
 #[test]
 fn text_delta_round_trips() {

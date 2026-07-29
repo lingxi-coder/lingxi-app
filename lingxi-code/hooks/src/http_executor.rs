@@ -343,18 +343,21 @@ impl HttpExecutor {
         }
 
         // 1. SSRF check.
-        if let Err(e) = self.ssrf_guard.check_url(url) {
-            return HttpExecutionOutcome {
-                result: HookResult {
-                    outcome: HookOutcome::Error,
-                    stdout: String::new(),
-                    stderr: format!("Hook {} failed: SSRF guard rejected url: {}", hook.id, e),
-                    exit_code: None,
-                    response: None,
-                },
-                signal: HttpExecutionSignal::SsrfBlocked(e.to_string()),
-            };
-        }
+        let resolved_addrs = match self.ssrf_guard.resolve_url(url).await {
+            Ok(resolved) => resolved,
+            Err(e) => {
+                return HttpExecutionOutcome {
+                    result: HookResult {
+                        outcome: HookOutcome::Error,
+                        stdout: String::new(),
+                        stderr: format!("Hook {} failed: SSRF guard rejected url: {}", hook.id, e),
+                        exit_code: None,
+                        response: None,
+                    },
+                    signal: HttpExecutionSignal::SsrfBlocked(e.to_string()),
+                };
+            }
+        };
 
         // 2. Pick effective timeout (per-hook override or default).
         let effective_timeout = match &hook.executor {
@@ -406,7 +409,11 @@ impl HttpExecutor {
 
         // 4. Issue the request. `HttpTransport` enforces the request-level
         //    timeout natively and surfaces `HttpError::Timeout` on elapse.
-        let raw = match self.http.request(req).await {
+        let raw = match self
+            .http
+            .request_with_resolved_addrs(req, resolved_addrs)
+            .await
+        {
             Ok(r) => r,
             Err(HttpError::Timeout(_)) => {
                 return HttpExecutionOutcome {
@@ -472,27 +479,48 @@ mod tests {
     use async_trait::async_trait;
     use protocol::{HookId, HttpResponse};
     use std::sync::Mutex;
+    use traits::ResolvedAddressOverride;
 
     struct MockHttp {
         recorded: Mutex<Vec<HttpRequest>>,
+        resolved: Mutex<Vec<Option<ResolvedAddressOverride>>>,
         response_body: String,
         response_status: u16,
         error_to_return: Mutex<Option<HttpError>>,
     }
 
-    #[async_trait]
-    impl HttpTransport for MockHttp {
-        async fn request(&self, req: HttpRequest) -> Result<HttpResponse, HttpError> {
+    impl MockHttp {
+        fn dispatch(
+            &self,
+            req: HttpRequest,
+            resolved: Option<ResolvedAddressOverride>,
+        ) -> Result<HttpResponse, HttpError> {
             if let Some(e) = self.error_to_return.lock().unwrap().take() {
                 return Err(e);
             }
             self.recorded.lock().unwrap().push(req);
+            self.resolved.lock().unwrap().push(resolved);
             Ok(HttpResponse {
                 status: self.response_status,
                 headers: Vec::new(),
                 body: self.response_body.clone(),
                 body_bytes: Vec::new(),
             })
+        }
+    }
+
+    #[async_trait]
+    impl HttpTransport for MockHttp {
+        async fn request(&self, req: HttpRequest) -> Result<HttpResponse, HttpError> {
+            self.dispatch(req, None)
+        }
+
+        async fn request_with_resolved_addrs(
+            &self,
+            req: HttpRequest,
+            resolved: Option<ResolvedAddressOverride>,
+        ) -> Result<HttpResponse, HttpError> {
+            self.dispatch(req, resolved)
         }
         async fn stream_sse(
             &self,
@@ -522,6 +550,47 @@ mod tests {
             once: false,
             status_message: None,
         }
+    }
+
+    #[derive(Default)]
+    struct StaticResolver(
+        std::collections::HashMap<(String, u16), Result<Vec<std::net::SocketAddr>, String>>,
+    );
+
+    impl StaticResolver {
+        fn public_example_hosts() -> Self {
+            let mut answers = std::collections::HashMap::new();
+            for host in [
+                "hook.example.com",
+                "hooks.example.com",
+                "evil.example.com",
+                "api.hooks.example.com",
+            ] {
+                answers.insert(
+                    (host.to_string(), 443),
+                    Ok(vec!["93.184.216.34:443".parse().unwrap()]),
+                );
+            }
+            Self(answers)
+        }
+    }
+
+    #[async_trait]
+    impl crate::ssrf_guard::DnsResolver for StaticResolver {
+        async fn lookup_host(
+            &self,
+            host: &str,
+            port: u16,
+        ) -> Result<Vec<std::net::SocketAddr>, String> {
+            self.0
+                .get(&(host.to_string(), port))
+                .cloned()
+                .unwrap_or_else(|| Err(format!("missing resolver answer for {host}:{port}")))
+        }
+    }
+
+    fn test_ssrf_guard() -> SsrfGuard {
+        SsrfGuard::with_test_resolver(StaticResolver::public_example_hosts())
     }
 
     #[test]
@@ -567,12 +636,9 @@ mod tests {
                 r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}"#
                     .into(),
             error_to_return: Mutex::new(None),
+            resolved: Mutex::new(Vec::new()),
         });
-        let exec = HttpExecutor::new(
-            http.clone(),
-            SsrfGuard::with_defaults(),
-            Duration::from_secs(5),
-        );
+        let exec = HttpExecutor::new(http.clone(), test_ssrf_guard(), Duration::from_secs(5));
         let hook = make_http_hook("https://hook.example.com/pre");
 
         let outcome = exec
@@ -590,6 +656,14 @@ mod tests {
         let resp = outcome.result.response.expect("response parsed");
         assert_eq!(resp.decision, Some(crate::response::HookDecision::Approve));
         assert_eq!(http.recorded.lock().unwrap().len(), 1);
+        let resolved = http.resolved.lock().unwrap();
+        let pinned = resolved
+            .first()
+            .cloned()
+            .flatten()
+            .expect("domain request should pin vetted addresses");
+        assert_eq!(pinned.domain, "hook.example.com");
+        assert_eq!(pinned.addrs, vec!["93.184.216.34:443".parse().unwrap()]);
     }
 
     #[tokio::test]
@@ -599,6 +673,7 @@ mod tests {
             response_status: 200,
             response_body: String::new(),
             error_to_return: Mutex::new(None),
+            resolved: Mutex::new(Vec::new()),
         });
         let exec = HttpExecutor::new(
             http.clone(),
@@ -636,12 +711,9 @@ mod tests {
             response_status: 200,
             response_body: String::new(),
             error_to_return: Mutex::new(Some(HttpError::Timeout(Duration::from_millis(1)))),
+            resolved: Mutex::new(Vec::new()),
         });
-        let exec = HttpExecutor::new(
-            http.clone(),
-            SsrfGuard::with_defaults(),
-            Duration::from_millis(1),
-        );
+        let exec = HttpExecutor::new(http.clone(), test_ssrf_guard(), Duration::from_millis(1));
         let hook = make_http_hook("https://hook.example.com/pre");
 
         let outcome = exec
@@ -800,6 +872,7 @@ mod tests {
     fn mock_http() -> Arc<MockHttp> {
         Arc::new(MockHttp {
             recorded: Mutex::new(Vec::new()),
+            resolved: Mutex::new(Vec::new()),
             response_status: 200,
             response_body: String::new(),
             error_to_return: Mutex::new(None),
@@ -809,7 +882,7 @@ mod tests {
     fn exec_with_policy(http: Arc<MockHttp>, policy: HttpHookPolicy) -> HttpExecutor {
         HttpExecutor {
             http,
-            ssrf_guard: SsrfGuard::with_defaults(),
+            ssrf_guard: test_ssrf_guard(),
             timeout: Duration::from_secs(5),
             policy,
         }

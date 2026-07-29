@@ -11,10 +11,12 @@ object ComputerUseFeatureProvider : ComputerUseFeature {
         ComputerUseUiState(lastError = "Google Play 版本不包含 Computer Use"),
     )
     private val noApproval = MutableStateFlow<ComputerUseApproval?>(null)
+    private val unavailableConfiguration = MutableStateFlow(ComputerUseConfiguration())
 
     override val available: Boolean = false
     override val state: StateFlow<ComputerUseUiState> = unavailable
     override val pendingApproval: StateFlow<ComputerUseApproval?> = noApproval
+    override val configuration: StateFlow<ComputerUseConfiguration> = unavailableConfiguration
 
     override fun attach(context: Context, onEmergencyStop: () -> Unit) = Unit
 
@@ -37,6 +39,11 @@ object ComputerUseFeatureProvider : ComputerUseFeature {
     override fun resolveApproval(id: String, allowed: Boolean) = Unit
 
     override fun clearAudit(context: Context) = Unit
+
+    override fun updateConfiguration(
+        context: Context,
+        configuration: ComputerUseConfiguration,
+    ) = Unit
 
     override fun openAccessibilitySettings(context: Context) = Unit
 

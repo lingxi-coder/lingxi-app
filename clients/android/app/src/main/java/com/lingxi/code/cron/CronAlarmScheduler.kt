@@ -4,23 +4,23 @@ import android.app.AlarmManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.os.Build
+import android.provider.Settings
 import android.util.Log
 
 /**
  * Owns the single exact-alarm that drives cron firing. AlarmManager is the
  * phone's substitute for the desktop tick loop: it wakes [CronAlarmReceiver] at
- * the next due cron minute, which starts [CronRunService].
+ * the next due cron minute. The receiver only enqueues durable WorkManager work.
  *
  * One stable [REQUEST_CODE] ⇒ re-arming REPLACES the pending alarm (never stacks
- * a second). [arm] is the cheap path the service uses after a run (it already
- * queried the next fire); [armNext] is the cold path (boot / app-open / UI edit)
- * that builds a transient engine to ask the engine for the next fire.
+ * a second). [arm] is the cheap path when the next time is already known;
+ * [armNext] is the compatibility path used by app-open and existing UI wiring.
  *
- * Exact-alarm gating: on Android 13+ `USE_EXACT_ALARM` grants exact alarms with
- * no prompt; on Android 12 (31-32) `SCHEDULE_EXACT_ALARM` is user-revocable, so
- * [canScheduleExact] is checked and a denied state falls back to an inexact
- * (Doze-batched) alarm — late, but it still fires.
+ * Exact-alarm gating uses user-revocable `SCHEDULE_EXACT_ALARM`. Denied devices
+ * are handled by the unique 15-minute WorkManager watchdog; this class never
+ * creates a second inexact AlarmManager schedule.
  */
 object CronAlarmScheduler {
 
@@ -30,34 +30,30 @@ object CronAlarmScheduler {
 
     /**
      * Arm the next exact alarm at `triggerAtMs` (epoch millis). A time already in
-     * the past fires (almost) immediately. Falls back to an inexact alarm when
-     * exact alarms are not permitted.
+     * the past fires (almost) immediately. A denied permission cancels the exact
+     * alarm because the watchdog is the only degraded-mode scheduler.
      */
     fun arm(context: Context, triggerAtMs: Long) {
         val appContext = context.applicationContext
+        CronWorkScheduler.ensureWatchdog(appContext)
         val alarmManager =
             appContext.getSystemService(Context.ALARM_SERVICE) as? AlarmManager ?: return
-        val pendingIntent = pendingIntent(appContext)
         val trigger = maxOf(triggerAtMs, System.currentTimeMillis())
+        if (!canScheduleExact(appContext)) {
+            alarmManager.cancel(pendingIntent(appContext, trigger))
+            Log.i(TAG, "exact alarm permission unavailable; watchdog owns scheduling")
+            return
+        }
         try {
-            if (canScheduleExact(appContext)) {
-                alarmManager.setExactAndAllowWhileIdle(
-                    AlarmManager.RTC_WAKEUP,
-                    trigger,
-                    pendingIntent,
-                )
-            } else {
-                // Doze-batched, approximate — fires late but fires. The UI surfaces
-                // a banner prompting the user to grant exact alarms.
-                alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, trigger, pendingIntent)
-            }
-            Log.i(TAG, "armed cron alarm at $trigger (exact=${canScheduleExact(appContext)})")
+            alarmManager.setExactAndAllowWhileIdle(
+                AlarmManager.RTC_WAKEUP,
+                trigger,
+                pendingIntent(appContext, trigger),
+            )
+            Log.i(TAG, "armed exact cron alarm at $trigger")
         } catch (se: SecurityException) {
-            // Exact-alarm permission revoked between the gate check and the call —
-            // degrade to an inexact alarm rather than crash.
-            runCatching {
-                alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, trigger, pendingIntent)
-            }
+            Log.w(TAG, "exact alarm permission revoked while arming", se)
+            alarmManager.cancel(pendingIntent(appContext, trigger))
         }
     }
 
@@ -66,30 +62,16 @@ object CronAlarmScheduler {
         val appContext = context.applicationContext
         val alarmManager =
             appContext.getSystemService(Context.ALARM_SERVICE) as? AlarmManager ?: return
-        alarmManager.cancel(pendingIntent(appContext))
+        alarmManager.cancel(pendingIntent(appContext, 0L))
     }
 
     /**
-     * Cold re-arm: build a transient headless engine, ask it for the earliest
-     * next fire, and arm (or cancel when there are no jobs). Used by the boot
-     * receiver, on app launch, and after a UI create/delete. A missing API key
-     * (no engine) leaves any existing alarm in place.
+     * Compatibility entry used by existing app/UI wiring. Reconciliation scans
+     * global and Project scopes, ensures the watchdog, and arms the single global
+     * earliest alarm.
      */
     suspend fun armNext(context: Context) {
-        val appContext = context.applicationContext
-        val handle = HeadlessEngineFactory.build(appContext) ?: return
-        try {
-            val nextMs = handle.nextCronFireTime()
-            if (nextMs == null) {
-                cancel(appContext)
-            } else {
-                arm(appContext, nextMs.toLong())
-            }
-        } catch (t: Throwable) {
-            Log.w(TAG, "armNext failed: ${t.message}")
-        } finally {
-            runCatching { handle.destroy() }
-        }
+        CronCoordinator(context.applicationContext).reconcile("legacy-arm-next")
     }
 
     /** Whether exact alarms can be scheduled (always pre-Android 12). */
@@ -100,8 +82,21 @@ object CronAlarmScheduler {
         return alarmManager.canScheduleExactAlarms()
     }
 
-    private fun pendingIntent(context: Context): PendingIntent {
-        val intent = Intent(context, CronAlarmReceiver::class.java).setAction(ACTION_CRON_FIRE)
+    /** System settings intent shown only after an explanatory UI affordance. */
+    fun permissionSettingsIntent(context: Context): Intent =
+        Intent(
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM
+            } else {
+                Settings.ACTION_APPLICATION_DETAILS_SETTINGS
+            },
+            Uri.parse("package:${context.applicationContext.packageName}"),
+        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+
+    private fun pendingIntent(context: Context, scheduledAtMs: Long): PendingIntent {
+        val intent = Intent(context, CronAlarmReceiver::class.java)
+            .setAction(ACTION_CRON_FIRE)
+            .putExtra(CronWorkKeys.SCHEDULED_AT_MS, scheduledAtMs)
         return PendingIntent.getBroadcast(
             context,
             REQUEST_CODE,

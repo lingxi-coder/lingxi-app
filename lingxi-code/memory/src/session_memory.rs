@@ -111,8 +111,22 @@ impl SessionMemoryExtractor {
     /// `last_extracted_message_id` and compares against the
     /// initialization/update threshold depending on [`Self::is_initialized`].
     #[must_use]
-    pub fn should_extract(&self, history: &[ConversationMessage]) -> bool {
+    pub fn should_extract(&mut self, history: &[ConversationMessage]) -> bool {
         if !self.config.enabled {
+            return false;
+        }
+        // A completed compaction can remove the exact watermark message. Treat
+        // the current compacted tail as the new baseline instead of recounting
+        // the entire retained window (which would repeatedly extract the same
+        // tool calls). Subsequent messages are measured from this anchor.
+        if self
+            .last_extracted_message_id
+            .as_ref()
+            .is_some_and(|id| !history.iter().any(|message| &message.id() == id))
+        {
+            if let Some(last) = history.last() {
+                self.last_extracted_message_id = Some(last.id());
+            }
             return false;
         }
         // Thresholds are `u32`; clamp the count into `u32` for the compare (a
@@ -203,9 +217,10 @@ pub fn count_tool_calls_since(history: &[ConversationMessage], since: Option<&Me
     let tail: &[ConversationMessage] = match since {
         Some(id) => match history.iter().position(|m| &m.id() == id) {
             Some(idx) => &history[idx + 1..],
-            // The watermark message is no longer in history (e.g. compacted
-            // away) — count the whole window rather than silently zero.
-            None => history,
+            // A missing watermark means the caller has crossed a compaction
+            // boundary. Fail closed here; `should_extract` realigns its mutable
+            // watermark to the compacted tail before a future count.
+            None => &[],
         },
         None => history,
     };
@@ -310,14 +325,14 @@ mod tests {
     #[test]
     fn disabled_extractor_never_fires() {
         // Even with a flood of tool calls, a disabled config never extracts.
-        let ex = SessionMemoryExtractor::new(SessionMemoryConfig::default());
+        let mut ex = SessionMemoryExtractor::new(SessionMemoryConfig::default());
         let history = vec![assistant_tools(100)];
         assert!(!ex.should_extract(&history));
     }
 
     #[test]
     fn should_extract_uses_initialization_threshold_before_first_extraction() {
-        let ex = SessionMemoryExtractor::new(enabled_config(3, 1));
+        let mut ex = SessionMemoryExtractor::new(enabled_config(3, 1));
         assert!(!ex.is_initialized());
         // 2 tool calls < init threshold 3 => no.
         assert!(!ex.should_extract(&[assistant_tools(2)]));
@@ -357,11 +372,20 @@ mod tests {
     }
 
     #[test]
-    fn count_tool_calls_since_missing_watermark_counts_whole_window() {
-        // A watermark id not present in history (compacted away) counts all.
+    fn missing_watermark_realigns_without_recounting_compacted_history() {
+        let mut ex = SessionMemoryExtractor::new(enabled_config(10, 1));
+        ex.last_extracted_message_id = Some(MessageId::new());
         let history = vec![assistant_tools(3)];
         let stale = MessageId::new();
-        assert_eq!(count_tool_calls_since(&history, Some(&stale)), 3);
+        assert_eq!(count_tool_calls_since(&history, Some(&stale)), 0);
+        assert!(!ex.should_extract(&history));
+        assert_eq!(
+            ex.last_extracted_message_id,
+            history.last().map(ConversationMessage::id)
+        );
+        let mut next = history;
+        next.push(assistant_tools(1));
+        assert!(ex.should_extract(&next));
     }
 
     #[test]

@@ -5,14 +5,21 @@ import android.content.Context
 import android.content.Intent
 
 /**
- * Receives the exact cron alarm and hands off to [CronRunService]. A
- * BroadcastReceiver has only ~10s and cannot do network work, so it does the
- * minimum: start the foreground service, which builds the engine and runs the
- * due jobs. (Starting a `dataSync` foreground service from an exact-alarm
- * broadcast is an allowed exemption, unlike from BOOT_COMPLETED.)
+ * Receives the exact cron alarm and performs no engine or network work. The
+ * unique expedited dispatch WorkRequest survives process loss and deduplicates
+ * repeated broadcasts for the same scheduled instant.
  */
 class CronAlarmReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        CronRunService.start(context.applicationContext)
+        if (intent.action != CronAlarmScheduler.ACTION_CRON_FIRE) return
+        val scheduledAtMs = intent.getLongExtra(
+            CronWorkKeys.SCHEDULED_AT_MS,
+            System.currentTimeMillis(),
+        )
+        CronWorkScheduler.enqueueDispatch(
+            context = context.applicationContext,
+            scheduledAtMs = scheduledAtMs,
+            expedited = true,
+        )
     }
 }

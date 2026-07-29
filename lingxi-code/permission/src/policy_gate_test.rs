@@ -1161,9 +1161,22 @@ mod tests {
             tool_use_id: Some("toolu_hook_99".into()),
             ..Default::default()
         };
-        let _ = gate
-            .check_after_hook_allow_ctx("Bash", &serde_json::json!({ "command": "ls" }), &ctx)
+        let outcome = gate
+            .check_after_hook_allow_outcome_ctx(
+                "Bash",
+                &serde_json::json!({ "command": "ls" }),
+                &ctx,
+            )
             .await;
+        assert!(matches!(
+            outcome,
+            PermissionOutcome::Allow {
+                decision_classification: Some(
+                    traits::permission_gate::ToolDecisionClassification::UserTemporary
+                ),
+                ..
+            }
+        ));
         let seen = inner
             .ctx
             .lock()

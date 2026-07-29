@@ -13,6 +13,42 @@ import org.junit.Test
 
 class LinuxRuntimeStateTest {
     @Test
+    fun missing_mobile_linux_rootfs_exposes_install_without_terminal() {
+        val capability = MobileLinuxCapabilityFfi(
+            available = true,
+            backend = "android-proot",
+            mode = MobileLinuxRuntimeModeFfi.MOBILE_LINUX,
+            reason = null,
+            streamingOutput = true,
+            backgroundProcesses = true,
+            pty = true,
+            bindMounts = true,
+            rootfsIntegrity = true,
+        )
+        val status = MobileLinuxStatusFfi(
+            state = MobileLinuxRootfsStateFfi.MISSING,
+            backend = "android-proot",
+            mode = MobileLinuxRuntimeModeFfi.MOBILE_LINUX,
+            platform = "android",
+            abi = "arm64-v8a",
+            version = "1.0.0",
+            managedRoot = "/tmp/mobile-linux",
+            activeRoot = null,
+            stagedRoot = null,
+            archiveSha256 = "fixed",
+            installedSizeBytes = null,
+            writableGuestPaths = emptyList(),
+            lastError = null,
+        )
+
+        val ui = linuxRuntimeUiStateFrom(LinuxRuntimeMode.MobileLinux, capability, status)
+
+        assertTrue(ui.installAllowed)
+        assertFalse(ui.canOpenTerminal)
+        assertEquals(LinuxRuntimeTerminalStatus.Disabled, ui.terminal.status)
+    }
+
+    @Test
     fun blocked_mobile_linux_maps_to_blocked_ui_state() {
         val capability = MobileLinuxCapabilityFfi(
             available = false,
@@ -150,6 +186,7 @@ class LinuxRuntimeStateTest {
         )
 
         assertTrue(ui.canOpenTerminal)
+        assertFalse(ui.installAllowed)
         assertEquals(1, ui.tasks.size)
         assertTrue(ui.tasks.first().stoppable)
         assertTrue(ui.tasks.first().state.contains("运行中"))

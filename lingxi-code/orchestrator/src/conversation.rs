@@ -2670,7 +2670,7 @@ impl ConversationOrchestrator {
         let transcript_path = self
             .jsonl_writer
             .as_ref()
-            .map(|writer| writer.path().to_path_buf())
+            .map(|writer| writer.active_path())
             .unwrap_or_else(|| self.computed_transcript_path(&session_id));
         slot.save(sidequery::CacheSafeParams {
             system_prompt: system.unwrap_or("").into(),
@@ -3453,6 +3453,15 @@ impl ConversationOrchestrator {
             history_after[0] = marker.clone();
             s.history = history_after;
         }
+        // Relevant-memory and skill reminders live only in outgoing request
+        // snapshots. Once compaction discards those snapshots, they may surface
+        // again; restored file attachments remain deduplicated by
+        // `read_state_map`. Drop in-flight pre-compact queries as well so stale
+        // selections cannot be injected against the new history.
+        self.surfaced_memory_paths.lock().await.clear();
+        self.surfaced_skill_names.lock().await.clear();
+        *self.pending_memory_prefetch.lock().await = None;
+        *self.pending_skill_prefetch.lock().await = None;
         // P1-05: persist the full compaction transition (claude 2.1.207
         // `insertMessageChain` + the compact flow), so a cold `--resume`
         // reconstructs exactly the post-compact state. Best-effort — a write
@@ -7079,6 +7088,10 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // the `--agent`-adopted main-thread agent's prompt; else the default.
         let system_prompt: Option<String> = Some(self.effective_system_prompt().await);
 
+        // A side query left unfinished when the previous user turn ended was
+        // keyed to that previous prompt. Never surface it against new intent.
+        self.discard_stale_prefetches().await;
+
         // 1. Append the user prompt to session history.
         let user_msg = ConversationMessage::user(MessageId::new(), prompt.to_string());
         {
@@ -7286,6 +7299,10 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // claude-code `nre` precedence: `--system-prompt` (override) wins; else
         // the `--agent`-adopted main-thread agent's prompt; else the default.
         let system_prompt: Option<String> = Some(self.effective_system_prompt().await);
+
+        // A side query left unfinished when the previous user turn ended was
+        // keyed to that previous prompt. Never surface it against new intent.
+        self.discard_stale_prefetches().await;
 
         // 1. Append the user prompt (+ any pasted images) to session history.
         // `images` arrives already decoded (path-based callers ran `load_images`
@@ -9105,6 +9122,10 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // `--agent` main-thread agent's prompt; else the default (`build_system_prompt`).
         let system_prompt: Option<String> = Some(self.effective_system_prompt().await);
 
+        // A side query left unfinished when the previous user turn ended was
+        // keyed to that previous prompt. Never surface it against new intent.
+        self.discard_stale_prefetches().await;
+
         // 1. Append the user prompt to session history.
         let user_msg = ConversationMessage::user(MessageId::new(), prompt.to_string());
         {
@@ -10695,21 +10716,49 @@ DO NOT mention this to the user explicitly because they are already aware.\n</sy
     /// !m.isMeta)` in `wAo`). The memdir directory is derived from the cwd; the
     /// stub prefetch ignores both for now (it resolves to an empty set) so this
     /// is inert by default.
+    async fn discard_stale_prefetches(&self) {
+        *self.pending_memory_prefetch.lock().await = None;
+        *self.pending_skill_prefetch.lock().await = None;
+    }
+
     pub(crate) async fn start_memory_prefetch(&self) {
         let Some(prefetch) = self.memory_prefetch.as_ref() else {
             return; // no prefetch wired ⇒ surfacing channel stays inert
         };
-        // Latest non-meta user message = the turn query (TS findLast user/!meta).
-        // Meta messages (the transient reminders we append) carry no user intent,
-        // but they never enter `session.history`, so a plain last-user scan over
-        // history is faithful here.
+        // Keep at most one in-flight selector. A slow result continues under
+        // the current model call instead of being overwritten or queueing
+        // unbounded side queries.
+        if self.pending_memory_prefetch.lock().await.is_some() {
+            return;
+        }
+        // Latest REAL user message = the turn query. Compact summaries,
+        // transcript-only rows, Stop-hook feedback, and tool-result user rows
+        // are synthetic context rather than user intent.
         let query = {
             let s = self.session.lock().await;
             s.history
                 .iter()
                 .rev()
-                .find(|m| matches!(m.role(), protocol::MessageRole::User))
-                .map(ConversationMessage::text_content)
+                .find_map(|message| match message {
+                    ConversationMessage::User {
+                        content,
+                        is_meta: false,
+                        is_compact_summary: false,
+                        is_visible_in_transcript_only: false,
+                        ..
+                    } => {
+                        let text = content
+                            .iter()
+                            .filter_map(|block| match block {
+                                protocol::ContentBlock::Text { text } => Some(text.as_str()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        (!text.is_empty()).then_some(text)
+                    }
+                    _ => None,
+                })
                 .unwrap_or_default()
         };
         // Task 5 (worktree 206 session-cwd plumbing): the live cwd, so a future
@@ -10744,9 +10793,18 @@ DO NOT mention this to the user explicitly because they are already aware.\n</sy
     /// per-turn OUTGOING snapshot (never `session.history` / JSONL), so it is
     /// recomputed each turn and never accumulates.
     pub(crate) async fn relevant_memory_reminder_message(&self) -> Option<ConversationMessage> {
-        // Consume the in-flight prefetch handle armed at turn start. `None` ⇒ no
-        // prefetch wired / not armed ⇒ no surfacing this turn.
-        let pending = self.pending_memory_prefetch.lock().await.take()?;
+        // Never await an unresolved side query on the model-call critical path.
+        // Leave it in the slot so it can run concurrently with this iteration
+        // and be collected by a later one.
+        let pending = {
+            let mut slot = self.pending_memory_prefetch.lock().await;
+            let pending = slot.take()?;
+            if !pending.is_ready() {
+                *slot = Some(pending);
+                return None;
+            }
+            pending
+        };
         let surfaced = pending.take().await;
         if surfaced.is_empty() {
             return None;
@@ -10798,6 +10856,11 @@ DO NOT mention this to the user explicitly because they are already aware.\n</sy
         let Some(prefetch) = self.skill_discovery_prefetch.as_ref() else {
             return; // no prefetch wired ⇒ discovery channel stays inert
         };
+        // One bounded in-flight discovery. A slow result remains eligible for a
+        // later iteration and never queues another side query behind it.
+        if self.pending_skill_prefetch.lock().await.is_some() {
+            return;
+        }
         // Latest non-meta user message = the turn query (TS findLast user/!meta),
         // and the most recent assistant message's tool names for the write-pivot
         // predicate — both read in one history lock.
@@ -10807,8 +10870,26 @@ DO NOT mention this to the user explicitly because they are already aware.\n</sy
                 .history
                 .iter()
                 .rev()
-                .find(|m| matches!(m.role(), protocol::MessageRole::User))
-                .map(ConversationMessage::text_content)
+                .find_map(|message| match message {
+                    ConversationMessage::User {
+                        content,
+                        is_meta: false,
+                        is_compact_summary: false,
+                        is_visible_in_transcript_only: false,
+                        ..
+                    } => {
+                        let text = content
+                            .iter()
+                            .filter_map(|block| match block {
+                                protocol::ContentBlock::Text { text } => Some(text.as_str()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        (!text.is_empty()).then_some(text)
+                    }
+                    _ => None,
+                })
                 .unwrap_or_default();
             let last_assistant_tools = s
                 .history
@@ -10855,11 +10936,19 @@ DO NOT mention this to the user explicitly because they are already aware.\n</sy
     /// JSONL).
     pub(crate) async fn skill_discovery_reminder_message(&self) -> Option<ConversationMessage> {
         // Consume the in-flight prefetch handle armed at turn start.
-        let pending = self.pending_skill_prefetch.lock().await.take()?;
-
-        // hidden_by_main_turn — peek readiness BEFORE the consuming take.
-        let hidden = pending.is_ready();
-        telemetry::emit_skill_discovery_collected(hidden);
+        let pending = {
+            let mut slot = self.pending_skill_prefetch.lock().await;
+            let pending = slot.take()?;
+            // A side query that has not hidden under available work must not
+            // delay the API call. Keep it alive and try again next iteration.
+            if !pending.is_ready() {
+                *slot = Some(pending);
+                telemetry::emit_skill_discovery_collected(false);
+                return None;
+            }
+            pending
+        };
+        telemetry::emit_skill_discovery_collected(true);
 
         let skills = pending.take().await;
         if skills.is_empty() {

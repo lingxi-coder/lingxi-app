@@ -151,6 +151,146 @@ test('computer access requests broadcast to renderers and are tracked as pending
   assert.equal((manager as any).pendingComputerAccessIds.size, 0);
 });
 
+test('AskUserQuestion events are tracked and cleared across disconnect', async () => {
+  const manager = new BridgeManager({
+    launchConfig: () => ({ workspace: '/workspace', trusted: true }),
+  });
+  const broadcasts: Array<{ channel: string; payload: unknown }> = [];
+  (manager as any).broadcast = (channel: string, payload: unknown) => broadcasts.push({ channel, payload });
+  const handlers = new Map<string, (...args: unknown[]) => void>();
+  const fakeClient = {
+    on: (event: string, handler: (...args: unknown[]) => void) => { handlers.set(event, handler); return fakeClient; },
+  };
+  const event = {
+    type: 'ask_user_question',
+    request: {
+      request_id: 7,
+      questions: [{
+        question: 'Choose a mode',
+        header: 'Mode',
+        options: [{ label: 'Safe', description: 'Keep safeguards enabled' }],
+        multi_select: false,
+      }],
+    },
+  };
+
+  (manager as any).wireClient(fakeClient, 0);
+  handlers.get('event')!(event);
+
+  assert.deepEqual(broadcasts, [{ channel: 'lingxi:event', payload: event }]);
+  assert.ok((manager as any).pendingAskUserQuestionIds.has(7));
+  assert.deepEqual((manager as any).pendingAskUserQuestionRequests.get(7)?.request, event.request);
+  assert.deepEqual(manager.pendingAskUserQuestions, [event.request]);
+
+  (manager as any).child = null;
+  await (manager as any).stopBridge();
+  assert.equal((manager as any).pendingAskUserQuestionIds.size, 0);
+  assert.equal((manager as any).pendingAskUserQuestionRequests.size, 0);
+});
+
+test('AskUserQuestion resolved events clear replay state before a renderer reload', () => {
+  const manager = new BridgeManager({
+    launchConfig: () => ({ workspace: '/workspace', trusted: true }),
+  });
+  const handlers = new Map<string, (...args: unknown[]) => void>();
+  const fakeClient = {
+    on: (event: string, handler: (...args: unknown[]) => void) => { handlers.set(event, handler); return fakeClient; },
+  };
+
+  (manager as any).wireClient(fakeClient, 0);
+  handlers.get('event')!({
+    type: 'ask_user_question',
+    request: {
+      request_id: 11,
+      questions: [{
+        question: 'Choose a mode',
+        header: 'Mode',
+        options: [{ label: 'Safe', description: 'Keep safeguards enabled' }],
+        multi_select: false,
+      }],
+      timeout_secs: 60,
+    },
+  });
+  handlers.get('event')!({
+    type: 'ask_user_question_resolved',
+    request_id: 11,
+  });
+
+  assert.equal((manager as any).pendingAskUserQuestionIds.has(11), false);
+  assert.equal((manager as any).pendingAskUserQuestionRequests.has(11), false);
+});
+
+test('AskUserQuestion broker resolution clears replay state without a renderer answer', async () => {
+  const manager = new BridgeManager({
+    launchConfig: () => ({ workspace: '/workspace', trusted: true }),
+  });
+  const handlers = new Map<string, (...args: unknown[]) => void>();
+  const fakeClient = {
+    on: (event: string, handler: (...args: unknown[]) => void) => { handlers.set(event, handler); return fakeClient; },
+  };
+
+  (manager as any).broadcast = () => undefined;
+  (manager as any).wireClient(fakeClient, 0);
+  handlers.get('event')!({
+    type: 'ask_user_question',
+    request: {
+      request_id: 12,
+      timeout_secs: 0,
+      questions: [{
+        question: 'Choose a mode',
+        header: 'Mode',
+        options: [
+          { label: 'Safe', description: 'Keep safeguards enabled' },
+          { label: 'Fast', description: 'Move quicker' },
+        ],
+        multi_select: false,
+      }],
+    },
+  });
+  handlers.get('event')!({
+    type: 'ask_user_question_resolved',
+    request_id: 12,
+  });
+
+  assert.equal((manager as any).pendingAskUserQuestionIds.has(12), false);
+  assert.equal((manager as any).pendingAskUserQuestionRequests.has(12), false);
+});
+
+test('registerWindow replays pending AskUserQuestion requests to a reloaded renderer', () => {
+  const manager = new BridgeManager({
+    launchConfig: () => ({ workspace: '/workspace', trusted: true }),
+  });
+  const handlers = new Map<string, (...args: unknown[]) => void>();
+  const fakeClient = {
+    on: (event: string, handler: (...args: unknown[]) => void) => { handlers.set(event, handler); return fakeClient; },
+  };
+  const sent: Array<{ channel: string; payload: unknown }> = [];
+  const webContents = {
+    send: (channel: string, payload: unknown) => sent.push({ channel, payload }),
+    once: (_event: string, _handler: () => void) => undefined,
+    isDestroyed: () => false,
+  };
+  const event = {
+    type: 'ask_user_question',
+    request: {
+      request_id: 13,
+      questions: [{
+        question: 'Choose a mode',
+        header: 'Mode',
+        options: [{ label: 'Safe', description: 'Keep safeguards enabled' }],
+        multi_select: false,
+      }],
+    },
+  };
+
+  (manager as any).wireClient(fakeClient, 0);
+  handlers.get('event')!(event);
+
+  manager.registerWindow(webContents as any, 'app://desktop/index.html');
+
+  assert.deepEqual(sent, [{ channel: 'lingxi:event', payload: event }]);
+});
+
 test('provider credential status is sourced from the engine secure store', async () => {
   const commands: Array<Record<string, unknown>> = [];
   const manager = new BridgeManager({

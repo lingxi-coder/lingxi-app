@@ -5,6 +5,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasContentDescription
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -78,7 +80,10 @@ class ModelPickerUiTest {
         rule.onNodeWithText("Thinking · 1M 上下文 · 284B / 13B 激活").assertIsDisplayed()
 
         rule.onNodeWithTag(UiTags.MODEL_PICKER_SEARCH).performTextInput("sonnet")
-        rule.onNodeWithText("Claude Sonnet 5").assertIsDisplayed()
+        rule.onNode(
+            hasText("Claude Sonnet 5", substring = true) and
+                hasContentDescription("当前模型"),
+        ).assertIsDisplayed()
         rule.onNodeWithText("DeepSeek V4 Flash").assertDoesNotExist()
     }
 
@@ -107,7 +112,10 @@ class ModelPickerUiTest {
         assertEquals(null, selectedModel.get())
 
         rule.onNodeWithTag(UiTags.MODEL_PICKER_CHIP).performClick()
-        rule.onNodeWithText("Claude Sonnet 5").performClick()
+        rule.onNode(
+            hasText("Claude Sonnet 5", substring = true) and
+                hasContentDescription("当前模型"),
+        ).performClick()
         assertEquals("anthropic/claude-sonnet-5", selectedModel.get())
     }
 }

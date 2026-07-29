@@ -1717,6 +1717,8 @@ mod command_arm_tests {
             (
                 HookEvent::ElicitationResult {
                     server_name: "srv".into(),
+                    elicitation_id: None,
+                    mode: None,
                     result: json!({"action": "accept", "content": {"token": "xyz"}}),
                 },
                 "ElicitationResult",
@@ -1839,6 +1841,8 @@ mod command_arm_tests {
         let ctx = HookContext::default();
         let ev = HookEvent::ElicitationResult {
             server_name: "my-server".into(),
+            elicitation_id: Some("elicit-7".into()),
+            mode: Some(crate::events::ElicitationMode::Form),
             result: json!({"action": "decline", "content": {"reason": "no"}}),
         };
         let (marker, body) = build_envelope_body(&ev, &ctx).expect("must serialize");
@@ -1846,9 +1850,8 @@ mod command_arm_tests {
         assert!(body.contains(r#""mcp_server_name":"my-server""#), "{body}");
         assert!(body.contains(r#""action":"decline""#), "{body}");
         assert!(body.contains(r#""content":{"reason":"no"}"#), "{body}");
-        // `elicitation_id` and `mode` default to `None` (absent from wire).
-        assert!(!body.contains("elicitation_id"), "{body}");
-        assert!(!body.contains("mode"), "{body}");
+        assert!(body.contains(r#""elicitation_id":"elicit-7""#), "{body}");
+        assert!(body.contains(r#""mode":"form""#), "{body}");
     }
 
     #[test]
@@ -1857,6 +1860,8 @@ mod command_arm_tests {
         let ctx = HookContext::default();
         let ev = HookEvent::ElicitationResult {
             server_name: "srv".into(),
+            elicitation_id: None,
+            mode: None,
             result: json!({}),
         };
         let (_marker, body) = build_envelope_body(&ev, &ctx).expect("must serialize");
@@ -3200,7 +3205,10 @@ mod http_agent_dispatch_tests {
                     .into(),
         });
         let mut registry = HookRegistry::new();
-        registry.register(http_hook("https://hooks.example.com/pre"));
+        // A public IP literal keeps this dispatch test independent from the
+        // machine's DNS. Domain-resolution and connection pinning are covered
+        // by the dedicated HTTP-executor/transport tests.
+        registry.register(http_hook("https://93.184.216.34/pre"));
         let exec = HookExecutorImpl::new(
             Arc::new(RwLock::new(registry)),
             http.clone(),
@@ -3212,7 +3220,7 @@ mod http_agent_dispatch_tests {
         // The HTTP arm reached the transport with the hook's URL.
         let recorded = http.recorded.lock().unwrap();
         assert_eq!(recorded.len(), 1, "the Http arm must reach the transport");
-        assert_eq!(recorded[0].url, "https://hooks.example.com/pre");
+        assert_eq!(recorded[0].url, "https://93.184.216.34/pre");
         drop(recorded);
         // The parsed allow response surfaces as an Approve decision.
         assert_eq!(agg.decision, Some(HookDecision::Approve));

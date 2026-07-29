@@ -181,6 +181,8 @@ pub struct InProcessTeammateHandler {
     /// cycle-break as [`Self::tool_registry`]); unfilled ⇒ the runner skips the
     /// SubagentStart fire (byte-identical legacy).
     hook_executor: Arc<OnceLock<Arc<hooks::HookExecutorImpl>>>,
+    /// Managed hook-slot policy shared with normal subagent spawns.
+    strict_plugin_only_hooks: Arc<OnceLock<bool>>,
     /// Skill loader handed to the teammate's runner so it preloads the
     /// definition's frontmatter `skills:`. SET-ONCE; unfilled ⇒ no preloading.
     skill_loader: Arc<OnceLock<Arc<dyn traits::skill_loader::SkillLoader>>>,
@@ -226,6 +228,7 @@ impl InProcessTeammateHandler {
             tool_wide_deny_names: Arc::new(OnceLock::new()),
             budget_enforcer: None,
             hook_executor: Arc::new(OnceLock::new()),
+            strict_plugin_only_hooks: Arc::new(OnceLock::new()),
             skill_loader: Arc::new(OnceLock::new()),
             hook_session_id: protocol::SessionId::nil(),
             hook_cwd: std::path::PathBuf::new(),
@@ -283,6 +286,12 @@ impl InProcessTeammateHandler {
     pub fn with_hook_executor(self, executor: Arc<hooks::HookExecutorImpl>) -> Self {
         let _ = self.hook_executor.set(executor);
         self
+    }
+
+    /// Return the set-once managed hook-policy cell.
+    #[must_use]
+    pub fn strict_plugin_only_hooks_handle(&self) -> Arc<OnceLock<bool>> {
+        self.strict_plugin_only_hooks.clone()
     }
 
     /// Return a clone of the set-once skill-loader cell.
@@ -485,6 +494,11 @@ impl InProcessTeammateHandler {
             // cells (filled at the composition root, same as `PoolSubagentSpawner`).
             // Unfilled ⇒ the runner skips them (byte-identical legacy).
             hook_executor: self.hook_executor.get().cloned(),
+            strict_plugin_only_hooks: self
+                .strict_plugin_only_hooks
+                .get()
+                .copied()
+                .unwrap_or(false),
             skill_loader: self.skill_loader.get().cloned(),
             hook_session_id: self.hook_session_id,
             hook_cwd: self.hook_cwd.clone(),

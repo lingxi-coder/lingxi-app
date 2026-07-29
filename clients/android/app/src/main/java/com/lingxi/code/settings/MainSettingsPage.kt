@@ -38,8 +38,8 @@ import com.lingxi.code.theme.LingXiTheme
 
 /**
  * The main grouped settings list — the Android port of the iOS
- * `MainSettingsPage`: an account card followed by the 智能 / 记忆与知识 /
- * 能力扩展 / 应用 / 隐私与安全 / 关于 sections. Each row navigates the nested
+ * `MainSettingsPage`: an account card followed by the 智能 / 能力扩展 / 应用 /
+ * 隐私与安全 / 关于 sections. Each row navigates the nested
  * [navController] to its detail page; the toggle rows mutate the hoisted store
  * via lambdas (kept inline-simple for the privacy switches, which are local).
  */
@@ -137,25 +137,6 @@ fun MainSettingsPage(
             )
         }
 
-        // 记忆与知识 ----------------------------------------------------------
-        SettingsSection(label = "记忆与知识") {
-            SettingsRow(
-                icon = LXIconName.Book, iconColor = Color(red = 0f, green = 0.7601f, blue = 0.7664f),
-                label = "知识库", value = "24 项",
-                onTap = { navController.navigate(SettingsRoutes.KNOWLEDGE) },
-            )
-            SettingsRow(
-                icon = LXIconName.Brain, iconColor = Color(red = 0.809f, green = 0.4552f, blue = 0.8891f),
-                label = "记忆", sub = "灵犀记住的关于你的事实", value = "42 条",
-                onTap = { navController.navigate(SettingsRoutes.MEMORY) },
-            )
-            SettingsRow(
-                icon = LXIconName.Workflow, iconColor = Color(red = 0f, green = 0.78f, blue = 0.55f),
-                label = "工作流与自动化", value = "3 启用", isLast = true,
-                onTap = { navController.navigate(SettingsRoutes.WORKFLOWS) },
-            )
-        }
-
         // 应用 ----------------------------------------------------------------
         SettingsSection(label = "应用") {
             SettingsRow(
@@ -198,7 +179,12 @@ fun MainSettingsPage(
             SettingsRow(icon = LXIconName.Play, label = "重新观看引导", sub = "再过一遍首次设置向导", onTap = onReplayOnboarding)
             SettingsRow(icon = LXIconName.Book, label = "帮助中心", onTap = {})
             SettingsRow(icon = LXIconName.Message, label = "反馈与建议", onTap = {})
-            SettingsRow(icon = LXIconName.Link, label = "开源许可", isLast = true, onTap = {})
+            SettingsRow(
+                icon = LXIconName.Link,
+                label = "开源许可",
+                isLast = true,
+                onTap = { navController.navigate(SettingsRoutes.OPEN_SOURCE) },
+            )
         }
 
         Text(

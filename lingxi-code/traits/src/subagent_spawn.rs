@@ -711,6 +711,21 @@ pub trait SubagentSpawner: Send + Sync {
         ))
     }
 
+    /// Restore a persisted background agent under its original stable id.
+    ///
+    /// The default delegates to [`Self::spawn_async`] for hosts that do not
+    /// persist background agents. Durable hosts override this so mailbox
+    /// routing, transcript paths, and parked rows retain the identity already
+    /// exposed to the user before the process restart.
+    async fn restore_async(
+        &self,
+        _agent_id: protocol::AgentId,
+        request: SubagentSpawnRequest,
+        inherit: SubagentInheritance,
+    ) -> Result<AsyncLaunch, SubagentSpawnError> {
+        self.spawn_async(request, inherit).await
+    }
+
     /// Register `name → agent_id` for `SendMessage` routing of a spawned ASYNC
     /// subagent (claude `AppState.agentNameRegistry.set`, `AgentTool.tsx:704-711`).
     ///

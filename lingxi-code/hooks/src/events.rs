@@ -407,6 +407,10 @@ pub enum HookEvent {
     ElicitationResult {
         /// Name of the MCP server that requested elicitation.
         server_name: String,
+        /// Server-assigned elicitation ID, if specified.
+        elicitation_id: Option<String>,
+        /// Presentation mode used for the elicitation.
+        mode: Option<ElicitationMode>,
         /// User-supplied result payload.
         result: Value,
     },

@@ -11,6 +11,15 @@ import org.junit.Test
  */
 class SessionCatalogTest {
 
+    @Test
+    fun `legacy display-prefixed session id is canonicalized`() {
+        val uuid = "19587a33-0725-48db-abca-8a2aed345f6b"
+
+        assertEquals(uuid, canonicalSessionId("sess:$uuid"))
+        assertEquals(uuid, canonicalSessionId(uuid.uppercase()))
+        assertEquals("sess:not-a-uuid", canonicalSessionId("sess:not-a-uuid"))
+    }
+
     // 2024-06-15T12:00:00Z as seconds since epoch (the reference "now").
     private val now = SessionCatalog.parseRfc3339ToEpochSeconds("2024-06-15T12:00:00Z")!!
 

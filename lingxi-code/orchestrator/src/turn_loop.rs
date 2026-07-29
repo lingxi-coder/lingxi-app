@@ -2841,10 +2841,27 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 tool_use_id: Some(tool_use_id.to_string()),
                 ..Default::default()
             };
-            let hook_decision = orch
+            let hook_outcome = orch
                 .perms
-                .check_after_hook_allow_ctx(name, &effective_input, &ctx)
+                .check_after_hook_allow_outcome_ctx(name, &effective_input, &ctx)
                 .await;
+            let mut hook_decision_classification = None;
+            let hook_decision = match hook_outcome {
+                traits::permission_gate::PermissionOutcome::Allow {
+                    updated_input,
+                    decision_classification,
+                    permission_updates: _,
+                } => {
+                    hook_decision_classification = decision_classification;
+                    if let Some(updated) = updated_input {
+                        effective_input = updated;
+                    }
+                    PermissionDecision::Allow
+                }
+                traits::permission_gate::PermissionOutcome::Deny { reason } => {
+                    PermissionDecision::Deny { reason }
+                }
+            };
             // The hook only OWNS the label when its allow stands: `han` returns
             // the hook's own `{behavior:"allow"}` (decisionReason `hook`) there,
             // but when the re-check overrides it (`Hook returned '…' but deny
@@ -2853,7 +2870,10 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             // SettingSource. `PermissionDecision` is 2-valued, so the overriding
             // rule's own scope is not separable here.
             decision_otel_source = if matches!(hook_decision, PermissionDecision::Allow) {
-                "hook"
+                hook_decision_classification.map_or(
+                    "hook",
+                    traits::permission_gate::ToolDecisionClassification::as_str,
+                )
             } else {
                 "config"
             };

@@ -3,6 +3,7 @@ package com.lingxi.code.conversation
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.text.ClickableText
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -27,6 +28,7 @@ import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -55,6 +57,7 @@ fun MessageBubble(
     modifier: Modifier = Modifier,
     dimmed: Boolean = false,
     onShare: (String) -> Unit = {},
+    onOpenLink: (String) -> Unit = {},
 ) {
     val t = LingXiTheme.palette
     if (message.role == Role.User) {
@@ -91,7 +94,7 @@ fun MessageBubble(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 message.tag?.let { Pill(text = it, color = t.accent) }
-                AIText(markdown = message.text)
+                AIText(markdown = message.text, onOpenLink = onOpenLink)
                 // Share affordance: surfaces the native chooser for this reply's
                 // text through the same ShareController the engine bridges onto
                 // `traits::SharingService` — so a bubble share and a `tool-share`
@@ -160,39 +163,50 @@ fun AssistantAvatar(
 fun AIText(
     markdown: String,
     modifier: Modifier = Modifier,
+    onOpenLink: (String) -> Unit = {},
 ) {
     val blocks = remember(markdown) { parseMarkdownBlocks(markdown) }
     Column(
         modifier = modifier,
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        blocks.forEach { block -> MdBlockView(block) }
+        blocks.forEach { block -> MdBlockView(block, onOpenLink) }
     }
 }
 
 /** Render one [MdBlock]. */
 @Composable
-private fun MdBlockView(block: MdBlock) {
+private fun MdBlockView(block: MdBlock, onOpenLink: (String) -> Unit) {
     val t = LingXiTheme.palette
     when (block) {
-        is MdBlock.Paragraph -> Text(
-            text = inlineSpans(block.spans, t.surfaceHover, t.text2),
-            color = t.text,
-            fontSize = 15.5f.sp,
-            lineHeight = (15.5f * 1.6f).sp,
-        )
+        is MdBlock.Paragraph -> {
+            val text = inlineSpans(block.spans, t.surfaceHover, t.text2, t.accent)
+            ClickableText(
+                text = text,
+                style = androidx.compose.ui.text.TextStyle(
+                    color = t.text,
+                    fontSize = 15.5f.sp,
+                    lineHeight = (15.5f * 1.6f).sp,
+                ),
+                onClick = { offset ->
+                    text.getStringAnnotations("url", offset, offset)
+                        .firstOrNull()
+                        ?.let { onOpenLink(it.item) }
+                },
+            )
+        }
 
         is MdBlock.CodeBlock -> CodeBlockView(block)
 
         is MdBlock.BulletList -> Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
             block.items.forEach { item ->
-                ListRow(marker = "•", spans = item)
+                ListRow(marker = "•", spans = item, onOpenLink = onOpenLink)
             }
         }
 
         is MdBlock.NumberedList -> Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
             block.items.forEach { item ->
-                ListRow(marker = item.marker, spans = item.spans)
+                ListRow(marker = item.marker, spans = item.spans, onOpenLink = onOpenLink)
             }
         }
     }
@@ -200,7 +214,11 @@ private fun MdBlockView(block: MdBlock) {
 
 /** A single list row: a fixed-width marker gutter + the item's inline content. */
 @Composable
-private fun ListRow(marker: String, spans: List<MdInline>) {
+private fun ListRow(
+    marker: String,
+    spans: List<MdInline>,
+    onOpenLink: (String) -> Unit,
+) {
     val t = LingXiTheme.palette
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.Top) {
         Text(
@@ -210,12 +228,20 @@ private fun ListRow(marker: String, spans: List<MdInline>) {
             lineHeight = (15.5f * 1.6f).sp,
             modifier = Modifier.widthIn(min = 18.dp),
         )
-        Text(
-            text = inlineSpans(spans, t.surfaceHover, t.text2),
-            color = t.text,
-            fontSize = 15.5f.sp,
-            lineHeight = (15.5f * 1.6f).sp,
+        val text = inlineSpans(spans, t.surfaceHover, t.text2, t.accent)
+        ClickableText(
+            text = text,
+            style = androidx.compose.ui.text.TextStyle(
+                color = t.text,
+                fontSize = 15.5f.sp,
+                lineHeight = (15.5f * 1.6f).sp,
+            ),
             modifier = Modifier.weight(1f),
+            onClick = { offset ->
+                text.getStringAnnotations("url", offset, offset)
+                    .firstOrNull()
+                    ?.let { onOpenLink(it.item) }
+            },
         )
     }
 }
@@ -255,7 +281,12 @@ private fun CodeBlockView(block: MdBlock.CodeBlock) {
  * Build an [androidx.compose.ui.text.AnnotatedString] from [MdInline] spans:
  * `**bold**` → semibold, `` `code` `` → monospace on a tinted background.
  */
-private fun inlineSpans(spans: List<MdInline>, codeBg: Color, codeColor: Color) =
+private fun inlineSpans(
+    spans: List<MdInline>,
+    codeBg: Color,
+    codeColor: Color,
+    linkColor: Color,
+) =
     buildAnnotatedString {
         spans.forEach { span ->
             when (span) {
@@ -272,6 +303,18 @@ private fun inlineSpans(spans: List<MdInline>, codeBg: Color, codeColor: Color) 
                     ),
                 ) {
                     append(span.text)
+                }
+                is MdInline.Link -> {
+                    pushStringAnnotation(tag = "url", annotation = span.url)
+                    withStyle(
+                        SpanStyle(
+                            color = linkColor,
+                            textDecoration = TextDecoration.Underline,
+                        ),
+                    ) {
+                        append(span.label)
+                    }
+                    pop()
                 }
             }
         }

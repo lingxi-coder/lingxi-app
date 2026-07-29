@@ -8,7 +8,7 @@
 
 use crate::file::{MemoryError, MemoryFile};
 use sidequery::{QuerySource, SideQueryClient, SideQueryRequest};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -94,14 +94,31 @@ impl MemorySelector {
             .query(req)
             .await
             .map_err(|e| MemoryError::SelectorUnavailable(e.to_string()))?;
-        let names = parse_filenames(resp.structured.as_ref());
+        let names: HashSet<String> = parse_filenames(resp.structured.as_ref())
+            .into_iter()
+            .collect();
+        let basename_counts =
+            candidates
+                .iter()
+                .fold(HashMap::<String, usize>::new(), |mut counts, memory| {
+                    if let Some(name) = memory.path.file_name().and_then(|name| name.to_str()) {
+                        *counts.entry(name.to_string()).or_default() += 1;
+                    }
+                    counts
+                });
         Ok(candidates
             .iter()
             .filter(|m| {
+                let exact = m.path.to_string_lossy();
+                if names.contains(exact.as_ref()) {
+                    return true;
+                }
                 m.path
                     .file_name()
                     .and_then(|s| s.to_str())
-                    .is_some_and(|s| names.contains(&s.to_string()))
+                    .is_some_and(|basename| {
+                        basename_counts.get(basename) == Some(&1) && names.contains(basename)
+                    })
             })
             .map(|m| m.path.clone())
             .take(self.max_selected)
@@ -186,7 +203,9 @@ fn parse_filenames(value: Option<&serde_json::Value>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use protocol::{MemoryEntry, MemoryEntryTier};
+    use sidequery::{SideQueryError, SideQueryResponse};
     use std::path::PathBuf;
 
     fn entry(path: &str, body: &str, age_days: u64) -> MemoryEntry {
@@ -231,5 +250,64 @@ mod tests {
         let days = age.as_secs() / 86_400;
         // Allow a 1-day slack for the test's wall-clock drift across the calls.
         assert!((9..=10).contains(&days), "expected ~10 days, got {days}");
+    }
+
+    struct StructuredClient(serde_json::Value);
+
+    #[async_trait]
+    impl SideQueryClient for StructuredClient {
+        async fn query(&self, _req: SideQueryRequest) -> Result<SideQueryResponse, SideQueryError> {
+            Ok(SideQueryResponse {
+                text: None,
+                structured: Some(self.0.clone()),
+                tool_calls: Vec::new(),
+                usage: cost::Usage::default(),
+                stop_reason: Some("end_turn".into()),
+            })
+        }
+    }
+
+    fn memory_file(path: &str) -> MemoryFile {
+        MemoryFile {
+            path: PathBuf::from(path),
+            mtime: std::time::SystemTime::UNIX_EPOCH,
+            frontmatter: crate::MemoryFrontmatter::default(),
+            content: String::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn duplicate_basename_requires_exact_path() {
+        let selector = MemorySelector::new(Arc::new(StructuredClient(serde_json::json!({
+            "filenames": ["shared.md"]
+        }))));
+        let available = vec![
+            memory_file("/user/shared.md"),
+            memory_file("/project/shared.md"),
+        ];
+        let selected = selector
+            .select_relevant("query", &available, &[], &HashSet::new())
+            .await
+            .unwrap();
+        assert!(
+            selected.is_empty(),
+            "an ambiguous basename must not select multiple memory tiers"
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_path_disambiguates_duplicate_basename() {
+        let selector = MemorySelector::new(Arc::new(StructuredClient(serde_json::json!({
+            "filenames": ["/project/shared.md"]
+        }))));
+        let available = vec![
+            memory_file("/user/shared.md"),
+            memory_file("/project/shared.md"),
+        ];
+        let selected = selector
+            .select_relevant("query", &available, &[], &HashSet::new())
+            .await
+            .unwrap();
+        assert_eq!(selected, vec![PathBuf::from("/project/shared.md")]);
     }
 }

@@ -18,12 +18,14 @@ license.workspace = true
 traits = { path = "../../traits" }
 platform-posix-minimal = { path = "../posix-minimal" }
 platform-common = { path = "../common" }
+platform-pty = { path = "../pty" }
 http-client = { path = "../../http-client" }
 async-trait.workspace = true
 tracing.workspace = true
 # `rt` for `tokio::task::spawn_blocking` (the runner wraps the blocking jailed
 # spawn so it never stalls the async executor).
-tokio = { workspace = true, features = ["rt"] }
+tokio = { workspace = true, features = ["io-util", "process", "rt", "sync", "time"] }
+nix = { version = "0.27", default-features = false, features = ["signal", "process"] }
 # Unconditional (NOT target-gated): the runner's safe translation layer
 # (JailSpec/JailedOutput/build_net_deny_bpf/run_jailed + the per-arch helpers)
 # must be reachable from the host build of `platform-android` so the runner can
@@ -35,6 +37,7 @@ platform-android-minijail = { path = "../android-minijail" }
 # Rust — no unsafe needed; pinned to match sibling crates (android-minijail, etc.).
 sha2 = "0.10"
 hex = "0.4"
+serde_json.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }

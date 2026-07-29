@@ -27,6 +27,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod ask_user_question_broker;
 pub mod computer_access_broker;
 pub mod listener;
 pub mod lowering;
@@ -36,6 +37,7 @@ pub mod sink;
 pub mod test_support;
 pub mod turn;
 
+pub use ask_user_question_broker::BridgeAskUserQuestionBroker;
 pub use computer_access_broker::{BridgeComputerAccessBroker, ComputerAccessRequestSink};
 pub use listener::{ClientEventListener, ListenerSink};
 pub use output_stream::AdapterOutputStream;

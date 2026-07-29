@@ -32,6 +32,17 @@ data class ProviderStatusRefreshResult(
     val error: String? = null,
 )
 
+data class ProviderConnectionTestResult(
+    val connected: Boolean,
+    val reachable: Boolean,
+    val authenticated: Boolean,
+    val modelAvailable: Boolean,
+    val httpStatus: Int?,
+    val latencyMs: Long,
+    val message: String,
+    val usedStoredCredential: Boolean,
+)
+
 data class ProviderEngineLaunchConfig(
     val providerProfilesJson: String,
     val routingJson: String,
@@ -42,6 +53,13 @@ interface ProviderCredentialClient : AutoCloseable {
     suspend fun list(providerIds: List<String>): ProviderCredentialSnapshot
     suspend fun set(providerId: String, secret: String): ProviderCredentialSnapshot
     suspend fun delete(providerId: String): ProviderCredentialSnapshot
+    suspend fun test(
+        providerId: String,
+        providerPreset: String,
+        apiBase: String,
+        model: String,
+        credentialOverride: String?,
+    ): ProviderConnectionTestResult
     override fun close() = Unit
 }
 
@@ -108,6 +126,50 @@ class EngineProviderCredentialClient(
             )
         }
 
+    override suspend fun test(
+        providerId: String,
+        providerPreset: String,
+        apiBase: String,
+        model: String,
+        credentialOverride: String?,
+    ): ProviderConnectionTestResult {
+        if (closed.get()) {
+            return unavailableConnectionResult("provider credential client is closed")
+        }
+        val engine = handle ?: return unavailableConnectionResult("engine unavailable")
+        return try {
+            val result = withTimeout(20_000) {
+                engine.testProviderConnection(
+                    providerId = providerId,
+                    providerPreset = providerPreset,
+                    apiBase = apiBase,
+                    model = model,
+                    credentialOverride = credentialOverride
+                        ?.takeIf { it.isNotBlank() }
+                        ?.let { ProviderCredentialSecretDto(value = it) },
+                )
+            }
+            ProviderConnectionTestResult(
+                connected = result.connected,
+                reachable = result.reachable,
+                authenticated = result.authenticated,
+                modelAvailable = result.modelAvailable,
+                httpStatus = result.httpStatus?.toInt(),
+                latencyMs = result.latencyMs.toLong(),
+                message = result.message,
+                usedStoredCredential = result.usedStoredCredential,
+            )
+        } catch (_: kotlinx.coroutines.TimeoutCancellationException) {
+            unavailableConnectionResult("连接测试超时")
+        } catch (t: kotlinx.coroutines.CancellationException) {
+            throw t
+        } catch (_: Throwable) {
+            unavailableConnectionResult(
+                "连接测试暂不可用",
+            )
+        }
+    }
+
     private suspend fun runOperation(
         submit: suspend (com.lingxi.code.bindings.MobileEngineHandle, ULong) -> Unit,
     ): ProviderCredentialSnapshot {
@@ -152,6 +214,17 @@ class EngineProviderCredentialClient(
             unavailableProviderIds = emptySet(),
             storageEncrypted = false,
             error = error,
+        )
+
+        fun unavailableConnectionResult(message: String) = ProviderConnectionTestResult(
+            connected = false,
+            reachable = false,
+            authenticated = false,
+            modelAvailable = false,
+            httpStatus = null,
+            latencyMs = 0,
+            message = message,
+            usedStoredCredential = false,
         )
     }
 }
@@ -242,6 +315,30 @@ class ProviderSettingsRepository(
         return snapshot
     }
 
+    suspend fun testConnection(
+        provider: GenericProvider,
+        credentialOverride: String?,
+    ): ProviderConnectionTestResult {
+        val credentialId = engineCredentialIdFor(provider)
+            ?: return ProviderConnectionTestResult(
+                connected = false,
+                reachable = false,
+                authenticated = false,
+                modelAvailable = false,
+                httpStatus = null,
+                latencyMs = 0,
+                message = "该 Provider 尚未接入 Android 内建连接测试",
+                usedStoredCredential = credentialOverride.isNullOrBlank(),
+            )
+        return credentialClient.test(
+            providerId = credentialId,
+            providerPreset = provider.preset,
+            apiBase = provider.url,
+            model = provider.model,
+            credentialOverride = credentialOverride?.trim()?.takeIf { it.isNotEmpty() },
+        )
+    }
+
     /**
      * Non-secret provider settings consumed by the mobile Rust engine.
      *
@@ -279,7 +376,9 @@ class ProviderSettingsRepository(
         internal fun buildEngineLaunchConfig(
             savedProviders: List<GenericProvider>,
         ): ProviderEngineLaunchConfig {
-            val providers = savedProviders.filter { it.enabled }
+            val providers = savedProviders.filter {
+                it.enabled && it.credentialConfigured
+            }
             val profiles = JSONObject()
             providers.forEach { provider ->
                 if (!usesBuiltInProfile(provider)) {
@@ -305,7 +404,7 @@ class ProviderSettingsRepository(
         ): List<String> =
             savedProviders
                 .asSequence()
-                .filter(GenericProvider::enabled)
+                .filter { it.enabled && it.credentialConfigured }
                 .map(::profileNameFor)
                 .distinct()
                 .sorted()

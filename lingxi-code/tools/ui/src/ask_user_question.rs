@@ -859,8 +859,9 @@ impl Tool for AskUserQuestionTool {
         // question order for deterministic output).
         let mut answers = Map::new();
         for q in &questions {
-            let answer = answers_map.get(&q.question).cloned().unwrap_or_default();
-            answers.insert(q.question.clone(), Value::String(answer));
+            if let Some(answer) = answers_map.get(&q.question) {
+                answers.insert(q.question.clone(), Value::String(answer.clone()));
+            }
         }
 
         let mut completed: LogEventMetadata = HashMap::new();
@@ -1208,6 +1209,36 @@ mod tests {
         assert!(out.data["annotations"]["Which?"]
             .get("customResponses")
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn partial_resolver_output_omits_unanswered_questions() {
+        let mut answers = HashMap::new();
+        answers.insert("First?".to_string(), "A".to_string());
+        let tool = AskUserQuestionTool::with_resolver(
+            shell_test_ctx(dummy_out()),
+            Arc::new(CustomResolver { answers }),
+        );
+        let input = json!({
+            "questions": [
+                {
+                    "question": "First?",
+                    "header": "First",
+                    "options": [opt("A", "a"), opt("B", "b")]
+                },
+                {
+                    "question": "Second?",
+                    "header": "Second",
+                    "options": [opt("C", "c"), opt("D", "d")]
+                }
+            ]
+        });
+        let out = tool.call(input, fresh_ctx(), fresh_tx()).await.expect("ok");
+        assert_eq!(out.data["answers"]["First?"], json!("A"));
+        assert!(
+            out.data["answers"].get("Second?").is_none(),
+            "an unanswered question must not be fabricated as an empty string"
+        );
     }
 
     struct MultiResolver;

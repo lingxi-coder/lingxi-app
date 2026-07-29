@@ -1,44 +1,61 @@
-# Mobile Linux migration guardrails
+# Android MobileLinux release contract
 
-This directory exists to keep the OpenMinis-style mobile Linux migration in a legally and store-compliant state before any GPL-derived runtime code is introduced into product builds.
+LingXi's Android combined distribution is GPLv3 when it includes the
+OpenMinis-derived shell, PRoot, PTY bridge, or Alpine rootfs integration.
+Original MIT and Apache-2.0 components retain their notices.
 
-Current status on July 28, 2026:
+The source baseline is immutable and machine-readable in
+`mobile-linux-pins.json`:
 
-- `mobile-linux` product builds must stay disabled until written redistribution/linking authorization is present for every GPL-governed runtime component that would ship in the app.
-- No GPL runtime source may be copied from `docs/superpowers/references/OpenMinis/` into product paths while authorization is missing.
-- The guardrail scripts under `lingxi-code/scripts/mobile-linux/` are fail-closed when `LINGXI_MOBILE_LINUX_ENABLED=1`.
-- The license-clean phase-1 implementation is present: shared runtime contracts, Android/iOS bridge configuration, unavailable/blocked runtime behavior, rootfs manifest verification and atomic activation helpers, mobile settings UI, and CI policy checks.
-- Android remains on the legacy Minijail-backed execution path. iOS remains on its unavailable shell path. Neither product target links PRoot/iSH or embeds an Alpine archive in the current authorization state.
+- OpenMinis `9cf3a855fecd27bb5735b84cacbd56852a3ab8dd`
+- OpenMinis PRoot fork `8cf13e997cdc9472997aae19df8050c073c9a86c`
+- talloc 2.4.2
+- Alpine 3.21.3 for `arm64-v8a` and `x86_64`
 
-After written authorization is approved, activation still requires a reviewed
-change that:
+Android keeps one distribution dimension:
 
-1. pins the authorization-manifest digest at build time;
-2. bundles the approved runtime source/binaries and reproducible rootfs assets;
-3. implements the prepared Android PRoot and iOS iSH runtime traits;
-4. passes the command, PTY, rootfs, process-tree, network-denial, device, and
-   staged-rollout tests from the migration plan.
+- `play` maps to **Store** and compiles out policy-sensitive high-risk offloads.
+- `direct` maps to **Full** and compiles the complete permission-gated surface.
 
-Possessing an authorization file alone never enables execution: the current
-bridges intentionally report `Unsupported` after a valid grant is detected
-until a separately reviewed native runtime is actually linked.
+Both distributions can contain MobileLinux. A MobileLinux failure must be
+reported explicitly and must never silently switch to the Legacy runtime.
 
-An enabled release must provide its generated manifest at
-`rootfs/current/rootfs-manifest.json`. The sample manifest is never accepted by
-the enabled CI path.
+Build and verification entrypoints:
 
-Directory layout:
+```text
+clients/android/scripts/verify-mobile-linux-pins.sh
+clients/android/scripts/build-mobile-linux-native.sh --variant play
+clients/android/scripts/build-mobile-linux-native.sh --variant direct
+clients/android/scripts/verify-mobile-linux-native.sh --variant <play|direct>
+clients/android/scripts/stage-mobile-linux-assets.sh --variant <play|direct> --input <evidence>
+```
 
-- `authorization/` — required grant-file contract and placeholders
-- `rootfs/` — rootfs manifest schema and sample
-- `sbom/` — SBOM and license evidence expectations
+Native and rootfs outputs are generated under gitignored build/output
+directories. Reference-tree `.so`, loader, and rootfs binaries are never copied
+into a product artifact. `build-mobile-linux-native.sh` reconstructs PRoot,
+its unbundled read-only loader, the PTY bridge, the UniFFI library, mksh, and
+toybox from pinned source for both supported ABIs.
 
-Recommended CI entrypoints:
+A release evidence directory contains, per ABI:
 
-- `lingxi-code/scripts/mobile-linux/check-authorizations.sh`
-- `lingxi-code/scripts/mobile-linux/check-store-compliance.sh`
-- `lingxi-code/scripts/mobile-linux/check-rootfs-manifest.sh`
-- `lingxi-code/scripts/mobile-linux/check-sbom-and-licenses.sh`
-- `lingxi-code/scripts/mobile-linux/package-rootfs-release.sh`
-- `lingxi-code/scripts/mobile-linux/test-rootfs-tooling.sh`
-- `lingxi-code/scripts/mobile-linux/smoke.sh`
+```text
+<abi>/alpine-minirootfs-3.21.3-<alpine-arch>.tar.gz
+<abi>/rootfs-manifest.json
+<abi>/rootfs.spdx.json
+```
+
+Staging verifies the official archive digest and manifest digest before
+copying assets under `app/build/generated/mobileLinux/<play|direct>/assets`.
+Gradle stores `.gz` and `.zst` assets without recompression, preserving the
+manifest hash.
+
+Release deliverables must also include:
+
+- `LICENSES/NOTICE.md` and the exact GPL/LGPL texts;
+- `sbom/mobile-linux.spdx.json` plus the generated per-rootfs SBOM;
+- complete corresponding source or a durable corresponding-source offer;
+- all Android/Gradle dependency notices and the Alpine package-license list.
+
+The former authorization documents remain as historical migration records.
+The distribution choice is now GPLv3; they are no longer a substitute for the
+source, notice, and SBOM release gates described above.

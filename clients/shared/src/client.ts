@@ -341,6 +341,16 @@ export class BridgeClient extends EventEmitter {
     this.sendCommand({ type: 'deny_computer_access', request_id: requestId });
   }
 
+  /** Answer a parked interactive questionnaire, correlated by `request_id`. */
+  answerAskUserQuestion(requestId: number, answers: Record<string, string>): void {
+    this.sendCommand({ type: 'answer_ask_user_question', request_id: requestId, answers });
+  }
+
+  /** Cancel a parked interactive questionnaire, correlated by `request_id`. */
+  cancelAskUserQuestion(requestId: number): void {
+    this.sendCommand({ type: 'cancel_ask_user_question', request_id: requestId });
+  }
+
   // ── Inbound frames ──────────────────────────────────────────────────────────
 
   private onMessage(data: WebSocket.RawData): void {

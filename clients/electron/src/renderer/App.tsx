@@ -11,6 +11,7 @@ import {
   SetupCard,
 } from './components/BetaDesktop';
 import { ComputerAccessPrompt } from './components/ComputerAccessPrompt';
+import { AskUserQuestionPrompt } from './components/AskUserQuestionPrompt';
 import { PermissionPrompt } from './components/PermissionPrompt';
 import { Stage } from './components/Stage';
 import { Theme } from './theme/ThemeContext';
@@ -91,6 +92,12 @@ export function App() {
           onSubmit={(requestId, response) => { void bridge.approveComputerAccess(requestId, response).catch(() => undefined); }}
           onDeny={(requestId) => { void bridge.denyComputerAccess(requestId).catch(() => undefined); }}
           onOpenSystemSettings={(pane) => { void bridge.openSystemSettings(pane).catch(() => undefined); }}
+        />
+
+        <AskUserQuestionPrompt
+          request={bridge.pendingAskUserQuestion}
+          onSubmit={(requestId, answers) => { void bridge.answerAskUserQuestion(requestId, answers).catch(() => undefined); }}
+          onCancel={(requestId) => { void bridge.cancelAskUserQuestion(requestId).catch(() => undefined); }}
         />
 
         {settingsOpen && (

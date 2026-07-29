@@ -18,6 +18,22 @@ enum class SessionCatalogPhase {
     Error,
 }
 
+private val BARE_SESSION_UUID =
+    Regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+/**
+ * Convert the legacy mobile `SessionId::Display` spelling (`sess:<uuid>`) to
+ * the bare UUID used by JSONL filenames and `ResumeSession`.
+ *
+ * Invalid/non-UUID values are preserved so callers still receive the engine's
+ * honest malformed-id error rather than silently targeting a different value.
+ */
+fun canonicalSessionId(value: String): String {
+    val trimmed = value.trim()
+    val candidate = trimmed.removePrefix("sess:")
+    return if (BARE_SESSION_UUID.matches(candidate)) candidate.lowercase() else trimmed
+}
+
 data class EngineSessionState(
     val rows: List<SessionRow> = emptyList(),
     val phase: SessionCatalogPhase = SessionCatalogPhase.Loading,
@@ -47,6 +63,20 @@ data class EngineSessionState(
             errorMessage = message,
         )
     }
+}
+
+/**
+ * Keep durable session-index rows visible while the live engine catalog is
+ * loading or has not yet observed a newly started session.
+ *
+ * Once the engine returns that row, the live version wins and the repository's
+ * authoritative sync removes stale cached rows.
+ */
+fun EngineSessionState.withCachedRows(cachedRows: List<SessionRow>): EngineSessionState {
+    if (cachedRows.isEmpty()) return this
+    val liveIds = rows.mapTo(mutableSetOf()) { it.uuid }
+    val merged = rows + cachedRows.filterNot { it.uuid in liveIds }
+    return EngineSessionState.ready(merged)
 }
 
 /**
@@ -94,7 +124,7 @@ object SessionCatalog {
         modifiedRfc3339: String,
         nowEpochSeconds: Long = System.currentTimeMillis() / 1000L,
     ): SessionRow = SessionRow(
-        uuid = uuid,
+        uuid = canonicalSessionId(uuid),
         title = title.ifBlank { "未命名会话" },
         messageCount = messageCount,
         relativeTime = relativeTime(modifiedRfc3339, nowEpochSeconds),

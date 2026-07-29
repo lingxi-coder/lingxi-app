@@ -11,6 +11,7 @@ import com.lingxi.code.model.Message
 import com.lingxi.code.model.SessionCatalogPhase
 import com.lingxi.code.model.SessionCatalog
 import com.lingxi.code.model.SessionRow
+import com.lingxi.code.model.withCachedRows
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
@@ -205,6 +206,25 @@ class SessionStateTest {
         assertEquals(listOf("uuid-42"), source.resumeCalls)
     }
 
+    @Test
+    fun legacyPrefixedSessionId_isCanonicalBeforeResume() = runTest(dispatcher) {
+        val source = FakeSessionSource(MutableStateFlow(EngineSessionState.loading()))
+        val vm = ChatViewModel(source)
+        val uuid = "19587a33-0725-48db-abca-8a2aed345f6b"
+
+        vm.resumeSession(
+            SessionRow(
+                uuid = "sess:$uuid",
+                title = "旧版会话",
+                messageCount = 1,
+                relativeTime = "刚刚",
+            ),
+        )
+
+        assertEquals(uuid, vm.state.value.session.id)
+        assertEquals(listOf(uuid), source.resumeCalls)
+    }
+
     // --- sessionActivationFrom: the out-of-band session activation path -------
 
     private fun userDto(text: String) =
@@ -238,6 +258,36 @@ class SessionStateTest {
         // The assistant body folds thinking + text into one block-joined string.
         assertTrue(restored.transcript[1].text.contains("推理…"))
         assertTrue(restored.transcript[1].text.contains("第一条回答"))
+    }
+
+    @Test
+    fun sessionActivationFrom_canonicalizesLegacyDisplayPrefix() {
+        val uuid = "19587a33-0725-48db-abca-8a2aed345f6b"
+
+        val started = sessionActivationFrom(ClientEvent.SessionStarted(sessionId = "sess:$uuid"))
+        val resumed = sessionActivationFrom(
+            ClientEvent.SessionResumed(sessionId = "sess:$uuid", messages = emptyList()),
+        )
+
+        assertEquals(uuid, started?.sessionId)
+        assertEquals(uuid, resumed?.sessionId)
+    }
+
+    @Test
+    fun cachedStartedSessionRemainsVisibleUntilLiveCatalogCatchesUp() {
+        val cached = SessionRow(
+            uuid = "19587a33-0725-48db-abca-8a2aed345f6b",
+            title = "新对话",
+            messageCount = 0,
+            relativeTime = "刚刚",
+        )
+
+        val waiting = EngineSessionState.ready(emptyList()).withCachedRows(listOf(cached))
+        assertEquals(listOf(cached), waiting.rows)
+
+        val live = cached.copy(title = "真实标题", messageCount = 2)
+        val caughtUp = EngineSessionState.ready(listOf(live)).withCachedRows(listOf(cached))
+        assertEquals(listOf(live), caughtUp.rows)
     }
 
     @Test

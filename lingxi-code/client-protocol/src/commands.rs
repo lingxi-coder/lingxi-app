@@ -35,6 +35,7 @@ use crate::computer_access::ComputerAccessResponseDto;
 use crate::listings::TaskStatusDto;
 use crate::permission::PermissionResponseDto;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// A provider credential carried over the authenticated local bridge.
 ///
@@ -151,6 +152,22 @@ pub enum ClientCommand {
     DenyComputerAccess {
         /// Correlator with the originating
         /// [`ComputerAccessRequestDto`](crate::computer_access::ComputerAccessRequestDto).
+        request_id: u64,
+    },
+
+    // ── `AskUserQuestion` resolution ──────────────────────────────────────
+    /// Submit the answers for a parked interactive questionnaire.
+    AnswerAskUserQuestion {
+        /// Correlator from the originating
+        /// [`AskUserQuestionRequestDto`](crate::ask_user_question::AskUserQuestionRequestDto).
+        request_id: u64,
+        /// Question text to the user's selected label(s) or free-text answer.
+        answers: HashMap<String, String>,
+    },
+
+    /// Cancel a parked interactive questionnaire.
+    CancelAskUserQuestion {
+        /// Correlator from the originating request.
         request_id: u64,
     },
 

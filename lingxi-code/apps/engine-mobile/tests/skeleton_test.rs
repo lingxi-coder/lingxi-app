@@ -153,3 +153,115 @@ fn submit_send_prompt_drives_listener_text_then_turn_ended() {
         })
         .expect("a completed turn must release the slot so NewSession succeeds");
 }
+
+#[test]
+fn completed_mobile_turns_are_persisted_and_listed_per_session() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let scripted_turn = |message_id: &str, text: &str| {
+        vec![
+            message_start(message_id, "claude-sonnet-4-20250514"),
+            content_block_start_text(0),
+            text_delta(0, text),
+            content_block_stop(0),
+            message_delta_stop("end_turn"),
+            message_stop(),
+        ]
+    };
+    let streaming: Arc<dyn StreamingApiClient> =
+        Arc::new(MockStreamingApiClient::with_turns(vec![
+            scripted_turn("msg_persist_1", "first persisted reply"),
+            scripted_turn("msg_persist_2", "second persisted reply"),
+        ]));
+    let platform = Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
+    let listener = Arc::new(FakeListener::default());
+    let cfg = MobileConfig {
+        cwd: tmp.path().to_path_buf(),
+        lingxi_home: tmp.path().join(".lingxi"),
+        ..MobileConfig::default()
+    };
+    let handle = new_engine_with_streaming(
+        cfg,
+        platform,
+        listener.clone(),
+        Arc::new(CollectingPermissionSink::default()),
+        Some(streaming),
+    )
+    .expect("build engine with scripted streaming");
+
+    handle.runtime().block_on(async {
+        let mut session_ids = Vec::new();
+        for (index, prompt) in ["first persisted prompt", "second persisted prompt"]
+            .into_iter()
+            .enumerate()
+        {
+            handle
+                .submit(ClientCommand::NewSession {
+                    cwd: None,
+                    model: None,
+                })
+                .await
+                .expect("start session");
+            let session_id = listener
+                .received
+                .lock()
+                .await
+                .iter()
+                .rev()
+                .find_map(|event| match event {
+                    ClientEvent::SessionStarted { session_id } => Some(session_id.clone()),
+                    _ => None,
+                })
+                .expect("SessionStarted carries the durable id");
+            session_ids.push(session_id);
+
+            handle
+                .submit(ClientCommand::SendPrompt {
+                    text: prompt.into(),
+                    prompt_mode: None,
+                    images: Vec::new(),
+                    turn_id: Some(index as u64 + 1),
+                })
+                .await
+                .expect("send prompt");
+            for _ in 0..2000 {
+                let completed = listener
+                    .received
+                    .lock()
+                    .await
+                    .iter()
+                    .filter(|event| matches!(event, ClientEvent::TurnEnded { .. }))
+                    .count();
+                if completed > index {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }
+
+        handle
+            .submit(ClientCommand::ListSessions { limit: None })
+            .await
+            .expect("list persisted sessions");
+        let listed = listener
+            .received
+            .lock()
+            .await
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                ClientEvent::SessionList { sessions } => Some(sessions.clone()),
+                _ => None,
+            })
+            .expect("SessionList event");
+        let listed_ids: std::collections::HashSet<_> =
+            listed.iter().map(|row| row.uuid.as_str()).collect();
+
+        assert_eq!(session_ids.len(), 2);
+        assert_ne!(session_ids[0], session_ids[1]);
+        assert_eq!(listed.len(), 2, "each completed session must be listed");
+        assert!(session_ids
+            .iter()
+            .all(|id| listed_ids.contains(id.as_str())));
+        assert!(listed.iter().all(|row| row.message_count >= 2));
+    });
+}

@@ -39,14 +39,19 @@ import com.lingxi.code.computeruse.ComputerUseApprovalDialog
 import com.lingxi.code.computeruse.ComputerUseFeatureProvider
 import com.lingxi.code.connectivity.rememberOnlineState
 import com.lingxi.code.connectivity.shouldShowOfflineBanner
+import com.lingxi.code.cron.AndroidCronRepository
+import com.lingxi.code.cron.CronRunStatus
+import com.lingxi.code.cron.CronSchedulingMode
 import com.lingxi.code.drawer.DrawerContent
 import com.lingxi.code.drawer.DrawerProductionData
 import com.lingxi.code.drawer.rememberDrawerUiState
+import com.lingxi.code.model.Cron
 import com.lingxi.code.model.EngineSessionState
 import com.lingxi.code.model.ModelProviderStatus
 import com.lingxi.code.model.SessionCatalogPhase
 import com.lingxi.code.model.SessionRef
 import com.lingxi.code.model.SessionRow
+import com.lingxi.code.model.withCachedRows
 import com.lingxi.code.project.ConflictResolution
 import com.lingxi.code.project.CreateProjectDialog
 import com.lingxi.code.project.LocalProjectWorkspace
@@ -58,6 +63,8 @@ import com.lingxi.code.project.ProjectStore
 import com.lingxi.code.project.ProjectStoreState
 import com.lingxi.code.project.toDrawerProject
 import com.lingxi.code.settings.ProviderSettingsRepository
+import com.lingxi.code.settings.LinuxRuntimeBridge
+import com.lingxi.code.settings.LinuxRuntimeMode
 import com.lingxi.code.settings.SettingsStore
 import com.lingxi.code.theme.LingXiTheme
 import com.lingxi.code.voice.offline.SherpaVoice
@@ -75,6 +82,9 @@ import android.graphics.BitmapFactory
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 
 /**
  * Root composable for the app shell.
@@ -98,6 +108,8 @@ fun RootScreen(
     onOpenSettings: () -> Unit = {},
     onOpenModelSettings: () -> Unit = {},
     onOpenProviderSettings: (String?) -> Unit = { onOpenModelSettings() },
+    onOpenCronSettings: (String?) -> Unit = { onOpenSettings() },
+    onOpenTerminal: (sessionId: String, initCommand: String?) -> Unit = { _, _ -> },
     modelSetupRequired: Boolean = false,
     // FlowMode (心流) profile bits, read from the persisted AppearancePrefs and
     // passed down so the voice-orb overlay can label itself + gate its text input.
@@ -118,6 +130,19 @@ fun RootScreen(
         factory = ProjectStore.factory(context),
     )
     val projectState by projectStore.state.collectAsState()
+    val cronRepository = remember(context) { AndroidCronRepository.get(context) }
+    val cronState by cronRepository.state.collectAsState()
+    val projectScopeSignature = remember(projectState.activeProjectId, projectState.projects) {
+        buildString {
+            append(projectState.activeProjectId.orEmpty())
+            projectState.projects.forEach { append('|').append(it.record.id) }
+        }
+    }
+    LaunchedEffect(projectState.loading, projectScopeSignature) {
+        if (!projectState.loading) {
+            cronRepository.requestReconcile("project-change")
+        }
+    }
 
     // The Activity-scoped ViewModel owns the one native engine source. This is
     // important across configuration changes: Compose is recreated, while the
@@ -153,6 +178,47 @@ fun RootScreen(
             }
         }
     }
+    val selectedLinuxMode = settingsStore?.state?.value?.linuxRuntime?.selectedMode
+        ?: LinuxRuntimeMode.Legacy
+    LaunchedEffect(chatViewModel, selectedLinuxMode, reconnectToken) {
+        if (selectedLinuxMode != LinuxRuntimeMode.MobileLinux) return@LaunchedEffect
+        var cursor = runCatching {
+            LinuxRuntimeBridge.readEvents(
+                context = appContext,
+                mode = selectedLinuxMode,
+                limit = 256u,
+            ).maxOfOrNull { it.sequence }
+        }.getOrNull()
+        while (currentCoroutineContext().isActive) {
+            val eventResult = runCatching {
+                LinuxRuntimeBridge.readEvents(
+                    context = appContext,
+                    mode = selectedLinuxMode,
+                    afterSequence = cursor,
+                    limit = 256u,
+                )
+            }
+            if (eventResult.isFailure) {
+                delay(250)
+                continue
+            }
+            val events = eventResult.getOrThrow()
+            for (event in events.sortedBy { it.sequence }) {
+                val snapshot = event.taskId?.let { taskId ->
+                    runCatching {
+                        LinuxRuntimeBridge.taskStatus(
+                            context = appContext,
+                            mode = selectedLinuxMode,
+                            taskId = taskId,
+                        )
+                    }.getOrNull()
+                }
+                chatViewModel.reduceMobileLinuxEvent(event, snapshot)
+                cursor = maxOf(cursor ?: 0u, event.sequence)
+            }
+            delay(if (events.isEmpty()) 80 else 10)
+        }
+    }
     val state by chatViewModel.state.collectAsState()
     DisposableEffect(chatViewModel, context) {
         ComputerUseFeatureProvider.attach(context) { chatViewModel.cancel() }
@@ -174,7 +240,10 @@ fun RootScreen(
     // SessionList). `isOpen` flips on the open animation's start, so this fires
     // once per open, not per frame.
     LaunchedEffect(drawerState.isOpen) {
-        if (drawerState.isOpen) chatViewModel.refreshSessions()
+        if (drawerState.isOpen) {
+            chatViewModel.refreshSessions()
+            cronRepository.refresh()
+        }
     }
 
     // Voice-flow overlay visibility, hoisted here (the Android analog of the iOS
@@ -295,6 +364,7 @@ fun RootScreen(
         project: ProjectSnapshot?,
         target: SessionRef?,
         newSession: Boolean,
+        resumeEmpty: Boolean = false,
         replacePendingTransition: Boolean = false,
     ): Boolean {
         val destination = target ?: SessionRef("new", "新对话")
@@ -303,6 +373,7 @@ fun RootScreen(
             projectId = project?.record?.id,
             target = destination,
             newSession = newSession,
+            resumeEmpty = resumeEmpty,
             replacePendingTransition = replacePendingTransition,
             createSource = {
                 EngineConversationSource.create(
@@ -337,13 +408,16 @@ fun RootScreen(
                 project != null &&
                 sourceProjectId == null
         ) {
-            val last = project.record.lastActiveSessionId
+            val lastSummary = project.record.lastActiveSessionId
                 ?.let { id -> project.sessions.firstOrNull { it.sessionId == id } }
-                ?.let { SessionRef(it.sessionId, it.title) }
+            val last = lastSummary?.let {
+                SessionRef(id = it.sessionId, title = it.title)
+            }
             switchEngineScope(
                 project = project,
                 target = last,
                 newSession = last == null,
+                resumeEmpty = lastSummary?.messageCount == 0,
                 replacePendingTransition = true,
             )
         }
@@ -362,8 +436,7 @@ fun RootScreen(
     ) {
         if (sessionState.phase == SessionCatalogPhase.Ready) {
             val provisionalSessionMayNotBeListed =
-                sourceProjectId != null &&
-                    state.isNew &&
+                state.isNew &&
                     (
                         state.session.id == "new" ||
                             sessionState.rows.none { it.uuid == state.session.id }
@@ -384,16 +457,14 @@ fun RootScreen(
         state.sessionReady,
         state.isNew,
     ) {
-        val projectId = sourceProjectId
         if (
-            projectId != null &&
             state.sessionReady &&
             state.isNew &&
             state.session.id != "new"
         ) {
             runCatching {
                 projectStore.recordStartedSession(
-                    projectId = projectId,
+                    projectId = sourceProjectId,
                     sessionId = state.session.id,
                     title = state.session.title,
                 )
@@ -435,24 +506,50 @@ fun RootScreen(
         }
     }
 
-    val globalDrawerSessions = if (sourceProjectId == null) {
-        sessionState
-    } else {
-        EngineSessionState.ready(
-            projectState.globalSessions.map { cached ->
-                SessionRow(
-                    uuid = cached.sessionId,
-                    title = cached.title,
-                    messageCount = cached.messageCount,
-                    relativeTime = cached.relativeTime,
-                )
-            },
+    val cachedGlobalRows = projectState.globalSessions.map { cached ->
+        SessionRow(
+            uuid = cached.sessionId,
+            title = cached.title,
+            messageCount = cached.messageCount,
+            relativeTime = cached.relativeTime,
         )
+    }
+    val globalDrawerSessions = if (sourceProjectId == null) {
+        sessionState.withCachedRows(cachedGlobalRows)
+    } else {
+        EngineSessionState.ready(cachedGlobalRows)
     }
     val drawerProductionData = DrawerProductionData(
         workspaces = listOf(LocalProjectWorkspace),
         projects = projectState.projects.map { it.toDrawerProject() },
-        crons = emptyList(),
+        crons = cronState.tasks.map { cron ->
+            val status = cron.activeRun?.status ?: cron.lastRun?.status
+            Cron(
+                id = "${cron.scope.scopeId}:${cron.task.id}",
+                wsId = LocalProjectWorkspace.id,
+                title = cron.task.prompt.lineSequence().firstOrNull()
+                    ?.take(42)
+                    ?.ifBlank { cron.task.id }
+                    ?: cron.task.id,
+                cron = cron.task.cron,
+                next = cron.task.nextFireMs?.toLong()?.let(::formatCronTime) ?: "无后续触发",
+                desc = buildString {
+                    append(cron.scope.projectName)
+                    append(" · ")
+                    append(
+                        when {
+                            cron.schedulingMode == CronSchedulingMode.Unsupported ->
+                                cron.unsupportedReason ?: "Android 不支持此周期"
+                            status != null -> cronStatusLabel(status)
+                            cron.schedulingMode == CronSchedulingMode.FifteenMinuteFallback ->
+                                "15 分钟巡检"
+                            else -> "精确闹钟"
+                        },
+                    )
+                },
+                enabled = cron.schedulingMode != CronSchedulingMode.Unsupported,
+            )
+        },
         projectStatusMessage = projectState.operation?.message,
     )
     LaunchedEffect(Unit) {
@@ -558,6 +655,7 @@ fun RootScreen(
                                                 null,
                                                 SessionRef(row.uuid, row.title),
                                                 false,
+                                                resumeEmpty = row.messageCount == 0,
                                             )
                                         ) {
                                             closeDrawer()
@@ -573,13 +671,29 @@ fun RootScreen(
                             val project = projectState.projects.firstOrNull {
                                 it.record.id == projectId
                             } ?: return@DrawerContent
+                            val session = project.sessions
+                                .firstOrNull { it.sessionId == ref.id }
+                                ?: return@DrawerContent
+                            val resumeTarget = SessionRef(session.sessionId, session.title)
                             val switched = if (sourceProjectId == projectId) {
-                                drawerUi.selectSession(ref.id)
-                                chatViewModel.openSession(ref)
+                                drawerUi.selectSession(resumeTarget.id)
+                                chatViewModel.openSession(
+                                    resumeTarget,
+                                    empty = session.messageCount == 0,
+                                )
                                 true
                             } else {
                                 scope.launch {
-                                    if (switchEngineScope(project, ref, false)) closeDrawer()
+                                    if (
+                                        switchEngineScope(
+                                            project = project,
+                                            target = resumeTarget,
+                                            newSession = false,
+                                            resumeEmpty = session.messageCount == 0,
+                                        )
+                                    ) {
+                                        closeDrawer()
+                                    }
                                 }
                                 false
                             }
@@ -611,6 +725,14 @@ fun RootScreen(
                                 pendingReauthorizeProjectId = projectId
                                 importProjectLauncher.launch(null)
                             }
+                        },
+                        onOpenCron = { taskKey ->
+                            closeDrawer()
+                            onOpenCronSettings(taskKey)
+                        },
+                        onCreateCron = {
+                            closeDrawer()
+                            onOpenCronSettings(null)
                         },
                     )
                 }
@@ -667,6 +789,9 @@ fun RootScreen(
                     onOpenModelSettings = onOpenModelSettings,
                     modelProviderStatuses = modelProviderStatuses,
                     onOpenProviderSettings = onOpenProviderSettings,
+                    onOpenTerminal = { sessionId, command ->
+                        onOpenTerminal(sessionId, command)
+                    },
                 )
             }
         }
@@ -756,6 +881,21 @@ fun RootScreen(
             onDismiss = projectStore::clearError,
         )
     }
+}
+
+private fun formatCronTime(epochMs: Long): String =
+    java.time.Instant.ofEpochMilli(epochMs)
+        .atZone(java.time.ZoneId.systemDefault())
+        .format(java.time.format.DateTimeFormatter.ofPattern("MM-dd HH:mm"))
+
+private fun cronStatusLabel(status: CronRunStatus): String = when (status) {
+    CronRunStatus.Queued -> "已排队"
+    CronRunStatus.Running -> "运行中"
+    CronRunStatus.Succeeded -> "最近成功"
+    CronRunStatus.Failed -> "最近失败"
+    CronRunStatus.TimedOut -> "最近超时"
+    CronRunStatus.Cancelled -> "已取消"
+    CronRunStatus.Skipped -> "已跳过"
 }
 
 internal fun appendVoiceTranscript(base: String, transcript: String): String = when {

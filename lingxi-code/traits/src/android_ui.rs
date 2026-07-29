@@ -14,6 +14,8 @@ pub const MAX_ANDROID_UI_NODES: usize = 500;
 pub const MAX_ANDROID_UI_DEPTH: usize = 50;
 pub const MAX_ANDROID_UI_BATCH: usize = 20;
 pub const MAX_ANDROID_UI_WAIT_MS: u64 = 30_000;
+pub const MAX_ANDROID_AUDIO_LISTEN_MS: u64 = 60_000;
+pub const MAX_ANDROID_AUDIO_SPEAK_CHARS: usize = 4_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -41,7 +43,7 @@ pub enum AndroidCaptureMode {
     MediaProjection,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AndroidAutomationStatus {
     pub service_enabled: bool,
     pub session_state: AndroidAutomationSessionState,
@@ -51,6 +53,20 @@ pub struct AndroidAutomationStatus {
     pub display_height: u32,
     pub remaining_ms: Option<u64>,
     pub detail: Option<String>,
+    #[serde(default)]
+    pub audio_listen_enabled: bool,
+    #[serde(default)]
+    pub audio_speak_enabled: bool,
+    #[serde(default)]
+    pub audio_input_language: Option<String>,
+    #[serde(default)]
+    pub audio_voice: Option<String>,
+    #[serde(default = "default_android_audio_speed")]
+    pub audio_speed: f32,
+}
+
+fn default_android_audio_speed() -> f32 {
+    1.0
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,6 +143,33 @@ pub struct AndroidScreenshot {
     pub width: u32,
     pub height: u32,
     pub png_bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AndroidAudioListenRequest {
+    pub language: Option<String>,
+    pub timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AndroidAudioTranscript {
+    pub text: String,
+    pub language: Option<String>,
+    pub confidence: Option<f32>,
+    pub duration_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AndroidAudioSpeakRequest {
+    pub text: String,
+    pub voice: Option<String>,
+    pub speed: Option<f32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AndroidAudioSpeakResult {
+    pub completed: bool,
+    pub duration_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -268,5 +311,26 @@ pub trait AndroidUiAutomation: Send + Sync {
         condition: AndroidWaitCondition,
         timeout_ms: u64,
     ) -> Result<AndroidActionResult, AndroidAutomationError>;
+    async fn listen(
+        &self,
+        _request: AndroidAudioListenRequest,
+    ) -> Result<AndroidAudioTranscript, AndroidAutomationError> {
+        Err(AndroidAutomationError::Unsupported(
+            "audio listening is not available on this Android host".into(),
+        ))
+    }
+    async fn speak(
+        &self,
+        _request: AndroidAudioSpeakRequest,
+    ) -> Result<AndroidAudioSpeakResult, AndroidAutomationError> {
+        Err(AndroidAutomationError::Unsupported(
+            "audio speech is not available on this Android host".into(),
+        ))
+    }
+    async fn stop_audio(&self) -> Result<(), AndroidAutomationError> {
+        Err(AndroidAutomationError::Unsupported(
+            "audio control is not available on this Android host".into(),
+        ))
+    }
     async fn stop(&self) -> Result<(), AndroidAutomationError>;
 }

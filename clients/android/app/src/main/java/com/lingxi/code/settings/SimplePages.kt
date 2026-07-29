@@ -36,12 +36,12 @@ import com.lingxi.code.model.VoiceConfig
 import com.lingxi.code.theme.LingXiTheme
 
 /**
- * The "simple" settings pages owned by A6 — account, knowledge, memory,
- * workflows, notifications, input, privacy, language. Each is a thin
- * composition of [SettingsSection] / [SettingsRow] / [RadioList], ported 1:1
- * from the iOS `SimplePages.swift`. Toggles that the iOS code held as local
- * `@State` stay local here too; the language radio + notifications bind to the
- * hoisted store so the main-list summary stays in sync.
+ * The "simple" settings pages owned by A6 — account, notifications, input,
+ * privacy, and language. Each is a thin composition of [SettingsSection] /
+ * [SettingsRow] / [RadioList], ported from the iOS `SimplePages.swift`.
+ * Toggles that the iOS code held as local `@State` stay local here too; the
+ * language radio + notifications bind to the hoisted store so the main-list
+ * summary stays in sync.
  */
 
 // MARK: - Account -----------------------------------------------------------
@@ -87,60 +87,6 @@ fun AccountPage() {
             SettingsRow(icon = LXIconName.Link, label = "同步设备", sub = "3 台设备已连接", onTap = {})
             SettingsRow(icon = LXIconName.X, label = "退出登录", danger = true, isLast = true, onTap = {})
         }
-    }
-}
-
-// MARK: - Knowledge ---------------------------------------------------------
-@Composable
-fun KnowledgePage() {
-    var autoRecall by remember { mutableStateOf(true) }
-    Column(Modifier.fillMaxWidth()) {
-        Blurb("知识库内容会被嵌入并附加到 AI 上下文。所有索引在本机完成。")
-        SettingsSection(label = "存储") {
-            SettingsRow(label = "使用空间", value = "142 MB", chevron = false)
-            SettingsRow(label = "文件数", value = "24 个", chevron = false)
-            SettingsRow(label = "索引模型", value = "bge-m3-local", isLast = true, onTap = {})
-        }
-        SettingsSection(label = "行为") {
-            SettingsRow(label = "自动检索", sub = "每次提问自动召回相关片段", chevron = false) {
-                LXToggle(checked = autoRecall, onCheckedChange = { autoRecall = it })
-            }
-            SettingsRow(label = "召回数量上限", value = "8 段", isLast = true, onTap = {})
-        }
-    }
-}
-
-// MARK: - Memory ------------------------------------------------------------
-@Composable
-fun MemoryPage() {
-    Column(Modifier.fillMaxWidth()) {
-        Blurb("灵犀根据对话自动提取关于你的偏好、习惯、关系。你可以随时编辑或删除。")
-        SettingsSection(label = "近期记忆") {
-            SettingsRow(label = "偏好深色 + 中文", sub = "2026-05-12 形成", onTap = {})
-            SettingsRow(label = "工作日 8:30 倾向收到晨报", sub = "2026-05-10 形成", onTap = {})
-            SettingsRow(label = "正在做 AxieLix 灵犀项目", sub = "2026-05-08 形成", isLast = true, onTap = {})
-        }
-        SettingsSection {
-            SettingsRow(icon = LXIconName.X, label = "清除全部记忆", chevron = false, danger = true, isLast = true, onTap = {})
-        }
-    }
-}
-
-// MARK: - Workflows ---------------------------------------------------------
-@Composable
-fun WorkflowsPage() {
-    var w1 by remember { mutableStateOf(true) }
-    var w2 by remember { mutableStateOf(true) }
-    var w3 by remember { mutableStateOf(true) }
-    var w4 by remember { mutableStateOf(false) }
-    SettingsSection(
-        label = "自动化",
-        footer = "工作流由 cron 表达式或事件触发。在主界面侧栏 → 定时 可创建。",
-    ) {
-        SettingsRow(label = "每日晨报", sub = "工作日 08:30", chevron = false) { LXToggle(checked = w1, onCheckedChange = { w1 = it }) }
-        SettingsRow(label = "周报自动生成", sub = "每周五 17:00", chevron = false) { LXToggle(checked = w2, onCheckedChange = { w2 = it }) }
-        SettingsRow(label = "客户反馈周聚合", sub = "每周一 09:00", chevron = false) { LXToggle(checked = w3, onCheckedChange = { w3 = it }) }
-        SettingsRow(label = "凌晨日志巡检", sub = "已暂停", chevron = false, isLast = true) { LXToggle(checked = w4, onCheckedChange = { w4 = it }) }
     }
 }
 

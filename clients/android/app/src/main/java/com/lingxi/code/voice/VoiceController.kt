@@ -20,6 +20,7 @@ import com.lingxi.code.bindings.MobileEngineHandle
 import com.lingxi.code.bindings.PermissionRequest
 import com.lingxi.code.bindings.SpeechFfiException
 import com.lingxi.code.bindings.buildAndroidEngineWithMobileLinux
+import com.lingxi.code.computeruse.ComputerUseFeatureProvider
 import com.lingxi.code.voice.audio.AndroidSttAdapter
 import com.lingxi.code.voice.audio.AndroidTtsAdapter
 import com.lingxi.code.voice.audio.SystemSpeechRecognizerStt
@@ -171,6 +172,9 @@ fun buildVoiceEngine(
             notifications = notifications,
             clipboard = clipboard,
             permissions = permissions,
+            // Direct injects the active, user-authorized host. Play returns null,
+            // so android_use is absent from that distribution.
+            computerUse = ComputerUseFeatureProvider.engineHost(),
             // P1: shell/sandbox config not surfaced in the app UI yet — null
             // keeps shell support fully absent (spec r3 registration gate).
             shell = null,

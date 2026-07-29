@@ -606,6 +606,7 @@ pub fn build_mobile_engine(
                     .map(|cfg| std::path::PathBuf::from(cfg.managed_root.clone())),
                 shell: None,
                 secure_storage: None,
+                android_ui_automation: None,
             },
             mobile_linux_mode,
         ));
@@ -2813,6 +2814,248 @@ impl engine_mobile::PermissionRequestSink for NoopPermissionSink {
     async fn emit_request(&self, _request: client_protocol::permission::PermissionRequest) {}
 }
 
+// ---------------------------------------------------------------------------
+// Direct Android Computer Use callback + traits bridge.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
+#[derive(Debug, thiserror::Error)]
+pub enum AndroidComputerUseFfiError {
+    #[error("accessibility service disabled")]
+    ServiceDisabled,
+    #[error("Computer Use session inactive")]
+    SessionInactive,
+    #[error("Computer Use permission denied: {message}")]
+    PermissionDenied { message: String },
+    #[error("target package not allowed: {message}")]
+    TargetNotAllowed { message: String },
+    #[error("Computer Use tier insufficient: {message}")]
+    TierInsufficient { message: String },
+    #[error("protected Android surface: {message}")]
+    ProtectedSurface { message: String },
+    #[error("stale Android node: {message}")]
+    StaleNode { message: String },
+    #[error("Android Computer Use timeout: {message}")]
+    Timeout { message: String },
+    #[error("unsupported Android Computer Use operation: {message}")]
+    Unsupported { message: String },
+    #[error("Android Computer Use error: {message}")]
+    Other { message: String },
+}
+
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[derive(Debug, Clone)]
+pub struct AndroidScreenshotFfi {
+    pub width: u32,
+    pub height: u32,
+    pub png_bytes: Vec<u8>,
+}
+
+/// Kotlin-owned Direct-build Computer Use host. JSON is used for the
+/// Android-specific tree/action vocabulary so the UniFFI surface stays stable
+/// while the strongly typed Rust trait remains the tool contract.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
+#[async_trait::async_trait]
+pub trait AndroidComputerUseHost: Send + Sync {
+    async fn status_json(&self) -> Result<String, AndroidComputerUseFfiError>;
+    async fn request_access_json(
+        &self,
+        request_json: String,
+    ) -> Result<String, AndroidComputerUseFfiError>;
+    async fn list_granted_apps_json(&self) -> Result<String, AndroidComputerUseFfiError>;
+    async fn screenshot(&self) -> Result<AndroidScreenshotFfi, AndroidComputerUseFfiError>;
+    async fn ui_tree_json(&self) -> Result<String, AndroidComputerUseFfiError>;
+    async fn find_nodes_json(
+        &self,
+        query_json: String,
+    ) -> Result<String, AndroidComputerUseFfiError>;
+    async fn inspect_node_json(
+        &self,
+        node_id: String,
+    ) -> Result<String, AndroidComputerUseFfiError>;
+    async fn perform_json(&self, action_json: String)
+        -> Result<String, AndroidComputerUseFfiError>;
+    async fn wait_for_json(
+        &self,
+        condition_json: String,
+        timeout_ms: u64,
+    ) -> Result<String, AndroidComputerUseFfiError>;
+    async fn stop(&self) -> Result<(), AndroidComputerUseFfiError>;
+}
+
+#[cfg(feature = "uniffi")]
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+struct AndroidComputerUseBridge {
+    inner: Box<dyn AndroidComputerUseHost>,
+}
+
+#[cfg(feature = "uniffi")]
+fn computer_use_error_from_ffi(
+    error: AndroidComputerUseFfiError,
+) -> traits::AndroidAutomationError {
+    use traits::AndroidAutomationError as Target;
+    match error {
+        AndroidComputerUseFfiError::ServiceDisabled => Target::ServiceDisabled,
+        AndroidComputerUseFfiError::SessionInactive => Target::SessionInactive,
+        AndroidComputerUseFfiError::PermissionDenied { message } => {
+            Target::PermissionDenied(message)
+        }
+        AndroidComputerUseFfiError::TargetNotAllowed { message } => {
+            Target::TargetNotAllowed(message)
+        }
+        AndroidComputerUseFfiError::TierInsufficient { message } => {
+            Target::TierInsufficient(message)
+        }
+        AndroidComputerUseFfiError::ProtectedSurface { message } => {
+            Target::ProtectedSurface(message)
+        }
+        AndroidComputerUseFfiError::StaleNode { message } => Target::StaleNode(message),
+        AndroidComputerUseFfiError::Timeout { message } => Target::Timeout(message),
+        AndroidComputerUseFfiError::Unsupported { message } => Target::Unsupported(message),
+        AndroidComputerUseFfiError::Other { message } => Target::Other(message),
+    }
+}
+
+#[cfg(feature = "uniffi")]
+fn decode_computer_use_json<T: serde::de::DeserializeOwned>(
+    value: String,
+) -> Result<T, traits::AndroidAutomationError> {
+    serde_json::from_str(&value).map_err(|error| {
+        traits::AndroidAutomationError::Other(format!("invalid host JSON: {error}"))
+    })
+}
+
+#[cfg(feature = "uniffi")]
+fn encode_computer_use_json<T: serde::Serialize>(
+    value: &T,
+) -> Result<String, traits::AndroidAutomationError> {
+    serde_json::to_string(value).map_err(|error| {
+        traits::AndroidAutomationError::Other(format!("cannot encode host JSON: {error}"))
+    })
+}
+
+#[cfg(feature = "uniffi")]
+#[async_trait::async_trait]
+impl traits::AndroidUiAutomation for AndroidComputerUseBridge {
+    async fn status(
+        &self,
+    ) -> Result<traits::AndroidAutomationStatus, traits::AndroidAutomationError> {
+        let value = self
+            .inner
+            .status_json()
+            .await
+            .map_err(computer_use_error_from_ffi)?;
+        decode_computer_use_json(value)
+    }
+
+    async fn request_access(
+        &self,
+        request: traits::AndroidAccessRequest,
+    ) -> Result<Vec<traits::AndroidAppInfo>, traits::AndroidAutomationError> {
+        let request = encode_computer_use_json(&request)?;
+        let value = self
+            .inner
+            .request_access_json(request)
+            .await
+            .map_err(computer_use_error_from_ffi)?;
+        decode_computer_use_json(value)
+    }
+
+    async fn list_granted_apps(
+        &self,
+    ) -> Result<Vec<traits::AndroidAppInfo>, traits::AndroidAutomationError> {
+        let value = self
+            .inner
+            .list_granted_apps_json()
+            .await
+            .map_err(computer_use_error_from_ffi)?;
+        decode_computer_use_json(value)
+    }
+
+    async fn screenshot(
+        &self,
+    ) -> Result<traits::AndroidScreenshot, traits::AndroidAutomationError> {
+        let value = self
+            .inner
+            .screenshot()
+            .await
+            .map_err(computer_use_error_from_ffi)?;
+        Ok(traits::AndroidScreenshot {
+            width: value.width,
+            height: value.height,
+            png_bytes: value.png_bytes,
+        })
+    }
+
+    async fn ui_tree(&self) -> Result<traits::AndroidUiSnapshot, traits::AndroidAutomationError> {
+        let value = self
+            .inner
+            .ui_tree_json()
+            .await
+            .map_err(computer_use_error_from_ffi)?;
+        decode_computer_use_json(value)
+    }
+
+    async fn find_nodes(
+        &self,
+        query: traits::AndroidNodeQuery,
+    ) -> Result<Vec<traits::AndroidUiNode>, traits::AndroidAutomationError> {
+        let query = encode_computer_use_json(&query)?;
+        let value = self
+            .inner
+            .find_nodes_json(query)
+            .await
+            .map_err(computer_use_error_from_ffi)?;
+        decode_computer_use_json(value)
+    }
+
+    async fn inspect_node(
+        &self,
+        node_id: String,
+    ) -> Result<traits::AndroidUiNode, traits::AndroidAutomationError> {
+        let value = self
+            .inner
+            .inspect_node_json(node_id)
+            .await
+            .map_err(computer_use_error_from_ffi)?;
+        decode_computer_use_json(value)
+    }
+
+    async fn perform(
+        &self,
+        action: traits::AndroidAction,
+    ) -> Result<traits::AndroidActionResult, traits::AndroidAutomationError> {
+        let action = encode_computer_use_json(&action)?;
+        let value = self
+            .inner
+            .perform_json(action)
+            .await
+            .map_err(computer_use_error_from_ffi)?;
+        decode_computer_use_json(value)
+    }
+
+    async fn wait_for(
+        &self,
+        condition: traits::AndroidWaitCondition,
+        timeout_ms: u64,
+    ) -> Result<traits::AndroidActionResult, traits::AndroidAutomationError> {
+        let condition = encode_computer_use_json(&condition)?;
+        let value = self
+            .inner
+            .wait_for_json(condition, timeout_ms)
+            .await
+            .map_err(computer_use_error_from_ffi)?;
+        decode_computer_use_json(value)
+    }
+
+    async fn stop(&self) -> Result<(), traits::AndroidAutomationError> {
+        self.inner.stop().await.map_err(computer_use_error_from_ffi)
+    }
+}
+
 /// The Kotlin-implemented permission sink the Android app registers when it builds
 /// the engine. Defined in THIS crate (not re-used from `engine-mobile`) so its
 /// `UniFFI` converter registers under `android_aar`'s tag — a prerequisite for
@@ -3101,6 +3344,7 @@ pub fn build_android_engine(
     notifications: Box<dyn AndroidNotification>,
     clipboard: Box<dyn AndroidClipboard>,
     permissions: Box<dyn AndroidPermissionSink>,
+    computer_use: Option<Box<dyn AndroidComputerUseHost>>,
     shell: Option<AndroidShellConfigFfi>,
     git: Option<AndroidGitConfigFfi>,
     git_credential_provider: Option<Box<dyn AndroidGitCredentialProvider>>,
@@ -3125,6 +3369,7 @@ pub fn build_android_engine(
         notifications,
         clipboard,
         permissions,
+        computer_use,
         shell,
         git,
         git_credential_provider,
@@ -3147,6 +3392,7 @@ pub fn build_android_engine_with_mobile_linux(
     notifications: Box<dyn AndroidNotification>,
     clipboard: Box<dyn AndroidClipboard>,
     permissions: Box<dyn AndroidPermissionSink>,
+    computer_use: Option<Box<dyn AndroidComputerUseHost>>,
     shell: Option<AndroidShellConfigFfi>,
     git: Option<AndroidGitConfigFfi>,
     git_credential_provider: Option<Box<dyn AndroidGitCredentialProvider>>,
@@ -3260,6 +3506,10 @@ pub fn build_android_engine_with_mobile_linux(
                 secure_storage: secure_storage.map(|s| {
                     std::sync::Arc::new(AndroidSecureStorageBridge { inner: s })
                         as std::sync::Arc<dyn traits::SecureStorage>
+                }),
+                android_ui_automation: computer_use.map(|host| {
+                    std::sync::Arc::new(AndroidComputerUseBridge { inner: host })
+                        as std::sync::Arc<dyn traits::AndroidUiAutomation>
                 }),
             },
             mobile_linux_mode,
@@ -3452,6 +3702,7 @@ pub fn build_android_engine_with_mobile_linux(
             notifications,
             clipboard,
             permissions,
+            computer_use,
             shell,
             git,
             provider_config,

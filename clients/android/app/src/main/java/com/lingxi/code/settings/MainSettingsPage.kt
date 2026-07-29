@@ -30,6 +30,7 @@ import androidx.compose.ui.unit.sp
 import androidx.navigation.NavHostController
 import com.lingxi.code.components.LXIconName
 import com.lingxi.code.components.LXToggle
+import com.lingxi.code.computeruse.ComputerUseFeatureProvider
 import com.lingxi.code.model.Presets
 import com.lingxi.code.model.ProviderKind
 import com.lingxi.code.theme.Accents
@@ -112,6 +113,16 @@ fun MainSettingsPage(
                 value = state.linuxRuntime.badge,
                 onTap = { navController.navigate(SettingsRoutes.LINUX_RUNTIME) },
             )
+            if (ComputerUseFeatureProvider.available) {
+                SettingsRow(
+                    icon = LXIconName.Sparkle,
+                    iconColor = Color(red = 0.62f, green = 0.48f, blue = 0.96f),
+                    label = "Computer Use",
+                    sub = "Android 屏幕观察与受控操作",
+                    value = "Direct",
+                    onTap = { navController.navigate(SettingsRoutes.COMPUTER_USE) },
+                )
+            }
             SettingsRow(
                 icon = LXIconName.Dream, iconColor = Color(red = 0.809f, green = 0.4552f, blue = 0.8891f),
                 label = "Dream 模式", sub = "后台离线思考与整理",

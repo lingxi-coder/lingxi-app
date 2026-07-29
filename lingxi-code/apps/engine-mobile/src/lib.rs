@@ -177,6 +177,22 @@ pub fn mobile_tool_registry_with_skill_loader(
     reg
 }
 
+/// Register Android Computer Use only when both the Direct-build Cargo feature
+/// and a live native host are present. Play builds pass no host and compile
+/// without the feature. Direct foreground and headless engines intentionally
+/// share the host; its in-memory active-session grants remain the security gate.
+pub fn register_android_ui_automation(
+    reg: &mut ToolRegistry,
+    automation: Option<Arc<dyn traits::AndroidUiAutomation>>,
+) {
+    #[cfg(feature = "android-computer-use")]
+    if let Some(automation) = automation {
+        tool_android_use::register_all(reg, automation);
+    }
+    #[cfg(not(feature = "android-computer-use"))]
+    let _ = (reg, automation);
+}
+
 /// Assemble the mobile builtin **skill** registry.
 #[must_use]
 pub fn mobile_skill_registry() -> SkillRegistry {

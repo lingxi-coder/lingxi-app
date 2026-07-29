@@ -776,6 +776,129 @@ fn count_document_and_image_blocks(messages: &[protocol::ConversationMessage]) -
 /// `messages.ts:207` `INTERRUPT_MESSAGE`.
 const INTERRUPT_MESSAGE: &str = "[Request interrupted by user]";
 
+/// Clone a message for durable persistence, replacing explicitly ephemeral tool
+/// images with their non-sensitive summary. The live in-memory message remains
+/// untouched and still carries its image content blocks to the current model.
+fn redact_ephemeral_tool_result_images(
+    message: &protocol::ConversationMessage,
+) -> protocol::ConversationMessage {
+    let mut sanitized = message.clone();
+    let blocks = match &mut sanitized {
+        protocol::ConversationMessage::User { content, .. }
+        | protocol::ConversationMessage::Assistant { content, .. } => content,
+        protocol::ConversationMessage::System { .. } => return sanitized,
+    };
+    for block in blocks {
+        let protocol::ContentBlock::ToolResult {
+            content,
+            content_blocks,
+            ..
+        } = block
+        else {
+            continue;
+        };
+        let Ok(marker) = serde_json::from_str::<serde_json::Value>(content) else {
+            continue;
+        };
+        if marker
+            .get("_lingxi_ephemeral")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+        {
+            continue;
+        }
+        *content = marker
+            .get("summary")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("Ephemeral tool image omitted from session persistence.")
+            .to_string();
+        *content_blocks = None;
+    }
+    sanitized
+}
+
+#[cfg(test)]
+mod ephemeral_tool_result_persistence_tests {
+    use super::redact_ephemeral_tool_result_images;
+    use protocol::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
+    use serde_json::json;
+
+    fn tool_result(
+        content: String,
+        content_blocks: Option<Vec<serde_json::Value>>,
+    ) -> ConversationMessage {
+        ConversationMessage::User {
+            id: MessageId::new(),
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: ToolUseId::new(),
+                content,
+                is_error: false,
+                provider_tool_use_id: None,
+                content_blocks,
+            }],
+            is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+        }
+    }
+
+    #[test]
+    fn ephemeral_images_are_removed_only_from_the_persisted_clone() {
+        let original = tool_result(
+            json!({
+                "_lingxi_ephemeral": true,
+                "summary": "Temporary screenshot omitted."
+            })
+            .to_string(),
+            Some(vec![json!({
+                "type": "image",
+                "source": {"type": "base64", "media_type": "image/png", "data": "secret"}
+            })]),
+        );
+        let sanitized = redact_ephemeral_tool_result_images(&original);
+        let ConversationMessage::User {
+            content: sanitized_blocks,
+            ..
+        } = &sanitized
+        else {
+            panic!("expected user message");
+        };
+        let ContentBlock::ToolResult {
+            content,
+            content_blocks,
+            ..
+        } = &sanitized_blocks[0]
+        else {
+            panic!("expected tool result");
+        };
+        assert_eq!(content, "Temporary screenshot omitted.");
+        assert!(content_blocks.is_none());
+        let ConversationMessage::User {
+            content: original_blocks,
+            ..
+        } = &original
+        else {
+            panic!("expected user message");
+        };
+        let ContentBlock::ToolResult { content_blocks, .. } = &original_blocks[0] else {
+            panic!("expected tool result");
+        };
+        assert!(
+            content_blocks.is_some(),
+            "live in-memory message must stay intact"
+        );
+    }
+
+    #[test]
+    fn unmarked_tool_results_are_byte_for_byte_unchanged() {
+        let original = tool_result(
+            "ordinary result".into(),
+            Some(vec![json!({"type": "text", "text": "ordinary"})]),
+        );
+        assert_eq!(redact_ephemeral_tool_result_images(&original), original);
+    }
+}
+
 /// Bare text injected as a user message when streaming is cancelled (ESC /
 /// SIGINT) DURING tool execution for the current turn. 1:1 with claude-code
 /// `messages.ts:208` `INTERRUPT_MESSAGE_FOR_TOOL_USE`.
@@ -4914,7 +5037,12 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         msg: &ConversationMessage,
         parent_override: Option<String>,
     ) {
-        self.persist_message_to_jsonl_inner(msg, parent_override, None, false)
+        // Android Computer Use screenshots must reach the current model but
+        // must not be written to the durable JSONL transcript. The tool marks
+        // only those results with `_lingxi_ephemeral`; every existing desktop
+        // and mobile result remains byte-identical.
+        let sanitized = redact_ephemeral_tool_result_images(msg);
+        self.persist_message_to_jsonl_inner(&sanitized, parent_override, None, false)
             .await;
     }
 

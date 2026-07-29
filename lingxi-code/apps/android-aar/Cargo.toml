@@ -27,6 +27,7 @@ crate-type = ["lib", "cdylib"]
 # host + the `client-adapter`/`client-protocol` UniFFI types) and this crate's
 # own `setup_scaffolding!`. `uniffi` is offline-clear since F3-00.
 default = ["uniffi"]
+android-computer-use = ["engine-mobile/android-computer-use"]
 uniffi = [
     "dep:uniffi",
     "dep:async-trait",
@@ -51,6 +52,8 @@ traits = { path = "../../traits" }
 protocol = { path = "../../protocol" }
 branding.workspace = true
 thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 sha2 = "0.10"
 
 # F3-04: optional UniFFI dep — pulled under the (default) `uniffi` feature so the
@@ -82,7 +85,6 @@ platform-android-minijail = { path = "../../platforms/android-minijail" }
 # dep-minimal and to anchor the libgit2 cdylib link from a reachable crate
 # (the P2 libcap link-anchor lesson).
 tool-git-mobile = { path = "../../tools/git-mobile" }
-serde_json = { workspace = true }
 # P5b-T7: the bundled-shell bootstrap (`bootstrap_bundled_shell`) sha256-hashes
 # `libmksh.so` for the runner's content-identity check and hex-encodes it.
 # Target-gated (android-only) like `platform-android` to keep host builds

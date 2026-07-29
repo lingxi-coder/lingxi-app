@@ -22,6 +22,7 @@ pub const CLAUDE_CODE_VERSION: &str = "2.1.220";
 
 pub mod agent_name_registry;
 pub mod agent_view;
+pub mod android_ui;
 pub mod auth;
 pub mod backgrounding;
 pub mod bg_session_forker;
@@ -76,6 +77,13 @@ pub mod voice;
 pub mod web_search;
 pub mod worktree;
 
+pub use android_ui::{
+    AndroidAccessRequest, AndroidAccessTier, AndroidAction, AndroidActionResult, AndroidAppInfo,
+    AndroidAutomationError, AndroidAutomationSessionState, AndroidAutomationStatus,
+    AndroidCaptureMode, AndroidGlobalAction, AndroidNodeQuery, AndroidRect, AndroidScreenshot,
+    AndroidUiAutomation, AndroidUiNode, AndroidUiSnapshot, AndroidWaitCondition,
+    MAX_ANDROID_UI_BATCH, MAX_ANDROID_UI_DEPTH, MAX_ANDROID_UI_NODES, MAX_ANDROID_UI_WAIT_MS,
+};
 pub use auth::{AuthError, AuthHandle, LoginInfo};
 pub use backgrounding::{
     classify_backgrounding, BackgroundingDecision, BackgroundingSnapshot,

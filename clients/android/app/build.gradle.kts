@@ -25,6 +25,27 @@ android {
         }
     }
 
+    flavorDimensions += "distribution"
+    productFlavors {
+        create("play") {
+            dimension = "distribution"
+            // "play" is the Store distribution described by the MobileLinux
+            // plan. High-risk offloads are absent at compile time.
+            buildConfigField("String", "DISTRIBUTION_CHANNEL", "\"store\"")
+            buildConfigField("boolean", "MOBILE_LINUX_FULL", "false")
+            buildConfigField("boolean", "HIGH_RISK_NATIVE_OFFLOADS", "false")
+        }
+        create("direct") {
+            dimension = "distribution"
+            applicationIdSuffix = ".direct"
+            // "direct" is the Full distribution. Runtime permission gates
+            // still apply; this flag only describes compiled capabilities.
+            buildConfigField("String", "DISTRIBUTION_CHANNEL", "\"full\"")
+            buildConfigField("boolean", "MOBILE_LINUX_FULL", "true")
+            buildConfigField("boolean", "HIGH_RISK_NATIVE_OFFLOADS", "true")
+        }
+    }
+
     buildTypes {
         debug {
             isMinifyEnabled = false
@@ -50,6 +71,13 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
+    }
+
+    androidResources {
+        // Rootfs archives are already compressed and must remain byte-for-byte
+        // identical to the SHA-256 recorded in rootfs-manifest.json.
+        noCompress += listOf("gz", "zst")
     }
 
     packaging {
@@ -66,6 +94,19 @@ android {
         jniLibs {
             useLegacyPackaging = true
         }
+    }
+
+    sourceSets {
+        // Native libraries are built independently so the Play artifact never
+        // links the Direct-only android_use implementation.
+        getByName("main").jniLibs.setSrcDirs(emptyList<String>())
+        getByName("play").jniLibs.srcDir("src/play/jniLibs")
+        getByName("direct").jniLibs.srcDir("src/direct/jniLibs")
+        // Source-built rootfs archives and corresponding-source notices are
+        // staged under build/ (gitignored), never copied from reference
+        // binaries into the repository.
+        getByName("play").assets.srcDir("build/generated/mobileLinux/play/assets")
+        getByName("direct").assets.srcDir("build/generated/mobileLinux/direct/assets")
     }
 
     testOptions {

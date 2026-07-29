@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <item name="computer_use_test_text" type="id" />
+    <item name="computer_use_test_password" type="id" />
+    <item name="computer_use_test_scroll" type="id" />
+    <item name="computer_use_test_webview" type="id" />
+    <item name="computer_use_test_canvas" type="id" />
+</resources>

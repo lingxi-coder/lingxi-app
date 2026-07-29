@@ -12,6 +12,7 @@
 //! OS: the platform crate (`platform-posix` / `platform-ios` / …) decides the
 //! concrete handles; library crates stay `#[cfg]`-free.
 
+use crate::android_ui::AndroidUiAutomation;
 use crate::camera::CameraControl;
 use crate::clipboard::Clipboard;
 use crate::clock::Clock;
@@ -77,6 +78,11 @@ pub trait Platform: Send + Sync {
     }
     /// Screen-capture + input automation backend, if available.
     fn computer_control(&self) -> Option<Arc<dyn ComputerControl>> {
+        None
+    }
+    /// Android-native accessibility + gesture automation, if this is a Direct
+    /// Android build with a live host bridge. Desktop/iOS keep the default.
+    fn android_ui_automation(&self) -> Option<Arc<dyn AndroidUiAutomation>> {
         None
     }
     /// OS-native secure credential store (iOS Keychain / Android Keystore), if

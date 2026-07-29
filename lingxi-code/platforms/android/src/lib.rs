@@ -37,10 +37,10 @@ use platform_common::{MobileLinuxProcessRunner, MobileLinuxSandbox};
 use std::path::PathBuf;
 use std::sync::Arc;
 use traits::{
-    CameraControl, Clipboard, Clock, FileSystem, HttpTransport, MobileLinuxRuntime,
-    MobileLinuxRuntimeMode, MountPurpose, MountSpec, NotificationService, Platform, ProcessRunner,
-    Sandbox, SandboxBackend, SandboxError, SecureStorage, SharingService, SpeechToText,
-    TextToSpeech, UnavailableMobileLinuxRuntime, VoiceRecorder, WorktreeManager,
+    AndroidUiAutomation, CameraControl, Clipboard, Clock, FileSystem, HttpTransport,
+    MobileLinuxRuntime, MobileLinuxRuntimeMode, MountPurpose, MountSpec, NotificationService,
+    Platform, ProcessRunner, Sandbox, SandboxBackend, SandboxError, SecureStorage, SharingService,
+    SpeechToText, TextToSpeech, UnavailableMobileLinuxRuntime, VoiceRecorder, WorktreeManager,
 };
 
 /// Construction inputs for [`AndroidPlatform`].
@@ -73,6 +73,9 @@ pub struct AndroidPlatformInputs {
     /// `/login` off (it cannot persist tokens). Inject a real store to enable
     /// subscription login.
     pub secure_storage: Option<Arc<dyn SecureStorage>>,
+    /// Direct-build Android accessibility automation bridge. Play builds and
+    /// headless engines pass `None`.
+    pub android_ui_automation: Option<Arc<dyn AndroidUiAutomation>>,
     /// Mobile Linux runtime bridge (Android PRoot path). `None` keeps the
     /// legacy shell runner in place.
     pub mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
@@ -104,6 +107,7 @@ pub struct AndroidPlatform {
     notifications: Option<Arc<dyn NotificationService>>,
     clipboard: Option<Arc<dyn Clipboard>>,
     secure_storage: Option<Arc<dyn SecureStorage>>,
+    android_ui_automation: Option<Arc<dyn AndroidUiAutomation>>,
     mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
     mobile_linux_mode: MobileLinuxRuntimeMode,
     /// The shared capability cache when shell support is wired (`None` for the
@@ -234,6 +238,7 @@ impl AndroidPlatform {
             notifications: inputs.notifications,
             clipboard: inputs.clipboard,
             secure_storage: inputs.secure_storage,
+            android_ui_automation: inputs.android_ui_automation,
             mobile_linux: effective_mobile_linux_runtime,
             mobile_linux_mode,
             shell_caps,
@@ -350,6 +355,9 @@ impl Platform for AndroidPlatform {
     fn secure_storage(&self) -> Option<Arc<dyn SecureStorage>> {
         self.secure_storage.clone()
     }
+    fn android_ui_automation(&self) -> Option<Arc<dyn AndroidUiAutomation>> {
+        self.android_ui_automation.clone()
+    }
     fn mobile_linux(&self) -> Option<Arc<dyn MobileLinuxRuntime>> {
         self.mobile_linux.clone()
     }
@@ -408,6 +416,7 @@ mod tests {
             notifications: None,
             clipboard: None,
             secure_storage: None,
+            android_ui_automation: None,
             mobile_linux: None,
             mobile_linux_workspace_root: None,
             mobile_linux_workspace_id: None,

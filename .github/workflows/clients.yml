@@ -134,14 +134,20 @@ jobs:
 
       # Build the gitignored integration artifacts (libandroid_aar.so per ABI +
       # Kotlin UniFFI bindings) that the Gradle project links against.
-      - name: Build JNI libs + UniFFI bindings
-        run: bash clients/android/scripts/build-jni.sh
+      - name: Build Play and Direct JNI libs + UniFFI bindings
+        run: |
+          bash clients/android/scripts/build-jni.sh --variant play
+          bash clients/android/scripts/build-jni.sh --variant direct
 
       # Unit tests + debug APK + androidTest APK. The androidTest APK is what
       # the emulator job (job 3) installs and runs.
-      - name: Gradle — unit tests + assemble debug + assemble test APK
+      - name: Gradle — Play/Direct tests and APKs
         working-directory: clients/android
-        run: ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest
+        run: |
+          ./gradlew \
+            :app:testPlayDebugUnitTest :app:testDirectDebugUnitTest \
+            :app:assemblePlayDebug :app:assembleDirectDebug \
+            :app:assemblePlayDebugAndroidTest :app:assembleDirectDebugAndroidTest
 
   # ---------------------------------------------------------------------------
   # 3. android-emulator — the instrumented engine round-trip on an emulator.
@@ -193,8 +199,8 @@ jobs:
       # Rebuild jniLibs in THIS job — emulator-runner runs in the same job, but
       # this job never ran job 2's build steps, so the artifacts must be made
       # here too before the on-device test compiles the engine.
-      - name: Build JNI libs + UniFFI bindings
-        run: bash clients/android/scripts/build-jni.sh
+      - name: Build Play JNI libs + UniFFI bindings
+        run: bash clients/android/scripts/build-jni.sh --variant play
 
       # api-level 30 (>= minSdk 26), x86_64 + google_apis for KVM-accelerated
       # boot. force-avd-creation + the headless/no-window emulator options are
@@ -209,7 +215,7 @@ jobs:
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           disable-animations: true
           working-directory: clients/android
-          script: ./gradlew :app:connectedDebugAndroidTest
+          script: ./gradlew :app:connectedPlayDebugAndroidTest
 
   # ---------------------------------------------------------------------------
   # 4. ios — XCFramework build + Xcode simulator engine round-trip (macOS).

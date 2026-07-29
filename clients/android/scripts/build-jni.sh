@@ -7,7 +7,7 @@
 #
 #   1. cargo-ndk cross-compiles the `android-aar` crate's `cdylib`
 #      (`libandroid_aar.so`) for every target ABI into
-#        clients/android/app/src/main/jniLibs/<abi>/libandroid_aar.so
+#        clients/android/app/src/<play|direct>/jniLibs/<abi>/libandroid_aar.so
 #      ABIs: arm64-v8a (aarch64-linux-android) + x86_64 (x86_64-linux-android).
 #   2. Generates the Kotlin UniFFI bindings from the built `.so` in `--library`
 #      mode into
@@ -25,6 +25,16 @@
 
 set -euo pipefail
 
+VARIANT="play"
+if [[ "${1:-}" == "--variant" ]]; then
+  VARIANT="${2:-}"
+  shift 2
+fi
+case "${VARIANT}" in
+  play|direct) ;;
+  *) echo "ERROR: --variant must be play or direct" >&2; exit 2 ;;
+esac
+
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
@@ -41,8 +51,11 @@ HOST_DYLIB="lib${LIB_STEM}.dylib"     # macOS host cdylib (bindgen introspection
 
 UNIFFI_CONFIG="${CARGO_DIR}/apps/${CRATE}/uniffi.toml"
 
-# Android output layout (mirrors the standard Gradle jniLibs/<abi> convention).
-JNILIBS_DIR="${ANDROID_DIR}/app/src/main/jniLibs"
+# Build into a gitignored staging directory, then atomically replace only this
+# script's three owned files after every ABI and binding step succeeds. A Rust
+# compile failure must not erase the last known-good app binaries.
+FINAL_JNILIBS_DIR="${ANDROID_DIR}/app/src/${VARIANT}/jniLibs"
+JNILIBS_DIR="${ANDROID_DIR}/app/build/nativeStaging/${VARIANT}/jniLibs"
 KOTLIN_OUT="${ANDROID_DIR}/app/src/main/java"   # bindgen writes <pkg-path>/*.kt under here
 
 PROFILE="release"
@@ -121,7 +134,9 @@ fi
 # `cargo ndk -t <abi> -o <jniLibs>` places each built `.so` under
 # <jniLibs>/<abi>/. We pass the Gradle ABI names; cargo-ndk maps them to triples.
 log "Cross-compiling ${CRATE} cdylib (${PROFILE}) for: ${TARGETS[*]/#/}"
-rm -rf "${JNILIBS_DIR}"
+if [[ -d "${JNILIBS_DIR}" ]]; then
+  find "${JNILIBS_DIR}" -mindepth 1 -delete
+fi
 mkdir -p "${JNILIBS_DIR}"
 
 NDK_ABI_ARGS=()
@@ -132,8 +147,15 @@ done
 # `cargo ndk` shells out to `cargo metadata` in the CURRENT directory BEFORE it
 # honors `--manifest-path`, so run it from the workspace root or it fails with
 # "could not find Cargo.toml" when invoked from elsewhere (e.g. the repo root).
-( cd "${CARGO_DIR}" && cargo ndk "${NDK_ABI_ARGS[@]}" -o "${JNILIBS_DIR}" \
-    build --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" --"${PROFILE}" )
+if [[ "${VARIANT}" == "direct" ]]; then
+  ( cd "${CARGO_DIR}" && cargo ndk "${NDK_ABI_ARGS[@]}" -o "${JNILIBS_DIR}" \
+      build --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" \
+      --features android-computer-use --"${PROFILE}" )
+else
+  ( cd "${CARGO_DIR}" && cargo ndk "${NDK_ABI_ARGS[@]}" -o "${JNILIBS_DIR}" \
+      build --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" \
+      --"${PROFILE}" )
+fi
 
 # Verify every expected ABI `.so` landed.
 for t in "${TARGETS[@]}"; do
@@ -234,6 +256,17 @@ KT_COUNT="$(find "${KOTLIN_OUT}" -name '*.kt' -path "*${PKG_REL_PATH}*" 2>/dev/n
 # ---------------------------------------------------------------------------
 # Done
 # ---------------------------------------------------------------------------
+for t in "${TARGETS[@]}"; do
+  abi="$(abi_of "${t}")"
+  mkdir -p "${FINAL_JNILIBS_DIR}/${abi}"
+  cp -f \
+    "${JNILIBS_DIR}/${abi}/${SONAME}" \
+    "${JNILIBS_DIR}/${abi}/libmksh.so" \
+    "${JNILIBS_DIR}/${abi}/libtoybox.so" \
+    "${FINAL_JNILIBS_DIR}/${abi}/"
+done
+
 log "OK"
-echo "jniLibs        : ${JNILIBS_DIR}"
+echo "variant        : ${VARIANT}"
+echo "jniLibs        : ${FINAL_JNILIBS_DIR}"
 echo "Kotlin bindings: ${GEN_PKG_DIR} (${KT_COUNT} .kt file(s))"

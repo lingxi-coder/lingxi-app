@@ -213,6 +213,9 @@ fun SettingsHost(
                 page(SettingsRoutes.LINUX_RUNTIME) {
                     LinuxRuntimePage(state = state, store = resolvedStore)
                 }
+                page(SettingsRoutes.COMPUTER_USE) {
+                    ComputerUseSettingsPage()
+                }
                 page(SettingsRoutes.MCP_EDIT) {
                     val id = it.arguments?.getString("id") ?: ""
                     MCPEditPage(
@@ -267,6 +270,7 @@ private fun titleFor(entry: androidx.navigation.NavBackStackEntry?, state: Setti
         SettingsRoutes.SKILLS -> SettingsTitles.SKILLS
         SettingsRoutes.MCP_LIST -> SettingsTitles.MCP
         SettingsRoutes.LINUX_RUNTIME -> SettingsTitles.LINUX_RUNTIME
+        SettingsRoutes.COMPUTER_USE -> SettingsTitles.COMPUTER_USE
         SettingsRoutes.DREAM -> SettingsTitles.DREAM
         SettingsRoutes.CRON -> SettingsTitles.CRON
         SettingsRoutes.PROVIDER_LIST -> providerKindArg(entry).title

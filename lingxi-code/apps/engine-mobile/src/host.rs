@@ -81,7 +81,9 @@ use traits::{
     OrchestratorHandle, OutputStream, Platform, RootfsState, RootfsStatus, SlashCommandDispatcher,
 };
 
-use crate::{mobile_command_registry, mobile_tool_registry_with_skill_loader};
+use crate::{
+    mobile_command_registry, mobile_tool_registry_with_skill_loader, register_android_ui_automation,
+};
 
 /// A sized newtype over the platform's `Arc<dyn HttpTransport>`.
 ///
@@ -1465,10 +1467,9 @@ pub async fn build_mobile_inner(
     // `should_use_sandbox` short-circuits to `NoSandbox` and the expansion runs
     // via the plain `ProcessRunner` — consistent with mobile's own Bash tool.
     let shell_expansion_provider = tool_skill::build_prompt_shell_provider(&tool_ctx);
-    let tools = Arc::new(mobile_tool_registry_with_skill_loader(
-        tool_ctx,
-        skill_loader,
-    ));
+    let mut tools = mobile_tool_registry_with_skill_loader(tool_ctx, skill_loader);
+    register_android_ui_automation(&mut tools, platform.android_ui_automation());
+    let tools = Arc::new(tools);
 
     // P0.1 ACTIVATION on mobile (gated, default OFF) — the same gate as desktop,
     // `LINGXI_MEMDIR_PREFETCH`. When truthy, wire the memdir-backed memory

@@ -12,6 +12,7 @@ import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -34,6 +35,8 @@ import com.lingxi.code.conversation.ChatViewModel
 import com.lingxi.code.conversation.ComposerAttachment
 import com.lingxi.code.conversation.EngineConversationSource
 import com.lingxi.code.conversation.PermissionPromptDialog
+import com.lingxi.code.computeruse.ComputerUseApprovalDialog
+import com.lingxi.code.computeruse.ComputerUseFeatureProvider
 import com.lingxi.code.connectivity.rememberOnlineState
 import com.lingxi.code.connectivity.shouldShowOfflineBanner
 import com.lingxi.code.drawer.DrawerContent
@@ -151,6 +154,11 @@ fun RootScreen(
         }
     }
     val state by chatViewModel.state.collectAsState()
+    DisposableEffect(chatViewModel, context) {
+        ComputerUseFeatureProvider.attach(context) { chatViewModel.cancel() }
+        onDispose { }
+    }
+    val computerUseApproval by ComputerUseFeatureProvider.pendingApproval.collectAsState()
     val pendingPermission by chatViewModel.pendingPermission.collectAsState()
     // The engine's REAL resumable-session catalog (out-of-band, sibling of the
     // model catalog). The drawer renders its loading / empty / error states
@@ -693,6 +701,10 @@ fun RootScreen(
             onDeny = { requestId ->
                 scope.launch { chatViewModel.denyPermission(requestId) }
             },
+        )
+        ComputerUseApprovalDialog(
+            approval = computerUseApproval,
+            onResolve = ComputerUseFeatureProvider::resolveApproval,
         )
 
         CreateProjectDialog(

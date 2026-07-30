@@ -6947,6 +6947,13 @@ pub async fn build(
     // so the HTTP hook executor gates outbound URLs + intersects the per-hook
     // env-var allowlist. `(None, None)` = no restriction (behavior-neutral).
     let (http_hook_urls, http_hook_env_vars) = load_merged_http_hook_policy(&cwd);
+    // Transcript sink for the per-hook-run `attachment` records claude-code
+    // persists (one `hook_success` / `hook_non_blocking_error` /
+    // `hook_cancelled` line per hook run). Created empty here because the hook
+    // executor is built BEFORE the orchestrator that owns the JSONL writer;
+    // `attach` fills the cell once `orch` exists (step 4.x below), the same
+    // shape as `subagent_hook_executor_cell`.
+    let hook_attachment_sink = Arc::new(orchestrator::JsonlHookAttachmentSink::new());
     let hooks = Arc::new(
         hooks::HookExecutorImpl::new(
             hook_registry.clone(),
@@ -6975,7 +6982,9 @@ pub async fn build(
         // and the SessionStart/Setup always-stream gate emit hook_started /
         // hook_response frames. Default no-op when the stream impl ignores them
         // (TUI / plain sink paths).
-        .with_hook_observer(output.clone()),
+        .with_hook_observer(output.clone())
+        // One transcript `attachment` line per hook run, matching claude-code.
+        .with_attachment_sink(hook_attachment_sink.clone() as Arc<dyn hooks::HookAttachmentSink>),
     );
 
     // G4: fill the subagent spawner's hook-executor cell now that `hooks` exists,
@@ -8790,6 +8799,12 @@ pub async fn build(
         _ => orch_builder,
     };
     let orch = Arc::new(orch_builder);
+
+    // Fill the hook-attachment sink's cell now that the orchestrator (and its
+    // JSONL writer) exists, so every hook run from here on persists its one
+    // transcript `attachment` line. The sink holds a `Weak`, so this does not
+    // create an orchestrator↔hook-executor reference cycle.
+    hook_attachment_sink.attach(&orch);
 
     // Publish the orchestrator's shared output-token pool to the workflow
     // handler (registered above with a still-empty cell). From here, a launched

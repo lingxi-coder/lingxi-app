@@ -16,6 +16,7 @@
 
 mod agent_executor;
 pub mod async_registry;
+pub mod attachment;
 pub mod builtin;
 pub mod cwd_changed_firer;
 pub mod definition;
@@ -38,6 +39,10 @@ pub mod user_config;
 pub mod watcher_rebinder;
 
 pub use async_registry::AsyncHookRegistry;
+pub use attachment::{
+    cancelled_attachment, non_blocking_error_attachment, success_attachment, CancellationTimeout,
+    HookAttachmentIdentity, HookAttachmentSink,
+};
 pub use cwd_changed_firer::{CwdChangedFire, CwdChangedFirer, OptionalCwdChangedFirer};
 pub use definition::{HookCondition, HookDefinition, HookExecutor, HookSource};
 pub use events::{HookEvent, HookEventType, HookProgressEvent};

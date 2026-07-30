@@ -371,6 +371,19 @@ pub struct AggregateHookResult {
     /// the orchestrator injects as a (non-meta) user message at session start.
     /// Additive default `None` → byte-identical when no hook sets it.
     pub initial_user_message: Option<String>,
+    /// One transcript `attachment` payload per synchronously completed hook
+    /// run, in execution order (claude-code persists exactly one for every hook
+    /// that runs — 26 048 records mined from real 2.1.220 transcripts). Built by
+    /// [`crate::attachment`] from the run's outcome: `hook_success`,
+    /// `hook_non_blocking_error`, or `hook_cancelled`. A run that BLOCKED
+    /// contributes nothing here — claude yields a `hook_blocking_error`
+    /// attachment on that arm instead, which the port does not model.
+    /// Also pushed to the executor's
+    /// [`crate::attachment::HookAttachmentSink`] when one is wired (the
+    /// engine's transcript writer). Truly asynchronous completions are written
+    /// through that sink after this aggregate has returned and therefore do not
+    /// appear in this vector. Additive default empty.
+    pub hook_attachments: Vec<Value>,
     /// `true` when ANY folded `SessionStart` hook returned `reloadSkills: true`
     /// (claude-code `if(p.reloadSkills)u=!0`, OR-folded). Signals the skill/command
     /// directories should be re-scanned. NOTE: the port has no hot-reload seam yet,

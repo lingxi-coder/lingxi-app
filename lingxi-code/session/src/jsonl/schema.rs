@@ -218,6 +218,9 @@ impl Serialize for JsonlMessage {
         let is_user = self.message_type == "user";
         let is_assistant = self.message_type == "assistant";
         let is_system = self.message_type == "system";
+        // Attachment line: claude emits the `attachment` PAYLOAD before the
+        // `type` discriminator and writes NO inner `message`.
+        let is_attachment = self.message_type == "attachment";
         let is_api_error = self.extra.contains_key("isApiErrorMessage");
         // Compact-boundary system line: claude flattens the system envelope
         // (`subtype`/`content`/`level`/`compactMetadata` are top-level
@@ -301,6 +304,20 @@ impl Serialize for JsonlMessage {
             if let Some(v) = self.extra.get("effort") {
                 map.serialize_entry("effort", v)?;
             }
+        } else if is_attachment {
+            // (d2) attachment head: attachment, type, uuid, timestamp — the
+            //      payload leads, BEFORE `type` (real 2.1.220 transcripts:
+            //      every one of the 26 048 mined attachment lines orders them
+            //      `parentUuid, isSidechain, attachment, type, uuid,
+            //      timestamp, …trailer`). Attachment lines carry NO inner
+            //      `message`, so `self.message` (Null) is skipped like the
+            //      compact-boundary arm.
+            if let Some(v) = self.extra.get("attachment") {
+                map.serialize_entry("attachment", v)?;
+            }
+            map.serialize_entry("type", &self.message_type)?;
+            map.serialize_entry("uuid", &self.uuid)?;
+            map.serialize_entry("timestamp", &self.timestamp)?;
         } else if is_compact_boundary {
             // (f1) compact-boundary system head — claude's flattened envelope
             //      (real 2.1.207 transcripts): type, subtype, content,
@@ -374,9 +391,90 @@ impl Serialize for JsonlMessage {
             if is_compact_boundary && BOUNDARY_HEAD_EXTRA.contains(&k.as_str()) {
                 continue;
             }
+            if is_attachment && k == "attachment" {
+                continue;
+            }
             map.serialize_entry(k, v)?;
         }
 
         map.end()
+    }
+}
+
+#[cfg(test)]
+mod attachment_envelope_tests {
+    use super::JsonlMessage;
+
+    /// Real 2.1.220 `attachment` lines put the `attachment` payload BEFORE the
+    /// `type` discriminator — outer key order
+    /// `parentUuid, isSidechain, attachment, type, uuid, timestamp, userType,
+    /// entrypoint, cwd, sessionId, version, gitBranch[, slug]`
+    /// (26 048 attachment lines mined from `~/.claude/projects/**/*.jsonl`;
+    /// the dominant envelope, 12 607 lines, is exactly this plus the unported
+    /// `session_id` / `sessionKind` / `slug` siblings).
+    #[test]
+    fn attachment_line_emits_payload_before_type() {
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "attachment".to_string(),
+            serde_json::json!({"type": "hook_success", "hookName": "Stop"}),
+        );
+        let msg = JsonlMessage {
+            message_type: "attachment".to_string(),
+            uuid: "84c51927-5550-4d0c-bdff-16c5699c7d4c".to_string(),
+            parent_uuid: Some("9fccb389-ff4d-4502-b0c4-e9ecb4459013".to_string()),
+            session_id: "931e2281-6acb-4c36-8352-a2378fd6c88d".to_string(),
+            timestamp: "2026-07-27T18:34:21.476Z".to_string(),
+            cwd: "/private/tmp".to_string(),
+            version: "0.12.0".to_string(),
+            message: serde_json::Value::Null,
+            is_sidechain: false,
+            user_type: Some("external".to_string()),
+            git_branch: Some("HEAD".to_string()),
+            entrypoint: Some("cli".to_string()),
+            slug: None,
+            prompt_id: None,
+            logical_parent_uuid: None,
+            extra,
+        };
+        assert_eq!(
+            serde_json::to_string(&msg).unwrap(),
+            r#"{"parentUuid":"9fccb389-ff4d-4502-b0c4-e9ecb4459013","isSidechain":false,"attachment":{"type":"hook_success","hookName":"Stop"},"type":"attachment","uuid":"84c51927-5550-4d0c-bdff-16c5699c7d4c","timestamp":"2026-07-27T18:34:21.476Z","userType":"external","entrypoint":"cli","cwd":"/private/tmp","sessionId":"931e2281-6acb-4c36-8352-a2378fd6c88d","version":"0.12.0","gitBranch":"HEAD"}"#
+        );
+    }
+
+    /// An attachment line carries NO inner `message` — the generic arm's
+    /// `"message":null` must not leak onto it.
+    #[test]
+    fn attachment_line_has_no_inner_message_key() {
+        let mut extra = serde_json::Map::new();
+        extra.insert("attachment".to_string(), serde_json::json!({"type": "x"}));
+        let msg = JsonlMessage {
+            message_type: "attachment".to_string(),
+            uuid: "u".to_string(),
+            parent_uuid: None,
+            session_id: "s".to_string(),
+            timestamp: "t".to_string(),
+            cwd: "/c".to_string(),
+            version: "v".to_string(),
+            message: serde_json::Value::Null,
+            is_sidechain: false,
+            user_type: None,
+            git_branch: None,
+            entrypoint: None,
+            slug: None,
+            prompt_id: None,
+            logical_parent_uuid: None,
+            extra,
+        };
+        let s = serde_json::to_string(&msg).unwrap();
+        assert!(!s.contains("\"message\""), "no inner message key: {s}");
+        // (`"attachment"` alone also matches the `"type":"attachment"` value,
+        // so key on the payload's opening brace.)
+        assert_eq!(
+            s.matches("\"attachment\":{").count(),
+            1,
+            "payload emitted once, not tail-appended a second time: {s}"
+        );
     }
 }

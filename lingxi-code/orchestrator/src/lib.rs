@@ -24,6 +24,7 @@ pub mod end_conversation_tool;
 pub mod error;
 pub mod file_changed_firer;
 pub mod handle_impl;
+pub mod hook_attachment_sink;
 pub mod hook_prompt_runner;
 pub mod image_input;
 pub mod mcp_hook_dispatcher;
@@ -71,6 +72,7 @@ pub use conversation::{
 pub use cwd_changed_firer::OrchestratorCwdChangedFirer;
 pub use error::OrchestratorError;
 pub use file_changed_firer::OrchestratorFileChangedFirer;
+pub use hook_attachment_sink::JsonlHookAttachmentSink;
 pub use hook_prompt_runner::ApiClientHookPromptRunner;
 pub use mcp_hook_dispatcher::OrchestratorHookDispatcher;
 pub use prompt::{

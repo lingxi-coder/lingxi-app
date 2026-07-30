@@ -1880,6 +1880,7 @@ mod async_path_tests {
     //! hook still runs synchronously (the regression guard).
     use super::*;
     use crate::async_registry::AsyncHookRegistry;
+    use crate::attachment::HookAttachmentSink;
     use crate::definition::{HookExecutor as DefHookExecutor, HookSource};
     use crate::events::{HookEvent, HookEventType};
     use crate::response::HookDecision;
@@ -1895,6 +1896,18 @@ mod async_path_tests {
         BackgroundTaskHandle, ProcessError, ProcessHandle, ProcessOutput, RuntimeError,
         RuntimeSpawner, SandboxPolicy, SandboxedCommand,
     };
+
+    #[derive(Default)]
+    struct AsyncRecordingSink {
+        seen: StdMutex<Vec<serde_json::Value>>,
+    }
+
+    #[async_trait]
+    impl HookAttachmentSink for AsyncRecordingSink {
+        async fn record(&self, attachment: serde_json::Value) {
+            self.seen.lock().unwrap().push(attachment);
+        }
+    }
 
     /// Tokio-backed runtime — the hooks crate already depends on tokio, so the
     /// background hook future can be spawned with `tokio::spawn` here.
@@ -2161,6 +2174,45 @@ mod async_path_tests {
 
         // Let it finish so the test runtime doesn't leak the task.
         gate.notify_one();
+    }
+
+    /// A config-non-blocking hook returns before completion, so the completed
+    /// run is retained through the transcript sink rather than the already
+    /// returned aggregate.
+    #[tokio::test]
+    async fn non_blocking_completion_persists_real_attachment() {
+        let runtime = TestRuntime::new();
+        let (tx, mut rx) = mpsc::channel(4);
+        let async_reg = Arc::new(AsyncHookRegistry::new(runtime, tx));
+        let sink = Arc::new(AsyncRecordingSink::default());
+        let runner = CountingRunner::new(out("async complete\n", "", 0));
+
+        let hook = command_hook(false);
+        let hook_id = hook.id;
+        let mut registry = HookRegistry::new();
+        registry.register(hook);
+        let exec = HookExecutorImpl::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(UnusedHttp),
+            TestRuntime::new(),
+        )
+        .with_process_runner(runner, Arc::new(StubSandbox))
+        .with_async_registry(async_reg)
+        .with_attachment_sink(sink.clone());
+
+        let agg = exec.execute(pre_event(), HookContext::default()).await;
+        assert!(agg.hook_attachments.is_empty());
+
+        let (got_id, got) = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("completion must publish before timeout")
+            .expect("completion channel stays open");
+        assert_eq!(got_id, hook_id);
+        assert_eq!(got.stdout, "async complete\n");
+        let seen = sink.seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0]["type"], "hook_success");
+        assert_eq!(seen[0]["content"], "async complete");
     }
 
     /// (2) + (3) The registry records the in-flight handle and publishes the
@@ -2436,6 +2488,7 @@ mod async_path_tests {
         let runtime = TestRuntime::new();
         let (tx, mut rx) = mpsc::channel(4);
         let async_reg = Arc::new(AsyncHookRegistry::new(runtime, tx));
+        let sink = Arc::new(AsyncRecordingSink::default());
 
         // Eventual (post-marker) output: JSON `additionalContext` the fold-back
         // parses through `map_command_output`.
@@ -2458,13 +2511,18 @@ mod async_path_tests {
             TestRuntime::new(),
         )
         .with_process_runner(runner, Arc::new(StubSandbox))
-        .with_async_registry(async_reg.clone());
+        .with_async_registry(async_reg.clone())
+        .with_attachment_sink(sink.clone());
 
         let agg = exec.execute(pre_event(), HookContext::default()).await;
         // No synchronous decision, no stdout leak — the marker path is a no-op turn.
         assert_eq!(
             agg.decision, None,
             "an async-marker hook contributes no synchronous decision"
+        );
+        assert!(
+            agg.hook_attachments.is_empty(),
+            "the marker placeholder is not a completed hook run"
         );
 
         // The eventual output folds back on completion_tx, keyed by hook id and
@@ -2482,6 +2540,12 @@ mod async_path_tests {
             Some("async done"),
             "the eventual additionalContext must survive the fold-back mapping"
         );
+        let seen = sink.seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1, "only the eventual completion is persisted");
+        assert_eq!(seen[0]["type"], "hook_success");
+        assert_eq!(seen[0]["content"], "");
+        assert_eq!(seen[0]["stdout"], got.stdout);
+        assert_eq!(seen[0]["exitCode"], 0);
     }
 
     /// When no async registry is wired, the runtime-marker path degrades to a

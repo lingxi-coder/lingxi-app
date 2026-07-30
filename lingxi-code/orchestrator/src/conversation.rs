@@ -5260,6 +5260,64 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         }
     }
 
+    /// Persist ONE hook-run `attachment` transcript line.
+    ///
+    /// claude-code writes exactly one `type:"attachment"` line per hook run
+    /// (26 048 such records mined from real 2.1.220 transcripts under
+    /// `~/.claude/projects`). The outer envelope puts the payload BEFORE the
+    /// discriminator — `parentUuid, isSidechain, attachment, type, uuid,
+    /// timestamp, …trailer` — and carries NO inner `message`; that ordering is
+    /// implemented by the attachment arm of
+    /// [`session::jsonl::schema::JsonlMessage`]'s hand-written `Serialize`.
+    ///
+    /// `payload` is the value built by [`hooks::attachment`] (`hook_success` /
+    /// `hook_non_blocking_error` / `hook_cancelled`). Best-effort like every
+    /// other JSONL append; advances `last_jsonl_uuid` on success so the next
+    /// line chains off it.
+    pub async fn persist_hook_attachment_to_jsonl(&self, payload: serde_json::Value) {
+        let Some(writer) = self.jsonl_writer.as_ref() else {
+            return;
+        };
+        let session_id_str = self.session.lock().await.session_id.to_string();
+        let parent_uuid = self.last_jsonl_uuid.lock().await.clone();
+        let git_branch = self.resolve_git_branch().await;
+        let mut extra = serde_json::Map::new();
+        extra.insert("attachment".to_string(), payload);
+
+        let jmsg = session::JsonlMessage {
+            message_type: "attachment".to_string(),
+            uuid: uuid::Uuid::new_v4().to_string(),
+            parent_uuid,
+            session_id: session_id_str.clone(),
+            timestamp: chrono::Utc::now()
+                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+                .to_string(),
+            cwd: self.current_cwd().to_string_lossy().into_owned(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            // Attachment lines carry NO inner `message`.
+            message: serde_json::Value::Null,
+            is_sidechain: false,
+            user_type: Some("external".to_string()),
+            git_branch,
+            entrypoint: Some(entrypoint_value()),
+            slug: None,
+            prompt_id: None,
+            logical_parent_uuid: None,
+            extra,
+        };
+        let line_uuid = jmsg.uuid.clone();
+        match writer.append(&jmsg).await {
+            Ok(()) => {
+                *self.last_jsonl_uuid.lock().await = Some(line_uuid.clone());
+                telemetry::emit_session_appended(&session_id_str, &line_uuid);
+            }
+            Err(e) => {
+                self.record_transcript_append_failure(&session_id_str, "hook_attachment", &e)
+                    .await;
+            }
+        }
+    }
+
     /// Persist the latest active-goal snapshot as a transcript metadata line.
     ///
     /// This keeps `/goal` resumable on non-compacted transcripts; compact
@@ -16601,6 +16659,231 @@ mod transcript_persistence_warning_tests {
         assert_eq!(
             notice_count, 0,
             "transcript-append failures must not surface a user-visible notice"
+        );
+    }
+}
+
+#[cfg(test)]
+mod hook_attachment_persistence_tests {
+    use super::*;
+    use crate::test_support::{
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
+    };
+    use crate::OrchestratorConfig;
+    use platform_posix::fs::PosixFileSystem;
+    use std::sync::Arc;
+    use tool_api::registry::ToolRegistry;
+
+    fn orch_with_writer(
+        dir: &std::path::Path,
+        path: std::path::PathBuf,
+    ) -> ConversationOrchestrator {
+        let fs: Arc<dyn traits::FileSystem> = Arc::new(PosixFileSystem::new(dir.to_path_buf()));
+        let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(path, fs));
+        ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            dir.to_path_buf(),
+        )
+        .with_jsonl_writer(writer)
+    }
+
+    /// A hook-run attachment lands as its own `type:"attachment"` transcript
+    /// line whose payload rides in the `attachment` key BEFORE `type`, and it
+    /// advances the chain so the next line parents to it.
+    #[tokio::test]
+    async fn hook_attachment_is_persisted_as_an_attachment_line() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session.jsonl");
+        let orch = orch_with_writer(dir.path(), path.clone());
+
+        let payload = hooks::success_attachment(
+            &hooks::HookAttachmentIdentity {
+                hook_name: "PostToolUse:Bash".into(),
+                hook_event: "PostToolUse".into(),
+                tool_use_id: "toolu_01ApkBwAZMCAza47B5nAWiGS".into(),
+            },
+            "formatted",
+            "formatted\n",
+            "",
+            0,
+            "./hooks/fmt.sh",
+            37,
+        );
+        orch.persist_hook_attachment_to_jsonl(payload.clone()).await;
+
+        let raw = std::fs::read_to_string(&path).expect("read jsonl");
+        let lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(lines.len(), 1, "one line: {raw}");
+        let v: serde_json::Value = serde_json::from_str(lines[0]).expect("json");
+        assert_eq!(v["type"], "attachment");
+        assert_eq!(v["attachment"], payload);
+        assert!(v.get("message").is_none(), "no inner message: {}", lines[0]);
+        // Payload precedes the discriminator on real 2.1.220 attachment lines.
+        let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(
+            &keys[..4],
+            ["parentUuid", "isSidechain", "attachment", "type"]
+        );
+        // Chain advanced.
+        assert_eq!(
+            orch.last_jsonl_uuid.lock().await.as_deref(),
+            v["uuid"].as_str()
+        );
+    }
+
+    /// END-TO-END: a real `HookExecutorImpl` wired with the real sink and a
+    /// real orchestrator writes ONE `attachment` transcript line for the hook
+    /// run — the whole publish chain (executor → sink → JSONL writer), not just
+    /// each half. Guards against the value being computed but never persisted.
+    #[tokio::test]
+    async fn executor_run_reaches_the_transcript_through_the_real_sink() {
+        use async_trait::async_trait;
+        use hooks::executor::BuiltinHookHandler;
+        use hooks::registry::{HookContext, HookRegistry};
+        use hooks::{HookOutcome, HookResult};
+
+        struct Ok0;
+        #[async_trait]
+        impl BuiltinHookHandler for Ok0 {
+            async fn handle(&self, _event: &hooks::HookEvent, _ctx: &HookContext) -> HookResult {
+                HookResult {
+                    outcome: HookOutcome::Success,
+                    stdout: "linted".into(),
+                    stderr: String::new(),
+                    exit_code: Some(0),
+                    response: None,
+                }
+            }
+            fn id(&self) -> &str {
+                "lint"
+            }
+        }
+
+        struct UnusedHttp;
+        #[async_trait]
+        impl traits::HttpTransport for UnusedHttp {
+            async fn request(
+                &self,
+                _req: protocol::HttpRequest,
+            ) -> Result<protocol::HttpResponse, traits::HttpError> {
+                Err(traits::HttpError::InvalidRequest("unused".into()))
+            }
+            async fn stream_sse(
+                &self,
+                _req: protocol::HttpRequest,
+            ) -> Result<traits::http::SseStream, traits::HttpError> {
+                Err(traits::HttpError::InvalidRequest("unused".into()))
+            }
+        }
+        struct UnusedRuntime;
+        #[async_trait]
+        impl traits::RuntimeSpawner for UnusedRuntime {
+            async fn spawn(
+                &self,
+                _name: &str,
+                _task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
+            ) -> Result<traits::BackgroundTaskHandle, traits::RuntimeError> {
+                Err(traits::RuntimeError::Internal("unused".into()))
+            }
+            async fn sleep(&self, _d: std::time::Duration) {}
+            async fn cancel(
+                &self,
+                _h: &traits::BackgroundTaskHandle,
+            ) -> Result<(), traits::RuntimeError> {
+                Ok(())
+            }
+        }
+
+        let mut registry = HookRegistry::new();
+        registry.register(hooks::HookDefinition {
+            id: protocol::HookId::new(),
+            name: "lint".into(),
+            events: vec![hooks::HookEventType::PostToolUse],
+            if_condition: None,
+            executor: hooks::HookExecutor::Builtin {
+                handler_id: "lint".into(),
+            },
+            source: hooks::HookSource::User,
+            blocking: true,
+            timeout: None,
+            priority: 0,
+            once: false,
+            status_message: None,
+        });
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session.jsonl");
+        let sink = Arc::new(crate::JsonlHookAttachmentSink::new());
+
+        let mut exec = hooks::HookExecutorImpl::new(
+            Arc::new(tokio::sync::RwLock::new(registry)),
+            Arc::new(UnusedHttp),
+            Arc::new(UnusedRuntime),
+        )
+        .with_attachment_sink(sink.clone() as Arc<dyn hooks::HookAttachmentSink>);
+        exec.register_builtin(Arc::new(Ok0));
+
+        let orch = Arc::new(orch_with_writer(dir.path(), path.clone()));
+        sink.attach(&orch);
+
+        exec.execute(
+            hooks::HookEvent::PostToolUse {
+                tool_name: "Edit".into(),
+                tool_input: serde_json::json!({}),
+                tool_output: serde_json::json!({}),
+                tool_use_id: protocol::ToolUseId::from("toolu_e2e".to_string()),
+                duration_ms: None,
+            },
+            HookContext::default(),
+        )
+        .await;
+
+        let raw = std::fs::read_to_string(&path).expect("transcript written");
+        let lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(lines.len(), 1, "exactly one attachment line: {raw}");
+        let v: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(v["type"], "attachment");
+        assert_eq!(v["attachment"]["type"], "hook_success");
+        assert_eq!(v["attachment"]["hookName"], "PostToolUse:Edit");
+        assert_eq!(v["attachment"]["hookEvent"], "PostToolUse");
+        assert_eq!(v["attachment"]["toolUseID"], "toolu_e2e");
+        assert_eq!(v["attachment"]["content"], "linted");
+        assert_eq!(v["attachment"]["exitCode"], 0);
+        assert_eq!(v["attachment"]["command"], "lint");
+    }
+
+    /// The sink adapter forwards to the orchestrator once attached, and is an
+    /// inert no-op before that (composition order: the hook executor is built
+    /// before the orchestrator exists).
+    #[tokio::test]
+    async fn sink_forwards_to_the_attached_orchestrator() {
+        use hooks::HookAttachmentSink;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session.jsonl");
+        let sink = Arc::new(crate::JsonlHookAttachmentSink::new());
+
+        // Unattached: must not panic, must not write.
+        sink.record(serde_json::json!({"type": "hook_success"}))
+            .await;
+        assert!(!path.exists(), "unattached sink writes nothing");
+
+        let orch = Arc::new(orch_with_writer(dir.path(), path.clone()));
+        sink.attach(&orch);
+        sink.record(serde_json::json!({"type": "hook_cancelled"}))
+            .await;
+
+        let raw = std::fs::read_to_string(&path).expect("read jsonl");
+        assert!(
+            raw.contains(r#""attachment":{"type":"hook_cancelled"}"#),
+            "sink persisted the payload: {raw}"
         );
     }
 }

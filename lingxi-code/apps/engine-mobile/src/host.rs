@@ -1423,6 +1423,11 @@ async fn build_mobile_inner_with_ask(
     //      structured "not wired" error rather than spawning). The
     //      `RuntimeSpawner` is the posix-minimal `PosixRuntime` (only the omitted
     //      Agent/async arms consult it; the Command arm uses `process`).
+    // Transcript sink for the per-hook-run `attachment` records claude-code
+    // persists (one line per hook run). Created empty because the hook
+    // executor is built BEFORE the orchestrator that owns the JSONL writer;
+    // `attach` fills the cell once `orch` exists (step 8 below).
+    let hook_attachment_sink = Arc::new(orchestrator::JsonlHookAttachmentSink::new());
     let hooks: Arc<hooks::HookExecutorImpl> = Arc::new(
         hooks::HookExecutorImpl::new(
             hook_registry.clone(),
@@ -1437,7 +1442,9 @@ async fn build_mobile_inner_with_ask(
         )))
         // (H-BIN-12) Gate outbound HTTP-hook URLs + intersect the per-hook env
         // allowlist from the merged settings; `(None, None)` = no restriction.
-        .with_http_hook_policy(allowed_http_hook_urls, http_hook_allowed_env_vars),
+        .with_http_hook_policy(allowed_http_hook_urls, http_hook_allowed_env_vars)
+        // One transcript `attachment` line per hook run, matching claude-code.
+        .with_attachment_sink(hook_attachment_sink.clone() as Arc<dyn hooks::HookAttachmentSink>),
     );
 
     // P0.2: the production FFI entry points inject
@@ -1742,6 +1749,11 @@ async fn build_mobile_inner_with_ask(
         orch_inner = orch_inner.with_memory_prefetch(prefetch);
     }
     let orch = Arc::new(orch_inner);
+
+    // Fill the hook-attachment sink's cell now that the orchestrator (and its
+    // JSONL writer) exists. The sink holds a `Weak`, so this does not create an
+    // orchestrator↔hook-executor reference cycle.
+    hook_attachment_sink.attach(&orch);
 
     // H-CHG-02: wire the enforcing gate's live `set_permission_mode` auto gate to
     // the LIVE `session.model` (mutated by `/model` switches / resume), so a

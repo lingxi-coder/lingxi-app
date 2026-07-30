@@ -20,6 +20,9 @@ use client_protocol::commands::{
     ProviderCredentialSecretDto,
 };
 use client_protocol::listings::TaskStatusDto;
+use client_protocol::local_apps::{
+    AppCreateOriginDto, AppDesignPatchDto, AppDesignPatchOpDto, AppTemplateKindDto, DesignValueDto,
+};
 use client_protocol::permission::PermissionResponseDto;
 
 /// `SendPrompt` — the core inbound command. Carries the text, an optional
@@ -456,6 +459,261 @@ fn task_stop_round_trips() {
     assert_eq!(back, cmd);
 }
 
+/// `ListApps` — a unit-style pull command; the reply is an `AppsChanged` event.
+#[test]
+fn list_apps_round_trips() {
+    let cmd = ClientCommand::ListApps;
+    let json = serde_json::to_value(&cmd).expect("serialize ListApps");
+    assert_eq!(json["type"], "list_apps");
+    let back: ClientCommand = serde_json::from_value(json).expect("deserialize ListApps");
+    assert_eq!(back, cmd);
+}
+
+/// `CreateApp` — name + bare-string template/origin + an optional
+/// `conversation_id` (present for `origin: chat`, skipped when `None`).
+#[test]
+fn create_app_round_trips() {
+    let cmd = ClientCommand::CreateApp {
+        name: "Habits".to_string(),
+        template: AppTemplateKindDto::Dashboard,
+        origin: AppCreateOriginDto::Chat,
+        conversation_id: Some("conv-42".to_string()),
+    };
+    let json = serde_json::to_value(&cmd).expect("serialize CreateApp");
+    assert_eq!(json["type"], "create_app");
+    assert_eq!(json["name"], "Habits");
+    assert_eq!(json["template"], "dashboard");
+    assert_eq!(json["origin"], "chat");
+    assert_eq!(json["conversation_id"], "conv-42");
+    let back: ClientCommand = serde_json::from_value(json).expect("deserialize CreateApp");
+    assert_eq!(back, cmd);
+
+    // A library-born app carries no conversation_id — the None is skipped.
+    let from_library = ClientCommand::CreateApp {
+        name: "Recipes".to_string(),
+        template: AppTemplateKindDto::ContentShowcase,
+        origin: AppCreateOriginDto::Library,
+        conversation_id: None,
+    };
+    let json_l = serde_json::to_value(&from_library).expect("serialize library CreateApp");
+    assert_eq!(json_l["origin"], "library");
+    assert!(
+        json_l.get("conversation_id").is_none(),
+        "None conversation_id must be skipped"
+    );
+    let back_l: ClientCommand =
+        serde_json::from_value(json_l).expect("deserialize library CreateApp");
+    assert_eq!(back_l, from_library);
+}
+
+/// `OpenAppDesigner` — opens the design-spec gate for one app.
+#[test]
+fn open_app_designer_round_trips() {
+    let cmd = ClientCommand::OpenAppDesigner {
+        app_id: "habits-1a2b".to_string(),
+    };
+    let json = serde_json::to_value(&cmd).expect("serialize OpenAppDesigner");
+    assert_eq!(json["type"], "open_app_designer");
+    assert_eq!(json["app_id"], "habits-1a2b");
+    let back: ClientCommand = serde_json::from_value(json).expect("deserialize OpenAppDesigner");
+    assert_eq!(back, cmd);
+}
+
+/// `UpdateAppDesignDraft` — optimistic-concurrency gated draft edit carrying
+/// the spec-§A patch shape (`{op, field_id, value}` ops).
+#[test]
+fn update_app_design_draft_round_trips() {
+    let cmd = ClientCommand::UpdateAppDesignDraft {
+        app_id: "habits-1a2b".to_string(),
+        expected_revision: 3,
+        patch: AppDesignPatchDto {
+            ops: vec![
+                AppDesignPatchOpDto::Set {
+                    field_id: "title".to_string(),
+                    value: DesignValueDto::ShortText {
+                        value: "Habit Tracker".to_string(),
+                    },
+                },
+                AppDesignPatchOpDto::Remove {
+                    field_id: "accent".to_string(),
+                },
+            ],
+            note: Some("rename + drop accent".to_string()),
+        },
+    };
+    let json = serde_json::to_value(&cmd).expect("serialize UpdateAppDesignDraft");
+    assert_eq!(json["type"], "update_app_design_draft");
+    assert_eq!(json["app_id"], "habits-1a2b");
+    assert_eq!(json["expected_revision"], 3);
+    assert_eq!(json["patch"]["ops"][0]["op"], "set");
+    assert_eq!(json["patch"]["ops"][0]["field_id"], "title");
+    assert_eq!(json["patch"]["ops"][0]["value"]["kind"], "short_text");
+    assert_eq!(json["patch"]["ops"][1]["op"], "remove");
+    assert_eq!(json["patch"]["note"], "rename + drop accent");
+    let back: ClientCommand =
+        serde_json::from_value(json).expect("deserialize UpdateAppDesignDraft");
+    assert_eq!(back, cmd);
+}
+
+/// `ApplyAgentDesignSuggestion` — echoes the pending suggestion id under the
+/// same revision gating as a draft edit.
+#[test]
+fn apply_agent_design_suggestion_round_trips() {
+    let cmd = ClientCommand::ApplyAgentDesignSuggestion {
+        app_id: "habits-1a2b".to_string(),
+        suggestion_id: "sugg-77".to_string(),
+        expected_revision: 4,
+    };
+    let json = serde_json::to_value(&cmd).expect("serialize ApplyAgentDesignSuggestion");
+    assert_eq!(json["type"], "apply_agent_design_suggestion");
+    assert_eq!(json["app_id"], "habits-1a2b");
+    assert_eq!(json["suggestion_id"], "sugg-77");
+    assert_eq!(json["expected_revision"], 4);
+    let back: ClientCommand =
+        serde_json::from_value(json).expect("deserialize ApplyAgentDesignSuggestion");
+    assert_eq!(back, cmd);
+}
+
+/// `ConfirmAppDesign` — echoes the pending designer `interaction_id` (only
+/// delivered via `AppDesignerRequested`) plus the CURRENT draft revision.
+#[test]
+fn confirm_app_design_round_trips() {
+    let cmd = ClientCommand::ConfirmAppDesign {
+        app_id: "habits-1a2b".to_string(),
+        revision: 5,
+        interaction_id: "int-designer-9".to_string(),
+    };
+    let json = serde_json::to_value(&cmd).expect("serialize ConfirmAppDesign");
+    assert_eq!(json["type"], "confirm_app_design");
+    assert_eq!(json["app_id"], "habits-1a2b");
+    assert_eq!(json["revision"], 5);
+    assert_eq!(json["interaction_id"], "int-designer-9");
+    let back: ClientCommand = serde_json::from_value(json).expect("deserialize ConfirmAppDesign");
+    assert_eq!(back, cmd);
+}
+
+/// `CancelAppDesign` — voids the pending designer gate.
+#[test]
+fn cancel_app_design_round_trips() {
+    let cmd = ClientCommand::CancelAppDesign {
+        app_id: "habits-1a2b".to_string(),
+    };
+    let json = serde_json::to_value(&cmd).expect("serialize CancelAppDesign");
+    assert_eq!(json["type"], "cancel_app_design");
+    assert_eq!(json["app_id"], "habits-1a2b");
+    let back: ClientCommand = serde_json::from_value(json).expect("deserialize CancelAppDesign");
+    assert_eq!(back, cmd);
+}
+
+/// The runtime trio (`StartApp` / `StopApp` / `RestartApp`) — phase 1 replies
+/// with a typed `not_yet_available` failure, but the wire shape is frozen now.
+#[test]
+fn app_runtime_commands_round_trip() {
+    let cases = [
+        (
+            ClientCommand::StartApp {
+                app_id: "habits-1a2b".to_string(),
+            },
+            "start_app",
+        ),
+        (
+            ClientCommand::StopApp {
+                app_id: "habits-1a2b".to_string(),
+            },
+            "stop_app",
+        ),
+        (
+            ClientCommand::RestartApp {
+                app_id: "habits-1a2b".to_string(),
+            },
+            "restart_app",
+        ),
+    ];
+    for (cmd, tag) in cases {
+        let json = serde_json::to_value(&cmd).expect("serialize runtime command");
+        assert_eq!(json["type"], tag, "{cmd:?} tag mismatch");
+        assert_eq!(json["app_id"], "habits-1a2b");
+        let back: ClientCommand = serde_json::from_value(json).expect("deserialize runtime command");
+        assert_eq!(back, cmd);
+    }
+}
+
+/// `ConfirmAppPreview` — echoes the pending preview `interaction_id` (only
+/// delivered via `AppPreviewReady`) plus the CURRENT draft revision.
+#[test]
+fn confirm_app_preview_round_trips() {
+    let cmd = ClientCommand::ConfirmAppPreview {
+        app_id: "habits-1a2b".to_string(),
+        revision: 6,
+        interaction_id: "int-preview-3".to_string(),
+    };
+    let json = serde_json::to_value(&cmd).expect("serialize ConfirmAppPreview");
+    assert_eq!(json["type"], "confirm_app_preview");
+    assert_eq!(json["app_id"], "habits-1a2b");
+    assert_eq!(json["revision"], 6);
+    assert_eq!(json["interaction_id"], "int-preview-3");
+    let back: ClientCommand = serde_json::from_value(json).expect("deserialize ConfirmAppPreview");
+    assert_eq!(back, cmd);
+}
+
+/// `RequestAppRevision` — carries the user's revision feedback prompt.
+#[test]
+fn request_app_revision_round_trips() {
+    let cmd = ClientCommand::RequestAppRevision {
+        app_id: "habits-1a2b".to_string(),
+        prompt: "make the chart blue".to_string(),
+    };
+    let json = serde_json::to_value(&cmd).expect("serialize RequestAppRevision");
+    assert_eq!(json["type"], "request_app_revision");
+    assert_eq!(json["app_id"], "habits-1a2b");
+    assert_eq!(json["prompt"], "make the chart blue");
+    let back: ClientCommand = serde_json::from_value(json).expect("deserialize RequestAppRevision");
+    assert_eq!(back, cmd);
+}
+
+/// `ListAppCheckpoints` — phase 1 replies with an empty list (git is phase 5).
+#[test]
+fn list_app_checkpoints_round_trips() {
+    let cmd = ClientCommand::ListAppCheckpoints {
+        app_id: "habits-1a2b".to_string(),
+    };
+    let json = serde_json::to_value(&cmd).expect("serialize ListAppCheckpoints");
+    assert_eq!(json["type"], "list_app_checkpoints");
+    assert_eq!(json["app_id"], "habits-1a2b");
+    let back: ClientCommand =
+        serde_json::from_value(json).expect("deserialize ListAppCheckpoints");
+    assert_eq!(back, cmd);
+}
+
+/// `RestoreAppCheckpoint` — names the checkpoint to restore to.
+#[test]
+fn restore_app_checkpoint_round_trips() {
+    let cmd = ClientCommand::RestoreAppCheckpoint {
+        app_id: "habits-1a2b".to_string(),
+        checkpoint_id: "ckpt-0001".to_string(),
+    };
+    let json = serde_json::to_value(&cmd).expect("serialize RestoreAppCheckpoint");
+    assert_eq!(json["type"], "restore_app_checkpoint");
+    assert_eq!(json["app_id"], "habits-1a2b");
+    assert_eq!(json["checkpoint_id"], "ckpt-0001");
+    let back: ClientCommand =
+        serde_json::from_value(json).expect("deserialize RestoreAppCheckpoint");
+    assert_eq!(back, cmd);
+}
+
+/// `DeleteApp` — deletes the record + workspace; confirmed via `AppsChanged`.
+#[test]
+fn delete_app_round_trips() {
+    let cmd = ClientCommand::DeleteApp {
+        app_id: "habits-1a2b".to_string(),
+    };
+    let json = serde_json::to_value(&cmd).expect("serialize DeleteApp");
+    assert_eq!(json["type"], "delete_app");
+    assert_eq!(json["app_id"], "habits-1a2b");
+    let back: ClientCommand = serde_json::from_value(json).expect("deserialize DeleteApp");
+    assert_eq!(back, cmd);
+}
+
 /// THE LIFECYCLE LOCK (decision §0.5). For EVERY `ClientCommand` variant except
 /// `ResumeSession`, serialize a canonical instance and assert the wire frame
 /// carries NO `session_id` key. `ResumeSession` is the ONE allowed occurrence —
@@ -512,6 +770,70 @@ fn no_live_command_carries_session_id() {
         },
         ClientCommand::TaskStop {
             task_id: "b00000000".to_string(),
+        },
+        ClientCommand::ListApps,
+        ClientCommand::CreateApp {
+            name: "Habits".to_string(),
+            template: AppTemplateKindDto::Dashboard,
+            origin: AppCreateOriginDto::Chat,
+            conversation_id: Some("conv-42".to_string()),
+        },
+        ClientCommand::OpenAppDesigner {
+            app_id: "habits-1a2b".to_string(),
+        },
+        ClientCommand::UpdateAppDesignDraft {
+            app_id: "habits-1a2b".to_string(),
+            expected_revision: 1,
+            patch: AppDesignPatchDto {
+                ops: vec![AppDesignPatchOpDto::Set {
+                    field_id: "title".to_string(),
+                    value: DesignValueDto::ShortText {
+                        value: "T".to_string(),
+                    },
+                }],
+                note: None,
+            },
+        },
+        ClientCommand::ApplyAgentDesignSuggestion {
+            app_id: "habits-1a2b".to_string(),
+            suggestion_id: "sugg-1".to_string(),
+            expected_revision: 1,
+        },
+        ClientCommand::ConfirmAppDesign {
+            app_id: "habits-1a2b".to_string(),
+            revision: 1,
+            interaction_id: "int-1".to_string(),
+        },
+        ClientCommand::CancelAppDesign {
+            app_id: "habits-1a2b".to_string(),
+        },
+        ClientCommand::StartApp {
+            app_id: "habits-1a2b".to_string(),
+        },
+        ClientCommand::StopApp {
+            app_id: "habits-1a2b".to_string(),
+        },
+        ClientCommand::RestartApp {
+            app_id: "habits-1a2b".to_string(),
+        },
+        ClientCommand::ConfirmAppPreview {
+            app_id: "habits-1a2b".to_string(),
+            revision: 1,
+            interaction_id: "int-2".to_string(),
+        },
+        ClientCommand::RequestAppRevision {
+            app_id: "habits-1a2b".to_string(),
+            prompt: "p".to_string(),
+        },
+        ClientCommand::ListAppCheckpoints {
+            app_id: "habits-1a2b".to_string(),
+        },
+        ClientCommand::RestoreAppCheckpoint {
+            app_id: "habits-1a2b".to_string(),
+            checkpoint_id: "ckpt-1".to_string(),
+        },
+        ClientCommand::DeleteApp {
+            app_id: "habits-1a2b".to_string(),
         },
         ClientCommand::RequestExit,
     ];

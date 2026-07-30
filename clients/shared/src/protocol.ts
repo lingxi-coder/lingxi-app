@@ -8,6 +8,7 @@
  *  - `client-protocol/src/message.rs`    → {@link MessageDto} / {@link MessageBlockDto}
  *  - `client-protocol/src/permission.rs` → {@link PermissionRequest} + response DTOs
  *  - `client-protocol/src/listings.rs`   → the screen-listing row/payload DTOs
+ *  - `client-protocol/src/local_apps.rs` → the local-apps DTOs ({@link AppRecordDto}, …)
  *  - `client-protocol/src/error.rs`      → {@link ClientError}
  *  - `client-protocol/src/version.rs`    → {@link CLIENT_PROTOCOL_VERSION}
  *  - `bridge/src/wire.rs`                → {@link Frame}, {@link ClientHello},
@@ -146,6 +147,38 @@ export type ClientCommand =
   | { type: 'task_list'; status_filter?: TaskStatusDto }
   | { type: 'task_output'; task_id: string; offset: number }
   | { type: 'task_stop'; task_id: string }
+  // ── Local apps ──────────────────────────────────────────────────────────────
+  | { type: 'list_apps' }
+  | {
+      type: 'create_app';
+      name: string;
+      template: AppTemplateKindDto;
+      origin: AppCreateOriginDto;
+      conversation_id?: string;
+    }
+  | { type: 'open_app_designer'; app_id: string }
+  | {
+      type: 'update_app_design_draft';
+      app_id: string;
+      expected_revision: number;
+      patch: AppDesignPatchDto;
+    }
+  | {
+      type: 'apply_agent_design_suggestion';
+      app_id: string;
+      suggestion_id: string;
+      expected_revision: number;
+    }
+  | { type: 'confirm_app_design'; app_id: string; revision: number; interaction_id: string }
+  | { type: 'cancel_app_design'; app_id: string }
+  | { type: 'start_app'; app_id: string }
+  | { type: 'stop_app'; app_id: string }
+  | { type: 'restart_app'; app_id: string }
+  | { type: 'confirm_app_preview'; app_id: string; revision: number; interaction_id: string }
+  | { type: 'request_app_revision'; app_id: string; prompt: string }
+  | { type: 'list_app_checkpoints'; app_id: string }
+  | { type: 'restore_app_checkpoint'; app_id: string; checkpoint_id: string }
+  | { type: 'delete_app'; app_id: string }
   // ── Lifecycle ───────────────────────────────────────────────────────────────
   | { type: 'request_exit' };
 
@@ -411,6 +444,106 @@ export interface TaskRowDto {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// local_apps.rs
+//
+// The fieldless enums ride as BARE wire strings (byte-identical to the
+// local-apps core enums' canonical values — the `AccessTierDto` precedent);
+// `DesignValueDto` is tagged on `kind` and `AppDesignPatchOpDto` on `op`, the
+// discriminators the local-apps spec fixes.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Scaffold template an app is designed from (local_apps.rs `AppTemplateKindDto`). */
+export type AppTemplateKindDto =
+  | 'dashboard'
+  | 'crud_tracker'
+  | 'content_showcase'
+  | 'form_utility';
+
+/** Designer/generation workflow state (local_apps.rs `AppWorkflowStateDto`). */
+export type AppWorkflowStateDto =
+  | 'collecting_spec'
+  | 'awaiting_spec_confirmation'
+  | 'generating'
+  | 'validating'
+  | 'awaiting_preview_confirmation'
+  | 'revising'
+  | 'ready'
+  | 'generation_failed'
+  | 'validation_failed';
+
+/** Runtime (dev-server) state (local_apps.rs `AppRuntimeStateDto`). */
+export type AppRuntimeStateDto = 'stopped' | 'starting' | 'running' | 'stopping' | 'failed';
+
+/** Where a `create_app` originated (local_apps.rs `AppCreateOriginDto`). */
+export type AppCreateOriginDto = 'chat' | 'library';
+
+/** Typed local-app failure code carried by `app_operation_failed` (local_apps.rs `AppErrorCodeDto`). */
+export type AppErrorCodeDto =
+  | 'not_found'
+  | 'revision_conflict'
+  | 'interaction_invalid'
+  | 'workflow_state_invalid'
+  | 'runtime_busy'
+  | 'not_yet_available'
+  | 'storage_corrupt'
+  | 'invalid_request'
+  | 'io';
+
+/** Why a checkpoint was recorded (local_apps.rs `AppCheckpointKindDto`). */
+export type AppCheckpointKindDto =
+  | 'scaffold_created'
+  | 'generation_validated'
+  | 'preview_approved'
+  | 'user_approved'
+  | 'pre_restore';
+
+/** Layout density for a `density` design value (local_apps.rs `DensityLevelDto`). */
+export type DensityLevelDto = 'compact' | 'comfortable';
+
+/** One draft field value, tagged by field kind (local_apps.rs `DesignValueDto`). */
+export type DesignValueDto =
+  | { kind: 'short_text'; value: string }
+  | { kind: 'long_text'; value: string }
+  | { kind: 'single_choice'; value: string }
+  | { kind: 'multiple_choice'; value: string[] }
+  | { kind: 'boolean'; value: boolean }
+  | { kind: 'color'; value: string }
+  | { kind: 'density'; value: DensityLevelDto }
+  | { kind: 'screen_list'; value: string[] }
+  | { kind: 'feature_list'; value: string[] };
+
+/** One patch operation against the draft field map (local_apps.rs `AppDesignPatchOpDto`). */
+export type AppDesignPatchOpDto =
+  | { op: 'set'; field_id: string; value: DesignValueDto }
+  | { op: 'remove'; field_id: string };
+
+/** An ordered batch of draft edits (local_apps.rs `AppDesignPatchDto`). */
+export interface AppDesignPatchDto {
+  ops: AppDesignPatchOpDto[];
+  note?: string;
+}
+
+/** One local-app row (local_apps.rs `AppRecordDto`). */
+export interface AppRecordDto {
+  id: string;
+  name: string;
+  template: AppTemplateKindDto;
+  created_at_ms: number;
+  updated_at_ms: number;
+  workflow_state: AppWorkflowStateDto;
+  conversation_id?: string;
+  workspace_rel: string;
+}
+
+/** One restorable app checkpoint (local_apps.rs `AppCheckpointDto`). */
+export interface AppCheckpointDto {
+  id: string;
+  label: string;
+  kind: AppCheckpointKindDto;
+  created_at_ms: number;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // events.rs
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -510,6 +643,46 @@ export type ClientEvent =
     }
   | { type: 'task_status_changed'; task_id: string; status: TaskStatusDto }
   | { type: 'commands_changed'; commands: SlashCommandDto[] }
+  // ── Local apps ──────────────────────────────────────────────────────────────
+  | { type: 'apps_changed'; apps: AppRecordDto[] }
+  | { type: 'app_designer_requested'; app_id: string; interaction_id: string; revision: number }
+  | {
+      type: 'app_design_draft_changed';
+      app_id: string;
+      revision: number;
+      fields: Record<string, DesignValueDto>;
+    }
+  | {
+      type: 'app_design_suggestion_available';
+      app_id: string;
+      suggestion_id: string;
+      based_on_revision: number;
+      patch: AppDesignPatchDto;
+    }
+  | {
+      type: 'app_design_conflict';
+      app_id: string;
+      expected_revision: number;
+      actual_revision: number;
+    }
+  | { type: 'app_workflow_changed'; app_id: string; state: AppWorkflowStateDto; detail?: string }
+  | {
+      type: 'app_generation_progress';
+      app_id: string;
+      stage: string;
+      percent?: number;
+      detail?: string;
+    }
+  | { type: 'app_runtime_changed'; app_id: string; state: AppRuntimeStateDto; last_error?: string }
+  | {
+      type: 'app_preview_ready';
+      app_id: string;
+      interaction_id: string;
+      revision: number;
+      url?: string;
+    }
+  | { type: 'app_checkpoint_created'; app_id: string; checkpoint: AppCheckpointDto }
+  | { type: 'app_operation_failed'; app_id?: string; code: AppErrorCodeDto; message: string }
   // ── Reserved / feed-deferred (round-trip only) ──────────────────────────────
   | { type: 'coordinator_status'; active_workers: number; team?: string }
   | {

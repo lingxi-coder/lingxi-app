@@ -1,0 +1,6 @@
+{
+  "type": "app_operation_failed",
+  "app_id": "habits-1a2b",
+  "code": "not_yet_available",
+  "message": "app runtime lands in phase 4"
+}

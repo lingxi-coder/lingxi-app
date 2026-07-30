@@ -1869,6 +1869,7 @@ dependencies = [
  "hooks",
  "insta",
  "llm-client",
+ "local-apps",
  "orchestrator",
  "permission",
  "platform-android",

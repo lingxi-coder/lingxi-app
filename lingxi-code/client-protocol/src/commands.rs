@@ -33,6 +33,7 @@
 
 use crate::computer_access::ComputerAccessResponseDto;
 use crate::listings::TaskStatusDto;
+use crate::local_apps::{AppCreateOriginDto, AppDesignPatchDto, AppTemplateKindDto};
 use crate::permission::PermissionResponseDto;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -308,6 +309,152 @@ pub enum ClientCommand {
     TaskStop {
         /// 9-char task id.
         task_id: String,
+    },
+
+    // ── Local apps ────────────────────────────────────────────────────────
+    /// List the local apps. Replied with an
+    /// [`AppsChanged`](crate::events::ClientEvent::AppsChanged) event carrying
+    /// the full record set.
+    ListApps,
+
+    /// Create a new local-app record and its workspace. Confirmed by an
+    /// [`AppsChanged`](crate::events::ClientEvent::AppsChanged) event.
+    CreateApp {
+        /// User-facing display name.
+        name: String,
+        /// Scaffold template the app is designed from.
+        template: AppTemplateKindDto,
+        /// Where the creation originated (`chat` / `library`).
+        origin: AppCreateOriginDto,
+        /// Conversation the app was created from (`origin: chat`). Skipped
+        /// from the wire when `None`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        conversation_id: Option<String>,
+    },
+
+    /// Open the design-spec confirmation gate. Replied with an
+    /// [`AppDesignerRequested`](crate::events::ClientEvent::AppDesignerRequested)
+    /// event carrying the `interaction_id` the confirm command must echo.
+    OpenAppDesigner {
+        /// App whose designer to open.
+        app_id: String,
+    },
+
+    /// Apply a user edit batch to the design draft. Optimistic-concurrency
+    /// gated: `expected_revision` must equal the current draft revision, else
+    /// the engine emits
+    /// [`AppDesignConflict`](crate::events::ClientEvent::AppDesignConflict)
+    /// and the draft is left untouched (no silent overwrite).
+    UpdateAppDesignDraft {
+        /// App whose draft to edit.
+        app_id: String,
+        /// Draft revision the client believes to be current.
+        expected_revision: u64,
+        /// The edit batch, applied in order.
+        patch: AppDesignPatchDto,
+    },
+
+    /// Apply the pending agent design suggestion. `suggestion_id` must match
+    /// the pending suggestion (from
+    /// [`AppDesignSuggestionAvailable`](crate::events::ClientEvent::AppDesignSuggestionAvailable))
+    /// and `expected_revision` the current draft revision.
+    ApplyAgentDesignSuggestion {
+        /// App whose pending suggestion to apply.
+        app_id: String,
+        /// Id of the pending suggestion being applied.
+        suggestion_id: String,
+        /// Draft revision the client believes to be current.
+        expected_revision: u64,
+    },
+
+    /// Confirm the design spec and start generation. `interaction_id` must be
+    /// the pending designer gate (delivered by
+    /// [`AppDesignerRequested`](crate::events::ClientEvent::AppDesignerRequested))
+    /// and `revision` the CURRENT draft revision.
+    ConfirmAppDesign {
+        /// App whose design to confirm.
+        app_id: String,
+        /// Draft revision being confirmed (must be current).
+        revision: u64,
+        /// The pending designer interaction id being resolved.
+        interaction_id: String,
+    },
+
+    /// Cancel out of the design confirmation gate (voids the pending designer
+    /// interaction; the draft keeps collecting).
+    CancelAppDesign {
+        /// App whose designer gate to cancel.
+        app_id: String,
+    },
+
+    /// Start the app's dev-server runtime. Phase 1 validates the app exists,
+    /// then fails typed with
+    /// [`AppOperationFailed`](crate::events::ClientEvent::AppOperationFailed)
+    /// `{ code: not_yet_available }` (runtime is phase 4).
+    StartApp {
+        /// App to start.
+        app_id: String,
+    },
+
+    /// Stop the app's dev-server runtime (`not_yet_available` until phase 4,
+    /// like [`Self::StartApp`]).
+    StopApp {
+        /// App to stop.
+        app_id: String,
+    },
+
+    /// Restart the app's dev-server runtime (`not_yet_available` until phase
+    /// 4, like [`Self::StartApp`]).
+    RestartApp {
+        /// App to restart.
+        app_id: String,
+    },
+
+    /// Approve the generated preview. `interaction_id` must be the pending
+    /// preview gate (delivered by
+    /// [`AppPreviewReady`](crate::events::ClientEvent::AppPreviewReady)) and
+    /// `revision` the CURRENT draft revision.
+    ConfirmAppPreview {
+        /// App whose preview to approve.
+        app_id: String,
+        /// Draft revision being approved (must be current).
+        revision: u64,
+        /// The pending preview interaction id being resolved.
+        interaction_id: String,
+    },
+
+    /// Request a revision pass with feedback (from the preview gate or a ready
+    /// app). The prompt is recorded for the agent continuation.
+    RequestAppRevision {
+        /// App to revise.
+        app_id: String,
+        /// The user's revision feedback.
+        prompt: String,
+    },
+
+    /// List an app's restorable checkpoints. Phase 1 replies with an empty
+    /// list (git wiring is phase 5).
+    ListAppCheckpoints {
+        /// App whose checkpoints to list.
+        app_id: String,
+    },
+
+    /// Restore an app workspace to a checkpoint. Phase 1 validates the app
+    /// exists, then fails typed with
+    /// [`AppOperationFailed`](crate::events::ClientEvent::AppOperationFailed)
+    /// `{ code: not_yet_available }` (git wiring is phase 5).
+    RestoreAppCheckpoint {
+        /// App to restore.
+        app_id: String,
+        /// Checkpoint to restore to.
+        checkpoint_id: String,
+    },
+
+    /// Delete an app record and its workspace. Confirmed by an
+    /// [`AppsChanged`](crate::events::ClientEvent::AppsChanged) event.
+    DeleteApp {
+        /// App to delete.
+        app_id: String,
     },
 
     // ── Lifecycle ─────────────────────────────────────────────────────────

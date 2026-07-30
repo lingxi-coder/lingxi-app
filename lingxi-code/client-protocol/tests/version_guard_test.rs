@@ -296,6 +296,124 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::TaskStatusChanged.task_id", "String");
     put("ClientEvent::TaskStatusChanged.status", "TaskStatusDto");
 
+    put("ClientEvent::CommandsChanged", "commands_changed");
+    put(
+        "ClientEvent::CommandsChanged.commands",
+        "Vec<SlashCommandDto>",
+    );
+
+    put("ClientEvent::AppsChanged", "apps_changed");
+    put("ClientEvent::AppsChanged.apps", "Vec<AppRecordDto>");
+
+    put("ClientEvent::AppDesignerRequested", "app_designer_requested");
+    put("ClientEvent::AppDesignerRequested.app_id", "String");
+    put(
+        "ClientEvent::AppDesignerRequested.interaction_id",
+        "String",
+    );
+    put("ClientEvent::AppDesignerRequested.revision", "u64");
+
+    put(
+        "ClientEvent::AppDesignDraftChanged",
+        "app_design_draft_changed",
+    );
+    put("ClientEvent::AppDesignDraftChanged.app_id", "String");
+    put("ClientEvent::AppDesignDraftChanged.revision", "u64");
+    put(
+        "ClientEvent::AppDesignDraftChanged.fields",
+        "HashMap<String, DesignValueDto>",
+    );
+
+    put(
+        "ClientEvent::AppDesignSuggestionAvailable",
+        "app_design_suggestion_available",
+    );
+    put(
+        "ClientEvent::AppDesignSuggestionAvailable.app_id",
+        "String",
+    );
+    put(
+        "ClientEvent::AppDesignSuggestionAvailable.suggestion_id",
+        "String",
+    );
+    put(
+        "ClientEvent::AppDesignSuggestionAvailable.based_on_revision",
+        "u64",
+    );
+    put(
+        "ClientEvent::AppDesignSuggestionAvailable.patch",
+        "AppDesignPatchDto",
+    );
+
+    put("ClientEvent::AppDesignConflict", "app_design_conflict");
+    put("ClientEvent::AppDesignConflict.app_id", "String");
+    put(
+        "ClientEvent::AppDesignConflict.expected_revision",
+        "u64",
+    );
+    put("ClientEvent::AppDesignConflict.actual_revision", "u64");
+
+    put("ClientEvent::AppWorkflowChanged", "app_workflow_changed");
+    put("ClientEvent::AppWorkflowChanged.app_id", "String");
+    put(
+        "ClientEvent::AppWorkflowChanged.state",
+        "AppWorkflowStateDto",
+    );
+    put(
+        "ClientEvent::AppWorkflowChanged.detail",
+        "Option<String>",
+    );
+
+    put(
+        "ClientEvent::AppGenerationProgress",
+        "app_generation_progress",
+    );
+    put("ClientEvent::AppGenerationProgress.app_id", "String");
+    put("ClientEvent::AppGenerationProgress.stage", "String");
+    put(
+        "ClientEvent::AppGenerationProgress.percent",
+        "Option<u8>",
+    );
+    put(
+        "ClientEvent::AppGenerationProgress.detail",
+        "Option<String>",
+    );
+
+    put("ClientEvent::AppRuntimeChanged", "app_runtime_changed");
+    put("ClientEvent::AppRuntimeChanged.app_id", "String");
+    put(
+        "ClientEvent::AppRuntimeChanged.state",
+        "AppRuntimeStateDto",
+    );
+    put(
+        "ClientEvent::AppRuntimeChanged.last_error",
+        "Option<String>",
+    );
+
+    put("ClientEvent::AppPreviewReady", "app_preview_ready");
+    put("ClientEvent::AppPreviewReady.app_id", "String");
+    put("ClientEvent::AppPreviewReady.interaction_id", "String");
+    put("ClientEvent::AppPreviewReady.revision", "u64");
+    put("ClientEvent::AppPreviewReady.url", "Option<String>");
+
+    put(
+        "ClientEvent::AppCheckpointCreated",
+        "app_checkpoint_created",
+    );
+    put("ClientEvent::AppCheckpointCreated.app_id", "String");
+    put(
+        "ClientEvent::AppCheckpointCreated.checkpoint",
+        "AppCheckpointDto",
+    );
+
+    put("ClientEvent::AppOperationFailed", "app_operation_failed");
+    put(
+        "ClientEvent::AppOperationFailed.app_id",
+        "Option<String>",
+    );
+    put("ClientEvent::AppOperationFailed.code", "AppErrorCodeDto");
+    put("ClientEvent::AppOperationFailed.message", "String");
+
     put("ClientEvent::CoordinatorStatus", "coordinator_status");
     put("ClientEvent::CoordinatorStatus.active_workers", "u32");
     put("ClientEvent::CoordinatorStatus.team", "Option<String>");
@@ -458,6 +576,105 @@ fn current_contract_index() -> ContractIndex {
 
     put("ClientCommand::TaskStop", "task_stop");
     put("ClientCommand::TaskStop.task_id", "String");
+
+    put("ClientCommand::ListApps", "list_apps");
+
+    put("ClientCommand::CreateApp", "create_app");
+    put("ClientCommand::CreateApp.name", "String");
+    put("ClientCommand::CreateApp.template", "AppTemplateKindDto");
+    put("ClientCommand::CreateApp.origin", "AppCreateOriginDto");
+    put(
+        "ClientCommand::CreateApp.conversation_id",
+        "Option<String>",
+    );
+
+    put("ClientCommand::OpenAppDesigner", "open_app_designer");
+    put("ClientCommand::OpenAppDesigner.app_id", "String");
+
+    put(
+        "ClientCommand::UpdateAppDesignDraft",
+        "update_app_design_draft",
+    );
+    put("ClientCommand::UpdateAppDesignDraft.app_id", "String");
+    put(
+        "ClientCommand::UpdateAppDesignDraft.expected_revision",
+        "u64",
+    );
+    put(
+        "ClientCommand::UpdateAppDesignDraft.patch",
+        "AppDesignPatchDto",
+    );
+
+    put(
+        "ClientCommand::ApplyAgentDesignSuggestion",
+        "apply_agent_design_suggestion",
+    );
+    put(
+        "ClientCommand::ApplyAgentDesignSuggestion.app_id",
+        "String",
+    );
+    put(
+        "ClientCommand::ApplyAgentDesignSuggestion.suggestion_id",
+        "String",
+    );
+    put(
+        "ClientCommand::ApplyAgentDesignSuggestion.expected_revision",
+        "u64",
+    );
+
+    put("ClientCommand::ConfirmAppDesign", "confirm_app_design");
+    put("ClientCommand::ConfirmAppDesign.app_id", "String");
+    put("ClientCommand::ConfirmAppDesign.revision", "u64");
+    put(
+        "ClientCommand::ConfirmAppDesign.interaction_id",
+        "String",
+    );
+
+    put("ClientCommand::CancelAppDesign", "cancel_app_design");
+    put("ClientCommand::CancelAppDesign.app_id", "String");
+
+    put("ClientCommand::StartApp", "start_app");
+    put("ClientCommand::StartApp.app_id", "String");
+
+    put("ClientCommand::StopApp", "stop_app");
+    put("ClientCommand::StopApp.app_id", "String");
+
+    put("ClientCommand::RestartApp", "restart_app");
+    put("ClientCommand::RestartApp.app_id", "String");
+
+    put("ClientCommand::ConfirmAppPreview", "confirm_app_preview");
+    put("ClientCommand::ConfirmAppPreview.app_id", "String");
+    put("ClientCommand::ConfirmAppPreview.revision", "u64");
+    put(
+        "ClientCommand::ConfirmAppPreview.interaction_id",
+        "String",
+    );
+
+    put(
+        "ClientCommand::RequestAppRevision",
+        "request_app_revision",
+    );
+    put("ClientCommand::RequestAppRevision.app_id", "String");
+    put("ClientCommand::RequestAppRevision.prompt", "String");
+
+    put(
+        "ClientCommand::ListAppCheckpoints",
+        "list_app_checkpoints",
+    );
+    put("ClientCommand::ListAppCheckpoints.app_id", "String");
+
+    put(
+        "ClientCommand::RestoreAppCheckpoint",
+        "restore_app_checkpoint",
+    );
+    put("ClientCommand::RestoreAppCheckpoint.app_id", "String");
+    put(
+        "ClientCommand::RestoreAppCheckpoint.checkpoint_id",
+        "String",
+    );
+
+    put("ClientCommand::DeleteApp", "delete_app");
+    put("ClientCommand::DeleteApp.app_id", "String");
 
     put("ClientCommand::RequestExit", "request_exit");
 
@@ -683,6 +900,119 @@ fn current_contract_index() -> ContractIndex {
     put("CoordinatorWorkerDto.agent_type", "String");
     put("CoordinatorWorkerDto.status", "String");
 
+    // ── Local-apps DTOs (local_apps.rs) ───────────────────────────────────
+    put("AppTemplateKindDto::Dashboard", "dashboard");
+    put("AppTemplateKindDto::CrudTracker", "crud_tracker");
+    put("AppTemplateKindDto::ContentShowcase", "content_showcase");
+    put("AppTemplateKindDto::FormUtility", "form_utility");
+
+    put("AppWorkflowStateDto::CollectingSpec", "collecting_spec");
+    put(
+        "AppWorkflowStateDto::AwaitingSpecConfirmation",
+        "awaiting_spec_confirmation",
+    );
+    put("AppWorkflowStateDto::Generating", "generating");
+    put("AppWorkflowStateDto::Validating", "validating");
+    put(
+        "AppWorkflowStateDto::AwaitingPreviewConfirmation",
+        "awaiting_preview_confirmation",
+    );
+    put("AppWorkflowStateDto::Revising", "revising");
+    put("AppWorkflowStateDto::Ready", "ready");
+    put(
+        "AppWorkflowStateDto::GenerationFailed",
+        "generation_failed",
+    );
+    put(
+        "AppWorkflowStateDto::ValidationFailed",
+        "validation_failed",
+    );
+
+    put("AppRuntimeStateDto::Stopped", "stopped");
+    put("AppRuntimeStateDto::Starting", "starting");
+    put("AppRuntimeStateDto::Running", "running");
+    put("AppRuntimeStateDto::Stopping", "stopping");
+    put("AppRuntimeStateDto::Failed", "failed");
+
+    put("AppCreateOriginDto::Chat", "chat");
+    put("AppCreateOriginDto::Library", "library");
+
+    put("AppErrorCodeDto::NotFound", "not_found");
+    put("AppErrorCodeDto::RevisionConflict", "revision_conflict");
+    put(
+        "AppErrorCodeDto::InteractionInvalid",
+        "interaction_invalid",
+    );
+    put(
+        "AppErrorCodeDto::WorkflowStateInvalid",
+        "workflow_state_invalid",
+    );
+    put("AppErrorCodeDto::RuntimeBusy", "runtime_busy");
+    put("AppErrorCodeDto::NotYetAvailable", "not_yet_available");
+    put("AppErrorCodeDto::StorageCorrupt", "storage_corrupt");
+    put("AppErrorCodeDto::InvalidRequest", "invalid_request");
+    put("AppErrorCodeDto::Io", "io");
+
+    put(
+        "AppCheckpointKindDto::ScaffoldCreated",
+        "scaffold_created",
+    );
+    put(
+        "AppCheckpointKindDto::GenerationValidated",
+        "generation_validated",
+    );
+    put(
+        "AppCheckpointKindDto::PreviewApproved",
+        "preview_approved",
+    );
+    put("AppCheckpointKindDto::UserApproved", "user_approved");
+    put("AppCheckpointKindDto::PreRestore", "pre_restore");
+
+    put("DensityLevelDto::Compact", "compact");
+    put("DensityLevelDto::Comfortable", "comfortable");
+
+    put("AppRecordDto.id", "String");
+    put("AppRecordDto.name", "String");
+    put("AppRecordDto.template", "AppTemplateKindDto");
+    put("AppRecordDto.created_at_ms", "u64");
+    put("AppRecordDto.updated_at_ms", "u64");
+    put("AppRecordDto.workflow_state", "AppWorkflowStateDto");
+    put("AppRecordDto.conversation_id", "Option<String>");
+    put("AppRecordDto.workspace_rel", "String");
+
+    put("DesignValueDto::ShortText", "short_text");
+    put("DesignValueDto::ShortText.value", "String");
+    put("DesignValueDto::LongText", "long_text");
+    put("DesignValueDto::LongText.value", "String");
+    put("DesignValueDto::SingleChoice", "single_choice");
+    put("DesignValueDto::SingleChoice.value", "String");
+    put("DesignValueDto::MultipleChoice", "multiple_choice");
+    put("DesignValueDto::MultipleChoice.value", "Vec<String>");
+    put("DesignValueDto::Boolean", "boolean");
+    put("DesignValueDto::Boolean.value", "bool");
+    put("DesignValueDto::Color", "color");
+    put("DesignValueDto::Color.value", "String");
+    put("DesignValueDto::Density", "density");
+    put("DesignValueDto::Density.value", "DensityLevelDto");
+    put("DesignValueDto::ScreenList", "screen_list");
+    put("DesignValueDto::ScreenList.value", "Vec<String>");
+    put("DesignValueDto::FeatureList", "feature_list");
+    put("DesignValueDto::FeatureList.value", "Vec<String>");
+
+    put("AppDesignPatchOpDto::Set", "set");
+    put("AppDesignPatchOpDto::Set.field_id", "String");
+    put("AppDesignPatchOpDto::Set.value", "DesignValueDto");
+    put("AppDesignPatchOpDto::Remove", "remove");
+    put("AppDesignPatchOpDto::Remove.field_id", "String");
+
+    put("AppDesignPatchDto.ops", "Vec<AppDesignPatchOpDto>");
+    put("AppDesignPatchDto.note", "Option<String>");
+
+    put("AppCheckpointDto.id", "String");
+    put("AppCheckpointDto.label", "String");
+    put("AppCheckpointDto.kind", "AppCheckpointKindDto");
+    put("AppCheckpointDto.created_at_ms", "u64");
+
     ix
 }
 
@@ -901,6 +1231,11 @@ fn contract_index_covers_every_dto() {
         MemoryTierDto, SessionRowDto, SlashCommandDto, StatusSnapshotDto, TaskRowDto,
         TaskStatusDto,
     };
+    use client_protocol::local_apps::{
+        AppCheckpointDto, AppCheckpointKindDto, AppCreateOriginDto, AppDesignPatchDto,
+        AppDesignPatchOpDto, AppErrorCodeDto, AppRecordDto, AppRuntimeStateDto,
+        AppTemplateKindDto, AppWorkflowStateDto, DensityLevelDto, DesignValueDto,
+    };
     use client_protocol::message::{MessageBlockDto, MessageDto};
     use client_protocol::permission::{
         PermissionKindDto, PermissionRequest, PermissionResolved, PermissionResponseDto,
@@ -1082,6 +1417,47 @@ fn contract_index_covers_every_dto() {
             agent_type: String::new(),
             status: String::new(),
         },
+    );
+    let _apps = (
+        AppRecordDto {
+            id: String::new(),
+            name: String::new(),
+            template: AppTemplateKindDto::Dashboard,
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            workflow_state: AppWorkflowStateDto::CollectingSpec,
+            conversation_id: None,
+            workspace_rel: String::new(),
+        },
+        AppDesignPatchDto {
+            ops: vec![
+                AppDesignPatchOpDto::Set {
+                    field_id: String::new(),
+                    value: DesignValueDto::Density {
+                        value: DensityLevelDto::Compact,
+                    },
+                },
+                AppDesignPatchOpDto::Remove {
+                    field_id: String::new(),
+                },
+            ],
+            note: None,
+        },
+        AppCheckpointDto {
+            id: String::new(),
+            label: String::new(),
+            kind: AppCheckpointKindDto::ScaffoldCreated,
+            created_at_ms: 0,
+        },
+        AppRuntimeStateDto::Stopped,
+        AppCreateOriginDto::Library,
+        AppErrorCodeDto::NotYetAvailable,
+        ClientEvent::AppOperationFailed {
+            app_id: None,
+            code: AppErrorCodeDto::NotFound,
+            message: String::new(),
+        },
+        ClientCommand::ListApps,
     );
 
     // Sanity: the index is non-empty and contains a known anchor key.

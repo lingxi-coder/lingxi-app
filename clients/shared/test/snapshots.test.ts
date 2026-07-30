@@ -175,6 +175,132 @@ function validatePermissionMode(v: unknown): void {
   );
 }
 
+// ── local_apps.rs validators (bare-string enums + kind/op-tagged DTOs) ────────
+
+function validateAppTemplateKind(v: unknown): void {
+  assert.ok(
+    ['dashboard', 'crud_tracker', 'content_showcase', 'form_utility'].includes(v as string),
+  );
+}
+
+function validateAppWorkflowState(v: unknown): void {
+  assert.ok(
+    [
+      'collecting_spec',
+      'awaiting_spec_confirmation',
+      'generating',
+      'validating',
+      'awaiting_preview_confirmation',
+      'revising',
+      'ready',
+      'generation_failed',
+      'validation_failed',
+    ].includes(v as string),
+  );
+}
+
+function validateAppRuntimeState(v: unknown): void {
+  assert.ok(['stopped', 'starting', 'running', 'stopping', 'failed'].includes(v as string));
+}
+
+function validateAppCreateOrigin(v: unknown): void {
+  assert.ok(['chat', 'library'].includes(v as string));
+}
+
+function validateAppErrorCode(v: unknown): void {
+  assert.ok(
+    [
+      'not_found',
+      'revision_conflict',
+      'interaction_invalid',
+      'workflow_state_invalid',
+      'runtime_busy',
+      'not_yet_available',
+      'storage_corrupt',
+      'invalid_request',
+      'io',
+    ].includes(v as string),
+  );
+}
+
+function validateAppCheckpointKind(v: unknown): void {
+  assert.ok(
+    [
+      'scaffold_created',
+      'generation_validated',
+      'preview_approved',
+      'user_approved',
+      'pre_restore',
+    ].includes(v as string),
+  );
+}
+
+function validateDesignValue(v: unknown): void {
+  const o = rec(v);
+  switch (o['kind']) {
+    case 'short_text':
+    case 'long_text':
+    case 'single_choice':
+    case 'color':
+      assert.ok(isString(o['value']));
+      break;
+    case 'multiple_choice':
+    case 'screen_list':
+    case 'feature_list':
+      assert.ok(Array.isArray(o['value']));
+      for (const item of o['value'] as unknown[]) assert.ok(isString(item));
+      break;
+    case 'boolean':
+      assert.ok(isBool(o['value']));
+      break;
+    case 'density':
+      assert.ok(['compact', 'comfortable'].includes(o['value'] as string));
+      break;
+    default:
+      assert.fail(`unknown DesignValueDto kind: ${String(o['kind'])}`);
+  }
+}
+
+function validateDesignPatch(v: unknown): void {
+  const o = rec(v);
+  assert.ok(Array.isArray(o['ops']));
+  for (const op of o['ops'] as unknown[]) {
+    const p = rec(op);
+    switch (p['op']) {
+      case 'set':
+        assert.ok(isString(p['field_id']));
+        validateDesignValue(p['value']);
+        break;
+      case 'remove':
+        assert.ok(isString(p['field_id']));
+        break;
+      default:
+        assert.fail(`unknown AppDesignPatchOpDto op: ${String(p['op'])}`);
+    }
+  }
+  if ('note' in o) assert.ok(isString(o['note']));
+}
+
+function validateAppRecord(v: unknown): void {
+  const o = rec(v);
+  assert.ok(
+    isString(o['id']) &&
+      isString(o['name']) &&
+      isNumber(o['created_at_ms']) &&
+      isNumber(o['updated_at_ms']) &&
+      isString(o['workspace_rel']),
+  );
+  validateAppTemplateKind(o['template']);
+  validateAppWorkflowState(o['workflow_state']);
+  if ('conversation_id' in o) assert.ok(isString(o['conversation_id']));
+}
+
+function validateAppCheckpoint(v: unknown): void {
+  const o = rec(v);
+  assert.ok(isString(o['id']) && isString(o['label']) && isNumber(o['created_at_ms']));
+  validateAppCheckpointKind(o['kind']);
+}
+
 // ── ClientCommand ─────────────────────────────────────────────────────────────
 
 function validateCommand(name: string, v: unknown): void {
@@ -271,6 +397,46 @@ function validateCommand(name: string, v: unknown): void {
       break;
     case 'task_stop':
       assert.ok(isString(o['task_id']));
+      break;
+    case 'list_apps':
+      break;
+    case 'create_app':
+      assert.ok(isString(o['name']));
+      validateAppTemplateKind(o['template']);
+      validateAppCreateOrigin(o['origin']);
+      if ('conversation_id' in o) assert.ok(isString(o['conversation_id']));
+      break;
+    case 'open_app_designer':
+    case 'cancel_app_design':
+    case 'start_app':
+    case 'stop_app':
+    case 'restart_app':
+    case 'list_app_checkpoints':
+    case 'delete_app':
+      assert.ok(isString(o['app_id']));
+      break;
+    case 'update_app_design_draft':
+      assert.ok(isString(o['app_id']) && isNumber(o['expected_revision']));
+      validateDesignPatch(o['patch']);
+      break;
+    case 'apply_agent_design_suggestion':
+      assert.ok(
+        isString(o['app_id']) &&
+          isString(o['suggestion_id']) &&
+          isNumber(o['expected_revision']),
+      );
+      break;
+    case 'confirm_app_design':
+    case 'confirm_app_preview':
+      assert.ok(
+        isString(o['app_id']) && isNumber(o['revision']) && isString(o['interaction_id']),
+      );
+      break;
+    case 'request_app_revision':
+      assert.ok(isString(o['app_id']) && isString(o['prompt']));
+      break;
+    case 'restore_app_checkpoint':
+      assert.ok(isString(o['app_id']) && isString(o['checkpoint_id']));
       break;
     default:
       assert.fail(`snapshot ${name}: unknown ClientCommand type "${String(o['type'])}"`);
@@ -481,6 +647,66 @@ function validateEvent(name: string, v: unknown): void {
       assert.ok(isString(o['task_id']));
       validateTaskStatus(o['status']);
       break;
+    case 'apps_changed':
+      assert.ok(Array.isArray(o['apps']));
+      for (const app of o['apps'] as unknown[]) validateAppRecord(app);
+      break;
+    case 'app_designer_requested':
+      assert.ok(
+        isString(o['app_id']) && isString(o['interaction_id']) && isNumber(o['revision']),
+      );
+      break;
+    case 'app_design_draft_changed': {
+      assert.ok(isString(o['app_id']) && isNumber(o['revision']));
+      const fields = rec(o['fields']);
+      for (const value of Object.values(fields)) validateDesignValue(value);
+      break;
+    }
+    case 'app_design_suggestion_available':
+      assert.ok(
+        isString(o['app_id']) &&
+          isString(o['suggestion_id']) &&
+          isNumber(o['based_on_revision']),
+      );
+      validateDesignPatch(o['patch']);
+      break;
+    case 'app_design_conflict':
+      assert.ok(
+        isString(o['app_id']) &&
+          isNumber(o['expected_revision']) &&
+          isNumber(o['actual_revision']),
+      );
+      break;
+    case 'app_workflow_changed':
+      assert.ok(isString(o['app_id']));
+      validateAppWorkflowState(o['state']);
+      if ('detail' in o) assert.ok(isString(o['detail']));
+      break;
+    case 'app_generation_progress':
+      assert.ok(isString(o['app_id']) && isString(o['stage']));
+      if ('percent' in o) assert.ok(isNumber(o['percent']));
+      if ('detail' in o) assert.ok(isString(o['detail']));
+      break;
+    case 'app_runtime_changed':
+      assert.ok(isString(o['app_id']));
+      validateAppRuntimeState(o['state']);
+      if ('last_error' in o) assert.ok(isString(o['last_error']));
+      break;
+    case 'app_preview_ready':
+      assert.ok(
+        isString(o['app_id']) && isString(o['interaction_id']) && isNumber(o['revision']),
+      );
+      if ('url' in o) assert.ok(isString(o['url']));
+      break;
+    case 'app_checkpoint_created':
+      assert.ok(isString(o['app_id']));
+      validateAppCheckpoint(o['checkpoint']);
+      break;
+    case 'app_operation_failed':
+      if ('app_id' in o) assert.ok(isString(o['app_id']));
+      validateAppErrorCode(o['code']);
+      assert.ok(isString(o['message']));
+      break;
     case 'coordinator_status':
       assert.ok(isNumber(o['active_workers']));
       if ('team' in o) assert.ok(isString(o['team']));
@@ -572,7 +798,7 @@ function validateError(v: unknown): void {
 
 test('every command snapshot parses as ClientCommand', () => {
   const files = listSnapshots('command');
-  assert.equal(files.length, 25, `expected 25 command snapshots, found ${files.length}`);
+  assert.equal(files.length, 40, `expected 40 command snapshots, found ${files.length}`);
   for (const file of files) {
     validateCommand(file, loadSnapshot('command', file));
   }
@@ -580,7 +806,7 @@ test('every command snapshot parses as ClientCommand', () => {
 
 test('every event snapshot parses as ClientEvent', () => {
   const files = listSnapshots('event');
-  assert.equal(files.length, 36, `expected 36 event snapshots, found ${files.length}`);
+  assert.equal(files.length, 47, `expected 47 event snapshots, found ${files.length}`);
   for (const file of files) {
     validateEvent(file, loadSnapshot('event', file));
   }

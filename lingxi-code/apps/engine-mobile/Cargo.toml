@@ -83,6 +83,12 @@ uniffi = [
     # desktop root). Engine-tier (no `apps/*` edge), optional + uniffi-gated.
     "dep:compaction",
     "dep:sidequery",
+    # LOCAL-APPS (phase 1): the shared core of the on-device "Apps" capability
+    # (data model, designer-workflow state machine, atomic storage, resumable
+    # continuations). The FFI host owns one `AppService` per engine handle and
+    # routes the 15 `*App*` client commands to it, so the crate rides the same
+    # uniffi gate as the client-protocol DTO surface it is lowered onto.
+    "dep:local-apps",
 ]
 
 [dependencies]
@@ -146,6 +152,11 @@ provider-config = { path = "../../provider-config", optional = true }
 # `build_mobile_inner` and attached via `.with_compaction(...)`.
 compaction = { path = "../../compaction", optional = true }
 sidequery = { path = "../../sidequery", optional = true }
+# LOCAL-APPS (phase 1): `AppService` — the single source of truth for the
+# on-device "Apps" capability the `submit` command path drives. Engine-tier
+# (no `apps/*` edge), optional + uniffi-gated like its runtime-wiring siblings
+# above.
+local-apps = { path = "../../local-apps", optional = true }
 # SESSIONS/HISTORY: enumerates the on-disk `<claude_home>/projects/<cwd>/*.jsonl`
 # session catalog for the `ListSessions` command. Engine-tier, optional +
 # uniffi-gated like its siblings above.

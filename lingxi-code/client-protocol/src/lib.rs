@@ -26,6 +26,7 @@ pub mod computer_access;
 pub mod error;
 pub mod events;
 pub mod listings;
+pub mod local_apps;
 pub mod message;
 pub mod permission;
 pub mod version;

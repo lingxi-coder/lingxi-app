@@ -44,6 +44,14 @@ mod host;
 #[cfg(feature = "uniffi")]
 mod skill_loader;
 
+// LOCAL-APPS (phase 1): the domain ⇄ protocol bridge for the engine-owned
+// `local_apps::AppService` — the observer that lowers domain events onto the
+// client event sink plus the DTO lowering/raising helpers the `submit` command
+// arms use. uniffi-gated like `host` (it names the client-protocol DTO surface,
+// which is pulled only under that feature).
+#[cfg(feature = "uniffi")]
+mod local_apps_bridge;
+
 #[cfg(feature = "uniffi")]
 pub use host::{
     build_mobile, build_mobile_engine, build_mobile_engine_inner, build_mobile_inner,

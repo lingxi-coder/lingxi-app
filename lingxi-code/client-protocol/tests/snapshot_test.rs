@@ -51,7 +51,13 @@ use client_protocol::listings::{
     DoctorSummaryDto, HookDto, McpServerDto, McpStatusDto, MemoryEntryDto, MemoryTierDto,
     SessionRowDto, SlashCommandDto, StatusSnapshotDto, TaskRowDto, TaskStatusDto,
 };
+use client_protocol::local_apps::{
+    AppCheckpointDto, AppCheckpointKindDto, AppCreateOriginDto, AppDesignPatchDto,
+    AppDesignPatchOpDto, AppErrorCodeDto, AppRecordDto, AppRuntimeStateDto, AppTemplateKindDto,
+    AppWorkflowStateDto, DensityLevelDto, DesignValueDto,
+};
 use client_protocol::message::{MessageBlockDto, MessageDto};
+use std::collections::HashMap;
 use client_protocol::permission::{
     PermissionKindDto, PermissionRequest, PermissionResolved, PermissionResponseDto, WorkerInfoDto,
 };
@@ -413,6 +419,107 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             },
         ),
         (
+            "event/apps_changed.json",
+            ClientEvent::AppsChanged {
+                apps: vec![canonical_app_record()],
+            },
+        ),
+        (
+            "event/app_designer_requested.json",
+            ClientEvent::AppDesignerRequested {
+                app_id: "habits-1a2b".to_string(),
+                interaction_id: "int-00000001".to_string(),
+                revision: 3,
+            },
+        ),
+        (
+            "event/app_design_draft_changed.json",
+            ClientEvent::AppDesignDraftChanged {
+                app_id: "habits-1a2b".to_string(),
+                revision: 4,
+                // Exactly ONE entry: a HashMap's iteration order is
+                // nondeterministic, so a multi-entry map would make the
+                // pretty-printed golden flaky.
+                fields: HashMap::from([(
+                    "title".to_string(),
+                    DesignValueDto::ShortText {
+                        value: "Habit Tracker".to_string(),
+                    },
+                )]),
+            },
+        ),
+        (
+            "event/app_design_suggestion_available.json",
+            ClientEvent::AppDesignSuggestionAvailable {
+                app_id: "habits-1a2b".to_string(),
+                suggestion_id: "sugg-00000001".to_string(),
+                based_on_revision: 4,
+                patch: canonical_design_patch(),
+            },
+        ),
+        (
+            "event/app_design_conflict.json",
+            ClientEvent::AppDesignConflict {
+                app_id: "habits-1a2b".to_string(),
+                expected_revision: 2,
+                actual_revision: 4,
+            },
+        ),
+        (
+            "event/app_workflow_changed.json",
+            ClientEvent::AppWorkflowChanged {
+                app_id: "habits-1a2b".to_string(),
+                state: AppWorkflowStateDto::Generating,
+                detail: None,
+            },
+        ),
+        (
+            "event/app_generation_progress.json",
+            ClientEvent::AppGenerationProgress {
+                app_id: "habits-1a2b".to_string(),
+                stage: "scaffold".to_string(),
+                percent: Some(40),
+                detail: Some("writing pages".to_string()),
+            },
+        ),
+        (
+            "event/app_runtime_changed.json",
+            ClientEvent::AppRuntimeChanged {
+                app_id: "habits-1a2b".to_string(),
+                state: AppRuntimeStateDto::Stopped,
+                last_error: None,
+            },
+        ),
+        (
+            "event/app_preview_ready.json",
+            ClientEvent::AppPreviewReady {
+                app_id: "habits-1a2b".to_string(),
+                interaction_id: "int-00000002".to_string(),
+                revision: 4,
+                url: None,
+            },
+        ),
+        (
+            "event/app_checkpoint_created.json",
+            ClientEvent::AppCheckpointCreated {
+                app_id: "habits-1a2b".to_string(),
+                checkpoint: AppCheckpointDto {
+                    id: "ckpt-00000001".to_string(),
+                    label: "Preview approved".to_string(),
+                    kind: AppCheckpointKindDto::PreviewApproved,
+                    created_at_ms: 1_750_000_000_000,
+                },
+            },
+        ),
+        (
+            "event/app_operation_failed.json",
+            ClientEvent::AppOperationFailed {
+                app_id: Some("habits-1a2b".to_string()),
+                code: AppErrorCodeDto::NotYetAvailable,
+                message: "app runtime lands in phase 4".to_string(),
+            },
+        ),
+        (
             "event/thinking_delta.json",
             ClientEvent::ThinkingDelta {
                 thinking: "Let me reason about this.".to_string(),
@@ -572,6 +679,104 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
             "command/task_stop.json",
             ClientCommand::TaskStop {
                 task_id: "b12345678".to_string(),
+            },
+        ),
+        ("command/list_apps.json", ClientCommand::ListApps),
+        (
+            "command/create_app.json",
+            ClientCommand::CreateApp {
+                name: "Habits".to_string(),
+                template: AppTemplateKindDto::Dashboard,
+                origin: AppCreateOriginDto::Chat,
+                conversation_id: Some("55555555-5555-4555-8555-555555555555".to_string()),
+            },
+        ),
+        (
+            "command/open_app_designer.json",
+            ClientCommand::OpenAppDesigner {
+                app_id: "habits-1a2b".to_string(),
+            },
+        ),
+        (
+            "command/update_app_design_draft.json",
+            ClientCommand::UpdateAppDesignDraft {
+                app_id: "habits-1a2b".to_string(),
+                expected_revision: 3,
+                patch: canonical_design_patch(),
+            },
+        ),
+        (
+            "command/apply_agent_design_suggestion.json",
+            ClientCommand::ApplyAgentDesignSuggestion {
+                app_id: "habits-1a2b".to_string(),
+                suggestion_id: "sugg-00000001".to_string(),
+                expected_revision: 4,
+            },
+        ),
+        (
+            "command/confirm_app_design.json",
+            ClientCommand::ConfirmAppDesign {
+                app_id: "habits-1a2b".to_string(),
+                revision: 4,
+                interaction_id: "int-00000001".to_string(),
+            },
+        ),
+        (
+            "command/cancel_app_design.json",
+            ClientCommand::CancelAppDesign {
+                app_id: "habits-1a2b".to_string(),
+            },
+        ),
+        (
+            "command/start_app.json",
+            ClientCommand::StartApp {
+                app_id: "habits-1a2b".to_string(),
+            },
+        ),
+        (
+            "command/stop_app.json",
+            ClientCommand::StopApp {
+                app_id: "habits-1a2b".to_string(),
+            },
+        ),
+        (
+            "command/restart_app.json",
+            ClientCommand::RestartApp {
+                app_id: "habits-1a2b".to_string(),
+            },
+        ),
+        (
+            "command/confirm_app_preview.json",
+            ClientCommand::ConfirmAppPreview {
+                app_id: "habits-1a2b".to_string(),
+                revision: 4,
+                interaction_id: "int-00000002".to_string(),
+            },
+        ),
+        (
+            "command/request_app_revision.json",
+            ClientCommand::RequestAppRevision {
+                app_id: "habits-1a2b".to_string(),
+                prompt: "make the chart blue".to_string(),
+            },
+        ),
+        (
+            "command/list_app_checkpoints.json",
+            ClientCommand::ListAppCheckpoints {
+                app_id: "habits-1a2b".to_string(),
+            },
+        ),
+        (
+            "command/restore_app_checkpoint.json",
+            ClientCommand::RestoreAppCheckpoint {
+                app_id: "habits-1a2b".to_string(),
+                checkpoint_id: "ckpt-00000001".to_string(),
+            },
+        ),
+        (
+            "command/delete_app.json",
+            ClientCommand::DeleteApp {
+                app_id: "habits-1a2b".to_string(),
             },
         ),
         ("command/request_exit.json", ClientCommand::RequestExit),
@@ -824,6 +1029,93 @@ fn canonical_coordinator_worker() -> CoordinatorWorkerDto {
         name: "alpha".to_string(),
         agent_type: "explorer".to_string(),
         status: "working".to_string(),
+    }
+}
+
+/// The canonical local-app record: a chat-born dashboard app mid-design.
+fn canonical_app_record() -> AppRecordDto {
+    AppRecordDto {
+        id: "habits-1a2b".to_string(),
+        name: "Habits".to_string(),
+        template: AppTemplateKindDto::Dashboard,
+        created_at_ms: 1_750_000_000_000,
+        updated_at_ms: 1_750_000_000_001,
+        workflow_state: AppWorkflowStateDto::CollectingSpec,
+        conversation_id: Some("55555555-5555-4555-8555-555555555555".to_string()),
+        workspace_rel: "apps/habits-1a2b/workspace".to_string(),
+    }
+}
+
+/// The canonical design patch: one `set` (a `{kind, value}` design value) and
+/// one `remove`, plus a note — pinning the spec-§A `{op, field_id, value}` op
+/// shape exactly.
+/// Canonical patch carrying EVERY `DesignValueDto` kind exactly once (in a
+/// `Vec`, so the golden bytes stay deterministic) plus a remove op. The
+/// checked-in goldens built from this patch are the ONLY artifact the TS
+/// mirror (`clients/shared`) validates its `DesignValueDto` union and
+/// `validateDesignValue` branches against, so every kind must appear in
+/// Rust-produced bytes — a single-kind patch would leave the other arms
+/// untested across the language seam.
+fn canonical_design_patch() -> AppDesignPatchDto {
+    AppDesignPatchDto {
+        ops: vec![
+            AppDesignPatchOpDto::Set {
+                field_id: "title".to_string(),
+                value: DesignValueDto::ShortText {
+                    value: "Habit Tracker".to_string(),
+                },
+            },
+            AppDesignPatchOpDto::Set {
+                field_id: "description".to_string(),
+                value: DesignValueDto::LongText {
+                    value: "Track daily habits\nwith streaks.".to_string(),
+                },
+            },
+            AppDesignPatchOpDto::Set {
+                field_id: "layout".to_string(),
+                value: DesignValueDto::SingleChoice {
+                    value: "grid".to_string(),
+                },
+            },
+            AppDesignPatchOpDto::Set {
+                field_id: "tags".to_string(),
+                value: DesignValueDto::MultipleChoice {
+                    value: vec!["health".to_string(), "daily".to_string()],
+                },
+            },
+            AppDesignPatchOpDto::Set {
+                field_id: "compact_mode".to_string(),
+                value: DesignValueDto::Boolean { value: true },
+            },
+            AppDesignPatchOpDto::Set {
+                field_id: "accent_color".to_string(),
+                value: DesignValueDto::Color {
+                    value: "#3366ff".to_string(),
+                },
+            },
+            AppDesignPatchOpDto::Set {
+                field_id: "density".to_string(),
+                value: DesignValueDto::Density {
+                    value: DensityLevelDto::Comfortable,
+                },
+            },
+            AppDesignPatchOpDto::Set {
+                field_id: "screens".to_string(),
+                value: DesignValueDto::ScreenList {
+                    value: vec!["today".to_string(), "history".to_string()],
+                },
+            },
+            AppDesignPatchOpDto::Set {
+                field_id: "features".to_string(),
+                value: DesignValueDto::FeatureList {
+                    value: vec!["streaks".to_string(), "reminders".to_string()],
+                },
+            },
+            AppDesignPatchOpDto::Remove {
+                field_id: "accent".to_string(),
+            },
+        ],
+        note: Some("rename + drop accent".to_string()),
     }
 }
 

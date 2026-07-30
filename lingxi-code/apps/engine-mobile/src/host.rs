@@ -47,6 +47,7 @@ use client_protocol::commands::{
 };
 use client_protocol::error::ClientError;
 use client_protocol::events::ClientEvent;
+use client_protocol::local_apps::{AppCreateOriginDto, AppDesignPatchDto, AppTemplateKindDto};
 use client_protocol::permission::{
     PermissionKindDto, PermissionRequest as PermissionRequestDto, PermissionResponseDto,
 };
@@ -54,6 +55,8 @@ use command_api::model::BuiltinCommandHandler;
 use command_api::parse_slash_command;
 use command_api::RegistrySlashDispatcher;
 use cron::CronJobFirer;
+use local_apps::{AppError, AppService, NoopContinuationSink};
+
 use llm_client::oauth::anthropic::client::ClaudeAiOAuthClient;
 use llm_client::oauth::anthropic::config::ClaudeAiOAuthConfig;
 use llm_client::oauth::anthropic::handle::OAuthHandle;
@@ -1996,6 +1999,14 @@ pub struct MobileEngineHandle {
     /// cron firing path can call `build_mobile_inner` (and reach `filesystem()` /
     /// `clock()`) without re-deriving the device handles.
     firer_platform: Arc<dyn Platform>,
+    /// LOCAL-APPS (phase 1): the engine-owned [`AppService`] — the single
+    /// source of truth for the on-device "Apps" capability, rebuilt from disk
+    /// alone at every boot and rooted at the per-profile data root
+    /// (`<app_files_root>/apps/…`, see [`mobile_apps_data_root`]). Held as a
+    /// `Result` so a corrupt on-disk store degrades to typed
+    /// `AppOperationFailed` replies on every app command instead of bricking
+    /// engine construction.
+    local_apps: Result<Arc<AppService>, AppError>,
 }
 
 /// Default `ListSessions` row cap when the command omits an explicit `limit`
@@ -2372,6 +2383,240 @@ impl MobileEngineHandle {
             .map_err(|e| MobileEngineError::Internal(format!("mobile_linux_status failed: {e}")))?;
         Ok(lower_mobile_linux_status(capability, status))
     }
+
+    // ── Local apps (phase 1) ────────────────────────────────────────────────
+    //
+    // The `submit` arms below delegate here. Failures are DOMAIN outcomes, not
+    // transport errors: every arm resolves `Ok(())` and surfaces its failure as
+    // a typed `AppOperationFailed { code, message }` event, the single failure
+    // channel the spec gives app clients. Successful mutations additionally
+    // announce the new record set via `AppsChanged` (create/delete already ride
+    // the service's own `AppsChanged` domain event, so only the other mutating
+    // arms re-emit it here).
+
+    /// The engine-owned local-apps service, or the boot-time load error
+    /// (surfaced by [`Self::local_apps_or_report`] as `AppOperationFailed` on
+    /// every app command). Exposed for tests and the phase-3 generator, which
+    /// drive the generation/validation transitions the command surface does
+    /// not carry.
+    ///
+    /// # Errors
+    ///
+    /// The boot-time [`AppError`] when the on-disk store failed to load.
+    pub fn local_apps(&self) -> Result<Arc<AppService>, AppError> {
+        self.local_apps.clone()
+    }
+
+    /// The live service, or emit the boot-time load failure and yield `None`.
+    async fn local_apps_or_report(&self, app_id: Option<&str>) -> Option<Arc<AppService>> {
+        match &self.local_apps {
+            Ok(service) => Some(service.clone()),
+            Err(error) => {
+                self.emit_app_failure(app_id.map(str::to_string), error).await;
+                None
+            }
+        }
+    }
+
+    /// Lower one typed [`AppError`] onto the `AppOperationFailed` event.
+    async fn emit_app_failure(&self, app_id: Option<String>, error: &AppError) {
+        self.event_sink
+            .emit(ClientEvent::AppOperationFailed {
+                app_id,
+                code: crate::local_apps_bridge::lower_error_code(error.code()),
+                message: error.to_string(),
+            })
+            .await;
+    }
+
+    /// Post-mutation `AppsChanged` snapshot: every successful mutation
+    /// announces the full record set (records carry `workflow_state` /
+    /// `updated_at_ms`, so any mutation changes the set). Delegated to
+    /// [`AppService::announce_apps`] — the snapshot and its emission ride the
+    /// service's emission-order lock (through the installed
+    /// `SinkAppEventObserver`), so a concurrent mutation on another `submit`
+    /// can never get its events overtaken by a stale snapshot.
+    async fn emit_apps_snapshot(&self, service: &AppService) {
+        service.announce_apps().await;
+    }
+
+    async fn handle_list_apps(&self) {
+        let Some(service) = self.local_apps_or_report(None).await else {
+            return;
+        };
+        self.emit_apps_snapshot(&service).await;
+    }
+
+    async fn handle_create_app(
+        &self,
+        name: &str,
+        template: AppTemplateKindDto,
+        origin: AppCreateOriginDto,
+        conversation_id: Option<String>,
+    ) {
+        let Some(service) = self.local_apps_or_report(None).await else {
+            return;
+        };
+        let template = match crate::local_apps_bridge::raise_template(template) {
+            Ok(template) => template,
+            Err(error) => {
+                self.emit_app_failure(None, &error).await;
+                return;
+            }
+        };
+        // The record keeps a conversation binding only for chat-origin creates
+        // (`AppRecord.conversation_id` doc: "origin: chat"); a library create
+        // never binds one.
+        let conversation_id = match origin {
+            AppCreateOriginDto::Chat => conversation_id,
+            _ => None,
+        };
+        // Success needs no extra emit: `create_app` announces the new record
+        // set via its own `AppsChanged` domain event.
+        if let Err(error) = service.create_app(name, template, conversation_id).await {
+            self.emit_app_failure(None, &error).await;
+        }
+    }
+
+    async fn handle_open_app_designer(&self, app_id: String) {
+        let Some(service) = self.local_apps_or_report(Some(&app_id)).await else {
+            return;
+        };
+        match service.open_designer(&app_id).await {
+            Ok(_interaction) => self.emit_apps_snapshot(&service).await,
+            Err(error) => self.emit_app_failure(Some(app_id), &error).await,
+        }
+    }
+
+    async fn handle_update_app_design_draft(
+        &self,
+        app_id: String,
+        expected_revision: u64,
+        patch: AppDesignPatchDto,
+    ) {
+        let Some(service) = self.local_apps_or_report(Some(&app_id)).await else {
+            return;
+        };
+        let patch = match crate::local_apps_bridge::raise_patch(patch) {
+            Ok(patch) => patch,
+            Err(error) => {
+                self.emit_app_failure(Some(app_id), &error).await;
+                return;
+            }
+        };
+        match service.update_draft(&app_id, expected_revision, &patch).await {
+            Ok(_revision) => self.emit_apps_snapshot(&service).await,
+            // A stale revision already emitted `AppDesignConflict` from the
+            // service; the typed failure rides alongside it.
+            Err(error) => self.emit_app_failure(Some(app_id), &error).await,
+        }
+    }
+
+    async fn handle_apply_agent_design_suggestion(
+        &self,
+        app_id: String,
+        suggestion_id: &str,
+        expected_revision: u64,
+    ) {
+        let Some(service) = self.local_apps_or_report(Some(&app_id)).await else {
+            return;
+        };
+        match service
+            .apply_suggestion(&app_id, suggestion_id, expected_revision)
+            .await
+        {
+            Ok(_revision) => self.emit_apps_snapshot(&service).await,
+            Err(error) => self.emit_app_failure(Some(app_id), &error).await,
+        }
+    }
+
+    async fn handle_confirm_app_design(&self, app_id: String, interaction_id: &str, revision: u64) {
+        let Some(service) = self.local_apps_or_report(Some(&app_id)).await else {
+            return;
+        };
+        match service.confirm_design(&app_id, interaction_id, revision).await {
+            Ok(()) => self.emit_apps_snapshot(&service).await,
+            Err(error) => self.emit_app_failure(Some(app_id), &error).await,
+        }
+    }
+
+    async fn handle_cancel_app_design(&self, app_id: String) {
+        let Some(service) = self.local_apps_or_report(Some(&app_id)).await else {
+            return;
+        };
+        match service.cancel_design(&app_id).await {
+            Ok(()) => self.emit_apps_snapshot(&service).await,
+            Err(error) => self.emit_app_failure(Some(app_id), &error).await,
+        }
+    }
+
+    async fn handle_confirm_app_preview(&self, app_id: String, interaction_id: &str, revision: u64) {
+        let Some(service) = self.local_apps_or_report(Some(&app_id)).await else {
+            return;
+        };
+        match service.confirm_preview(&app_id, interaction_id, revision).await {
+            Ok(()) => self.emit_apps_snapshot(&service).await,
+            Err(error) => self.emit_app_failure(Some(app_id), &error).await,
+        }
+    }
+
+    async fn handle_request_app_revision(&self, app_id: String, prompt: &str) {
+        let Some(service) = self.local_apps_or_report(Some(&app_id)).await else {
+            return;
+        };
+        match service.request_revision(&app_id, prompt).await {
+            Ok(()) => self.emit_apps_snapshot(&service).await,
+            Err(error) => self.emit_app_failure(Some(app_id), &error).await,
+        }
+    }
+
+    async fn handle_list_app_checkpoints(&self, app_id: String) {
+        let Some(service) = self.local_apps_or_report(Some(&app_id)).await else {
+            return;
+        };
+        match service.list_checkpoints(&app_id).await {
+            // The protocol has no list event — each checkpoint rides its own
+            // `AppCheckpointCreated`, so an empty list is zero events. Phase 1
+            // always returns the empty list (git wiring is phase 5).
+            Ok(checkpoints) => {
+                for checkpoint in &checkpoints {
+                    self.event_sink
+                        .emit(ClientEvent::AppCheckpointCreated {
+                            app_id: app_id.clone(),
+                            checkpoint: crate::local_apps_bridge::lower_checkpoint(checkpoint),
+                        })
+                        .await;
+                }
+            }
+            Err(error) => self.emit_app_failure(Some(app_id), &error).await,
+        }
+    }
+
+    async fn handle_delete_app(&self, app_id: String) {
+        let Some(service) = self.local_apps_or_report(Some(&app_id)).await else {
+            return;
+        };
+        // Success needs no extra emit: `delete_app` announces the shrunken
+        // record set via its own `AppsChanged` domain event.
+        if let Err(error) = service.delete_app(&app_id).await {
+            self.emit_app_failure(Some(app_id), &error).await;
+        }
+    }
+
+    /// Spec §H honesty path for `StartApp` / `StopApp` / `RestartApp` /
+    /// `RestoreAppCheckpoint`: validate the app exists, then fail typed with
+    /// `not_yet_available` — the phase-1 engine NEVER fakes a runtime or
+    /// checkpoint transition.
+    async fn handle_app_phase_gap(&self, app_id: String, unavailable: String) {
+        let Some(service) = self.local_apps_or_report(Some(&app_id)).await else {
+            return;
+        };
+        let error = match service.record(&app_id).await {
+            Ok(_record) => AppError::NotYetAvailable(unavailable),
+            Err(error) => error,
+        };
+        self.emit_app_failure(Some(app_id), &error).await;
+    }
 }
 
 // F3-05: the inbound command path — the async FFI entry point. Under the
@@ -2442,6 +2687,13 @@ impl MobileEngineHandle {
     ///   transcript and the same UUID. Other missing, corrupt, or malformed
     ///   sessions are honestly `Rejected` — we never emit a false
     ///   `SessionResumed`.
+    ///
+    /// - The local-apps commands (`ListApps` / `CreateApp` / … / `DeleteApp`)
+    ///   → the engine-owned [`AppService`] (LOCAL-APPS phase 1): domain events
+    ///   lower onto the `App*` client events, every failure surfaces as a
+    ///   typed `AppOperationFailed { code, message }`, and the runtime /
+    ///   checkpoint commands honestly fail `not_yet_available` (runtime is
+    ///   phase 4, git checkpoints are phase 5).
     ///
     /// Remaining host-driven / reserved commands (the task commands — mobile binds
     /// no `TaskRegistry`) are accepted and no-op'd (the `#[non_exhaustive]` enum
@@ -2881,6 +3133,126 @@ impl MobileEngineHandle {
             // `SessionResumed`.
             ClientCommand::ResumeSession { session_id, cwd } => {
                 self.resume_session_impl(session_id, cwd, None).await
+            }
+
+            // ── Local apps (LOCAL-APPS phase 1) ─────────────────────────────
+            //
+            // The 15 app commands route to the engine-owned `AppService` (the
+            // single source of truth for the on-device "Apps" capability).
+            // Failures are domain outcomes, not transport errors: each arm
+            // resolves `Ok(())` and surfaces its failure as a typed
+            // `AppOperationFailed { code, message }` event (see the handler
+            // section in the plain impl block above).
+            ClientCommand::ListApps => {
+                self.handle_list_apps().await;
+                Ok(())
+            }
+            ClientCommand::CreateApp {
+                name,
+                template,
+                origin,
+                conversation_id,
+            } => {
+                self.handle_create_app(&name, template, origin, conversation_id)
+                    .await;
+                Ok(())
+            }
+            ClientCommand::OpenAppDesigner { app_id } => {
+                self.handle_open_app_designer(app_id).await;
+                Ok(())
+            }
+            ClientCommand::UpdateAppDesignDraft {
+                app_id,
+                expected_revision,
+                patch,
+            } => {
+                self.handle_update_app_design_draft(app_id, expected_revision, patch)
+                    .await;
+                Ok(())
+            }
+            ClientCommand::ApplyAgentDesignSuggestion {
+                app_id,
+                suggestion_id,
+                expected_revision,
+            } => {
+                self.handle_apply_agent_design_suggestion(app_id, &suggestion_id, expected_revision)
+                    .await;
+                Ok(())
+            }
+            ClientCommand::ConfirmAppDesign {
+                app_id,
+                revision,
+                interaction_id,
+            } => {
+                self.handle_confirm_app_design(app_id, &interaction_id, revision)
+                    .await;
+                Ok(())
+            }
+            ClientCommand::CancelAppDesign { app_id } => {
+                self.handle_cancel_app_design(app_id).await;
+                Ok(())
+            }
+            // Spec §H: the runtime commands validate existence, then fail
+            // typed with `not_yet_available` — phase 1 never fakes a runtime
+            // transition (the dev-server runtime arrives in phase 4).
+            ClientCommand::StartApp { app_id } => {
+                self.handle_app_phase_gap(
+                    app_id,
+                    "StartApp: the app dev-server runtime arrives in phase 4".into(),
+                )
+                .await;
+                Ok(())
+            }
+            ClientCommand::StopApp { app_id } => {
+                self.handle_app_phase_gap(
+                    app_id,
+                    "StopApp: the app dev-server runtime arrives in phase 4".into(),
+                )
+                .await;
+                Ok(())
+            }
+            ClientCommand::RestartApp { app_id } => {
+                self.handle_app_phase_gap(
+                    app_id,
+                    "RestartApp: the app dev-server runtime arrives in phase 4".into(),
+                )
+                .await;
+                Ok(())
+            }
+            ClientCommand::ConfirmAppPreview {
+                app_id,
+                revision,
+                interaction_id,
+            } => {
+                self.handle_confirm_app_preview(app_id, &interaction_id, revision)
+                    .await;
+                Ok(())
+            }
+            ClientCommand::RequestAppRevision { app_id, prompt } => {
+                self.handle_request_app_revision(app_id, &prompt).await;
+                Ok(())
+            }
+            ClientCommand::ListAppCheckpoints { app_id } => {
+                self.handle_list_app_checkpoints(app_id).await;
+                Ok(())
+            }
+            ClientCommand::RestoreAppCheckpoint {
+                app_id,
+                checkpoint_id,
+            } => {
+                self.handle_app_phase_gap(
+                    app_id,
+                    format!(
+                        "RestoreAppCheckpoint: git checkpoint restore arrives in phase 5 \
+                         (checkpoint {checkpoint_id})"
+                    ),
+                )
+                .await;
+                Ok(())
+            }
+            ClientCommand::DeleteApp { app_id } => {
+                self.handle_delete_app(app_id).await;
+                Ok(())
             }
 
             // ── Host-driven / reserved in the foundation ────────────────────
@@ -4287,6 +4659,24 @@ pub fn build_mobile_engine(
 /// `submit(SendPrompt)` drives a deterministic turn without a network. The whole
 /// session-host wiring (the runtime, the recording permission sink, the adapter
 /// sinks) is identical to production — only the stream's source differs.
+/// LOCAL-APPS (phase 1): the per-profile data root the apps store lives under
+/// (`<root>/apps/index.json`, `<root>/apps/<id>/…`).
+///
+/// The engine's per-profile data dir is the app-files root: every production
+/// path sets `lingxi_home = <app_files_root>/<DOT_DIR>` (android-aar
+/// `build_android_engine*`; the host `test_config` mirrors it under a temp
+/// root), so its parent IS the profile root — deliberately independent of
+/// `cwd`, which may point at a per-project workspace while apps are a
+/// profile-global capability. A degenerate `lingxi_home` (empty / no parent,
+/// only reachable through a hand-rolled `MobileConfig`) falls back to `cwd`,
+/// which equals the app-files root whenever no project workspace is selected.
+fn mobile_apps_data_root(cfg: &MobileConfig) -> std::path::PathBuf {
+    cfg.lingxi_home
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map_or_else(|| cfg.cwd.clone(), std::path::Path::to_path_buf)
+}
+
 #[doc(hidden)]
 pub fn build_mobile_engine_inner(
     cfg: MobileConfig,
@@ -4349,6 +4739,52 @@ pub fn build_mobile_engine_inner(
         runtime.spawn(async move { broker.run(ask_user_question_rx).await });
     }
 
+    // LOCAL-APPS (phase 1): the engine-owned `AppService`, rebuilt from disk
+    // alone at every boot and observed straight onto the connection's event
+    // sink. Continuations get the `NoopContinuationSink` — no conversation
+    // -injection seam exists yet (mobile `NewSession` ignores `cwd`, so an
+    // app-workspace-scoped conversation cannot be opened on the live engine;
+    // phase 3 swaps in the real conversation sink). A load failure must not
+    // brick the engine: it is held on the handle and every app command reports
+    // it as a typed `AppOperationFailed` instead.
+    // `AppService::load` is async (it announces still-pending gate events after
+    // rebuilding from disk); engine construction runs on the FFI caller's plain
+    // thread, so blocking on the engine runtime here is safe.
+    let local_apps = runtime
+        .block_on(AppService::load(
+            mobile_apps_data_root(&firer_cfg),
+            firer_platform.clock(),
+            Arc::new(NoopContinuationSink),
+            Arc::new(crate::local_apps_bridge::SinkAppEventObserver::new(
+                event_sink.clone(),
+            )),
+        ))
+        .map(Arc::new);
+    match &local_apps {
+        Ok(service) => {
+            // Startup redelivery sweep (spec §E at-least-once): prune entries a
+            // pre-crash run already delivered and drain the rest into the
+            // registered sink. With the phase-1 Noop sink a drained
+            // continuation is marked delivered (consumed); once phase 3 wires
+            // the conversation sink this same sweep becomes real redelivery.
+            let service = service.clone();
+            runtime.spawn(async move {
+                if let Err(error) = service.redeliver_all_undelivered().await {
+                    tracing::warn!(
+                        error = %error,
+                        "local-apps startup continuation sweep failed; entries stay queued"
+                    );
+                }
+            });
+        }
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "local-apps store failed to load; app commands will report the failure"
+            );
+        }
+    }
+
     Ok(Arc::new(MobileEngineHandle {
         runtime,
         inner,
@@ -4362,6 +4798,7 @@ pub fn build_mobile_engine_inner(
         fs,
         firer_cfg,
         firer_platform,
+        local_apps,
     }))
 }
 
@@ -6032,6 +6469,1017 @@ mod tests {
             !refs.iter().any(|model| model == "gpt-5.5"),
             "ambiguous bare ids must not leak into the mobile picker"
         );
+    }
+
+    // ── LOCAL-APPS (phase 1): handler-level tests (command in → state +
+    //    events out) over the real engine handle ─────────────────────────────
+
+    use client_protocol::local_apps::{
+        AppCreateOriginDto, AppDesignPatchDto, AppDesignPatchOpDto, AppErrorCodeDto,
+        AppTemplateKindDto, AppWorkflowStateDto, DesignValueDto,
+    };
+
+    /// Drain and return every event delivered to the fake listener so far.
+    /// Wait for the local-apps spawned emission queue to drain, then take
+    /// everything the listener has received. Event delivery is asynchronous
+    /// (`AppService` hands events to a spawned ordered emitter), so a bare
+    /// take races the emitter; the `flush_events` barrier makes this
+    /// deterministic.
+    async fn drain_events(handle: &MobileEngineHandle, listener: &FakeListener) -> Vec<Ev> {
+        if let Ok(service) = handle.local_apps() {
+            service.flush_events().await;
+        }
+        std::mem::take(&mut *listener.received.lock().await)
+    }
+
+    fn title_patch(value: &str) -> AppDesignPatchDto {
+        AppDesignPatchDto {
+            ops: vec![AppDesignPatchOpDto::Set {
+                field_id: "title".into(),
+                value: DesignValueDto::ShortText {
+                    value: value.into(),
+                },
+            }],
+            note: None,
+        }
+    }
+
+    fn apps_changed_rows(events: &[Ev]) -> Option<Vec<client_protocol::local_apps::AppRecordDto>> {
+        events.iter().rev().find_map(|event| match event {
+            Ev::AppsChanged { apps } => Some(apps.clone()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn local_apps_designer_flow_round_trips_through_submit() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, listener) = build_submit_handle(tmp.path());
+
+        handle.runtime().block_on(async {
+            // Create (library origin ⇒ no conversation binding).
+            handle
+                .submit(ClientCommand::CreateApp {
+                    name: "Habit Tracker".into(),
+                    template: AppTemplateKindDto::CrudTracker,
+                    origin: AppCreateOriginDto::Library,
+                    conversation_id: Some("conv-ignored".into()),
+                })
+                .await
+                .expect("submit(CreateApp)");
+            let events = drain_events(&handle, &listener).await;
+            let apps = apps_changed_rows(&events).expect("CreateApp must announce AppsChanged");
+            assert_eq!(apps.len(), 1);
+            assert_eq!(apps[0].name, "Habit Tracker");
+            assert_eq!(apps[0].workflow_state, AppWorkflowStateDto::CollectingSpec);
+            assert_eq!(
+                apps[0].conversation_id, None,
+                "a library-origin create binds no conversation"
+            );
+            let app_id = apps[0].id.clone();
+            assert_eq!(apps[0].workspace_rel, format!("apps/{app_id}/workspace"));
+
+            // Open the designer gate; the interaction id reaches the client
+            // ONLY through this event (spec §I gating).
+            handle
+                .submit(ClientCommand::OpenAppDesigner {
+                    app_id: app_id.clone(),
+                })
+                .await
+                .expect("submit(OpenAppDesigner)");
+            let events = drain_events(&handle, &listener).await;
+            let (designer_interaction, designer_revision) = events
+                .iter()
+                .find_map(|event| match event {
+                    Ev::AppDesignerRequested {
+                        app_id: id,
+                        interaction_id,
+                        revision,
+                    } if *id == app_id => Some((interaction_id.clone(), *revision)),
+                    _ => None,
+                })
+                .expect("AppDesignerRequested must be emitted");
+            assert_eq!(designer_revision, 0);
+            assert!(events.iter().any(|event| matches!(
+                event,
+                Ev::AppWorkflowChanged {
+                    state: AppWorkflowStateDto::AwaitingSpecConfirmation,
+                    ..
+                }
+            )));
+            assert!(
+                apps_changed_rows(&events).is_some(),
+                "every mutation announces the new record set via AppsChanged"
+            );
+
+            // A conflicting update is rejected: conflict event + typed
+            // failure, and the stale value is NOT applied.
+            handle
+                .submit(ClientCommand::UpdateAppDesignDraft {
+                    app_id: app_id.clone(),
+                    expected_revision: 7,
+                    patch: title_patch("Stale"),
+                })
+                .await
+                .expect("submit(UpdateAppDesignDraft stale)");
+            let events = drain_events(&handle, &listener).await;
+            assert!(events.iter().any(|event| matches!(
+                event,
+                Ev::AppDesignConflict {
+                    expected_revision: 7,
+                    actual_revision: 0,
+                    ..
+                }
+            )));
+            assert!(events.iter().any(|event| matches!(
+                event,
+                Ev::AppOperationFailed {
+                    code: AppErrorCodeDto::RevisionConflict,
+                    ..
+                }
+            )));
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, Ev::AppDesignDraftChanged { .. })),
+                "a conflicting edit must not change the draft"
+            );
+
+            // A valid update bumps the revision and carries the field map.
+            handle
+                .submit(ClientCommand::UpdateAppDesignDraft {
+                    app_id: app_id.clone(),
+                    expected_revision: 0,
+                    patch: title_patch("Mine"),
+                })
+                .await
+                .expect("submit(UpdateAppDesignDraft)");
+            let events = drain_events(&handle, &listener).await;
+            let fields = events
+                .iter()
+                .find_map(|event| match event {
+                    Ev::AppDesignDraftChanged {
+                        revision: 1,
+                        fields,
+                        ..
+                    } => Some(fields.clone()),
+                    _ => None,
+                })
+                .expect("AppDesignDraftChanged at revision 1");
+            assert!(matches!(
+                fields.get("title"),
+                Some(DesignValueDto::ShortText { value }) if value == "Mine"
+            ));
+
+            // Confirm gating (spec §I): a guessed interaction id fails…
+            handle
+                .submit(ClientCommand::ConfirmAppDesign {
+                    app_id: app_id.clone(),
+                    revision: 1,
+                    interaction_id: "int-guessed".into(),
+                })
+                .await
+                .expect("submit(ConfirmAppDesign guessed)");
+            let events = drain_events(&handle, &listener).await;
+            assert!(events.iter().any(|event| matches!(
+                event,
+                Ev::AppOperationFailed {
+                    code: AppErrorCodeDto::InteractionInvalid,
+                    ..
+                }
+            )));
+            // …and the right id with a stale revision fails too.
+            handle
+                .submit(ClientCommand::ConfirmAppDesign {
+                    app_id: app_id.clone(),
+                    revision: 0,
+                    interaction_id: designer_interaction.clone(),
+                })
+                .await
+                .expect("submit(ConfirmAppDesign stale)");
+            let events = drain_events(&handle, &listener).await;
+            assert!(events.iter().any(|event| matches!(
+                event,
+                Ev::AppOperationFailed {
+                    code: AppErrorCodeDto::RevisionConflict,
+                    ..
+                }
+            )));
+            let service = handle.local_apps().expect("local-apps service");
+            assert_eq!(
+                service.record(&app_id).await.unwrap().workflow_state,
+                local_apps::AppWorkflowState::AwaitingSpecConfirmation,
+                "failed confirms must not advance the workflow"
+            );
+
+            // The exact pending id + the current revision confirms → generating.
+            handle
+                .submit(ClientCommand::ConfirmAppDesign {
+                    app_id: app_id.clone(),
+                    revision: 1,
+                    interaction_id: designer_interaction,
+                })
+                .await
+                .expect("submit(ConfirmAppDesign)");
+            let events = drain_events(&handle, &listener).await;
+            assert!(events.iter().any(|event| matches!(
+                event,
+                Ev::AppWorkflowChanged {
+                    state: AppWorkflowStateDto::Generating,
+                    ..
+                }
+            )));
+
+            // Generation/validation transitions are AppService seams (the
+            // phase-3 generator drives them); their domain events must ride
+            // the SAME outbound sink as the command replies.
+            service
+                .generation_complete(&app_id)
+                .await
+                .expect("generation_complete");
+            service
+                .validation_passed(&app_id)
+                .await
+                .expect("validation_passed");
+            let events = drain_events(&handle, &listener).await;
+            assert!(events.iter().any(|event| matches!(
+                event,
+                Ev::AppWorkflowChanged {
+                    state: AppWorkflowStateDto::Validating,
+                    ..
+                }
+            )));
+            let (preview_interaction, preview_revision) = events
+                .iter()
+                .find_map(|event| match event {
+                    Ev::AppPreviewReady {
+                        interaction_id,
+                        revision,
+                        url: None,
+                        ..
+                    } => Some((interaction_id.clone(), *revision)),
+                    _ => None,
+                })
+                .expect("AppPreviewReady must be emitted with no url in phase 1");
+            assert_eq!(preview_revision, 1);
+
+            // Confirm the preview through the UI command path → ready.
+            handle
+                .submit(ClientCommand::ConfirmAppPreview {
+                    app_id: app_id.clone(),
+                    revision: preview_revision,
+                    interaction_id: preview_interaction,
+                })
+                .await
+                .expect("submit(ConfirmAppPreview)");
+            let events = drain_events(&handle, &listener).await;
+            assert!(events.iter().any(|event| matches!(
+                event,
+                Ev::AppWorkflowChanged {
+                    state: AppWorkflowStateDto::Ready,
+                    ..
+                }
+            )));
+            assert_eq!(
+                service.record(&app_id).await.unwrap().workflow_state,
+                local_apps::AppWorkflowState::Ready
+            );
+        });
+    }
+
+    #[test]
+    fn local_apps_runtime_and_checkpoint_commands_fail_typed_not_yet_available() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, listener) = build_submit_handle(tmp.path());
+
+        handle.runtime().block_on(async {
+            handle
+                .submit(ClientCommand::CreateApp {
+                    name: "Board".into(),
+                    template: AppTemplateKindDto::Dashboard,
+                    origin: AppCreateOriginDto::Chat,
+                    conversation_id: Some("conv-7".into()),
+                })
+                .await
+                .expect("submit(CreateApp)");
+            let events = drain_events(&handle, &listener).await;
+            let apps = apps_changed_rows(&events).expect("CreateApp must announce AppsChanged");
+            assert_eq!(
+                apps[0].conversation_id.as_deref(),
+                Some("conv-7"),
+                "a chat-origin create keeps the conversation binding"
+            );
+            let app_id = apps[0].id.clone();
+
+            // Spec §H honesty: runtime + checkpoint-restore commands validate
+            // the app, then fail typed — and NEVER fake a runtime transition.
+            for command in [
+                ClientCommand::StartApp {
+                    app_id: app_id.clone(),
+                },
+                ClientCommand::StopApp {
+                    app_id: app_id.clone(),
+                },
+                ClientCommand::RestartApp {
+                    app_id: app_id.clone(),
+                },
+                ClientCommand::RestoreAppCheckpoint {
+                    app_id: app_id.clone(),
+                    checkpoint_id: "cp-1".into(),
+                },
+            ] {
+                handle.submit(command).await.expect("submit(phase-gap)");
+                let events = drain_events(&handle, &listener).await;
+                assert!(events.iter().any(|event| matches!(
+                    event,
+                    Ev::AppOperationFailed {
+                        app_id: Some(id),
+                        code: AppErrorCodeDto::NotYetAvailable,
+                        ..
+                    } if *id == app_id
+                )));
+                assert!(
+                    !events
+                        .iter()
+                        .any(|event| matches!(event, Ev::AppRuntimeChanged { .. })),
+                    "phase 1 must not fake runtime transitions"
+                );
+            }
+            let service = handle.local_apps().expect("local-apps service");
+            assert_eq!(
+                service.runtime_record(&app_id).await.unwrap().state,
+                local_apps::AppRuntimeState::Stopped,
+                "the runtime record must stay untouched"
+            );
+
+            // A missing app is not_found, not not_yet_available.
+            handle
+                .submit(ClientCommand::StartApp {
+                    app_id: "beadfeed".into(),
+                })
+                .await
+                .expect("submit(StartApp missing)");
+            let events = drain_events(&handle, &listener).await;
+            assert!(events.iter().any(|event| matches!(
+                event,
+                Ev::AppOperationFailed {
+                    code: AppErrorCodeDto::NotFound,
+                    ..
+                }
+            )));
+
+            // Checkpoints: phase 1 replies with the empty list — zero
+            // checkpoint events and no failure for an existing app; a missing
+            // app still fails typed.
+            handle
+                .submit(ClientCommand::ListAppCheckpoints {
+                    app_id: app_id.clone(),
+                })
+                .await
+                .expect("submit(ListAppCheckpoints)");
+            let events = drain_events(&handle, &listener).await;
+            assert!(events.iter().all(|event| !matches!(
+                event,
+                Ev::AppOperationFailed { .. } | Ev::AppCheckpointCreated { .. }
+            )));
+            handle
+                .submit(ClientCommand::ListAppCheckpoints {
+                    app_id: "beadfeed".into(),
+                })
+                .await
+                .expect("submit(ListAppCheckpoints missing)");
+            let events = drain_events(&handle, &listener).await;
+            assert!(events.iter().any(|event| matches!(
+                event,
+                Ev::AppOperationFailed {
+                    code: AppErrorCodeDto::NotFound,
+                    ..
+                }
+            )));
+        });
+    }
+
+    #[test]
+    fn local_apps_state_survives_engine_rebuild_and_delete_removes_the_app() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, listener) = build_submit_handle(tmp.path());
+        let app_id = handle.runtime().block_on(async {
+            handle
+                .submit(ClientCommand::CreateApp {
+                    name: "Persist".into(),
+                    template: AppTemplateKindDto::FormUtility,
+                    origin: AppCreateOriginDto::Library,
+                    conversation_id: None,
+                })
+                .await
+                .expect("submit(CreateApp)");
+            let events = drain_events(&handle, &listener).await;
+            let apps = apps_changed_rows(&events).expect("CreateApp must announce AppsChanged");
+            let app_id = apps[0].id.clone();
+            handle
+                .submit(ClientCommand::UpdateAppDesignDraft {
+                    app_id: app_id.clone(),
+                    expected_revision: 0,
+                    patch: title_patch("Kept"),
+                })
+                .await
+                .expect("submit(UpdateAppDesignDraft)");
+            app_id
+        });
+        // The store lives at the per-profile data root (`<root>/apps/…`) —
+        // `test_config` roots `lingxi_home` under the temp dir, so its parent
+        // (the temp root) is the profile root.
+        assert!(tmp
+            .path()
+            .join("apps")
+            .join(&app_id)
+            .join("workspace")
+            .join(branding::DOT_DIR)
+            .join("design-spec.json")
+            .is_file());
+        drop(handle);
+
+        // A brand-new engine over the same root rebuilds from disk alone.
+        let (handle, listener) = build_submit_handle(tmp.path());
+        handle.runtime().block_on(async {
+            handle
+                .submit(ClientCommand::ListApps)
+                .await
+                .expect("submit(ListApps)");
+            let events = drain_events(&handle, &listener).await;
+            let apps = apps_changed_rows(&events).expect("ListApps replies with AppsChanged");
+            assert_eq!(apps.len(), 1);
+            assert_eq!(apps[0].id, app_id);
+            let service = handle.local_apps().expect("local-apps service");
+            assert_eq!(
+                service.draft(&app_id).await.unwrap().revision,
+                1,
+                "the draft revision survives the engine rebuild"
+            );
+
+            handle
+                .submit(ClientCommand::DeleteApp {
+                    app_id: app_id.clone(),
+                })
+                .await
+                .expect("submit(DeleteApp)");
+            let events = drain_events(&handle, &listener).await;
+            assert!(events
+                .iter()
+                .any(|event| matches!(event, Ev::AppsChanged { apps } if apps.is_empty())));
+        });
+        assert!(
+            !tmp.path().join("apps").join(&app_id).exists(),
+            "DeleteApp must remove the app directory"
+        );
+    }
+
+    #[test]
+    fn local_apps_suggestion_and_cancel_commands_round_trip_through_submit() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, listener) = build_submit_handle(tmp.path());
+
+        handle.runtime().block_on(async {
+            handle
+                .submit(ClientCommand::CreateApp {
+                    name: "Moodboard".into(),
+                    template: AppTemplateKindDto::ContentShowcase,
+                    origin: AppCreateOriginDto::Library,
+                    conversation_id: None,
+                })
+                .await
+                .expect("submit(CreateApp)");
+            let events = drain_events(&handle, &listener).await;
+            let app_id = apps_changed_rows(&events).expect("CreateApp must announce AppsChanged")
+                [0]
+            .id
+            .clone();
+
+            // The designer gate opens at revision 0; its interaction id
+            // reaches the client only through this event.
+            handle
+                .submit(ClientCommand::OpenAppDesigner {
+                    app_id: app_id.clone(),
+                })
+                .await
+                .expect("submit(OpenAppDesigner)");
+            let events = drain_events(&handle, &listener).await;
+            let (designer_interaction, designer_revision) = events
+                .iter()
+                .find_map(|event| match event {
+                    Ev::AppDesignerRequested {
+                        app_id: id,
+                        interaction_id,
+                        revision,
+                    } if *id == app_id => Some((interaction_id.clone(), *revision)),
+                    _ => None,
+                })
+                .expect("AppDesignerRequested must be emitted");
+            assert_eq!(designer_revision, 0);
+
+            // A user edit AFTER the confirmation request: the gate survives,
+            // the draft revision moves past the one the gate was opened at.
+            handle
+                .submit(ClientCommand::UpdateAppDesignDraft {
+                    app_id: app_id.clone(),
+                    expected_revision: 0,
+                    patch: title_patch("Mood"),
+                })
+                .await
+                .expect("submit(UpdateAppDesignDraft)");
+            let events = drain_events(&handle, &listener).await;
+            assert!(events.iter().any(|event| matches!(
+                event,
+                Ev::AppDesignDraftChanged { revision: 1, .. }
+            )));
+
+            // An agent-side suggestion (AppService seam — the phase-3 designer
+            // agent drives this) is announced with the id the apply command
+            // must echo.
+            let service = handle.local_apps().expect("local-apps service");
+            let suggestion = service
+                .store_suggestion(
+                    &app_id,
+                    local_apps::AppDesignPatch {
+                        ops: vec![local_apps::AppDesignPatchOp::Set {
+                            field_id: "accent".into(),
+                            value: local_apps::DesignValue::Color("#3366ff".into()),
+                        }],
+                        note: None,
+                    },
+                )
+                .await
+                .expect("store_suggestion");
+            let events = drain_events(&handle, &listener).await;
+            let mut saw_suggestion = false;
+            for event in &events {
+                if let Ev::AppDesignSuggestionAvailable {
+                    app_id: id,
+                    suggestion_id,
+                    based_on_revision,
+                    patch,
+                } = event
+                {
+                    assert_eq!(id, &app_id);
+                    assert_eq!(suggestion_id, &suggestion.suggestion_id);
+                    assert_eq!(*based_on_revision, 1);
+                    assert!(matches!(
+                        &patch.ops[..],
+                        [AppDesignPatchOpDto::Set {
+                            field_id,
+                            value: DesignValueDto::Color { value },
+                        }] if field_id == "accent" && value == "#3366ff"
+                    ));
+                    saw_suggestion = true;
+                }
+            }
+            assert!(saw_suggestion, "AppDesignSuggestionAvailable must be emitted");
+
+            // A guessed suggestion id cannot apply…
+            handle
+                .submit(ClientCommand::ApplyAgentDesignSuggestion {
+                    app_id: app_id.clone(),
+                    suggestion_id: "sugg-guessed".into(),
+                    expected_revision: 1,
+                })
+                .await
+                .expect("submit(ApplyAgentDesignSuggestion guessed)");
+            let events = drain_events(&handle, &listener).await;
+            assert!(events.iter().any(|event| matches!(
+                event,
+                Ev::AppOperationFailed {
+                    code: AppErrorCodeDto::InteractionInvalid,
+                    ..
+                }
+            )));
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, Ev::AppDesignDraftChanged { .. })),
+                "a failed apply must not change the draft"
+            );
+
+            // …and a stale expected_revision conflicts (conflict event + typed
+            // failure, suggestion left pending).
+            handle
+                .submit(ClientCommand::ApplyAgentDesignSuggestion {
+                    app_id: app_id.clone(),
+                    suggestion_id: suggestion.suggestion_id.clone(),
+                    expected_revision: 0,
+                })
+                .await
+                .expect("submit(ApplyAgentDesignSuggestion stale)");
+            let events = drain_events(&handle, &listener).await;
+            assert!(events.iter().any(|event| matches!(
+                event,
+                Ev::AppDesignConflict {
+                    expected_revision: 0,
+                    actual_revision: 1,
+                    ..
+                }
+            )));
+            assert!(events.iter().any(|event| matches!(
+                event,
+                Ev::AppOperationFailed {
+                    code: AppErrorCodeDto::RevisionConflict,
+                    ..
+                }
+            )));
+
+            // The exact id + current revision applies the patch (revision 2).
+            handle
+                .submit(ClientCommand::ApplyAgentDesignSuggestion {
+                    app_id: app_id.clone(),
+                    suggestion_id: suggestion.suggestion_id.clone(),
+                    expected_revision: 1,
+                })
+                .await
+                .expect("submit(ApplyAgentDesignSuggestion)");
+            let events = drain_events(&handle, &listener).await;
+            let fields = events
+                .iter()
+                .find_map(|event| match event {
+                    Ev::AppDesignDraftChanged {
+                        revision: 2,
+                        fields,
+                        ..
+                    } => Some(fields.clone()),
+                    _ => None,
+                })
+                .expect("AppDesignDraftChanged at revision 2");
+            assert!(matches!(
+                fields.get("accent"),
+                Some(DesignValueDto::Color { value }) if value == "#3366ff"
+            ));
+
+            // Confirming with the revision the gate was OPENED at — after the
+            // post-request edits — must fail with revision_conflict and leave
+            // the gate pending (spec §B: confirm requires the CURRENT
+            // revision).
+            handle
+                .submit(ClientCommand::ConfirmAppDesign {
+                    app_id: app_id.clone(),
+                    revision: designer_revision,
+                    interaction_id: designer_interaction.clone(),
+                })
+                .await
+                .expect("submit(ConfirmAppDesign post-edit stale)");
+            let events = drain_events(&handle, &listener).await;
+            assert!(events.iter().any(|event| matches!(
+                event,
+                Ev::AppOperationFailed {
+                    code: AppErrorCodeDto::RevisionConflict,
+                    ..
+                }
+            )));
+            assert_eq!(
+                service.record(&app_id).await.unwrap().workflow_state,
+                local_apps::AppWorkflowState::AwaitingSpecConfirmation,
+                "the failed confirm must not consume the gate or move the workflow"
+            );
+
+            // Cancelling through the UI command voids the gate → collecting_spec…
+            handle
+                .submit(ClientCommand::CancelAppDesign {
+                    app_id: app_id.clone(),
+                })
+                .await
+                .expect("submit(CancelAppDesign)");
+            let events = drain_events(&handle, &listener).await;
+            assert!(events.iter().any(|event| matches!(
+                event,
+                Ev::AppWorkflowChanged {
+                    state: AppWorkflowStateDto::CollectingSpec,
+                    ..
+                }
+            )));
+
+            // …and the voided gate can never confirm again, even with the
+            // current revision echoed correctly.
+            handle
+                .submit(ClientCommand::ConfirmAppDesign {
+                    app_id: app_id.clone(),
+                    revision: 2,
+                    interaction_id: designer_interaction,
+                })
+                .await
+                .expect("submit(ConfirmAppDesign voided)");
+            let events = drain_events(&handle, &listener).await;
+            assert!(events.iter().any(|event| matches!(
+                event,
+                Ev::AppOperationFailed {
+                    code: AppErrorCodeDto::WorkflowStateInvalid,
+                    ..
+                }
+            )));
+        });
+    }
+
+    #[test]
+    fn local_apps_revision_requests_round_trip_through_submit() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, listener) = build_submit_handle(tmp.path());
+
+        handle.runtime().block_on(async {
+            handle
+                .submit(ClientCommand::CreateApp {
+                    name: "Gallery".into(),
+                    template: AppTemplateKindDto::ContentShowcase,
+                    origin: AppCreateOriginDto::Library,
+                    conversation_id: None,
+                })
+                .await
+                .expect("submit(CreateApp)");
+            let events = drain_events(&handle, &listener).await;
+            let app_id = apps_changed_rows(&events).expect("CreateApp must announce AppsChanged")
+                [0]
+            .id
+            .clone();
+
+            handle
+                .submit(ClientCommand::OpenAppDesigner {
+                    app_id: app_id.clone(),
+                })
+                .await
+                .expect("submit(OpenAppDesigner)");
+            let events = drain_events(&handle, &listener).await;
+            let designer_interaction = events
+                .iter()
+                .find_map(|event| match event {
+                    Ev::AppDesignerRequested { interaction_id, .. } => {
+                        Some(interaction_id.clone())
+                    }
+                    _ => None,
+                })
+                .expect("AppDesignerRequested must be emitted");
+            handle
+                .submit(ClientCommand::ConfirmAppDesign {
+                    app_id: app_id.clone(),
+                    revision: 0,
+                    interaction_id: designer_interaction,
+                })
+                .await
+                .expect("submit(ConfirmAppDesign)");
+            drain_events(&handle, &listener).await;
+
+            // The generation/validation seams (phase 3 drives them) open the
+            // preview gate.
+            let service = handle.local_apps().expect("local-apps service");
+            service
+                .generation_complete(&app_id)
+                .await
+                .expect("generation_complete");
+            service
+                .validation_passed(&app_id)
+                .await
+                .expect("validation_passed");
+            let events = drain_events(&handle, &listener).await;
+            let first_preview = events
+                .iter()
+                .find_map(|event| match event {
+                    Ev::AppPreviewReady { interaction_id, .. } => Some(interaction_id.clone()),
+                    _ => None,
+                })
+                .expect("AppPreviewReady must be emitted");
+
+            // From the preview gate, feedback through the UI command voids the
+            // gate → revising, with no failure.
+            handle
+                .submit(ClientCommand::RequestAppRevision {
+                    app_id: app_id.clone(),
+                    prompt: "use a darker header".into(),
+                })
+                .await
+                .expect("submit(RequestAppRevision)");
+            let events = drain_events(&handle, &listener).await;
+            assert!(events.iter().any(|event| matches!(
+                event,
+                Ev::AppWorkflowChanged {
+                    state: AppWorkflowStateDto::Revising,
+                    ..
+                }
+            )));
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, Ev::AppOperationFailed { .. })),
+                "a legal revision request must not fail"
+            );
+
+            // The voided preview gate can no longer confirm.
+            handle
+                .submit(ClientCommand::ConfirmAppPreview {
+                    app_id: app_id.clone(),
+                    revision: 0,
+                    interaction_id: first_preview.clone(),
+                })
+                .await
+                .expect("submit(ConfirmAppPreview voided)");
+            let events = drain_events(&handle, &listener).await;
+            assert!(events.iter().any(|event| matches!(
+                event,
+                Ev::AppOperationFailed {
+                    code: AppErrorCodeDto::WorkflowStateInvalid,
+                    ..
+                }
+            )));
+
+            // The revision pass lands → a FRESH preview gate is minted.
+            service.revision_ready(&app_id).await.expect("revision_ready");
+            service
+                .validation_passed(&app_id)
+                .await
+                .expect("validation_passed after revision");
+            let events = drain_events(&handle, &listener).await;
+            let second_preview = events
+                .iter()
+                .find_map(|event| match event {
+                    Ev::AppPreviewReady { interaction_id, .. } => Some(interaction_id.clone()),
+                    _ => None,
+                })
+                .expect("AppPreviewReady must be emitted after the revision pass");
+            assert_ne!(
+                second_preview, first_preview,
+                "a re-opened gate must mint a fresh interaction id"
+            );
+
+            handle
+                .submit(ClientCommand::ConfirmAppPreview {
+                    app_id: app_id.clone(),
+                    revision: 0,
+                    interaction_id: second_preview,
+                })
+                .await
+                .expect("submit(ConfirmAppPreview)");
+            let events = drain_events(&handle, &listener).await;
+            assert!(events.iter().any(|event| matches!(
+                event,
+                Ev::AppWorkflowChanged {
+                    state: AppWorkflowStateDto::Ready,
+                    ..
+                }
+            )));
+
+            // From ready, feedback is also legal → revising again.
+            handle
+                .submit(ClientCommand::RequestAppRevision {
+                    app_id: app_id.clone(),
+                    prompt: "add a favorites screen".into(),
+                })
+                .await
+                .expect("submit(RequestAppRevision from ready)");
+            let events = drain_events(&handle, &listener).await;
+            assert!(events.iter().any(|event| matches!(
+                event,
+                Ev::AppWorkflowChanged {
+                    state: AppWorkflowStateDto::Revising,
+                    ..
+                }
+            )));
+            assert_eq!(
+                service.record(&app_id).await.unwrap().workflow_state,
+                local_apps::AppWorkflowState::Revising
+            );
+        });
+    }
+
+    #[test]
+    fn local_apps_startup_sweep_consumes_continuations_queued_by_a_previous_run() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        // Seed the on-disk store (at the same `<root>/apps` the engine roots
+        // its service at) with a gate outcome whose delivery FAILED — the
+        // state a crash mid-delivery leaves behind.
+        let seeded_app_id = {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("seed runtime");
+            rt.block_on(async {
+                let sink = Arc::new(local_apps::RecordingContinuationSink::new());
+                sink.set_fail(true);
+                let service = local_apps::AppService::load(
+                    tmp.path(),
+                    Arc::new(local_apps::test_support::FixedClock::new(1_753_900_000_000)),
+                    Arc::clone(&sink) as Arc<dyn local_apps::ContinuationSink>,
+                    Arc::new(local_apps::NoopAppEventObserver),
+                )
+                .await
+                .expect("seed service");
+                let record = service
+                    .create_app("Queued", local_apps::AppTemplateKind::Dashboard, None)
+                    .await
+                    .expect("create app");
+                let gate = service
+                    .open_designer(&record.id)
+                    .await
+                    .expect("open designer");
+                service
+                    .confirm_design(&record.id, &gate.interaction_id, 0)
+                    .await
+                    .expect("confirm design");
+                let queued = service
+                    .interactions(&record.id)
+                    .await
+                    .expect("interactions");
+                assert_eq!(
+                    queued.undelivered.len(),
+                    1,
+                    "failed delivery must stay queued on disk"
+                );
+                assert_eq!(queued.last_delivered_seq, 0);
+                record.id
+            })
+        };
+
+        // A fresh engine over the same root spawns the startup redelivery
+        // sweep (spec §E at-least-once); with the phase-1 Noop sink the queued
+        // continuation is drained and marked delivered — never dropped with a
+        // stale `last_delivered_seq`.
+        let (handle, _listener) = build_submit_handle(tmp.path());
+        handle.runtime().block_on(async {
+            let service = handle.local_apps().expect("local-apps service");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                let interactions = service
+                    .interactions(&seeded_app_id)
+                    .await
+                    .expect("interactions");
+                if interactions.undelivered.is_empty() {
+                    assert_eq!(
+                        interactions.last_delivered_seq, 1,
+                        "the sweep must mark the continuation delivered"
+                    );
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "startup sweep did not consume the queued continuation in time"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        });
+    }
+
+    /// A corrupt on-disk apps store must DEGRADE, never brick: the engine
+    /// still builds (chat is unaffected), `local_apps()` returns the boot
+    /// error, and every app command surfaces it as a typed
+    /// `AppOperationFailed { code: storage_corrupt }` — the Err branch of the
+    /// handle's `local_apps` Result and `local_apps_or_report`'s emit path.
+    #[test]
+    fn local_apps_corrupt_store_degrades_but_never_bricks_the_engine() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(tmp.path().join("apps")).expect("apps dir");
+        std::fs::write(tmp.path().join("apps/index.json"), "{ not json")
+            .expect("plant corrupt index");
+
+        // The engine still builds over the corrupt store…
+        let (handle, listener) = build_submit_handle(tmp.path());
+        handle.runtime().block_on(async {
+            // …the boot-time load error is held on the handle…
+            let err = match handle.local_apps() {
+                Err(error) => error,
+                Ok(_) => panic!("a corrupt store must surface as the boot error"),
+            };
+            assert_eq!(err.code(), local_apps::AppErrorCode::StorageCorrupt);
+
+            // …and every app command reports it typed instead of hanging or
+            // pretending an empty store.
+            handle
+                .submit(ClientCommand::ListApps)
+                .await
+                .expect("submit(ListApps) must not be a transport error");
+            handle
+                .submit(ClientCommand::CreateApp {
+                    name: "Habit Tracker".into(),
+                    template: AppTemplateKindDto::Dashboard,
+                    origin: AppCreateOriginDto::Library,
+                    conversation_id: None,
+                })
+                .await
+                .expect("submit(CreateApp) must not be a transport error");
+            let events = drain_events(&handle, &listener).await;
+            let failures = events
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event,
+                        Ev::AppOperationFailed {
+                            code: AppErrorCodeDto::StorageCorrupt,
+                            ..
+                        }
+                    )
+                })
+                .count();
+            assert_eq!(
+                failures, 2,
+                "each app command must emit the typed boot failure: {events:?}"
+            );
+            assert!(
+                !events.iter().any(|event| matches!(event, Ev::AppsChanged { .. })),
+                "a corrupt store must never masquerade as an (empty) app list"
+            );
+        });
     }
 }
 

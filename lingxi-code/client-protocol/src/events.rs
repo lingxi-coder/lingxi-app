@@ -20,8 +20,13 @@ use crate::listings::{
     AgentDto, AuthStateDto, CoordinatorWorkerDto, DoctorReportDto, HookDto, McpServerDto,
     MemoryEntryDto, SessionRowDto, SlashCommandDto, StatusSnapshotDto, TaskRowDto, TaskStatusDto,
 };
+use crate::local_apps::{
+    AppCheckpointDto, AppDesignPatchDto, AppErrorCodeDto, AppRecordDto, AppRuntimeStateDto,
+    AppWorkflowStateDto, DesignValueDto,
+};
 use crate::message::MessageDto;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Outbound events the engine streams to a client.
 ///
@@ -361,6 +366,132 @@ pub enum ClientEvent {
     CommandsChanged {
         /// The full updated slash-command catalog snapshot.
         commands: Vec<SlashCommandDto>,
+    },
+
+    // ── Local apps ────────────────────────────────────────────────────────
+    //
+    // Docstrings in this section are deliberately terse: uniffi bakes every
+    // docstring into a fixed-capacity per-item metadata buffer, and the
+    // `ClientEvent` enum is near that cap. Full semantics live on the
+    // `crate::local_apps` DTOs and the matching `ClientCommand` variants.
+    /// The local-app record set changed (created / deleted / listed).
+    AppsChanged {
+        /// The full app record set.
+        apps: Vec<AppRecordDto>,
+    },
+
+    /// The design-spec gate opened; `interaction_id` reaches the client ONLY
+    /// here, gating `ConfirmAppDesign` to the UI flow.
+    AppDesignerRequested {
+        /// App whose designer gate opened.
+        app_id: String,
+        /// Pending designer interaction id to echo on confirm.
+        interaction_id: String,
+        /// Draft revision when the gate opened.
+        revision: u64,
+    },
+
+    /// The design draft changed (user patch or applied suggestion).
+    AppDesignDraftChanged {
+        /// App whose draft changed.
+        app_id: String,
+        /// Draft revision after the change.
+        revision: u64,
+        /// Full field map after the change.
+        fields: HashMap<String, DesignValueDto>,
+    },
+
+    /// An agent design suggestion awaits explicit user application.
+    AppDesignSuggestionAvailable {
+        /// App the suggestion belongs to.
+        app_id: String,
+        /// Id to echo back to apply the suggestion.
+        suggestion_id: String,
+        /// Draft revision the suggestion was computed against.
+        based_on_revision: u64,
+        /// The proposed edit batch.
+        patch: AppDesignPatchDto,
+    },
+
+    /// A draft edit was rejected on a stale `expected_revision`; the user's
+    /// value is NOT applied (no silent overwrite).
+    AppDesignConflict {
+        /// App whose edit was rejected.
+        app_id: String,
+        /// Revision the client believed current.
+        expected_revision: u64,
+        /// Revision the draft actually holds.
+        actual_revision: u64,
+    },
+
+    /// The app's designer/generation workflow state changed.
+    AppWorkflowChanged {
+        /// App whose workflow moved.
+        app_id: String,
+        /// The new workflow state.
+        state: AppWorkflowStateDto,
+        /// Optional detail (e.g. a failure summary). Skipped when `None`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+    },
+
+    /// Progress report while generating (phase 3 produces these).
+    AppGenerationProgress {
+        /// App being generated.
+        app_id: String,
+        /// Free-form stage label (e.g. `"scaffold"`).
+        stage: String,
+        /// Optional 0–100 completion estimate. Skipped when `None`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        percent: Option<u8>,
+        /// Optional human-readable detail. Skipped when `None`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+    },
+
+    /// The app's runtime (dev-server) state record changed.
+    AppRuntimeChanged {
+        /// App whose runtime moved.
+        app_id: String,
+        /// The new runtime state.
+        state: AppRuntimeStateDto,
+        /// Last runtime failure, if any. Skipped when `None`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        last_error: Option<String>,
+    },
+
+    /// The generated preview is ready; `interaction_id` gates
+    /// `ConfirmAppPreview` exactly like [`Self::AppDesignerRequested`].
+    AppPreviewReady {
+        /// App whose preview is ready.
+        app_id: String,
+        /// Pending preview interaction id to echo on confirm.
+        interaction_id: String,
+        /// Draft revision the preview was generated from.
+        revision: u64,
+        /// Preview URL; `None` until the phase-4 runtime serves it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        url: Option<String>,
+    },
+
+    /// A restorable checkpoint was recorded (git wiring is phase 5).
+    AppCheckpointCreated {
+        /// App the checkpoint belongs to.
+        app_id: String,
+        /// The recorded checkpoint.
+        checkpoint: AppCheckpointDto,
+    },
+
+    /// A local-app command failed with a typed code (incl. the phase-1
+    /// `not_yet_available` honesty path for runtime/checkpoint commands).
+    AppOperationFailed {
+        /// The addressed app, when one was addressed. Skipped when `None`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        app_id: Option<String>,
+        /// Stable machine-readable failure code.
+        code: AppErrorCodeDto,
+        /// Human-readable failure message.
+        message: String,
     },
 
     // ── Live thinking/usage (§0.7 follow-up) + reserved (§0.9) ────────────

@@ -2361,6 +2361,23 @@ fn tool_result_size(content: &str, content_blocks: Option<&[serde_json::Value]>)
 /// `config_home` (library/test callers) is likewise a strict no-op for the
 /// persistence arm — the blank-result arm still applies, since it needs no
 /// filesystem.
+/// Outcome of [`apply_tool_result_persistence`].
+///
+/// `replaced` is load-bearing, not informational. claude-code's `F0u` returns
+/// `{...e, content: a}` where `content` is the ONE model-facing payload — a
+/// string OR an array — so a substitution replaces the whole payload. LingXi
+/// splits that payload across `ContentBlock::ToolResult`'s `content` string and
+/// its `content_blocks` array, and the wire conversion prefers the array when
+/// present (`llm-client/src/convert.rs`: `content_blocks.map_or_else(|| String(content), Array)`).
+/// So substituting only `content` would leave the oversized array to win at the
+/// wire: the file gets written, the telemetry fires, and the model still
+/// receives the full payload. The caller MUST clear `content_blocks` whenever
+/// this reports `true`.
+struct PersistenceOutcome {
+    content: String,
+    replaced: bool,
+}
+
 async fn apply_tool_result_persistence(
     orch: &ConversationOrchestrator,
     tool_name: &str,
@@ -2368,7 +2385,7 @@ async fn apply_tool_result_persistence(
     threshold: Option<usize>,
     content: String,
     content_blocks: Option<&[serde_json::Value]>,
-) -> String {
+) -> PersistenceOutcome {
     use crate::tool_result_persistence as trp;
 
     if tool_result_is_blank(&content, content_blocks) {
@@ -2380,20 +2397,23 @@ async fn apply_tool_result_persistence(
             );
             bus.log_event("tengu_tool_empty_result", metadata).await;
         }
-        return format!("({tool_name} completed with no output)");
+        return PersistenceOutcome {
+            content: format!("({tool_name} completed with no output)"),
+            replaced: true,
+        };
     }
     if tool_result_has_media(content_blocks) {
-        return content;
+        return PersistenceOutcome { content, replaced: false };
     }
     let Some(threshold) = threshold else {
-        return content;
+        return PersistenceOutcome { content, replaced: false };
     };
     let size = tool_result_size(&content, content_blocks);
     if size <= threshold {
-        return content;
+        return PersistenceOutcome { content, replaced: false };
     }
     let Some(home) = orch.config_home.as_ref() else {
-        return content;
+        return PersistenceOutcome { content, replaced: false };
     };
 
     // `x2e` serializes an ARRAY body with `JSON.stringify(e,null,2)` and a
@@ -2403,7 +2423,7 @@ async fn apply_tool_result_persistence(
             Ok(s) => (s, true),
             // `e.some(l=>l.type!=="text")` already returned an error above in
             // the oracle; an unserializable array is the same "leave it alone".
-            Err(_) => return content,
+            Err(_) => return PersistenceOutcome { content, replaced: false },
         },
         None => (content.clone(), false),
     };
@@ -2423,7 +2443,7 @@ async fn apply_tool_result_persistence(
                 path = %dir.join(tool_use_id.as_str()).display(),
                 "Failed to persist tool result: {msg}"
             );
-            return content;
+            return PersistenceOutcome { content, replaced: false };
         }
     };
     let path_display = persisted.filepath.display().to_string();
@@ -2460,7 +2480,10 @@ async fn apply_tool_result_persistence(
         metadata.insert("thresholdUsed".into(), int(threshold));
         bus.log_event("tengu_tool_result_persisted", metadata).await;
     }
-    replacement
+    PersistenceOutcome {
+        content: replacement,
+        replaced: true,
+    }
 }
 
 pub(crate) async fn dispatch_tool_uses_tracked(
@@ -4405,7 +4428,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         // the `(<tool> completed with no output)` sentinel; oversized ones are
         // written to `<session>/tool-results/` and replaced by a
         // `<persisted-output>` envelope.
-        let final_content = apply_tool_result_persistence(
+        let persistence = apply_tool_result_persistence(
             orch,
             &name,
             &tool_use_id,
@@ -4419,6 +4442,17 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             content_blocks.as_deref(),
         )
         .await;
+        // claude-code's `F0u` substitutes the ONE model-facing payload
+        // (`{...e, content: a}`, where `content` is a string OR an array).
+        // LingXi splits that payload in two and the wire prefers the array when
+        // present, so a substitution must drop the array too — otherwise the
+        // envelope is computed, the file written, the telemetry fired, and the
+        // model still receives the full oversized payload.
+        let (final_content, content_blocks) = if persistence.replaced {
+            (persistence.content, None)
+        } else {
+            (persistence.content, content_blocks)
+        };
         results.push(ContentBlock::ToolResult {
             tool_use_id: tool_use_id.clone(),
             content: final_content,
@@ -6275,7 +6309,7 @@ mod tool_result_persistence_wiring_tests {
                 "IGNORED".into(),
                 Some(&blocks),
             )
-            .await;
+            .await.content;
             assert_eq!(out, "IGNORED", "{media} block must suppress persistence");
         }
         assert!(!tmp.path().join("projects").exists());
@@ -6290,10 +6324,128 @@ mod tool_result_persistence_wiring_tests {
             "IGNORED".into(),
             Some(&blocks),
         )
-        .await;
+        .await.content;
         assert!(out.starts_with(PERSISTED_OUTPUT_OPEN), "control: {out}");
         // An ARRAY body is written as pretty JSON under a `.json` stem (`kKr`).
         assert!(out.contains(&format!("{}.json", id.as_str())), "{out}");
+    }
+
+    /// An MCP-shaped result (array `data` ⇒ `content_blocks: Some(..)`) must
+    /// have its ARRAY dropped when the payload is persisted.
+    ///
+    /// claude-code's `F0u` substitutes the ONE model-facing payload
+    /// (`{...e, content: a}`, where `content` is a string OR an array). LingXi
+    /// splits it across `content` and `content_blocks`, and the wire prefers
+    /// the array when present (`llm-client/src/convert.rs`:
+    /// `content_blocks.map_or_else(|| String(content), Array)`). Substituting
+    /// only `content` therefore wrote the file, fired the telemetry, and still
+    /// handed the model the full oversized array — the defect this pins.
+    #[tokio::test]
+    async fn persisting_an_mcp_array_result_drops_the_array() {
+        struct McpArrayTool;
+        #[async_trait]
+        impl Tool for McpArrayTool {
+            fn name(&self) -> &str {
+                "mcp__srv__big"
+            }
+            fn input_schema(&self) -> &serde_json::Value {
+                static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
+                    once_cell::sync::Lazy::new(|| json!({ "type": "object" }));
+                &SCHEMA
+            }
+            fn is_enabled(&self, _: &ToolStaticContext) -> bool {
+                true
+            }
+            fn is_mcp(&self) -> bool {
+                true
+            }
+            fn max_result_size_chars(&self) -> usize {
+                1024 * 1024
+            }
+            fn persistence_threshold(&self) -> Option<usize> {
+                Some(THRESHOLD)
+            }
+            fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
+                true
+            }
+            fn is_read_only(&self, _: &serde_json::Value) -> bool {
+                true
+            }
+            async fn validate_input(
+                &self,
+                _: &serde_json::Value,
+                _: &ToolUseContext,
+            ) -> Result<(), ValidationError> {
+                Ok(())
+            }
+            async fn check_permissions(
+                &self,
+                _: &serde_json::Value,
+                _: &ToolUseContext,
+            ) -> permission::PermissionResult {
+                permission::PermissionResult::Allow {
+                    reason: permission::PermissionDecisionReason::Other {
+                        reason: "test".into(),
+                    },
+                    updated_input: None,
+                    update_destination: None,
+                    metadata: permission::result::PermissionMetadata::default(),
+                }
+            }
+            async fn description(&self, _: &serde_json::Value, _: &DescriptionOptions) -> String {
+                "big".into()
+            }
+            async fn prompt(&self, _: &PromptOptions) -> String {
+                String::new()
+            }
+            async fn call(
+                &self,
+                _: serde_json::Value,
+                _: ToolUseContext,
+                _: ToolProgressSender,
+            ) -> Result<ToolCallResult, ToolError> {
+                let body = "y".repeat(THRESHOLD * 4);
+                Ok(ToolCallResult {
+                    data: json!([{ "type": "text", "text": body }]),
+                    model_content: Some(body),
+                    new_messages: vec![],
+                    context_modifier: None,
+                    is_error: false,
+                    mcp_meta: None,
+                })
+            }
+        }
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let orch = orch_with(Arc::new(McpArrayTool), Some(tmp.path().to_path_buf()));
+        let uses = vec![(
+            ToolUseId::new(),
+            "mcp__srv__big".to_string(),
+            json!({}),
+            None,
+        )];
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses, None)
+            .await
+            .expect("dispatch");
+
+        match &results[0] {
+            ContentBlock::ToolResult {
+                content,
+                content_blocks,
+                ..
+            } => {
+                assert!(
+                    content.starts_with(PERSISTED_OUTPUT_OPEN),
+                    "oversized MCP result must be persisted, got: {content}"
+                );
+                assert!(
+                    content_blocks.is_none(),
+                    "the array must be dropped once the payload is substituted, \
+                     else the wire sends it and the envelope is discarded"
+                );
+            }
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
     }
 
     /// T7 — no `config_home` (library/test callers) is a STRICT no-op.

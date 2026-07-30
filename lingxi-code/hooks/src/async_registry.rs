@@ -33,6 +33,12 @@ pub const DEFAULT_ASYNC_HOOK_TIMEOUT_MS: u64 = 15_000;
 /// `Arc`s for the relevant arm) and hands it to [`AsyncHookRegistry::spawn`].
 pub type HookWork = Pin<Box<dyn Future<Output = HookResult> + Send + 'static>>;
 
+/// Finalizer invoked exactly once with the registry's winning result,
+/// including a timeout synthesized by the registry itself.
+pub type HookCompletion = Box<
+    dyn FnOnce(HookResult) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> + Send + 'static,
+>;
+
 /// Registry of currently-running non-blocking hooks.
 ///
 /// Each `spawn` call hands the hook off to the runtime spawner and stores the
@@ -86,6 +92,25 @@ impl AsyncHookRegistry {
         async_timeout: Option<Duration>,
         work: HookWork,
     ) -> Result<BackgroundTaskHandle, RuntimeError> {
+        self.spawn_with_completion(hook_id, async_timeout, work, None)
+            .await
+    }
+
+    /// Spawn a non-blocking hook and run `completion` with the final result.
+    ///
+    /// Unlike code inside `work`, this finalizer also runs when the registry's
+    /// timeout wins the race. It is intended for side effects such as
+    /// transcript persistence that must observe every terminal outcome.
+    ///
+    /// # Errors
+    /// Returns [`RuntimeError`] if the runtime refuses the spawn.
+    pub async fn spawn_with_completion(
+        &self,
+        hook_id: HookId,
+        async_timeout: Option<Duration>,
+        work: HookWork,
+        completion: Option<HookCompletion>,
+    ) -> Result<BackgroundTaskHandle, RuntimeError> {
         let timeout =
             async_timeout.unwrap_or_else(|| Duration::from_millis(DEFAULT_ASYNC_HOOK_TIMEOUT_MS));
         // One clone races the timeout inside the task; a second drives the
@@ -102,6 +127,9 @@ impl AsyncHookRegistry {
                 r = work => r,
                 () = timeout_runtime.sleep(timeout) => timeout_result(),
             };
+            if let Some(completion) = completion {
+                completion(result.clone()).await;
+            }
             // Drop the in-flight entry before publishing so a draining engine
             // never observes a completed-but-still-tracked hook.
             in_flight.lock().await.remove(&hook_id);
@@ -278,6 +306,8 @@ mod tests {
         let runtime = TestRuntime::new();
         let (tx, mut rx) = mpsc::channel(4);
         let reg = AsyncHookRegistry::new(runtime, tx);
+        let finalized = Arc::new(StdMutex::new(Vec::new()));
+        let finalized_for_callback = finalized.clone();
 
         let hook_id = HookId::new();
         // A hook that never completes within the timeout window.
@@ -286,9 +316,19 @@ mod tests {
             ok_result("never")
         });
 
-        reg.spawn(hook_id, Some(Duration::from_millis(10)), work)
-            .await
-            .expect("spawn must succeed");
+        let completion: HookCompletion = Box::new(move |result| {
+            Box::pin(async move {
+                finalized_for_callback.lock().unwrap().push(result.outcome);
+            })
+        });
+        reg.spawn_with_completion(
+            hook_id,
+            Some(Duration::from_millis(10)),
+            work,
+            Some(completion),
+        )
+        .await
+        .expect("spawn must succeed");
 
         let (got_id, got) = rx.recv().await.expect("timeout must publish a result");
         assert_eq!(got_id, hook_id);
@@ -297,6 +337,11 @@ mod tests {
             "timeout must carry HookOutcome::Timeout"
         );
         assert!(got.stderr.contains("timed out"));
+        assert_eq!(
+            finalized.lock().unwrap().as_slice(),
+            [HookOutcome::Timeout],
+            "the finalizer observes registry-generated timeouts"
+        );
     }
 
     #[tokio::test]

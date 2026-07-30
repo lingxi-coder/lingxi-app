@@ -10,7 +10,7 @@
 //! command-hook contract (`claude-code/src/utils/hooks.ts`).
 
 use crate::agent_executor::{AgentExecutionSignal, AgentExecutor};
-use crate::async_registry::{AsyncHookRegistry, HookWork};
+use crate::async_registry::{AsyncHookRegistry, HookCompletion, HookWork};
 use crate::attachment::{self, CancellationTimeout, HookAttachmentIdentity, HookAttachmentSink};
 use crate::definition::{HookDefinition, HookExecutor};
 use crate::events::HookEvent;
@@ -1008,26 +1008,25 @@ impl HookExecutorImpl {
         let hook_registry = self.registry.clone();
         let hook_id = hook.id;
         let once = hook.once;
-        let attachment_sink = self.attachment_sink.clone();
+        let completion = attachment_completion(
+            self.attachment_sink.clone(),
+            hook_owned.clone(),
+            identity,
+            std::time::Instant::now(),
+        );
         let work: HookWork = Box::pin(async move {
-            let run_started = std::time::Instant::now();
             let result = dispatcher
                 .dispatch(&hook_owned, &event_owned, &ctx_owned)
                 .await;
             if once && matches!(result.outcome, HookOutcome::Success) {
                 hook_registry.write().await.remove_once_hook(hook_id);
             }
-            #[allow(clippy::cast_possible_truncation)]
-            let run_ms = run_started.elapsed().as_millis() as u64;
-            if let (Some(sink), Some(value)) = (
-                attachment_sink,
-                build_run_attachment(&hook_owned, &identity, &result, run_ms),
-            ) {
-                sink.record(value).await;
-            }
             result
         });
-        if let Err(e) = registry.spawn(hook.id, hook.timeout, work).await {
+        if let Err(e) = registry
+            .spawn_with_completion(hook.id, hook.timeout, work, completion)
+            .await
+        {
             tracing::warn!(
                 hook_id = %hook.id,
                 error = %e,
@@ -1291,8 +1290,12 @@ impl Dispatcher {
                         if let (Some(output_rx), Some(registry)) = (output, &self.async_registry) {
                             let hook_owned = hook.clone();
                             let hook_id = hook.id;
-                            let attachment_sink = self.attachment_sink.clone();
-                            let attachment_id = attachment_identity(event);
+                            let completion = attachment_completion(
+                                self.attachment_sink.clone(),
+                                hook_owned.clone(),
+                                attachment_identity(event),
+                                run_started,
+                            );
                             let work: HookWork = Box::pin(async move {
                                 let out =
                                     output_rx.await.unwrap_or_else(|_| traits::ProcessOutput {
@@ -1301,29 +1304,21 @@ impl Dispatcher {
                                         exit_code: -1,
                                         timed_out: true,
                                     });
-                                let result =
-                                    map_command_output(&hook_owned, Ok(out), expected_event).0;
-                                #[allow(clippy::cast_possible_truncation)]
-                                let run_ms = run_started.elapsed().as_millis() as u64;
-                                if let (Some(sink), Some(value)) = (
-                                    attachment_sink,
-                                    build_run_attachment(
-                                        &hook_owned,
-                                        &attachment_id,
-                                        &result,
-                                        run_ms,
-                                    ),
-                                ) {
-                                    sink.record(value).await;
-                                }
-                                result
+                                map_command_output(&hook_owned, Ok(out), expected_event).0
                             });
                             // Bound the registration by the SAME async timeout the
                             // runner used to bound the child: on normal completion
                             // the (biased) `work` arm wins and publishes the mapped
                             // output; on overrun the registry publishes a timeout
                             // result, matching claude's `asyncTimeout` semantics.
-                            if let Err(e) = registry.spawn(hook_id, Some(async_timeout), work).await
+                            if let Err(e) = registry
+                                .spawn_with_completion(
+                                    hook_id,
+                                    Some(async_timeout),
+                                    work,
+                                    completion,
+                                )
+                                .await
                             {
                                 tracing::warn!(
                                     hook_id = %hook_id,
@@ -2519,6 +2514,26 @@ fn map_command_output(
             }
         }
     }
+}
+
+/// Build the async-registry finalizer that persists the winning terminal
+/// outcome, including a timeout synthesized outside the hook work future.
+fn attachment_completion(
+    sink: Option<Arc<dyn HookAttachmentSink>>,
+    hook: HookDefinition,
+    identity: HookAttachmentIdentity,
+    run_started: std::time::Instant,
+) -> Option<HookCompletion> {
+    let sink = sink?;
+    Some(Box::new(move |result| {
+        Box::pin(async move {
+            #[allow(clippy::cast_possible_truncation)]
+            let run_ms = run_started.elapsed().as_millis() as u64;
+            if let Some(value) = build_run_attachment(&hook, &identity, &result, run_ms) {
+                sink.record(value).await;
+            }
+        })
+    }))
 }
 
 /// Mint the identity fields shared by every attachment produced for one

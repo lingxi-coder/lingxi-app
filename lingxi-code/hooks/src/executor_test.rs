@@ -2215,6 +2215,49 @@ mod async_path_tests {
         assert_eq!(seen[0]["content"], "async complete");
     }
 
+    /// A registry timeout cancels the work future, so attachment persistence
+    /// must run from the registry's terminal-result finalizer.
+    #[tokio::test]
+    async fn non_blocking_timeout_persists_cancelled_attachment() {
+        let runtime = TestRuntime::new();
+        let (tx, mut rx) = mpsc::channel(4);
+        let async_reg = Arc::new(AsyncHookRegistry::new(runtime, tx));
+        let sink = Arc::new(AsyncRecordingSink::default());
+        let gate = Arc::new(Notify::new());
+        let ran = Arc::new(Notify::new());
+        let runner = GatedRunner::new(gate, ran.clone(), out("never", "", 0));
+
+        let mut hook = command_hook(false);
+        hook.timeout = Some(Duration::from_millis(10));
+        let hook_id = hook.id;
+        let mut registry = HookRegistry::new();
+        registry.register(hook);
+        let exec = HookExecutorImpl::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(UnusedHttp),
+            TestRuntime::new(),
+        )
+        .with_process_runner(runner, Arc::new(StubSandbox))
+        .with_async_registry(async_reg)
+        .with_attachment_sink(sink.clone());
+
+        let agg = exec.execute(pre_event(), HookContext::default()).await;
+        assert!(agg.hook_attachments.is_empty());
+        ran.notified().await;
+
+        let (got_id, got) = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("timeout result must publish")
+            .expect("completion channel stays open");
+        assert_eq!(got_id, hook_id);
+        assert!(matches!(got.outcome, HookOutcome::Timeout));
+        let seen = sink.seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0]["type"], "hook_cancelled");
+        assert_eq!(seen[0]["timedOut"], true);
+        assert_eq!(seen[0]["timeoutMs"], 10);
+    }
+
     /// (2) + (3) The registry records the in-flight handle and publishes the
     /// eventual result on `completion_tx`; here the hook completes normally.
     #[tokio::test]

@@ -1072,6 +1072,16 @@ pub struct ConversationOrchestrator {
     /// Cached UUID of the last persisted JSONL entry — used to populate
     /// `parentUuid` on the next append. Reset to `None` for fresh sessions.
     pub(crate) last_jsonl_uuid: Mutex<Option<String>>,
+    /// `tool_use_id` → claude's message-level `toolDenialKind`, recorded when a
+    /// tool is denied and consumed when its `tool_result` user line is
+    /// persisted.
+    ///
+    /// A side table rather than a field on the message because
+    /// `ConversationMessage` is shared with the model wire, where the kind has
+    /// no place — the same reason `injected_message_sources` is kept beside the
+    /// history rather than on the message. Entries are removed on use, so a
+    /// denial stamps exactly one line.
+    pub(crate) tool_denial_kinds: Mutex<std::collections::HashMap<String, String>>,
     /// Lazily-resolved git branch for the cwd — the parity analog of TS
     /// `getBranch()`, which claude-code calls once per `insertMessageChain`
     /// (`sessionStorage.ts:1012-1019`) and stamps onto every line of that chain.
@@ -1716,6 +1726,7 @@ impl ConversationOrchestrator {
             hooks_restricted: false,
             jsonl_writer: None,
             last_jsonl_uuid: Mutex::new(None),
+            tool_denial_kinds: Mutex::new(std::collections::HashMap::new()),
             git_branch_cache: Mutex::new(None),
             current_prompt_id: Mutex::new(None),
             should_exit: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -1882,6 +1893,39 @@ impl ConversationOrchestrator {
     /// resume-into-TUI seed alongside adopting the resumed history + id; without
     /// it the first appended message would be a chain orphan (recoverable, but
     /// this keeps the on-disk chain linear).
+    /// Record the `toolDenialKind` for a tool that was denied rather than run,
+    /// so its `tool_result` user line carries the provenance when persisted.
+    ///
+    /// Values are claude's: `user-rejected`, `permission-rule`,
+    /// `automode-blocked`, `automode-unavailable`, `automode-parsing-error`,
+    /// plus the abort kinds `cancelled` / `interrupted`.
+    pub(crate) async fn record_tool_denial_kind(&self, id: &protocol::ToolUseId, kind: &str) {
+        self.tool_denial_kinds
+            .lock()
+            .await
+            .insert(id.to_string(), kind.to_string());
+    }
+
+    /// Take the recorded kind for a message carrying EXACTLY ONE `tool_result`.
+    ///
+    /// The single-block guard is claude's own (`Tpr`): a user message with zero
+    /// or several tool_results cannot attribute one message-level kind, so it
+    /// gets none. Taking (rather than reading) keeps a denial from stamping a
+    /// second line if the same result were ever persisted twice.
+    async fn take_tool_denial_kind(&self, msg: &ConversationMessage) -> Option<String> {
+        let ConversationMessage::User { content, .. } = msg else {
+            return None;
+        };
+        let mut results = content.iter().filter_map(|b| match b {
+            protocol::ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id),
+            _ => None,
+        });
+        let (Some(only), None) = (results.next(), results.next()) else {
+            return None;
+        };
+        self.tool_denial_kinds.lock().await.remove(&only.to_string())
+    }
+
     pub async fn seed_last_jsonl_uuid(&self, last_uuid: Option<String>) {
         *self.last_jsonl_uuid.lock().await = last_uuid;
     }
@@ -5503,6 +5547,15 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // claude's on-disk order (`isVisibleInTranscriptOnly` before
         // `isCompactSummary`, between `message` and `uuid` — the schema's user
         // arm emits them there).
+        // Denial provenance: claude stamps `toolDenialKind` on the tool_result
+        // user line for a tool that was denied rather than run. The schema's
+        // tool-result head places it after `timestamp` and before the common
+        // trailer; the exactly-one-tool_result guard lives in
+        // `take_tool_denial_kind`.
+        if let Some(kind) = self.take_tool_denial_kind(msg).await {
+            jmsg.extra
+                .insert("toolDenialKind".to_string(), serde_json::Value::String(kind));
+        }
         if msg.is_visible_in_transcript_only() || compact_summary {
             jmsg.extra.insert(
                 "isVisibleInTranscriptOnly".to_string(),
@@ -17103,6 +17156,77 @@ mod persist_with_parent_tests {
             Some(overridden_uuid.as_str()),
             "subsequent non-overridden line must chain off the overridden line"
         );
+    }
+
+    /// A denied tool's persisted `user` line carries `toolDenialKind`, in
+    /// claude's slot (after `timestamp`, before the `userType` trailer).
+    ///
+    /// The kind is recorded against the `tool_use_id` at the permission
+    /// decision and stamped here, mirroring claude's message-level field. The
+    /// exactly-one-`tool_result` guard is claude's own (`Tpr`): a message
+    /// carrying several tool_results cannot attribute one kind, so it gets none.
+    #[tokio::test]
+    async fn denied_tool_result_line_carries_tool_denial_kind() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let session_path = dir.path().join("session.jsonl");
+        let orch = orch_with_writer(dir.path(), session_path.clone());
+
+        let tuid = protocol::ToolUseId::new();
+        orch.record_tool_denial_kind(&tuid, "permission-rule").await;
+
+        let msg = ConversationMessage::User {
+            id: protocol::MessageId::new(),
+            content: vec![protocol::ContentBlock::ToolResult {
+                tool_use_id: tuid.clone(),
+                content: "Permission to use Bash has been denied.".into(),
+                is_error: true,
+                provider_tool_use_id: None,
+                content_blocks: None,
+            }],
+            is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+        };
+        orch.persist_message_to_jsonl(&msg).await;
+
+        let raw = std::fs::read_to_string(&session_path).expect("session file");
+        let line = raw.lines().next().expect("one line");
+        assert!(
+            line.contains(r#""toolDenialKind":"permission-rule""#),
+            "denied line must carry the kind, got: {line}"
+        );
+        let i_kind = line.find("toolDenialKind").expect("kind present");
+        let i_trailer = line.find("userType").expect("trailer present");
+        assert!(
+            i_kind < i_trailer,
+            "toolDenialKind must precede the common trailer, got: {line}"
+        );
+    }
+
+    /// An ALLOWED tool's line is byte-unchanged — no stray key.
+    #[tokio::test]
+    async fn allowed_tool_result_line_has_no_denial_kind() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let session_path = dir.path().join("session.jsonl");
+        let orch = orch_with_writer(dir.path(), session_path.clone());
+
+        let msg = ConversationMessage::User {
+            id: protocol::MessageId::new(),
+            content: vec![protocol::ContentBlock::ToolResult {
+                tool_use_id: protocol::ToolUseId::new(),
+                content: "ok".into(),
+                is_error: false,
+                provider_tool_use_id: None,
+                content_blocks: None,
+            }],
+            is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+        };
+        orch.persist_message_to_jsonl(&msg).await;
+
+        let raw = std::fs::read_to_string(&session_path).expect("session file");
+        assert!(!raw.contains("toolDenialKind"));
     }
 
     #[tokio::test]

@@ -194,6 +194,29 @@ const RECOGNIZED_EXTRA: &[&str] = &[
 /// user lines, so a non-user line carrying them still round-trips verbatim.
 const USER_HEAD_EXTRA: &[&str] = &["isVisibleInTranscriptOnly", "isCompactSummary"];
 
+/// `extra` keys emitted BETWEEN `timestamp` and the common trailer, in this
+/// exact order — claude's tool-result head.
+///
+/// Census of every `toolDenialKind`-bearing line in real 2.1.220 transcripts
+/// (14 records across 5 envelope variants, which differ only in the optional
+/// `agentId` / `session_id` / `slug`) agrees on
+/// `…, uuid, timestamp, toolUseResult, toolDenialKind,
+/// sourceToolAssistantUUID, userType, …` — i.e. these precede the trailer,
+/// whereas an unrecognized `extra` key is appended after it.
+///
+/// Order comes from THIS list, not from `extra` insertion order, so the bytes
+/// do not depend on the order a producer happens to fill the map in.
+///
+/// Only `toolDenialKind` has a producer today; `toolUseResult` and
+/// `sourceToolAssistantUUID` are still absent from LingXi's transcript
+/// (verified against port-written sessions) and are listed here so that
+/// whoever adds them lands them in the right slot by construction.
+const TOOL_RESULT_HEAD_EXTRA: &[&str] = &[
+    "toolUseResult",
+    "toolDenialKind",
+    "sourceToolAssistantUUID",
+];
+
 /// `extra` keys the `subtype:"compact_boundary"` SYSTEM head consumes —
 /// claude's flattened boundary envelope (`type, subtype, content, level,
 /// compactMetadata, uuid, timestamp`, real 2.1.207 transcripts; boundary lines
@@ -360,6 +383,17 @@ impl Serialize for JsonlMessage {
             map.serialize_entry("timestamp", &self.timestamp)?;
         }
 
+        // (g2) Tool-result head — claude emits these BETWEEN `timestamp` and the
+        //      common trailer, in the fixed order of [`TOOL_RESULT_HEAD_EXTRA`]
+        //      rather than in `extra` insertion order, so a caller that sets
+        //      them in any order writes the same bytes. Each is skipped when
+        //      absent; a line carrying none of them is byte-unchanged.
+        for key in TOOL_RESULT_HEAD_EXTRA {
+            if let Some(v) = self.extra.get(*key) {
+                map.serialize_entry(*key, v)?;
+            }
+        }
+
         // (h) Common trailer — same emit/skip predicates as the derived impl,
         //     only the POSITION moves (it now follows the per-kind envelope).
         if let Some(v) = &self.user_type {
@@ -392,6 +426,10 @@ impl Serialize for JsonlMessage {
                 continue;
             }
             if is_attachment && k == "attachment" {
+                continue;
+            }
+            // Already emitted by the tool-result head above.
+            if TOOL_RESULT_HEAD_EXTRA.contains(&k.as_str()) {
                 continue;
             }
             map.serialize_entry(k, v)?;
@@ -476,5 +514,86 @@ mod attachment_envelope_tests {
             1,
             "payload emitted once, not tail-appended a second time: {s}"
         );
+    }
+}
+
+// The tool-result head: claude places `toolUseResult`, `toolDenialKind` and
+// `sourceToolAssistantUUID` BETWEEN `timestamp` and the common trailer, not
+// after it. Census of every `toolDenialKind`-bearing line in real 2.1.220
+// transcripts (14 records, 5 envelope variants differing only in the optional
+// `agentId` / `session_id` / `slug`) agrees on:
+//
+//   …, uuid, timestamp, toolUseResult, toolDenialKind,
+//   sourceToolAssistantUUID, userType, entrypoint, cwd, sessionId, version,
+//   gitBranch[, slug]
+#[cfg(test)]
+mod tool_result_head_tests {
+    use super::JsonlMessage;
+    use serde_json::{json, Map};
+
+    fn base() -> JsonlMessage {
+        JsonlMessage {
+            parent_uuid: Some("p".into()),
+            is_sidechain: false,
+            message_type: "user".into(),
+            message: json!({"role":"user","content":[]}),
+            uuid: "u".into(),
+            timestamp: "T".into(),
+            user_type: Some("external".into()),
+            entrypoint: Some("cli".into()),
+            cwd: "/w".into(),
+            session_id: "s".into(),
+            version: "0.12.0".into(),
+            git_branch: None,
+            slug: None,
+            logical_parent_uuid: None,
+            prompt_id: None,
+            extra: Map::new(),
+        }
+    }
+
+    #[test]
+    fn denial_head_keys_precede_the_common_trailer() {
+        let mut m = base();
+        m.extra
+            .insert("toolUseResult".into(), json!("Error: denied"));
+        m.extra
+            .insert("toolDenialKind".into(), json!("permission-rule"));
+        m.extra
+            .insert("sourceToolAssistantUUID".into(), json!("a-uuid"));
+        assert_eq!(
+            serde_json::to_string(&m).unwrap(),
+            r#"{"parentUuid":"p","isSidechain":false,"type":"user","message":{"role":"user","content":[]},"uuid":"u","timestamp":"T","toolUseResult":"Error: denied","toolDenialKind":"permission-rule","sourceToolAssistantUUID":"a-uuid","userType":"external","entrypoint":"cli","cwd":"/w","sessionId":"s","version":"0.12.0"}"#
+        );
+    }
+
+    /// Order among the head keys is claude's, NOT the insertion order of the
+    /// `extra` map — a caller that sets them in a different order still writes
+    /// the same bytes.
+    #[test]
+    fn head_key_order_is_fixed_regardless_of_insertion_order() {
+        let mut m = base();
+        m.extra
+            .insert("sourceToolAssistantUUID".into(), json!("a-uuid"));
+        m.extra
+            .insert("toolDenialKind".into(), json!("cancelled"));
+        m.extra.insert("toolUseResult".into(), json!("x"));
+        let s = serde_json::to_string(&m).unwrap();
+        let i_res = s.find("toolUseResult").unwrap();
+        let i_kind = s.find("toolDenialKind").unwrap();
+        let i_src = s.find("sourceToolAssistantUUID").unwrap();
+        let i_trailer = s.find("userType").unwrap();
+        assert!(
+            i_res < i_kind && i_kind < i_src && i_src < i_trailer,
+            "claude order is toolUseResult < toolDenialKind < sourceToolAssistantUUID < trailer, got {s}"
+        );
+    }
+
+    /// A line carrying none of them is unchanged.
+    #[test]
+    fn absent_head_keys_change_nothing() {
+        let s = serde_json::to_string(&base()).unwrap();
+        assert!(!s.contains("toolDenialKind"));
+        assert!(s.contains(r#""timestamp":"T","userType":"external""#));
     }
 }

@@ -2516,6 +2516,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             // plumbing to be faithful. `cancelled` is not one of the five kinds
             // the permission classifier emits, but it IS an ordinary
             // `toolDenialKind` value that produces a `tool_result_meta` entry.
+            orch.record_tool_denial_kind(tool_use_id, "cancelled").await;
             orch.output
                 .emit_tool_result_denied(
                     tool_use_id,
@@ -3294,6 +3295,12 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 // labels `user_reject` / `user_abort` for OTEL) carries no
                 // `behavior_ask`, so a host-side rejection currently reports the
                 // `permission-rule` fallthrough instead of `user-rejected`.
+                // Same provenance on BOTH surfaces: the stream-json frame gets
+                // `tool_result_meta` via the emit below, and the persisted
+                // transcript line gets the message-level `toolDenialKind` via
+                // this record, consumed when the tool_result user line is
+                // written.
+                orch.record_tool_denial_kind(tool_use_id, denial_kind).await;
                 orch.output
                     .emit_tool_result_denied(
                         tool_use_id,

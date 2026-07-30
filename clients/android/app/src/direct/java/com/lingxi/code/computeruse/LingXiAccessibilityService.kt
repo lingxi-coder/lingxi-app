@@ -17,6 +17,17 @@ import java.io.ByteArrayOutputStream
 import java.util.concurrent.Executor
 
 class LingXiAccessibilityService : AccessibilityService() {
+    private val gestureGate = ComputerUseGestureGate()
+
+    override fun onCreate() {
+        super.onCreate()
+        // Some vendor builds can recreate and bind the service without
+        // delivering onServiceConnected() again to the new app lifecycle.
+        // Registering the live instance here keeps UI and start checks aligned
+        // with the service the system is actually running.
+        ComputerUseFeatureProvider.onAccessibilityConnected(this)
+    }
+
     override fun onServiceConnected() {
         serviceInfo = serviceInfo.apply {
             flags = flags or
@@ -30,16 +41,16 @@ class LingXiAccessibilityService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
         ComputerUseFeatureProvider.onAccessibilityEvent(
+            service = this,
             packageName = event.packageName?.toString(),
             eventType = event.eventType,
         )
     }
 
     override fun onInterrupt() {
-        ComputerUseFeatureProvider.onAccessibilityDisconnected(
-            this,
-            "系统中断了无障碍服务",
-        )
+        // onInterrupt() asks an AccessibilityService to stop active feedback;
+        // it does not mean the service was disabled or disconnected.
+        cancelPendingGestures()
     }
 
     override fun onDestroy() {
@@ -56,25 +67,30 @@ class LingXiAccessibilityService : AccessibilityService() {
         strokes: List<GestureDescription.StrokeDescription>,
         timeoutMs: Long = 5_000,
     ): Boolean {
+        val gestureToken = gestureGate.begin() ?: return false
         val deferred = CompletableDeferred<Boolean>()
-        val description = GestureDescription.Builder().also { builder ->
-            strokes.forEach(builder::addStroke)
-        }.build()
-        val accepted = dispatchGesture(
-            description,
-            object : GestureResultCallback() {
-                override fun onCompleted(gestureDescription: GestureDescription?) {
-                    deferred.complete(true)
-                }
+        return try {
+            val description = GestureDescription.Builder().also { builder ->
+                strokes.forEach(builder::addStroke)
+            }.build()
+            val accepted = dispatchGesture(
+                description,
+                object : GestureResultCallback() {
+                    override fun onCompleted(gestureDescription: GestureDescription?) {
+                        deferred.complete(true)
+                    }
 
-                override fun onCancelled(gestureDescription: GestureDescription?) {
-                    deferred.complete(false)
-                }
-            },
-            null,
-        )
-        if (!accepted) return false
-        return withTimeout(timeoutMs) { deferred.await() }
+                    override fun onCancelled(gestureDescription: GestureDescription?) {
+                        deferred.complete(false)
+                    }
+                },
+                null,
+            )
+            if (!accepted) return false
+            withTimeout(timeoutMs) { deferred.await() }
+        } finally {
+            gestureGate.finish(gestureToken)
+        }
     }
 
     internal suspend fun tap(x: Float, y: Float, durationMs: Long): Boolean {
@@ -138,14 +154,12 @@ class LingXiAccessibilityService : AccessibilityService() {
     }
 
     internal fun cancelPendingGestures() {
-        val path = Path().apply { moveTo(-100f, -100f) }
-        dispatchGesture(
-            GestureDescription.Builder()
-                .addStroke(GestureDescription.StrokeDescription(path, 0, 1))
-                .build(),
-            null,
-            null,
-        )
+        // Android exposes no inert "cancel gesture" API. Dispatching another
+        // gesture cancels the old one but also injects a real pointer event, so
+        // a stop path must never use a fake tap as cancellation. Invalidate the
+        // tracked action instead; the cancelled agent coroutine and service
+        // teardown prevent any subsequent action from being accepted.
+        gestureGate.claimCancellation()
     }
 
     @RequiresApi(Build.VERSION_CODES.R)

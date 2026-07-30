@@ -8,6 +8,12 @@ internal enum class ComputerUseRisk {
     Blocked,
 }
 
+internal enum class ComputerUseObservedPackagePolicy {
+    Allowed,
+    BlockActions,
+    StopSession,
+}
+
 internal object ComputerUseSecurity {
     private val protectedPackagePrefixes = listOf(
         "com.lingxi.code",
@@ -39,6 +45,22 @@ internal object ComputerUseSecurity {
 
     fun isHardBlockedPackage(packageName: String): Boolean =
         protectedPackagePrefixes.any { packageName == it || packageName.startsWith("$it.") }
+
+    /**
+     * Accessibility events are a noisy observation stream, especially on OEM
+     * Android builds where transient overlays report their own package. An
+     * unselected package must never become controllable, but its event alone is
+     * not proof that the user escaped the authorized app. Only intrinsically
+     * protected packages terminate the whole session.
+     */
+    fun observedPackagePolicy(
+        packageName: String,
+        isAllowed: Boolean,
+    ): ComputerUseObservedPackagePolicy = when {
+        isHardBlockedPackage(packageName) -> ComputerUseObservedPackagePolicy.StopSession
+        isAllowed -> ComputerUseObservedPackagePolicy.Allowed
+        else -> ComputerUseObservedPackagePolicy.BlockActions
+    }
 
     fun isHardBlockedSurface(
         packageName: String,

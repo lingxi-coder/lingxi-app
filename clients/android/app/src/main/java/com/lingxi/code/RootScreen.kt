@@ -73,7 +73,10 @@ import com.lingxi.code.settings.SettingsStore
 import com.lingxi.code.theme.LingXiTheme
 import com.lingxi.code.voice.offline.SherpaVoice
 import android.Manifest
+import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import androidx.core.content.ContextCompat
 import com.lingxi.code.share.rememberShare
 import com.lingxi.code.vision.rememberCameraCapture
@@ -231,8 +234,26 @@ fun RootScreen(
     }
     val computerUseApproval by ComputerUseFeatureProvider.pendingApproval.collectAsState()
     val computerUseState by ComputerUseFeatureProvider.state.collectAsState()
+    val computerUseConfiguration by ComputerUseFeatureProvider.configuration.collectAsState()
+    val authorizedComputerUsePackages =
+        computerUseConfiguration.appSelections.keys +
+            computerUseState.grants.map { it.packageName }
+    val computerUseBrowserPackages = remember(appContext, authorizedComputerUsePackages) {
+        if (ComputerUseFeatureProvider.available) {
+            resolveBrowserPackages(
+                context = appContext,
+                candidatePackages = authorizedComputerUsePackages,
+            )
+        } else {
+            emptySet()
+        }
+    }
     val computerUseReadiness = if (ComputerUseFeatureProvider.available) {
-        computerUseSetupStatus(computerUseState)
+        computerUseSetupStatus(
+            state = computerUseState,
+            configuredPackages = computerUseConfiguration.appSelections.keys,
+            browserPackages = computerUseBrowserPackages,
+        )
     } else {
         null
     }
@@ -931,20 +952,45 @@ fun RootScreen(
     }
 }
 
-private const val ANDROID_CHROME_PACKAGE = "com.android.chrome"
-
-internal fun computerUseSetupStatus(state: ComputerUseUiState): ComputerUseSetupStatus =
+internal fun computerUseSetupStatus(
+    state: ComputerUseUiState,
+    configuredPackages: Set<String> = emptySet(),
+    browserPackages: Set<String>,
+): ComputerUseSetupStatus =
     ComputerUseSetupStatus(
         accessibilityEnabled = state.serviceEnabled,
-        chromeAuthorized = state.grants.any {
-            it.packageName == ANDROID_CHROME_PACKAGE
-        },
+        browserAuthorized =
+            state.grants.any { it.packageName in browserPackages } ||
+                configuredPackages.any { it in browserPackages },
         sessionActive = state.sessionState in setOf(
             ComputerUseSessionState.Starting,
             ComputerUseSessionState.Active,
             ComputerUseSessionState.AwaitingApproval,
         ),
     )
+
+/**
+ * Returns the selected Computer Use apps that Android confirms can open web
+ * links. Resolving each already-visible package explicitly avoids assuming a
+ * vendor-specific browser package such as Chrome or MIUI Browser.
+ */
+internal fun resolveBrowserPackages(
+    context: Context,
+    candidatePackages: Set<String>,
+): Set<String> {
+    if (candidatePackages.isEmpty()) return emptySet()
+
+    val webIntent = Intent(Intent.ACTION_VIEW, Uri.parse("https://example.com"))
+        .addCategory(Intent.CATEGORY_BROWSABLE)
+    return candidatePackages.filterTo(linkedSetOf()) { packageName ->
+        runCatching {
+            context.packageManager.resolveActivity(
+                Intent(webIntent).setPackage(packageName),
+                PackageManager.MATCH_DEFAULT_ONLY,
+            ) != null
+        }.getOrDefault(false)
+    }
+}
 
 internal fun shouldShowComputerUseSetup(
     readiness: ComputerUseSetupStatus?,

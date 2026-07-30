@@ -17,19 +17,19 @@ class ComputerUseSetupStatusTest {
     fun reportsOnlyMissingSetupSteps() {
         val status = ComputerUseSetupStatus(
             accessibilityEnabled = true,
-            chromeAuthorized = false,
+            browserAuthorized = false,
             sessionActive = false,
         )
 
         assertFalse(status.ready)
-        assertEquals("授权 Chrome、启动控制会话", status.missingSteps)
+        assertEquals("授权浏览器、启动控制会话", status.missingSteps)
     }
 
     @Test
     fun allRequirementsReadyHidesSetupPrompt() {
         val status = ComputerUseSetupStatus(
             accessibilityEnabled = true,
-            chromeAuthorized = true,
+            browserAuthorized = true,
             sessionActive = true,
         )
 
@@ -38,22 +38,47 @@ class ComputerUseSetupStatusTest {
     }
 
     @Test
-    fun startingSessionWithChromeGrantIsAlreadyReady() {
+    fun startingSessionWithBrowserGrantIsAlreadyReady() {
         val status = computerUseSetupStatus(
-            ComputerUseUiState(
+            state = ComputerUseUiState(
                 serviceEnabled = true,
                 sessionState = ComputerUseSessionState.Starting,
                 grants = listOf(
                     ComputerUseGrant(
-                        packageName = "com.android.chrome",
-                        label = "Chrome",
+                        packageName = "com.android.browser",
+                        label = "浏览器",
                         tier = ComputerUseTier.Full,
                     ),
                 ),
             ),
+            browserPackages = setOf("com.android.browser"),
         )
 
         assertTrue(status.ready)
+    }
+
+    @Test
+    fun savedBrowserSelectionOnlyLeavesSessionStartMissing() {
+        val status = computerUseSetupStatus(
+            state = ComputerUseUiState(serviceEnabled = true),
+            configuredPackages = setOf("com.android.browser"),
+            browserPackages = setOf("com.android.browser"),
+        )
+
+        assertFalse(status.ready)
+        assertEquals("启动控制会话", status.missingSteps)
+    }
+
+    @Test
+    fun nonBrowserSelectionStillRequiresBrowserAuthorization() {
+        val status = computerUseSetupStatus(
+            state = ComputerUseUiState(serviceEnabled = true),
+            configuredPackages = setOf("com.miui.gallery"),
+            browserPackages = emptySet(),
+        )
+
+        assertFalse(status.ready)
+        assertEquals("授权浏览器、启动控制会话", status.missingSteps)
     }
 
     @Test
@@ -97,7 +122,7 @@ class ComputerUseSetupStatusTest {
     fun dismissalStaysHiddenUntilANewAndroidUseRequestNeedsSetup() {
         val unavailable = ComputerUseSetupStatus(
             accessibilityEnabled = false,
-            chromeAuthorized = false,
+            browserAuthorized = false,
             sessionActive = false,
         )
 
@@ -122,7 +147,7 @@ class ComputerUseSetupStatusTest {
     fun configuredComputerUseNeverShowsOrReshowsSetup() {
         val ready = ComputerUseSetupStatus(
             accessibilityEnabled = true,
-            chromeAuthorized = true,
+            browserAuthorized = true,
             sessionActive = true,
         )
 

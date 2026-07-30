@@ -61,6 +61,13 @@ data class ComputerUseConfiguration(
     val listenEnabled: Boolean = false,
     val speakEnabled: Boolean = true,
     val maxListenSeconds: Int = 15,
+    /**
+     * Last app/tier choices shown by settings.
+     *
+     * These are only a convenience template. They do not become active grants
+     * until the user explicitly starts a new Computer Use session.
+     */
+    val appSelections: Map<String, ComputerUseTier> = emptyMap(),
 )
 
 internal fun shouldActivateMicrophoneForegroundService(

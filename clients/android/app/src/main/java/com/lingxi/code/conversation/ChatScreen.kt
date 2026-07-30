@@ -220,21 +220,21 @@ fun ChatScreen(
 /**
  * Real Direct-build Computer Use readiness projected into the conversation UI.
  *
- * The feature is usable only when Accessibility is connected, Chrome is among
- * the in-memory session grants, and the user-started session is active.
+ * The feature is usable only when Accessibility is connected, a browser is
+ * authorized, and the user-started session is active.
  */
 data class ComputerUseSetupStatus(
     val accessibilityEnabled: Boolean,
-    val chromeAuthorized: Boolean,
+    val browserAuthorized: Boolean,
     val sessionActive: Boolean,
 ) {
     val ready: Boolean
-        get() = accessibilityEnabled && chromeAuthorized && sessionActive
+        get() = accessibilityEnabled && browserAuthorized && sessionActive
 
     val missingSteps: String
         get() = buildList {
             if (!accessibilityEnabled) add("启用 LingXi 无障碍服务")
-            if (!chromeAuthorized) add("授权 Chrome")
+            if (!browserAuthorized) add("授权浏览器")
             if (!sessionActive) add("启动控制会话")
         }.joinToString("、")
 }

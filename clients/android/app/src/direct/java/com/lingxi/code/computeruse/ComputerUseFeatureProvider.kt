@@ -50,6 +50,11 @@ object ComputerUseFeatureProvider : ComputerUseFeature, AndroidComputerUseHost {
     private const val MAX_SECURITY_SCAN_NODES = 2_000
     private const val MAX_TREE_BYTES = 512 * 1024
     private const val APPROVAL_TIMEOUT_MS = 60_000L
+    private val ACCESSIBILITY_DISCONNECT_ERRORS = setOf(
+        "无障碍服务已断开",
+        "系统中断了无障碍服务",
+        "无障碍服务断开，控制会话已停止",
+    )
 
     private val mutableState = MutableStateFlow(ComputerUseUiState())
     private val mutableApproval = MutableStateFlow<ComputerUseApproval?>(null)
@@ -186,6 +191,14 @@ object ComputerUseFeatureProvider : ComputerUseFeature, AndroidComputerUseHost {
             }
             check(this.grants.isNotEmpty()) { "所选应用均属于不可控制界面" }
         }
+        val persistedSelections = currentGrants().associate {
+            it.packageName to it.tier
+        }
+        val configurationWithSelections = mutableConfiguration.value.copy(
+            appSelections = persistedSelections,
+        )
+        settingsStore?.save(configurationWithSelections)
+        mutableConfiguration.value = configurationWithSelections
         stopping = false
         val now = System.currentTimeMillis()
         lastInteractionAt.set(now)
@@ -321,7 +334,15 @@ object ComputerUseFeatureProvider : ComputerUseFeature, AndroidComputerUseHost {
         mutableState.value = mutableState.value.copy(serviceEnabled = false, lastError = reason)
     }
 
-    internal fun onAccessibilityEvent(packageName: String?, eventType: Int) {
+    internal fun onAccessibilityEvent(
+        service: LingXiAccessibilityService,
+        packageName: String?,
+        eventType: Int,
+    ) {
+        if (accessibility !== service) {
+            accessibility = service
+            refreshServiceStatus()
+        }
         generation.incrementAndGet()
         lastEventAt.set(System.currentTimeMillis())
         val observedPackage = packageName?.takeIf(String::isNotBlank) ?: return
@@ -350,12 +371,18 @@ object ComputerUseFeatureProvider : ComputerUseFeature, AndroidComputerUseHost {
         }
 
         mutableState.value = mutableState.value.copy(activePackage = observedPackage)
-        if (
-            ComputerUseSecurity.isHardBlockedPackage(observedPackage) ||
-            !isPackageAllowed(observedPackage)
+        when (
+            ComputerUseSecurity.observedPackagePolicy(
+                packageName = observedPackage,
+                isAllowed = isPackageAllowed(observedPackage),
+            )
         ) {
-            stopForSecurityViolation("控制目标切换到了未授权应用 $observedPackage")
-            return
+            ComputerUseObservedPackagePolicy.StopSession -> {
+                stopForSecurityViolation("控制目标切换到了受保护应用 $observedPackage")
+                return
+            }
+            ComputerUseObservedPackagePolicy.BlockActions -> return
+            ComputerUseObservedPackagePolicy.Allowed -> Unit
         }
 
         if (
@@ -755,14 +782,29 @@ object ComputerUseFeatureProvider : ComputerUseFeature, AndroidComputerUseHost {
         if (
             actionType != "open_app" &&
             afterPackage != originalPackage &&
-            afterPackage != applicationContext?.packageName &&
-            !isPackageAllowed(afterPackage)
+            afterPackage != applicationContext?.packageName
         ) {
-            audit.append(targetPackage, actionType, risk, confirmation, "target-changed")
-            stopForSecurityViolation("操作后跳入未授权应用 $afterPackage")
-            throw AndroidComputerUseFfiException.TargetNotAllowed(
-                "操作后跳入未授权应用 $afterPackage",
-            )
+            when (
+                ComputerUseSecurity.observedPackagePolicy(
+                    packageName = afterPackage,
+                    isAllowed = isPackageAllowed(afterPackage),
+                )
+            ) {
+                ComputerUseObservedPackagePolicy.StopSession -> {
+                    audit.append(targetPackage, actionType, risk, confirmation, "protected-target")
+                    stopForSecurityViolation("操作后跳入受保护应用 $afterPackage")
+                    throw AndroidComputerUseFfiException.ProtectedSurface(
+                        "操作后跳入受保护应用 $afterPackage",
+                    )
+                }
+                ComputerUseObservedPackagePolicy.BlockActions -> {
+                    audit.append(targetPackage, actionType, risk, confirmation, "target-changed")
+                    throw AndroidComputerUseFfiException.TargetNotAllowed(
+                        "操作后跳入未授权应用 $afterPackage",
+                    )
+                }
+                ComputerUseObservedPackagePolicy.Allowed -> Unit
+            }
         }
         touch()
         audit.append(
@@ -950,20 +992,41 @@ object ComputerUseFeatureProvider : ComputerUseFeature, AndroidComputerUseHost {
                     ) {
                         break
                     }
-                    if (
-                        foregroundPackage.isNotBlank() &&
-                        foregroundPackage != context.packageName &&
-                        !isPackageAllowed(foregroundPackage)
-                    ) {
-                        stopForSecurityViolation(
-                            "启动 $packageName 时跳入未授权应用 $foregroundPackage",
-                        )
-                        throw AndroidComputerUseFfiException.TargetNotAllowed(foregroundPackage)
+                    if (foregroundPackage.isNotBlank() && foregroundPackage != context.packageName) {
+                        when (
+                            ComputerUseSecurity.observedPackagePolicy(
+                                packageName = foregroundPackage,
+                                isAllowed = isPackageAllowed(foregroundPackage),
+                            )
+                        ) {
+                            ComputerUseObservedPackagePolicy.StopSession -> {
+                                stopForSecurityViolation(
+                                    "启动 $packageName 时跳入受保护应用 $foregroundPackage",
+                                )
+                                throw AndroidComputerUseFfiException.ProtectedSurface(
+                                    foregroundPackage,
+                                )
+                            }
+                            // OEM overlays can briefly own the active window while
+                            // the selected app is launching. Keep waiting, but every
+                            // action remains blocked until the selected app is active.
+                            ComputerUseObservedPackagePolicy.BlockActions,
+                            ComputerUseObservedPackagePolicy.Allowed,
+                            -> Unit
+                        }
                     }
                     delay(50)
                 }
             }
         } catch (_: kotlinx.coroutines.TimeoutCancellationException) {
+            val foregroundPackage = currentPackage()
+            if (
+                foregroundPackage.isNotBlank() &&
+                foregroundPackage != context.packageName &&
+                !isPackageAllowed(foregroundPackage)
+            ) {
+                throw AndroidComputerUseFfiException.TargetNotAllowed(foregroundPackage)
+            }
             throw AndroidComputerUseFfiException.Timeout("等待 $packageName 进入前台超时")
         }
         assertCurrentSurfaceSafe()
@@ -1314,7 +1377,14 @@ object ComputerUseFeatureProvider : ComputerUseFeature, AndroidComputerUseHost {
     }
 
     private fun refreshServiceStatus() {
-        mutableState.value = mutableState.value.copy(serviceEnabled = accessibility != null)
+        val serviceEnabled = accessibility != null
+        val lastError = mutableState.value.lastError
+        mutableState.value = mutableState.value.copy(
+            serviceEnabled = serviceEnabled,
+            lastError = lastError.takeUnless {
+                serviceEnabled && it in ACCESSIBILITY_DISCONNECT_ERRORS
+            },
+        )
     }
 
     private fun finishStoppedState(reason: String) {
@@ -1457,6 +1527,14 @@ object ComputerUseFeatureProvider : ComputerUseFeature, AndroidComputerUseHost {
         val root = accessibility?.activeRoot() ?: return null
         return try {
             val packageName = root.packageName?.toString().orEmpty()
+            if (
+                !shouldInspectComputerUseSurface(
+                    hostPackage = applicationContext?.packageName,
+                    rootPackage = packageName,
+                )
+            ) {
+                return null
+            }
             val scan = scanSurface(root)
             if (
                 ComputerUseSecurity.isHardBlockedSurface(

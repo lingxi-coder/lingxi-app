@@ -128,9 +128,66 @@ class ComputerUseSecurityTest {
     }
 
     @Test
+    fun untrustedVendorOverlayBlocksActionsWithoutStoppingTheSession() {
+        assertEquals(
+            ComputerUseObservedPackagePolicy.BlockActions,
+            ComputerUseSecurity.observedPackagePolicy(
+                packageName = "com.miui.systemAdSolution",
+                isAllowed = false,
+            ),
+        )
+        assertEquals(
+            ComputerUseObservedPackagePolicy.StopSession,
+            ComputerUseSecurity.observedPackagePolicy(
+                packageName = "com.android.permissioncontroller",
+                isAllowed = false,
+            ),
+        )
+        assertEquals(
+            ComputerUseObservedPackagePolicy.Allowed,
+            ComputerUseSecurity.observedPackagePolicy(
+                packageName = "com.android.browser",
+                isAllowed = true,
+            ),
+        )
+    }
+
+    @Test
     fun actionTiersMatchReadClickFullContract() {
         assertEquals(ComputerUseTier.Read, ComputerUseSecurity.requiredTier("screenshot"))
         assertEquals(ComputerUseTier.Click, ComputerUseSecurity.requiredTier("swipe"))
         assertEquals(ComputerUseTier.Full, ComputerUseSecurity.requiredTier("set_text"))
+    }
+
+    @Test
+    fun gestureCancellationOnlyDispatchesWhileAnActionIsInFlight() {
+        val gate = ComputerUseGestureGate()
+
+        assertFalse(gate.claimCancellation())
+        val firstGesture = gate.begin()
+        assertTrue(firstGesture != null)
+        assertTrue(gate.claimCancellation())
+        assertFalse(gate.claimCancellation())
+
+        val secondGesture = gate.begin()
+        assertTrue(secondGesture != null)
+        gate.finish(checkNotNull(firstGesture))
+        assertTrue(gate.claimCancellation())
+    }
+
+    @Test
+    fun staleExternalEventsDoNotScanTheLingXiSettingsSurface() {
+        assertFalse(
+            shouldInspectComputerUseSurface(
+                hostPackage = "com.lingxi.code.direct.debug",
+                rootPackage = "com.lingxi.code.direct.debug",
+            ),
+        )
+        assertTrue(
+            shouldInspectComputerUseSurface(
+                hostPackage = "com.lingxi.code.direct.debug",
+                rootPackage = "com.android.chrome",
+            ),
+        )
     }
 }

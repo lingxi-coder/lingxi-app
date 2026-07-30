@@ -21,6 +21,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
@@ -56,11 +57,18 @@ fun ComputerUseSettingsPage(
     val apps = remember { feature.listLaunchableApps(context) }
     val selected = remember {
         mutableStateMapOf<String, ComputerUseTier>().apply {
-            state.grants.forEach { put(it.packageName, it.tier) }
+            val launchablePackages = apps.mapTo(mutableSetOf()) { it.packageName }
+            val initial = if (state.grants.isNotEmpty()) {
+                state.grants.associate { it.packageName to it.tier }
+            } else {
+                configuration.appSelections
+            }
+            putAll(initial.filterKeys { it in launchablePackages })
         }
     }
     var search by remember { mutableStateOf("") }
     var pendingStart by remember { mutableStateOf<List<ComputerUseGrant>?>(null) }
+    var startFeedback by remember { mutableStateOf<String?>(null) }
     var microphoneGranted by remember {
         mutableStateOf(
             ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
@@ -79,12 +87,38 @@ fun ComputerUseSettingsPage(
                 includeSystemUi = grants.any { it.systemUi },
                 projectionResultCode = result.resultCode,
                 projectionData = result.data,
-            )
+            ).onFailure { error ->
+                startFeedback = error.message ?: "启动 Computer Use 失败"
+            }
+        } else {
+            startFeedback = "已取消屏幕捕获授权，无法启动 Computer Use"
         }
     }
     val notificationLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
-    ) { }
+    ) { granted ->
+        val grants = pendingStart
+        if (!granted || grants == null) {
+            pendingStart = null
+            if (!granted) {
+                startFeedback = "需要通知权限才能启动不可静默关闭的控制会话"
+            }
+        } else {
+            val projection = feature.mediaProjectionRequest(context)
+            if (projection != null) {
+                projectionLauncher.launch(projection)
+            } else {
+                pendingStart = null
+                feature.start(
+                    context = context,
+                    grants = grants,
+                    includeSystemUi = grants.any { it.systemUi },
+                ).onFailure { error ->
+                    startFeedback = error.message ?: "启动 Computer Use 失败"
+                }
+            }
+        }
+    }
     val microphoneLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
@@ -104,6 +138,19 @@ fun ComputerUseSettingsPage(
         search.isBlank() ||
             it.label.contains(search, ignoreCase = true) ||
             it.packageName.contains(search, ignoreCase = true)
+    }
+    LaunchedEffect(state.sessionState, state.grants, configuration.appSelections) {
+        val launchablePackages = apps.mapTo(mutableSetOf()) { it.packageName }
+        val source = if (state.grants.isNotEmpty()) {
+            state.grants.associate { it.packageName to it.tier }
+        } else {
+            configuration.appSelections
+        }
+        val restored = source.filterKeys { it in launchablePackages }
+        if (selected.toMap() != restored) {
+            selected.clear()
+            selected.putAll(restored)
+        }
     }
 
     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
@@ -135,6 +182,9 @@ fun ComputerUseSettingsPage(
                 Text("当前应用：$it", color = t.text3, fontSize = 12.sp)
             }
             state.lastError?.let {
+                Text(it, color = t.danger, fontSize = 12.sp)
+            }
+            startFeedback?.let {
                 Text(it, color = t.danger, fontSize = 12.sp)
             }
             TextButton(
@@ -278,7 +328,7 @@ fun ComputerUseSettingsPage(
                 modifier = Modifier.fillMaxWidth(),
             )
             Text(
-                "为每个应用选择本次会话权限",
+                "选择会被保留，但权限仅在你主动启动的控制会话内生效",
                 color = t.text2,
                 fontWeight = FontWeight.SemiBold,
             )
@@ -294,6 +344,7 @@ fun ComputerUseSettingsPage(
                             } else {
                                 selected[app.packageName] = ComputerUseTier.Read
                             }
+                            persistComputerUseAppSelections(context, feature, selected)
                         }
                         .padding(14.dp),
                 ) {
@@ -316,7 +367,10 @@ fun ComputerUseSettingsPage(
                             ComputerUseTier.entries.forEach { tier ->
                                 FilterChip(
                                     selected = selected[app.packageName] == tier,
-                                    onClick = { selected[app.packageName] = tier },
+                                    onClick = {
+                                        selected[app.packageName] = tier
+                                        persistComputerUseAppSelections(context, feature, selected)
+                                    },
                                     label = { Text(tier.label()) },
                                     modifier = Modifier.sizeIn(minHeight = 48.dp),
                                 )
@@ -338,16 +392,7 @@ fun ComputerUseSettingsPage(
             Button(
                 enabled = selected.isNotEmpty() && state.serviceEnabled,
                 onClick = {
-                    if (
-                        Build.VERSION.SDK_INT >= 33 &&
-                        ContextCompat.checkSelfPermission(
-                            context,
-                            Manifest.permission.POST_NOTIFICATIONS,
-                        ) != PackageManager.PERMISSION_GRANTED
-                    ) {
-                        notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                        return@Button
-                    }
+                    startFeedback = null
                     val grants = apps.mapNotNull { app ->
                         selected[app.packageName]?.let { tier ->
                             ComputerUseGrant(
@@ -358,6 +403,17 @@ fun ComputerUseSettingsPage(
                             )
                         }
                     }
+                    if (
+                        Build.VERSION.SDK_INT >= 33 &&
+                        ContextCompat.checkSelfPermission(
+                            context,
+                            Manifest.permission.POST_NOTIFICATIONS,
+                        ) != PackageManager.PERMISSION_GRANTED
+                    ) {
+                        pendingStart = grants
+                        notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                        return@Button
+                    }
                     val projection = feature.mediaProjectionRequest(context)
                     if (projection != null) {
                         pendingStart = grants
@@ -367,7 +423,9 @@ fun ComputerUseSettingsPage(
                             context,
                             grants,
                             includeSystemUi = grants.any { it.systemUi },
-                        )
+                        ).onFailure { error ->
+                            startFeedback = error.message ?: "启动 Computer Use 失败"
+                        }
                     }
                 },
                 modifier = Modifier.fillMaxWidth().sizeIn(minHeight = 52.dp),
@@ -397,6 +455,17 @@ private fun updateComputerUseConfiguration(
     configuration: ComputerUseConfiguration,
 ) {
     feature.updateConfiguration(context, configuration)
+}
+
+private fun persistComputerUseAppSelections(
+    context: android.content.Context,
+    feature: com.lingxi.code.computeruse.ComputerUseFeature,
+    selections: Map<String, ComputerUseTier>,
+) {
+    feature.updateConfiguration(
+        context,
+        feature.configuration.value.copy(appSelections = selections.toMap()),
+    )
 }
 
 private fun voiceLanguageLabel(language: String): String = when (language) {

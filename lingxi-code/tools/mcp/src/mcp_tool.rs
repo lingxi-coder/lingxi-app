@@ -783,6 +783,26 @@ impl Tool for MCPTool {
     fn max_result_size_chars(&self) -> usize {
         30_000
     }
+    /// claude-code's MCP factory (2.1.220 BIN off 232139111):
+    /// ```js
+    /// maxResultSizeChars: N ? Math.min(L, gor) : Gar.maxResultSizeChars,
+    /// persistenceThresholdCeiling: N ? gor : void 0,
+    /// ```
+    /// `N` is "this server declared its own output cap", `L` is that cap,
+    /// `gor = 500000`, and the generic MCP descriptor `Gar` declares
+    /// `maxResultSizeChars: 1e5` (BIN off 231406237).
+    ///
+    /// [`MCPTool`] models no server-declared cap, so `N` is always false here
+    /// and the raw value is `Gar`'s 100 000. The ceiling is left unset (see
+    /// the sibling default), which selects `AKr = 50000`, so the orchestrator's
+    /// fold yields an effective 50 000.
+    ///
+    /// NOT [`Self::max_result_size_chars`] (30 000): that is the truncation
+    /// cap, a separate oracle field. Folding it in here would persist MCP
+    /// output 20 000 chars earlier than claude does.
+    fn persistence_threshold(&self) -> Option<usize> {
+        Some(100_000)
+    }
     fn is_concurrency_safe(&self, _: &Value) -> bool {
         true
     }
@@ -1847,6 +1867,47 @@ pub async fn build_registered_mcp_tools(
 mod tests {
     use super::*;
     use std::collections::HashMap as StdHashMap;
+
+    /// MCP results persist above the folded 50 000 threshold.
+    ///
+    /// claude-code's MCP factory (2.1.220 BIN off 232139111) is
+    ///   `maxResultSizeChars: N ? Math.min(L, gor) : Gar.maxResultSizeChars`
+    ///   `persistenceThresholdCeiling: N ? gor : void 0`
+    /// where `N` is "the server declared its own output cap", `L` is that cap,
+    /// `gor = 500000`, and the generic MCP descriptor `Gar` declares
+    /// `maxResultSizeChars: 1e5` (BIN off 231406237).
+    ///
+    /// `MCPTool` models no server-declared cap, so `N` is always FALSE here:
+    /// the raw threshold is `Gar`'s 100 000 and the ceiling stays unset, which
+    /// selects the `AKr = 50000` default. `M0u`'s fold
+    /// (`Math.min(raw, ceiling ?? 50000)`) therefore yields 50 000.
+    ///
+    /// Deliberately NOT `max_result_size_chars()` (30 000 here): that is the
+    /// truncation cap, a different oracle field. Reusing it would persist MCP
+    /// output 20 000 chars earlier than claude does.
+    #[test]
+    fn mcp_persistence_threshold_folds_to_the_akr_default() {
+        let tool = MCPTool::new(tool_api::test_support::ctx_for_file_tools(
+            tool_api::test_support::make_dummy_fs(),
+            std::sync::Arc::new(telemetry::AnalyticsBus::new()),
+            vec![std::path::PathBuf::from("/tmp")],
+        ));
+        assert_eq!(
+            tool.persistence_threshold(),
+            Some(100_000),
+            "raw declared value is Gar.maxResultSizeChars = 1e5"
+        );
+        assert_eq!(
+            tool.persistence_threshold_ceiling(),
+            None,
+            "no server-declared cap => ceiling unset => AKr default applies"
+        );
+        assert_ne!(
+            tool.persistence_threshold(),
+            Some(tool.max_result_size_chars()),
+            "persistence threshold must NOT be the truncation cap"
+        );
+    }
 
     #[test]
     fn parse_full_name_happy() {

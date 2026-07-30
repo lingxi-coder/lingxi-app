@@ -38,7 +38,7 @@ export interface WorkspaceMetadata {
     message: string;
   };
 }
-export interface CredentialMetadata { configured: boolean; encryptionAvailable: boolean; sessionOnly?: true; runtimeOnly?: true }
+export interface CredentialMetadata { configured: boolean; encryptionAvailable: boolean; runtimeOnly?: true }
 export interface ProviderCredentialMetadata extends CredentialMetadata { providerId: string }
 export interface ProviderCredentialUpdate { credential: ProviderCredentialMetadata; settings: PublicSettings }
 export interface DiagnosticEntry {
@@ -50,7 +50,6 @@ export interface DiagnosticEntry {
 export interface BootstrapState {
   settings: PublicSettings;
   workspace: WorkspaceMetadata;
-  credential: CredentialMetadata;
   providerCredentials?: ProviderCredentialMetadata[];
   pendingAskUserQuestions?: AskUserQuestionRequestDto[];
   connection: ConnectionState;
@@ -72,9 +71,6 @@ export interface LingxiApi {
   setWorkspace(path: string): Promise<WorkspaceMetadata>;
   searchWorkspaceFiles(query: string): Promise<WorkspaceFileSearchResult>;
   setWorkspaceTrusted(trusted: boolean): Promise<WorkspaceMetadata>;
-  credential(): Promise<CredentialMetadata>;
-  setCredential(credential: string): Promise<CredentialMetadata>;
-  clearCredential(): Promise<CredentialMetadata>;
   providerCredentials(): Promise<ProviderCredentialMetadata[]>;
   setProviderCredential(providerId: string, credential: string): Promise<ProviderCredentialUpdate>;
   clearProviderCredential(providerId: string): Promise<ProviderCredentialMetadata>;

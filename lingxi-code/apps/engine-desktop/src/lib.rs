@@ -4757,27 +4757,75 @@ pub struct LlmStack {
     pub subscriber_state: SubscriberState,
 }
 
+/// The single credential composition shared by CLI, TUI, and Desktop.
+///
+/// Keeping the native-storage selection, fallback path, clock, HTTP transport,
+/// and [`CredentialManager`] construction together prevents entrypoints from
+/// silently drifting to different stores.
+pub struct SharedCredentialStack {
+    /// Platform HTTP transport used by the credential manager.
+    pub http: Arc<PosixHttp>,
+    /// Platform clock used by the credential manager.
+    pub clock: Arc<PosixClock>,
+    /// Shared storage handle, also reused by MCP OAuth persistence.
+    pub storage: Arc<dyn traits::SecureStorage>,
+    /// Canonical provider/OAuth credential manager.
+    pub credentials: Arc<CredentialManager>,
+}
+
+/// Build the credential stack shared by every desktop-class entrypoint.
+///
+/// Production uses the platform store rooted at `lingxi_home`. Isolated test
+/// boots opt into a file-only store and never consult the user's native
+/// keychain.
+///
+/// # Errors
+/// Returns [`BuildError::SecureStorage`] when the shared storage cannot be
+/// initialized.
+pub async fn build_shared_credential_stack(
+    lingxi_home: &std::path::Path,
+    isolated_credential_storage: bool,
+) -> Result<SharedCredentialStack, BuildError> {
+    let http = Arc::new(PosixHttp::new());
+    let clock = Arc::new(PosixClock::new());
+    let credentials_path = lingxi_home.join(".credentials.json");
+    let storage = if isolated_credential_storage {
+        platform_posix::plaintext_secure_storage(credentials_path).await
+    } else {
+        secure_storage_for_platform(
+            std::env::var("USER").unwrap_or_else(|_| "default".to_string()),
+            lingxi_home.to_path_buf(),
+            credentials_path,
+        )
+        .await
+    }
+    .map_err(|e| BuildError::SecureStorage(e.to_string()))?;
+    let credentials = Arc::new(CredentialManager::new(
+        storage.clone(),
+        clock.clone(),
+        http.clone(),
+    ));
+    Ok(SharedCredentialStack {
+        http,
+        clock,
+        storage,
+        credentials,
+    })
+}
+
 /// Resolve the LLM stack from a [`DesktopConfig`] alone.
 ///
 /// Pure with respect to the session: it touches the keychain, the process
 /// environment and the network (the availability probe), but creates no
 /// session, no transcript and no hooks.
 pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildError> {
-    // (1) Platform-minimal façade (http + clock + storage).
-    let http = Arc::new(PosixHttp::new());
-    let clock = Arc::new(PosixClock::new());
-    let credentials_path = cfg.lingxi_home.join(".credentials.json");
-    let storage = if cfg.isolated_credential_storage {
-        platform_posix::plaintext_secure_storage(credentials_path).await
-    } else {
-        secure_storage_for_platform(
-            std::env::var("USER").unwrap_or_else(|_| "default".to_string()),
-            cfg.lingxi_home.clone(),
-            credentials_path,
-        )
-        .await
-    }
-    .map_err(|e| BuildError::SecureStorage(e.to_string()))?;
+    // (1) Platform-minimal façade shared byte-for-byte with CLI/TUI auth.
+    let SharedCredentialStack {
+        http,
+        clock,
+        storage: mcp_oauth_storage,
+        credentials,
+    } = build_shared_credential_stack(&cfg.lingxi_home, cfg.isolated_credential_storage).await?;
 
     // (2a) Task 10: LlmTransportBridge wraps the PosixHttp transport for
     //      `DefaultLlmClient`. A second `PosixHttp` instance is used so the
@@ -4801,11 +4849,8 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
     let subscription: traits::subscription::SharedSubscription = std::sync::Arc::new(
         std::sync::RwLock::new(Some(traits::subscription::SubscriptionSnapshot::default())),
     );
-    // Retain a clone for the MCP OAuth seam (5.26): `CredentialManager::new`
-    // moves `storage`, but the registry's `OAuthDeps.storage` needs the SAME
-    // platform `Arc<dyn SecureStorage>` for per-server token persistence.
-    let mcp_oauth_storage = storage.clone();
-    let credentials = Arc::new(CredentialManager::new(storage, clock.clone(), http.clone()));
+    // `mcp_oauth_storage` and `credentials` originate from the same shared
+    // stack, so provider keys and MCP OAuth never split across backends.
     // (M13) Track WHERE the key came from — the auth resolver ranks an
     // env/host-supplied key ABOVE stored OAuth but a keychain-stored key BELOW
     // it, so the two sources must stay distinguishable.

@@ -31,9 +31,6 @@ const CH_WORKSPACE_PICK = 'lingxi:workspace:pick';
 const CH_WORKSPACE_SET = 'lingxi:workspace:set';
 const CH_WORKSPACE_FILES_SEARCH = 'lingxi:workspace-files:search';
 const CH_TRUST_SET = 'lingxi:trust:set';
-const CH_CREDENTIAL_GET = 'lingxi:credential:get';
-const CH_CREDENTIAL_SET = 'lingxi:credential:set';
-const CH_CREDENTIAL_CLEAR = 'lingxi:credential:clear';
 const CH_PROVIDER_CREDENTIALS_GET = 'lingxi:provider-credentials:get';
 const CH_PROVIDER_CREDENTIAL_SET = 'lingxi:provider-credential:set';
 const CH_PROVIDER_CREDENTIAL_CLEAR = 'lingxi:provider-credential:clear';
@@ -74,7 +71,7 @@ export interface WorkspaceMetadata {
     message: string;
   };
 }
-export interface CredentialMetadata { configured: boolean; encryptionAvailable: boolean; sessionOnly?: true; runtimeOnly?: true }
+export interface CredentialMetadata { configured: boolean; encryptionAvailable: boolean; runtimeOnly?: true }
 export interface ProviderCredentialMetadata extends CredentialMetadata { providerId: string }
 export interface ProviderCredentialUpdate { credential: ProviderCredentialMetadata; settings: PublicSettings }
 export interface DiagnosticEntry {
@@ -86,7 +83,6 @@ export interface DiagnosticEntry {
 export interface BootstrapState {
   settings: PublicSettings;
   workspace: WorkspaceMetadata;
-  credential: CredentialMetadata;
   providerCredentials?: ProviderCredentialMetadata[];
   pendingAskUserQuestions?: AskUserQuestionRequestDto[];
   connection: ConnectionState;
@@ -109,9 +105,6 @@ export interface LingxiApi {
   setWorkspace(path: string): Promise<WorkspaceMetadata>;
   searchWorkspaceFiles(query: string): Promise<WorkspaceFileSearchResult>;
   setWorkspaceTrusted(trusted: boolean): Promise<WorkspaceMetadata>;
-  credential(): Promise<CredentialMetadata>;
-  setCredential(credential: string): Promise<CredentialMetadata>;
-  clearCredential(): Promise<CredentialMetadata>;
   providerCredentials(): Promise<ProviderCredentialMetadata[]>;
   setProviderCredential(providerId: string, credential: string): Promise<ProviderCredentialUpdate>;
   clearProviderCredential(providerId: string): Promise<ProviderCredentialMetadata>;
@@ -153,9 +146,6 @@ const api: LingxiApi = {
   setWorkspace: (path) => ipcRenderer.invoke(CH_WORKSPACE_SET, path) as Promise<WorkspaceMetadata>,
   searchWorkspaceFiles: (query) => ipcRenderer.invoke(CH_WORKSPACE_FILES_SEARCH, query) as Promise<WorkspaceFileSearchResult>,
   setWorkspaceTrusted: (trusted) => ipcRenderer.invoke(CH_TRUST_SET, trusted) as Promise<WorkspaceMetadata>,
-  credential: () => ipcRenderer.invoke(CH_CREDENTIAL_GET) as Promise<CredentialMetadata>,
-  setCredential: (credential) => ipcRenderer.invoke(CH_CREDENTIAL_SET, credential) as Promise<CredentialMetadata>,
-  clearCredential: () => ipcRenderer.invoke(CH_CREDENTIAL_CLEAR) as Promise<CredentialMetadata>,
   providerCredentials: () => ipcRenderer.invoke(CH_PROVIDER_CREDENTIALS_GET) as Promise<ProviderCredentialMetadata[]>,
   setProviderCredential: (providerId, credential) => ipcRenderer.invoke(CH_PROVIDER_CREDENTIAL_SET, providerId, credential) as Promise<ProviderCredentialUpdate>,
   clearProviderCredential: (providerId) => ipcRenderer.invoke(CH_PROVIDER_CREDENTIAL_CLEAR, providerId) as Promise<ProviderCredentialMetadata>,

@@ -20,6 +20,7 @@ import {
   slashNavigationDirection,
 } from '../bridge/slashCommands';
 import { groupModelReferences, modelReference } from '../bridge/modelCatalog';
+import { persistProviderCredentialInput } from '../bridge/providerCredentials';
 import { Icon } from './Icon';
 import { PROVIDERS, providerById } from '../../shared/providers';
 import { PERM_MODES } from '../data';
@@ -1178,22 +1179,21 @@ export function SetupCard({ bridge }: { bridge: UseBridge }) {
   const t = useT();
   const snapshot = bridge.bootstrap;
   const workspace = snapshot?.workspace;
-  const credential = snapshot?.credential;
   const providerCredentials = snapshot?.providerCredentials ?? [];
   const configuredProviders = PROVIDERS.filter((provider) => providerCredentials.find((entry) => entry.providerId === provider.id)?.configured);
   const [selectedProviderId, setSelectedProviderId] = useState(configuredProviders[0]?.id ?? 'anthropic');
   const [key, setKey] = useState('');
   const selectedProvider = providerById(selectedProviderId) ?? PROVIDERS[0];
-  const selectedMetadata = providerCredentials.find((entry) => entry.providerId === selectedProvider.id)
-    ?? (selectedProvider.id === 'anthropic' ? { ...credential, providerId: 'anthropic' } : undefined);
+  const selectedMetadata = providerCredentials.find((entry) => entry.providerId === selectedProvider.id);
   const save = () => {
-    const value = key.trim();
-    if (!value) return;
-    setKey('');
-    invoke(() => bridge.setProviderCredential(selectedProvider.id, value));
+    const submitted = key;
+    invoke(async () => {
+      const saved = await persistProviderCredentialInput(selectedProvider.id, submitted, bridge.setProviderCredential);
+      if (saved) setKey((current) => current === submitted ? '' : current);
+    });
   };
   const workspaceUnavailable = Boolean(workspace?.recovery);
-  const hasProvider = configuredProviders.length > 0 || Boolean(credential?.configured);
+  const hasProvider = configuredProviders.length > 0;
   const step = !workspace?.path || workspaceUnavailable ? 1 : !workspace.trusted ? 2 : !hasProvider ? 3 : 4;
   return (
     <div style={{ flex: 1, display: 'grid', placeItems: 'center', padding: 30, background: t.stageBg, overflow: 'auto' }}>
@@ -1213,11 +1213,11 @@ export function SetupCard({ bridge }: { bridge: UseBridge }) {
           <Button primary={step === 2} disabled={!workspace?.path || workspaceUnavailable} onClick={() => invoke(() => bridge.setWorkspaceTrusted(true))}>Trust this workspace</Button>
         </SetupStep>
           <SetupStep number={3} title="Connect a provider" active={step === 3} complete={hasProvider}>
-            <p>Choose the provider and sign-in method for this desktop. Credentials are sent to the local engine only when it starts.</p>
+            <p>Choose a provider for this desktop. API keys are persisted by the local engine and shared with CLI and TUI.</p>
             {selectedMetadata?.runtimeOnly && <p style={{ color: t.ok }}>Available to the running engine for this app launch. LingXi has not stored this external credential.</p>}
-            {selectedMetadata?.configured && !selectedMetadata.sessionOnly && !selectedMetadata.runtimeOnly && <p style={{ color: t.ok }}>Saved in the shared macOS login Keychain used by Desktop, CLI, and TUI. Generic API keys do not appear in the Passwords app.</p>}
-            {selectedMetadata?.sessionOnly && <p style={{ color: t.warn }}>Available for this app session only. This build cannot access its signed macOS keychain group; reconnect after relaunch.</p>}
-            {!selectedMetadata?.configured && selectedMetadata?.encryptionAvailable === false && <p style={{ color: t.warn }}>Secure persistence is unavailable. You can still connect for this session; LingXi never writes a plaintext fallback.</p>}
+            {selectedMetadata?.configured && selectedMetadata.encryptionAvailable && !selectedMetadata.runtimeOnly && <p style={{ color: t.ok }}>Saved in the shared macOS login Keychain used by Desktop, CLI, and TUI. Generic API keys do not appear in the Passwords app.</p>}
+            {selectedMetadata?.configured && !selectedMetadata.encryptionAvailable && !selectedMetadata.runtimeOnly && <p style={{ color: t.warn }}>macOS Keychain is unavailable. Saved in the shared owner-only local fallback used by Desktop, CLI, and TUI.</p>}
+            {!selectedMetadata?.configured && selectedMetadata?.encryptionAvailable === false && <p style={{ color: t.warn }}>macOS Keychain is unavailable. Connecting will use the shared owner-only local fallback used by Desktop, CLI, and TUI.</p>}
           <div role="radiogroup" aria-label="LLM providers" style={{ width: '100%', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(155px, 1fr))', gap: 7 }}>
             {PROVIDERS.map((provider) => {
               const metadata = providerCredentials.find((entry) => entry.providerId === provider.id);
@@ -1234,7 +1234,7 @@ export function SetupCard({ bridge }: { bridge: UseBridge }) {
             <label htmlFor="provider-credential" style={{ color: t.text2, fontSize: 11 }}>{selectedProvider.keyLabel}</label>
             <div style={{ display: 'flex', gap: 7, width: '100%' }}>
               <input id="provider-credential" type="password" autoComplete="off" spellCheck={false} value={key} onChange={(event) => setKey(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') save(); }} placeholder={selectedProvider.keyPlaceholder} aria-label={selectedProvider.keyLabel} style={{ flex: 1, minWidth: 0, height: 33, borderRadius: 8, border: `0.5px solid ${t.border}`, background: t.windowBg, color: t.text, padding: '0 9px', outline: 0 }} />
-              <Button primary disabled={!key.trim()} onClick={save}>{selectedMetadata?.configured ? 'Replace' : 'Connect'}</Button>
+              <Button primary disabled={!key.trim()} onClick={save}>{selectedMetadata?.runtimeOnly ? 'Use entered key' : selectedMetadata?.configured ? 'Replace' : 'Connect'}</Button>
             </div>
           </> : <p style={{ color: t.warn }}>{selectedProvider.label} uses {selectedProvider.authMethod === 'oauth' ? 'OAuth' : 'device sign-in'}, which is available from the CLI/TUI connect flow but is not wired into this desktop build yet.</p>}
         </SetupStep>
@@ -1314,8 +1314,7 @@ export function BetaSettings({ bridge, theme, onTheme, onClose }: { bridge: UseB
   const [key, setKey] = useState('');
   const [selectedProviderId, setSelectedProviderId] = useState('anthropic');
   const selectedProvider = providerById(selectedProviderId) ?? PROVIDERS[0];
-  const selectedMetadata = snapshot?.providerCredentials?.find((entry) => entry.providerId === selectedProvider.id)
-    ?? (selectedProvider.id === 'anthropic' && snapshot?.credential ? { ...snapshot.credential, providerId: 'anthropic' } : undefined);
+  const selectedMetadata = snapshot?.providerCredentials?.find((entry) => entry.providerId === selectedProvider.id);
   const panelRef = useRef<HTMLElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
   const onCloseRef = useRef(onClose);
@@ -1340,7 +1339,13 @@ export function BetaSettings({ bridge, theme, onTheme, onClose }: { bridge: UseB
     document.addEventListener('keydown', keyDown);
     return () => { document.removeEventListener('keydown', keyDown); previouslyFocused?.focus(); };
   }, []);
-  const save = () => { const value = key.trim(); if (!value) return; setKey(''); invoke(() => bridge.setProviderCredential(selectedProvider.id, value)); };
+  const save = () => {
+    const submitted = key;
+    invoke(async () => {
+      const saved = await persistProviderCredentialInput(selectedProvider.id, submitted, bridge.setProviderCredential);
+      if (saved) setKey((current) => current === submitted ? '' : current);
+    });
+  };
   return (
     <div role="dialog" aria-modal="true" aria-labelledby="lingxi-settings-title" style={{ position: 'absolute', inset: 0, zIndex: 50, display: 'grid', placeItems: 'center', background: 'rgba(0,0,0,.42)', padding: 24 }}>
       <section ref={panelRef} style={{ width: 'min(720px, 100%)', maxHeight: 'min(720px, 92vh)', overflow: 'auto', borderRadius: 15, border: `0.5px solid ${t.border}`, background: t.windowBg, boxShadow: '0 24px 70px rgba(0,0,0,.36)' }}>
@@ -1349,7 +1354,7 @@ export function BetaSettings({ bridge, theme, onTheme, onClose }: { bridge: UseB
           <SettingsSection title="Appearance"><div style={{ display: 'flex', gap: 8 }}><Button primary={theme === 'dark'} onClick={() => onTheme('dark')}><Icon name="moon" size={13} /> Dark</Button><Button primary={theme === 'light'} onClick={() => onTheme('light')}><Icon name="sun" size={13} /> Light</Button></div></SettingsSection>
           <SettingsSection title="Workspace"><code className="mono" style={{ color: t.text2, fontSize: 10.5, overflowWrap: 'anywhere' }}>{snapshot?.workspace.path ?? 'Not selected'}</code><div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}><Button disabled={bridge.running} onClick={() => invoke(bridge.pickWorkspace)}>Change folder</Button>{snapshot?.workspace.path && <Button disabled={bridge.running} danger={snapshot.workspace.trusted} onClick={() => invoke(() => bridge.setWorkspaceTrusted(!snapshot.workspace.trusted))}>{snapshot.workspace.trusted ? 'Revoke trust' : 'Trust workspace'}</Button>}</div>{snapshot?.settings.recentWorkspaces.length ? <div><p style={{ marginBottom: 6 }}>Recent workspaces</p>{snapshot.settings.recentWorkspaces.map((path) => <button key={path} type="button" disabled={bridge.running} onClick={() => invoke(() => bridge.selectRecentWorkspace(path))} className="mono" style={{ display: 'block', width: '100%', padding: '5px 0', border: 0, background: 'transparent', color: t.accent, textAlign: 'left', cursor: bridge.running ? 'not-allowed' : 'pointer', opacity: bridge.running ? .5 : 1, fontSize: 10.5, overflow: 'hidden', textOverflow: 'ellipsis' }}>{path}</button>)}</div> : null}</SettingsSection>
           <SettingsSection title="Providers">
-            <p>Desktop, CLI, and TUI share provider credentials from the macOS login Keychain.</p>
+            <p>Desktop, CLI, and TUI share one credential store. It uses the macOS login Keychain when available and an owner-only local fallback otherwise.</p>
             <div style={{ width: '100%', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(145px, 1fr))', gap: 7 }}>
               {PROVIDERS.map((provider) => {
                 const metadata = snapshot?.providerCredentials?.find((entry) => entry.providerId === provider.id);
@@ -1358,9 +1363,9 @@ export function BetaSettings({ bridge, theme, onTheme, onClose }: { bridge: UseB
               })}
             </div>
             {selectedMetadata?.runtimeOnly && <p style={{ color: t.ok }}>The running engine received this credential from an external runtime source. LingXi has not stored it.</p>}
-            {selectedMetadata?.configured && !selectedMetadata.sessionOnly && !selectedMetadata.runtimeOnly && <p style={{ color: t.ok }}>Persisted securely on this Mac. Generic API keys are intentionally not listed in the Passwords app.</p>}
-            {selectedMetadata?.sessionOnly && <p style={{ color: t.warn }}>Session-only credential: it will be cleared when LingXi exits.</p>}
-            {!selectedMetadata?.configured && selectedMetadata?.encryptionAvailable === false && <p style={{ color: t.warn }}>Secure persistence is unavailable in this build; connecting keeps the key in memory only.</p>}
+            {selectedMetadata?.configured && selectedMetadata.encryptionAvailable && !selectedMetadata.runtimeOnly && <p style={{ color: t.ok }}>Persisted securely on this Mac. Generic API keys are intentionally not listed in the Passwords app.</p>}
+            {selectedMetadata?.configured && !selectedMetadata.encryptionAvailable && !selectedMetadata.runtimeOnly && <p style={{ color: t.warn }}>macOS Keychain is unavailable. This credential is in the shared owner-only local fallback used by Desktop, CLI, and TUI.</p>}
+            {!selectedMetadata?.configured && selectedMetadata?.encryptionAvailable === false && <p style={{ color: t.warn }}>macOS Keychain is unavailable. Connecting will use the shared owner-only local fallback used by Desktop, CLI, and TUI.</p>}
             {selectedProvider.available ? <>
               <label htmlFor="settings-provider-credential" style={{ color: t.text2, fontSize: 11 }}>{selectedProvider.keyLabel}</label>
               <div style={{ display: 'flex', gap: 7, width: '100%' }}><input id="settings-provider-credential" type="password" autoComplete="off" disabled={bridge.running} value={key} onChange={(event) => setKey(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') save(); }} placeholder={selectedMetadata?.configured ? 'Enter a replacement key' : selectedProvider.keyPlaceholder} aria-label={`${selectedProvider.keyLabel} for settings`} style={{ flex: 1, height: 33, borderRadius: 8, border: `0.5px solid ${t.border}`, background: t.surface, color: t.text, padding: '0 9px' }} /><Button disabled={!key.trim() || bridge.running} onClick={save}>{selectedMetadata?.runtimeOnly ? 'Use entered key' : selectedMetadata?.configured ? 'Replace' : 'Connect'}</Button>{selectedMetadata?.configured && !selectedMetadata.runtimeOnly && <Button disabled={bridge.running} danger onClick={() => invoke(() => bridge.clearProviderCredential(selectedProvider.id))}>Delete</Button>}</div>
@@ -1372,7 +1377,7 @@ export function BetaSettings({ bridge, theme, onTheme, onClose }: { bridge: UseB
             {bridge.desktop.doctor && <div style={{ color: bridge.desktop.doctor.summary.failed > 0 ? t.danger : bridge.desktop.doctor.summary.warnings > 0 ? t.warn : t.ok, fontSize: 10.5 }}>Doctor: {bridge.desktop.doctor.summary.passed} passed, {bridge.desktop.doctor.summary.warnings} warnings, {bridge.desktop.doctor.summary.failed} failed</div>}
           </SettingsSection>
           <SettingsSection title="Diagnostics"><p>Sanitized lifecycle messages only. Prompts, tool payloads and credential values are excluded.</p><div style={{ display: 'flex', gap: 7 }}><Button onClick={() => invoke(bridge.copyDiagnostics)}>Copy report</Button><Button onClick={() => invoke(bridge.exportDiagnostics)}>Export JSON…</Button><Button onClick={() => invoke(bridge.refreshDiagnostics)}>Refresh</Button></div><div className="mono" style={{ maxHeight: 170, overflow: 'auto', padding: 9, borderRadius: 8, background: t.surface, border: `0.5px solid ${t.border}`, color: t.text3, fontSize: 9.5, lineHeight: 1.55 }}>{snapshot?.diagnostics.length ? snapshot.diagnostics.map((entry, index) => <div key={`${entry.timestamp}-${index}`}><span style={{ color: entry.level === 'error' ? t.danger : entry.level === 'warn' ? t.warn : t.text4 }}>{entry.timestamp} [{entry.source}/{entry.level}]</span> {entry.message}</div>) : 'No diagnostic entries.'}</div></SettingsSection>
-          <SettingsSection title="About"><p>LingXi Code Desktop · Internal Beta</p><p>Local engine, explicit workspace trust, encrypted credentials, manual signed updates.</p></SettingsSection>
+          <SettingsSection title="About"><p>LingXi Code Desktop · Internal Beta</p><p>Local engine, explicit workspace trust, shared credential storage, manual signed updates.</p></SettingsSection>
         </div>
       </section>
     </div>

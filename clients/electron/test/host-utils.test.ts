@@ -19,7 +19,7 @@ import {
   workspaceFingerprint,
   workspaceTrust,
 } from '../src/main/host-utils';
-import { SettingsStore, type EncryptionProvider } from '../src/main/settings';
+import { SettingsStore } from '../src/main/settings';
 
 const temporaryDirectories: string[] = [];
 function temporaryDirectory(): string {
@@ -149,11 +149,11 @@ test('provider bridge arguments request a JSON credential envelope without embed
 
 test('credential envelope uses the bridge-server snake_case contract', () => {
   const payload = buildCredentialEnvelope({
-    apiKey: 'legacy-secret',
+    apiKey: 'anthropic-secret',
     providerCredentials: { deepseek: 'provider-secret' },
   });
   assert.deepEqual(JSON.parse(payload), {
-    api_key: 'legacy-secret',
+    api_key: 'anthropic-secret',
     provider_keys: { deepseek: 'provider-secret' },
   });
   assert.doesNotMatch(payload, /apiKey|providerKeys/);
@@ -182,179 +182,6 @@ test('sanitized diagnostics persist across host restarts without secret plaintex
   assert.match(second.snapshot()[0]?.message ?? '', /REDACTED/);
 });
 
-test('credential storage persists only encrypted bytes and exposes metadata only', () => {
-  const userData = temporaryDirectory();
-  const encryption: EncryptionProvider = {
-    isEncryptionAvailable: () => true,
-    encryptString: (value) => Buffer.from(`encrypted:${Buffer.from(value).toString('base64')}`),
-    decryptString: (value) => Buffer.from(value.toString().slice('encrypted:'.length), 'base64').toString(),
-  };
-  const store = new SettingsStore(userData, encryption);
-  const metadata = store.setCredential('credential-value');
-  assert.deepEqual(metadata, { configured: true, encryptionAvailable: true });
-  assert.doesNotMatch(readFileSync(store.credentialPath, 'utf8'), /credential-value/);
-  assert.equal(store.readCredential(), 'credential-value');
-  assert.deepEqual(store.clearCredential(), { configured: false, encryptionAvailable: true });
-});
-
-test('credential writes fail closed when platform encryption is unavailable', () => {
-  const store = new SettingsStore(temporaryDirectory(), {
-    isEncryptionAvailable: () => false,
-    encryptString: () => { throw new Error('must not encrypt'); },
-    decryptString: () => { throw new Error('must not decrypt'); },
-  });
-  assert.throws(() => store.setCredential('secret'), /unavailable/);
-});
-
-test('empty provider metadata does not probe macOS secure storage', () => {
-  let probes = 0;
-  const store = new SettingsStore(temporaryDirectory(), {
-    isEncryptionAvailable: () => { probes += 1; return true; },
-    encryptString: (value) => Buffer.from(value),
-    decryptString: (value) => value.toString(),
-  });
-  assert.deepEqual(store.providerCredentialMetadata('openai'), {
-    providerId: 'openai', configured: false, encryptionAvailable: true,
-  });
-  assert.deepEqual(store.credentialMetadata(), { configured: false, encryptionAvailable: true });
-  assert.equal(probes, 0);
-});
-
-test('provider credentials are encrypted and isolated by provider id', () => {
-  const userData = temporaryDirectory();
-  const encryption: EncryptionProvider = {
-    isEncryptionAvailable: () => true,
-    encryptString: (value) => Buffer.from(`encrypted:${Buffer.from(value).toString('base64')}`),
-    decryptString: (value) => Buffer.from(value.toString().slice('encrypted:'.length), 'base64').toString(),
-  };
-  const store = new SettingsStore(userData, encryption);
-  const openai = store.setProviderCredential('openai', 'openai-secret');
-  const deepseek = store.setProviderCredential('deepseek', 'deepseek-secret');
-  assert.equal(openai.providerId, 'openai');
-  assert.equal(deepseek.providerId, 'deepseek');
-  assert.equal(store.readProviderCredential('openai'), 'openai-secret');
-  assert.equal(store.readProviderCredential('deepseek'), 'deepseek-secret');
-  assert.deepEqual(store.readProviderCredentials(['openai']), { openai: 'openai-secret' });
-  assert.doesNotMatch(readFileSync(join(userData, 'provider-credentials', 'openai.bin'), 'utf8'), /openai-secret/);
-  assert.equal(store.clearProviderCredential('openai').configured, false);
-  assert.equal(store.readProviderCredential('openai'), undefined);
-});
-
-test('provider credentials survive a fresh settings store through the keychain backend', () => {
-  const userData = temporaryDirectory();
-  const values = new Map<string, string>();
-  const keychain = {
-    available: true,
-    has: (providerId: string) => values.has(providerId),
-    read: (providerId: string) => values.get(providerId),
-    write: (providerId: string, value: string) => { values.set(providerId, value); },
-    clear: (providerId: string) => { values.delete(providerId); },
-  };
-  const encryption: EncryptionProvider = {
-    isEncryptionAvailable: () => { throw new Error('legacy file path must not be used'); },
-    encryptString: () => { throw new Error('legacy file path must not be used'); },
-    decryptString: () => { throw new Error('legacy file path must not be used'); },
-  };
-  const first = new SettingsStore(userData, encryption, keychain);
-  assert.equal(first.setProviderCredential('deepseek', 'deepseek-secret').configured, true);
-  assert.equal(first.readProviderCredential('deepseek'), 'deepseek-secret');
-  assert.deepEqual(new SettingsStore(userData, encryption, keychain).readProviderCredentials(['deepseek']), {
-    deepseek: 'deepseek-secret',
-  });
-  assert.equal(first.clearProviderCredential('deepseek').configured, false);
-});
-
-test('legacy credential discovery reads only keychain items that exist', () => {
-  const userData = temporaryDirectory();
-  const reads: string[] = [];
-  const keychain = {
-    available: true,
-    has: (providerId: string) => providerId === 'deepseek',
-    read: (providerId: string) => {
-      reads.push(providerId);
-      return providerId === 'deepseek' ? 'deepseek-secret' : undefined;
-    },
-    write: () => { throw new Error('migration write is not expected'); },
-    clear: () => undefined,
-  };
-  const encryption: EncryptionProvider = {
-    isEncryptionAvailable: () => true,
-    encryptString: (value) => Buffer.from(value),
-    decryptString: (value) => value.toString(),
-  };
-
-  const store = new SettingsStore(userData, encryption, keychain);
-  assert.deepEqual(store.readProviderCredentials(['openai', 'deepseek', 'openrouter']), {
-    deepseek: 'deepseek-secret',
-  });
-  assert.deepEqual(reads, ['deepseek']);
-});
-
-test('legacy encrypted credentials wait for direct engine migration', () => {
-  const userData = temporaryDirectory();
-  mkdirSync(join(userData, 'provider-credentials'), { recursive: true });
-  writeFileSync(join(userData, 'provider-credentials', 'deepseek.bin'), 'encrypted:deepseek-secret');
-  let compatibilityWrites = 0;
-  const store = new SettingsStore(userData, {
-    isEncryptionAvailable: () => true,
-    encryptString: (value) => Buffer.from(`encrypted:${value}`),
-    decryptString: (value) => value.toString().slice('encrypted:'.length),
-  }, {
-    available: true,
-    has: () => false,
-    read: () => undefined,
-    write: () => { compatibilityWrites += 1; },
-    clear: () => undefined,
-  });
-
-  assert.equal(store.readProviderCredential('deepseek'), 'deepseek-secret');
-  assert.equal(compatibilityWrites, 0);
-  assert.equal(readFileSync(join(userData, 'provider-credentials', 'deepseek.bin'), 'utf8'), 'encrypted:deepseek-secret');
-});
-
-test('macOS keeps a replacement credential in memory when secure persistence is unavailable', () => {
-  const keychain = {
-    available: false,
-    has: () => false,
-    read: () => undefined,
-    write: () => { throw new Error('must not write an unavailable keychain'); },
-    clear: () => undefined,
-  };
-  const encryption: EncryptionProvider = {
-    isEncryptionAvailable: () => { throw new Error('legacy Safe Storage must not be used on macOS'); },
-    encryptString: () => { throw new Error('legacy Safe Storage must not be used on macOS'); },
-    decryptString: () => { throw new Error('legacy Safe Storage must not be used on macOS'); },
-  };
-  const userData = temporaryDirectory();
-  const store = new SettingsStore(userData, encryption, keychain);
-
-  assert.deepEqual(store.setProviderCredential('deepseek', 'replacement-secret'), {
-    providerId: 'deepseek',
-    configured: true,
-    encryptionAvailable: false,
-    sessionOnly: true,
-  });
-  assert.equal(store.readProviderCredential('deepseek'), 'replacement-secret');
-  assert.deepEqual(new SettingsStore(userData, encryption, keychain).providerCredentialMetadata('deepseek'), {
-    providerId: 'deepseek',
-    configured: false,
-    encryptionAvailable: false,
-  });
-});
-
-test('unavailable persisted provider storage fails closed without exposing a secret', () => {
-  const userData = temporaryDirectory();
-  mkdirSync(join(userData, 'provider-credentials'), { recursive: true });
-  writeFileSync(join(userData, 'provider-credentials', 'deepseek.bin'), 'encrypted-by-missing-keychain');
-  const store = new SettingsStore(userData, {
-    isEncryptionAvailable: () => { throw new Error('keychain unavailable'); },
-    encryptString: () => { throw new Error('must not encrypt'); },
-    decryptString: () => { throw new Error('keychain unavailable'); },
-  });
-  assert.equal(store.providerCredentialMetadata('deepseek').configured, true);
-  assert.deepEqual(store.readProviderCredentials(['deepseek']), {});
-});
-
 test('settings reject secret-bearing API URLs and only reopen recorded workspaces', () => {
   const userData = temporaryDirectory();
   writeFileSync(join(userData, 'settings.v1.json'), JSON.stringify({
@@ -363,18 +190,10 @@ test('settings reject secret-bearing API URLs and only reopen recorded workspace
     recentWorkspaces: [],
     trustedWorkspaces: {},
   }));
-  const store = new SettingsStore(userData, {
-    isEncryptionAvailable: () => true,
-    encryptString: (value) => Buffer.from(value),
-    decryptString: (value) => value.toString(),
-  });
+  const store = new SettingsStore(userData);
   assert.equal(store.getPublic().apiBaseUrl, undefined);
   assert.equal(store.update({ theme: 'light' }).theme, 'light');
-  assert.equal(new SettingsStore(userData, {
-    isEncryptionAvailable: () => true,
-    encryptString: (value) => Buffer.from(value),
-    decryptString: (value) => value.toString(),
-  }).getPublic().theme, 'light');
+  assert.equal(new SettingsStore(userData).getPublic().theme, 'light');
   assert.throws(() => store.update({ apiBaseUrl: 'https://user:secret@api.example.test/v1' }), /must not contain/);
   assert.throws(() => store.update({ apiBaseUrl: 'https://api.example.test/v1#token' }), /must not contain/);
 

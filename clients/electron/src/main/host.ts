@@ -7,7 +7,18 @@ import type { BridgeManager, ConnectionState } from './bridge.js';
 import { WorkspaceFileSearch } from './file-search.js';
 import { canonicalWorkspace, DiagnosticBuffer, sanitizeDiagnostic, type DiagnosticEntry, type PublicSettings } from './host-utils.js';
 import { PROVIDER_IDS, providerById } from '../shared/providers.js';
-import type { CredentialMetadata, ProviderCredentialMetadata, SettingsStore } from './settings.js';
+import type { SettingsStore } from './settings.js';
+
+export interface CredentialMetadata {
+  configured: boolean;
+  encryptionAvailable: boolean;
+  /** The running engine received a credential from an external runtime source. */
+  runtimeOnly?: true;
+}
+
+export interface ProviderCredentialMetadata extends CredentialMetadata {
+  providerId: string;
+}
 
 export const CH_BOOTSTRAP = 'lingxi:bootstrap';
 export const CH_SETTINGS_GET = 'lingxi:settings:get';
@@ -16,9 +27,6 @@ export const CH_WORKSPACE_PICK = 'lingxi:workspace:pick';
 export const CH_WORKSPACE_SET = 'lingxi:workspace:set';
 export const CH_WORKSPACE_FILES_SEARCH = 'lingxi:workspace-files:search';
 export const CH_TRUST_SET = 'lingxi:trust:set';
-export const CH_CREDENTIAL_GET = 'lingxi:credential:get';
-export const CH_CREDENTIAL_SET = 'lingxi:credential:set';
-export const CH_CREDENTIAL_CLEAR = 'lingxi:credential:clear';
 export const CH_PROVIDER_CREDENTIALS_GET = 'lingxi:provider-credentials:get';
 export const CH_PROVIDER_CREDENTIAL_SET = 'lingxi:provider-credential:set';
 export const CH_PROVIDER_CREDENTIAL_CLEAR = 'lingxi:provider-credential:clear';
@@ -53,7 +61,6 @@ export interface WorkspaceMetadata {
 export interface BootstrapState {
   settings: PublicSettings;
   workspace: WorkspaceMetadata;
-  credential: CredentialMetadata;
   providerCredentials?: ProviderCredentialMetadata[];
   pendingAskUserQuestions?: AskUserQuestionRequestDto[];
   connection: ConnectionState;
@@ -169,28 +176,6 @@ export class HostController {
       await this.restartIfConfigured();
       return { path: workspace, ...result };
     });
-    ipcMain.handle(CH_CREDENTIAL_GET, (event: IpcMainInvokeEvent) => { this.assertSender(event); return this.credentialSnapshot(); });
-    ipcMain.handle(CH_CREDENTIAL_SET, async (event: IpcMainInvokeEvent, credential: unknown) => {
-      this.assertSender(event);
-      if (typeof credential !== 'string') throw new Error('invalid credential');
-      this.assertNoActiveTurn();
-      this.requireWorkspace();
-      await this.bridge.setProviderCredential('anthropic', credential);
-      // Remove any legacy Electron-owned copy only after the shared engine
-      // keychain write has succeeded.
-      this.settings.clearCredential();
-      await this.restartIfConfigured();
-      return this.credentialSnapshot();
-    });
-    ipcMain.handle(CH_CREDENTIAL_CLEAR, async (event: IpcMainInvokeEvent) => {
-      this.assertSender(event);
-      this.assertNoActiveTurn();
-      this.requireWorkspace();
-      await this.bridge.deleteProviderCredential('anthropic');
-      this.settings.clearCredential();
-      await this.restartIfConfigured();
-      return this.credentialSnapshot();
-    });
     ipcMain.handle(CH_PROVIDER_CREDENTIALS_GET, (event: IpcMainInvokeEvent) => {
       this.assertSender(event);
       return this.providerCredentialSnapshot();
@@ -201,11 +186,18 @@ export class HostController {
       if (typeof credential !== 'string') throw new Error('invalid credential');
       this.assertNoActiveTurn();
       this.requireWorkspace();
-      await this.bridge.setProviderCredential(provider.id, credential);
-      this.settings.clearProviderCredential(provider.id);
+      const stored = await this.bridge.setProviderCredential(provider.id, credential);
+      if (!stored.configured_provider_ids.includes(provider.id)) {
+        throw new Error(`provider credential was not persisted (${provider.id})`);
+      }
+      const credentialMetadata: ProviderCredentialMetadata = {
+        providerId: provider.id,
+        configured: true,
+        encryptionAvailable: stored.storage_encrypted,
+      };
       if (provider.defaultModel) this.settings.update({ model: provider.defaultModel });
       await this.restartIfConfigured();
-      return { credential: this.providerCredentialMetadata(provider.id), settings: this.settings.getPublic() };
+      return { credential: credentialMetadata, settings: this.settings.getPublic() };
     });
     ipcMain.handle(CH_PROVIDER_CREDENTIAL_CLEAR, async (event: IpcMainInvokeEvent, providerId: unknown) => {
       this.assertSender(event);
@@ -213,7 +205,6 @@ export class HostController {
       this.assertNoActiveTurn();
       this.requireWorkspace();
       await this.bridge.deleteProviderCredential(provider.id);
-      this.settings.clearProviderCredential(provider.id);
       await this.restartIfConfigured();
       return this.providerCredentialMetadata(provider.id);
     });
@@ -267,7 +258,6 @@ export class HostController {
     return {
       settings: this.settings.getPublic(),
       workspace: this.workspace(),
-      credential: this.credentialSnapshot(),
       providerCredentials: this.providerCredentialSnapshot(),
       ...(pendingAskUserQuestions.length > 0 ? { pendingAskUserQuestions: [...pendingAskUserQuestions] } : {}),
       connection: this.bridge.connectionState,
@@ -292,7 +282,6 @@ export class HostController {
         fingerprint: workspace.fingerprint,
         recovery: workspace.recovery,
       },
-      credential: this.credentialSnapshot(),
       providerCredentials: this.providerCredentialSnapshot(),
       connection: this.bridge.connectionState,
       bridgeRuntime: this.bridge.runtimeVersions,
@@ -307,38 +296,36 @@ export class HostController {
   }
 
   private providerCredentialSnapshot(): ProviderCredentialMetadata[] {
-    const providerMetadata = (this.settings as SettingsStore & {
-      providerCredentialMetadataFor?: (providerIds: readonly string[]) => ProviderCredentialMetadata[];
-    }).providerCredentialMetadataFor;
-    const activeProviders = new Set(this.bridge.activeCredentialProviderIds ?? []);
+    const activeProviders = new Set(
+      this.bridge.connectionState.status === 'connected'
+        ? this.bridge.activeCredentialProviderIds ?? []
+        : [],
+    );
     const persistedProviders = new Set(this.bridge.persistedCredentialProviderIds ?? []);
     const engineStorageEncrypted = this.bridge.providerCredentialStorageEncrypted ?? false;
-    const snapshot = typeof providerMetadata === 'function'
-      ? providerMetadata.call(this.settings, PROVIDER_IDS)
-      : PROVIDER_IDS.map((providerId) => providerId === 'anthropic'
-        ? { providerId, ...this.settings.credentialMetadata() }
-        : { providerId, configured: false, encryptionAvailable: false });
-    return snapshot.map((metadata) => {
-      if (persistedProviders.has(metadata.providerId)) {
+    return PROVIDER_IDS.map((providerId) => {
+      if (persistedProviders.has(providerId)) {
         return {
-          providerId: metadata.providerId,
+          providerId,
           configured: true,
           encryptionAvailable: engineStorageEncrypted,
         };
       }
-      if (metadata.configured || !activeProviders.has(metadata.providerId)) return metadata;
-      return { ...metadata, configured: true, runtimeOnly: true };
+      if (activeProviders.has(providerId)) {
+        return {
+          providerId,
+          configured: true,
+          encryptionAvailable: false,
+          runtimeOnly: true,
+        };
+      }
+      return { providerId, configured: false, encryptionAvailable: engineStorageEncrypted };
     });
   }
 
   private providerCredentialMetadata(providerId: string): ProviderCredentialMetadata {
     return this.providerCredentialSnapshot().find((metadata) => metadata.providerId === providerId)
       ?? { providerId, configured: false, encryptionAvailable: false };
-  }
-
-  private credentialSnapshot(): CredentialMetadata {
-    const { providerId: _providerId, ...metadata } = this.providerCredentialMetadata('anthropic');
-    return metadata;
   }
 
   private requireProvider(providerId: unknown) {
@@ -372,7 +359,7 @@ export class HostController {
     for (const channel of [
       CH_BOOTSTRAP, CH_SETTINGS_GET, CH_SETTINGS_UPDATE, CH_WORKSPACE_PICK, CH_WORKSPACE_SET,
       CH_WORKSPACE_FILES_SEARCH,
-      CH_TRUST_SET, CH_CREDENTIAL_GET, CH_CREDENTIAL_SET, CH_CREDENTIAL_CLEAR,
+      CH_TRUST_SET,
       CH_PROVIDER_CREDENTIALS_GET, CH_PROVIDER_CREDENTIAL_SET, CH_PROVIDER_CREDENTIAL_CLEAR,
       CH_BRIDGE_RESTART, CH_DIAGNOSTICS_GET,
       CH_DIAGNOSTICS_COPY, CH_DIAGNOSTICS_EXPORT, CH_OPEN_SYSTEM_SETTINGS,

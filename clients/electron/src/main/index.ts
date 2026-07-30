@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, safeStorage, shell, type Session } from 'electron';
+import { app, BrowserWindow, dialog, shell, type Session } from 'electron';
 import { join } from 'node:path';
 import { dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -7,8 +7,11 @@ import { BridgeManager } from './bridge.js';
 import { HostController } from './host.js';
 import { DiagnosticBuffer, sanitizeDiagnostic } from './host-utils.js';
 import { SettingsStore } from './settings.js';
-import { MacKeychainCredentialStore } from './keychain.js';
+import { ignoreBrokenPipe } from './process-streams.js';
 import { PROVIDER_IDS } from '../shared/providers.js';
+
+ignoreBrokenPipe(process.stdout);
+ignoreBrokenPipe(process.stderr);
 
 const moduleDirectory = dirname(fileURLToPath(import.meta.url));
 const securedSessions = new WeakSet<Session>();
@@ -145,10 +148,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(() => {
   const diagnostics = new DiagnosticBuffer(join(userData, 'logs', 'desktop.jsonl'));
   diagnostics.add('info', 'host', `desktop start: app=${app.getVersion()} electron=${process.versions.electron} platform=${process.platform} arch=${process.arch}`);
   diagnostics.add('info', 'host', 'credential store: shared engine secure storage');
-  // SettingsStore remains a read-only migration source for pre-unification
-  // Electron ciphertext and generic-password items. New writes go through the
-  // bridge into the Rust CredentialManager shared with CLI/TUI.
-  const settings = new SettingsStore(userData, safeStorage, new MacKeychainCredentialStore());
+  const settings = new SettingsStore(userData);
   bridge = new BridgeManager({
     isPackaged: app.isPackaged,
     resourcesPath: process.resourcesPath,
@@ -162,9 +162,6 @@ if (hasSingleInstanceLock) void app.whenReady().then(() => {
         : { trusted: false };
     },
     onModelChanged: (model) => { settings.update({ model }); },
-    onProviderCredentialMigrated: (providerId) => {
-      settings.clearProviderCredential(providerId);
-    },
     confirmBypassPermissions: async () => {
       // Shown ONCE per install (persisted), mirroring the oracle's
       // `bypassPermissionsModeAccepted`. Body text is the oracle's Bypass
@@ -196,25 +193,12 @@ if (hasSingleInstanceLock) void app.whenReady().then(() => {
       const workspace = settings.getWorkspace();
       if (!workspace) throw new Error('select a workspace before starting the bridge');
       const configured = settings.getPublic();
-      const providerIds = PROVIDER_IDS;
-      const legacyCredentials = settings.readProviderCredentials(providerIds);
-      const credentials = { ...legacyCredentials };
-      for (const providerId of providerIds) {
-        if (credentials[providerId] === undefined) {
-          const environmentCredential = readEnvironmentCredential(providerId);
-          if (environmentCredential !== undefined) credentials[providerId] = environmentCredential;
+      const credentials: Record<string, string> = {};
+      for (const providerId of PROVIDER_IDS) {
+        const environmentCredential = readEnvironmentCredential(providerId);
+        if (environmentCredential !== undefined) {
+          credentials[providerId] = environmentCredential;
         }
-      }
-      const unavailable = settings
-        .providerCredentialMetadataFor(providerIds)
-        .filter((entry) => entry.configured && credentials[entry.providerId] === undefined)
-        .map((entry) => entry.providerId);
-      if (unavailable.length > 0) {
-        diagnostics.add(
-          'warn',
-          'host',
-          `legacy provider credential is unreadable and will be ignored (${unavailable.join(', ')})`,
-        );
       }
       return {
         workspace,
@@ -223,7 +207,6 @@ if (hasSingleInstanceLock) void app.whenReady().then(() => {
         providerCredentials: Object.fromEntries(
           Object.entries(credentials).filter(([providerId]) => providerId !== 'anthropic'),
         ),
-        providerCredentialsToMigrate: legacyCredentials,
         model: configured.model,
         apiBaseUrl: configured.apiBaseUrl,
       };

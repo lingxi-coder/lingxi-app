@@ -25,7 +25,6 @@ import {
 import type {
   BootstrapState,
   ConnectionState,
-  CredentialMetadata,
   DiagnosticEntry,
   ProviderCredentialMetadata,
   ProviderCredentialUpdate,
@@ -63,8 +62,6 @@ export interface UseBridge {
   selectRecentWorkspace(path: string): Promise<WorkspaceMetadata>;
   searchWorkspaceFiles(query: string): Promise<WorkspaceFileSearchResult>;
   setWorkspaceTrusted(trusted: boolean): Promise<WorkspaceMetadata>;
-  setCredential(credential: string): Promise<CredentialMetadata>;
-  clearCredential(): Promise<CredentialMetadata>;
   setProviderCredential(providerId: string, credential: string): Promise<ProviderCredentialUpdate>;
   clearProviderCredential(providerId: string): Promise<ProviderCredentialMetadata>;
   setThemePreference(theme: 'dark' | 'light'): Promise<void>;
@@ -386,48 +383,28 @@ export function useBridge(): UseBridge {
     } catch (cause) { return capture(cause); }
   }, [capture, host, patchBootstrap]);
 
-  const setCredential = useCallback(async (credential: string) => {
-    if (!host) throw new Error('Desktop host unavailable.');
-    try {
-      const metadata = await host.setCredential(credential);
-      patchBootstrap({ credential: metadata });
-      return metadata;
-    } catch (cause) { return capture(cause); }
-  }, [capture, host, patchBootstrap]);
-
-  const clearCredential = useCallback(async () => {
-    if (!host) throw new Error('Desktop host unavailable.');
-    try {
-      const credential = await host.clearCredential();
-      patchBootstrap({ credential });
-      return credential;
-    } catch (cause) { return capture(cause); }
-  }, [capture, host, patchBootstrap]);
-
   const setProviderCredential = useCallback(async (providerId: string, credential: string) => {
     if (!host) throw new Error('Desktop host unavailable.');
     try {
       const update = await host.setProviderCredential(providerId, credential);
       patchBootstrap({
         settings: update.settings,
-        credential: update.credential.providerId === 'anthropic' ? update.credential : bootstrap?.credential ?? { configured: false, encryptionAvailable: false },
         providerCredentials: (bootstrap?.providerCredentials ?? []).map((entry) => entry.providerId === providerId ? update.credential : entry),
       });
       return update;
     } catch (cause) { return capture(cause); }
-  }, [bootstrap?.credential, bootstrap?.providerCredentials, capture, host, patchBootstrap]);
+  }, [bootstrap?.providerCredentials, capture, host, patchBootstrap]);
 
   const clearProviderCredential = useCallback(async (providerId: string) => {
     if (!host) throw new Error('Desktop host unavailable.');
     try {
       const metadata = await host.clearProviderCredential(providerId);
       patchBootstrap({
-        credential: metadata.providerId === 'anthropic' ? metadata : bootstrap?.credential ?? { configured: false, encryptionAvailable: false },
         providerCredentials: (bootstrap?.providerCredentials ?? []).map((entry) => entry.providerId === providerId ? metadata : entry),
       });
       return metadata;
     } catch (cause) { return capture(cause); }
-  }, [bootstrap?.credential, bootstrap?.providerCredentials, capture, host, patchBootstrap]);
+  }, [bootstrap?.providerCredentials, capture, host, patchBootstrap]);
 
   const setThemePreference = useCallback(async (theme: 'dark' | 'light') => {
     if (!host) return;
@@ -526,8 +503,6 @@ export function useBridge(): UseBridge {
     selectRecentWorkspace,
     searchWorkspaceFiles,
     setWorkspaceTrusted,
-    setCredential,
-    clearCredential,
     setProviderCredential,
     clearProviderCredential,
     setThemePreference,

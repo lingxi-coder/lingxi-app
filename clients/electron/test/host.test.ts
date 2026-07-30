@@ -76,6 +76,36 @@ test('bootstrap treats a credential already supplied to the running engine as co
   });
 });
 
+test('bootstrap does not treat launch credentials as configured when the engine failed to start', () => {
+  const diagnostics = new DiagnosticBuffer();
+  const settings = {
+    getWorkspace: () => '/workspace',
+    getTrust: () => ({ trusted: true, fingerprint: 'fingerprint' }),
+    getPublic: () => ({ version: 1, recentWorkspaces: ['/workspace'] }),
+    credentialMetadata: () => ({ configured: false, encryptionAvailable: false }),
+    providerCredentialMetadataFor: (providerIds: readonly string[]) => providerIds.map((providerId) => ({
+      providerId,
+      configured: false,
+      encryptionAvailable: false,
+    })),
+  };
+  const bridge = {
+    connectionState: { status: 'error' as const, message: 'bridge-server binary not found' },
+    activeCredentialProviderIds: ['deepseek'],
+    turnActive: false,
+  };
+  const host = new HostController(settings as any, bridge as any, diagnostics);
+
+  const bootstrap = (host as any).bootstrap();
+  const deepseek = bootstrap.providerCredentials.find((entry: { providerId: string }) => entry.providerId === 'deepseek');
+
+  assert.deepEqual(deepseek, {
+    providerId: 'deepseek',
+    configured: false,
+    encryptionAvailable: false,
+  });
+});
+
 test('bootstrap reports CLI/TUI credentials discovered by the shared engine store as persisted', () => {
   const diagnostics = new DiagnosticBuffer();
   const settings = {

@@ -473,28 +473,17 @@ fn print_status_text(
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
-/// Build a `CredentialManager` over the platform secure store, addressing the
-/// SAME `~/.claude` (or `$LINGXI_CONFIG_DIR`) location the desktop runtime and
-/// `/login` write to, so `status` / `logout` observe real credentials.
-async fn build_credential_manager() -> Result<secret::CredentialManager, anyhow::Error> {
+/// Open the exact credential stack used by the bridge/Desktop runtime.
+async fn build_credential_manager() -> Result<Arc<secret::CredentialManager>, anyhow::Error> {
     let lingxi_home = crate::run::lingxi_home_dir();
-    let user = std::env::var("USER").unwrap_or_else(|_| "default".to_string());
-    let storage = platform_posix::secure_storage_for_platform(
-        user,
-        lingxi_home.clone(),
-        lingxi_home.join(".credentials.json"),
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("secure storage: {e}"))?;
-
-    let clock = std::sync::Arc::new(platform_posix::PosixClock::new());
-    let http = std::sync::Arc::new(platform_posix::PosixHttp::new());
-
-    Ok(secret::CredentialManager::new(storage, clock, http))
+    let stack = engine_desktop::build_shared_credential_stack(&lingxi_home, false)
+        .await
+        .map_err(|e| anyhow::anyhow!("secure storage: {e}"))?;
+    Ok(stack.credentials)
 }
 
 pub(crate) async fn build_oauth_handle(use_console: bool) -> Result<OAuthHandle, anyhow::Error> {
-    let credentials = Arc::new(build_credential_manager().await?);
+    let credentials = build_credential_manager().await?;
     let http: Arc<dyn traits::HttpTransport> = Arc::new(platform_posix::PosixHttp::new());
     let config = if use_console {
         ClaudeAiOAuthConfig::console_with_port(0)

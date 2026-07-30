@@ -56,8 +56,6 @@ export interface BridgeLaunchConfig {
   workspace: string;
   apiKey?: string;
   providerCredentials?: Record<string, string>;
-  /** Legacy Electron-owned values to move into the shared engine store. */
-  providerCredentialsToMigrate?: Record<string, string>;
   trusted: boolean;
   model?: string;
   apiBaseUrl?: string;
@@ -85,7 +83,6 @@ export interface BridgeManagerOptions {
   accessState?: () => { workspace?: string; trusted: boolean };
   diagnostics?: DiagnosticBuffer;
   onModelChanged?: (model: string) => void;
-  onProviderCredentialMigrated?: (providerId: string) => void;
   /** SECURITY: consulted before a `set_permission_mode: bypassPermissions`
    * command is forwarded to the engine. Must show a blocking acceptance dialog
    * (once — persisted) and resolve `true` only on explicit consent. When absent,
@@ -361,10 +358,9 @@ export class BridgeManager {
         bridgeVersionDiagnostic(hello.server_name, hello.protocol_version, hello.capabilities.client_protocol_version),
       );
       this.setState({ status: 'connected' });
-      // Read/migrate credential metadata after readiness. macOS may need to
-      // consult the login Keychain; that must never hold the desktop in a
-      // spawning/restarting state.
-      void this.refreshAndMigrateProviderCredentials(launch, generation);
+      // Reading credential metadata may consult the login Keychain, so it
+      // must never hold the desktop in a spawning/restarting state.
+      void this.refreshProviderCredentials();
     } catch (error) {
       if (generation === this.generation) {
         this.fail(error);
@@ -374,49 +370,11 @@ export class BridgeManager {
     }
   }
 
-  private async refreshAndMigrateProviderCredentials(
-    launch: BridgeLaunchConfig,
-    generation: number,
-  ): Promise<void> {
+  private async refreshProviderCredentials(): Promise<void> {
     const providerIds = this.opts.providerIds ?? [];
-    // Whether the engine-store read that populates `persistedCredentialProviders`
-    // actually succeeded. When there is nothing to list, the reset-empty state
-    // is authoritative; when a list is attempted, it is only authoritative if it
-    // resolved (the op has a hard 10s timeout and consults the keychain).
-    let persistedStateKnown = true;
     if (providerIds.length > 0) {
-      persistedStateKnown = false;
       try {
         await this.listProviderCredentials(providerIds);
-        persistedStateKnown = true;
-      } catch (error) {
-        this.diagnostics.add('warn', 'bridge', error);
-      }
-    }
-    if (generation !== this.generation || this.disposed) return;
-
-    if (!persistedStateKnown) {
-      // The persisted-state read failed/timed out, so `persistedCredentialProviders`
-      // is unreliably empty. Migrating now would treat every provider as absent
-      // and clobber a newer CLI/TUI credential in the SHARED engine store (the
-      // legacy copy is then deleted, making the overwrite the only survivor).
-      // Defer legacy migration to the next connect, when the read may succeed.
-      this.diagnostics.add(
-        'warn',
-        'bridge',
-        'deferring legacy credential migration: engine credential list unavailable',
-      );
-      return;
-    }
-
-    for (const [providerId, credential] of Object.entries(launch.providerCredentialsToMigrate ?? {})) {
-      if (generation !== this.generation || this.disposed) return;
-      try {
-        if (!this.persistedCredentialProviders.has(providerId)) {
-          await this.setProviderCredential(providerId, credential);
-        }
-        this.opts.onProviderCredentialMigrated?.(providerId);
-        this.diagnostics.add('info', 'bridge', `migrated legacy provider credential (${providerId})`);
       } catch (error) {
         this.diagnostics.add('warn', 'bridge', error);
       }

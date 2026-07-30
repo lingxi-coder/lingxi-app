@@ -9,7 +9,9 @@
 
 use async_trait::async_trait;
 use protocol::SecureStorageData;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
+use tokio::io::AsyncWriteExt;
 use traits::{SecureStorage, SecureStorageBackend, SecureStorageError};
 
 /// Plain-text file-based secure storage rooted at a base directory.
@@ -27,6 +29,9 @@ impl PlainTextSecureStorage {
     /// created.
     pub async fn new(base_dir: PathBuf) -> Result<Self, SecureStorageError> {
         tokio::fs::create_dir_all(&base_dir)
+            .await
+            .map_err(|e| SecureStorageError::Io(e.to_string()))?;
+        tokio::fs::set_permissions(&base_dir, std::fs::Permissions::from_mode(0o700))
             .await
             .map_err(|e| SecureStorageError::Io(e.to_string()))?;
         Ok(Self { base_dir })
@@ -50,10 +55,27 @@ impl SecureStorage for PlainTextSecureStorage {
             tokio::fs::create_dir_all(parent)
                 .await
                 .map_err(|e| SecureStorageError::Io(e.to_string()))?;
+            tokio::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+                .await
+                .map_err(|e| SecureStorageError::Io(e.to_string()))?;
         }
         let json =
             serde_json::to_string(&data).map_err(|e| SecureStorageError::Io(e.to_string()))?;
-        tokio::fs::write(&path, json)
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)
+            .await
+            .map_err(|e| SecureStorageError::Io(e.to_string()))?;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .await
+            .map_err(|e| SecureStorageError::Io(e.to_string()))?;
+        file.write_all(json.as_bytes())
+            .await
+            .map_err(|e| SecureStorageError::Io(e.to_string()))?;
+        file.flush()
             .await
             .map_err(|e| SecureStorageError::Io(e.to_string()))?;
         Ok(())

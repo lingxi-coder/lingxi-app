@@ -24,8 +24,7 @@ export function App() {
   const palette = useMemo(() => tokens(theme === 'dark'), [theme]);
   const bridge = useBridge();
   const workspace = bridge.bootstrap?.workspace;
-  const credential = bridge.bootstrap?.credential;
-  const providerConfigured = Boolean(credential?.configured) || Boolean(bridge.bootstrap?.providerCredentials?.some((entry) => entry.configured));
+  const providerConfigured = Boolean(bridge.bootstrap?.providerCredentials?.some((entry) => entry.configured));
   const ready = Boolean(
     bridge.hosted
     && workspace?.path

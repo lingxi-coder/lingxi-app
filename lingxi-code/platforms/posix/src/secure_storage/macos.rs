@@ -114,7 +114,7 @@ impl MacOsKeychainStorage {
 
     /// Return the full keychain service name for the supplied `service_suffix`.
     ///
-    /// Callers pass `"-credentials"` (OAuth) or `""` (legacy API key) — the
+    /// Callers pass `"-credentials"` (OAuth) or `""` (API key) — the
     /// "LingXi" prefix and `dir_hash` are interpolated here so the
     /// resulting string matches claude-code's literal layout.
     pub(crate) fn keychain_service_name(&self, service_suffix: &str) -> String {
@@ -167,8 +167,7 @@ impl SecureStorage for MacOsKeychainStorage {
         // command on stdin. Keeps the hex payload out of argv so process
         // monitors only see `security -i`.
         let stdin_command = format!(
-            "add-generic-password -U -a \"{}\" -s \"{}\" -X \"{}\"\n",
-            account, full_service, hex_value,
+            "add-generic-password -U -a \"{account}\" -s \"{full_service}\" -X \"{hex_value}\" -T \"/usr/bin/security\"\n",
         );
 
         let (exit_status, stderr) = if stdin_command.len() <= SECURITY_STDIN_LINE_LIMIT {
@@ -193,6 +192,8 @@ impl SecureStorage for MacOsKeychainStorage {
                     full_service.as_str(),
                     "-X",
                     hex_value.as_str(),
+                    "-T",
+                    "/usr/bin/security",
                 ],
             )
             .await?
@@ -545,11 +546,13 @@ shift
 account=
 service=
 hex_value=
+trusted_application=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -a) account=$2; shift 2 ;;
     -s) service=$2; shift 2 ;;
     -X) hex_value=$2; shift 2 ;;
+    -T) trusted_application=$2; shift 2 ;;
     -U|-w) shift ;;
     *) shift ;;
   esac
@@ -557,6 +560,7 @@ done
 entry="$state/$account--$service"
 case "$operation" in
   add-generic-password)
+    [ "$trusted_application" = "/usr/bin/security" ] || exit 65
     escaped=$(printf '%s' "$hex_value" | sed 's/../\\x&/g')
     printf '%b' "$escaped" > "$entry"
     ;;
@@ -683,6 +687,24 @@ esac
         let reader = mk_test_storage_with_command("/a", "/b", command);
         let actual = reader
             .retrieve("-credentials", "account")
+            .await
+            .expect("cold retrieve");
+        assert_payload(actual, &expected);
+    }
+
+    #[tokio::test]
+    async fn oversized_store_argv_fallback_preserves_security_acl() {
+        let (_temp, command) = fake_security_store();
+        let writer = mk_test_storage_with_command("/a", "/b", command.clone());
+        let expected = test_payload(&vec![b'x'; 3_000]);
+        writer
+            .store("-credentials", "large-account", expected.clone())
+            .await
+            .expect("store through argv fallback");
+
+        let reader = mk_test_storage_with_command("/a", "/b", command);
+        let actual = reader
+            .retrieve("-credentials", "large-account")
             .await
             .expect("cold retrieve");
         assert_payload(actual, &expected);

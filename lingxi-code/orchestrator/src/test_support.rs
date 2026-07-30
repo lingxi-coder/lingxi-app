@@ -274,6 +274,16 @@ pub fn mock_message_response(
 #[derive(Clone)]
 pub struct MockOutputStream {
     events: Arc<Mutex<Vec<OutputEvent>>>,
+    /// Denial provenance observed via `emit_tool_result_denied`, as
+    /// `(tool_use_id, denial_kind)` in emission order.
+    ///
+    /// Kept OUT of [`OutputEvent`]: that enum is shared across crates and
+    /// matched exhaustively in several of them, so a new variant would be a
+    /// wide breaking change for a test-only signal. It lives here because the
+    /// trait method is DEFAULTED — without an explicit override the mock would
+    /// silently inherit the default, drop `denial_kind`, and let every
+    /// deny-path test pass no matter what the turn loop computed.
+    denials: Arc<Mutex<Vec<(protocol::ToolUseId, String)>>>,
 }
 
 impl MockOutputStream {
@@ -282,7 +292,13 @@ impl MockOutputStream {
     pub fn new() -> Self {
         Self {
             events: Arc::new(Mutex::new(Vec::new())),
+            denials: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// Snapshot the `(tool_use_id, denial_kind)` pairs captured so far.
+    pub async fn denial_snapshot(&self) -> Vec<(protocol::ToolUseId, String)> {
+        self.denials.lock().await.clone()
     }
 
     /// Snapshot the captured events.
@@ -388,6 +404,22 @@ impl OutputStream for MockOutputStream {
             tool: tool.to_string(),
             result: result.clone(),
         });
+    }
+    async fn emit_tool_result_denied(
+        &self,
+        id: &protocol::ToolUseId,
+        tool: &str,
+        model_text: &str,
+        result: &serde_json::Value,
+        denial_kind: &str,
+    ) {
+        self.denials
+            .lock()
+            .await
+            .push((id.clone(), denial_kind.to_string()));
+        // Still record the ordinary result event so existing assertions that
+        // count/inspect `ToolResult` keep seeing denied tools.
+        self.emit_tool_result(id, tool, model_text, result).await;
     }
     async fn emit_end_turn(&self, stop_reason: &str, cost: &CostSnapshot) {
         self.events.lock().await.push(OutputEvent::EndTurn {

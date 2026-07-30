@@ -2072,6 +2072,43 @@ pub trait OutputStream: Send + Sync {
         result: &serde_json::Value,
     );
 
+    /// [`Self::emit_tool_result`] for a tool that was DENIED rather than run.
+    ///
+    /// `denial_kind` is claude-code's message-level `toolDenialKind`. The five
+    /// values produced by the kind classifier (`jDd`, binary offset 235392096)
+    /// are `user-rejected`, `permission-rule`, `automode-blocked`,
+    /// `automode-unavailable`, `automode-parsing-error` — but that is NOT the
+    /// whole value set: the abort paths stamp `cancelled` (offsets 235399713 /
+    /// 235408905) and `interrupted` (via `YDd`, offset 235394375, which returns
+    /// `cancelled` for a `background` abort reason and `interrupted` otherwise).
+    /// Both are ordinary `toolDenialKind` values that DO produce a
+    /// `tool_result_meta` entry — the builder gates only on the field being
+    /// absent — and a downstream consumer (offset 245793995) reads them to
+    /// classify a turn as `tool_abort` rather than `tool_denial`. Verified
+    /// against real 2.1.220 transcripts, which contain `"interrupted"`.
+    ///
+    /// Transports that expose the provenance (stream-json emits
+    /// `tool_result_meta`) override this; every other implementor inherits the
+    /// default, which drops it and behaves exactly like
+    /// [`Self::emit_tool_result`]. Defaulted deliberately: this trait has many
+    /// implementors and a signature change would touch all of them for a field
+    /// only the stream-json transport can carry.
+    ///
+    /// NOT YET STAMPED by LingXi: the abort/cancel paths still call
+    /// [`Self::emit_tool_result`], so their frames carry no provenance where
+    /// 2.1.220 carries `cancelled` / `interrupted`. A missing value, not a
+    /// wrong one.
+    async fn emit_tool_result_denied(
+        &self,
+        id: &protocol::ToolUseId,
+        tool: &str,
+        model_text: &str,
+        result: &serde_json::Value,
+        _denial_kind: &str,
+    ) {
+        self.emit_tool_result(id, tool, model_text, result).await;
+    }
+
     /// Emit a heartbeat for a tool call that is still running.
     ///
     /// Long-running tools can otherwise leave transport clients silent between

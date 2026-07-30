@@ -2167,6 +2167,75 @@ pub(crate) async fn dispatch_tool_uses(
 /// The three user-OWNED `SettingSource`s are the only ones that read as a user
 /// decision; `projectSettings`/`policySettings`/`flagSettings`/`cliArg`/… (and a
 /// decision with no rule at all — mode, classifier, safety check) stay "config".
+/// claude-code's `toolDenialKind` classifier — byte-locked to the 2.1.220
+/// mapping at binary offset 235392096:
+///
+/// ```js
+/// if(e.behavior==="ask") return "user-rejected";
+/// let t=e.decisionReason;
+/// if(t.type==="classifier" && t.classifier==="auto-mode"){
+///   if(t.reason===TRt)              return "automode-unavailable";
+///   if(t.reason.startsWith(p2s))    return "automode-parsing-error";
+///   return "automode-blocked";
+/// }
+/// return "permission-rule";
+/// ```
+///
+/// with `TRt = "Classifier unavailable"` (offset 226748755) and
+/// `p2s = "Auto mode could not evaluate this action and is blocking it for
+/// safety"` (offset 235392399). `TRt` is matched by EQUALITY and `p2s` by
+/// PREFIX — the oracle appends detail after `p2s`, so a prefix test is required.
+///
+/// The `behavior === "ask"` test runs FIRST and short-circuits: an ask-behavior
+/// denial is `user-rejected` even when it also carries a classifier reason.
+///
+/// Documented narrowing: the oracle additionally requires
+/// `t.classifier === "auto-mode"`. `permission::policy_gate::decision_reason_type`
+/// maps BOTH classifier variants (`ClassifierApproved` / `ClassifierRejected`)
+/// to `"classifier"`, and auto-mode is the only classifier LingXi has, so
+/// `type == "classifier"` implies `classifier == "auto-mode"` here. Should a
+/// second classifier ever land, this must gain the extra discriminator or it
+/// will mislabel that classifier's denials as `automode-*`.
+///
+/// REACHABILITY (do not read the branches as live): today only
+/// `automode-blocked` can actually fire. `PermissionDecisionReason::ClassifierRejected`
+/// carries just `{classifier, score}` and no reason text
+/// (`permission/src/result.rs`), and `permission::policy_gate::sysmsg_decision_reason`
+/// returns `None` for it, so every classifier denial arrives here as
+/// `(behavior_ask=false, Some("classifier"), None)`. The `TRt` / `p2s` branches
+/// become reachable only once the classifier's reason text is threaded onto the
+/// decision. The current OUTPUT is correct — the port's only classifier denial
+/// is a genuine block — but the two sibling branches are inert until then.
+/// `behavior_ask` is likewise hard-coded `false` at both producers, so the `ask`
+/// short-circuit is inert too (same reason the contentBlocks path is documented
+/// as dormant at its own call site).
+pub(crate) fn tool_denial_kind(
+    behavior_ask: bool,
+    decision_reason_type: Option<&str>,
+    decision_reason: Option<&str>,
+) -> &'static str {
+    /// claude-code `TRt`.
+    const CLASSIFIER_UNAVAILABLE: &str = "Classifier unavailable";
+    /// claude-code `p2s`.
+    const SAFETY_BLOCK_PREFIX: &str =
+        "Auto mode could not evaluate this action and is blocking it for safety";
+
+    if behavior_ask {
+        return "user-rejected";
+    }
+    if decision_reason_type == Some("classifier") {
+        let reason = decision_reason.unwrap_or_default();
+        if reason == CLASSIFIER_UNAVAILABLE {
+            return "automode-unavailable";
+        }
+        if reason.starts_with(SAFETY_BLOCK_PREFIX) {
+            return "automode-parsing-error";
+        }
+        return "automode-blocked";
+    }
+    "permission-rule"
+}
+
 pub(crate) fn rule_decision_otel_source(rule_source: Option<&str>, allow: bool) -> &'static str {
     match rule_source {
         Some("session") => {
@@ -2780,6 +2849,14 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         // Both inert on normal denies.
         let mut reject_content_blocks: Vec<ContentBlock> = Vec::new();
         let mut deny_hook_says_retry = false;
+        // Same carry-over pattern for the denial provenance: `PermissionDecision`
+        // collapses to `Deny { reason }`, so the structured signals
+        // `tool_denial_kind` needs (`behavior_ask` / `decision_reason_type` /
+        // `decision_reason`) must be classified in the SOURCED arm and carried
+        // out to the emit site. "permission-rule" is the oracle's own fallthrough
+        // and stays correct for every arm that carries no classifier reason
+        // (hook Block, plan-mode, unknown).
+        let mut denial_kind: &'static str = "permission-rule";
         let plan_mode = orch.session.lock().await.plan_mode;
         // ORPHAN RECOVERY: a re-dispatched orphaned tool carries a forced
         // permission decision (its recovered `control_response`) that REPLACES the
@@ -2921,6 +2998,14 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                     content_blocks,
                 } => {
                     decision_otel_source = rule_decision_otel_source(rule_source.as_deref(), false);
+                    // Classify the denial for the stream-json `tool_result_meta`
+                    // while the structured provenance is still in scope — the
+                    // `PermissionDecision::Deny` this arm returns keeps only `reason`.
+                    denial_kind = tool_denial_kind(
+                        behavior_ask,
+                        decision_reason_type.as_deref(),
+                        decision_reason.as_deref(),
+                    );
                     // `ask`-behavior rejection contentBlocks (`toolExecution.ts:1040-1043`):
                     // claude-code appends `permissionDecision.contentBlocks` to the deny
                     // user message at top level ONLY when `behavior === 'ask'`. Carry them
@@ -3111,6 +3196,32 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                                     // into `Deny`, so the turn's cancel token — the same
                                     // signal the stdio gate raced to produce this deny —
                                     // is what separates them.
+                                    // Denial provenance: this arm keeps the
+                                    // `permission-rule` fallthrough, and that is
+                                    // CORRECT for the transport that can observe it.
+                                    // claude-code's `JMn` (binary offset 246277535)
+                                    // wraps a stdio `can_use_tool` result as
+                                    // `{...hostResult, decisionReason:{type:
+                                    // "permissionPromptTool", …}}`, PRESERVING the
+                                    // host's `behavior`. So a host deny reaches the
+                                    // kind classifier as `behavior === "deny"` with a
+                                    // `permissionPromptTool` reason — neither the
+                                    // `ask` branch nor the classifier branch — and
+                                    // falls through to `permission-rule`.
+                                    //
+                                    // `user-rejected` means `behavior === "ask"`,
+                                    // which is what the INTERACTIVE CLI prompt
+                                    // returns (hence `userFeedback: behavior==="ask"
+                                    // ? … : void 0` at offset 235412899). Real
+                                    // transcripts from an interactive session are
+                                    // therefore full of `user-rejected` — but
+                                    // `tool_result_meta` is emitted only by the
+                                    // stream-json transport, whose permission
+                                    // transport is the stdio gate. Do NOT stamp
+                                    // `user-rejected` here: this arm also covers
+                                    // transport failure and a dropped response
+                                    // channel, which claude-code maps to
+                                    // `{type:"other"}` ⇒ `permission-rule` too.
                                     decision_otel_source =
                                         if cancel.as_ref().is_some_and(|t| t.is_cancelled()) {
                                             "user_abort"
@@ -3166,12 +3277,23 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                     provider_tool_use_id: provider_id.clone(),
                     content_blocks: None,
                 };
+                // Denial provenance (claude-code `toolDenialKind`), classified by
+                // `tool_denial_kind` in the SOURCED resolution arm and carried
+                // here via `denial_kind`. Transports that cannot carry it (all
+                // but stream-json) inherit the trait default and ignore it.
+                //
+                // NOT yet distinguished: the stdio `can_use_tool` prompt-transport
+                // deny (the `PermissionOutcome::Deny` arm below, which the port
+                // labels `user_reject` / `user_abort` for OTEL) carries no
+                // `behavior_ask`, so a host-side rejection currently reports the
+                // `permission-rule` fallthrough instead of `user-rejected`.
                 orch.output
-                    .emit_tool_result(
+                    .emit_tool_result_denied(
                         tool_use_id,
                         name,
                         &reason,
                         &serde_json::json!({ "error": reason }),
+                        denial_kind,
                     )
                     .await;
                 results.push(result_block);
@@ -4194,5 +4316,77 @@ mod decision_otel_source_tests {
         // classifier / safety-check decision carries no rule and stays "config".
         assert_eq!(rule_decision_otel_source(None, true), "config");
         assert_eq!(rule_decision_otel_source(None, false), "config");
+    }
+}
+
+// The `toolDenialKind` classifier, kept out of the concurrently-edited
+// turn_loop_test.rs for the same reason as the module above.
+#[cfg(test)]
+mod tool_denial_kind_tests {
+    use super::tool_denial_kind;
+
+    #[test]
+    fn ask_behavior_is_user_rejected_and_outranks_the_classifier() {
+        // The oracle tests `behavior === "ask"` FIRST and returns before it ever
+        // looks at decisionReason, so an ask-behavior denial that also carries a
+        // classifier reason is still `user-rejected`.
+        assert_eq!(tool_denial_kind(true, None, None), "user-rejected");
+        assert_eq!(
+            tool_denial_kind(true, Some("classifier"), Some("Classifier unavailable")),
+            "user-rejected"
+        );
+    }
+
+    #[test]
+    fn classifier_unavailable_reason_is_automode_unavailable() {
+        // `t.reason === TRt` — EXACT equality, not a prefix.
+        assert_eq!(
+            tool_denial_kind(false, Some("classifier"), Some("Classifier unavailable")),
+            "automode-unavailable"
+        );
+        assert_eq!(
+            tool_denial_kind(false, Some("classifier"), Some("Classifier unavailable later")),
+            "automode-blocked",
+            "TRt is matched by equality, so a longer string is NOT unavailable"
+        );
+    }
+
+    #[test]
+    fn safety_block_prefix_is_automode_parsing_error() {
+        // `t.reason.startsWith(p2s)` — a PREFIX test, so the trailing detail the
+        // oracle appends must still classify as a parsing error.
+        let p2s = "Auto mode could not evaluate this action and is blocking it for safety";
+        assert_eq!(
+            tool_denial_kind(false, Some("classifier"), Some(p2s)),
+            "automode-parsing-error"
+        );
+        assert_eq!(
+            tool_denial_kind(false, Some("classifier"), Some(&format!("{p2s}: bad JSON"))),
+            "automode-parsing-error"
+        );
+    }
+
+    #[test]
+    fn other_classifier_reasons_are_automode_blocked() {
+        assert_eq!(
+            tool_denial_kind(false, Some("classifier"), Some("writes outside the workspace")),
+            "automode-blocked"
+        );
+        assert_eq!(
+            tool_denial_kind(false, Some("classifier"), None),
+            "automode-blocked",
+            "a classifier denial with no reason still falls through to blocked"
+        );
+    }
+
+    #[test]
+    fn non_classifier_denials_are_permission_rule() {
+        for kind in [None, Some("rule"), Some("mode"), Some("hook"), Some("safetyCheck")] {
+            assert_eq!(
+                tool_denial_kind(false, kind, Some("Classifier unavailable")),
+                "permission-rule",
+                "{kind:?} is not a classifier decision, so the reason text is irrelevant"
+            );
+        }
     }
 }

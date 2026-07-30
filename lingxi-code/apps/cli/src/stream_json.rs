@@ -626,6 +626,31 @@ impl StreamJsonStream {
         model_text: &str,
         result: &Value,
     ) -> Value {
+        self.build_tool_result_frame_with_denial(tool_use_id, model_text, result, None, None)
+            .await
+    }
+
+    /// [`Self::build_tool_result_frame`] plus denial provenance.
+    ///
+    /// `user_feedback` is plumbed but NOT yet live: [`OutputStream::emit_tool_result_denied`]
+    /// carries no feedback argument, so production always passes `None` and only
+    /// tests exercise the field. claude-code attaches it solely when
+    /// `behavior === "ask"` (binary offset 235412899), a state LingXi's gates do
+    /// not currently produce — so this is parity-neutral today, not a silent drop.
+    ///
+    /// When `denial_kind` is set, the frame gains a `tool_result_meta` array
+    /// built by [`build_tool_result_meta`]. claude-code spreads the field
+    /// CONDITIONALLY (`...o.length>0&&{tool_result_meta:o}`, 2.1.220 binary
+    /// offset 233203100), so a non-denied result omits the key entirely rather
+    /// than carrying an empty array — emitting `[]` would be a wire divergence.
+    async fn build_tool_result_frame_with_denial(
+        &self,
+        tool_use_id: &str,
+        model_text: &str,
+        result: &Value,
+        denial_kind: Option<&str>,
+        user_feedback: Option<&str>,
+    ) -> Value {
         let is_error = result.get("error").is_some();
         let uuid = uuid::Uuid::new_v4().to_string();
         let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
@@ -637,7 +662,7 @@ impl StreamJsonStream {
             "content": content_value,
             "is_error": is_error
         });
-        json!({
+        let mut frame = json!({
             "type": "user",
             "message": {
                 "role": "user",
@@ -648,7 +673,19 @@ impl StreamJsonStream {
             "toolUseResult": result,
             "uuid": uuid,
             "timestamp": timestamp
-        })
+        });
+        let meta = build_tool_result_meta(
+            denial_kind,
+            user_feedback,
+            &frame["message"]["content"],
+        );
+        if !meta.is_empty() {
+            frame
+                .as_object_mut()
+                .expect("frame is a JSON object")
+                .insert("tool_result_meta".to_string(), Value::Array(meta));
+        }
+        frame
     }
 
     /// Build the success result frame Value (exact 20-key golden order).
@@ -1141,6 +1178,29 @@ impl OutputStream for StreamJsonStream {
         }
         let frame = self
             .build_tool_result_frame(_id.as_str(), model_text, result)
+            .await;
+        self.enqueue(&frame);
+    }
+
+    async fn emit_tool_result_denied(
+        &self,
+        id: &protocol::ToolUseId,
+        _tool: &str,
+        model_text: &str,
+        result: &serde_json::Value,
+        denial_kind: &str,
+    ) {
+        if self.suppress_frames {
+            return;
+        }
+        let frame = self
+            .build_tool_result_frame_with_denial(
+                id.as_str(),
+                model_text,
+                result,
+                Some(denial_kind),
+                None,
+            )
             .await;
         self.enqueue(&frame);
     }
@@ -1682,6 +1742,62 @@ mod canonical_model_tests {
     }
 }
 
+/// Build the stream-json `tool_result_meta` array carrying denial provenance —
+/// byte-locked to claude-code `Tpr(e)` (2.1.220, binary offset 233198808):
+///
+/// ```js
+/// function Tpr(e){ let t=e.toolDenialKind; if(t===void 0) return [];
+///   let r=e.message.content; if(!Array.isArray(r)) return [];
+///   let n=r.filter(i=>i.type==="tool_result"); if(n.length!==1) return [];
+///   let o={id:n[0].tool_use_id, non_execution_kind:t};
+///   if(e.userFeedback!==void 0) o.user_feedback=e.userFeedback;
+///   return [o] }
+/// ```
+///
+/// `denial_kind` is the message's `toolDenialKind`. Beyond the five values the
+/// kind classifier produces (`user-rejected`, `permission-rule`,
+/// `automode-blocked`, `automode-unavailable`, `automode-parsing-error`), the
+/// oracle also stamps `cancelled` / `interrupted` on its abort paths, and those
+/// DO produce a meta entry — this builder gates only on the kind being absent,
+/// exactly like `Tpr`. LingXi does not stamp the abort paths yet, so those
+/// values simply never reach here today. The emitted key order is `id`,
+/// `non_execution_kind`, then the optional `user_feedback`; the workspace pins
+/// serde_json `preserve_order`, so that order is the wire order.
+///
+/// The single-`tool_result` guard is deliberate and load-bearing: the oracle
+/// drops the meta entirely when a user message carries zero or several
+/// tool_result blocks, because the denial kind is a message-level field and
+/// could not be attributed to one specific block.
+fn build_tool_result_meta(
+    denial_kind: Option<&str>,
+    user_feedback: Option<&str>,
+    content: &Value,
+) -> Vec<Value> {
+    let Some(kind) = denial_kind else {
+        return Vec::new();
+    };
+    let Some(blocks) = content.as_array() else {
+        return Vec::new();
+    };
+    let mut results = blocks
+        .iter()
+        .filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_result"));
+    let (Some(only), None) = (results.next(), results.next()) else {
+        return Vec::new();
+    };
+    let Some(id) = only.get("tool_use_id") else {
+        return Vec::new();
+    };
+
+    let mut entry = serde_json::Map::new();
+    entry.insert("id".to_string(), id.clone());
+    entry.insert("non_execution_kind".to_string(), json!(kind));
+    if let Some(feedback) = user_feedback {
+        entry.insert("user_feedback".to_string(), json!(feedback));
+    }
+    vec![Value::Object(entry)]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1912,6 +2028,39 @@ mod tests {
         );
         assert_eq!(f3["message"]["content"][0]["is_error"], true);
         assert_eq!(f3["toolUseResult"], err);
+    }
+
+    /// A denied tool result carries `tool_result_meta` on the user frame
+    /// (claude-code `…,...o.length>0&&{tool_result_meta:o},…`, 2.1.220 binary
+    /// offset 233203100); a normal result omits the key ENTIRELY rather than
+    /// emitting an empty array — the oracle spreads it conditionally.
+    #[tokio::test]
+    async fn denied_tool_result_frame_carries_tool_result_meta() {
+        let stream = StreamJsonStream::new(make_params("sess-deny"));
+        let tuid = "toolu_deny_1";
+        let err = json!({ "error": "Permission to use Bash has been denied." });
+
+        let denied = stream
+            .build_tool_result_frame_with_denial(
+                tuid,
+                "Permission to use Bash has been denied.",
+                &err,
+                Some("permission-rule"),
+                None,
+            )
+            .await;
+        assert_eq!(
+            serde_json::to_string(&denied["tool_result_meta"]).unwrap(),
+            r#"[{"id":"toolu_deny_1","non_execution_kind":"permission-rule"}]"#
+        );
+
+        let allowed = stream
+            .build_tool_result_frame(tuid, "ok\n", &json!({"stdout": "ok\n"}))
+            .await;
+        assert!(
+            allowed.get("tool_result_meta").is_none(),
+            "a non-denied result must omit the key, not emit []"
+        );
     }
 
     #[test]
@@ -2962,5 +3111,77 @@ mod tests {
         assert_eq!(usage["output_tokens"], 4_u64);
         assert_eq!(usage["service_tier"], "standard");
         assert_eq!(usage["speed"], "standard");
+    }
+
+    // ---- tool_result_meta (denial provenance) ----------------------------
+    //
+    // Byte-locked to claude-code `Tpr(e)` (2.1.220, binary offset 233198808):
+    //
+    //   function Tpr(e){ let t=e.toolDenialKind; if(t===void 0) return [];
+    //     let r=e.message.content; if(!Array.isArray(r)) return [];
+    //     let n=r.filter(i=>i.type==="tool_result"); if(n.length!==1) return [];
+    //     let o={id:n[0].tool_use_id, non_execution_kind:t};
+    //     if(e.userFeedback!==void 0) o.user_feedback=e.userFeedback;
+    //     return [o] }
+    //
+    // The emitted key order is `id` then `non_execution_kind` then the optional
+    // `user_feedback` — significant because the workspace pins serde_json
+    // `preserve_order`.
+
+    fn tool_result_content(ids: &[&str]) -> Value {
+        Value::Array(
+            ids.iter()
+                .map(|id| {
+                    json!({"type": "tool_result", "tool_use_id": id, "content": "x", "is_error": true})
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn tool_result_meta_carries_denial_kind_for_single_tool_result() {
+        let meta = build_tool_result_meta(Some("user-rejected"), None, &tool_result_content(&["toolu_1"]));
+        assert_eq!(
+            serde_json::to_string(&meta).unwrap(),
+            r#"[{"id":"toolu_1","non_execution_kind":"user-rejected"}]"#
+        );
+    }
+
+    #[test]
+    fn tool_result_meta_appends_user_feedback_after_kind() {
+        let meta = build_tool_result_meta(
+            Some("automode-blocked"),
+            Some("not allowed"),
+            &tool_result_content(&["toolu_9"]),
+        );
+        assert_eq!(
+            serde_json::to_string(&meta).unwrap(),
+            r#"[{"id":"toolu_9","non_execution_kind":"automode-blocked","user_feedback":"not allowed"}]"#
+        );
+    }
+
+    #[test]
+    fn tool_result_meta_is_empty_without_denial_kind() {
+        let meta = build_tool_result_meta(None, Some("ignored"), &tool_result_content(&["toolu_1"]));
+        assert!(meta.is_empty());
+    }
+
+    #[test]
+    fn tool_result_meta_is_empty_when_not_exactly_one_tool_result() {
+        let two = build_tool_result_meta(
+            Some("user-rejected"),
+            None,
+            &tool_result_content(&["toolu_1", "toolu_2"]),
+        );
+        assert!(two.is_empty(), "two tool_result blocks must yield no meta");
+
+        let none = build_tool_result_meta(Some("user-rejected"), None, &Value::Array(vec![]));
+        assert!(none.is_empty(), "zero tool_result blocks must yield no meta");
+    }
+
+    #[test]
+    fn tool_result_meta_is_empty_for_non_array_content() {
+        let meta = build_tool_result_meta(Some("user-rejected"), None, &json!("plain string"));
+        assert!(meta.is_empty());
     }
 }

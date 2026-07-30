@@ -1,3 +1,7 @@
-node_modules/
+# No trailing slash: `node_modules/` matches only directories, so a symlink
+# named node_modules (e.g. one pointing at another checkout's install) would
+# slip past it and get committed by `git add -A`. The bare pattern matches
+# every file type.
+node_modules
 dist/
 *.tsbuildinfo

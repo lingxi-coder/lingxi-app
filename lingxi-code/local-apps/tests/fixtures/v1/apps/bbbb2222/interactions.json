@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "nextSeq": 2,
+  "lastDeliveredSeq": 0,
+  "undelivered": [
+    {
+      "seq": 1,
+      "appId": "bbbb2222",
+      "kind": "design_cancelled",
+      "payload": {},
+      "createdAtMs": 1753000000900
+    }
+  ]
+}

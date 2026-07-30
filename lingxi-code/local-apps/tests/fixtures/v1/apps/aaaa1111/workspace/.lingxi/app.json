@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "app": {
+    "id": "aaaa1111",
+    "name": "Fixture Maximal",
+    "template": "crud_tracker",
+    "createdAtMs": 1753000000000,
+    "updatedAtMs": 1753000000700,
+    "workflowState": "awaiting_preview_confirmation",
+    "conversationId": "conv-fixture-1",
+    "workspaceRel": "apps/aaaa1111/workspace"
+  }
+}

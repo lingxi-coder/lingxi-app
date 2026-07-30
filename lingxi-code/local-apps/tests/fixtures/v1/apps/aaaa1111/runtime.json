@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "appId": "aaaa1111",
+  "state": "failed",
+  "port": 3111,
+  "pid": 4242,
+  "lastError": "dev server exited with code 1",
+  "updatedAtMs": 1753000000800
+}

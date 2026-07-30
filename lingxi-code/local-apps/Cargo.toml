@@ -1,0 +1,25 @@
+[package]
+name = "local-apps"
+version = "0.12.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+branding.workspace = true
+traits = { path = "../traits" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+tokio = { workspace = true }
+tracing.workspace = true
+# Feature-scoped persisted ids (8 lowercase hex chars), same generator family as
+# `tools/cron::generate_cron_task_id`.
+rand = "0.9"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

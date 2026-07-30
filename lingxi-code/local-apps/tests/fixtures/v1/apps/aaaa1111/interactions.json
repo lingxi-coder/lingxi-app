@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "pending": {
+    "interactionId": "int-ab3a1f27c7c8",
+    "appId": "aaaa1111",
+    "kind": "preview",
+    "revision": 1,
+    "createdAtMs": 1753000000700
+  },
+  "nextSeq": 5,
+  "lastDeliveredSeq": 1,
+  "undelivered": [
+    {
+      "seq": 2,
+      "appId": "aaaa1111",
+      "kind": "design_cancelled",
+      "payload": {},
+      "createdAtMs": 1753000000250
+    },
+    {
+      "seq": 3,
+      "appId": "aaaa1111",
+      "kind": "design_confirmed",
+      "payload": {
+        "revision": 1
+      },
+      "createdAtMs": 1753000000400
+    },
+    {
+      "seq": 4,
+      "appId": "aaaa1111",
+      "kind": "revision_requested",
+      "payload": {
+        "prompt": "make the header darker"
+      },
+      "createdAtMs": 1753000000550
+    }
+  ]
+}

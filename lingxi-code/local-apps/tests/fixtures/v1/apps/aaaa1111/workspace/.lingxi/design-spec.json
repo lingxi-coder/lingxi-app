@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 1,
+  "template": "crud_tracker",
+  "revision": 1,
+  "fields": {
+    "accent": {
+      "kind": "color",
+      "value": "#3366ff"
+    },
+    "compact_mode": {
+      "kind": "boolean",
+      "value": true
+    },
+    "density": {
+      "kind": "density",
+      "value": "comfortable"
+    },
+    "description": {
+      "kind": "long_text",
+      "value": "Track daily habits\nwith streaks."
+    },
+    "features": {
+      "kind": "feature_list",
+      "value": [
+        "streaks",
+        "reminders"
+      ]
+    },
+    "layout": {
+      "kind": "single_choice",
+      "value": "grid"
+    },
+    "screens": {
+      "kind": "screen_list",
+      "value": [
+        "today",
+        "history"
+      ]
+    },
+    "tags": {
+      "kind": "multiple_choice",
+      "value": [
+        "health",
+        "daily"
+      ]
+    },
+    "title": {
+      "kind": "short_text",
+      "value": "Habit Tracker"
+    }
+  },
+  "pendingSuggestion": {
+    "suggestionId": "sugg-a4d337a36adb",
+    "patch": {
+      "ops": [
+        {
+          "op": "set",
+          "fieldId": "accent",
+          "value": {
+            "kind": "color",
+            "value": "#112233"
+          }
+        },
+        {
+          "op": "remove",
+          "fieldId": "tags"
+        }
+      ],
+      "note": "tone down the accent"
+    },
+    "basedOnRevision": 1
+  },
+  "confirmedRevision": 1
+}

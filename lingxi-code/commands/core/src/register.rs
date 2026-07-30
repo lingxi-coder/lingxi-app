@@ -319,8 +319,8 @@ pub fn register_core_batch_7(reg: &mut CommandRegistry) {
 ///
 /// Handle/root threading:
 ///
-/// * `handle` — the live orchestrator handle. `/fork`, `/goal`, `/recap`, and
-///   `/stop` each consume it (`/fork` reads the transcript + coordinator gate
+/// * `handle` — the live orchestrator handle. `/btw`, `/fork`, `/goal`,
+///   `/recap`, and `/stop` each consume it (`/fork` reads the transcript + coordinator gate
 ///   and drives `fork_conversation`; `/goal` keeps its own session state but
 ///   holds the handle for a future app-state seam; `/recap` reads the
 ///   transcript; `/stop` requests exit).
@@ -356,7 +356,7 @@ pub fn register_core_batch_8(
 ) {
     use crate::{
         AutocompactHandler, ForkBackgroundHandler, ForkHandler, GoalHandler, RecapHandler,
-        ReloadSkillsHandler, SkillDoctorHandler, StopHandler, SubtaskHandler,
+        ReloadSkillsHandler, SideQuestionHandler, SkillDoctorHandler, StopHandler, SubtaskHandler,
     };
 
     reg.register_builtin_handler(Arc::new(AutocompactHandler::new()));
@@ -385,10 +385,11 @@ pub fn register_core_batch_8(
     } else {
         reg.register_builtin_handler(Arc::new(ForkHandler::new(handle.clone())));
     }
+    reg.register_builtin_handler(Arc::new(SideQuestionHandler::new(handle.clone())));
     reg.register_builtin_handler(Arc::new(GoalHandler::new(handle.clone())));
     reg.register_builtin_handler(Arc::new(RecapHandler::new(handle.clone())));
     reg.register_builtin_handler(Arc::new(ReloadSkillsHandler::with_all_roots(
-        shared_registry,
+        shared_registry.clone(),
         cwd.clone(),
         lingxi_home.clone(),
         managed_dir.clone(),
@@ -396,7 +397,8 @@ pub fn register_core_batch_8(
         additional_skill_dirs.clone(),
         safe_mode,
     )));
-    reg.register_builtin_handler(Arc::new(SkillDoctorHandler::new(
+    reg.register_builtin_handler(Arc::new(SkillDoctorHandler::with_registry(
+        shared_registry,
         cwd,
         lingxi_home,
         managed_dir,

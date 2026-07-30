@@ -96,8 +96,8 @@ pub const MAX_ASK_OPTIONS: usize = 4;
 pub const MIN_ASK_OPTIONS: usize = 2;
 /// Header chip width — `ASK_USER_QUESTION_TOOL_CHIP_WIDTH` (`prompt.ts:5`).
 pub const ASK_USER_QUESTION_TOOL_CHIP_WIDTH: usize = 12;
-/// Header maximum length (chip width). LingXi enforces this as `maxLength`;
-/// TS documents it in the field description but does not hard-validate it.
+/// Header display guidance (chip width). Claude documents this in the field
+/// description but does not hard-validate it.
 pub const MAX_ASK_HEADER_LEN: usize = ASK_USER_QUESTION_TOOL_CHIP_WIDTH;
 
 /// LingXi-only locks retained for the system-tools parity fixture. TS uses
@@ -495,8 +495,7 @@ fn parse_option(idx_q: usize, idx_o: usize, v: &Value) -> Result<QuestionOption,
     })
 }
 
-/// Parse one question object, enforcing the per-question option-count bounds
-/// and `header` length.
+/// Parse one question object, enforcing the per-question option-count bounds.
 fn parse_question(idx_q: usize, v: &Value) -> Result<Question, ToolError> {
     let obj = v.as_object().ok_or_else(|| {
         ToolError::InvalidInput(format!(
@@ -518,14 +517,6 @@ fn parse_question(idx_q: usize, v: &Value) -> Result<Question, ToolError> {
             "AskUserQuestion: questions[{idx_q}].header must be a string"
         ))
     })?;
-    if header.chars().count() > MAX_ASK_HEADER_LEN {
-        return Err(ToolError::InvalidInput(format!(
-            "AskUserQuestion: questions[{idx_q}].header length {} exceeds max {}",
-            header.chars().count(),
-            MAX_ASK_HEADER_LEN
-        )));
-    }
-
     let opts_v = obj
         .get("options")
         .and_then(Value::as_array)
@@ -1057,7 +1048,7 @@ mod tests {
         validate_input_internal(&input).expect("cross-question dup labels ok");
     }
 
-    // --- header chip width ---
+    // --- header chip width guidance ---
 
     #[test]
     fn header_at_chip_width_ok() {
@@ -1069,13 +1060,13 @@ mod tests {
     }
 
     #[test]
-    fn header_over_chip_width_rejected() {
+    fn header_over_chip_width_is_not_hard_rejected() {
         let header = "x".repeat(MAX_ASK_HEADER_LEN + 1);
         let input = json!({
             "questions": [{ "question": "Q?", "header": header, "options": [opt("A", "a"), opt("B", "b")] }]
         });
-        let err = validate_input_internal(&input).unwrap_err();
-        assert!(format!("{err}").contains("header length 13 exceeds max 12"));
+        validate_input_internal(&input)
+            .expect("chip width is model guidance, not an input-schema constraint");
     }
 
     // --- multiSelect default + preview passthrough ---

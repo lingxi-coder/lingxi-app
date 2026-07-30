@@ -16,6 +16,7 @@ use hooks::{
 use protocol::{HookId, HttpResponse, SessionId, ToolUseId};
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use test_harness::mocks::{MockHttpTransport, MockRuntimeSpawner, ScriptedResponse};
 use tokio::sync::RwLock;
@@ -75,6 +76,30 @@ fn dummy_ctx() -> HookContext {
         agent_id: None,
         cwd: std::path::PathBuf::from("/tmp"),
         ..Default::default()
+    }
+}
+
+#[derive(Default)]
+struct StaticResolver(HashMap<(String, u16), Result<Vec<SocketAddr>, String>>);
+
+impl StaticResolver {
+    fn parity_http_hosts() -> Self {
+        let mut answers = HashMap::new();
+        answers.insert(
+            ("mock-server.test".to_string(), 80),
+            Ok(vec!["93.184.216.34:80".parse().expect("public example ip")]),
+        );
+        Self(answers)
+    }
+}
+
+#[async_trait]
+impl hooks::DnsResolver for StaticResolver {
+    async fn lookup_host(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
+        self.0
+            .get(&(host.to_string(), port))
+            .cloned()
+            .unwrap_or_else(|| Err(format!("missing resolver answer for {host}:{port}")))
     }
 }
 
@@ -227,7 +252,9 @@ async fn http_arm_pretooluse_with_mock_transport_succeeds() {
     }));
 
     let runtime = Arc::new(MockRuntimeSpawner::default());
-    let exec = HookExecutorImpl::new(reg, mock_http, runtime);
+    let exec = HookExecutorImpl::new(reg, mock_http, runtime).with_ssrf_guard(
+        hooks::SsrfGuard::with_resolver(StaticResolver::parity_http_hosts()),
+    );
 
     let agg = exec.execute(pre_tool_use_event(), dummy_ctx()).await;
     // The HTTP arm returns Success for status 200; no Block decision.

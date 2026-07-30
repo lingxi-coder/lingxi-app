@@ -62,7 +62,7 @@ pub use response::{
     AggregateHookResult, ElicitationHookResponse, HookDecision, HookOutcome, HookResponse,
     HookResult,
 };
-pub use ssrf_guard::{IpRange, SsrfError, SsrfGuard};
+pub use ssrf_guard::{DnsResolver, IpRange, SsrfError, SsrfGuard};
 pub use task_completed_firer::{OptionalTaskCompletedFirer, TaskCompletedFire, TaskCompletedFirer};
 pub use task_created_firer::{OptionalTaskCreatedFirer, TaskCreatedFire, TaskCreatedFirer};
 pub use teammate_idle_firer::{OptionalTeammateIdleFirer, TeammateIdleFire, TeammateIdleFirer};

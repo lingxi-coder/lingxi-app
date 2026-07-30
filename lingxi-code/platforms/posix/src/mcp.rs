@@ -279,6 +279,16 @@ struct PromptsListResult {
 struct RawPrompt {
     name: String,
     description: Option<String>,
+    #[serde(default)]
+    arguments: Vec<RawPromptArgument>,
+}
+
+#[derive(Deserialize)]
+struct RawPromptArgument {
+    name: String,
+    description: Option<String>,
+    #[serde(default)]
+    required: bool,
 }
 
 /// Map a [`ConnectionError`] from an outbound call into the generic
@@ -501,6 +511,15 @@ impl McpTransport for PosixMcpTransport {
             .map(|p| McpPromptDto {
                 name: p.name,
                 description: p.description,
+                arguments: p
+                    .arguments
+                    .into_iter()
+                    .map(|argument| traits::McpPromptArgumentDto {
+                        name: argument.name,
+                        description: argument.description,
+                        required: argument.required,
+                    })
+                    .collect(),
             })
             .collect())
     }

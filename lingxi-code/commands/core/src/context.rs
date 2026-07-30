@@ -78,6 +78,13 @@ fn render_context(model: &str, usage: &traits::ContextUsageSnapshot) -> String {
             ));
         }
     }
+    if let Some(warning) = usage.overflow_warning(
+        std::env::var_os("DISABLE_COMPACT").is_some_and(|value| !value.is_empty()),
+    ) {
+        out.push_str("\n⚠ ");
+        out.push_str(&warning);
+        out.push('\n');
+    }
     out
 }
 
@@ -199,6 +206,21 @@ mod tests {
         assert!(s.contains("| System prompt | 25k | 3% |"));
         assert!(s.contains("| Autocompact buffer | 13k | 1% |"));
         assert!(s.contains("| Free space | 887k | 89% |"));
+    }
+
+    #[test]
+    fn renders_explicit_over_context_warning() {
+        let s = render_context(
+            "claude-opus-5",
+            &traits::ContextUsageSnapshot {
+                live_context_tokens: 1_012_345,
+                max_context_tokens: 1_000_000,
+                ..Default::default()
+            },
+        );
+        assert!(s.contains(
+            "⚠ Context exceeds the 1m-token limit by 12.3k tokens \u{2014} run /compact or /clear to continue."
+        ));
     }
 
     #[test]

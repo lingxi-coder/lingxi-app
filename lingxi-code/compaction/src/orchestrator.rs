@@ -315,8 +315,8 @@ impl CompactionOrchestrator {
         // when the idle-gap trigger fires; with `config.enabled == false` (the
         // default) it is a no-op. The prior code ran `micro.compact`
         // UNCONDITIONALLY, over-clearing tool results on every iteration even
-        // when time-based micro is disabled. PARITY-GAP: `ConversationMessage`
-        // carries no per-message timestamp; callers provide the session sidecar.
+        // when time-based micro is disabled. Per-message wire timestamps remain
+        // unchanged; callers provide the persisted session timing sidecar.
         // Missing timing (legacy transcript) is a strict no-op.
         if crate::microcompact::evaluate_time_based_trigger(
             &self.micro.config,

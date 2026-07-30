@@ -35,8 +35,7 @@ const AGENT_COLOR_NAMES: [&str; 8] = [
 
 /// User-addressable permission-mode strings — claude `PERMISSION_MODES`
 /// (`EXTERNAL_PERMISSION_MODES`; `'auto'` is feature-gated in claude and not
-/// surfaced here). Used to VALIDATE the raw frontmatter value before mapping it
-/// onto the lossy [`AgentPermissionMode`] enum.
+/// surfaced here). Used to validate and preserve the raw frontmatter value.
 const PERMISSION_MODES: [&str; 5] = [
     "acceptEdits",
     "bypassPermissions",
@@ -740,10 +739,9 @@ fn parse_isolation(value: Option<&serde_yaml::Value>, path: &Path) -> Option<Age
 }
 
 /// claude permissionMode coercion: validate against PERMISSION_MODES; invalid
-/// -> log. Map the VALID raw string onto the lossy [`AgentPermissionMode`]
-/// enum — only `'plan'` has a behavioral analog (`Plan`); the other four
-/// collapse to `Bubble` (a documented divergence: LingXi's enum lacks
-/// `acceptEdits`/`bypassPermissions`/`default`/`dontAsk` variants).
+/// -> log. Preserve the valid raw string as the corresponding
+/// [`AgentPermissionMode`] so both subagent spawns and main-thread `--agent`
+/// sessions can apply the oracle's permission-mode precedence.
 fn parse_permission_mode(value: Option<&serde_yaml::Value>, path: &Path) -> AgentPermissionMode {
     let Some(raw) = value.and_then(yaml_as_string) else {
         return AgentPermissionMode::Bubble;
@@ -757,8 +755,11 @@ fn parse_permission_mode(value: Option<&serde_yaml::Value>, path: &Path) -> Agen
         return AgentPermissionMode::Bubble;
     }
     match raw.as_str() {
+        "default" => AgentPermissionMode::Default,
+        "acceptEdits" => AgentPermissionMode::AcceptEdits,
+        "dontAsk" => AgentPermissionMode::DontAsk,
+        "bypassPermissions" => AgentPermissionMode::BypassPermissions,
         "plan" => AgentPermissionMode::Plan,
-        // 'default' | 'acceptEdits' | 'bypassPermissions' | 'dontAsk'
         _ => AgentPermissionMode::Bubble,
     }
 }
@@ -991,10 +992,13 @@ pub fn parse_agent_from_json(
     let permission_mode = match obj.get("permissionMode") {
         None | Some(serde_json::Value::Null) => AgentPermissionMode::Bubble,
         Some(serde_json::Value::String(raw)) if PERMISSION_MODES.contains(&raw.as_str()) => {
-            if raw == "plan" {
-                AgentPermissionMode::Plan
-            } else {
-                AgentPermissionMode::Bubble
+            match raw.as_str() {
+                "default" => AgentPermissionMode::Default,
+                "acceptEdits" => AgentPermissionMode::AcceptEdits,
+                "dontAsk" => AgentPermissionMode::DontAsk,
+                "bypassPermissions" => AgentPermissionMode::BypassPermissions,
+                "plan" => AgentPermissionMode::Plan,
+                _ => AgentPermissionMode::Bubble,
             }
         }
         _ => {
@@ -1947,15 +1951,22 @@ mod tests {
             md("---\nname: a\ndescription: d\npermissionMode: plan\n---\n").permission_mode,
             AgentPermissionMode::Plan
         );
-        // 'default' is valid but collapses to Bubble (lossy enum).
         assert_eq!(
             md("---\nname: a\ndescription: d\npermissionMode: default\n---\n").permission_mode,
-            AgentPermissionMode::Bubble
+            AgentPermissionMode::Default
         );
-        // 'acceptEdits' is valid but collapses to Bubble.
         assert_eq!(
             md("---\nname: a\ndescription: d\npermissionMode: acceptEdits\n---\n").permission_mode,
-            AgentPermissionMode::Bubble
+            AgentPermissionMode::AcceptEdits
+        );
+        assert_eq!(
+            md("---\nname: a\ndescription: d\npermissionMode: dontAsk\n---\n").permission_mode,
+            AgentPermissionMode::DontAsk
+        );
+        assert_eq!(
+            md("---\nname: a\ndescription: d\npermissionMode: bypassPermissions\n---\n")
+                .permission_mode,
+            AgentPermissionMode::BypassPermissions
         );
         // invalid -> Bubble (logged)
         assert_eq!(

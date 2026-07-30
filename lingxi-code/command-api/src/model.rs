@@ -148,6 +148,9 @@ pub enum SlashCommandKind {
         connection_id: McpConnectionId,
         /// Prompt name to fetch via `prompts/get`.
         prompt_name: String,
+        /// Server-declared named arguments, in wire order.
+        #[serde(default)]
+        arguments: Vec<traits::McpPromptArgumentDto>,
     },
     /// Programmatically-registered bundled skill (port of the reference
     /// `registerBundledSkill`, `bundledSkills.ts`). Unlike [`Self::Markdown`],

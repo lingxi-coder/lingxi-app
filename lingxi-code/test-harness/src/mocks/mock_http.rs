@@ -15,7 +15,7 @@ use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
-use traits::{HttpError, HttpTransport};
+use traits::{HttpError, HttpTransport, ResolvedAddressOverride};
 
 /// A pre-recorded response that the mock transport hands back on the next call.
 #[derive(Debug, Clone)]
@@ -92,6 +92,14 @@ impl HttpTransport for MockHttpTransport {
                 "no scripted response available".into(),
             )),
         }
+    }
+
+    async fn request_with_resolved_addrs(
+        &self,
+        req: HttpRequest,
+        _resolved: Option<ResolvedAddressOverride>,
+    ) -> Result<HttpResponse, HttpError> {
+        self.request(req).await
     }
 
     async fn stream_sse(&self, req: HttpRequest) -> Result<traits::http::SseStream, HttpError> {

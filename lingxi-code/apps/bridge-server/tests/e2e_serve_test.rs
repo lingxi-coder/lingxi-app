@@ -79,6 +79,8 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
         // Deterministic e2e: empty memory, never the real FS.
         memory_provider: None,
         permission_mode: permission::PermissionMode::Default,
+        permission_mode_cli: None,
+        permission_mode_cli_explicit: false,
         allow_dangerously_skip_permissions: false,
         connect_prompt: None,
         max_turns: None,

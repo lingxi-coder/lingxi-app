@@ -47,9 +47,9 @@ class ClientEventMapperTest {
     }
 
     @Test
-    fun thinkingDelta_mapsToThinking() {
+    fun thinkingDelta_preservesReasoningText() {
         val r = clientEventToReply(ClientEvent.ThinkingDelta(thinking = "reasoning…", signature = null))
-        assertEquals(ReplyEvent.Thinking, r)
+        assertEquals(ReplyEvent.ReasoningDelta("reasoning…"), r)
     }
 
     @Test
@@ -81,9 +81,12 @@ class ClientEventMapperTest {
             ClientEvent.ToolUseResult(id = "t1", tool = "read", resultJson = "{}", isError = false),
         )
         assertTrue(r is ReplyEvent.ToolActivity)
-        val label = (r as ReplyEvent.ToolActivity).label
-        assertTrue(label.contains("read"))
-        assertTrue(label.contains("完成"))
+        val activity = r as ReplyEvent.ToolActivity
+        assertTrue(activity.label.contains("read"))
+        assertTrue(activity.label.contains("完成"))
+        assertEquals("t1", activity.id)
+        assertEquals("read", activity.tool)
+        assertEquals(AgentToolStatus.Completed, activity.status)
     }
 
     @Test
@@ -92,9 +95,26 @@ class ClientEventMapperTest {
             ClientEvent.ToolUseResult(id = "t1", tool = "write", resultJson = "{}", isError = true),
         )
         assertTrue(r is ReplyEvent.ToolActivity)
-        val label = (r as ReplyEvent.ToolActivity).label
-        assertTrue(label.contains("write"))
-        assertTrue(label.contains("失败"))
+        val activity = r as ReplyEvent.ToolActivity
+        assertTrue(activity.label.contains("write"))
+        assertTrue(activity.label.contains("失败"))
+        assertEquals(AgentToolStatus.Failed, activity.status)
+    }
+
+    @Test
+    fun genericToolStart_preservesSafeInputSummary() {
+        val r = clientEventToReply(
+            ClientEvent.ToolUseStarted(
+                id = "read-1",
+                tool = "Read",
+                inputJson = """{"path":"/workspace/index.html","api_key":"secret"}""",
+            ),
+        ) as ReplyEvent.ToolActivity
+
+        assertEquals("read-1", r.id)
+        assertEquals("Read", r.tool)
+        assertEquals(AgentToolStatus.Running, r.status)
+        assertEquals("/workspace/index.html", r.inputSummary)
     }
 
     // --- terminal events --------------------------------------------------
@@ -165,7 +185,7 @@ class ClientEventMapperTest {
         )
     }
 
-    // --- ignored events ---------------------------------------------------
+    // --- completion / telemetry ------------------------------------------
 
     @Test
     fun messageComplete_withMessage_mapsToCompleted() {
@@ -188,13 +208,37 @@ class ClientEventMapperTest {
     }
 
     @Test
-    fun usageUpdate_isIgnored() {
+    fun usageUpdate_mapsToLiveUsage() {
         val r = clientEventToReply(
             ClientEvent.UsageUpdate(
                 inputTokens = 1u, outputTokens = 2u, cacheReadTokens = 0u, cacheCreationTokens = 0u,
             ),
         )
-        assertNull(r)
+        assertEquals(
+            ReplyEvent.Usage(AgentRunUsage(1, 2, 0, 0)),
+            r,
+        )
+    }
+
+    @Test
+    fun retryAndSystemNotice_mapToLiveTraceEvents() {
+        assertEquals(
+            ReplyEvent.Retry("rate limited", 2, 5, 1_500),
+            clientEventToReply(
+                ClientEvent.ApiRetry(
+                    message = "rate limited",
+                    attempt = 2u,
+                    maxRetries = 5u,
+                    delayMs = 1_500u,
+                ),
+            ),
+        )
+        assertEquals(
+            ReplyEvent.Notice("上下文即将压缩", false),
+            clientEventToReply(
+                ClientEvent.SystemNotice(message = "上下文即将压缩", isError = false),
+            ),
+        )
     }
 
     @Test

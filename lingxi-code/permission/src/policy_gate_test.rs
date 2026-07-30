@@ -1808,8 +1808,12 @@ mod tests {
             Arc::new(policy),
             RecordingInner::new(PermissionDecision::Allow),
         );
-        let provider: crate::policy_gate::LiveModelProvider =
-            Arc::new(|| Some("claude-sonnet-4-5".to_string()));
+        let provider: crate::policy_gate::LiveModelProvider = Arc::new(|| {
+            Some(crate::policy_gate::LiveModelContext {
+                model: "claude-sonnet-4-5".to_string(),
+                provider: "firstParty".to_string(),
+            })
+        });
         gate.live_model_provider_handle()
             .set(provider)
             .unwrap_or_else(|_| panic!("cell set once"));
@@ -1827,8 +1831,12 @@ mod tests {
             Arc::new(policy),
             RecordingInner::new(PermissionDecision::Allow),
         );
-        let provider: crate::policy_gate::LiveModelProvider =
-            Arc::new(|| Some("claude-opus-4-8".to_string()));
+        let provider: crate::policy_gate::LiveModelProvider = Arc::new(|| {
+            Some(crate::policy_gate::LiveModelContext {
+                model: "claude-opus-4-8".to_string(),
+                provider: "firstParty".to_string(),
+            })
+        });
         gate.live_model_provider_handle()
             .set(provider)
             .unwrap_or_else(|_| panic!("cell set once"));
@@ -1847,8 +1855,12 @@ mod tests {
             Arc::new(policy),
             RecordingInner::new(PermissionDecision::Allow),
         );
-        let provider: crate::policy_gate::LiveModelProvider =
-            Arc::new(|| Some("claude-sonnet-4-5".to_string()));
+        let provider: crate::policy_gate::LiveModelProvider = Arc::new(|| {
+            Some(crate::policy_gate::LiveModelContext {
+                model: "claude-sonnet-4-5".to_string(),
+                provider: "firstParty".to_string(),
+            })
+        });
         gate.live_model_provider_handle()
             .set(provider)
             .unwrap_or_else(|_| panic!("cell set once"));
@@ -1875,6 +1887,28 @@ mod tests {
         gate.set_permission_mode("auto")
             .await
             .expect("auto accepted when the live model is unreadable");
+    }
+
+    #[tokio::test]
+    async fn set_permission_mode_uses_live_non_first_party_provider() {
+        let policy = PermissionPolicy::from_rules(PermissionMode::Default, Vec::new());
+        let gate = PolicyPermissionGate::new(
+            Arc::new(policy),
+            RecordingInner::new(PermissionDecision::Allow),
+        );
+        let provider: crate::policy_gate::LiveModelProvider = Arc::new(|| {
+            Some(crate::policy_gate::LiveModelContext {
+                model: "claude-sonnet-4-6".to_string(),
+                provider: "vertex".to_string(),
+            })
+        });
+        gate.live_model_provider_handle()
+            .set(provider)
+            .unwrap_or_else(|_| panic!("cell set once"));
+        assert_eq!(
+            gate.set_permission_mode("auto").await.unwrap_err(),
+            "Cannot set permission mode to auto: auto mode unavailable for this model"
+        );
     }
 
     #[tokio::test]

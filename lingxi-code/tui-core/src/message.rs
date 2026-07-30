@@ -272,7 +272,7 @@ pub enum RenderedMessage {
         entries: Vec<(serde_json::Value, serde_json::Value)>,
     },
     /// (M7-05) A fold of Read/Search/List tool runs into one count summary.
-    /// Scope: read/search/list counts (git/PR/bash/mcp/memory parts → M8).
+    /// Fullscreen also folds MCP, Bash, and auto-managed memory writes.
     CollapsedReadSearch {
         /// Number of search (Grep/Glob) tool uses.
         search_count: u64,
@@ -288,6 +288,12 @@ pub enum RenderedMessage {
         entries: Vec<String>,
         /// Number of REPL invocations folded (present-tense `REPL'ing`).
         repl_count: u64,
+        /// Number of MCP tool calls folded in fullscreen.
+        mcp_call_count: u64,
+        /// Distinct MCP server names in stable display order.
+        mcp_server_names: Vec<String>,
+        /// Number of non-search/read Bash commands folded in fullscreen.
+        bash_count: u64,
         /// The latest read target — the dim `⎿` hint shown ONLY while active.
         latest_hint: Option<String>,
         /// Team memories recalled (M9-03; data feed wired later).

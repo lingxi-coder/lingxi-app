@@ -15,6 +15,8 @@ use async_trait::async_trait;
 use hooks::events::{HookEvent, PromptExpansionType};
 use hooks::registry::HookContext;
 use hooks::HookExecutorImpl;
+use protocol::McpConnectionId;
+use serde_json::{Map, Value};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -44,6 +46,19 @@ pub type BackgroundPromptLauncher = Arc<
             String,
         )
             -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// Resolves a live MCP prompt through the connection generation that
+/// advertised it. Hosts without MCP leave this unwired.
+pub type McpPromptResolver = Arc<
+    dyn Fn(
+            McpConnectionId,
+            String,
+            Value,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, String>> + Send>>
         + Send
         + Sync,
 >;
@@ -138,6 +153,9 @@ pub struct RegistrySlashDispatcher {
     /// Host-owned background launcher for bundled commands declaring
     /// `context: fork`. `None` fails closed instead of executing inline.
     background_prompt_launcher: Option<BackgroundPromptLauncher>,
+    /// Live `prompts/get` bridge. Kept host-owned so `command-api` does not
+    /// depend on the concrete MCP registry crate.
+    mcp_prompt_resolver: Option<McpPromptResolver>,
 }
 
 impl RegistrySlashDispatcher {
@@ -150,6 +168,7 @@ impl RegistrySlashDispatcher {
             shell_expansion: None,
             skill_usage_home: None,
             background_prompt_launcher: None,
+            mcp_prompt_resolver: None,
         }
     }
 
@@ -180,6 +199,13 @@ impl RegistrySlashDispatcher {
     #[must_use]
     pub fn with_background_prompt_launcher(mut self, launcher: BackgroundPromptLauncher) -> Self {
         self.background_prompt_launcher = Some(launcher);
+        self
+    }
+
+    /// Wire live MCP prompt expansion.
+    #[must_use]
+    pub fn with_mcp_prompt_resolver(mut self, resolver: McpPromptResolver) -> Self {
+        self.mcp_prompt_resolver = Some(resolver);
         self
     }
 
@@ -274,6 +300,7 @@ impl RegistrySlashDispatcher {
             shell_expansion: self.shell_expansion.clone(),
             skill_usage_home: self.skill_usage_home.clone(),
             background_prompt_launcher: self.background_prompt_launcher.clone(),
+            mcp_prompt_resolver: self.mcp_prompt_resolver.clone(),
         }
     }
 
@@ -399,6 +426,60 @@ impl SlashCommandDispatcher for RegistrySlashDispatcher {
             };
         }
 
+        if let SlashCommandKind::Mcp {
+            connection_id,
+            prompt_name,
+            arguments,
+        } = &command.kind
+        {
+            let connection_id = *connection_id;
+            let prompt_name = prompt_name.clone();
+            let arguments = arguments.clone();
+            let resolver = self.mcp_prompt_resolver.clone();
+            drop(reg);
+
+            let wire_arguments =
+                match bind_mcp_prompt_arguments(&arguments, &parsed.positional_args) {
+                    Ok(arguments) => arguments,
+                    Err(error) => {
+                        return SlashDispatchResult::Handled {
+                            display: format!("{}: {error}", command.name),
+                        };
+                    }
+                };
+            let Some(resolver) = resolver else {
+                return SlashDispatchResult::Handled {
+                    display: format!(
+                        "{}: MCP prompt expansion is unavailable in this host",
+                        command.name
+                    ),
+                };
+            };
+
+            self.fire_user_prompt_expansion(&command.name, &parsed.raw_args, CommandSource::Mcp)
+                .await;
+            return match resolver(connection_id, prompt_name, Value::Object(wire_arguments)).await {
+                Ok(result) => match render_mcp_prompt_result(&result) {
+                    Ok(prompt) => {
+                        if let Some(config_home) = self.skill_usage_home.as_deref() {
+                            if let Err(error) =
+                                crate::skill_usage::record_skill_usage(config_home, &command.name)
+                            {
+                                tracing::warn!(command = %command.name, %error, "failed to record MCP prompt usage");
+                            }
+                        }
+                        SlashDispatchResult::RunAsTurn { prompt }
+                    }
+                    Err(error) => SlashDispatchResult::Handled {
+                        display: format!("{}: invalid MCP prompt result: {error}", command.name),
+                    },
+                },
+                Err(error) => SlashDispatchResult::Handled {
+                    display: format!("{}: MCP prompt expansion failed: {error}", command.name),
+                },
+            };
+        }
+
         if matches!(
             command.kind,
             SlashCommandKind::Markdown { .. } | SlashCommandKind::Plugin { .. }
@@ -435,12 +516,12 @@ impl SlashCommandDispatcher for RegistrySlashDispatcher {
             };
             return match expand_markdown_command(&command, &parsed, &expand_ctx).await {
                 Ok(content) => {
-                    // `/skill-doctor` reads this persistent counter. Only the
-                    // same user/project/local sources it reports are counted;
-                    // bundled, managed, MCP, and plugin commands are excluded.
+                    // `/skill-doctor` reads this persistent counter. Record
+                    // file-backed and plugin skills; bundled/managed commands
+                    // are not part of its diagnostic surface.
                     if matches!(
-                        command.source,
-                        CommandSource::User | CommandSource::Project | CommandSource::Local
+                        &command.kind,
+                        SlashCommandKind::Markdown { .. } | SlashCommandKind::Plugin { .. }
                     ) {
                         if let Some(config_home) = self.skill_usage_home.as_deref() {
                             if let Err(error) =
@@ -539,6 +620,95 @@ impl SlashCommandDispatcher for RegistrySlashDispatcher {
                 SlashDispatchResult::Handled { display: prompt }
             }
         }
+    }
+}
+
+fn bind_mcp_prompt_arguments(
+    declarations: &[traits::McpPromptArgumentDto],
+    positional: &[String],
+) -> Result<Map<String, Value>, String> {
+    if positional.len() > declarations.len() {
+        return Err(format!(
+            "expected at most {} argument{}, received {}",
+            declarations.len(),
+            if declarations.len() == 1 { "" } else { "s" },
+            positional.len()
+        ));
+    }
+
+    let mut bound = Map::new();
+    for (index, declaration) in declarations.iter().enumerate() {
+        match positional.get(index) {
+            Some(value) => {
+                bound.insert(declaration.name.clone(), Value::String(value.clone()));
+            }
+            None if declaration.required => {
+                return Err(format!("missing required argument <{}>", declaration.name));
+            }
+            None => {}
+        }
+    }
+    Ok(bound)
+}
+
+fn render_mcp_prompt_result(result: &Value) -> Result<String, String> {
+    let messages = result
+        .get("messages")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "missing messages array".to_string())?;
+    if messages.is_empty() {
+        return Err("messages array is empty".to_string());
+    }
+
+    let mut rendered = Vec::with_capacity(messages.len());
+    for message in messages {
+        let role = message
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or("user");
+        let content = message
+            .get("content")
+            .ok_or_else(|| "message is missing content".to_string())?;
+        let text = render_mcp_prompt_content(content)?;
+        rendered.push((role, text));
+    }
+
+    if rendered.len() == 1 && rendered[0].0 == "user" {
+        return Ok(rendered.pop().expect("one element").1);
+    }
+    Ok(rendered
+        .into_iter()
+        .map(|(role, content)| format!("[{role}]\n{content}"))
+        .collect::<Vec<_>>()
+        .join("\n\n"))
+}
+
+fn render_mcp_prompt_content(content: &Value) -> Result<String, String> {
+    match content {
+        Value::String(text) => Ok(text.clone()),
+        Value::Array(parts) => parts
+            .iter()
+            .map(render_mcp_prompt_content)
+            .collect::<Result<Vec<_>, _>>()
+            .map(|parts| parts.join("\n")),
+        Value::Object(object) if object.get("type").and_then(Value::as_str) == Some("text") => {
+            object
+                .get("text")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .ok_or_else(|| "text content is missing text".to_string())
+        }
+        Value::Object(object) if object.get("type").and_then(Value::as_str) == Some("resource") => {
+            let resource = object
+                .get("resource")
+                .ok_or_else(|| "resource content is missing resource".to_string())?;
+            if let Some(text) = resource.get("text").and_then(Value::as_str) {
+                Ok(text.to_string())
+            } else {
+                serde_json::to_string(resource).map_err(|error| error.to_string())
+            }
+        }
+        other => serde_json::to_string(other).map_err(|error| error.to_string()),
     }
 }
 
@@ -1153,6 +1323,92 @@ mod tests {
         assert_eq!(seen[0].expansion_type, PromptExpansionType::McpPrompt);
         assert_eq!(seen[0].command_source, Some("mcp".to_string()));
         assert_eq!(seen[0].prompt, "/demo arg");
+    }
+
+    fn registry_with_mcp_prompt(connection_id: McpConnectionId) -> Arc<RwLock<CommandRegistry>> {
+        let mut registry = CommandRegistry::new();
+        registry.register_command(SlashCommand {
+            name: "github:review".to_string(),
+            description: "Review a pull request".to_string(),
+            source: CommandSource::Mcp,
+            kind: SlashCommandKind::Mcp {
+                connection_id,
+                prompt_name: "review".to_string(),
+                arguments: vec![
+                    traits::McpPromptArgumentDto {
+                        name: "repository".to_string(),
+                        description: None,
+                        required: true,
+                    },
+                    traits::McpPromptArgumentDto {
+                        name: "focus".to_string(),
+                        description: None,
+                        required: false,
+                    },
+                ],
+            },
+            ..SlashCommand::default()
+        });
+        Arc::new(RwLock::new(registry))
+    }
+
+    #[tokio::test]
+    async fn mcp_prompt_dispatch_binds_arguments_and_runs_rendered_prompt() {
+        let connection_id = McpConnectionId::new();
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let resolver_seen = seen.clone();
+        let resolver: McpPromptResolver = Arc::new(move |id, name, arguments| {
+            let seen = resolver_seen.clone();
+            Box::pin(async move {
+                *seen.lock().unwrap() = Some((id, name, arguments));
+                Ok(serde_json::json!({
+                    "messages": [{
+                        "role": "user",
+                        "content": {"type": "text", "text": "Review src/lib.rs"}
+                    }]
+                }))
+            })
+        });
+        let dispatcher = RegistrySlashDispatcher::new(registry_with_mcp_prompt(connection_id))
+            .with_mcp_prompt_resolver(resolver);
+
+        match dispatcher
+            .dispatch("/github:review lingxi \"unsafe code\"")
+            .await
+        {
+            SlashDispatchResult::RunAsTurn { prompt } => {
+                assert_eq!(prompt, "Review src/lib.rs");
+            }
+            other => panic!("expected MCP prompt turn, got {other:?}"),
+        }
+        let call = seen.lock().unwrap().clone().expect("resolver call");
+        assert_eq!(call.0, connection_id);
+        assert_eq!(call.1, "review");
+        assert_eq!(
+            call.2,
+            serde_json::json!({"repository": "lingxi", "focus": "unsafe code"})
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_prompt_missing_required_argument_fails_before_wire_call() {
+        let connection_id = McpConnectionId::new();
+        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let resolver_called = called.clone();
+        let resolver: McpPromptResolver = Arc::new(move |_, _, _| {
+            resolver_called.store(true, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async { unreachable!("required argument must fail before resolver") })
+        });
+        let dispatcher = RegistrySlashDispatcher::new(registry_with_mcp_prompt(connection_id))
+            .with_mcp_prompt_resolver(resolver);
+
+        match dispatcher.dispatch("/github:review").await {
+            SlashDispatchResult::Handled { display } => {
+                assert!(display.contains("missing required argument <repository>"));
+            }
+            other => panic!("expected validation error, got {other:?}"),
+        }
+        assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     /// A command with NO args reports an empty `command_args` and the bare

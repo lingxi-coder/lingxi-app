@@ -71,6 +71,21 @@ pub(crate) fn wire_mode_str(mode: PermissionMode) -> &'static str {
     }
 }
 
+/// Main-loop/subagent override implied by an agent definition's own
+/// `permissionMode` frontmatter.
+#[must_use]
+pub fn definition_mode_override(mode: AgentPermissionMode) -> Option<PermissionMode> {
+    match mode {
+        AgentPermissionMode::Bubble | AgentPermissionMode::Isolated => None,
+        AgentPermissionMode::Default => Some(PermissionMode::Default),
+        AgentPermissionMode::AcceptEdits => Some(PermissionMode::AcceptEdits),
+        AgentPermissionMode::DontAsk => Some(PermissionMode::DontAsk),
+        AgentPermissionMode::BypassPermissions => Some(PermissionMode::BypassPermissions),
+        AgentPermissionMode::Auto => Some(PermissionMode::Auto),
+        AgentPermissionMode::Plan => Some(PermissionMode::Plan),
+    }
+}
+
 /// Clamp a REQUESTED child spawn mode against the PARENT's live mode — claude
 /// `wKe(e,t)` with `e`=requested, `t`=parent:
 ///
@@ -102,11 +117,7 @@ fn clamp_spawn_mode(
 /// mode unchanged — byte-identical to pre-2.1.207.
 #[must_use]
 fn definition_mode_fallback(mode: AgentPermissionMode) -> Option<PermissionMode> {
-    match mode {
-        AgentPermissionMode::Plan => Some(PermissionMode::Plan),
-        AgentPermissionMode::Auto => Some(PermissionMode::Auto),
-        AgentPermissionMode::Bubble | AgentPermissionMode::Isolated => None,
-    }
+    definition_mode_override(mode)
 }
 
 /// Compute a spawned child's EFFECTIVE permission-context mode override — claude
@@ -304,6 +315,30 @@ mod tests {
                 PermissionMode::Default,
                 AgentPermissionMode::Plan
             ),
+            Some(PermissionMode::Plan)
+        );
+    }
+
+    #[test]
+    fn definition_modes_round_trip_to_permission_modes() {
+        assert_eq!(
+            definition_mode_override(AgentPermissionMode::Default),
+            Some(PermissionMode::Default)
+        );
+        assert_eq!(
+            definition_mode_override(AgentPermissionMode::AcceptEdits),
+            Some(PermissionMode::AcceptEdits)
+        );
+        assert_eq!(
+            definition_mode_override(AgentPermissionMode::DontAsk),
+            Some(PermissionMode::DontAsk)
+        );
+        assert_eq!(
+            definition_mode_override(AgentPermissionMode::BypassPermissions),
+            Some(PermissionMode::BypassPermissions)
+        );
+        assert_eq!(
+            definition_mode_override(AgentPermissionMode::Plan),
             Some(PermissionMode::Plan)
         );
     }

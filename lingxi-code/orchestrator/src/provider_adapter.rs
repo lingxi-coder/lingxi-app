@@ -1325,9 +1325,10 @@ mod tests {
 
     #[test]
     fn model_supports_fast_mode_gates_on_opus_fast_tier() {
-        // The 2.1.220 registry marks opus-4-7 / opus-4-8 / opus-5 as fast.
+        // Claude Code 2.1.219 removed opus-4-7 from fast mode. The 2.1.220
+        // registry keeps only opus-4-8 / opus-5 on the fast tier.
         assert!(model_supports_fast_mode("claude-opus-4-8"));
-        assert!(model_supports_fast_mode("claude-opus-4-7"));
+        assert!(!model_supports_fast_mode("claude-opus-4-7"));
         assert!(model_supports_fast_mode("claude-opus-5"));
         assert!(model_supports_fast_mode("CLAUDE-OPUS-4-8"));
         assert!(model_supports_fast_mode("us.anthropic.claude-opus-5-v1:0"));

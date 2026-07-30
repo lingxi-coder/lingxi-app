@@ -796,8 +796,11 @@ fun RootScreen(
                     isDark = isDark,
                     onToggleTheme = onToggleTheme,
                     onOpenDrawer = { scope.launch { drawerState.open() } },
-                    // TAP the mic → FlowMode orb; press-and-hold → STT (below).
-                    onMicClick = { flowActive = true },
+                    // Ordinary mic and Flow Mode are separate controls.
+                    onMicClick = {
+                        voiceActive = !voiceActive
+                        if (voiceActive) onVoiceHoldStart() else onVoiceHoldRelease()
+                    },
                     onMicHoldStart = {
                         voiceActive = true
                         onVoiceHoldStart()
@@ -805,6 +808,22 @@ fun RootScreen(
                     onMicHoldRelease = {
                         voiceActive = false
                         onVoiceHoldRelease()
+                    },
+                    onFlowModeClick = { flowActive = !flowActive },
+                    flowModeActive = flowActive,
+                    flowModePanel = {
+                        FlowModeOverlay(
+                            visible = flowActive,
+                            assistantName = assistantName,
+                            inputDialog = inputDialog,
+                            voiceLang = voiceLang,
+                            streaming = state.streaming,
+                            assistantText = orbAssistantText,
+                            onSend = { text -> runConversationAction { chatViewModel.send(text) } },
+                            onCancel = { chatViewModel.cancel() },
+                            onListen = orbListen,
+                            onClose = { flowActive = false },
+                        )
                     },
                     draft = draft,
                     onDraftChange = {
@@ -842,21 +861,6 @@ fun RootScreen(
 
         // Immersive voice overlay (full-screen, above everything else).
         VoiceFlowOverlay(visible = voiceActive)
-
-        // FlowMode (心流) voice-orb overlay — interactive living-orb experience
-        // opened by a mic tap; dismissed by its own close button.
-        FlowModeOverlay(
-            visible = flowActive,
-            assistantName = assistantName,
-            inputDialog = inputDialog,
-            voiceLang = voiceLang,
-            streaming = state.streaming,
-            assistantText = orbAssistantText,
-            onSend = { text -> runConversationAction { chatViewModel.send(text) } },
-            onCancel = { chatViewModel.cancel() },
-            onListen = orbListen,
-            onClose = { flowActive = false },
-        )
 
         // Permission prompt (above everything): renders the head parked request
         // and resolves it by submitting Approve/DenyPermission through the source,

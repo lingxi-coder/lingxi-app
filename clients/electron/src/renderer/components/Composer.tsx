@@ -35,6 +35,7 @@ export function Composer({ repo, model, models, setModel, appendMessage, onSubmi
 
   // ─── Audio recording ─────────────────────────────────────
   const [recording, setRecording] = useState(false);
+  const [flowMode, setFlowMode] = useState(false);
   const [recSecs, setRecSecs] = useState(0);
   const [micDenied, setMicDenied] = useState(false);
   const waveCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -44,7 +45,7 @@ export function Composer({ repo, model, models, setModel, appendMessage, onSubmi
   const barsRef = useRef<number[]>([]);
 
   useEffect(() => {
-    if (!recording) return;
+    if (!recording && !flowMode) return;
     barsRef.current = new Array<number>(NUM_BARS).fill(0);
     const startTime = performance.now();
     let cancelled = false;
@@ -57,6 +58,7 @@ export function Composer({ repo, model, models, setModel, appendMessage, onSubmi
         if (!cancelled) {
           setMicDenied(true);
           setRecording(false);
+          setFlowMode(false);
         }
         return;
       }
@@ -150,7 +152,7 @@ export function Composer({ repo, model, models, setModel, appendMessage, onSubmi
       }
       setRecSecs(0);
     };
-  }, [recording, t.text, t.text4]);
+  }, [recording, flowMode, t.text, t.text4]);
 
   const fmtTime = (s: number) => {
     const m = Math.floor(s / 60);
@@ -252,6 +254,42 @@ export function Composer({ repo, model, models, setModel, appendMessage, onSubmi
           </div>
         )}
 
+        {flowMode && (
+          <div
+            role="status"
+            aria-label="心流模式正在聆听"
+            style={{
+              position: 'relative',
+              height: 132,
+              marginBottom: 10,
+              overflow: 'hidden',
+              borderRadius: 16,
+              border: `0.5px solid ${t.accentBorder}`,
+              background: `radial-gradient(circle at 50% 48%, ${t.accentBg} 0%, ${t.surface} 68%)`,
+            }}
+          >
+            <div style={{ position: 'absolute', inset: 0, opacity: 0.88 }}>
+              <canvas ref={waveCanvasRef} style={{ width: '100%', height: '100%', display: 'block' }} />
+            </div>
+            <div style={{ position: 'absolute', left: 14, top: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ width: 7, height: 7, borderRadius: 99, background: t.accent, boxShadow: `0 0 12px ${t.accent}` }} />
+              <span style={{ color: t.text, fontSize: 12.5, fontWeight: 600 }}>心流模式</span>
+              <span className="mono" style={{ color: t.text3, fontSize: 11.5 }}>{fmtTime(recSecs)}</span>
+            </div>
+            <button
+              title="关闭心流模式"
+              aria-label="关闭心流模式"
+              onClick={() => setFlowMode(false)}
+              style={{ ...iconBtn(t), position: 'absolute', right: 10, top: 8, width: 30, height: 30 }}
+            >
+              <Icon name="x" size={13} color={t.text3} stroke={1.8} />
+            </button>
+            <div style={{ position: 'absolute', left: 0, right: 0, bottom: 12, textAlign: 'center', color: t.text3, fontSize: 11.5 }}>
+              正在聆听 · 可继续使用下方输入框
+            </div>
+          </div>
+        )}
+
         {/* Composer */}
         <div style={{ background: t.surface, border: `0.5px solid ${t.borderStrong}`, borderRadius: 12, padding: '10px 12px 8px' }}>
           <textarea
@@ -342,9 +380,11 @@ export function Composer({ repo, model, models, setModel, appendMessage, onSubmi
                 <Icon name="plus" size={14} color={t.text3} stroke={2} />
               </button>
               <button
-                title={micDenied ? '麦克风权限被拒' : '语音'}
+                title={micDenied ? '麦克风权限被拒' : '普通录音'}
+                aria-label={micDenied ? '麦克风权限被拒' : '普通录音'}
                 onClick={() => {
                   setMicDenied(false);
+                  setFlowMode(false);
                   setRecording(true);
                 }}
                 style={iconBtn(t)}
@@ -354,12 +394,25 @@ export function Composer({ repo, model, models, setModel, appendMessage, onSubmi
                 <Icon name="mic" size={13} color={micDenied ? t.danger : t.text3} stroke={1.8} />
               </button>
               <button
-                title="语音选项"
-                style={{ ...iconBtn(t), width: 18 }}
-                onMouseEnter={(e) => (e.currentTarget.style.background = t.surfaceHover)}
-                onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+                title={flowMode ? '关闭心流模式' : '开启心流模式'}
+                aria-label={flowMode ? '关闭心流模式' : '开启心流模式'}
+                aria-pressed={flowMode}
+                onClick={() => {
+                  setMicDenied(false);
+                  setRecording(false);
+                  setFlowMode((active) => !active);
+                }}
+                style={{
+                  ...iconBtn(t),
+                  width: 34,
+                  height: 34,
+                  borderRadius: 99,
+                  background: flowMode ? t.accent : t.text,
+                }}
+                onMouseEnter={(e) => (e.currentTarget.style.filter = 'brightness(1.12)')}
+                onMouseLeave={(e) => (e.currentTarget.style.filter = 'none')}
               >
-                <Icon name="chevron" size={11} color={t.text3} stroke={2} />
+                <Icon name="waveform" size={17} color={t.windowBg} stroke={2.1} />
               </button>
 
               <div style={{ flex: 1 }} />

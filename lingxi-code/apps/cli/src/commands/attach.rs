@@ -8,6 +8,11 @@
 use clap::Args;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+const STALL_RECONNECT_POLL: Duration = Duration::from_millis(50);
+const STALL_RECONNECT_TIMEOUT: Duration =
+    Duration::from_millis(crate::bg_attach_stall::RESPAWN_EXIT_WAIT_MS);
 
 /// Attach to a running background job by its short job id or session UUID.
 #[derive(Debug, Clone, Args)]
@@ -93,6 +98,64 @@ pub async fn run(cli: &Cli) -> i32 {
 /// integration point.  `agents` uses the same function, so it cannot
 /// accidentally start a second transcript writer while a live worker exists.
 pub(crate) fn attach_target(home: &Path, selector: &str) -> std::io::Result<AttachDisposition> {
+    let mut previous_stalled_auth: Option<String> = None;
+    let mut reconnect_deadline: Option<Instant> = None;
+
+    loop {
+        let resolved = resolve_attach_target(home, selector);
+        if let (
+            Some(previous_auth),
+            Some(ResolvedAttachTarget::Live(LiveAttachTarget { auth, .. })),
+        ) = (&previous_stalled_auth, &resolved)
+        {
+            if auth == previous_auth {
+                if reconnect_deadline.is_some_and(|deadline| Instant::now() < deadline) {
+                    std::thread::sleep(STALL_RECONNECT_POLL);
+                    continue;
+                }
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "timed out waiting for stalled background worker to restart",
+                ));
+            }
+        } else if previous_stalled_auth.is_some() {
+            if reconnect_deadline.is_some_and(|deadline| Instant::now() < deadline) {
+                std::thread::sleep(STALL_RECONNECT_POLL);
+                continue;
+            }
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "timed out waiting for stalled background worker to restart",
+            ));
+        }
+
+        match resolved {
+            None => return Ok(AttachDisposition::NotFound),
+            Some(ResolvedAttachTarget::NotRunning { short, session_id }) => {
+                return Ok(AttachDisposition::NotRunning { short, session_id });
+            }
+            Some(ResolvedAttachTarget::LiveEndpointUnavailable { short, session_id }) => {
+                return Ok(AttachDisposition::LiveEndpointUnavailable { short, session_id });
+            }
+            Some(ResolvedAttachTarget::Live(target)) => {
+                match crate::bg_attach::attach_to_socket(
+                    &target.socket,
+                    &target.auth,
+                    &target.short,
+                ) {
+                    Ok(()) => return Ok(AttachDisposition::Attached),
+                    Err(error) if crate::bg_attach::is_stall_restart_requested(&error) => {
+                        previous_stalled_auth = Some(target.auth);
+                        reconnect_deadline = Some(Instant::now() + STALL_RECONNECT_TIMEOUT);
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+    }
+}
+
+fn resolve_attach_target(home: &Path, selector: &str) -> Option<ResolvedAttachTarget> {
     use crate::agents_registry as reg;
 
     let jobs = reg::read_jobs(&reg::jobs_dir(home));
@@ -107,27 +170,13 @@ pub(crate) fn attach_target(home: &Path, selector: &str) -> std::io::Result<Atta
     // endpoint. This is an in-memory filter; the daemon remains the only roster
     // writer.
     let _ = crate::daemon_roster::retain_adoptable(&mut roster, &probe);
-    let resolved = resolve_attach_target_from(
+    resolve_attach_target_from(
         &jobs,
         &roster,
         selector,
         &|pid| crate::daemon_roster::ProcProbe::is_alive(&probe, pid),
         &|pid| crate::daemon_roster::ProcProbe::start_time(&probe, pid),
-    );
-
-    match resolved {
-        None => Ok(AttachDisposition::NotFound),
-        Some(ResolvedAttachTarget::NotRunning { short, session_id }) => {
-            Ok(AttachDisposition::NotRunning { short, session_id })
-        }
-        Some(ResolvedAttachTarget::LiveEndpointUnavailable { short, session_id }) => {
-            Ok(AttachDisposition::LiveEndpointUnavailable { short, session_id })
-        }
-        Some(ResolvedAttachTarget::Live(target)) => {
-            crate::bg_attach::attach_to_socket(&target.socket, &target.auth, &target.short)?;
-            Ok(AttachDisposition::Attached)
-        }
-    }
+    )
 }
 
 /// Pure selector resolver used by command parsing/liveness tests.

@@ -75,23 +75,24 @@ const ROUTING_CONTENT_PREVIEW_CHARS: usize = 50;
 ///
 /// Port of claude-code `utils/truncate.ts` `truncate(str, maxWidth)` (the
 /// two-arg / non-single-line form, `Us(t, 50)`): return the string unchanged
-/// when it fits, otherwise take the first `max_width - 1` chars and append the
-/// ellipsis.
-///
-/// PARITY-GAP: the TS uses `stringWidth` (terminal cell width — CJK glyphs
-/// count as 2) plus a grapheme segmenter; this seam has no `stringWidth`
-/// dependency, so we count Unicode scalar values (chars). Equivalent for the
-/// ASCII teammate notes carried in practice.
+/// when it fits, otherwise take complete grapheme clusters through
+/// `max_width - 1` terminal cells and append the ellipsis. Reuse the TUI's
+/// shared width primitive so CJK and multi-codepoint emoji follow the same
+/// display-width contract everywhere.
 fn truncate_preview(s: &str, max_width: usize) -> String {
-    if s.chars().count() <= max_width {
-        return s.to_string();
-    }
-    if max_width <= 1 {
-        return "\u{2026}".to_string();
-    }
-    let mut result: String = s.chars().take(max_width - 1).collect();
-    result.push('\u{2026}');
-    result
+    tui_core::render::truncate_to_width_ellipsis(s, max_width)
+}
+
+/// `isAgentSwarmsEnabled()` gate: Anthropic-internal runs are on by default,
+/// while external runs require the experimental env opt-in. `SendMessage`
+/// mirrors that runtime gate and additionally requires a live mailbox router.
+fn agent_swarms_enabled() -> bool {
+    std::env::var("USER_TYPE").is_ok_and(|v| v == "ant")
+        || traits::env::is_env_truthy(
+            std::env::var("LINGXI_EXPERIMENTAL_AGENT_TEAMS")
+                .ok()
+                .as_deref(),
+        )
 }
 
 static SEND_MESSAGE_SCHEMA: Lazy<Value> = Lazy::new(build_input_schema);
@@ -268,6 +269,57 @@ impl SendMessageTool {
         format!("{request_type}-{millis}@{agent_id}")
     }
 
+    fn protocol_timestamp() -> String {
+        let duration = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        let seconds = duration.as_secs();
+        let millis = duration.subsec_millis();
+        let days = (seconds / 86_400) as i64;
+        let seconds_of_day = seconds % 86_400;
+        let z = days + 719_468;
+        let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+        let day_of_era = z - era * 146_097;
+        let year_of_era =
+            (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+        let mut year = year_of_era + era * 400;
+        let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+        let month_prime = (5 * day_of_year + 2) / 153;
+        let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+        let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+        year += i64::from(month <= 2);
+        format!(
+            "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{millis:03}Z",
+            seconds_of_day / 3_600,
+            (seconds_of_day % 3_600) / 60,
+            seconds_of_day % 60
+        )
+    }
+
+    fn require_team_lead(ctx: &ToolUseContext, action: &str) -> Result<(), ToolError> {
+        if ctx.agent_id.is_none() && ctx.agent_name.is_none() {
+            return Ok(());
+        }
+        Err(ToolError::InvalidInput(format!(
+            "Only the team lead can {action} plans. Teammates cannot {action} their own or other plans."
+        )))
+    }
+
+    fn approval_permission_mode(&self) -> &'static str {
+        let raw = self
+            .ctx
+            .permission_gate
+            .as_ref()
+            .and_then(|gate| gate.permission_mode())
+            .unwrap_or_else(|| self.ctx.permission_mode.wire_str().to_string());
+        let mode = permission::permission_mode_from_cli_string(&raw);
+        if mode == permission::PermissionMode::Plan {
+            permission::PermissionMode::Default.wire_str()
+        } else {
+            mode.wire_str()
+        }
+    }
+
     /// Deliver through the live mailbox seam. Delivery failures are surfaced;
     /// returning a success result after `NotFound`/`Full` would falsely tell the
     /// model that a background agent received a course correction.
@@ -383,14 +435,12 @@ impl SendMessageTool {
         sender: &str,
     ) -> Result<Value, ToolError> {
         let request_id = Self::generate_request_id("shutdown", to_display);
-        // PARITY-GAP: claude-code wraps this in `createShutdownRequestMessage`
-        // (adds `from`/ISO `timestamp`); we deliver an equivalent structured
-        // payload best-effort.
         let payload = json!({
             "type": "shutdown_request",
             "requestId": request_id,
             "from": sender,
             "reason": reason,
+            "timestamp": Self::protocol_timestamp(),
         });
         Self::deliver(
             router,
@@ -485,24 +535,27 @@ impl SendMessageTool {
     }
 
     /// `handlePlanApproval` — the team lead approves a teammate's plan.
-    ///
-    /// PARITY-GAP: the TS gates on `isTeamLead(teamContext)` and inherits the
-    /// leader's permission mode from app state — neither is reachable from
-    /// `tool-ui`, so the gate is elided and the approval is delivered
-    /// best-effort.
     async fn handle_plan_approval(
+        &self,
         router: &Arc<dyn MailboxRouterHandle>,
         from: &str,
         recipient: &Recipient,
         to_display: &str,
         request_id: &str,
+        feedback: Option<&str>,
+        ctx: &ToolUseContext,
     ) -> Result<Value, ToolError> {
-        let payload = json!({
+        Self::require_team_lead(ctx, "approve")?;
+        let mut payload = json!({
             "type": "plan_approval_response",
             "requestId": request_id,
             "approved": true,
-            "from": TEAM_LEAD_NAME,
+            "timestamp": Self::protocol_timestamp(),
+            "permissionMode": self.approval_permission_mode(),
         });
+        if let Some(feedback) = feedback {
+            payload["feedback"] = json!(feedback);
+        }
         Self::deliver(
             router,
             from,
@@ -521,19 +574,22 @@ impl SendMessageTool {
 
     /// `handlePlanRejection` — the team lead rejects a teammate's plan.
     async fn handle_plan_rejection(
+        &self,
         router: &Arc<dyn MailboxRouterHandle>,
         from: &str,
         recipient: &Recipient,
         to_display: &str,
         request_id: &str,
         feedback: &str,
+        ctx: &ToolUseContext,
     ) -> Result<Value, ToolError> {
+        Self::require_team_lead(ctx, "reject")?;
         let payload = json!({
             "type": "plan_approval_response",
             "requestId": request_id,
             "approved": false,
             "feedback": feedback,
-            "from": TEAM_LEAD_NAME,
+            "timestamp": Self::protocol_timestamp(),
         });
         Self::deliver(
             router,
@@ -542,9 +598,12 @@ impl SendMessageTool {
             serde_json::to_string(&payload).unwrap_or_default(),
         )
         .await?;
+        let feedback_preview = truncate_preview(feedback, ROUTING_CONTENT_PREVIEW_CHARS);
         Ok(json!({
             "success": true,
-            "message": format!("Plan rejected for {to_display} with feedback: \"{feedback}\""),
+            "message": format!(
+                "Plan rejected for {to_display} with feedback: \"{feedback_preview}\""
+            ),
             "request_id": request_id,
         }))
     }
@@ -610,17 +669,10 @@ impl Tool for SendMessageTool {
         // TS `isEnabled()` = `isAgentSwarmsEnabled()`, which binds the tool to a
         // live team/teammate context.
         //
-        // The port's equivalent of "there is a swarm to talk to" is a wired
-        // `MailboxRouterHandle`: without one, `call` cannot route at ALL and
-        // returns `router_not_wired` for every invocation. Advertising a tool
-        // that always errors costs the model a tool slot, some system-prompt
-        // budget, and at least one wasted call to discover it does not work —
-        // so the availability now matches the usability.
-        //
-        // (2.1.215 audit M-02. The previous rationale — "the swarm surface is
-        // always live in the Rust host" — described the TYPE being present, not
-        // the seam being wired, which are different questions.)
-        self.ctx.mailbox_router.is_some()
+        // The port additionally requires a wired `MailboxRouterHandle`:
+        // without one, `call()` cannot route at all. Both conditions must hold
+        // before the tool is advertised.
+        self.ctx.mailbox_router.is_some() && agent_swarms_enabled()
     }
     fn should_defer(&self) -> bool {
         // TS `shouldDefer: true`.
@@ -719,16 +771,8 @@ impl Tool for SendMessageTool {
             return Ok(());
         }
 
-        // Structured message from here on.
-        // Agent-teams enablement gate: structured team-protocol messages require
-        // agent teams to be enabled (binary: `if(!qa())return{...}`).
-        // PARITY-GAP: the TS `qa()` = `isAgentSwarmsEnabled()` is a runtime
-        // toggle in the TS process. In Rust there is no equivalent runtime
-        // toggle; the swarm surface is always live when the mailbox seam is
-        // wired at construction. `validate_input` does not have `&self` mutable
-        // access to the seam, so we pass the gate here and let `call()` surface
-        // a delivery error if the router is not wired. The gate still sits at the
-        // correct structural position in the validation flow for future use.
+        // Structured message from here on. Runtime gating is enforced by
+        // `is_enabled()`, so validation only checks the message shape.
 
         if let Some(Value::Object(obj)) = input.get("message") {
             let mtype = obj.get("type").and_then(Value::as_str).unwrap_or("");
@@ -936,10 +980,7 @@ Approving shutdown terminates your process. Rejecting plan sends the teammate ba
                     .and_then(Self::semantic_bool)
                     .unwrap_or(false);
                 let reason = obj.get("reason").and_then(Value::as_str);
-                let feedback = obj
-                    .get("feedback")
-                    .and_then(Value::as_str)
-                    .unwrap_or("Plan needs revision");
+                let feedback = obj.get("feedback").and_then(Value::as_str);
                 match mtype {
                     "shutdown_request" => {
                         Self::handle_shutdown_request(
@@ -970,22 +1011,25 @@ Approving shutdown terminates your process. Rejecting plan sends the teammate ba
                     }
                     "plan_approval_response" => {
                         if approve {
-                            Self::handle_plan_approval(
-                                &router,
-                                &from,
-                                &recipient,
-                                &to,
-                                &request_id_in,
-                            )
-                            .await
-                        } else {
-                            Self::handle_plan_rejection(
+                            self.handle_plan_approval(
                                 &router,
                                 &from,
                                 &recipient,
                                 &to,
                                 &request_id_in,
                                 feedback,
+                                &ctx,
+                            )
+                            .await
+                        } else {
+                            self.handle_plan_rejection(
+                                &router,
+                                &from,
+                                &recipient,
+                                &to,
+                                &request_id_in,
+                                feedback.unwrap_or("Plan needs revision"),
+                                &ctx,
                             )
                             .await
                         }
@@ -1056,7 +1100,7 @@ Approving shutdown terminates your process. Rejecting plan sends the teammate ba
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use std::sync::{Mutex, OnceLock};
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
     use traits::mailbox::{MailboxError, RouteAck};
     use traits::process::ProcessOutput;
@@ -1072,6 +1116,11 @@ mod tests {
             exit_code: 0,
             timed_out: false,
         }
+    }
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
     }
 
     /// Records every `(from, to, content)` it is asked to route and always acks
@@ -1488,6 +1537,12 @@ mod tests {
         );
     }
 
+    #[test]
+    fn truncate_preview_counts_terminal_cells_and_keeps_graphemes_intact() {
+        assert_eq!(truncate_preview("你好世界", 7), "你好世…");
+        assert_eq!(truncate_preview("👨‍👩‍👧‍👦abc", 4), "👨‍👩‍👧‍👦a…");
+    }
+
     #[tokio::test]
     async fn broadcast_returns_broadcast_shape() {
         // DORMANT PLUMBING: the model can never reach this — validateInput now
@@ -1543,7 +1598,15 @@ mod tests {
         // Model-facing text mirrors the brief status string, not the data dump.
         assert_eq!(res.model_content.as_deref(), Some(msg));
         // The structured payload was delivered to the named recipient.
-        assert_eq!(router.routed.lock().unwrap()[0].1, "researcher");
+        let routed = router.routed.lock().unwrap();
+        assert_eq!(routed[0].1, "researcher");
+        let frame: Value = serde_json::from_str(&routed[0].2).unwrap();
+        assert_eq!(frame["type"], "shutdown_request");
+        assert_eq!(frame["from"], "team-lead");
+        assert_eq!(frame["reason"], "done for the day");
+        assert!(frame["timestamp"].as_str().is_some_and(|timestamp| {
+            timestamp.len() == 24 && timestamp.as_bytes()[19] == b'.' && timestamp.ends_with('Z')
+        }));
     }
 
     #[tokio::test]
@@ -1572,6 +1635,155 @@ mod tests {
             res.data["message"],
             "Shutdown rejected. Reason: \"still mid-task\". Continuing to work."
         );
+    }
+
+    #[tokio::test]
+    async fn plan_approval_is_lead_only_and_inherits_non_plan_mode() {
+        let router = Arc::new(RecordingRouter::new());
+        let mut tool_ctx = ctx_with(router.clone());
+        tool_ctx.permission_mode = permission::PermissionMode::AcceptEdits;
+        let tool = SendMessageTool::new(tool_ctx);
+
+        tool.call(
+            json!({
+                "to": "researcher",
+                "message": {
+                    "type": "plan_approval_response",
+                    "request_id": "plan-1@researcher",
+                    "approve": true
+                }
+            }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .expect("team lead may approve");
+
+        let routed = router.routed.lock().unwrap();
+        let frame: Value = serde_json::from_str(&routed[0].2).unwrap();
+        assert_eq!(frame["type"], "plan_approval_response");
+        assert_eq!(frame["permissionMode"], "acceptEdits");
+        assert!(frame.get("from").is_none());
+        assert!(frame["timestamp"].as_str().is_some_and(|timestamp| {
+            timestamp.len() == 24 && timestamp.as_bytes()[19] == b'.' && timestamp.ends_with('Z')
+        }));
+    }
+
+    #[tokio::test]
+    async fn plan_approval_downgrades_leader_plan_mode_to_default() {
+        let router = Arc::new(RecordingRouter::new());
+        let mut tool_ctx = ctx_with(router.clone());
+        tool_ctx.permission_mode = permission::PermissionMode::Plan;
+        let tool = SendMessageTool::new(tool_ctx);
+
+        tool.call(
+            json!({
+                "to": "researcher",
+                "message": {
+                    "type": "plan_approval_response",
+                    "request_id": "plan-2@researcher",
+                    "approve": true
+                }
+            }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .expect("team lead may approve");
+
+        let frame: Value = serde_json::from_str(&router.routed.lock().unwrap()[0].2).unwrap();
+        assert_eq!(frame["permissionMode"], "default");
+    }
+
+    #[tokio::test]
+    async fn plan_approval_preserves_optional_feedback_without_sender_field() {
+        let router = Arc::new(RecordingRouter::new());
+        let tool = SendMessageTool::new(ctx_with(router.clone()));
+
+        tool.call(
+            json!({
+                "to": "researcher",
+                "message": {
+                    "type": "plan_approval_response",
+                    "request_id": "plan-feedback@researcher",
+                    "approve": true,
+                    "feedback": "Proceed with the smaller diff"
+                }
+            }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .expect("team lead may approve with feedback");
+
+        let frame: Value = serde_json::from_str(&router.routed.lock().unwrap()[0].2).unwrap();
+        assert_eq!(frame["feedback"], "Proceed with the smaller diff");
+        assert!(frame.get("from").is_none());
+    }
+
+    #[tokio::test]
+    async fn plan_rejection_truncates_only_the_model_facing_feedback_preview() {
+        let router = Arc::new(RecordingRouter::new());
+        let tool = SendMessageTool::new(ctx_with(router.clone()));
+        let feedback = "x".repeat(80);
+
+        let result = tool
+            .call(
+                json!({
+                    "to": "researcher",
+                    "message": {
+                        "type": "plan_approval_response",
+                        "request_id": "plan-reject@researcher",
+                        "approve": false,
+                        "feedback": feedback
+                    }
+                }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("team lead may reject");
+
+        let frame: Value = serde_json::from_str(&router.routed.lock().unwrap()[0].2).unwrap();
+        assert_eq!(frame["feedback"], "x".repeat(80));
+        assert!(frame.get("from").is_none());
+        assert_eq!(
+            result.data["message"],
+            format!(
+                "Plan rejected for researcher with feedback: \"{}\"",
+                truncate_preview(&"x".repeat(80), ROUTING_CONTENT_PREVIEW_CHARS)
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn teammate_cannot_approve_or_reject_plans() {
+        for (approve, action) in [(true, "approve"), (false, "reject")] {
+            let router = Arc::new(RecordingRouter::new());
+            let tool = SendMessageTool::new(ctx_with(router.clone()));
+            let mut call_ctx = fresh_ctx();
+            call_ctx.agent_id = Some(protocol::AgentId::new());
+            call_ctx.agent_name = Some("reviewer".to_string());
+            let error = tool
+                .call(
+                    json!({
+                        "to": "researcher",
+                        "message": {
+                            "type": "plan_approval_response",
+                            "request_id": "plan-3@researcher",
+                            "approve": approve
+                        }
+                    }),
+                    call_ctx,
+                    fresh_tx(),
+                )
+                .await
+                .expect_err("teammate plan decisions must fail closed");
+            assert!(error
+                .model_facing_message()
+                .contains(&format!("Only the team lead can {action} plans")));
+            assert!(router.routed.lock().unwrap().is_empty());
+        }
     }
 
     #[tokio::test]
@@ -1638,5 +1850,30 @@ mod tests {
         );
         let tool = SendMessageTool::new(ctx);
         assert!(!tool.is_enabled(&ToolStaticContext::default()));
+    }
+
+    #[test]
+    fn send_message_is_disabled_when_agent_teams_gate_is_off() {
+        let _guard = env_lock().lock().unwrap();
+        std::env::remove_var("USER_TYPE");
+        std::env::remove_var("LINGXI_EXPERIMENTAL_AGENT_TEAMS");
+
+        let tool = SendMessageTool::new(ctx_with(Arc::new(RecordingRouter::new())));
+        assert!(
+            !tool.is_enabled(&ToolStaticContext::default()),
+            "external runs without the experimental gate must not advertise SendMessage"
+        );
+    }
+
+    #[test]
+    fn send_message_is_enabled_when_agent_teams_gate_is_on_and_router_wired() {
+        let _guard = env_lock().lock().unwrap();
+        std::env::remove_var("USER_TYPE");
+        std::env::set_var("LINGXI_EXPERIMENTAL_AGENT_TEAMS", "1");
+
+        let tool = SendMessageTool::new(ctx_with(Arc::new(RecordingRouter::new())));
+        assert!(tool.is_enabled(&ToolStaticContext::default()));
+
+        std::env::remove_var("LINGXI_EXPERIMENTAL_AGENT_TEAMS");
     }
 }

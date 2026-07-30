@@ -14,28 +14,10 @@
 //! logic is a `setInterval` closure over mutable state, which is exactly the
 //! shape that hides off-by-ones.
 //!
-//! # What does NOT live here, and why
-//!
-//! The ACTION half — SIGTERM, respawn-as-resume, SIGKILL — is not wired yet,
-//! and the blocker is architectural rather than missing code.
-//!
-//! The oracle runs this watchdog in one process that BOTH renders the attach
-//! stream and owns the worker handle (`b.onStream` for the first-frame signal,
-//! `b.kill()` / dispatch for the remedy). `LingXi` splits those: the attach
-//! client (`bg_attach::attach_to_socket`) sees the stream but has no respawn
-//! authority, and the daemon (`commands::daemon`) owns spawn/kill/respawn but
-//! has no view of worker output — its `WorkerRecord` carries pid, sockets and
-//! state, never frames.
-//!
-//! So the missing piece is a first-frame SIGNAL crossing that split. The
-//! natural home is the daemon: it already has a durable respawn counter
-//! (`jobs/<short>/respawns`), an injectable supervise loop, and the gates below
-//! map onto state it already tracks. The worker would stamp "first frame
-//! emitted" once, and the supervise loop would run [`StallWatchdog`].
-//!
-//! That decision changes the roster/worker contract in an area codex is
-//! actively developing, and a wrong watchdog SIGKILLs live user sessions — so
-//! it is left for an explicit design pass rather than guessed at here.
+//! The attach client owns first-frame observation while the daemon owns worker
+//! lifecycle. A private request file crosses that split: the client requests a
+//! resume restart, the daemon rotates the worker and endpoint credentials, and
+//! the public attach command re-resolves the endpoint before reconnecting.
 
 /// `iIa` — watchdog tick period.
 pub const STALL_TICK_MS: u64 = 1_000;
@@ -305,6 +287,20 @@ pub fn request_stall_respawn(jobs_dir: &std::path::Path, short: &str) {
     let _ = std::fs::write(&path, b"stall\n");
 }
 
+/// Read the durable number of attach-stall respawns already performed.
+///
+/// Missing, malformed, or negative values resolve to zero. The daemon is the
+/// sole writer; the attach client only uses this to carry the two-attempt
+/// budget across endpoint rotation.
+#[must_use]
+pub fn read_stall_respawns(jobs_dir: &std::path::Path, short: &str) -> i64 {
+    std::fs::read_to_string(jobs_dir.join(short).join("respawns"))
+        .ok()
+        .and_then(|raw| raw.trim().parse::<i64>().ok())
+        .filter(|count| *count >= 0)
+        .unwrap_or(0)
+}
+
 /// Consume a pending stall-respawn request. `true` when one was present.
 #[must_use]
 pub fn take_stall_request(jobs_dir: &std::path::Path, short: &str) -> bool {
@@ -568,6 +564,20 @@ mod tests {
         // again on every heartbeat, forever.
         assert!(take_stall_request(jobs, "cafe0001"));
         assert!(!take_stall_request(jobs, "cafe0001"));
+    }
+
+    #[test]
+    fn durable_respawn_count_is_read_safely() {
+        let dir = tempfile::tempdir().unwrap();
+        let job = dir.path().join("cafe0001");
+        std::fs::create_dir_all(&job).unwrap();
+        assert_eq!(read_stall_respawns(dir.path(), "cafe0001"), 0);
+        std::fs::write(job.join("respawns"), b"2\n").unwrap();
+        assert_eq!(read_stall_respawns(dir.path(), "cafe0001"), 2);
+        std::fs::write(job.join("respawns"), b"-1\n").unwrap();
+        assert_eq!(read_stall_respawns(dir.path(), "cafe0001"), 0);
+        std::fs::write(job.join("respawns"), b"not-a-number\n").unwrap();
+        assert_eq!(read_stall_respawns(dir.path(), "cafe0001"), 0);
     }
 
     #[test]

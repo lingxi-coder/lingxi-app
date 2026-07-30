@@ -48,6 +48,13 @@ import sys
 # phantom list — so their absence fails the run instead of being reported.
 CANARY_NESTED_FLAGS = ["--dry-run", "--keep-data", "--strict", "--push"]
 
+# Hidden compatibility command whose option string is present in the Claude
+# binary but whose parent is feature-gated out of the public `mcp --help`.
+# LingXi implements the same path; include it explicitly so a binary-string
+# oracle does not report a false absence merely because help discovery cannot
+# reach the gated parent.
+PORT_EXTRA_PATHS = [["mcp", "xaa", "login"]]
+
 HELP_TIMEOUT_S = 60
 
 
@@ -72,13 +79,22 @@ def subcommands(help_text: str) -> list[str]:
         if in_block:
             if not line.strip():
                 break
-            m = re.match(r"^\s{2,}([a-z][a-z0-9-]*)\s", line)
+            # Command rows start with EXACTLY two spaces. Wrapped description
+            # lines are aligned farther right; accepting arbitrary indentation
+            # previously invented paths such as `auto-mode and critique`.
+            m = re.match(r"^  ([a-z][a-z0-9-]*(?:\|[a-z][a-z0-9-]*)*)\s", line)
             if m and m.group(1) != "help":
-                out.append(m.group(1))
+                # Commander renders aliases as `plugin|plugins`; either token
+                # reaches the same command, so walk the canonical first name.
+                out.append(m.group(1).split("|", 1)[0])
     return out
 
 
-def walk(cli: str, max_depth: int = 3) -> tuple[dict[str, str], set[str]]:
+def walk(
+    cli: str,
+    max_depth: int = 3,
+    extra_paths: list[list[str]] | None = None,
+) -> tuple[dict[str, str], set[str]]:
     """Every reachable command path → its help text, plus every long flag.
 
     A path whose help is IDENTICAL to the root's is discarded: that is the
@@ -90,6 +106,7 @@ def walk(cli: str, max_depth: int = 3) -> tuple[dict[str, str], set[str]]:
     helps: dict[str, str] = {"": root}
     flags: set[str] = set(re.findall(r"(--[a-z0-9][a-z0-9-]*)", root))
     stack: list[list[str]] = [[s] for s in subcommands(root)]
+    stack.extend(extra_paths or [])
     while stack:
         path = stack.pop()
         text = run_help(cli, path)
@@ -131,7 +148,7 @@ def main() -> int:
     ap.add_argument("--check", action="store_true", help="run the self-check and stop")
     args = ap.parse_args()
 
-    helps, port = walk(args.cli)
+    helps, port = walk(args.cli, extra_paths=PORT_EXTRA_PATHS)
     problems = self_check(helps, port)
     if problems:
         print("SELF-CHECK FAILED — refusing to report a gap list:", file=sys.stderr)

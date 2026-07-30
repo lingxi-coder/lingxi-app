@@ -128,6 +128,39 @@ fn marketplace_entry_source(market_root: &Path, name: &str) -> Option<String> {
     }
 }
 
+/// Marketplace-level `defaultEnabled` override for one plugin entry.
+///
+/// Claude Code gives this value precedence over the plugin manifest. Missing
+/// or non-boolean values leave the manifest fallback in control; the
+/// marketplace validator is responsible for surfacing schema type errors.
+fn marketplace_entry_default_enabled(market_root: &Path, name: &str) -> Option<bool> {
+    let manifest = market_root
+        .join(branding::PLUGIN_MANIFEST_DIR)
+        .join("marketplace.json");
+    let raw = std::fs::read_to_string(manifest).ok()?;
+    let value: Value = serde_json::from_str(&raw).ok()?;
+    value
+        .get("plugins")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|plugin| plugin.get("name").and_then(Value::as_str) == Some(name))?
+        .get("defaultEnabled")
+        .and_then(Value::as_bool)
+}
+
+/// Manifest-level `defaultEnabled`, whose public-schema default is true.
+fn plugin_default_enabled(plugin_root: &Path) -> bool {
+    std::fs::read_to_string(
+        plugin_root
+            .join(branding::PLUGIN_MANIFEST_DIR)
+            .join("plugin.json"),
+    )
+    .ok()
+    .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+    .and_then(|value| value.get("defaultEnabled").and_then(Value::as_bool))
+    .unwrap_or(true)
+}
+
 /// Recursive directory copy (sync).
 fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
@@ -467,6 +500,11 @@ pub fn run_install(
     };
 
     let full_id = format!("{name}@{market_name}");
+    let default_enabled = registry
+        .get(&market_name)
+        .and_then(install_location)
+        .and_then(|root| marketplace_entry_default_enabled(&root, name))
+        .unwrap_or_else(|| plugin_default_enabled(&plugin_src));
     plugin_policy::ensure_marketplace_allowed(&market_name).map_err(|reason| {
         format!(
             "Installing plugin \"{arg}\"...{}",
@@ -558,7 +596,7 @@ pub fn run_install(
     }
     write_installed(plugins_dir, &installed)
         .map_err(|e| format!("Installing plugin \"{arg}\"...{}", fail("install", arg, &e)))?;
-    edit_enabled(scope, home, cwd, &full_id, Some(true))
+    edit_enabled(scope, home, cwd, &full_id, Some(default_enabled))
         .map_err(|e| format!("Installing plugin \"{arg}\"...{}", fail("install", arg, &e)))?;
 
     Ok(format!(
@@ -1013,6 +1051,49 @@ mod tests {
         assert_eq!(
             user_settings(&e)["enabledPlugins"]["hello@mymkt"],
             Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn install_respects_manifest_default_disabled_state() {
+        let e = env();
+        let manifest = e
+            .market
+            .join("plugins/hello")
+            .join(branding::PLUGIN_MANIFEST_DIR)
+            .join("plugin.json");
+        std::fs::write(
+            manifest,
+            r#"{"name":"hello","version":"1.2.3","defaultEnabled":false}"#,
+        )
+        .unwrap();
+
+        run_install("hello@mymkt", None, &[], &e.plugins, &e.home, &e.cwd).unwrap();
+
+        assert_eq!(
+            user_settings(&e)["enabledPlugins"]["hello@mymkt"],
+            Value::Bool(false)
+        );
+    }
+
+    #[test]
+    fn marketplace_default_enabled_overrides_plugin_manifest() {
+        let e = env();
+        let marketplace = e
+            .market
+            .join(branding::PLUGIN_MANIFEST_DIR)
+            .join("marketplace.json");
+        std::fs::write(
+            marketplace,
+            r#"{"name":"mymkt","owner":{"name":"me"},"plugins":[{"name":"hello","source":"./plugins/hello","defaultEnabled":false}]}"#,
+        )
+        .unwrap();
+
+        run_install("hello@mymkt", None, &[], &e.plugins, &e.home, &e.cwd).unwrap();
+
+        assert_eq!(
+            user_settings(&e)["enabledPlugins"]["hello@mymkt"],
+            Value::Bool(false)
         );
     }
 

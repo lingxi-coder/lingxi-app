@@ -18,6 +18,14 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use traits::LspServerConfig;
 
+fn default_plugin_enabled() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
 /// Top-level plugin manifest.
 ///
 /// Loaded once at install/enable time and held by the [`crate::lifecycle::PluginState`]
@@ -28,6 +36,14 @@ pub struct PluginManifest {
     pub id: PluginId,
     /// Human-readable plugin name.
     pub name: String,
+    /// Optional display label used by plugin-facing UI. Falls back to
+    /// [`Self::name`] when absent and never participates in namespacing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// Fallback activation state when no `enabledPlugins` scope has an
+    /// explicit value for this plugin.
+    #[serde(default = "default_plugin_enabled", skip_serializing_if = "is_true")]
+    pub default_enabled: bool,
     /// Semver-style version string.
     pub version: String,
     /// Free-form description.
@@ -99,6 +115,14 @@ pub struct UserConfigSchema {
 /// One declared user-config field.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UserConfigField {
+    /// Declared input type (`string`, `number`, `boolean`, `directory`, or
+    /// `file`). Kept as a string so a newer Claude Code field type remains
+    /// forward-compatible instead of making an installed plugin unloadable.
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
+    pub value_type: Option<String>,
+    /// Label shown in the configuration dialog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     /// Help text for the host UI.
     #[serde(default)]
     pub description: String,
@@ -113,6 +137,15 @@ pub struct UserConfigField {
     /// `if(p.default!==void 0)u[d]=p.default` substitution-context seeding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<serde_json::Value>,
+    /// Whether a string field accepts multiple values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multiple: Option<bool>,
+    /// Optional numeric lower bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<f64>,
+    /// Optional numeric upper bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<f64>,
 }
 
 /// A plugin's persisted `userConfig` state at one settings scope: the
@@ -156,12 +189,20 @@ impl PluginUserConfig {
 }
 
 /// A channel the plugin binds to an MCP server.
+///
+/// This is the public `plugin.json` shape used by Claude Code 2.1.220. There
+/// is no separate channel name: the referenced MCP server identifies the
+/// channel, and optional per-channel configuration uses the same schema as
+/// top-level plugin `userConfig`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginChannel {
-    /// Channel name.
-    pub name: String,
     /// MCP server name (must match a key in [`PluginComponents::mcp_servers`]).
-    pub mcp_server: String,
+    pub server: String,
     /// Optional channel-scoped user-config schema.
+    #[serde(
+        rename = "userConfig",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub user_config: Option<UserConfigSchema>,
 }

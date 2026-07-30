@@ -2498,6 +2498,7 @@ pub(crate) async fn startup_preflight(argv: &Argv) -> bool {
     if trust_gate().await == TrustGateOutcome::Decline {
         return false;
     }
+    external_includes_gate().await;
     let (bypass_mode, _) = crate::resolve_permission_mode(argv);
     let is_bypass = bypass_mode == permission::PermissionMode::BypassPermissions;
     let skip_set = read_skip_dangerous_prompt();
@@ -2515,6 +2516,62 @@ pub(crate) async fn startup_preflight(argv: &Argv) -> bool {
             false
         }
     }
+}
+
+async fn external_includes_gate() {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let Some(config_path) = migrations::global_config::global_config_path() else {
+        return;
+    };
+    if !external_includes_gate_should_prompt(&cwd, &config_path, is_full_tty()) {
+        return;
+    }
+    let paths = orchestrator::prompt::memory_block::pending_external_include_paths(&cwd);
+    if paths.is_empty() {
+        return;
+    }
+
+    let approved =
+        match tui::startup_external_includes::mount_external_includes_dialog(&paths).await {
+            Ok(tui::startup_external_includes::ExternalIncludesDialogOutcome::Accept) => true,
+            Ok(tui::startup_external_includes::ExternalIncludesDialogOutcome::Decline) => {
+                tracing::info!(event = "tengu_claude_md_external_includes_dialog_declined");
+                false
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "external LINGXI.md includes dialog failed; imports remain disabled"
+                );
+                return;
+            }
+        };
+    if let Err(error) = migrations::global_config::save_lingxi_md_external_includes_decision(
+        &config_path,
+        &cwd,
+        approved,
+    ) {
+        tracing::warn!(
+            error = %error,
+            "failed to persist external LINGXI.md includes decision; imports remain disabled"
+        );
+    }
+}
+
+fn external_includes_gate_should_prompt(
+    cwd: &std::path::Path,
+    config_path: &std::path::Path,
+    is_tty: bool,
+) -> bool {
+    is_tty
+        && !migrations::global_config::check_has_lingxi_md_external_includes_approved(
+            config_path,
+            cwd,
+        )
+        && !migrations::global_config::check_has_lingxi_md_external_includes_warning_shown(
+            config_path,
+            cwd,
+        )
 }
 
 /// Outcome of the startup trust gate ([`trust_gate`]).
@@ -2735,6 +2792,53 @@ mod tests {
         // -p with piped input should still print one-shot (matches v0.6.0).
         let a = argv(Some("hi"), false);
         assert_eq!(decide_mode_with(&a, false), Mode::Print("hi".into()));
+    }
+
+    #[test]
+    fn external_includes_prompt_only_once_per_project_decision() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join(".lingxi.json");
+        let cwd = tmp.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        assert!(
+            external_includes_gate_should_prompt(&cwd, &config_path, true),
+            "an interactive project without a recorded decision must prompt"
+        );
+        assert!(
+            !external_includes_gate_should_prompt(&cwd, &config_path, false),
+            "headless modes must never consume input for the startup dialog"
+        );
+
+        migrations::global_config::save_lingxi_md_external_includes_decision(
+            &config_path,
+            &cwd,
+            false,
+        )
+        .unwrap();
+        assert!(
+            !external_includes_gate_should_prompt(&cwd, &config_path, true),
+            "declining records warningShown and must not prompt every launch"
+        );
+    }
+
+    #[test]
+    fn external_includes_approval_suppresses_startup_prompt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join(".lingxi.json");
+        let cwd = tmp.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        migrations::global_config::save_lingxi_md_external_includes_decision(
+            &config_path,
+            &cwd,
+            true,
+        )
+        .unwrap();
+        assert!(
+            !external_includes_gate_should_prompt(&cwd, &config_path, true),
+            "an approved project must load external imports without re-prompting"
+        );
     }
 
     #[test]

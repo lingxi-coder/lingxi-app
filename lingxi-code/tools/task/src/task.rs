@@ -524,10 +524,7 @@ async fn emit_failed(
     bus.log_event(event, md).await;
 }
 
-// ==== Product-A V2 prompts (verbatim claude-code, base/non-swarm variant) ==
-//
-// PARITY-GAP: each tool's getPrompt() also has an isAgentSwarmsEnabled() branch
-// (teammate context / teammate workflow); those additions are omitted here.
+// ==== Product-A V2 prompts (verbatim base + swarms-enabled variants) ====
 
 const TASK_CREATE_PROMPT: &str = r#"Use this tool to create a structured task list for your current coding session. This helps you track progress, organize complex tasks, and demonstrate thoroughness to the user.
 It also helps the user understand the progress of the task and overall progress of their requests.
@@ -572,7 +569,7 @@ All tasks are created with status `pending`.
 
 /// `TaskCreate` prompt — swarms-ENABLED variant (`TaskCreateTool/prompt.ts`
 /// `getPrompt()` with `isAgentSwarmsEnabled() === true`). Splices
-/// `teammateContext` ( and potentially assigned to teammates) onto the
+/// `teammateContext` ("and potentially assigned to teammates") onto the
 /// "multiple operations" bullet and inserts the two `teammateTips` bullets
 /// before the final "Check TaskList first" tip. Byte-identical to the TS output.
 const TASK_CREATE_PROMPT_SWARM: &str = r#"Use this tool to create a structured task list for your current coding session. This helps you track progress, organize complex tasks, and demonstrate thoroughness to the user.
@@ -981,8 +978,9 @@ impl Tool for TaskCreateTool {
                 )));
             }
         }
-        // PARITY-GAP: context.setAppState(expandedView) (TaskCreateTool.ts:115-119)
-        // is omitted — no app-state seam here.
+        // The tool layer stays renderer-neutral. The TUI consumes this successful
+        // TaskCreate result in `apply_plan_tool_result` and updates the expanded
+        // planned-task view above the composer.
 
         emit_completed(
             &bus,

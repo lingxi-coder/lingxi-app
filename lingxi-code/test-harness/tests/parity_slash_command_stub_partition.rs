@@ -58,11 +58,11 @@ fn correct_by_design_set_is_locked_at_23() {
 }
 
 #[test]
-fn host_bound_deferred_set_is_locked_at_1() {
+fn host_bound_deferred_set_is_empty_after_btw_wiring() {
     assert_eq!(
         HOST_BOUND_DEFERRED_GAPS.len(),
-        1,
-        "the host-bound-deferred (genuine gap) set is locked at 1 command"
+        0,
+        "all public host-bound command gaps should be wired"
     );
 }
 
@@ -76,23 +76,6 @@ fn correct_by_design_and_host_bound_deferred_are_disjoint() {
         cbd.is_disjoint(&gaps),
         "correct-by-design and host-bound-deferred partitions overlap: {:?}",
         cbd.intersection(&gaps).collect::<Vec<_>>()
-    );
-}
-
-#[test]
-fn host_bound_deferred_is_exactly_btw() {
-    // Verified against the current oracle:
-    //   - btw/index.ts: type 'local-jsx', enabled, NO isEnabled gate — i.e.
-    //     claude-code implements it for ordinary users, so the Rust stub is a
-    //     deferred gap, NOT correct-by-design.
-    //   - x402 is gone from the oracle entirely (0 hits in the binary), so it
-    //     is not a gap — there is nothing left to be missing.
-    //   - reload-plugins is no longer classified host-bound.
-    let gaps = names_of(HOST_BOUND_DEFERRED_GAPS);
-    let expected: HashSet<&str> = ["btw"].into_iter().collect();
-    assert_eq!(
-        gaps, expected,
-        "host-bound-deferred must be exactly the commands claude-code implements"
     );
 }
 
@@ -111,9 +94,8 @@ fn correct_by_design_excludes_every_host_bound_name() {
 
 #[test]
 fn partition_union_equals_legacy_intentionally_disabled() {
-    // The refined two-way split is the legacy bucket-(d) table re-bucketed:
-    // it neither drops nor invents a name, it only routes the three host-bound
-    // names to their correct partition. This keeps the audit total honest.
+    // With `/btw` implemented, the legacy disabled table contains only
+    // correct-by-design entries.
     let mut union = names_of(CORRECT_BY_DESIGN_STUBS);
     union.extend(names_of(HOST_BOUND_DEFERRED_GAPS));
     assert_eq!(
@@ -176,12 +158,7 @@ async fn every_correct_by_design_stub_still_returns_the_locked_literal() {
 
 #[tokio::test]
 async fn host_bound_deferred_gaps_also_currently_stub_but_are_not_locked_as_faithful() {
-    // Today the Rust port stubs these three too (the host infra is unwired).
-    // We assert the CURRENT behavior (so the partition is self-consistent) but
-    // deliberately frame it as a *gap*: when the host dialog / control-request
-    // path lands, this expectation flips and the command leaves the stub set.
-    // That is allowed for the host-bound partition and forbidden for the
-    // correct-by-design partition — which is exactly why they are split.
+    // Kept as a generic guard for future host-bound gaps; currently empty.
     let d = full_dispatcher();
     for (name, _reason) in HOST_BOUND_DEFERRED_GAPS {
         let expected = UnimplementedCommandHandler::stub_literal(name);

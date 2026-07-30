@@ -212,13 +212,22 @@ pub fn collect_mcp_config_warnings(
 /// malformed record in one pass.
 fn validation_issues(entry: &Value, ty: &str) -> Vec<String> {
     let Some(object) = entry.as_object() else {
-        return vec!["<root>: Invalid input: expected object".to_string()];
+        return vec![format!(
+            "<root>: expected object, received {}",
+            json_type_name(entry)
+        )];
     };
     let mut issues = Vec::new();
     let require_nonempty_string = |key: &str, issues: &mut Vec<String>| match object.get(key) {
         Some(Value::String(value)) if !value.trim().is_empty() => {}
-        Some(Value::String(_)) | None => issues.push(format!("{key}: Required")),
-        Some(_) => issues.push(format!("{key}: Invalid input: expected string")),
+        Some(Value::String(_)) => issues.push(format!(
+            "{key}: Too small: expected string to have >=1 characters"
+        )),
+        None => issues.push(format!("{key}: expected string, received undefined")),
+        Some(value) => issues.push(format!(
+            "{key}: expected string, received {}",
+            json_type_name(value)
+        )),
     };
     match ty {
         "stdio" => {
@@ -228,12 +237,17 @@ fn validation_issues(entry: &Value, ty: &str) -> Vec<String> {
                     Value::Array(values) => {
                         for (index, value) in values.iter().enumerate() {
                             if !value.is_string() {
-                                issues
-                                    .push(format!("args.{index}: Invalid input: expected string"));
+                                issues.push(format!(
+                                    "args.{index}: expected string, received {}",
+                                    json_type_name(value)
+                                ));
                             }
                         }
                     }
-                    _ => issues.push("args: Invalid input: expected array".to_string()),
+                    value => issues.push(format!(
+                        "args: expected array, received {}",
+                        json_type_name(value)
+                    )),
                 }
             }
             if let Some(env) = object.get("env") {
@@ -241,18 +255,27 @@ fn validation_issues(entry: &Value, ty: &str) -> Vec<String> {
                     Value::Object(values) => {
                         for (key, value) in values {
                             if !value.is_string() {
-                                issues.push(format!("env.{key}: Invalid input: expected string"));
+                                issues.push(format!(
+                                    "env.{key}: expected string, received {}",
+                                    json_type_name(value)
+                                ));
                             }
                         }
                     }
-                    _ => issues.push("env: Invalid input: expected object".to_string()),
+                    value => issues.push(format!(
+                        "env: expected record, received {}",
+                        json_type_name(value)
+                    )),
                 }
             }
         }
         _ => match object.get("url") {
             Some(Value::String(_)) => {}
-            None => issues.push("url: Required".to_string()),
-            Some(_) => issues.push("url: Invalid input: expected string".to_string()),
+            None => issues.push("url: expected string, received undefined".to_string()),
+            Some(value) => issues.push(format!(
+                "url: expected string, received {}",
+                json_type_name(value)
+            )),
         },
     }
     if ty != "stdio" {
@@ -261,25 +284,42 @@ fn validation_issues(entry: &Value, ty: &str) -> Vec<String> {
                 Value::Object(values) => {
                     for (key, value) in values {
                         if !value.is_string() {
-                            issues.push(format!("headers.{key}: Invalid input: expected string"));
+                            issues.push(format!(
+                                "headers.{key}: expected string, received {}",
+                                json_type_name(value)
+                            ));
                         }
                     }
                 }
-                _ => issues.push("headers: Invalid input: expected object".to_string()),
+                value => issues.push(format!(
+                    "headers: expected record, received {}",
+                    json_type_name(value)
+                )),
             }
         }
     }
     if let Some(timeout) = object.get("timeout") {
         if timeout.as_u64().is_none_or(|value| value == 0) {
-            issues.push("timeout: Invalid input: expected positive integer".to_string());
+            issues.push("timeout: expected positive integer".to_string());
         }
     }
     if let Some(always_load) = object.get("alwaysLoad") {
         if !always_load.is_boolean() {
-            issues.push("alwaysLoad: Invalid input: expected boolean".to_string());
+            issues.push("alwaysLoad: expected boolean".to_string());
         }
     }
     issues
+}
+
+fn json_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
 }
 
 /// claude `ty_` (2.1.219) — config fields whose value carries leading or
@@ -528,14 +568,14 @@ mod tests {
     }
 
     /// An ABSENT `url` on a remote type IS still invalid — that is the case the
-    /// schema rejects, and it is the one `url: Required` belongs to.
+    /// schema rejects, and it carries Zod 4's missing-value issue.
     #[test]
     fn a_missing_remote_url_is_still_reported_as_required() {
         let w = only(&json!({"mcpServers":{"bad":{"type":"http"}}}));
         assert_eq!(w.len(), 1);
         assert_eq!(
             w[0].message,
-            "Skipped \u{2014} invalid MCP server config for \"bad\": url: Required"
+            "Skipped \u{2014} invalid MCP server config for \"bad\": url: expected string, received undefined"
         );
     }
 
@@ -674,12 +714,12 @@ mod tests {
         assert_eq!(warnings.len(), 1);
         let message = &warnings[0].message;
         for issue in [
-            "command: Required",
-            "args.0: Invalid input: expected string",
-            "args.2: Invalid input: expected string",
-            "env.TOKEN: Invalid input: expected string",
-            "timeout: Invalid input: expected positive integer",
-            "alwaysLoad: Invalid input: expected boolean",
+            "command: expected string, received undefined",
+            "args.0: expected string, received number",
+            "args.2: expected string, received boolean",
+            "env.TOKEN: expected string, received number",
+            "timeout: expected positive integer",
+            "alwaysLoad: expected boolean",
         ] {
             assert!(message.contains(issue), "missing diagnostic issue: {issue}");
         }

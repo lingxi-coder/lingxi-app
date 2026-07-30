@@ -13,6 +13,19 @@ use std::path::{Path, PathBuf};
 pub const ATTACH_SOCK_ENV: &str = "LINGXI_BG_ATTACH_SOCK";
 /// Environment key carrying the bearer token required by the attach endpoint.
 pub const ATTACH_AUTH_ENV: &str = "LINGXI_BG_ATTACH_AUTH";
+const STALL_RESTART_REQUESTED: &str = "background PTY restart requested after startup stall";
+
+/// Whether an attach attempt ended because the daemon was asked to rotate a
+/// stalled worker. The caller must re-resolve the roster because the restarted
+/// worker has a new endpoint credential.
+#[must_use]
+pub fn is_stall_restart_requested(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::ConnectionAborted && error.to_string() == STALL_RESTART_REQUESTED
+}
+
+fn stall_restart_requested_error() -> io::Error {
+    io::Error::new(io::ErrorKind::ConnectionAborted, STALL_RESTART_REQUESTED)
+}
 
 fn decode_exit_frame(payload: &[u8]) -> io::Result<()> {
     let bytes: [u8; 4] = payload.try_into().map_err(|_| {
@@ -1089,7 +1102,7 @@ mod unix {
                 true,
             ));
         let mut last_poll = std::time::Instant::now();
-        let mut stall_respawns: i64 = 0;
+        let stall_respawns = crate::bg_attach_stall::read_stall_respawns(&jobs_dir, session_label);
 
         let result = loop {
             match read_frame(&mut reader) {
@@ -1161,14 +1174,11 @@ mod unix {
                             );
                             let _ = stdout.flush();
                             crate::bg_attach_stall::request_stall_respawn(&jobs_dir, session_label);
-                            stall_respawns += 1;
-                            // Re-arm for the restarted worker's own first frame.
-                            stall = crate::bg_attach_stall::StallDriver::new(
-                                crate::bg_attach_stall::stall_threshold_ms(
-                                    crate::bg_attach_stall::STALL_DEFAULT_MS,
-                                    true,
-                                ),
-                            );
+                            // The daemon rotates both the worker and its
+                            // endpoint credential. Return a typed sentinel so
+                            // the command boundary re-resolves the roster
+                            // instead of waiting on this dead socket.
+                            break Err(super::stall_restart_requested_error());
                         }
                         crate::bg_attach_stall::StallDecision::GiveUp => {
                             crate::bg_attach_stall::emit_stall_gave_up(
@@ -1186,6 +1196,9 @@ mod unix {
                                 )
                             );
                             let _ = stdout.flush();
+                            // Ask the daemon to enforce the exhausted durable
+                            // budget with SIGKILL + failed job state.
+                            crate::bg_attach_stall::request_stall_respawn(&jobs_dir, session_label);
                             break Err(io::Error::other(
                                 crate::bg_attach_stall::KEEPS_STALLING_KILL_REASON,
                             ));

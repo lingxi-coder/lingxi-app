@@ -142,14 +142,10 @@ pub fn is_push_notif_enabled() -> bool {
     telemetry::flag_bool("tengu_kairos_push_notifications", false) && agent_push_notif_setting()
 }
 
-/// `mc("agentPushNotifEnabled", false).value` (cc_all.txt:504927). The port has
-/// no supported `agentPushNotifEnabled` setting (see `tools/meta` config — it is
-/// deliberately excluded), so this returns the binary default `false`.
-// PARITY-TODO: read the real `agentPushNotifEnabled` setting once the
-// notification-settings subsystem (Tier 2) is ported.
+/// `mc("agentPushNotifEnabled", false).value` (cc_all.txt:504927).
 #[must_use]
 fn agent_push_notif_setting() -> bool {
-    false
+    traits::session_flags::agent_push_notif_enabled()
 }
 
 fn env_truthy(key: &str) -> bool {
@@ -678,6 +674,7 @@ mod tests {
         reset_autonomous_loop_delivered();
         std::env::remove_var("LINGXI_LOOP_PERSISTENT");
         telemetry::test_clear_flag("tengu_kairos_loop_persistent");
+        traits::session_flags::set_agent_push_notif_enabled(false);
         // The resolver gate (`fJr`/`is_loop_default_prompt_enabled`) DEFAULTS off
         // (binary `tengu_kairos_loop_prompt=false`, FLAG-ONLY — no env). Turn it on
         // for the resolution tests via the test-only flag override (binary `ROt`/
@@ -785,13 +782,18 @@ mod tests {
         assert!(is_loop_keepalive_enabled(), "env arm");
         std::env::remove_var("LINGXI_LOOP_KEEPALIVE");
 
-        // Yke: push flag alone is not enough (agentPushNotifEnabled setting is
-        // unsupported → false), so Yke stays false — matching the binary default.
+        // Yke: push flag alone is not enough.
         telemetry::test_set_flag("tengu_kairos_push_notifications", true);
         assert!(
             !is_push_notif_enabled(),
             "Yke needs BOTH the flag and the agentPushNotifEnabled setting"
         );
+        traits::session_flags::set_agent_push_notif_enabled(true);
+        assert!(
+            is_push_notif_enabled(),
+            "Yke enables only after both gates are true"
+        );
+        traits::session_flags::set_agent_push_notif_enabled(false);
         telemetry::test_clear_flag("tengu_kairos_push_notifications");
     }
 

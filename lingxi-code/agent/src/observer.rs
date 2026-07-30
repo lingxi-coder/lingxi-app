@@ -7,6 +7,41 @@ use std::collections::{HashMap, HashSet};
 /// Observer fanout is bounded independently from ordinary subagent recursion.
 pub const DEFAULT_OBSERVER_FANOUT_DEPTH: u32 = 3;
 
+#[cfg(test)]
+pub(crate) fn observer_env_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+/// Observer agents remain experimental in Claude Code 2.1.220: the parser
+/// accepts the declaration unconditionally, but the runtime only arms it when
+/// the experimental env toggle is on and background tasks are not globally
+/// disabled. LingXi mirrors the externally observable gate here.
+#[must_use]
+pub fn observer_agents_enabled() -> bool {
+    let disabled = traits::env::is_env_truthy(
+        std::env::var("LINGXI_DISABLE_BACKGROUND_TASKS")
+            .ok()
+            .as_deref(),
+    ) || traits::env::is_env_truthy(
+        std::env::var("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS")
+            .ok()
+            .as_deref(),
+    );
+    if disabled {
+        return false;
+    }
+    traits::env::is_env_truthy(
+        std::env::var("CLAUDE_CODE_EXPERIMENTAL_OBSERVER_AGENTS")
+            .ok()
+            .as_deref(),
+    ) || traits::env::is_env_truthy(
+        std::env::var("LINGXI_EXPERIMENTAL_OBSERVER_AGENTS")
+            .ok()
+            .as_deref(),
+    )
+}
+
 /// A validated observer declaration inherited by a child spawn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObserverPropagation {
@@ -322,5 +357,40 @@ mod tests {
         assert_eq!(plan.observer_agent, "reviewer");
         assert!(plan.prompt.contains(&id.to_string()));
         assert!(plan.prompt.contains("Observed output"));
+    }
+
+    #[test]
+    fn observer_gate_requires_experimental_env_and_respects_background_disable() {
+        let _guard = observer_env_lock().lock().unwrap();
+        std::env::remove_var("CLAUDE_CODE_EXPERIMENTAL_OBSERVER_AGENTS");
+        std::env::remove_var("LINGXI_EXPERIMENTAL_OBSERVER_AGENTS");
+        std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
+        std::env::remove_var("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS");
+
+        assert!(!observer_agents_enabled(), "default external run stays off");
+
+        std::env::set_var("CLAUDE_CODE_EXPERIMENTAL_OBSERVER_AGENTS", "1");
+        assert!(
+            observer_agents_enabled(),
+            "experimental env enables observers"
+        );
+
+        std::env::set_var("LINGXI_DISABLE_BACKGROUND_TASKS", "1");
+        assert!(
+            !observer_agents_enabled(),
+            "background-task disable must force observers off"
+        );
+
+        std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
+        std::env::remove_var("CLAUDE_CODE_EXPERIMENTAL_OBSERVER_AGENTS");
+        std::env::set_var("LINGXI_EXPERIMENTAL_OBSERVER_AGENTS", "true");
+        assert!(
+            observer_agents_enabled(),
+            "LingXi alias also enables observers"
+        );
+
+        std::env::remove_var("LINGXI_EXPERIMENTAL_OBSERVER_AGENTS");
+        std::env::remove_var("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS");
+        std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
     }
 }

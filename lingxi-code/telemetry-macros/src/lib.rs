@@ -23,12 +23,15 @@ use syn::{parse_macro_input, LitStr};
 #[proc_macro]
 pub fn tengu_event_audit(input: TokenStream) -> TokenStream {
     let _ = input;
-    let macro_crate_dir = env!("CARGO_MANIFEST_DIR");
-    let tengu_dir = PathBuf::from(macro_crate_dir)
-        .join("..")
-        .join("telemetry")
-        .join("src")
-        .join("tengu");
+    // Read the INVOKING crate's manifest directory at macro-expansion time.
+    // Embedding this proc-macro crate's `CARGO_MANIFEST_DIR` with `env!` makes a
+    // cached dylib non-relocatable: a build from a temporary staged checkout
+    // keeps pointing at that deleted checkout when Cargo later reuses it from
+    // the real worktree.
+    let invoking_crate_dir = std::env::var_os("CARGO_MANIFEST_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../telemetry"));
+    let tengu_dir = invoking_crate_dir.join("src").join("tengu");
 
     let mut errors: Vec<String> = Vec::new();
     let categories = [

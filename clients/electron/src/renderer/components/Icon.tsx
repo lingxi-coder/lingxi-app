@@ -38,6 +38,7 @@ export function Icon({ name, size = 16, color = 'currentColor', stroke = 1.6, st
     case 'box': return <svg {...p}><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z" /><path d="m3.3 7 8.7 5 8.7-5M12 22V12" /></svg>;
     case 'more': return <svg {...p}><circle cx="12" cy="12" r="1" /><circle cx="19" cy="12" r="1" /><circle cx="5" cy="12" r="1" /></svg>;
     case 'mic': return <svg {...p}><rect x="9" y="2" width="6" height="11" rx="3" /><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3" /></svg>;
+    case 'waveform': return <svg {...p}><path d="M4 10v4M8 7v10M12 4v16M16 7v10M20 10v4" /></svg>;
     case 'send': return <svg {...p}><path d="M22 2 11 13" /><path d="M22 2 15 22 11 13 2 9z" /></svg>;
     case 'stop': return <svg {...p}><rect x="6" y="6" width="12" height="12" rx="1.5" /></svg>;
     case 'sun': return <svg {...p}><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" /></svg>;

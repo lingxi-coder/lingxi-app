@@ -96,7 +96,7 @@ pub fn network_intent(command: &str) -> Option<String> {
 /// `&&` and `||` collapse to a single boundary (they are two-char operators
 /// and must not produce an empty segment between them). Bare `&` (background)
 /// and `|` (pipe) each produce a boundary, as do `;` and `\n`.
-fn split_segments(command: &str) -> Vec<String> {
+pub(crate) fn split_segments(command: &str) -> Vec<String> {
     let bytes = command.as_bytes();
     let len = bytes.len();
     let mut segments: Vec<String> = Vec::new();

@@ -139,6 +139,7 @@ const TARGET_IMPLEMENTED: &[&str] = &[
     "autocompact",
     "background",
     "branch",
+    "btw",
     "cd",
     "clear",
     "color",
@@ -395,10 +396,10 @@ fn implemented_set_matches_target_implemented_names() {
 #[test]
 fn correct_by_design_and_host_bound_sets_remain_explicit() {
     assert_eq!(CORRECT_BY_DESIGN_STUBS.len(), 23);
-    // `x402` and `reload-plugins` left this set with the 105-name re-lock:
-    // `x402` is gone from the oracle entirely, `reload-plugins` is no longer
-    // classified host-bound. `btw` is the only remaining host-bound gap.
-    assert_eq!(HOST_BOUND_DEFERRED_GAPS.len(), 1);
+    assert!(
+        HOST_BOUND_DEFERRED_GAPS.is_empty(),
+        "/btw now has a handle-bound command and reopenable TUI panel"
+    );
 }
 
 #[tokio::test]

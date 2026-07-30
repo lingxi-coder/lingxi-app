@@ -13,11 +13,16 @@ use super::classify::classify;
 /// once on a breaker.
 #[derive(Debug, Default)]
 pub struct CollapseGroup {
+    fullscreen: bool,
     search_count: u64,
     read_file_paths: BTreeSet<String>,
     read_operation_count: u64,
     list_count: u64,
     repl_count: u64,
+    mcp_call_count: u64,
+    mcp_server_names: BTreeSet<String>,
+    bash_count: u64,
+    memory_write_count: u64,
     entries: Vec<String>,
     latest_hint: Option<String>,
 }
@@ -29,10 +34,19 @@ impl CollapseGroup {
         Self::default()
     }
 
+    /// An empty group configured for the current terminal surface.
+    #[must_use]
+    pub fn with_fullscreen(fullscreen: bool) -> Self {
+        Self {
+            fullscreen,
+            ..Self::default()
+        }
+    }
+
     /// Absorb a tool-use START. Returns `false` when the use is NOT collapsible
     /// (the caller must finalize this group and process the breaker instead).
     pub fn absorb_start(&mut self, tool: &str, input: &Value) -> bool {
-        let info = classify(tool, input);
+        let info = classify(tool, input, self.fullscreen);
         if !info.is_collapsible {
             return false;
         }
@@ -58,6 +72,18 @@ impl CollapseGroup {
         }
         if info.is_list {
             self.list_count += 1;
+        }
+        if info.is_mcp {
+            self.mcp_call_count += 1;
+        }
+        if let Some(server) = info.mcp_server_name {
+            self.mcp_server_names.insert(server);
+        }
+        if info.is_bash {
+            self.bash_count += 1;
+        }
+        if info.is_memory_write {
+            self.memory_write_count += 1;
         }
         true
     }
@@ -92,6 +118,30 @@ impl CollapseGroup {
         self.repl_count
     }
 
+    /// Number of MCP calls folded in either terminal mode.
+    #[must_use]
+    pub fn mcp_call_count(&self) -> u64 {
+        self.mcp_call_count
+    }
+
+    /// Distinct MCP server names in stable lexical order.
+    #[must_use]
+    pub fn mcp_server_names(&self) -> Vec<String> {
+        self.mcp_server_names.iter().cloned().collect()
+    }
+
+    /// Number of non-search Bash calls folded in fullscreen.
+    #[must_use]
+    pub fn bash_count(&self) -> u64 {
+        self.bash_count
+    }
+
+    /// Number of auto-managed memory writes folded in fullscreen.
+    #[must_use]
+    pub fn memory_write_count(&self) -> u64 {
+        self.memory_write_count
+    }
+
     /// The latest read hint (the `⎿` line while active).
     #[must_use]
     pub fn latest_hint(&self) -> Option<&str> {
@@ -104,26 +154,27 @@ impl CollapseGroup {
         &self.entries
     }
 
-    /// True when the group carries no counted fold yet (only silent absorbs) —
-    /// the caller skips committing an empty badge.
+    /// True only before any tool-use entry has been absorbed. A group containing
+    /// only silent meta-ops is retained so Ctrl-O can reveal those entries even
+    /// though normal mode renders no summary row.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.search_count == 0
-            && self.list_count == 0
-            && self.repl_count == 0
-            && self.read_file_paths.is_empty()
-            && self.read_operation_count == 0
+        self.entries.is_empty()
     }
 
     /// The comma-joined summary line (present-tense + trailing `…` when
     /// `is_active`, past-tense when finalized).
     #[must_use]
     pub fn summary_text(&self, is_active: bool) -> String {
-        search_read_summary_text(
+        search_read_summary_text_full(
             self.search_count,
             self.read_count(),
             self.list_count,
             self.repl_count,
+            self.mcp_call_count,
+            &self.mcp_server_names(),
+            self.bash_count,
+            self.memory_write_count,
             is_active,
         )
     }
@@ -165,6 +216,34 @@ pub fn search_read_summary_text(
     repl_count: u64,
     is_active: bool,
 ) -> String {
+    search_read_summary_text_full(
+        search_count,
+        read_count,
+        list_count,
+        repl_count,
+        0,
+        &[],
+        0,
+        0,
+        is_active,
+    )
+}
+
+/// Fullscreen-capable summary formatter, including MCP, Bash, and memory-write
+/// categories that the inline compatibility helper omits.
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn search_read_summary_text_full(
+    search_count: u64,
+    read_count: u64,
+    list_count: u64,
+    repl_count: u64,
+    mcp_call_count: u64,
+    mcp_server_names: &[String],
+    bash_count: u64,
+    memory_write_count: u64,
+    is_active: bool,
+) -> String {
     let mut parts: Vec<String> = Vec::new();
 
     if search_count > 0 {
@@ -195,8 +274,42 @@ pub fn search_read_summary_text(
         let noun = if repl_count == 1 { "time" } else { "times" };
         parts.push(format!("{verb} {repl_count} {noun}"));
     }
+    if mcp_call_count > 0 {
+        let verb = pick_verb(is_active, parts.is_empty(), "Querying", "Queried");
+        let servers = if mcp_server_names.is_empty() {
+            "MCP".to_string()
+        } else {
+            mcp_server_names.join(", ")
+        };
+        if mcp_call_count == 1 {
+            parts.push(format!("{verb} {servers}"));
+        } else {
+            parts.push(format!("{verb} {servers} {mcp_call_count} times"));
+        }
+    }
+    if bash_count > 0 {
+        let verb = pick_verb(is_active, parts.is_empty(), "Running", "Ran");
+        let noun = if bash_count == 1 {
+            "bash command"
+        } else {
+            "bash commands"
+        };
+        parts.push(format!("{verb} {bash_count} {noun}"));
+    }
+    if memory_write_count > 0 {
+        let verb = pick_verb(is_active, parts.is_empty(), "Writing", "Wrote");
+        let noun = if memory_write_count == 1 {
+            "memory"
+        } else {
+            "memories"
+        };
+        parts.push(format!("{verb} {memory_write_count} {noun}"));
+    }
 
     let text = parts.join(", ");
+    if text.is_empty() {
+        return text;
+    }
     if is_active {
         format!("{text}…")
     } else {
@@ -249,6 +362,34 @@ mod tests {
     fn non_collapsible_returns_false() {
         let mut g = CollapseGroup::new();
         assert!(!g.absorb_start("Edit", &json!({"file_path": "a"})));
+    }
+
+    #[test]
+    fn fullscreen_group_summarizes_bash_mcp_and_memory() {
+        let mut g = CollapseGroup::with_fullscreen(true);
+        assert!(g.absorb_start("Bash", &json!({"command": "rm a.rs"})));
+        assert!(g.absorb_start("mcp__github__search_code", &json!({})));
+        assert!(g.absorb_start(
+            "Write",
+            &json!({"file_path": "/home/u/.lingxi/memdir/note.md"})
+        ));
+        assert_eq!(g.bash_count(), 1);
+        assert_eq!(g.mcp_call_count(), 1);
+        assert_eq!(g.mcp_server_names(), vec!["github"]);
+        assert_eq!(g.memory_write_count(), 1);
+        assert_eq!(
+            g.summary_text(false),
+            "Queried github, ran 1 bash command, wrote 1 memory"
+        );
+    }
+
+    #[test]
+    fn silent_meta_group_retains_verbose_entries_without_a_summary() {
+        let mut g = CollapseGroup::with_fullscreen(true);
+        assert!(g.absorb_start("ToolSearch", &json!({"query": "github"})));
+        assert!(!g.is_empty());
+        assert!(g.summary_text(false).is_empty());
+        assert_eq!(g.entries().len(), 1);
     }
 
     #[test]

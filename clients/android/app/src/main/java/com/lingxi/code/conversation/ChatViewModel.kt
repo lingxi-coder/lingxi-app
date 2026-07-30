@@ -30,6 +30,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.util.Locale
 
 /**
  * Immutable UI state for the conversation surface. Hoisted out of the
@@ -40,7 +41,7 @@ data class ChatState(
     val messages: List<Message>,
     /** A brand-new (empty) chat shows the empty-state hero instead of a list. */
     val isNew: Boolean = false,
-    /** True while the assistant reply streams — renders the pulsing dots row. */
+    /** True while the assistant reply streams — keeps the run trace live. */
     val streaming: Boolean = false,
     /** True while ResumeSession/NewSession is awaiting engine confirmation. */
     val sessionTransitioning: Boolean = false,
@@ -68,6 +69,8 @@ data class ChatState(
     val shellTools: List<ShellToolCardState> = emptyList(),
     /** Latest android_use invocation, used to reopen setup guidance after dismissal. */
     val computerUseRequestKey: String? = null,
+    /** The latest turn's live CLI-like execution trace (not persisted as chat). */
+    val agentRun: AgentRunState? = null,
     /**
      * A persistent, dismissible turn error. Unlike [statusLine] (which the next
      * tool-activity event overwrites and a turn clears), this survives until the
@@ -119,6 +122,14 @@ internal fun classifyError(message: String): ChatErrorKind {
             "transport" in m || "超时" in m || "网络" in m || "连接" in m -> ChatErrorKind.NETWORK
         else -> ChatErrorKind.GENERIC
     }
+}
+
+private fun formatByteCount(bytes: Long): String = when {
+    bytes >= 1024L * 1024L ->
+        String.format(Locale.ROOT, "%.1f MiB", bytes / (1024.0 * 1024.0))
+    bytes >= 1024L ->
+        String.format(Locale.ROOT, "%.1f KiB", bytes / 1024.0)
+    else -> "$bytes B"
 }
 
 /**
@@ -535,6 +546,7 @@ class ChatViewModel(
                 sessionReady = true,
                 statusLine = null,
                 shellTools = emptyList(),
+                agentRun = null,
                 error = null,
             )
         }
@@ -620,6 +632,7 @@ class ChatViewModel(
                 sessionReady = false,
                 statusLine = status,
                 shellTools = emptyList(),
+                agentRun = null,
                 error = null,
             )
         }
@@ -735,6 +748,7 @@ class ChatViewModel(
                 error = null, // a fresh turn clears the prior turn's error banner
                 streaming = true, // gate the composer immediately, before the first event
                 messages = it.messages + Message(role = Role.User, text = trimmed),
+                agentRun = AgentRunState(turnId = token),
             )
         }
 
@@ -755,7 +769,13 @@ class ChatViewModel(
         // Supersede the turn: a late event arriving after the engine's Cancel
         // round-trip must not re-open streaming on the now-idle transcript.
         val job = abandonLocalTurn()
-        _state.update { it.copy(streaming = false, statusLine = "正在停止…") }
+        _state.update {
+            it.copy(
+                streaming = false,
+                statusLine = "正在停止…",
+                agentRun = it.agentRun?.finish(AgentRunOutcome.Cancelled),
+            )
+        }
         val cancellation = viewModelScope.async {
             runCatching { cancelEngineTurn(job) }
         }
@@ -818,21 +838,36 @@ class ChatViewModel(
     internal fun reduce(event: ReplyEvent, token: Long = turnToken) {
         if (token != turnToken) return // stale turn — its session was abandoned
         when (event) {
-            is ReplyEvent.Thinking -> _state.update { it.copy(streaming = true) }
+            is ReplyEvent.Thinking -> _state.update {
+                it.copy(
+                    streaming = true,
+                    agentRun = (it.agentRun ?: AgentRunState(turnId = token))
+                        .appendReasoning(""),
+                )
+            }
+
+            is ReplyEvent.ReasoningDelta -> _state.update {
+                it.copy(
+                    streaming = true,
+                    agentRun = (it.agentRun ?: AgentRunState(turnId = token))
+                        .appendReasoning(event.text),
+                )
+            }
 
             is ReplyEvent.Delta -> _state.update { s ->
+                val run = (s.agentRun ?: AgentRunState(turnId = token)).markGenerating()
                 val i = streamingIndex
                 if (i != null && s.messages.indices.contains(i)) {
                     // Append into the in-flight assistant message.
                     val updated = s.messages.toMutableList()
                     val prev = updated[i]
                     updated[i] = prev.copy(text = prev.text + event.text)
-                    s.copy(streaming = true, messages = updated)
+                    s.copy(streaming = true, messages = updated, agentRun = run)
                 } else {
                     // First delta of the turn: open a new assistant message.
                     val opened = s.messages + Message(role = Role.Ai, text = event.text)
                     streamingIndex = opened.size - 1
-                    s.copy(streaming = true, messages = opened)
+                    s.copy(streaming = true, messages = opened, agentRun = run)
                 }
             }
 
@@ -847,6 +882,8 @@ class ChatViewModel(
                     } else {
                         it.computerUseRequestKey
                     },
+                    agentRun = (it.agentRun ?: AgentRunState(turnId = token))
+                        .reduceTool(event),
                 )
             }
 
@@ -878,18 +915,91 @@ class ChatViewModel(
                 if (replacement == null) {
                     current
                 } else {
-                    current.copy(
-                        statusLine = when (replacement.status) {
+                    val toolStatus = when (replacement.status) {
+                        ShellToolStatus.Running -> AgentToolStatus.Running
+                        ShellToolStatus.Completed -> AgentToolStatus.Completed
+                        ShellToolStatus.Failed, ShellToolStatus.TimedOut -> AgentToolStatus.Failed
+                        ShellToolStatus.Cancelled -> AgentToolStatus.Cancelled
+                    }
+                    val traceEvent = ReplyEvent.ToolActivity(
+                        label = when (replacement.status) {
                             ShellToolStatus.Running -> "Shell 运行中…"
                             ShellToolStatus.Completed -> "Shell 完成"
                             ShellToolStatus.Failed -> "Shell 失败"
                             ShellToolStatus.TimedOut -> "Shell 超时"
                             ShellToolStatus.Cancelled -> "Shell 已取消"
                         },
+                        id = replacement.taskId,
+                        tool = "Shell",
+                        status = toolStatus,
+                        inputSummary = replacement.command,
+                        elapsedMs = replacement.durationMs,
+                    )
+                    current.copy(
+                        statusLine = traceEvent.label,
                         shellTools = current.shellTools
                             .filterNot { it.taskId == replacement.taskId } + replacement,
+                        agentRun = (current.agentRun ?: AgentRunState(turnId = token))
+                            .reduceTool(traceEvent),
                     )
                 }
+            }
+
+            is ReplyEvent.Notice -> _state.update {
+                val kind = if (event.isError) AgentRunNoticeKind.Error else AgentRunNoticeKind.Info
+                it.copy(
+                    statusLine = event.message,
+                    agentRun = (it.agentRun ?: AgentRunState(turnId = token))
+                        .addNotice(AgentRunNotice(event.message, kind)),
+                )
+            }
+
+            is ReplyEvent.Usage -> _state.update {
+                it.copy(
+                    agentRun = (it.agentRun ?: AgentRunState(turnId = token))
+                        .updateUsage(event.usage),
+                )
+            }
+
+            is ReplyEvent.Retry -> _state.update {
+                val delaySeconds = event.delayMs / 1_000.0
+                val label = "请求重试 ${event.attempt}/${event.maxRetries}（${delaySeconds}s）"
+                it.copy(
+                    statusLine = label,
+                    agentRun = (it.agentRun ?: AgentRunState(turnId = token))
+                        .addNotice(
+                            AgentRunNotice(
+                                "$label：${event.message}",
+                                AgentRunNoticeKind.Warning,
+                            ),
+                        ),
+                )
+            }
+
+            is ReplyEvent.Cost -> _state.update {
+                it.copy(
+                    agentRun = (it.agentRun ?: AgentRunState(turnId = token))
+                        .updateCost(event.formatted),
+                )
+            }
+
+            is ReplyEvent.Compaction -> _state.update {
+                val saved = formatByteCount(event.bytesSaved)
+                it.copy(
+                    agentRun = (it.agentRun ?: AgentRunState(turnId = token))
+                        .addNotice(
+                            AgentRunNotice(
+                                "上下文已压缩：${event.messagesBefore} → ${event.messagesAfter} 条，释放 $saved",
+                            ),
+                        ),
+                )
+            }
+
+            is ReplyEvent.Coordinator -> _state.update {
+                it.copy(
+                    agentRun = (it.agentRun ?: AgentRunState(turnId = token))
+                        .updateWorkers(event.activeWorkers, event.team),
+                )
             }
 
             is ReplyEvent.Error -> {
@@ -903,6 +1013,9 @@ class ChatViewModel(
                         streaming = false,
                         statusLine = null,
                         error = ChatError(event.message, classifyError(event.message)),
+                        agentRun = (it.agentRun ?: AgentRunState(turnId = token))
+                            .addNotice(AgentRunNotice(event.message, AgentRunNoticeKind.Error))
+                            .finish(AgentRunOutcome.Failed),
                     )
                 }
             }
@@ -915,9 +1028,19 @@ class ChatViewModel(
                     if (completedIndex != null && s.messages.indices.contains(completedIndex)) {
                         val updated = s.messages.toMutableList()
                         updated[completedIndex] = event.message
-                        s.copy(streaming = false, messages = updated)
+                        s.copy(
+                            streaming = false,
+                            messages = updated,
+                            agentRun = (s.agentRun ?: AgentRunState(turnId = token))
+                                .finish(AgentRunOutcome.Completed),
+                        )
                     } else {
-                        s.copy(streaming = false, messages = s.messages + event.message)
+                        s.copy(
+                            streaming = false,
+                            messages = s.messages + event.message,
+                            agentRun = (s.agentRun ?: AgentRunState(turnId = token))
+                                .finish(AgentRunOutcome.Completed),
+                        )
                     }
                 }
             }
@@ -925,7 +1048,17 @@ class ChatViewModel(
             is ReplyEvent.End -> {
                 streamingIndex = null
                 turnJob = null
-                _state.update { it.copy(streaming = false) }
+                _state.update {
+                    val run = it.agentRun ?: AgentRunState(turnId = token)
+                    it.copy(
+                        streaming = false,
+                        agentRun = if (run.outcome == AgentRunOutcome.Running) {
+                            run.finish(AgentRunOutcome.Completed)
+                        } else {
+                            run
+                        },
+                    )
+                }
             }
         }
     }

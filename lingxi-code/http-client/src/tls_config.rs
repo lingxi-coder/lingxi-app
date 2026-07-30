@@ -40,10 +40,9 @@
 //!   this transport crate has no argv; belongs to the CLI wiring layer.
 //! * settings-env-change agent rebuild (`XY()`), `/doctor` diagnostic rows, and
 //!   startup-telemetry fields — cross-cutting surfaces outside the transport.
-//! * The `tokio-tungstenite` websocket connector does not yet receive the same
-//!   identity/roots (follow-up).
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// A CA trust-store source — one element of `JEm()`'s output list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,6 +175,116 @@ impl TlsSettings {
             builder = add_extra_ca_certs(builder, path);
         }
         builder
+    }
+
+    /// Build the rustls configuration used by `tokio-tungstenite`.
+    ///
+    /// This deliberately assembles the same bundled/system/extra roots and
+    /// client identity as [`Self::apply_to_builder`]. A configured but invalid
+    /// client identity fails the WebSocket open instead of silently connecting
+    /// without mTLS.
+    pub fn websocket_client_config(&self) -> Result<Arc<rustls::ClientConfig>, String> {
+        use rustls::pki_types::{
+            CertificateDer, PrivateKeyDer, PrivatePkcs1KeyDer, PrivatePkcs8KeyDer,
+            PrivateSec1KeyDer,
+        };
+
+        let sources = parse_cert_store(self.cert_store.as_deref());
+        let mut roots = rustls::RootCertStore::empty();
+        if sources.contains(&CertSource::Bundled) {
+            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        }
+        if sources.contains(&CertSource::System) {
+            let loaded = rustls_native_certs::load_native_certs();
+            if !loaded.errors.is_empty() {
+                tracing::warn!(
+                    "CA certs: {} system root(s) failed to load: {:?}",
+                    loaded.errors.len(),
+                    loaded.errors
+                );
+            }
+            let (added, ignored) = roots.add_parsable_certificates(loaded.certs);
+            tracing::debug!(
+                "CA certs: Loaded {added} system CA certificates for WebSocket ({ignored} ignored)"
+            );
+        }
+        if let Some(path) = &self.extra_ca_certs {
+            let bytes = std::fs::read(path).map_err(|error| {
+                format!(
+                    "failed to read NODE_EXTRA_CA_CERTS file ({}): {error}",
+                    path.display()
+                )
+            })?;
+            let blocks = pem::parse_many(bytes)
+                .map_err(|error| format!("failed to parse NODE_EXTRA_CA_CERTS: {error}"))?;
+            let certs = blocks
+                .into_iter()
+                .filter(|block| block.tag() == "CERTIFICATE")
+                .map(|block| CertificateDer::from(block.into_contents()));
+            let (added, ignored) = roots.add_parsable_certificates(certs);
+            tracing::debug!(
+                "CA certs: Appended {added} extra certificates for WebSocket ({ignored} ignored)"
+            );
+        }
+
+        let identity = match (&self.client_cert, &self.client_key) {
+            (None, None) => None,
+            (Some(_), None) | (None, Some(_)) => {
+                return Err(
+                    "both LINGXI_CLIENT_CERT and LINGXI_CLIENT_KEY are required for mTLS"
+                        .to_string(),
+                );
+            }
+            (Some(cert_path), Some(key_path)) => {
+                let cert_pem = read_pem(cert_path, "client certificate from LINGXI_CLIENT_CERT")
+                    .ok_or_else(|| "failed to load WebSocket client certificate".to_string())?;
+                let certs: Vec<CertificateDer<'static>> = pem::parse_many(cert_pem.as_bytes())
+                    .map_err(|error| format!("failed to parse WebSocket client cert: {error}"))?
+                    .into_iter()
+                    .filter(|block| block.tag() == "CERTIFICATE")
+                    .map(|block| CertificateDer::from(block.into_contents()))
+                    .collect();
+                if certs.is_empty() {
+                    return Err("WebSocket client certificate PEM contains no certificate".into());
+                }
+
+                let key_pem = read_pem(key_path, "client key from LINGXI_CLIENT_KEY")
+                    .and_then(|raw| {
+                        decrypt_key_if_needed(raw, self.client_key_passphrase.as_deref())
+                    })
+                    .ok_or_else(|| "failed to load WebSocket client private key".to_string())?;
+                let block = pem::parse_many(key_pem.as_bytes())
+                    .map_err(|error| format!("failed to parse WebSocket client key: {error}"))?
+                    .into_iter()
+                    .find(|block| {
+                        matches!(
+                            block.tag(),
+                            "PRIVATE KEY" | "RSA PRIVATE KEY" | "EC PRIVATE KEY"
+                        )
+                    })
+                    .ok_or_else(|| {
+                        "WebSocket client key PEM contains no supported private key".to_string()
+                    })?;
+                let tag = block.tag().to_string();
+                let bytes = block.into_contents();
+                let key = match tag.as_str() {
+                    "PRIVATE KEY" => PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(bytes)),
+                    "RSA PRIVATE KEY" => PrivateKeyDer::Pkcs1(PrivatePkcs1KeyDer::from(bytes)),
+                    "EC PRIVATE KEY" => PrivateKeyDer::Sec1(PrivateSec1KeyDer::from(bytes)),
+                    _ => unreachable!("tag filtered above"),
+                };
+                Some((certs, key))
+            }
+        };
+
+        let builder = rustls::ClientConfig::builder().with_root_certificates(roots);
+        let config = match identity {
+            Some((certs, key)) => builder
+                .with_client_auth_cert(certs, key)
+                .map_err(|error| format!("failed to build WebSocket mTLS identity: {error}"))?,
+            None => builder.with_no_client_auth(),
+        };
+        Ok(Arc::new(config))
     }
 
     /// Build the reqwest client identity from `client_cert` + `client_key`
@@ -574,6 +683,117 @@ mod tests {
         assert!(
             resp.is_err(),
             "server requires a client cert; the identity-less client must fail, got: {resp:?}"
+        );
+    }
+
+    /// The WebSocket connector must inherit both custom CA trust and the mTLS
+    /// identity. This exercises a real WSS upgrade rather than inspecting the
+    /// constructed rustls config.
+    #[tokio::test]
+    async fn websocket_connector_applies_custom_ca_and_client_identity() {
+        use std::sync::Arc;
+        use tokio::net::TcpListener;
+        use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
+        use tokio_rustls::rustls::server::WebPkiClientVerifier;
+        use tokio_rustls::rustls::{RootCertStore, ServerConfig};
+        use tokio_rustls::TlsAcceptor;
+
+        let ca_key = rcgen::KeyPair::generate().unwrap();
+        let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+
+        let server_key = rcgen::KeyPair::generate().unwrap();
+        let server_params = rcgen::CertificateParams::new(vec!["127.0.0.1".to_string()]).unwrap();
+        let server_cert = server_params
+            .signed_by(&server_key, &ca_cert, &ca_key)
+            .unwrap();
+
+        let client_key = rcgen::KeyPair::generate().unwrap();
+        let mut client_params =
+            rcgen::CertificateParams::new(vec!["lingxi-wss-client".to_string()]).unwrap();
+        client_params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ClientAuth];
+        let client_cert = client_params
+            .signed_by(&client_key, &ca_cert, &ca_key)
+            .unwrap();
+
+        let mut client_roots = RootCertStore::empty();
+        client_roots
+            .add(CertificateDer::from(ca_cert.der().to_vec()))
+            .unwrap();
+        let verifier = WebPkiClientVerifier::builder(Arc::new(client_roots))
+            .build()
+            .unwrap();
+        let server_config = ServerConfig::builder()
+            .with_client_cert_verifier(verifier)
+            .with_single_cert(
+                vec![CertificateDer::from(server_cert.der().to_vec())],
+                PrivateKeyDer::try_from(server_key.serialize_der()).unwrap(),
+            )
+            .unwrap();
+        let acceptor = TlsAcceptor::from(Arc::new(server_config));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            for _ in 0..2 {
+                let Ok((tcp, _)) = listener.accept().await else {
+                    return;
+                };
+                let acceptor = acceptor.clone();
+                tokio::spawn(async move {
+                    let Ok(tls) = acceptor.accept(tcp).await else {
+                        return;
+                    };
+                    let Ok(mut websocket) = tokio_tungstenite::accept_async(tls).await else {
+                        return;
+                    };
+                    let _ = futures_util::SinkExt::close(&mut websocket).await;
+                });
+            }
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let cert_path = dir.path().join("client-cert.pem");
+        let key_path = dir.path().join("client-key.pem");
+        let ca_path = dir.path().join("ca.pem");
+        std::fs::write(&cert_path, client_cert.pem()).unwrap();
+        std::fs::write(&key_path, client_key.serialize_pem()).unwrap();
+        std::fs::write(&ca_path, ca_cert.pem()).unwrap();
+
+        let settings = TlsSettings {
+            client_cert: Some(cert_path),
+            client_key: Some(key_path),
+            client_key_passphrase: None,
+            cert_store: Some("bundled".to_string()),
+            extra_ca_certs: Some(ca_path.clone()),
+        };
+        let connector =
+            tokio_tungstenite::Connector::Rustls(settings.websocket_client_config().unwrap());
+        let url = format!("wss://127.0.0.1:{}/", addr.port());
+        let connected =
+            tokio_tungstenite::connect_async_tls_with_config(&url, None, false, Some(connector))
+                .await;
+        assert!(
+            connected.is_ok(),
+            "custom CA + client identity must complete WSS: {connected:?}"
+        );
+
+        let without_identity = TlsSettings {
+            client_cert: None,
+            client_key: None,
+            client_key_passphrase: None,
+            cert_store: Some("bundled".to_string()),
+            extra_ca_certs: Some(ca_path),
+        };
+        let connector = tokio_tungstenite::Connector::Rustls(
+            without_identity.websocket_client_config().unwrap(),
+        );
+        let connected =
+            tokio_tungstenite::connect_async_tls_with_config(&url, None, false, Some(connector))
+                .await;
+        assert!(
+            connected.is_err(),
+            "client-auth-required WSS must reject a connector without identity"
         );
     }
 

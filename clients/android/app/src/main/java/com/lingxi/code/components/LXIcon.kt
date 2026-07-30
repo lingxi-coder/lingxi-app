@@ -31,7 +31,7 @@ import androidx.compose.ui.unit.dp
  * than approximating with Material icons.
  */
 enum class LXIconName {
-    Menu, Edit, Search, Sparkle, Book, Workflow, Cog, Plus, Mic, Paperclip,
+    Menu, Edit, Search, Sparkle, Book, Workflow, Cog, Plus, Mic, AudioWave, Paperclip,
     Chevron, Sun, Moon, Check, Pin, Brain, ArrowUp, Folder, Clock, Message,
     ChevronR, Play, Pause, X, Skill, Plug, Dream, Link, Copy, Share,
     ArrowRight, Terminal,
@@ -233,6 +233,13 @@ private fun strokePaths(name: LXIconName): List<() -> Path> = when (name) {
             }
         },
         { line(listOf(12f to 19f, 12f to 22f)) },
+    )
+    LXIconName.AudioWave -> listOf(
+        { line(listOf(4f to 10f, 4f to 14f)) },
+        { line(listOf(8f to 7f, 8f to 17f)) },
+        { line(listOf(12f to 4f, 12f to 20f)) },
+        { line(listOf(16f to 7f, 16f to 17f)) },
+        { line(listOf(20f to 10f, 20f to 14f)) },
     )
     LXIconName.Paperclip -> listOf(
         {

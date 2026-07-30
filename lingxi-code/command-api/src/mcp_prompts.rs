@@ -50,11 +50,31 @@ pub fn mcp_prompt_commands(
                 description: described.unwrap_or(&name).to_string(),
                 has_user_specified_description: described.is_some(),
                 name,
-                source: CommandSource::Project,
+                source: CommandSource::Mcp,
                 kind: SlashCommandKind::Mcp {
                     connection_id: *connection_id,
                     prompt_name: prompt.name.clone(),
+                    arguments: prompt.arguments.clone(),
                 },
+                argument_hint: (!prompt.arguments.is_empty()).then(|| {
+                    prompt
+                        .arguments
+                        .iter()
+                        .map(|argument| {
+                            if argument.required {
+                                format!("<{}>", argument.name)
+                            } else {
+                                format!("[{}]", argument.name)
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                }),
+                argument_names: prompt
+                    .arguments
+                    .iter()
+                    .map(|argument| argument.name.clone())
+                    .collect(),
                 loaded_from: Some(MCP_LOADED_FROM.to_string()),
                 ..SlashCommand::default()
             }
@@ -77,6 +97,7 @@ mod tests {
             traits::McpPromptDto {
                 name: name.to_string(),
                 description: description.map(str::to_string),
+                arguments: Vec::new(),
             },
         )
     }
@@ -128,5 +149,29 @@ mod tests {
     #[test]
     fn no_prompts_yields_no_commands() {
         assert!(mcp_prompt_commands(&[]).is_empty());
+    }
+
+    #[test]
+    fn prompt_arguments_drive_hint_and_positional_names() {
+        let mut advertised = prompt("github", "review", Some("Review"));
+        advertised.2.arguments = vec![
+            traits::McpPromptArgumentDto {
+                name: "owner".to_string(),
+                description: Some("Repository owner".to_string()),
+                required: true,
+            },
+            traits::McpPromptArgumentDto {
+                name: "focus".to_string(),
+                description: None,
+                required: false,
+            },
+        ];
+        let commands = mcp_prompt_commands(&[advertised]);
+        assert_eq!(commands[0].source, CommandSource::Mcp);
+        assert_eq!(commands[0].argument_names, ["owner", "focus"]);
+        assert_eq!(
+            commands[0].argument_hint.as_deref(),
+            Some("<owner> [focus]")
+        );
     }
 }

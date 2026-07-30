@@ -422,6 +422,8 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         memory_provider: trusted.then(orchestrator::prompt::real_provider),
         // The Electron bridge has no permission-mode CLI flag; default mode.
         permission_mode: permission::PermissionMode::Default,
+        permission_mode_cli: None,
+        permission_mode_cli_explicit: false,
         // Plan 3c: bridge has no interactive secure prompt; headless no-op.
         connect_prompt: None,
         // The Electron bridge exposes no --max-turns / --max-budget flags;
@@ -1061,6 +1063,8 @@ mod tests {
             // Deterministic test: empty memory, never the real FS.
             memory_provider: None,
             permission_mode: permission::PermissionMode::Default,
+            permission_mode_cli: None,
+            permission_mode_cli_explicit: false,
             allow_dangerously_skip_permissions: false,
             connect_prompt: None,
             max_turns: None,

@@ -36,7 +36,7 @@ pub use argument_substitution::{
     substitute_arguments, substitute_arguments_faithful, FrontmatterArgs, SubstitutionError,
 };
 pub use describe::format_description_with_source;
-pub use dispatcher::{BackgroundPromptLauncher, RegistrySlashDispatcher};
+pub use dispatcher::{BackgroundPromptLauncher, McpPromptResolver, RegistrySlashDispatcher};
 pub use expand::{expand_markdown_command, ExpandCtx, ExpandError};
 pub use markdown_loader::{
     build_markdown_command, build_skill_command, command_name_from_path,

@@ -41,9 +41,9 @@ import com.lingxi.code.settings.SettingsHost
 import com.lingxi.code.settings.SettingsRoutes
 import com.lingxi.code.settings.SettingsStore
 import com.lingxi.code.model.ProviderKind
-import com.lingxi.code.terminal.MobileLinuxTerminalGateway
 import com.lingxi.code.terminal.TerminalRoute
 import com.lingxi.code.terminal.TerminalRouteArgs
+import com.lingxi.code.terminal.createTerminalGateway
 import com.lingxi.code.theme.AppearancePrefs
 import com.lingxi.code.theme.AppearanceStore
 import com.lingxi.code.theme.LingXiTheme
@@ -326,7 +326,7 @@ class MainActivity : ComponentActivity() {
                                 terminalLaunchGeneration,
                                 settingsState.linuxRuntime.selectedMode,
                             ) {
-                                MobileLinuxTerminalGateway(
+                                createTerminalGateway(
                                     applicationContext,
                                     settingsState.linuxRuntime.selectedMode,
                                 )

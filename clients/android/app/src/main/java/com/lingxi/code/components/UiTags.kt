@@ -59,6 +59,9 @@ object UiTags {
     /** The conversation's transient status row (engine tool activity / errors). */
     const val CHAT_STATUS = "tag.chatStatus"
 
+    /** The latest turn's expandable reasoning/tool/retry/usage timeline. */
+    const val AGENT_RUN_TIMELINE = "tag.agentRunTimeline"
+
     /** The permission-prompt modal (allow/deny for an engine-parked tool). */
     const val PERMISSION_PROMPT = "tag.permissionPrompt"
 

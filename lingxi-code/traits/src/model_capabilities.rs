@@ -110,7 +110,6 @@ pub fn capabilities_for(model_id: &str) -> &'static [&'static str] {
             "xhigh_effort",
             "adaptive_thinking",
             "context_management",
-            "fast_mode",
         ],
         "claude-opus-4-8" => &[
             "effort",
@@ -445,7 +444,11 @@ mod tests {
 
     #[test]
     fn fast_mode_matches_the_table() {
-        assert!(has_capability("claude-opus-4-7", ModelCapability::FastMode));
+        assert!(!has_capability(
+            "claude-opus-4-7",
+            ModelCapability::FastMode
+        ));
+        assert!(has_capability("claude-opus-4-8", ModelCapability::FastMode));
         assert!(has_capability("claude-opus-5", ModelCapability::FastMode));
         // fable-5's list deliberately omits fast_mode.
         assert!(!has_capability("claude-fable-5", ModelCapability::FastMode));
@@ -483,7 +486,6 @@ mod tests {
     #[test]
     fn initialize_projection_and_request_gate_share_fast_capability() {
         for id in [
-            "claude-opus-4-7",
             "claude-opus-4-8",
             "claude-opus-5",
             "us.anthropic.claude-opus-5-v1:0",
@@ -494,7 +496,12 @@ mod tests {
             );
             assert!(has_capability(id, ModelCapability::FastMode), "{id}");
         }
-        for id in ["claude-sonnet-5", "claude-fable-5", "gpt-5.5"] {
+        for id in [
+            "claude-opus-4-7",
+            "claude-sonnet-5",
+            "claude-fable-5",
+            "gpt-5.5",
+        ] {
             assert!(
                 !initialization_capabilities_for(id).supports_fast_mode,
                 "{id}"

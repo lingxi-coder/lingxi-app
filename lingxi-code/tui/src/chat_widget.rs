@@ -131,7 +131,7 @@ pub enum ChatOutcome {
     /// it off-loop via `OrchestratorHandle::set_fast_mode` and reports the
     /// applied state ("⚡ Fast mode ON" / "Fast mode OFF") through
     /// `TurnEvent::SystemNotice`. When on and the active model supports fast
-    /// mode (opus-4-7/opus-4-8), subsequent turns send `speed:"fast"`.
+    /// mode (opus-4-8/opus-5), subsequent turns send `speed:"fast"`.
     FastMode(Option<bool>),
     /// `/plan`: enter plan mode, or view/open the current session's real plan
     /// file. The reads and mutations run OFF-LOOP via [`OrchestratorHandle`]
@@ -386,6 +386,9 @@ pub struct ChatWidget {
     /// Tool-use ids currently absorbed by the open fold — a collapsible result
     /// for one of these is absorbed (does not break the group).
     collapse_ids: std::collections::HashSet<protocol::ToolUseId>,
+    /// Live terminal surface used by the collapse classifier. Fullscreen folds
+    /// extra Bash/MCP/memory categories; inline preserves native scrollback.
+    collapse_fullscreen: bool,
     /// Composition-root-shared `/web` config snapshot slot (`None` until the
     /// embedder wires one via [`Self::set_web_snapshot`]). [`Self::cmd_web`]
     /// reads a clone to seed the picker; the async `on_web_action` effect
@@ -473,6 +476,10 @@ pub struct ChatWidget {
     /// graceful "unavailable" line.
     task_registry: Option<std::sync::Arc<dyn traits::task_registry::TaskRegistryHandle>>,
     goal_handler: Option<command_core::goal::GoalHandler>,
+    /// Most recent history-inert `/btw` exchange. Claude Code keeps this
+    /// panel-local state so a bare `/btw` reopens the exchange without issuing
+    /// another side query or mutating the main transcript.
+    last_btw_exchange: Option<(String, String)>,
 }
 
 impl ChatWidget {
@@ -521,6 +528,7 @@ impl ChatWidget {
             collapse_group: None,
             collapse_group_id: None,
             collapse_ids: std::collections::HashSet::new(),
+            collapse_fullscreen: false,
             web_snapshot: None,
             permission_snapshot: None,
             plugin_snapshot: None,
@@ -534,6 +542,7 @@ impl ChatWidget {
             invoked_slash: String::new(),
             command_registry: None,
             goal_handler: None,
+            last_btw_exchange: None,
         }
     }
 
@@ -550,6 +559,16 @@ impl ChatWidget {
         provider: std::sync::Arc<dyn command_api::ShellExpansionProvider>,
     ) {
         self.shell_expansion = Some(provider);
+    }
+
+    /// Update the terminal surface used by the read/search collapse classifier.
+    /// Seal any open group first so a `/tui` transition cannot mix inline and
+    /// fullscreen classification rules in one summary.
+    pub fn set_collapse_fullscreen(&mut self, fullscreen: bool) {
+        if self.collapse_fullscreen != fullscreen {
+            self.finalize_collapse_group();
+            self.collapse_fullscreen = fullscreen;
+        }
     }
 
     /// Wire the live engine handle the OrchestratorHandle-backed commands
@@ -850,6 +869,9 @@ impl ChatWidget {
                 read_count: group.read_count(),
                 list_count: group.list_count(),
                 repl_count: group.repl_count(),
+                mcp_call_count: group.mcp_call_count(),
+                mcp_server_names: group.mcp_server_names(),
+                bash_count: group.bash_count(),
                 is_active: true,
                 group_id: self
                     .collapse_group_id
@@ -859,7 +881,7 @@ impl ChatWidget {
                 entries: group.entries().to_vec(),
                 mem_read: 0,
                 mem_search: 0,
-                mem_write: 0,
+                mem_write: group.memory_write_count(),
             },
             None => return,
         };
@@ -879,22 +901,22 @@ impl ChatWidget {
             .unwrap_or_else(protocol::ToolUseId::new);
         self.collapse_ids.clear();
         self.transcript.discard_active();
-        if group.is_empty() {
-            return;
-        }
         self.transcript
             .push_message(RenderedMessage::CollapsedReadSearch {
                 search_count: group.search_count(),
                 read_count: group.read_count(),
                 list_count: group.list_count(),
                 repl_count: group.repl_count(),
+                mcp_call_count: group.mcp_call_count(),
+                mcp_server_names: group.mcp_server_names(),
+                bash_count: group.bash_count(),
                 is_active: false,
                 group_id,
                 latest_hint: None,
                 entries: group.entries().to_vec(),
                 mem_read: 0,
                 mem_search: 0,
-                mem_write: 0,
+                mem_write: group.memory_write_count(),
             });
     }
 
@@ -1048,10 +1070,15 @@ impl ChatWidget {
                 // Collapsed read/search fold (client-side streaming accumulator,
                 // design doc §4): a collapsible use is absorbed into the active
                 // fold instead of committing its own ●/⎿ cells.
-                if tui_core::collapse::classify(tool.as_str(), &input).is_collapsible {
+                if tui_core::collapse::classify(tool.as_str(), &input, self.collapse_fullscreen)
+                    .is_collapsible
+                {
                     if self.collapse_group.is_none() {
                         self.flush_or_discard_active();
-                        self.collapse_group = Some(tui_core::collapse::CollapseGroup::new());
+                        self.collapse_group =
+                            Some(tui_core::collapse::CollapseGroup::with_fullscreen(
+                                self.collapse_fullscreen,
+                            ));
                         self.collapse_group_id = Some(id.clone());
                     }
                     if let Some(group) = self.collapse_group.as_mut() {
@@ -3362,20 +3389,25 @@ impl ChatWidget {
     }
 
     /// `/skill-doctor`: report which loaded skills are unused and costing
-    /// context (computed from the launch-time filesystem roots).
+    /// context from the live, merged command registry.
     pub(crate) fn cmd_skill_doctor(&mut self, args: &str) -> ChatOutcome {
-        let cwd = std::path::PathBuf::from(&self.session.doctor.cwd);
-        let lingxi_home = std::path::PathBuf::from(&self.session.doctor.lingxi_home);
-        self.run_core_command(
-            "skill-doctor",
-            args,
-            &command_core::skill_doctor::SkillDoctorHandler::new(
-                cwd,
-                lingxi_home,
-                None,
-                Vec::new(),
-            ),
-        )
+        let Some(registry) = self.command_registry.clone() else {
+            return self.show_system_text(
+                "/skill-doctor is unavailable (no command registry wired)",
+                true,
+            );
+        };
+        let handler = match registry.try_read() {
+            Ok(registry) => registry.get_handler("skill-doctor"),
+            Err(_) => None,
+        };
+        let Some(handler) = handler else {
+            return self.show_system_text(
+                "/skill-doctor is unavailable (configured handler missing)",
+                true,
+            );
+        };
+        self.run_core_command("skill-doctor", args, handler.as_ref())
     }
 
     // ===== OrchestratorHandle-backed commands. The read/inject ones route
@@ -3488,21 +3520,56 @@ impl ChatWidget {
     /// but NEVER enters the LLM history. Delivered through the SAME
     /// `run_core_command` bridge `/recap` uses (a throwaway `block_on` on the
     /// render-loop's blocking thread) against the history-inert
-    /// `answer_side_question` seam; the trimmed answer renders as a system line.
-    /// Bare `/btw` shows the usage line; graceful "unavailable" when no engine
-    /// handle is wired.
+    /// `answer_side_question` seam; the trimmed answer renders in a dedicated
+    /// side-question panel. A bare `/btw` reopens the most recent exchange (or
+    /// shows usage before the first exchange); the command degrades gracefully
+    /// when no engine handle is wired.
     pub(crate) fn cmd_btw(&mut self, args: &str) -> ChatOutcome {
-        if args.trim().is_empty() {
+        let question = args.trim();
+        if question.is_empty() {
+            if let Some((question, answer)) = self.last_btw_exchange.as_ref() {
+                self.bottom_pane
+                    .show_view(Box::new(ScreenView::side_question(question, answer)));
+                return ChatOutcome::Continue;
+            }
             return self.show_system_text("Usage: /btw <your question>", false);
         }
         let Some(handle) = self.orchestrator.clone() else {
             return self.show_system_text("/btw is unavailable (no engine handle wired)", true);
         };
-        self.run_core_command(
-            "btw",
-            args,
-            &command_core::side_question::SideQuestionHandler::new(handle),
-        )
+        let parsed = command_api::parser::ParsedSlashCommand {
+            name: "btw".to_string(),
+            raw_args: args.to_string(),
+            positional_args: args.split_whitespace().map(str::to_string).collect(),
+        };
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                return self.show_system_text(&format!("/btw failed: {error}"), true);
+            }
+        };
+        let handler = command_core::side_question::SideQuestionHandler::new(handle);
+        match runtime.block_on(command_api::model::BuiltinCommandHandler::handle(
+            &handler, &parsed,
+        )) {
+            command_api::model::CommandResult::Done {
+                display: Some(answer),
+            } => {
+                self.last_btw_exchange = Some((question.to_string(), answer));
+                let (question, answer) = self
+                    .last_btw_exchange
+                    .as_ref()
+                    .expect("exchange was stored above");
+                self.bottom_pane
+                    .show_view(Box::new(ScreenView::side_question(question, answer)));
+                ChatOutcome::Continue
+            }
+            command_api::model::CommandResult::Done { display: None } => ChatOutcome::Continue,
+            _ => self.show_system_text("/btw returned an unsupported result", true),
+        }
     }
 
     /// `/rename [name]`: persist a user-set title for the current session.
@@ -4596,6 +4663,7 @@ mod tests {
     use crate::bottom_pane::model_picker_view::ModelPickerView;
     use crate::bottom_pane::{BottomPaneView, ViewOutcome};
     use crate::history_cell::attachments::UserImageCell;
+    use crate::history_cell::HistoryCell;
     use crate::session::ModelRow;
     use crate::terminal::test_support::TestWriteBackend;
     use crate::terminal::Terminal;
@@ -5526,6 +5594,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn bare_btw_reopens_the_most_recent_exchange_without_a_new_query() {
+        let mut widget = widget();
+        widget.last_btw_exchange = Some((
+            "What changed?".to_string(),
+            "Only the isolated answer.".to_string(),
+        ));
+
+        assert!(matches!(widget.cmd_btw(""), ChatOutcome::Continue));
+        let body = widget
+            .bottom_pane()
+            .view_stack()
+            .active()
+            .and_then(|view| view.as_any().downcast_ref::<ScreenView>())
+            .expect("side-question screen")
+            .body_text();
+        assert!(body.contains("What changed?"), "{body}");
+        assert!(body.contains("Only the isolated answer."), "{body}");
+        assert_eq!(
+            widget.last_btw_exchange.as_ref().unwrap().0,
+            "What changed?",
+            "reopening must not replace or re-run the exchange"
+        );
+    }
+
     // ===== OrchestratorHandle-backed commands. Driven by the reusable
     // `orchestrator::test_support::MockOrchestratorHandle` (a dev-dependency):
     // its read methods return defaults, which is all `/context` etc. need. =====
@@ -6334,6 +6427,242 @@ mod tests {
         assert!(cells(&widget)
             .iter()
             .all(|c| c.as_any().downcast_ref::<ToolUseCell>().is_none()));
+    }
+
+    #[test]
+    fn fullscreen_bash_folds_and_silent_meta_remains_verbose_only() {
+        use crate::history_cell::tool::CollapsedReadSearchCell;
+
+        let mut widget = widget();
+        widget.set_collapse_fullscreen(true);
+        submit_command(&mut widget, "run");
+        widget.apply_turn_event(TurnEvent::TurnStarted);
+        widget.apply_turn_event(TurnEvent::ToolUseStart {
+            id: protocol::ToolUseId::from("meta"),
+            tool: "ToolSearch".to_string(),
+            input: serde_json::json!({"query": "github"}),
+        });
+        let active = widget
+            .transcript
+            .active_cell()
+            .expect("silent-only group must remain available to verbose mode");
+        assert!(
+            active
+                .display_lines(
+                    80,
+                    &Theme::dark(),
+                    crate::history_cell::RenderMode::default(),
+                )
+                .is_empty(),
+            "normal mode must not render an empty badge"
+        );
+        let verbose = active
+            .display_lines(
+                80,
+                &Theme::dark(),
+                crate::history_cell::RenderMode {
+                    verbose: true,
+                    ..Default::default()
+                },
+            )
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(verbose.contains("ToolSearch"), "{verbose}");
+
+        widget.apply_turn_event(TurnEvent::ToolUseStart {
+            id: protocol::ToolUseId::from("bash"),
+            tool: "Bash".to_string(),
+            input: serde_json::json!({"command": "echo hi"}),
+        });
+        widget.apply_turn_event(TurnEvent::ToolUseResult {
+            id: protocol::ToolUseId::from("bash"),
+            tool: "Bash".to_string(),
+            result: serde_json::json!("hi"),
+        });
+        widget.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
+
+        assert_eq!(widget.transcript.committed_cells().len(), 2);
+        assert!(cells(&widget)[1]
+            .as_any()
+            .downcast_ref::<CollapsedReadSearchCell>()
+            .is_some());
+        let summary = cells(&widget)[1]
+            .display_lines(
+                80,
+                &Theme::dark(),
+                crate::history_cell::RenderMode::default(),
+            )
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(summary.contains("Ran 1 bash command"), "{summary}");
+    }
+
+    #[test]
+    fn fullscreen_silent_meta_commits_and_replays_in_verbose() {
+        use crate::history_cell::tool::CollapsedReadSearchCell;
+
+        let mut widget = widget();
+        widget.set_collapse_fullscreen(true);
+        submit_command(&mut widget, "run");
+        widget.apply_turn_event(TurnEvent::TurnStarted);
+        widget.apply_turn_event(TurnEvent::ToolUseStart {
+            id: protocol::ToolUseId::from("meta"),
+            tool: "ToolSearch".to_string(),
+            input: serde_json::json!({"query": "github"}),
+        });
+        widget.apply_turn_event(TurnEvent::ToolUseResult {
+            id: protocol::ToolUseId::from("meta"),
+            tool: "ToolSearch".to_string(),
+            result: serde_json::json!("ok"),
+        });
+        widget.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
+
+        assert_eq!(widget.transcript.committed_cells().len(), 2);
+        let cell = cells(&widget)[1]
+            .as_any()
+            .downcast_ref::<CollapsedReadSearchCell>()
+            .expect("finalized silent group must stay in transcript for verbose replay");
+        assert!(cell
+            .display_lines(
+                80,
+                &Theme::dark(),
+                crate::history_cell::RenderMode::default()
+            )
+            .is_empty());
+        let verbose = cell
+            .display_lines(
+                80,
+                &Theme::dark(),
+                crate::history_cell::RenderMode {
+                    verbose: true,
+                    ..Default::default()
+                },
+            )
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(verbose.contains("ToolSearch"), "{verbose}");
+    }
+
+    #[test]
+    fn fullscreen_mutating_mcp_breaks_fold_but_search_mcp_still_folds() {
+        use crate::history_cell::tool::{CollapsedReadSearchCell, ToolUseCell};
+
+        let mut widget = widget();
+        widget.set_collapse_fullscreen(true);
+        submit_command(&mut widget, "run");
+        widget.apply_turn_event(TurnEvent::TurnStarted);
+        widget.apply_turn_event(TurnEvent::ToolUseStart {
+            id: protocol::ToolUseId::from("search"),
+            tool: "mcp__filesystem__read_file".to_string(),
+            input: serde_json::json!({"path": "README.md"}),
+        });
+        widget.apply_turn_event(TurnEvent::ToolUseResult {
+            id: protocol::ToolUseId::from("search"),
+            tool: "mcp__filesystem__read_file".to_string(),
+            result: serde_json::json!("ok"),
+        });
+        widget.apply_turn_event(TurnEvent::ToolUseStart {
+            id: protocol::ToolUseId::from("mutate"),
+            tool: "mcp__github__create_issue".to_string(),
+            input: serde_json::json!({"title": "bug"}),
+        });
+        widget.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
+
+        let committed = cells(&widget);
+        assert!(committed.iter().any(|cell| {
+            cell.as_any()
+                .downcast_ref::<CollapsedReadSearchCell>()
+                .is_some()
+        }));
+        assert!(committed.iter().any(|cell| {
+            cell.as_any()
+                .downcast_ref::<ToolUseCell>()
+                .is_some_and(|tool| {
+                    tool.display_lines(
+                        80,
+                        &Theme::dark(),
+                        crate::history_cell::RenderMode::default(),
+                    )
+                    .into_iter()
+                    .map(|line| line.to_string())
+                    .any(|line| line.contains("create_issue"))
+                })
+        }));
+    }
+
+    #[test]
+    fn switching_fullscreen_seals_the_existing_group_before_new_rules_apply() {
+        use crate::history_cell::tool::CollapsedReadSearchCell;
+
+        let mut widget = widget();
+        submit_command(&mut widget, "mixed");
+        widget.apply_turn_event(TurnEvent::TurnStarted);
+        widget.apply_turn_event(TurnEvent::ToolUseStart {
+            id: protocol::ToolUseId::from("read"),
+            tool: "Read".to_string(),
+            input: serde_json::json!({ "file_path": "/a" }),
+        });
+        widget.apply_turn_event(TurnEvent::ToolUseResult {
+            id: protocol::ToolUseId::from("read"),
+            tool: "Read".to_string(),
+            result: serde_json::json!("ok"),
+        });
+
+        widget.set_collapse_fullscreen(true);
+
+        widget.apply_turn_event(TurnEvent::ToolUseStart {
+            id: protocol::ToolUseId::from("bash"),
+            tool: "Bash".to_string(),
+            input: serde_json::json!({"command": "echo hi"}),
+        });
+        widget.apply_turn_event(TurnEvent::ToolUseResult {
+            id: protocol::ToolUseId::from("bash"),
+            tool: "Bash".to_string(),
+            result: serde_json::json!("hi"),
+        });
+        widget.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
+
+        assert_eq!(widget.transcript.committed_cells().len(), 3);
+        let first = cells(&widget)[1]
+            .as_any()
+            .downcast_ref::<CollapsedReadSearchCell>()
+            .expect("inline read fold committed before the mode switch");
+        let first_summary = first
+            .display_lines(
+                80,
+                &Theme::dark(),
+                crate::history_cell::RenderMode::default(),
+            )
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(first_summary.contains("Read 1 file"), "{first_summary}");
+
+        let second = cells(&widget)[2]
+            .as_any()
+            .downcast_ref::<CollapsedReadSearchCell>()
+            .expect("fullscreen bash fold committed after the mode switch");
+        let second_summary = second
+            .display_lines(
+                80,
+                &Theme::dark(),
+                crate::history_cell::RenderMode::default(),
+            )
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            second_summary.contains("Ran 1 bash command"),
+            "{second_summary}"
+        );
     }
 
     /// `!`-prefixed bash mode runs the command inline (no LLM turn): it echoes

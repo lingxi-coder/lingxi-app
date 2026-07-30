@@ -44,6 +44,7 @@ pub mod session;
 pub mod spinner;
 pub mod spinner_status;
 pub mod startup_bypass;
+pub mod startup_external_includes;
 pub mod startup_trust;
 pub mod status_line;
 pub(crate) mod style;

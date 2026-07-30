@@ -391,21 +391,54 @@ fun messageDtoText(blocks: List<MessageBlockDto>): String =
  * [ChatViewModel] reduces them into [ChatState].
  */
 sealed interface ReplyEvent {
-    /** The model is "thinking" — render the pulsing dots row. */
+    /** The model is thinking; starts the live run trace before text arrives. */
     data object Thinking : ReplyEvent
+
+    /** An incremental model-reasoning delta, rendered in the live run trace. */
+    data class ReasoningDelta(val text: String) : ReplyEvent
 
     /** An incremental assistant-text delta (the engine's streamed tokens). */
     data class Delta(val text: String) : ReplyEvent
 
-    /** Correlated tool activity worth surfacing in the status row. */
+    /** Correlated tool activity surfaced in both the status row and run trace. */
     data class ToolActivity(
         val label: String,
         val id: String? = null,
         val tool: String? = null,
+        val status: AgentToolStatus? = null,
+        val inputSummary: String? = null,
+        val elapsedMs: Long? = null,
     ) : ReplyEvent
 
     /** Correlated shell lifecycle update rendered as an expandable terminal card. */
     data class ShellTool(val update: ShellToolUpdate) : ReplyEvent
+
+    /** A non-terminal engine notice. */
+    data class Notice(val message: String, val isError: Boolean) : ReplyEvent
+
+    /** Incremental token accounting for the latest API call. */
+    data class Usage(val usage: AgentRunUsage) : ReplyEvent
+
+    /** A provider retry/backoff that keeps the turn alive. */
+    data class Retry(
+        val message: String,
+        val attempt: Int,
+        val maxRetries: Int,
+        val delayMs: Long,
+    ) : ReplyEvent
+
+    /** The engine's pre-formatted cumulative session cost. */
+    data class Cost(val formatted: String) : ReplyEvent
+
+    /** A completed context compaction. */
+    data class Compaction(
+        val messagesBefore: Int,
+        val messagesAfter: Int,
+        val bytesSaved: Long,
+    ) : ReplyEvent
+
+    /** Current coordinator/team worker activity. */
+    data class Coordinator(val activeWorkers: Int, val team: String?) : ReplyEvent
 
     /** A terminal error to surface (engine `Error`, or a build/submit failure). */
     data class Error(val message: String) : ReplyEvent
@@ -419,9 +452,9 @@ sealed interface ReplyEvent {
 
 /**
  * PURE mapping from one inbound engine [ClientEvent] to a [ReplyEvent], or
- * `null` to ignore (cost / listing / message-boundary events the conversation
- * surface doesn't render). Mirrors the iOS `EngineConversationSource.apply(_:)`
- * switch (clients/ios → ConversationSource.swift).
+ * `null` to ignore listing / configuration events that ride an out-of-band
+ * state path. Live thinking, tools, retries, usage and cost remain on this path
+ * so Android can render the same execution progress as the CLI/TUI.
  *
  * This is deliberately a free function with NO engine / Android dependencies so
  * it is exhaustively unit-testable on the JVM (where `buildAndroidEngine` is
@@ -432,7 +465,8 @@ sealed interface ReplyEvent {
 fun clientEventToReply(event: ClientEvent): ReplyEvent? = when (event) {
     is ClientEvent.TurnStarted -> ReplyEvent.Thinking
     is ClientEvent.TextDelta -> ReplyEvent.Delta(event.text)
-    is ClientEvent.ThinkingDelta -> ReplyEvent.Thinking
+    is ClientEvent.ThinkingDelta -> ReplyEvent.ReasoningDelta(event.thinking)
+    is ClientEvent.SystemNotice -> ReplyEvent.Notice(event.message, event.isError)
     is ClientEvent.ToolUseStarted ->
         if (isShellTool(event.tool)) {
             ReplyEvent.ShellTool(shellStarted(event.id, event.inputJson))
@@ -441,6 +475,8 @@ fun clientEventToReply(event: ClientEvent): ReplyEvent? = when (event) {
                 label = "调用工具 ${event.tool}…",
                 id = event.id,
                 tool = event.tool,
+                status = AgentToolStatus.Running,
+                inputSummary = summarizeToolInput(event.inputJson),
             )
         }
     is ClientEvent.ToolHeartbeat ->
@@ -453,6 +489,8 @@ fun clientEventToReply(event: ClientEvent): ReplyEvent? = when (event) {
                 label = "工具 ${event.tool} 运行中…",
                 id = event.id,
                 tool = event.tool,
+                status = AgentToolStatus.Running,
+                elapsedMs = event.elapsedMs.toLong(),
             )
         }
     is ClientEvent.ToolUseResult ->
@@ -463,14 +501,38 @@ fun clientEventToReply(event: ClientEvent): ReplyEvent? = when (event) {
                 label = "工具 ${event.tool} 失败",
                 id = event.id,
                 tool = event.tool,
+                status = AgentToolStatus.Failed,
             )
         } else {
             ReplyEvent.ToolActivity(
                 label = "工具 ${event.tool} 完成",
                 id = event.id,
                 tool = event.tool,
+                status = AgentToolStatus.Completed,
             )
         }
+    is ClientEvent.UsageUpdate -> ReplyEvent.Usage(
+        AgentRunUsage(
+            inputTokens = event.inputTokens.toLong(),
+            outputTokens = event.outputTokens.toLong(),
+            cacheReadTokens = event.cacheReadTokens.toLong(),
+            cacheCreationTokens = event.cacheCreationTokens.toLong(),
+        ),
+    )
+    is ClientEvent.ApiRetry -> ReplyEvent.Retry(
+        message = event.message,
+        attempt = event.attempt.toInt(),
+        maxRetries = event.maxRetries.toInt(),
+        delayMs = event.delayMs.toLong(),
+    )
+    is ClientEvent.CostUpdate -> ReplyEvent.Cost(event.formatted)
+    is ClientEvent.CompactionCompleted -> ReplyEvent.Compaction(
+        messagesBefore = event.messagesBefore.toInt(),
+        messagesAfter = event.messagesAfter.toInt(),
+        bytesSaved = event.bytesSaved.toLong(),
+    )
+    is ClientEvent.CoordinatorStatus ->
+        ReplyEvent.Coordinator(event.activeWorkers.toInt(), event.team)
     is ClientEvent.MessageComplete -> event.message
         ?.let { ReplyEvent.Completed(messageDtoToMessage(it)) }
         ?: ReplyEvent.End
@@ -478,7 +540,7 @@ fun clientEventToReply(event: ClientEvent): ReplyEvent? = when (event) {
     is ClientEvent.Error -> ReplyEvent.Error(
         userFacingEngineError(event.kind, event.message),
     )
-    else -> null // cost / usage / model / message-boundary / listings — ignored
+    else -> null // model / session / permission / listings ride out-of-band flows
 }
 
 /**
@@ -523,7 +585,7 @@ internal fun userFacingEngineError(kind: ErrorKindDto, message: String): String 
 /**
  * PURE flow transform: turn an inbound [ClientEvent] stream into the UI-facing
  * [ReplyEvent] stream the [ChatViewModel] reduces. Prepends a leading
- * [ReplyEvent.Thinking] (so the dots row shows the instant a turn is armed,
+ * [ReplyEvent.Thinking] (so the run trace shows the instant a turn is armed,
  * before the first engine event), maps each event through [clientEventToReply]
  * (dropping ignored ones), and COMPLETES after the first terminal reply
  * ([ReplyEvent.End] / [ReplyEvent.Error] / [ReplyEvent.Completed]) — emitting a trailing

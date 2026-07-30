@@ -51,6 +51,10 @@ pub struct ReqwestHttp {
     /// Snapshot of the TLS / CA settings so per-request DNS pinning can build a
     /// client with identical trust and mTLS material.
     tls: crate::tls_config::TlsSettings,
+    /// WebSocket rustls config assembled from the same root stores and client
+    /// identity as `tls`. Configuration errors are deferred until a WebSocket
+    /// is actually opened so ordinary HTTP remains available for diagnostics.
+    websocket_tls: Result<Arc<rustls::ClientConfig>, String>,
 }
 
 impl ReqwestHttp {
@@ -80,6 +84,7 @@ impl ReqwestHttp {
         // read once here and applied identically to BOTH clients so a corporate
         // mutual-TLS / custom-CA endpoint is reachable on every request path.
         let tls = crate::tls_config::TlsSettings::from_env();
+        let websocket_tls = tls.websocket_client_config();
         Self {
             client: tls
                 .apply_to_builder(reqwest::Client::builder())
@@ -93,6 +98,7 @@ impl ReqwestHttp {
                 .expect("reqwest no-redirect client init"),
             detailed_connection_errors,
             tls,
+            websocket_tls,
         }
     }
 
@@ -659,11 +665,19 @@ impl HttpTransport for ReqwestHttp {
         let connect_timeout = req.timeout.unwrap_or_else(|| {
             std::time::Duration::from_millis(DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS)
         });
-        let (stream, response) =
-            tokio::time::timeout(connect_timeout, tokio_tungstenite::connect_async(request))
-                .await
-                .map_err(|_| HttpError::Timeout(connect_timeout))?
-                .map_err(map_websocket_error)?;
+        let tls = self
+            .websocket_tls
+            .as_ref()
+            .map_err(|error| HttpError::InvalidRequest(error.clone()))?
+            .clone();
+        let connector = tokio_tungstenite::Connector::Rustls(tls);
+        let (stream, response) = tokio::time::timeout(
+            connect_timeout,
+            tokio_tungstenite::connect_async_tls_with_config(request, None, false, Some(connector)),
+        )
+        .await
+        .map_err(|_| HttpError::Timeout(connect_timeout))?
+        .map_err(map_websocket_error)?;
 
         let status = response.status().as_u16();
         let headers: Vec<(String, String)> = response

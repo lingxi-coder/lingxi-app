@@ -21,6 +21,11 @@ static NON_INTERACTIVE_SESSION: AtomicBool = AtomicBool::new(false);
 /// whose provider adapter has no settings handle.
 static SHOW_THINKING_SUMMARIES: AtomicBool = AtomicBool::new(false);
 
+/// Effective `agentPushNotifEnabled` setting. The feature flag remains a
+/// separate gate at each consumer; this cell carries only the merged user /
+/// project / local / managed setting value.
+static AGENT_PUSH_NOTIF_ENABLED: AtomicBool = AtomicBool::new(false);
+
 /// `$U()` (the "optimistic" tool-search gate) analog. SESSION-scoped in Claude
 /// Code: `$U()` reads the tool-search MODE (`ENABLE_TOOL_SEARCH` env /
 /// experimental-betas kill switch) and the active PROVIDER — never the current
@@ -70,6 +75,17 @@ pub fn set_show_thinking_summaries(show: bool) {
 #[must_use]
 pub fn show_thinking_summaries() -> bool {
     SHOW_THINKING_SUMMARIES.load(Ordering::Relaxed)
+}
+
+/// Publish the merged `agentPushNotifEnabled` setting.
+pub fn set_agent_push_notif_enabled(enabled: bool) {
+    AGENT_PUSH_NOTIF_ENABLED.store(enabled, Ordering::Relaxed);
+}
+
+/// Whether proactive agent push notifications are opted in by settings.
+#[must_use]
+pub fn agent_push_notif_enabled() -> bool {
+    AGENT_PUSH_NOTIF_ENABLED.load(Ordering::Relaxed)
 }
 
 /// Publish the session-scoped tool-search gate (Claude Code `$U()`) for the
@@ -150,5 +166,15 @@ mod tests {
         set_tool_search_enabled(false);
         assert!(!tool_search_enabled(), "false must be observable");
         set_tool_search_enabled(prior);
+    }
+
+    #[test]
+    fn agent_push_notification_setting_round_trips() {
+        let prior = agent_push_notif_enabled();
+        set_agent_push_notif_enabled(true);
+        assert!(agent_push_notif_enabled());
+        set_agent_push_notif_enabled(false);
+        assert!(!agent_push_notif_enabled());
+        set_agent_push_notif_enabled(prior);
     }
 }

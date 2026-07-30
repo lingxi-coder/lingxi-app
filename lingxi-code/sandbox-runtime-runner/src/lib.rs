@@ -44,6 +44,7 @@ use sandbox::runtime_config::{Platform, SandboxRuntimeConfig as EngineConfig};
 use sandbox::wrap::SandboxWrapError;
 use sandbox_runtime::linux::cleanup_bwrap_mount_points;
 use sandbox_runtime::manager::ManagerError;
+pub use sandbox_runtime::matcher::AskFn;
 use sandbox_runtime::SandboxManager;
 use tokio::sync::Mutex;
 
@@ -109,6 +110,7 @@ struct RunnerState {
 /// the first [`wrap`](SandboxRunner::wrap).
 pub struct SandboxRuntimeRunner {
     state: Mutex<RunnerState>,
+    ask_callback: Option<AskFn>,
 }
 
 impl Default for SandboxRuntimeRunner {
@@ -129,6 +131,22 @@ impl SandboxRuntimeRunner {
                 last_full_key: None,
                 mount_points: Vec::new(),
             }),
+            ask_callback: None,
+        }
+    }
+
+    /// Create an idle runner whose live proxies ask the host before allowing an
+    /// unmatched domain when `network.strictAllowlist` is disabled.
+    #[must_use]
+    pub fn with_ask_callback(ask_callback: AskFn) -> Self {
+        Self {
+            state: Mutex::new(RunnerState {
+                manager: None,
+                active_net: None,
+                last_full_key: None,
+                mount_points: Vec::new(),
+            }),
+            ask_callback: Some(ask_callback),
         }
     }
 }
@@ -156,7 +174,7 @@ impl tool_api::SandboxRunner for SandboxRuntimeRunner {
         if state.manager.is_none() {
             // ── Lazy first init ──
             let mut m = SandboxManager::new();
-            m.initialize(rt.clone(), None, false)
+            m.initialize(rt.clone(), self.ask_callback.clone(), false)
                 .await
                 .map_err(map_err)?;
             state.manager = Some(m);
@@ -166,7 +184,7 @@ impl tool_api::SandboxRunner for SandboxRuntimeRunner {
             // ── Structural change → reset + re-init ──
             let m = state.manager.as_mut().expect("manager checked Some");
             m.reset();
-            m.initialize(rt.clone(), None, false)
+            m.initialize(rt.clone(), self.ask_callback.clone(), false)
                 .await
                 .map_err(map_err)?;
             state.last_full_key = Some(key);
@@ -209,6 +227,8 @@ impl tool_api::SandboxRunner for SandboxRuntimeRunner {
 mod tests {
     use super::*;
     use sandbox::runtime_config::NetworkRestrictionConfig;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use tool_api::SandboxRunner as _;
 
     fn cfg_with_domains(domains: &[&str]) -> EngineConfig {
@@ -323,6 +343,68 @@ mod tests {
             s.manager.as_ref().unwrap().http_proxy_port().unwrap()
         };
         assert_eq!(port1, port2, "domain-only change must not rebind the proxy");
+        runner.reset().await;
+    }
+
+    /// The production runner must install the host callback on the live proxy.
+    /// Before this regression, `SandboxManager::initialize` always received
+    /// `None`, so non-strict and strict allowlists both denied unmatched hosts.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn unmatched_domain_reaches_host_ask_callback() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpStream;
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_in = Arc::clone(&calls);
+        let ask: AskFn = Arc::new(move |host, port| {
+            let calls = Arc::clone(&calls_in);
+            let host = host.to_owned();
+            Box::pin(async move {
+                assert_eq!(host, "unmatched.example");
+                assert_eq!(port, 443);
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(false)
+            })
+        });
+        let runner = SandboxRuntimeRunner::with_ask_callback(ask);
+        let cwd = PathBuf::from("/tmp");
+        runner
+            .wrap(
+                "echo ask",
+                &EngineConfig::default(),
+                Platform::Mac,
+                Some("bash"),
+                Some(&cwd),
+            )
+            .await
+            .expect("initialize proxy");
+
+        let proxy_port = {
+            let state = runner.state.lock().await;
+            state
+                .manager
+                .as_ref()
+                .and_then(SandboxManager::http_proxy_port)
+                .expect("live HTTP proxy")
+        };
+        let mut socket = TcpStream::connect(("127.0.0.1", proxy_port))
+            .await
+            .expect("connect to proxy");
+        socket
+            .write_all(
+                b"CONNECT unmatched.example:443 HTTP/1.1\r\n\
+                  Host: unmatched.example:443\r\n\r\n",
+            )
+            .await
+            .expect("write CONNECT");
+        let mut response = [0_u8; 128];
+        let read = socket.read(&mut response).await.expect("read response");
+        assert!(
+            String::from_utf8_lossy(&response[..read]).contains("403"),
+            "a rejected host prompt must remain denied"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
         runner.reset().await;
     }
 

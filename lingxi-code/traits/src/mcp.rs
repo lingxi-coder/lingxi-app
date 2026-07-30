@@ -234,6 +234,22 @@ pub struct McpPromptDto {
     pub name: String,
     /// Optional human-readable description.
     pub description: Option<String>,
+    /// Named arguments accepted by `prompts/get`, in server-declared order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub arguments: Vec<McpPromptArgumentDto>,
+}
+
+/// One named argument declared by an MCP prompt.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpPromptArgumentDto {
+    /// Wire argument name sent to `prompts/get`.
+    pub name: String,
+    /// Optional human-readable description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Whether the server requires this argument.
+    #[serde(default)]
+    pub required: bool,
 }
 
 /// Result of a tool invocation.

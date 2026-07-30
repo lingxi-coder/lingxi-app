@@ -63,8 +63,8 @@ import com.lingxi.code.theme.LingXiTheme
  * The conversation surface — the Android analog of the iOS `ChatView`.
  *
  * Composes the top bar (menu / title / theme-toggle / new-chat), a scrolling
- * message list (with the streaming "thinking" dots row and the new-chat empty
- * state), and the [Composer]. The conversation itself is owned by [state]; user
+ * message list (with the live execution trace and the new-chat empty state),
+ * and the [Composer]. The conversation itself is owned by [state]; user
  * intents are hoisted to the caller's [ChatViewModel] via the callbacks.
  *
  * @param onOpenDrawer opens the 对话/项目/定时 drawer (wired by the root shell).
@@ -87,6 +87,9 @@ fun ChatScreen(
     onMicClick: () -> Unit = {},
     onMicHoldStart: () -> Unit = {},
     onMicHoldRelease: () -> Unit = {},
+    onFlowModeClick: () -> Unit = {},
+    flowModeActive: Boolean = false,
+    flowModePanel: (@Composable () -> Unit)? = null,
     draft: String = "",
     onDraftChange: (String) -> Unit = {},
     onCameraClick: () -> Unit = {},
@@ -121,8 +124,14 @@ fun ChatScreen(
 
     // Auto-scroll to the latest turn / when streaming toggles (mirrors the iOS
     // ScrollViewReader.scrollTo("bottom")).
-    LaunchedEffect(state.messages.size, state.shellTools.size, state.streaming) {
-        val count = state.messages.size + state.shellTools.size + if (state.streaming) 1 else 0
+    LaunchedEffect(
+        state.messages.size,
+        state.shellTools.size,
+        state.agentRun?.revision,
+        state.streaming,
+    ) {
+        val liveRows = if (state.agentRun != null || state.streaming) 1 else 0
+        val count = state.messages.size + state.shellTools.size + liveRows
         if (count > 0) listState.animateScrollToItem(count - 1)
     }
 
@@ -173,6 +182,7 @@ fun ChatScreen(
                 state.error?.let { ErrorBanner(error = it, onDismiss = onDismissError) }
             }
             state.statusLine?.let { StatusRow(text = it) }
+            flowModePanel?.invoke()
             Composer(
                 text = draft,
                 onTextChange = onDraftChange,
@@ -190,6 +200,8 @@ fun ChatScreen(
                 onMicClick = onMicClick,
                 onMicHoldStart = onMicHoldStart,
                 onMicHoldRelease = onMicHoldRelease,
+                onFlowModeClick = onFlowModeClick,
+                flowModeActive = flowModeActive,
                 onCameraClick = onCameraClick,
                 attachment = attachment,
                 onRemoveAttachment = onRemoveAttachment,
@@ -341,7 +353,15 @@ private fun MessageList(
                 modifier = Modifier.padding(vertical = 4.dp),
             )
         }
-        if (state.streaming) {
+        state.agentRun?.let { run ->
+            item(key = "agent-run-${run.turnId}") {
+                AgentRunTimeline(
+                    state = run,
+                    modifier = Modifier.padding(vertical = 4.dp),
+                )
+            }
+        }
+        if (state.streaming && state.agentRun == null) {
             item(key = "streaming") { StreamingRow() }
         }
     }
@@ -373,7 +393,7 @@ private fun EmptyState() {
         Text("开启新对话", color = t.text, fontSize = 21.sp, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.size(7.dp))
         Text(
-            "随便说点什么，或按住屏幕进入语音心流模式。",
+            "随便说点什么，或轻点输入框旁的波形按钮开启心流模式。",
             color = t.text4,
             fontSize = 14.sp,
             lineHeight = (14f * 1.5f).sp,
@@ -629,7 +649,7 @@ private fun ErrorBanner(error: ChatError, onDismiss: () -> Unit) {
     }
 }
 
-/** The pulsing three-dot row shown while the assistant reply streams. */
+/** Minimal fallback shown only if a source streams without a run trace. */
 @Composable
 private fun StreamingRow() {
     val t = LingXiTheme.palette

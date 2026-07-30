@@ -157,6 +157,35 @@ impl ScreenView {
         )
     }
 
+    /// The `/btw` side-question exchange. Keeping the last exchange in a
+    /// read-only panel lets a bare `/btw` reopen it without re-running the
+    /// model or adding anything to the main conversation history.
+    #[must_use]
+    pub fn side_question(question: &str, answer: &str) -> Self {
+        let mut lines = vec![
+            Line::from(Span::styled(
+                "Question",
+                Style::default().add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+        ];
+        lines.extend(question.lines().map(|line| Line::from(line.to_string())));
+        lines.extend([
+            Line::from(""),
+            Line::from(Span::styled(
+                "Answer",
+                Style::default().add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+        ]);
+        lines.extend(answer.lines().map(|line| Line::from(line.to_string())));
+        Self::new(
+            "Side question",
+            lines,
+            "esc to close · ↑/↓ scroll · /btw to reopen",
+        )
+    }
+
     /// The `/doctor` diagnostics screen, built from a captured [`DoctorInfo`].
     #[must_use]
     pub fn doctor(d: &DoctorInfo) -> Self {
@@ -338,6 +367,15 @@ impl ScreenView {
                     fmt_tokens(row.tokens)
                 )),
             ]));
+        }
+        if let Some(warning) = usage.overflow_warning(
+            std::env::var_os("DISABLE_COMPACT").is_some_and(|value| !value.is_empty()),
+        ) {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                format!("⚠ {warning}"),
+                Style::default().fg(ratatui::style::Color::Yellow),
+            )));
         }
         Self::new("Context Usage", lines, "esc to close")
     }
@@ -961,6 +999,21 @@ mod tests {
         assert!(text.contains("System tools: 30k tokens (3%)"));
         assert!(text.contains("Autocompact buffer: 13k tokens (1%)"));
         assert!(text.contains("Free space: 887k tokens (89%)"));
+    }
+
+    #[test]
+    fn context_screen_warns_when_usage_exceeds_the_window() {
+        let view = ScreenView::context(
+            "claude-opus-5",
+            &traits::ContextUsageSnapshot {
+                live_context_tokens: 1_012_345,
+                max_context_tokens: 1_000_000,
+                ..Default::default()
+            },
+        );
+        assert!(view.body_text().contains(
+            "Context exceeds the 1m-token limit by 12.3k tokens \u{2014} run /compact or /clear to continue."
+        ));
     }
 
     /// With agent view disabled the two agents-view rows disappear entirely,

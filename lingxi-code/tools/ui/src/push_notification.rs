@@ -128,10 +128,10 @@ fn mobile_push_available() -> bool {
     false
 }
 
-/// `mc("agentPushNotifEnabled",false).value` — the per-config mobile-push opt-in.
-/// No setting backend in the port → the binary default `false`.
+/// `mc("agentPushNotifEnabled",false).value` — the merged per-session
+/// mobile-push opt-in.
 fn agent_push_notif_enabled() -> bool {
-    false
+    traits::session_flags::agent_push_notif_enabled()
 }
 
 /// `xur()` — is the user present (focus `H1e()` known, else last keystroke `N0()`
@@ -439,6 +439,7 @@ mod tests {
         std::env::remove_var("LINGXI_REMOTE");
         std::env::remove_var("CLAUDE_CODE_ENTRYPOINT");
         telemetry::test_clear_flag(PUSH_NOTIFICATION_FLAG);
+        traits::session_flags::set_agent_push_notif_enabled(false);
         g
     }
 

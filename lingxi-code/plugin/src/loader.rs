@@ -196,6 +196,8 @@ mod tests {
         PluginManifest {
             id: PluginId::new(),
             name: "weather".into(),
+            display_name: None,
+            default_enabled: true,
             version: "1.0.0".into(),
             description: String::new(),
             author: None,
@@ -216,6 +218,7 @@ mod tests {
             sensitive,
             required,
             default,
+            ..UserConfigField::default()
         }
     }
 

@@ -153,9 +153,9 @@ class EngineReplyStreamTest {
         assertTrue("no events after terminal", replies.none { it == ReplyEvent.Delta("late") })
     }
 
-    /** Ignored engine events (cost/usage) don't appear and don't break the stream. */
+    /** Live usage appears while out-of-band configuration events stay filtered. */
     @Test
-    fun ignoredEventsDoNotLeakOrStall() = runTest {
+    fun telemetryFlowsWithoutLeakingOutOfBandEvents() = runTest {
         val events = MutableSharedFlow<ClientEvent>(replay = 0, extraBufferCapacity = 8)
         val stream = mapReplyStream(
             events.onSubscription {
@@ -167,7 +167,12 @@ class EngineReplyStreamTest {
         )
 
         assertEquals(
-            listOf(ReplyEvent.Thinking, ReplyEvent.Delta("hi"), ReplyEvent.End),
+            listOf(
+                ReplyEvent.Thinking,
+                ReplyEvent.Usage(AgentRunUsage(1, 2, 0, 0)),
+                ReplyEvent.Delta("hi"),
+                ReplyEvent.End,
+            ),
             stream.toList(),
         )
     }

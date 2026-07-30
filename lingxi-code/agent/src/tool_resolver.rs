@@ -230,10 +230,11 @@ impl AgentToolResolver {
         let disallowed = Self::all_agent_disallowed_tools(Self::is_user_ant());
         tools.retain(|t| !disallowed.contains(&t.name()));
 
-        // (2b) Agent recursion depth-gate — claude 2.1.217
+        // (2b) Agent recursion depth-gate — introduced in Claude 2.1.217 and
+        // raised to a default maximum depth of 3 in 2.1.219.
         // `if(isAgentTool(a)) return depth < getMaxSubagentSpawnDepth()`.
-        // The default is 1 (top-level depth 0 may spawn; a depth-1 child may
-        // not), with `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` as the override.
+        // The default is 3 (depths 0-2 may spawn; a depth-3 child may not),
+        // with `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` as the override.
         // Applies to ALL subagents (ant + non-ant). The `use_exact_tools` fork
         // bypass (returned above) is exempt — fork recursion is governed by the
         // `is_in_fork_child` message guard in `AgentTool`.
@@ -778,7 +779,7 @@ mod tests {
         );
     }
 
-    // ── Agent recursion depth-gate (claude 2.1.217, default max depth 1) ──
+    // ── Agent recursion depth-gate (Claude 2.1.219, default max depth 3) ──
 
     #[test]
     fn agent_tool_kept_for_top_level_caller() {

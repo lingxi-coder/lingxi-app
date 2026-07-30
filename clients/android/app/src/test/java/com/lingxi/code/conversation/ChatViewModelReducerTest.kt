@@ -186,6 +186,19 @@ class ChatViewModelReducerTest {
         val s = vm.state.value
         assertTrue(s.streaming)
         assertTrue(s.messages.isEmpty())
+        assertTrue(s.agentRun!!.reasoningActive)
+    }
+
+    @Test
+    fun reasoningDelta_accumulatesInTransientRunTrace() {
+        val vm = newVm()
+        vm.reduce(ReplyEvent.ReasoningDelta("先检查"))
+        vm.reduce(ReplyEvent.ReasoningDelta("项目结构"))
+
+        val run = vm.state.value.agentRun!!
+        assertEquals("先检查项目结构", run.reasoning)
+        assertTrue(run.reasoningActive)
+        assertTrue(vm.state.value.messages.isEmpty())
     }
 
     // --- status line ------------------------------------------------------
@@ -195,6 +208,48 @@ class ChatViewModelReducerTest {
         val vm = newVm()
         vm.reduce(ReplyEvent.ToolActivity("调用工具 bash…"))
         assertEquals("调用工具 bash…", vm.state.value.statusLine)
+    }
+
+    @Test
+    fun correlatedToolActivity_updatesSingleTimelineRow() {
+        val vm = newVm()
+        vm.reduce(
+            ReplyEvent.ToolActivity(
+                label = "调用工具 Read…",
+                id = "tool-1",
+                tool = "Read",
+                status = AgentToolStatus.Running,
+                inputSummary = "/workspace/index.html",
+            ),
+        )
+        vm.reduce(
+            ReplyEvent.ToolActivity(
+                label = "工具 Read 完成",
+                id = "tool-1",
+                tool = "Read",
+                status = AgentToolStatus.Completed,
+                elapsedMs = 120,
+            ),
+        )
+
+        val tools = vm.state.value.agentRun!!.tools
+        assertEquals(1, tools.size)
+        assertEquals("/workspace/index.html", tools.single().summary)
+        assertEquals(AgentToolStatus.Completed, tools.single().status)
+        assertEquals(120L, tools.single().elapsedMs)
+    }
+
+    @Test
+    fun usageRetryAndCost_areVisibleInTimeline() {
+        val vm = newVm()
+        vm.reduce(ReplyEvent.Usage(AgentRunUsage(100, 20, 50, 0)))
+        vm.reduce(ReplyEvent.Retry("rate limited", 2, 5, 1_000))
+        vm.reduce(ReplyEvent.Cost("$0.0042"))
+
+        val run = vm.state.value.agentRun!!
+        assertEquals(100, run.usage!!.inputTokens)
+        assertEquals("$0.0042", run.formattedCost)
+        assertTrue(run.notices.single().text.contains("2/5"))
     }
 
     @Test
@@ -209,6 +264,16 @@ class ChatViewModelReducerTest {
         // Error surfaces in the PERSISTENT banner, not the dim status line.
         assertNull("statusLine cleared on error", s.statusLine)
         assertEquals("kaboom", s.error!!.message)
+        assertEquals(AgentRunOutcome.Failed, s.agentRun!!.outcome)
+    }
+
+    @Test
+    fun trailingEnd_afterError_doesNotRewriteFailureAsSuccess() {
+        val vm = newVm()
+        vm.reduce(ReplyEvent.Error("kaboom"))
+        vm.reduce(ReplyEvent.End)
+
+        assertEquals(AgentRunOutcome.Failed, vm.state.value.agentRun!!.outcome)
     }
 
     @Test
@@ -244,6 +309,7 @@ class ChatViewModelReducerTest {
         assertFalse(s.streaming)
         assertEquals(1, s.messages.size)
         assertEquals("done", s.messages[0].text)
+        assertEquals(AgentRunOutcome.Completed, s.agentRun!!.outcome)
     }
 
     @Test
@@ -296,6 +362,7 @@ class ChatViewModelReducerTest {
         assertTrue(vm.state.value.streaming)
         assertTrue(vm.state.value.isStreaming)
         assertEquals(listOf("hi"), src.submitted)
+        assertEquals(AgentRunOutcome.Running, vm.state.value.agentRun!!.outcome)
     }
 
     @Test
@@ -333,6 +400,7 @@ class ChatViewModelReducerTest {
         assertEquals(1, src.cancelCount)
         assertFalse("streaming reset immediately on cancel", vm.state.value.streaming)
         assertFalse(vm.state.value.isStreaming)
+        assertEquals(AgentRunOutcome.Cancelled, vm.state.value.agentRun!!.outcome)
     }
 
     @Test

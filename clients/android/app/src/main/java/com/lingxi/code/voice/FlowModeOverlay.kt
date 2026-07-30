@@ -46,6 +46,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.BlendMode
@@ -281,9 +282,8 @@ private fun LaunchedFrameLoop(onFrame: (now: Long, dt: Float) -> Unit) {
 // MARK: - FlowMode overlay
 
 /**
- * The full-screen FlowMode overlay. [visible] is hoisted (composer mic tap flips
- * it on; the close button flips it off). [assistantName] labels the speaking
- * phase + text input; [inputDialog] gates the pop-up text-input affordance.
+ * Inline FlowMode panel. The parent places it directly above the composer so
+ * entering Flow Mode never replaces the conversation screen.
  */
 @Composable
 fun FlowModeOverlay(
@@ -324,8 +324,6 @@ private fun FlowModeContent(
     var phase by remember { mutableStateOf(OrbPhase.Idle) }
     var userCaption by remember { mutableStateOf("") }
     var didSend by remember { mutableStateOf(false) }
-    var typing by remember { mutableStateOf(false) }
-    var draft by remember { mutableStateOf("") }
     var listenGeneration by remember { mutableLongStateOf(0L) }
     val name = assistantName.ifBlank { "灵犀" }
     // Speak the reply with the OFFLINE sherpa TTS when its pack is downloaded,
@@ -352,14 +350,6 @@ private fun FlowModeContent(
             }
         }
     }
-    fun submitTyped(text: String) {
-        val t = text.trim()
-        if (t.isEmpty()) return
-        listenGeneration++
-        cancelActiveOrbVoiceSession()
-        userCaption = t; didSend = true; phase = OrbPhase.Thinking; onSend(t)
-    }
-
     // Auto-listen on open; cancel the turn + stop TTS on close.
     LaunchedEffect(Unit) { listen() }
     DisposableEffect(Unit) {
@@ -407,7 +397,11 @@ private fun FlowModeContent(
 
     Box(
         modifier = Modifier
-            .fillMaxSize()
+            .fillMaxWidth()
+            .height(220.dp)
+            .padding(horizontal = 14.dp, vertical = 8.dp)
+            .clip(RoundedCornerShape(20.dp))
+            .border(0.5.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(20.dp))
             .background(
                 Brush.radialGradient(
                     colors = listOf(oklch(0.20f, 0.07f, 270f), Color(0xFF05050A)),
@@ -417,7 +411,7 @@ private fun FlowModeContent(
         // The orb — stop the active utterance, or interrupt/re-listen otherwise.
         OrbCanvas(
             phase = phase,
-            cyFrac = 0.40f,
+            cyFrac = 0.43f,
             modifier = Modifier
                 .fillMaxSize()
                 .clickable(
@@ -432,24 +426,25 @@ private fun FlowModeContent(
                 },
         )
 
-        // top bar
+        // Compact top bar; the normal composer remains available below.
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .windowInsetsPadding(WindowInsets.systemBars)
-                .padding(horizontal = 20.dp, vertical = 8.dp),
+                .padding(horizontal = 14.dp, vertical = 12.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            CircleGlassButton(LXIconName.Chevron, "退出心流") {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Canvas(Modifier.size(7.dp)) {
+                    drawCircle(oklch(0.72f, 0.18f, 150f))
+                }
+                Spacer(Modifier.width(8.dp))
+                Text("心流模式", color = Color.White.copy(alpha = 0.88f), fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold)
+            }
+            CircleGlassButton(LXIconName.X, "退出心流") {
                 listenGeneration++
                 cancelActiveOrbVoiceSession()
                 onClose()
-            }
-            if (inputDialog) {
-                CircleGlassButton(LXIconName.Message, "文字输入") { typing = true }
-            } else {
-                Spacer(Modifier.size(40.dp))
             }
         }
 
@@ -458,9 +453,8 @@ private fun FlowModeContent(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
-                .windowInsetsPadding(WindowInsets.systemBars)
-                .padding(horizontal = 28.dp)
-                .padding(bottom = 46.dp),
+                .padding(horizontal = 22.dp)
+                .padding(bottom = 14.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -473,36 +467,29 @@ private fun FlowModeContent(
                 Spacer(Modifier.width(8.dp))
                 Text(label, color = oklch(0.92f, 0.02f, 270f), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
             }
-            Spacer(Modifier.height(14.dp))
-            Box(modifier = Modifier.heightIn(min = 84.dp).widthIn(max = 320.dp), contentAlignment = Alignment.Center) {
+            Spacer(Modifier.height(6.dp))
+            Box(modifier = Modifier.heightIn(min = 22.dp).widthIn(max = 320.dp), contentAlignment = Alignment.Center) {
                 if (caption.isEmpty()) {
-                    Text(sub, color = oklch(0.60f, 0.03f, 270f), fontSize = 14.sp, textAlign = TextAlign.Center)
+                    Text(
+                        if (inputDialog) "$sub · 可继续使用下方输入框" else sub,
+                        color = oklch(0.60f, 0.03f, 270f),
+                        fontSize = 12.sp,
+                        textAlign = TextAlign.Center,
+                        maxLines = 1,
+                    )
                 } else {
                     val shown = if (isAi) caption else "“$caption”"
                     Text(
                         shown,
                         color = if (isAi) oklch(0.96f, 0.02f, 290f) else oklch(0.80f, 0.03f, 270f),
-                        fontSize = if (isAi) 18.sp else 17.sp,
+                        fontSize = if (isAi) 14.sp else 13.sp,
                         fontWeight = if (isAi) FontWeight.Medium else FontWeight.Normal,
-                        lineHeight = 26.sp,
+                        lineHeight = 18.sp,
                         textAlign = TextAlign.Center,
+                        maxLines = 2,
                     )
                 }
             }
-        }
-
-        // pop-up text input (心流中的文字输入)
-        if (typing) {
-            FlowTextInput(
-                name = name,
-                value = draft,
-                onValueChange = { draft = it },
-                onCancel = { typing = false; draft = "" },
-                onSend = {
-                    val txt = draft.trim()
-                    if (txt.isNotEmpty()) { typing = false; draft = ""; submitTyped(txt) }
-                },
-            )
         }
     }
 }
@@ -511,7 +498,7 @@ private fun FlowModeContent(
 private fun CircleGlassButton(icon: LXIconName, label: String, onClick: () -> Unit) {
     Box(
         modifier = Modifier
-            .size(40.dp)
+            .size(32.dp)
             .background(Color.White.copy(alpha = 0.06f), CircleShape)
             .border(0.5.dp, Color.White.copy(alpha = 0.12f), CircleShape)
             .clickable(onClick = onClick),

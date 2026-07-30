@@ -220,20 +220,32 @@ pub(crate) fn collapsed_read_search_lines(
     read_count: u64,
     list_count: u64,
     repl_count: u64,
+    mcp_call_count: u64,
+    mcp_server_names: &[String],
+    bash_count: u64,
+    memory_write_count: u64,
     is_active: bool,
     latest_hint: Option<&str>,
     entries: &[String],
     theme: &Theme,
     verbose: bool,
 ) -> Vec<StyledLine> {
-    let summary = tui_core::collapse::search_read_summary_text(
+    let summary = tui_core::collapse::search_read_summary_text_full(
         search_count,
         read_count,
         list_count,
         repl_count,
+        mcp_call_count,
+        mcp_server_names,
+        bash_count,
+        memory_write_count,
         is_active,
     );
-    let mut out = colored_lines(&summary, theme.dim);
+    let mut out = if summary.is_empty() {
+        Vec::new()
+    } else {
+        colored_lines(&summary, theme.dim)
+    };
     // The dim `⎿ <latest read>` hint renders ONLY while the group is active
     // (CollapsedReadSearchContent.tsx parity).
     if is_active {
@@ -378,6 +390,10 @@ pub struct CollapsedReadSearchCell {
     read_count: u64,
     list_count: u64,
     repl_count: u64,
+    mcp_call_count: u64,
+    mcp_server_names: Vec<String>,
+    bash_count: u64,
+    memory_write_count: u64,
     is_active: bool,
     latest_hint: Option<String>,
     entries: Vec<String>,
@@ -392,6 +408,10 @@ impl CollapsedReadSearchCell {
         read_count: u64,
         list_count: u64,
         repl_count: u64,
+        mcp_call_count: u64,
+        mcp_server_names: Vec<String>,
+        bash_count: u64,
+        memory_write_count: u64,
         is_active: bool,
         latest_hint: Option<String>,
         entries: Vec<String>,
@@ -401,6 +421,10 @@ impl CollapsedReadSearchCell {
             read_count,
             list_count,
             repl_count,
+            mcp_call_count,
+            mcp_server_names,
+            bash_count,
+            memory_write_count,
             is_active,
             latest_hint,
             entries,
@@ -415,6 +439,10 @@ impl StyledCell for CollapsedReadSearchCell {
             self.read_count,
             self.list_count,
             self.repl_count,
+            self.mcp_call_count,
+            &self.mcp_server_names,
+            self.bash_count,
+            self.memory_write_count,
             self.is_active,
             self.latest_hint.as_deref(),
             &self.entries,
@@ -673,6 +701,10 @@ mod tests {
             1,
             0,
             0,
+            0,
+            Vec::new(),
+            0,
+            0,
             false,
             None,
             vec!["Read a.rs".to_string(), "Grep foo".to_string()],
@@ -740,6 +772,10 @@ mod tests {
             1,
             0,
             0,
+            0,
+            Vec::new(),
+            0,
+            0,
             false,
             None,
             vec!["Read a.rs".to_string(), "Grep foo".to_string()],
@@ -750,5 +786,26 @@ mod tests {
         );
         let styled = cell.display_lines(80, &Theme::dark(), RenderMode::default());
         assert_eq!(styled[0].spans[0].style.fg, Some(rata(Theme::dark().dim)));
+    }
+
+    #[test]
+    fn fullscreen_categories_render_in_summary() {
+        let cell = CollapsedReadSearchCell::new(
+            0,
+            0,
+            0,
+            0,
+            2,
+            vec!["github".to_string()],
+            1,
+            1,
+            false,
+            None,
+            Vec::new(),
+        );
+        assert_eq!(
+            plain(&cell, false),
+            vec!["Queried github 2 times, ran 1 bash command, wrote 1 memory".to_string()]
+        );
     }
 }

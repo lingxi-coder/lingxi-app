@@ -1107,27 +1107,32 @@ fn strict_allowlist_override(
     managed_raw_tiers: &[String],
     user_settings_raw: Option<&str>,
 ) -> Option<bool> {
-    use sandbox::runtime_config::SettingsJson;
     // Managed/policy file tiers are deep-merged; resolve per-field last-defined
     // so a partial drop-in cannot clobber an earlier tier's value.
     let mut merged_managed: Option<bool> = None;
     for raw in managed_raw_tiers {
-        if let Ok(parsed) = serde_json::from_str::<SettingsJson>(raw) {
-            if let Some(n) = parsed.sandbox.and_then(|s| s.network) {
-                if n.strict_allowlist {
-                    merged_managed = Some(true);
-                }
-            }
+        if let Some(v) = strict_allowlist_setting(raw) {
+            merged_managed = Some(v);
         }
     }
     if let Some(v) = merged_managed {
         return Some(v);
     }
-    user_settings_raw
-        .and_then(|raw| serde_json::from_str::<SettingsJson>(raw).ok())
-        .and_then(|s| s.sandbox)
-        .and_then(|s| s.network)
-        .and_then(|n| n.strict_allowlist.then_some(true))
+    user_settings_raw.and_then(strict_allowlist_setting)
+}
+
+/// Read the source-level value without collapsing an explicit `false` into the
+/// serde default. `NetworkRestrictionConfig::strict_allowlist` is a runtime
+/// `bool`, so deserializing the whole settings object cannot distinguish
+/// `{"strictAllowlist": false}` from an omitted field. Source precedence needs
+/// that distinction: a managed `false` must override a lower-tier user `true`.
+fn strict_allowlist_setting(raw: &str) -> Option<bool> {
+    serde_json::from_str::<serde_json::Value>(raw)
+        .ok()?
+        .get("sandbox")?
+        .get("network")?
+        .get("strictAllowlist")?
+        .as_bool()
 }
 
 /// claude-code `getClaudeTempDir()` + `getClaudeTempDirName()` analog (Shell.ts:307),
@@ -2106,6 +2111,17 @@ pub struct DesktopConfig {
     /// case this field is execution-neutral but still drives
     /// `BuiltinToolContext.permission_mode` state.
     pub permission_mode: permission::PermissionMode,
+    /// Raw CLI `--permission-mode` selection, when the user explicitly passed
+    /// it. Preserved so `build()` can combine the final selected `--agent`
+    /// frontmatter permission mode with the oracle's precedence
+    /// (CLI/dangerous-skip > agent frontmatter > settings defaultMode).
+    pub permission_mode_cli: Option<String>,
+    /// Whether a CLI-surface permission override was explicitly requested via
+    /// `--permission-mode` or `--dangerously-skip-permissions`. This differs
+    /// from the resolved [`Self::permission_mode`]: an explicit
+    /// `--permission-mode default` must still suppress an agent frontmatter
+    /// override.
+    pub permission_mode_cli_explicit: bool,
     /// Make `BypassPermissions` mode available in the session permission
     /// mode cycle (claude-code `--allow-dangerously-skip-permissions`).
     /// When `true`, `Plan` mode bypasses permissions, and the runtime
@@ -2486,6 +2502,11 @@ impl std::fmt::Debug for DesktopConfig {
                 },
             )
             .field("permission_mode", &self.permission_mode)
+            .field("permission_mode_cli", &self.permission_mode_cli)
+            .field(
+                "permission_mode_cli_explicit",
+                &self.permission_mode_cli_explicit,
+            )
             .field(
                 "connect_prompt",
                 if self.connect_prompt.is_some() {
@@ -2577,6 +2598,8 @@ impl Default for DesktopConfig {
             session_started_as_coordinator: false,
             memory_provider: None,
             permission_mode: permission::PermissionMode::Default,
+            permission_mode_cli: None,
+            permission_mode_cli_explicit: false,
             allow_dangerously_skip_permissions: false,
             connect_prompt: None,
             system_prompt_override: None,
@@ -3254,6 +3277,37 @@ pub fn new_live_sandbox_runner() -> Arc<dyn tool_api::SandboxRunner> {
     Arc::new(sandbox_runtime_runner::SandboxRuntimeRunner::new())
 }
 
+fn sandbox_network_ask_callback(
+    permission_gate: Arc<dyn PermissionGate>,
+) -> sandbox_runtime_runner::AskFn {
+    Arc::new(move |host, port| {
+        let permission_gate = Arc::clone(&permission_gate);
+        let host = host.to_owned();
+        Box::pin(async move {
+            let input = serde_json::json!({
+                "host": host,
+                "port": port,
+            });
+            Ok(matches!(
+                permission_gate
+                    .check("Sandbox Network Callback", &input)
+                    .await,
+                traits::PermissionDecision::Allow
+            ))
+        })
+    })
+}
+
+fn new_live_sandbox_runner_with_permission_gate(
+    permission_gate: Arc<dyn PermissionGate>,
+) -> Arc<dyn tool_api::SandboxRunner> {
+    Arc::new(
+        sandbox_runtime_runner::SandboxRuntimeRunner::with_ask_callback(
+            sandbox_network_ask_callback(permission_gate),
+        ),
+    )
+}
+
 /// Errors surfaced while building a [`DesktopRuntime`].
 ///
 /// Lifted from `apps/cli`'s `InitError`. Construction is effectively infallible
@@ -3502,6 +3556,10 @@ fn anthropic_models_for(
         structured_output: true,
     };
     let mut ids: Vec<String> = vec![
+        // Opus 5 is the current first-party Opus model (Claude Code 2.1.219+).
+        // Keep it in the host's exact-id registry even when the configured
+        // default is Sonnet, otherwise `/model` advertises no route for it.
+        "claude-opus-5".to_string(),
         "claude-opus-4-8".to_string(),
         "claude-opus-4-6".to_string(),
         "claude-opus-4-5-20251101".to_string(),
@@ -3718,6 +3776,21 @@ fn load_merged_show_thinking_summaries(project_dir: &std::path::Path) -> bool {
     engine::settings::Settings::load(inputs)
         .ok()
         .and_then(|eff| eff.settings.show_thinking_summaries)
+        .unwrap_or(false)
+}
+
+/// Load the merged `settings.agentPushNotifEnabled` preference. The independent
+/// `tengu_kairos_push_notifications` feature flag is applied by consumers.
+fn load_merged_agent_push_notif_enabled(project_dir: &std::path::Path) -> bool {
+    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+    let inputs = engine::settings::LoadInputs {
+        env: &env,
+        project_dir,
+        defaults: engine::settings::schema::SettingsJson::default(),
+    };
+    engine::settings::Settings::load(inputs)
+        .ok()
+        .and_then(|effective| effective.settings.agent_push_notif_enabled)
         .unwrap_or(false)
 }
 
@@ -4108,7 +4181,7 @@ async fn discover_plugin_set(
 )> {
     let mut discovered = if ambient {
         let enabled = load_enabled_plugins(lingxi_home, cwd, additional_project_roots).await;
-        let mut d = plugin::discover_enabled_plugins(plugins_dir, &enabled).await;
+        let mut d = plugin::discover_effective_plugins(plugins_dir, &enabled).await;
         // Fallback: no allowlist match ⇒ flat-walk for direct plugin dirs.
         if d.is_empty() {
             d = plugin::discover_installed_plugins(plugins_dir).await;
@@ -4736,6 +4809,10 @@ pub struct LlmStack {
     pub default_model_profile: Option<String>,
     /// See [`build`] for the resolution rules behind `profile_first_party`.
     pub profile_first_party: std::collections::BTreeMap<String, bool>,
+    /// Claude auto-mode provider tag for each configured profile.
+    pub profile_auto_mode_provider: std::collections::BTreeMap<String, String>,
+    /// Provider tag applied to the built-in Anthropic profile after env routing.
+    pub first_party_environment_provider: String,
     /// See [`build`] for the resolution rules behind `provider_availability`.
     pub provider_availability: std::collections::BTreeMap<String, bool>,
     /// See [`build`] for the resolution rules behind `default_model_fallback`.
@@ -4747,6 +4824,8 @@ pub struct LlmStack {
     pub model_setting_for_spawns: String,
     /// See [`build`] for the resolution rules behind `session_provider_first_party`.
     pub session_provider_first_party: bool,
+    /// Resolved provider tag for the session's boot auto-mode gate.
+    pub session_auto_mode_provider: String,
     /// See [`build`] for the resolution rules behind `llm_client`.
     pub llm_client: Arc<DefaultLlmClient>,
     /// See [`build`] for the resolution rules behind `llm_transport`.
@@ -5213,20 +5292,28 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
     let (mut default_model_id, mut default_model_profile) =
         traits::parse_model_ref(&cfg.default_model, &default_listings);
 
-    // Per-profile firstParty-ness, captured while `assembled.client_config.
-    // providers` is still owned (`from_config` moves it below). The Explore
-    // firstParty gate itself is evaluated AFTER the connected-provider
-    // fallback so it reflects the model the session actually boots on.
-    let profile_first_party: std::collections::BTreeMap<String, bool> = assembled
+    // Per-profile Claude provider tag, captured while
+    // `assembled.client_config.providers` is still owned (`from_config` moves it
+    // below). The tag drives both Explore's first-party gate and auto mode's
+    // provider-sensitive model exclusions.
+    let profile_auto_mode_provider: std::collections::BTreeMap<String, String> = assembled
         .client_config
         .providers
         .iter()
         .map(|p| {
-            (
-                p.profile_name.clone(),
-                matches!(p.provider_id, llm_client::ProviderId::AnthropicFirstParty),
-            )
+            let provider = match &p.provider_id {
+                llm_client::ProviderId::AnthropicFirstParty => "firstParty",
+                llm_client::ProviderId::BedrockClaude => "anthropicAws",
+                llm_client::ProviderId::VertexClaude => "vertex",
+                llm_client::ProviderId::FoundryClaude => "foundry",
+                _ => "other",
+            };
+            (p.profile_name.clone(), provider.to_string())
         })
+        .collect();
+    let profile_first_party = profile_auto_mode_provider
+        .iter()
+        .map(|(profile, provider)| (profile.clone(), provider == "firstParty"))
         .collect();
 
     let mut client = DefaultLlmClient::from_config(assembled.client_config)
@@ -5433,7 +5520,7 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
     // `agent::model_resolution::resolve_builtin_explore_model`. Evaluated over
     // the POST-fallback default (the model the session actually boots on),
     // via the `profile_first_party` capture taken before `from_config`.
-    let session_provider_first_party = {
+    let session_profile_auto_mode_provider = {
         let profile_name = default_model_profile.clone().or_else(|| {
             model_providers
                 .get(&default_model_id)
@@ -5441,11 +5528,26 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
         });
         match profile_name {
             // Unknown profile name → the built-in Anthropic route.
-            Some(name) => profile_first_party.get(&name).copied().unwrap_or(true),
+            Some(name) => profile_auto_mode_provider
+                .get(&name)
+                .cloned()
+                .unwrap_or_else(|| "firstParty".to_string()),
             // No configured profile serves the default model → the built-in
             // Anthropic route (plain api-key / OAuth install).
-            None => true,
+            None => "firstParty".to_string(),
         }
+    };
+    let session_provider_first_party = session_profile_auto_mode_provider == "firstParty";
+    let first_party_environment_provider = match api_provider() {
+        ApiProvider::FirstParty => "firstParty",
+        ApiProvider::Bedrock => "anthropicAws",
+        ApiProvider::Vertex => "vertex",
+        ApiProvider::Foundry => "foundry",
+    };
+    let session_auto_mode_provider = if session_profile_auto_mode_provider == "firstParty" {
+        first_party_environment_provider.to_string()
+    } else {
+        session_profile_auto_mode_provider
     };
     if !cfg.custom_betas.is_empty() && (!has_api_key || !session_provider_first_party) {
         return Err(BuildError::InvalidCustomBetas);
@@ -5511,11 +5613,14 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
         default_model_id,
         default_model_profile,
         profile_first_party,
+        profile_auto_mode_provider,
+        first_party_environment_provider: first_party_environment_provider.to_string(),
         provider_availability,
         default_model_fallback,
         session_model_restriction,
         model_setting_for_spawns,
         session_provider_first_party,
+        session_auto_mode_provider,
         llm_client,
         llm_transport,
         cost_estimator,
@@ -5706,6 +5811,14 @@ pub async fn build(
         &cwd.to_string_lossy(),
         &main_session_uuid,
     );
+    // Resume the live file-history index before the first restored turn. The
+    // `/rewind` command can parse snapshots directly from disk, but the edit
+    // tools and turn-start snapshotter share this in-memory instance. Leaving
+    // it empty on resume caused the next edit to restart at version 1 and lose
+    // the previously tracked-file set.
+    if let Ok(content) = std::fs::read_to_string(&main_transcript_path) {
+        file_history.restore_from_records(session::file_history::parse_snapshot_records(&content));
+    }
     let main_subagents_dir = orchestrator::transcript_paths::subagents_dir(
         &cfg.lingxi_home,
         &cwd.to_string_lossy(),
@@ -5731,11 +5844,14 @@ pub async fn build(
         default_listings,
         default_model_id,
         default_model_profile,
+        profile_auto_mode_provider,
+        first_party_environment_provider,
         provider_availability,
         default_model_fallback,
         session_model_restriction,
         model_setting_for_spawns,
         session_provider_first_party,
+        session_auto_mode_provider,
         llm_client,
         llm_transport,
         cost_estimator,
@@ -5947,6 +6063,9 @@ pub async fn build(
     // / "default" / unknown ⇒ no section (prompt byte-identical to before).
     orch_cfg.output_style = load_merged_output_style(&cfg.cwd);
     traits::session_flags::set_show_thinking_summaries(load_merged_show_thinking_summaries(
+        &cfg.cwd,
+    ));
+    traits::session_flags::set_agent_push_notif_enabled(load_merged_agent_push_notif_enabled(
         &cfg.cwd,
     ));
     // OUTSTYLE.3: custom output-style search dirs — user (`~/.lingxi/output-styles`)
@@ -6373,6 +6492,13 @@ pub async fn build(
                         .cloned()
                 })
         });
+    // Main-thread agent frontmatter `permissionMode` participates in the boot
+    // mode precedence (`CLI / dangerous-skip > agent frontmatter > settings
+    // defaultMode`). Resolve it once from the SAME selected agent / resume
+    // snapshot that the main-loop application and frontmatter MCP merge use.
+    let selected_main_agent_permission_mode = main_agent_def_for_mcp
+        .as_ref()
+        .and_then(|def| agent::permission_mode::definition_mode_override(def.permission_mode));
     // (M7 cc2.1.220) `FWt(existing, agentDef, opts)` — fold the agent's
     // frontmatter `mcpServers` into the to-connect list so they register,
     // connect and surface tools EXACTLY like `--mcp-config` servers. Applied
@@ -6618,12 +6744,22 @@ pub async fn build(
         // permission-rule and sandbox derivations (parity 2.1.207 P1-10).
         let raw_tier_refs: Vec<&str> = raw_tiers.iter().map(String::as_str).collect();
         let sandbox_auto_allow = sandbox_auto_allow_from_settings_tiers(&raw_tier_refs, &cwd);
-        // CLI-resolved mode is the highest-priority source (TS orderedModes:
-        // the CLI flag / --permission-mode outranks the settings defaultMode).
-        // Apply it only when the CLI actually requested a non-default mode, so
-        // an unset CLI keeps the settings defaultMode computed above.
-        if cfg.permission_mode != permission::PermissionMode::Default {
+        // Main-thread agent frontmatter `permissionMode` sits below explicit
+        // CLI overrides but above settings `defaultMode`. An explicit CLI
+        // `default` still suppresses the agent mode, so we must key off the
+        // RAW request rather than the resolved `cfg.permission_mode` alone.
+        let env_scrub_active = traits::env::is_env_truthy(
+            std::env::var("LINGXI_SUBPROCESS_ENV_SCRUB").ok().as_deref(),
+        );
+        if cfg.permission_mode_cli_explicit {
             mode = cfg.permission_mode;
+        } else if !env_scrub_active {
+            if let Some(agent_mode) = selected_main_agent_permission_mode {
+                if !(agent_mode == permission::PermissionMode::BypassPermissions && bypass_disabled)
+                {
+                    mode = agent_mode;
+                }
+            }
         }
         // Auto-mode availability gate — claude-code `xms` mode-load downgrade
         // (`if(t==="auto"&&!P0())return"default"`). When the resolved mode is
@@ -6631,17 +6767,16 @@ pub async fn build(
         // killswitch, or the boot model does not support it), silently downgrade
         // to `default` so the session never boots INTO an unavailable auto mode.
         // The local denial circuit-breaker is fresh at boot; Statsig
-        // remote-disable is a documented omission; provider is resolved as
-        // `"firstParty"` (multi-provider mapping deferred — see
-        // `permission::auto_gate`).
+        // remote-disable is a documented omission. Model and provider are the
+        // post-fallback route the session actually boots on.
         if mode == permission::PermissionMode::Auto {
             let (gated, _reason) = permission::apply_auto_mode_gate(
                 mode,
                 &permission::AutoGateInputs {
                     disabled_by_settings: auto_mode_disabled,
                     circuit_broken: false,
-                    model: cfg.default_model.clone(),
-                    provider: "firstParty".to_string(),
+                    model: default_model_id.clone(),
+                    provider: session_auto_mode_provider.clone(),
                 },
             );
             mode = gated;
@@ -7738,7 +7873,7 @@ pub async fn build(
         // temp-file cleanup, not a leaked process. When a host teardown seam is
         // added (the future-batch note on `fire_session_end`), call
         // `sandbox_runner.reset().await` there for the tidy socket/CA cleanup.
-        sandbox_runner: new_live_sandbox_runner(),
+        sandbox_runner: new_live_sandbox_runner_with_permission_gate(perms.clone()),
         permission_mode: cfg.permission_mode,
         // (#3 shell-expansion) The base policy for embedded `!`cmd`` bodies in
         // prompt commands (`/commit` …). When enforcement is on this is the SAME
@@ -8686,8 +8821,30 @@ pub async fn build(
     // contended read returns `None` and the model check is skipped (fail-open).
     if let Some(cell) = live_model_provider_cell.as_ref() {
         let session = orch.session();
+        let model_providers = model_providers.clone();
+        let profile_auto_mode_provider = profile_auto_mode_provider.clone();
+        let first_party_environment_provider = first_party_environment_provider.to_string();
         let _ = cell.set(std::sync::Arc::new(move || {
-            session.try_lock().ok().map(|s| s.model.clone())
+            session.try_lock().ok().map(|state| {
+                let profile = state.model_profile.clone().or_else(|| {
+                    model_providers
+                        .get(&state.model)
+                        .map(|(profile, _)| profile.clone())
+                });
+                let profile_provider = profile
+                    .as_ref()
+                    .and_then(|profile| profile_auto_mode_provider.get(profile))
+                    .map_or("firstParty", String::as_str);
+                let provider = if profile_provider == "firstParty" {
+                    first_party_environment_provider.clone()
+                } else {
+                    profile_provider.to_string()
+                };
+                permission::LiveModelContext {
+                    model: state.model.clone(),
+                    provider,
+                }
+            })
         }));
     }
     // TPM-C (Task 5 step 2): seed the initial model_profile from a
@@ -9160,8 +9317,18 @@ pub async fn build(
     }
     let expansion_ctx_orch = orch.clone();
     let background_command_orch = orch.clone();
+    let mcp_prompt_registry = mcp_registry.clone();
     let dispatcher = RegistrySlashDispatcher::new(shared_command_registry.clone())
         .with_skill_usage_home(cfg.lingxi_home.clone())
+        .with_mcp_prompt_resolver(Arc::new(move |connection_id, prompt_name, arguments| {
+            let registry = mcp_prompt_registry.clone();
+            Box::pin(async move {
+                registry
+                    .get_prompt(connection_id, &prompt_name, arguments)
+                    .await
+                    .map_err(|error| error.to_string())
+            })
+        }))
         .with_background_prompt_launcher(Arc::new(move |prompt| {
             let orch = background_command_orch.clone();
             Box::pin(async move {
@@ -9404,10 +9571,53 @@ pub async fn build(
 mod tests {
     use super::{
         build, desktop_tool_registry, model_deprecation_warning, parse_worktree_slash_action,
-        resolve_workflow_size_guideline, CoordinatorWiring, DesktopConfig,
-        DesktopSessionComposition, WorktreeSlashAction, WORKTREE_SLASH_USAGE,
+        resolve_workflow_size_guideline, sandbox_network_ask_callback, CoordinatorWiring,
+        DesktopConfig, DesktopSessionComposition, WorktreeSlashAction, WORKTREE_SLASH_USAGE,
     };
+    use serde_json::Value;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    struct RecordingNetworkPermissionGate {
+        calls: AtomicUsize,
+        allow: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl traits::PermissionGate for RecordingNetworkPermissionGate {
+        async fn check(&self, name: &str, input: &Value) -> traits::PermissionDecision {
+            assert_eq!(name, "Sandbox Network Callback");
+            assert_eq!(input["host"], "api.example.test");
+            assert_eq!(input["port"], 8443);
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.allow {
+                traits::PermissionDecision::Allow
+            } else {
+                traits::PermissionDecision::Deny {
+                    reason: "blocked".into(),
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn sandbox_network_ask_routes_through_session_permission_gate() {
+        let allow_gate = Arc::new(RecordingNetworkPermissionGate {
+            calls: AtomicUsize::new(0),
+            allow: true,
+        });
+        let allow = sandbox_network_ask_callback(allow_gate.clone());
+        assert!(allow("api.example.test", 8443).await.unwrap());
+        assert_eq!(allow_gate.calls.load(Ordering::SeqCst), 1);
+
+        let deny_gate = Arc::new(RecordingNetworkPermissionGate {
+            calls: AtomicUsize::new(0),
+            allow: false,
+        });
+        let deny = sandbox_network_ask_callback(deny_gate.clone());
+        assert!(!deny("api.example.test", 8443).await.unwrap());
+        assert_eq!(deny_gate.calls.load(Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn workflow_size_uses_custom_home_flag_and_managed_precedence() {
@@ -10475,6 +10685,8 @@ mod tests {
             // Boot tests stay deterministic: empty memory, never the real FS.
             memory_provider: None,
             permission_mode: permission::PermissionMode::Default,
+            permission_mode_cli: None,
+            permission_mode_cli_explicit: false,
             allow_dangerously_skip_permissions: false,
             connect_prompt: None,
             system_prompt_override: None,
@@ -11416,6 +11628,10 @@ mod tests {
             "missing default opus: {ids:?}"
         );
         assert!(
+            ids.contains(&"claude-opus-5"),
+            "missing current Opus 5 route: {ids:?}"
+        );
+        assert!(
             ids.contains(&"claude-sonnet-4-6"),
             "missing default sonnet: {ids:?}"
         );
@@ -12017,6 +12233,70 @@ mod tests {
         );
     }
 
+    /// Main-thread `--agent` frontmatter `permissionMode` participates in the
+    /// boot permission-mode precedence: with no explicit CLI override, it
+    /// outranks the settings `defaultMode` and becomes the live session mode.
+    #[tokio::test]
+    async fn build_applies_selected_agent_frontmatter_permission_mode() {
+        let (_tmp, mut cfg) = test_config(true);
+        cfg.cli_agents_json = Some(
+            r#"{ "tester": {
+                "description": "a test agent",
+                "prompt": "you are the tester",
+                "permissionMode": "acceptEdits"
+            } }"#
+                .to_string(),
+        );
+        cfg.cli_agent = Some("tester".to_string());
+
+        let output: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+
+        let rt = build(cfg, output, perm_sink)
+            .await
+            .expect("build() must succeed with a --agent permission mode");
+
+        assert_eq!(
+            rt.orchestrator.permission_mode(),
+            Some("acceptEdits".to_string())
+        );
+    }
+
+    /// An explicit CLI permission-mode request, even `default`, suppresses the
+    /// selected agent's frontmatter override.
+    #[tokio::test]
+    async fn build_explicit_cli_default_beats_agent_frontmatter_permission_mode() {
+        let (_tmp, mut cfg) = test_config(true);
+        cfg.permission_mode = permission::PermissionMode::Default;
+        cfg.permission_mode_cli = Some("default".to_string());
+        cfg.permission_mode_cli_explicit = true;
+        cfg.cli_agents_json = Some(
+            r#"{ "tester": {
+                "description": "a test agent",
+                "prompt": "you are the tester",
+                "permissionMode": "plan"
+            } }"#
+                .to_string(),
+        );
+        cfg.cli_agent = Some("tester".to_string());
+
+        let output: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+
+        let rt = build(cfg, output, perm_sink)
+            .await
+            .expect("build() must succeed with an explicit CLI default");
+
+        assert_eq!(
+            rt.orchestrator.permission_mode(),
+            Some("default".to_string())
+        );
+    }
+
     /// (M7 cc2.1.220) `FWt` end-to-end: a `--agent` selection whose definition
     /// declares inline frontmatter `mcpServers` gets those servers MERGED into
     /// the boot config list BEFORE `connect_all`, so they REGISTER in the live
@@ -12155,6 +12435,43 @@ mod tests {
             !hooks.iter().any(|h| h.event == "SubagentStop"),
             "resume restoration is main-thread (is_agent=false): {hooks:?}"
         );
+    }
+
+    /// Resume restoration must also re-apply the persisted main-thread agent's
+    /// frontmatter `permissionMode` when no explicit CLI override is present.
+    #[tokio::test]
+    async fn build_resume_restores_agent_frontmatter_permission_mode() {
+        let (_tmp, mut cfg) = test_config(true);
+        let agents = r#"{ "tester": {
+                "description": "a test agent",
+                "prompt": "you are the tester",
+                "permissionMode": "plan"
+            } }"#;
+        cfg.cli_agents_json = Some(agents.to_string());
+        let session_id = "88888888-9999-aaaa-bbbb-cccccccccccc";
+        cfg.session_id_override = Some(session_id.to_string());
+
+        let mut resume_cfg = cfg.clone();
+        resume_cfg.cli_agent = None;
+        cfg.cli_agent = Some("tester".to_string());
+
+        let output1: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm1: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+        let _rt1 = build(cfg, output1, perm1)
+            .await
+            .expect("first boot with --agent must succeed");
+
+        let output2: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm2: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+        let rt2 = build(resume_cfg, output2, perm2)
+            .await
+            .expect("resume boot must succeed");
+
+        assert_eq!(rt2.orchestrator.permission_mode(), Some("plan".to_string()));
     }
 
     /// P1 resolved-agent snapshot: when the persisted agent is gone from the
@@ -13168,6 +13485,43 @@ mod tests {
         assert_eq!(
             apple_events_override(&["not json".to_string()], Some(&on)),
             Some(true)
+        );
+    }
+
+    /// `strictAllowlist` has the same source restriction as
+    /// `allowAppleEvents`, but its runtime schema stores a plain `bool`.
+    /// Preserve field presence while resolving sources so explicit `false`
+    /// remains authoritative instead of being mistaken for an absent field.
+    #[test]
+    fn strict_allowlist_override_preserves_explicit_false_and_precedence() {
+        use super::strict_allowlist_override;
+        let on = r#"{"sandbox":{"network":{"strictAllowlist":true}}}"#.to_string();
+        let off = r#"{"sandbox":{"network":{"strictAllowlist":false}}}"#.to_string();
+        let partial = r#"{"sandbox":{"network":{"allowedDomains":["example.com"]}}}"#.to_string();
+
+        assert_eq!(strict_allowlist_override(&[], None), None);
+        assert_eq!(strict_allowlist_override(&[], Some(&on)), Some(true));
+        assert_eq!(strict_allowlist_override(&[], Some(&off)), Some(false));
+
+        assert_eq!(
+            strict_allowlist_override(std::slice::from_ref(&off), Some(&on)),
+            Some(false),
+            "managed false must override a user true"
+        );
+        assert_eq!(
+            strict_allowlist_override(&[on.clone(), off.clone()], None),
+            Some(false),
+            "the last managed scalar must win"
+        );
+        assert_eq!(
+            strict_allowlist_override(&[on, partial.clone()], None),
+            Some(true),
+            "a partial managed drop-in must not erase an earlier value"
+        );
+        assert_eq!(
+            strict_allowlist_override(&[partial, "not json".to_string()], Some(&off)),
+            Some(false),
+            "absent or malformed managed tiers must fall back to the user tier"
         );
     }
 

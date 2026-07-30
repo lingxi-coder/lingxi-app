@@ -24,8 +24,9 @@
 //! window reporter — see `command_core::autocompact`), re-locking the total
 //! from 100 to **101**. Its stub-bucket siblings from the same triage
 //! (`powerup`, `scroll-speed` = interactive-only net-new; `install`,
-//! `sandbox-toggle` = interactive/host-bound already-in-surface stubs; `btw` =
-//! host-bound deferred) were kept as stubs / not added, so only the total moved.
+//! `sandbox-toggle` = interactive/host-bound already-in-surface stubs) were
+//! kept as stubs / not added, so only the total moved. `/btw` is now wired
+//! through batch 8 and the TUI retains its most recent side-question panel.
 //!
 //! The 2026-07-14 slash-parity pass (H-BIN-11 vs claude-code v2.1.207) added
 //! FIVE `local-jsx` builtin command objects that had been missed by the
@@ -229,7 +230,6 @@ pub const INTENTIONALLY_DISABLED_COMMANDS: &[(&str, &str)] = &[
         "compiled stub in claude-code (internal maintenance)",
     ),
     ("brief", "entitlement-gated in claude-code"),
-    ("btw", "entitlement-gated in claude-code"),
     ("bughunter", "compiled stub in claude-code"),
     ("ctx-viz", "compiled stub in claude-code (internal debug)"),
     (
@@ -269,14 +269,9 @@ pub const INTENTIONALLY_DISABLED_COMMANDS: &[(&str, &str)] = &[
 // STUB.6 — faithful-stub audit: refine the bucket-(d) table into TWO disjoint
 // partitions, verified against the claude-code TypeScript/compiled reference.
 //
-// The legacy `INTENTIONALLY_DISABLED_COMMANDS` table (above, kept verbatim for
-// git-history + existing-test continuity) conflated two *different* parity
-// situations under one "disabled" label. STUB.6 splits them so a future
-// contributor can tell, per command, whether the Rust stub is **faithful**
-// (claude-code itself ships nothing to run) or a **real (deferred) gap**
-// (claude-code ships a working command; the Rust port only lacks the host
-// infra to run it). The two are not interchangeable: only the first set is
-// "correct-by-design", and only the second is worth implementation effort.
+// The legacy `INTENTIONALLY_DISABLED_COMMANDS` table once conflated faithful
+// stubs with host-bound gaps. The last host-bound entry (`btw`) now has a live
+// handler and TUI panel, leaving only the correct-by-design partition.
 //
 // Evidence was taken directly from `claude-code/src/commands/<name>/`:
 //   - compiled `index.js` literally `{ isEnabled: () => false, isHidden: true,
@@ -300,8 +295,7 @@ pub const INTENTIONALLY_DISABLED_COMMANDS: &[(&str, &str)] = &[
 /// [`BUILTIN_CORE_NAMES`], and disjoint from [`HOST_BOUND_DEFERRED_GAPS`]
 /// (asserted by the STUB.6 partition tests in the test-harness).
 ///
-/// This is the refined subset of [`INTENTIONALLY_DISABLED_COMMANDS`], excluding
-/// the one host/UI-bound `btw` entry.
+/// This is now the complete [`INTENTIONALLY_DISABLED_COMMANDS`] set.
 pub const CORRECT_BY_DESIGN_STUBS: &[(&str, &str)] = &[
     // --- 18 compiled `{ isEnabled:()=>false, isHidden:true, name:'stub' }` ---
     (
@@ -401,12 +395,9 @@ pub const CORRECT_BY_DESIGN_STUBS: &[(&str, &str)] = &[
     ),
 ];
 
-/// Host/UI-bound behavior with no plain-text command body. `/reload-plugins`
-/// is implemented by the desktop host and therefore is not deferred here;
-/// `x402` is absent from the current oracle and has been removed entirely.
-pub const HOST_BOUND_DEFERRED_GAPS: &[(&str, &str)] = &[
-    ("btw", "claude-code ships a `local-jsx` side-question dialog (enabled, no gate) resolved via the askSideQuestion control-request; no plain-text command-api analog by design — implemented on the JSX/SDK dialog surface, not here (case 1)"),
-];
+/// Host/UI-bound command gaps. Empty after `/btw` gained both a handle-bound
+/// command implementation and a reopenable TUI panel.
+pub const HOST_BOUND_DEFERRED_GAPS: &[(&str, &str)] = &[];
 
 /// **Statically-hidden named commands** — real, enabled (or conditionally
 /// enabled) builtin command objects that claude-code ships with the literal
@@ -914,11 +905,11 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn intentionally_disabled_count_is_24() {
+    fn intentionally_disabled_count_is_23() {
         assert_eq!(
             INTENTIONALLY_DISABLED_COMMANDS.len(),
-            24,
-            "disabled command classification is locked at 24 commands"
+            23,
+            "disabled command classification is locked at 23 commands"
         );
     }
 
@@ -986,7 +977,6 @@ mod tests {
         assert!(table.contains_key("thinkback-play"));
         // entitlement-gated.
         assert!(table.contains_key("brief"));
-        assert!(table.contains_key("btw"));
         // compiled `name: 'stub'` files.
         for n in [
             "env",
@@ -1036,8 +1026,8 @@ mod tests {
     }
 
     #[test]
-    fn host_bound_deferred_count_is_1() {
-        assert_eq!(HOST_BOUND_DEFERRED_GAPS.len(), 1);
+    fn host_bound_deferred_set_is_empty() {
+        assert!(HOST_BOUND_DEFERRED_GAPS.is_empty());
     }
 
     #[test]
@@ -1119,15 +1109,16 @@ mod tests {
         assert_eq!(
             CORRECT_BY_DESIGN_STUBS.len() + HOST_BOUND_DEFERRED_GAPS.len(),
             INTENTIONALLY_DISABLED_COMMANDS.len(),
-            "23 + 1 == 24"
+            "all disabled commands are correct-by-design"
         );
         assert_eq!(BUILTIN_COMMAND_NAMES.len(), 106);
     }
 
     #[test]
-    fn host_bound_contains_only_btw() {
+    fn btw_is_not_classified_as_disabled_or_deferred() {
+        let disabled = name_set(INTENTIONALLY_DISABLED_COMMANDS);
         let gaps = name_set(HOST_BOUND_DEFERRED_GAPS);
-        let expected: std::collections::HashSet<&str> = ["btw"].into_iter().collect();
-        assert_eq!(gaps, expected);
+        assert!(!disabled.contains("btw"));
+        assert!(!gaps.contains("btw"));
     }
 }

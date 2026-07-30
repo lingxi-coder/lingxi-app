@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
@@ -82,6 +83,8 @@ fun Composer(
     onMicClick: () -> Unit = {},
     onMicHoldStart: () -> Unit = {},
     onMicHoldRelease: () -> Unit = {},
+    onFlowModeClick: () -> Unit = {},
+    flowModeActive: Boolean = false,
     onCameraClick: () -> Unit = {},
     attachment: ComposerAttachment? = null,
     onRemoveAttachment: () -> Unit = {},
@@ -220,24 +223,48 @@ fun Composer(
                     ) {
                         LXIcon(name = LXIconName.ArrowUp, size = 16.dp, color = Color.White, contentDescription = "发送")
                     }
-                    // Idle, empty: the mic (voice-hold) affordance.
-                    else -> Box(
-                        modifier = Modifier
-                            .size(34.dp)
-                            .voiceHold(
-                                onTap = { if (enabled) onMicClick() },
-                                onStart = { if (enabled) onMicHoldStart() },
-                                onRelease = { if (enabled) onMicHoldRelease() },
-                            )
-                            .semantics {
-                                onClick(label = "打开语音模式") {
-                                    if (enabled) onMicClick()
-                                    enabled
-                                }
-                            },
-                        contentAlignment = Alignment.Center,
+                    // Idle, empty: separate ordinary recording and Flow Mode.
+                    else -> Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        LXIcon(name = LXIconName.Mic, size = 18.dp, color = t.text2, stroke = 1.8f, contentDescription = "按住说话")
+                        Box(
+                            modifier = Modifier
+                                .size(34.dp)
+                                .voiceHold(
+                                    onTap = { if (enabled) onMicClick() },
+                                    onStart = { if (enabled) onMicHoldStart() },
+                                    onRelease = { if (enabled) onMicHoldRelease() },
+                                )
+                                .semantics {
+                                    contentDescription = "普通录音"
+                                    onClick(label = "开始普通录音") {
+                                        if (enabled) onMicClick()
+                                        enabled
+                                    }
+                                },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            LXIcon(name = LXIconName.Mic, size = 18.dp, color = t.text2, stroke = 1.8f)
+                        }
+                        Box(
+                            modifier = Modifier
+                                .size(40.dp)
+                                .clip(CircleShape)
+                                .background(if (flowModeActive) t.accent else t.text)
+                                .clickable(enabled = enabled, onClick = onFlowModeClick)
+                                .semantics {
+                                    contentDescription = if (flowModeActive) "关闭心流模式" else "开启心流模式"
+                                },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            LXIcon(
+                                name = LXIconName.AudioWave,
+                                size = 18.dp,
+                                color = if (flowModeActive) Color.White else t.windowBg,
+                                stroke = 1.65f,
+                            )
+                        }
                     }
                 }
             }

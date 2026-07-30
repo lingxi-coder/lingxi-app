@@ -68,14 +68,50 @@ const ACTIONS: &[&str] = &[
     "batch",
 ];
 
+const ANDROID_USE_PROMPT: &str = "\
+Operate Android apps and system UI through the supported native Accessibility \
+Computer Use channel. For any request to open, inspect, tap, type in, scroll, or \
+navigate an Android app, use this tool — NEVER use Shell commands such as \
+`monkey`, `am`, `cmd`, `pm`, `input`, `settings`, or `dumpsys`; the app-sandboxed \
+Shell is not adb/system shell and those commands will be denied.\n\n\
+Always call `status` before the first UI action. A session and its per-app grants \
+must already have been started by the user in LingXi Settings. `request_access` \
+only verifies those existing grants; it cannot turn on Accessibility or silently \
+start/expand a session. If status reports service disabled/session inactive, or \
+the target app is not granted, stop and ask the user to enable/start Computer Use \
+and authorize that app. Do not fall back to Shell or suppress the error.\n\n\
+Use `list_granted_apps` to obtain package names, then `open_app` with an authorized \
+package. Prefer accessibility node IDs over coordinates and re-observe with \
+`ui_tree`/`find` after UI changes. The same active session may `listen` through \
+the microphone or `speak` through Android TTS only when those capabilities are \
+enabled in Settings. Protected and high-risk surfaces remain enforced by the \
+Android host.";
+
 static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
     json!({
         "type": "object",
         "properties": {
-            "action": { "type": "string", "enum": ACTIONS },
-            "reason": { "type": "string", "maxLength": 500 },
-            "apps": { "type": "array", "items": { "type": "string" }, "maxItems": 20 },
-            "tier": { "type": "string", "enum": ["read", "click", "full"] },
+            "action": {
+                "type": "string",
+                "enum": ACTIONS,
+                "description": "Android native Computer Use action. Call status first; use open_app instead of Shell/monkey/am/cmd."
+            },
+            "reason": {
+                "type": "string",
+                "maxLength": 500,
+                "description": "Why access is needed. request_access validates grants already started by the user."
+            },
+            "apps": {
+                "type": "array",
+                "items": { "type": "string" },
+                "maxItems": 20,
+                "description": "Package names whose existing session grants should be verified."
+            },
+            "tier": {
+                "type": "string",
+                "enum": ["read", "click", "full"],
+                "description": "Minimum tier to verify. open_app and text/global navigation require full."
+            },
             "clipboard_read": { "type": "boolean" },
             "clipboard_write": { "type": "boolean" },
             "include_system_ui": { "type": "boolean" },
@@ -91,7 +127,10 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
             "duration_ms": { "type": "integer", "minimum": 1, "maximum": 5000 },
             "scale": { "type": "number", "minimum": 0.1, "maximum": 10.0 },
             "text": { "type": "string" },
-            "package_name": { "type": "string" },
+            "package_name": {
+                "type": "string",
+                "description": "Authorized Android package from list_granted_apps; required by open_app."
+            },
             "key": {
                 "type": "string",
                 "enum": ["back", "home", "recents", "notifications", "quick_settings",
@@ -307,7 +346,7 @@ impl Tool for AndroidUseTool {
     }
 
     async fn prompt(&self, _: &PromptOptions) -> String {
-        "Observe and operate an Android device through a user-started, per-app authorized session. The same session may listen through the microphone or speak through Android TTS only when those audio capabilities are enabled in Settings. Prefer accessibility node IDs over coordinates; re-observe after UI changes. Protected and high-risk surfaces are enforced by the Android host.".into()
+        ANDROID_USE_PROMPT.into()
     }
 
     async fn validate_input(
@@ -705,5 +744,21 @@ mod tests {
         assert!(parse_native_action(&json!({"action":"tap"})).is_err());
         assert!(parse_native_action(&json!({"action":"tap","node_id":"n"})).is_ok());
         assert!(parse_native_action(&json!({"action":"tap","x":1,"y":2})).is_ok());
+    }
+
+    #[test]
+    fn prompt_routes_android_host_actions_away_from_shell() {
+        for required in [
+            "Always call `status`",
+            "`open_app`",
+            "`monkey`",
+            "Do not fall back to Shell",
+            "list_granted_apps",
+        ] {
+            assert!(
+                ANDROID_USE_PROMPT.contains(required),
+                "missing Android routing guidance: {required}"
+            );
+        }
     }
 }

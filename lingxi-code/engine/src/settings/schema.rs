@@ -204,6 +204,11 @@ pub struct SettingsJson {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub show_thinking_summaries: Option<bool>,
 
+    /// Scalar field (later source wins). User opt-in for the feature-gated
+    /// proactive agent/mobile push notification surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_push_notif_enabled: Option<bool>,
+
     /// Scalar field (later source wins). When enabled, a literal `ultracode`
     /// token in a submitted prompt emits the Workflow authorization reminder.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -628,6 +633,13 @@ impl SettingsJson {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_push_notification_setting_parses() {
+        let parsed: SettingsJson =
+            serde_json::from_str(r#"{"agentPushNotifEnabled":true}"#).unwrap();
+        assert_eq!(parsed.agent_push_notif_enabled, Some(true));
+    }
 
     #[test]
     fn deserializes_minimal_settings() {

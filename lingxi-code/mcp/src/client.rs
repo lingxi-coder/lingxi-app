@@ -827,6 +827,15 @@ impl McpClient {
             .map(|p| McpPromptDto {
                 name: p.name,
                 description: p.description.map(|d| truncate_description(&d).into_owned()),
+                arguments: p
+                    .arguments
+                    .into_iter()
+                    .map(|argument| traits::McpPromptArgumentDto {
+                        name: argument.name,
+                        description: argument.description,
+                        required: argument.required,
+                    })
+                    .collect(),
             })
             .collect())
     }
@@ -981,6 +990,18 @@ struct RawPrompt {
     name: String,
     #[serde(default)]
     description: Option<String>,
+    #[serde(default)]
+    arguments: Vec<RawPromptArgument>,
+}
+
+/// Wire-level shape for one prompt argument.
+#[derive(Debug, Deserialize)]
+struct RawPromptArgument {
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    required: bool,
 }
 
 /// Wire-level shape of a `resources/list` response body.

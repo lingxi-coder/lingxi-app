@@ -40,7 +40,8 @@
 //! (`discover_enabled_plugins` probes the single-version case instead).
 
 use crate::manifest::{
-    ComponentPath, PluginComponents, PluginManifest, UserConfigField, UserConfigSchema,
+    ComponentPath, PluginChannel, PluginComponents, PluginManifest, UserConfigField,
+    UserConfigSchema,
 };
 use crate::source::PluginSource;
 use crate::trust::default_trust_for_source;
@@ -63,14 +64,22 @@ use std::path::{Path, PathBuf};
 /// - Metadata: `keywords`, `license`, `repository`.
 ///
 /// `name` is required; all other fields are optional. Unknown top-level
-/// fields are silently ignored by serde. When `commands`/`skills`/etc. are
-/// present they take precedence over auto-detection via `detect_components()`
-/// — but this override logic is not yet implemented in LingXi; the fields
-/// are parsed and stored for future use. Binary: `PluginManifestSchema`
-/// in `schemas.ts`.
+/// fields are silently ignored by serde. Component path fields follow Claude
+/// Code's field-specific merge rules in [`detect_components`]: commands,
+/// agents, and output styles replace their default directories; skills extend
+/// the default; hooks, MCP, and LSP declarations merge with their conventional
+/// files. Binary: `PluginManifestSchema` in `schemas.ts`.
 #[derive(Debug, Deserialize)]
 struct RawManifest {
     name: String,
+    /// UI-only label; identity and component namespaces continue to use
+    /// `name`.
+    #[serde(rename = "displayName", default)]
+    display_name: Option<String>,
+    /// Activation fallback when no settings scope has made an explicit
+    /// decision. Claude Code defaults this field to true.
+    #[serde(rename = "defaultEnabled", default = "default_plugin_enabled")]
+    default_enabled: bool,
     #[serde(default)]
     version: Option<String>,
     #[serde(default)]
@@ -79,8 +88,8 @@ struct RawManifest {
     author: Option<RawAuthor>,
     #[serde(default)]
     homepage: Option<String>,
-    /// Explicitly declared skill directories. Parsed but not yet wired to
-    /// override `detect_components()`. Binary: `skills` in `PluginManifestSchema`.
+    /// Explicitly declared skill directories. These extend the default
+    /// `skills/` directory. Binary: `skills` in `PluginManifestSchema`.
     #[serde(default)]
     skills: Option<PathDecl>,
     /// Explicitly declared command directories. Binary: `commands`.
@@ -113,7 +122,7 @@ struct RawManifest {
     settings: Option<HashMap<String, serde_json::Value>>,
     /// Channel declarations. Binary: `channels`.
     #[serde(default)]
-    channels: Option<Vec<serde_json::Value>>,
+    channels: Option<Vec<RawPluginChannel>>,
     /// Dependency declarations. Binary: `dependencies`.
     #[serde(default)]
     dependencies: Option<serde_json::Value>,
@@ -126,6 +135,10 @@ struct RawManifest {
     /// Repository URL or object. Binary: `repository`.
     #[serde(default)]
     repository: Option<serde_json::Value>,
+}
+
+fn default_plugin_enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -155,6 +168,16 @@ enum RawAuthor {
         #[serde(default)]
         name: Option<String>,
     },
+}
+
+/// Public `plugin.json` channel shape. `userConfig` is a direct field map,
+/// just like top-level `userConfig`; [`UserConfigSchema`] is the engine's
+/// internal wrapper.
+#[derive(Debug, Clone, Deserialize)]
+struct RawPluginChannel {
+    server: String,
+    #[serde(rename = "userConfig", default)]
+    user_config: Option<HashMap<String, UserConfigField>>,
 }
 
 impl RawAuthor {
@@ -305,9 +328,9 @@ async fn resolve_installed_version_dir(plugin_dir: &Path) -> Option<PathBuf> {
 /// path matches the write path. A record whose cache dir is missing / has no
 /// manifest is skipped (resilient to a hand-deleted cache). Returned tuples are
 /// `(freshly-minted id, manifest, install dir)`, sorted by plugin name.
-pub async fn discover_recorded_plugins(
+async fn discover_recorded_plugins_identified(
     plugins_dir: &Path,
-) -> Vec<(PluginId, PluginManifest, PathBuf)> {
+) -> Vec<(String, PluginId, PluginManifest, PathBuf)> {
     let mut out = Vec::new();
 
     // v2 schema (claude-code 2.1.201): `plugins["<plugin>@<market>"] = [ {scope,
@@ -336,7 +359,7 @@ pub async fn discover_recorded_plugins(
                                 continue; // same cache dir across scopes — load once
                             }
                             if let Some((id, manifest)) = load_plugin_from_path(&dir).await {
-                                out.push((id, manifest, dir.clone()));
+                                out.push((key.clone(), id, manifest, dir.clone()));
                                 seen = Some(dir);
                             }
                         }
@@ -354,12 +377,56 @@ pub async fn discover_recorded_plugins(
                             .join(sanitize_segment(name, false))
                             .join(sanitize_segment(version, true));
                         if let Some((id, manifest)) = load_plugin_from_path(&dir).await {
-                            out.push((id, manifest, dir));
+                            out.push((format!("{name}@{key}"), id, manifest, dir));
                         }
                     }
                 }
                 _ => {}
             }
+        }
+    }
+
+    out.sort_by(|a, b| a.2.name.cmp(&b.2.name));
+    out
+}
+
+/// Re-discover every plugin recorded in `installed_plugins.json`.
+///
+/// Listing and management callers intentionally receive every installed
+/// plugin regardless of its activation state. Runtime startup should use
+/// [`discover_effective_plugins`] instead.
+pub async fn discover_recorded_plugins(
+    plugins_dir: &Path,
+) -> Vec<(PluginId, PluginManifest, PathBuf)> {
+    discover_recorded_plugins_identified(plugins_dir)
+        .await
+        .into_iter()
+        .map(|(_, id, manifest, path)| (id, manifest, path))
+        .collect()
+}
+
+/// Resolve the effective runtime plugin set.
+///
+/// Explicit `enabledPlugins` entries win. Installed plugins with no explicit
+/// setting fall back to their manifest's `defaultEnabled` value (defaulting to
+/// true), while explicitly disabled plugins remain unloaded. The explicit
+/// cache probe is retained for old/cache-only installations that have no
+/// `installed_plugins.json` record.
+pub async fn discover_effective_plugins(
+    plugins_dir: &Path,
+    enabled: &BTreeMap<String, bool>,
+) -> Vec<(PluginId, PluginManifest, PathBuf)> {
+    let mut out = discover_enabled_plugins(plugins_dir, enabled).await;
+    let mut seen_paths: BTreeSet<PathBuf> = out.iter().map(|(_, _, path)| path.clone()).collect();
+
+    for (identifier, id, manifest, path) in discover_recorded_plugins_identified(plugins_dir).await
+    {
+        let active = enabled
+            .get(&identifier)
+            .copied()
+            .unwrap_or(manifest.default_enabled);
+        if active && seen_paths.insert(path.clone()) {
+            out.push((id, manifest, path));
         }
     }
 
@@ -582,10 +649,17 @@ pub(crate) async fn load_plugin_from_path(plugin_dir: &Path) -> Option<(PluginId
 
     let components = detect_components(plugin_dir, &parsed).await;
     let settings = load_plugin_settings(plugin_dir, parsed.settings.as_ref()).await;
+    let channels = validate_plugin_channels(
+        parsed.channels.as_deref().unwrap_or_default(),
+        &components.mcp_servers,
+        &manifest_path,
+    );
 
     let manifest = PluginManifest {
         id,
         name: parsed.name,
+        display_name: parsed.display_name,
+        default_enabled: parsed.default_enabled,
         version: parsed.version.unwrap_or_default(),
         description: parsed.description.unwrap_or_default(),
         author: parsed.author.and_then(RawAuthor::into_display),
@@ -595,10 +669,50 @@ pub(crate) async fn load_plugin_from_path(plugin_dir: &Path) -> Option<(PluginId
         trust_level,
         depends_on: Vec::new(),
         user_config: parsed.user_config.map(|fields| UserConfigSchema { fields }),
-        channels: Vec::new(),
+        channels,
         settings,
     };
     Some((id, manifest))
+}
+
+/// Retain only channel declarations that can bind to a server contributed by
+/// this plugin. A malformed reference must not silently become a connection to
+/// a same-named user/project MCP server.
+fn validate_plugin_channels(
+    declared: &[RawPluginChannel],
+    mcp_servers: &HashMap<String, mcp::McpServerConfig>,
+    manifest_path: &Path,
+) -> Vec<PluginChannel> {
+    let mut seen = BTreeSet::new();
+    let mut channels = Vec::with_capacity(declared.len());
+
+    for channel in declared {
+        if channel.server.is_empty() || !mcp_servers.contains_key(&channel.server) {
+            tracing::warn!(
+                path = %manifest_path.display(),
+                server = %channel.server,
+                "skipping plugin channel whose server is not declared by this plugin"
+            );
+            continue;
+        }
+        if !seen.insert(channel.server.clone()) {
+            tracing::warn!(
+                path = %manifest_path.display(),
+                server = %channel.server,
+                "skipping duplicate plugin channel declaration"
+            );
+            continue;
+        }
+        channels.push(PluginChannel {
+            server: channel.server.clone(),
+            user_config: channel
+                .user_config
+                .clone()
+                .map(|fields| UserConfigSchema { fields }),
+        });
+    }
+
+    channels
 }
 
 /// Auto-detect the component directories of a plugin (Step 3 of
@@ -611,7 +725,21 @@ pub(crate) async fn load_plugin_from_path(plugin_dir: &Path) -> Option<(PluginId
 async fn detect_components(plugin_dir: &Path, parsed: &RawManifest) -> PluginComponents {
     let default_commands = glob_md(&plugin_dir.join("commands")).await;
     let default_agents = glob_md(&plugin_dir.join("agents")).await;
-    let default_skills = glob_skill_dirs(&plugin_dir.join("skills")).await;
+    let default_skills_dir = plugin_dir.join("skills");
+    let mut default_skills = glob_skill_dirs(&default_skills_dir).await;
+    if parsed.skills.is_none()
+        && !tokio::fs::try_exists(&default_skills_dir)
+            .await
+            .unwrap_or(false)
+    {
+        let root_skill = plugin_dir.join("SKILL.md");
+        if tokio::fs::try_exists(&root_skill).await.unwrap_or(false) {
+            default_skills.push(ComponentPath {
+                path: root_skill,
+                metadata: component_root_metadata(plugin_dir),
+            });
+        }
+    }
     let default_output_styles = glob_md(&plugin_dir.join("output-styles")).await;
     let default_hooks = load_standard_hooks(plugin_dir).await;
     let default_mcp_servers = load_mcp_servers(plugin_dir).await;
@@ -732,9 +860,18 @@ async fn resolve_skill_declared_paths(plugin_dir: &Path, paths: PathDecl) -> Vec
             continue;
         };
         if meta.is_dir() {
-            let mut found = glob_skill_dirs(&abs).await;
-            stamp_component_root(&mut found, &abs);
-            out.extend(found);
+            let direct_skill = abs.join("SKILL.md");
+            if tokio::fs::try_exists(&direct_skill).await.unwrap_or(false) {
+                let root = abs.parent().unwrap_or(plugin_dir);
+                out.push(ComponentPath {
+                    path: direct_skill,
+                    metadata: component_root_metadata(root),
+                });
+            } else {
+                let mut found = glob_skill_dirs(&abs).await;
+                stamp_component_root(&mut found, &abs);
+                out.extend(found);
+            }
         } else if abs.file_name().and_then(|s| s.to_str()) == Some("SKILL.md") {
             let root = abs
                 .parent()
@@ -791,8 +928,8 @@ async fn glob_skill_dirs(skills_dir: &Path) -> Vec<ComponentPath> {
 /// plugin `.mcp.json` files in either form resolve here. A missing / malformed
 /// file yields an empty map (non-fatal — claude-code logs and continues), and
 /// an individual invalid entry is skipped while valid siblings are kept.
-/// Manifest-declared `mcpServers` is NOT read here (residual: `RawManifest`
-/// doesn't carry it).
+/// Manifest-declared `mcpServers` is merged separately by
+/// [`load_declared_mcp_servers`].
 async fn load_mcp_servers(plugin_dir: &Path) -> HashMap<String, mcp::McpServerConfig> {
     let path = plugin_dir.join(".mcp.json");
     let Ok(raw) = tokio::fs::read_to_string(&path).await else {
@@ -815,7 +952,8 @@ async fn load_mcp_servers(plugin_dir: &Path) -> HashMap<String, mcp::McpServerCo
 /// `Record<name, LspServerConfig>`. The record key is the server name; if an
 /// entry omits its own `name`, the key is stamped onto the config (the
 /// registry keys by `config.name`). A missing / malformed file yields an empty
-/// map. Manifest-declared `lspServers` is NOT read here (residual).
+/// map. Manifest-declared `lspServers` is merged separately by
+/// [`load_declared_lsp_servers`].
 async fn load_lsp_servers(plugin_dir: &Path) -> HashMap<String, traits::LspServerConfig> {
     let path = plugin_dir.join(".lsp.json");
     let Ok(raw) = tokio::fs::read_to_string(&path).await else {
@@ -1137,6 +1275,133 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn root_skill_is_discovered_for_single_skill_plugin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        fs::write(
+            plugin
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            r#"{"name":"single-skill"}"#,
+        )
+        .unwrap();
+        fs::write(plugin.join("SKILL.md"), "root skill").unwrap();
+
+        let (_id, manifest) = load_plugin_from_path(plugin).await.unwrap();
+        assert_eq!(manifest.components.skills.len(), 1);
+        assert_eq!(manifest.components.skills[0].path, plugin.join("SKILL.md"));
+    }
+
+    #[tokio::test]
+    async fn manifest_preserves_display_name_and_default_enabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        fs::write(
+            plugin
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            r#"{"name":"deployment-tools","displayName":"Deployment Tools","defaultEnabled":false}"#,
+        )
+        .unwrap();
+
+        let (_, manifest) = load_plugin_from_path(plugin).await.unwrap();
+        assert_eq!(manifest.display_name.as_deref(), Some("Deployment Tools"));
+        assert!(!manifest.default_enabled);
+    }
+
+    #[tokio::test]
+    async fn effective_discovery_applies_explicit_state_before_manifest_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins_dir = tmp.path();
+        let enabled_path = plugins_dir.join("cache/mkt/enabled/1.0.0");
+        let disabled_path = plugins_dir.join("cache/mkt/disabled/1.0.0");
+        for path in [&enabled_path, &disabled_path] {
+            fs::create_dir_all(path.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        }
+        fs::write(
+            enabled_path
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            r#"{"name":"enabled"}"#,
+        )
+        .unwrap();
+        fs::write(
+            disabled_path
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            r#"{"name":"disabled","defaultEnabled":false}"#,
+        )
+        .unwrap();
+        fs::write(
+            crate::installed::path(plugins_dir),
+            serde_json::to_vec(&serde_json::json!({
+                "version": 2,
+                "plugins": {
+                    "enabled@mkt": [{
+                        "scope": "user",
+                        "installPath": enabled_path,
+                        "version": "1.0.0"
+                    }],
+                    "disabled@mkt": [{
+                        "scope": "user",
+                        "installPath": disabled_path,
+                        "version": "1.0.0"
+                    }]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let defaults = discover_effective_plugins(plugins_dir, &BTreeMap::new()).await;
+        assert_eq!(
+            defaults
+                .iter()
+                .map(|(_, manifest, _)| manifest.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["enabled"]
+        );
+
+        let overrides = BTreeMap::from([
+            ("enabled@mkt".to_string(), false),
+            ("disabled@mkt".to_string(), true),
+        ]);
+        let explicit = discover_effective_plugins(plugins_dir, &overrides).await;
+        assert_eq!(
+            explicit
+                .iter()
+                .map(|(_, manifest, _)| manifest.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["disabled"]
+        );
+    }
+
+    #[tokio::test]
+    async fn declared_skill_directory_may_contain_skill_md_directly() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        fs::create_dir_all(plugin.join("custom-skill")).unwrap();
+        fs::write(
+            plugin
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            r#"{"name":"demo","skills":"./custom-skill"}"#,
+        )
+        .unwrap();
+        fs::write(plugin.join("custom-skill/SKILL.md"), "custom skill").unwrap();
+
+        let (_id, manifest) = load_plugin_from_path(plugin).await.unwrap();
+        assert_eq!(manifest.components.skills.len(), 1);
+        assert_eq!(
+            manifest.components.skills[0].path,
+            plugin.join("custom-skill/SKILL.md")
+        );
+    }
+
+    #[tokio::test]
     async fn declared_relative_paths_are_confined_and_inline_mcp_lsp_are_loaded() {
         let tmp = tempfile::tempdir().unwrap();
         let plugin = tmp.path();
@@ -1156,5 +1421,73 @@ mod tests {
         assert!(manifest.components.commands.is_empty());
         assert!(manifest.components.mcp_servers.contains_key("inline"));
         assert!(manifest.components.lsp_servers.contains_key("rust"));
+    }
+
+    #[tokio::test]
+    async fn channels_bind_declared_plugin_mcp_servers_and_preserve_user_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        fs::write(
+            plugin
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            r#"{
+                "name":"channel-demo",
+                "mcpServers":{"telegram":{"type":"stdio","command":"telegram-channel"}},
+                "channels":[{
+                    "server":"telegram",
+                    "userConfig":{
+                        "bot_token":{
+                            "type":"string",
+                            "title":"Bot token",
+                            "description":"Telegram token",
+                            "sensitive":true
+                        }
+                    }
+                }]
+            }"#,
+        )
+        .unwrap();
+
+        let (_id, manifest) = load_plugin_from_path(plugin).await.unwrap();
+        assert_eq!(manifest.channels.len(), 1);
+        assert_eq!(manifest.channels[0].server, "telegram");
+        let field = manifest.channels[0]
+            .user_config
+            .as_ref()
+            .unwrap()
+            .fields
+            .get("bot_token")
+            .unwrap();
+        assert_eq!(field.value_type.as_deref(), Some("string"));
+        assert_eq!(field.title.as_deref(), Some("Bot token"));
+        assert!(field.sensitive);
+    }
+
+    #[tokio::test]
+    async fn channels_cannot_bind_undeclared_or_duplicate_mcp_servers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        fs::write(
+            plugin
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            r#"{
+                "name":"channel-demo",
+                "mcpServers":{"telegram":{"type":"stdio","command":"telegram-channel"}},
+                "channels":[
+                    {"server":"telegram"},
+                    {"server":"telegram"},
+                    {"server":"user-server"}
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let (_id, manifest) = load_plugin_from_path(plugin).await.unwrap();
+        assert_eq!(manifest.channels.len(), 1);
+        assert_eq!(manifest.channels[0].server, "telegram");
     }
 }

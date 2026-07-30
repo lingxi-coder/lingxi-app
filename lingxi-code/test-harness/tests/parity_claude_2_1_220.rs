@@ -150,7 +150,7 @@ fn gap_oracle_is_pinned_without_private_prompt_text() {
         "8addc857f3fe64d5a0368af9ee50321b50afb4a6918ba3ef018ab84f5dbbe081"
     );
     assert_eq!(fixture["oracle"]["network"], "loopback-only");
-    assert_eq!(fixture["fast_mode"]["claude-opus-4-7"], "on");
+    assert_eq!(fixture["fast_mode"]["claude-opus-4-7"], "off");
 
     let prompts = fixture["system_prompt_manifests"]
         .as_array()

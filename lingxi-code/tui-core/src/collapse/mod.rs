@@ -14,4 +14,4 @@ pub mod classify;
 pub mod group;
 
 pub use classify::{classify, SearchOrReadResult};
-pub use group::{search_read_summary_text, CollapseGroup};
+pub use group::{search_read_summary_text, search_read_summary_text_full, CollapseGroup};

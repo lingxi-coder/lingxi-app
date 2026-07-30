@@ -80,12 +80,14 @@ internal fun shellFinished(
     val timedOut = result.jsonBoolean("timed_out") == true
     val cancelled = result.jsonBoolean("cancelled") == true ||
         result.jsonBoolean("interrupted") == true
+    val reportedError = result.jsonBoolean("is_error") == true
     val exitCode = result.jsonLong("exit_code")?.toInt()
         ?: result.jsonLong("code")?.toInt()
     val status = when {
         timedOut -> ShellToolStatus.TimedOut
         cancelled -> ShellToolStatus.Cancelled
-        isError || (exitCode != null && exitCode != 0) -> ShellToolStatus.Failed
+        isError || reportedError || (exitCode != null && exitCode != 0) ->
+            ShellToolStatus.Failed
         else -> ShellToolStatus.Completed
     }
     return ShellToolUpdate.Finished(

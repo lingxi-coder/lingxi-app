@@ -173,6 +173,78 @@ pub struct ParsedMemory {
     pub globs: Option<Vec<String>>,
 }
 
+/// Discover the external `@import` targets reachable from one top-level memory
+/// file without reading any file outside `cwd`.
+///
+/// Internal imports are followed up to [`MAX_INCLUDE_DEPTH`] so an external
+/// target referenced by a nested project file still participates in the
+/// startup approval dialog. External targets are returned in first-seen order
+/// and are never opened before approval.
+#[must_use]
+pub fn discover_external_include_paths(
+    path: &Path,
+    cwd: &Path,
+    home: Option<&Path>,
+) -> Vec<PathBuf> {
+    fn visit(
+        path: &Path,
+        cwd: &Path,
+        home: Option<&Path>,
+        depth: usize,
+        processed: &mut HashSet<PathBuf>,
+        external_seen: &mut HashSet<PathBuf>,
+        external: &mut Vec<PathBuf>,
+    ) {
+        let key = lexical_normalize(path);
+        if depth >= MAX_INCLUDE_DEPTH || !processed.insert(key) {
+            return;
+        }
+        let Ok(loaded) = load_file(path, None) else {
+            return;
+        };
+        let parsed = parse_memory_content(&loaded.body, path, home);
+        if parsed.body.trim().is_empty() {
+            return;
+        }
+        for include in parsed.include_paths {
+            if !is_text_include_extension(&include) {
+                continue;
+            }
+            if !path_in_working_path(&include, cwd) {
+                let normalized =
+                    std::fs::canonicalize(&include).unwrap_or_else(|_| lexical_normalize(&include));
+                if external_seen.insert(normalized.clone()) {
+                    external.push(normalized);
+                }
+                continue;
+            }
+            visit(
+                &include,
+                cwd,
+                home,
+                depth + 1,
+                processed,
+                external_seen,
+                external,
+            );
+        }
+    }
+
+    let mut processed = HashSet::new();
+    let mut external_seen = HashSet::new();
+    let mut external = Vec::new();
+    visit(
+        path,
+        cwd,
+        home,
+        0,
+        &mut processed,
+        &mut external_seen,
+        &mut external,
+    );
+    external
+}
+
 /// Recursively load `path` and every file it `@import`s, returning a flat
 /// list with the parent FIRST, then each include's expansion appended in
 /// directive order — matching claude-code `processMemoryFile`
@@ -975,12 +1047,15 @@ fn lexical_normalize(p: &Path) -> PathBuf {
     out
 }
 
-/// True when `path` is `working` or lives under it. Simplified
-/// `pathInWorkingPath` (filesystem.ts:709): lexical containment only — the
-/// `/private` symlink and case-fold normalisations are omitted (boundary).
+/// True when `path` is `working` or lives under it.
+///
+/// Existing paths are canonicalized before comparison so a project-local
+/// symlink cannot make an external import look confined. For a missing target
+/// we fall back to lexical containment: it cannot be opened by the loader, and
+/// this preserves the upstream behavior of silently ignoring missing imports.
 fn path_in_working_path(path: &Path, working: &Path) -> bool {
-    let p = lexical_normalize(path);
-    let w = lexical_normalize(working);
+    let p = std::fs::canonicalize(path).unwrap_or_else(|_| lexical_normalize(path));
+    let w = std::fs::canonicalize(working).unwrap_or_else(|_| lexical_normalize(working));
     p == w || p.starts_with(&w)
 }
 
@@ -1238,6 +1313,56 @@ mod import_tests {
         let allowed = expand_memory_file(&main, &mut p2, true, &cwd, Some(&cwd), 0);
         assert_eq!(allowed.len(), 2);
         assert!(allowed[1].body.contains("OUTSIDE"));
+    }
+
+    #[test]
+    fn external_import_discovery_follows_internal_files_without_opening_external_targets() {
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path().join("repo");
+        fs::create_dir_all(cwd.join("rules")).unwrap();
+        let outside = tmp.path().join("outside.md");
+        let nested = cwd.join("rules/nested.md");
+        fs::write(
+            cwd.join("LINGXI.md"),
+            "root\n@./rules/nested.md\n@../outside.md\n",
+        )
+        .unwrap();
+        fs::write(&nested, "nested\n@../../outside.md\n").unwrap();
+        // Deliberately do not create `outside.md`: discovery reports the target
+        // from syntax and must not require opening it before approval.
+
+        let found = discover_external_include_paths(&cwd.join("LINGXI.md"), &cwd, Some(tmp.path()));
+        assert_eq!(found, vec![outside]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_symlink_to_external_import_still_requires_approval() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path().join("repo");
+        let outside_dir = tmp.path().join("outside");
+        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir_all(&outside_dir).unwrap();
+        let outside = outside_dir.join("policy.md");
+        fs::write(&outside, "EXTERNAL").unwrap();
+        symlink(&outside_dir, cwd.join("linked")).unwrap();
+        fs::write(cwd.join("LINGXI.md"), "root\n@./linked/policy.md\n").unwrap();
+
+        let found = discover_external_include_paths(&cwd.join("LINGXI.md"), &cwd, Some(tmp.path()));
+        assert_eq!(found, vec![outside.canonicalize().unwrap()]);
+
+        let mut processed = HashSet::new();
+        let gated = expand_memory_file(
+            &cwd.join("LINGXI.md"),
+            &mut processed,
+            false,
+            &cwd,
+            Some(tmp.path()),
+            0,
+        );
+        assert_eq!(gated.len(), 1, "symlink escape must stay gated");
     }
 
     #[test]

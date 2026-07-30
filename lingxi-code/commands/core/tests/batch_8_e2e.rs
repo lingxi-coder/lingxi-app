@@ -1,9 +1,9 @@
 //! End-to-end: build a registry with `register_all_builtin_commands` +
-//! `register_core_batch_8`, dispatch each of the 6 batch-8 commands through the
+//! `register_core_batch_8`, dispatch each batch-8 command through the
 //! `RegistrySlashDispatcher`, and verify behaviour against the default mock
 //! orchestrator.
 //!
-//! Batch-8 commands: `/autocompact`, `/fork`, `/goal`, `/recap`,
+//! Batch-8 commands: `/autocompact`, `/btw`, `/fork`, `/goal`, `/recap`,
 //! `/reload-skills`, `/skill-doctor`, `/stop`.
 
 use command_api::CommandRegistry;
@@ -76,7 +76,7 @@ async fn handled(d: &RegistrySlashDispatcher, raw: &str) -> String {
 }
 
 #[test]
-fn all_7_batch_8_names_resolve() {
+fn all_8_batch_8_names_resolve() {
     let (d, _h, root) = fresh("resolve");
     // Access the underlying registry through a fresh build to assert resolution.
     let mut reg = CommandRegistry::new();
@@ -97,6 +97,7 @@ fn all_7_batch_8_names_resolve() {
     );
     for name in [
         "autocompact",
+        "btw",
         "fork",
         "goal",
         "recap",
@@ -108,6 +109,16 @@ fn all_7_batch_8_names_resolve() {
         assert!(reg.get_handler(name).is_some(), "/{name} handler missing");
     }
     drop(d);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[tokio::test]
+async fn btw_is_a_real_handle_bound_command_not_a_stub() {
+    let (dispatcher, _handle, root) = fresh("btw");
+    assert_eq!(
+        handled(&dispatcher, "/btw").await,
+        "Usage: /btw <your question>"
+    );
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -175,7 +186,7 @@ async fn skill_doctor_on_empty_tree_reports_no_skills() {
     let (d, _h, root) = fresh("doctor");
     assert_eq!(
         handled(&d, "/skill-doctor").await,
-        "Skills loaded this session\n\n  (no skills loaded)\n\nAll loaded skills have been used at least once."
+        "Skills loaded this session\n\n  (no skills loaded)"
     );
     std::fs::remove_dir_all(root).ok();
 }

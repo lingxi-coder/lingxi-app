@@ -352,6 +352,7 @@ impl<'cb> RataApp<'cb> {
                         let enabled = !self.fullscreen;
                         session.set_fullscreen(enabled)?;
                         self.fullscreen = enabled;
+                        self.chat_widget.set_collapse_fullscreen(enabled);
                         self.selection.clear();
                         // Entering clears the alternate screen; leaving must
                         // rebuild native scrollback from structured cells.
@@ -549,6 +550,7 @@ impl<'cb> RataApp<'cb> {
     /// Seed the terminal surface from startup settings/environment.
     pub fn configure_fullscreen(&mut self, enabled: bool, copy_on_select: bool) {
         self.fullscreen = enabled;
+        self.chat_widget.set_collapse_fullscreen(enabled);
         self.copy_on_select = copy_on_select;
         self.selection.clear();
     }

@@ -1203,15 +1203,12 @@ pub(crate) fn resolve_permission_mode(argv: &Argv) -> (permission::PermissionMod
     // inherit a requested bypass/plan/etc.
     let env_scrub_active =
         traits::env::is_env_truthy(std::env::var("LINGXI_SUBPROCESS_ENV_SCRUB").ok().as_deref());
-    // MODE-FRONTMATTER-04: the resolver accepts the `--agent`-resolved agent
-    // definition's `permissionMode` (pushed between the CLI flag and the
-    // settings defaultMode). The agent catalog (user/project `.lingxi/agents`
-    // dirs + builtins + `--agents` flag records) is resolved inside
-    // engine-desktop's `build()` (`DesktopConfig.cli_agent`), NOT at this early
-    // CLI surface, so the frontmatter mode is not yet available here. Passing
-    // `None` is behavior-safe (over-ask only: an agent requesting a MORE
-    // permissive mode simply does not receive it). Threading the resolved
-    // agent's `permissionMode` from the catalog remains a composition-root TODO.
+    // MODE-FRONTMATTER-04: the selected main-thread agent's frontmatter
+    // `permissionMode` sits between the CLI override and the settings
+    // `defaultMode`. The agent catalog is resolved later in
+    // `engine_desktop::build()`, so this early CLI pass cannot see it yet; the
+    // composition root re-applies the same precedence once it knows which
+    // agent actually won.
     let agent_frontmatter_mode: Option<permission::PermissionMode> = None;
     let (mode, notice) = permission::initial_permission_mode_from_cli(
         argv.permission_mode.as_deref(),

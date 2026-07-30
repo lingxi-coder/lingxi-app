@@ -328,6 +328,17 @@ impl HookExecutorImpl {
         self
     }
 
+    /// Override the SSRF guard used by HTTP hook dispatch.
+    ///
+    /// The default constructor keeps the production guard policy. This builder
+    /// exists so integration tests can provide deterministic DNS answers
+    /// without weakening the runtime defaults.
+    #[must_use]
+    pub fn with_ssrf_guard(mut self, ssrf_guard: SsrfGuard) -> Self {
+        self.ssrf_guard = ssrf_guard;
+        self
+    }
+
     /// Attach an [`AsyncHookRegistry`] so non-blocking (`blocking == false`)
     /// hooks are backgrounded instead of awaited (B5). Without this, a
     /// non-blocking hook still runs synchronously (its result is not dropped),
@@ -874,17 +885,27 @@ impl HookExecutorImpl {
         let Some(registry) = &self.async_registry else {
             // No registry wired: run inline but discard from the aggregate so
             // the "non-blocking can't block" contract still holds.
-            let _ = self.dispatcher().dispatch(hook, event, ctx).await;
+            let result = self.dispatcher().dispatch(hook, event, ctx).await;
+            if hook.once && matches!(result.outcome, HookOutcome::Success) {
+                self.registry.write().await.remove_once_hook(hook.id);
+            }
             return;
         };
         let dispatcher = self.dispatcher();
         let hook_owned = hook.clone();
         let event_owned = event.clone();
         let ctx_owned = ctx.clone();
+        let hook_registry = self.registry.clone();
+        let hook_id = hook.id;
+        let once = hook.once;
         let work: HookWork = Box::pin(async move {
-            dispatcher
+            let result = dispatcher
                 .dispatch(&hook_owned, &event_owned, &ctx_owned)
-                .await
+                .await;
+            if once && matches!(result.outcome, HookOutcome::Success) {
+                hook_registry.write().await.remove_once_hook(hook_id);
+            }
+            result
         });
         if let Err(e) = registry.spawn(hook.id, hook.timeout, work).await {
             tracing::warn!(

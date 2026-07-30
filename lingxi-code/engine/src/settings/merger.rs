@@ -74,6 +74,9 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
         show_thinking_summaries: next
             .show_thinking_summaries
             .or(prev.show_thinking_summaries),
+        agent_push_notif_enabled: next
+            .agent_push_notif_enabled
+            .or(prev.agent_push_notif_enabled),
         workflow_keyword_trigger_enabled: next
             .workflow_keyword_trigger_enabled
             .or(prev.workflow_keyword_trigger_enabled),
@@ -255,6 +258,21 @@ fn deep_merge_value(prev: serde_json::Value, next: serde_json::Value) -> serde_j
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_push_notification_setting_is_scalar_override() {
+        let merged = merge(
+            SettingsJson {
+                agent_push_notif_enabled: Some(false),
+                ..Default::default()
+            },
+            SettingsJson {
+                agent_push_notif_enabled: Some(true),
+                ..Default::default()
+            },
+        );
+        assert_eq!(merged.agent_push_notif_enabled, Some(true));
+    }
     use crate::settings::schema::SettingsJson;
 
     fn s(v: &str) -> String {

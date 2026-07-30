@@ -104,6 +104,7 @@ pub use reload_skills::ReloadSkillsHandler;
 pub use resume::ResumeHandler;
 pub use review::ReviewHandler;
 pub use security_review::SecurityReviewHandler;
+pub use side_question::SideQuestionHandler;
 pub use skill_doctor::SkillDoctorHandler;
 pub use skills::SkillsHandler;
 pub use status::StatusHandler;

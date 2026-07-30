@@ -114,6 +114,54 @@ pub struct ContextUsageSnapshot {
     pub cumulative_cost: CostSnapshot,
 }
 
+impl ContextUsageSnapshot {
+    /// Claude Code's explicit over-context warning (2.1.216+).
+    ///
+    /// `disable_compact` is the raw truthiness of `DISABLE_COMPACT`: callers
+    /// pass it in so this wire-level projection stays deterministic and easy
+    /// to test.
+    #[must_use]
+    pub fn overflow_warning(&self, disable_compact: bool) -> Option<String> {
+        let over = self
+            .live_context_tokens
+            .checked_sub(self.max_context_tokens)?;
+        if over == 0 || self.max_context_tokens == 0 {
+            return None;
+        }
+        let action = if disable_compact {
+            "/clear"
+        } else {
+            "/compact or /clear"
+        };
+        Some(format!(
+            "Context exceeds the {}-token limit by {} tokens \u{2014} run {action} to continue.",
+            compact_token_count(self.max_context_tokens),
+            compact_token_count(over)
+        ))
+    }
+}
+
+fn compact_token_count(tokens: u64) -> String {
+    const UNITS: [(u64, char); 4] = [
+        (1_000_000_000_000, 't'),
+        (1_000_000_000, 'b'),
+        (1_000_000, 'm'),
+        (1_000, 'k'),
+    ];
+    for (threshold, suffix) in UNITS {
+        if tokens >= threshold {
+            #[allow(clippy::cast_precision_loss)]
+            let rounded = ((tokens as f64 / threshold as f64) * 10.0).round() / 10.0;
+            let rendered = format!("{rounded:.1}");
+            return format!(
+                "{}{suffix}",
+                rendered.strip_suffix(".0").unwrap_or(&rendered)
+            );
+        }
+    }
+    tokens.to_string()
+}
+
 /// One stable category in a [`ContextUsageSnapshot`].
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextUsageCategory {
@@ -1290,7 +1338,7 @@ pub trait OrchestratorHandle: Send + Sync {
 
     /// Toggle the session's fast-mode flag (`/fast`). When on, subsequent turns
     /// send `speed:"fast"` in the request body IF the active model supports it
-    /// (opus-4-7 / opus-4-8). DEFAULT is an inert no-op so existing impls/mocks
+    /// (opus-4-8 / opus-5). DEFAULT is an inert no-op so existing impls/mocks
     /// compile unchanged.
     async fn set_fast_mode(&self, on: bool) -> Result<(), HandleError> {
         let _ = on;

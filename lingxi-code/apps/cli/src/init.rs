@@ -814,6 +814,13 @@ pub(crate) fn resolve_desktop_config(
         // CLI-resolved session permission mode (`initialPermissionModeFromCLI`),
         // threaded in by `run_cli`.
         permission_mode,
+        // Preserve the raw CLI request so the composition root can fold a
+        // selected main-thread agent's frontmatter `permissionMode` with the
+        // oracle precedence: explicit CLI override > agent frontmatter >
+        // settings `defaultMode`.
+        permission_mode_cli: argv.permission_mode.clone(),
+        permission_mode_cli_explicit: argv.permission_mode.is_some()
+            || argv.dangerously_skip_permissions,
         allow_dangerously_skip_permissions: argv.allow_dangerously_skip_permissions,
         // Plan 3c: the tui supplies the masked-key prompt via the credential
         // store + `pump_store_provider_key`, not this engine port — so the

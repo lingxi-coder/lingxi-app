@@ -1318,7 +1318,10 @@ impl SubagentSpawner for PoolSubagentSpawner {
         // the subagent's work under its Task cell. `None` drops them.
         progress: Option<tokio::sync::mpsc::Sender<String>>,
     ) -> Result<SubagentResult, SubagentSpawnError> {
-        let observer_spec = request.observer.clone();
+        let observer_spec = request
+            .observer
+            .clone()
+            .filter(|_| crate::observer::observer_agents_enabled());
         let observed_agent_type = request.subagent_type.clone();
         let observer_inherit = inherit.clone();
         // Resolve the REAL definition for this subagent_type (file catalog
@@ -1591,7 +1594,7 @@ impl SubagentSpawner for PoolSubagentSpawner {
         model: Option<&str>,
     ) -> traits::subagent_spawn::SelectedAgentMeta {
         let def = self.lookup_definition(subagent_type).await;
-        let observer = if def.observer.is_some() {
+        let observer = if crate::observer::observer_agents_enabled() && def.observer.is_some() {
             let mut definitions = vec![def.clone()];
             definitions.extend(
                 self.builtins
@@ -1858,6 +1861,8 @@ mod tests {
 
     #[tokio::test]
     async fn completed_spawn_launches_and_associates_observer_companion() {
+        let _guard = crate::observer::observer_env_lock().lock().unwrap();
+        std::env::set_var("CLAUDE_CODE_EXPERIMENTAL_OBSERVER_AGENTS", "1");
         let runtime = Arc::new(MockRuntimeSpawner::default());
         let pool = Arc::new(StateMachinePool::new(runtime, 4));
         let api = Arc::new(QueueApi {
@@ -1920,6 +1925,7 @@ mod tests {
             content["observer"]["result"]["content"]["content"][0]["text"],
             "observer result"
         );
+        std::env::remove_var("CLAUDE_CODE_EXPERIMENTAL_OBSERVER_AGENTS");
     }
 
     /// Runtime used to prove pool-level cancellation cleanup: it records
@@ -2347,9 +2353,9 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_tools_gates_agent_by_depth() {
-        // `Agent` is depth-gated, not flat-denied: a depth-0 caller keeps it;
-        // under Claude 2.1.217's default cap, a depth-1 child has it stripped.
-        // With ONLY an Agent tool registered, the depth-1 pool is empty.
+        // `Agent` is depth-gated, not flat-denied: callers at depths 0-2 keep
+        // it; under Claude 2.1.219's default cap, depth 3 has it stripped.
+        // With ONLY an Agent tool registered, the depth-3 pool is empty.
         let mut reg = ToolRegistry::new();
         reg.register_builtin(Arc::new(StubTool {
             name: "Agent",
@@ -2367,7 +2373,7 @@ mod tests {
                 use_exact_tools: false,
             })
         };
-        // depth 0: Agent kept (0 < default 1).
+        // depth 0: Agent kept (0 < default 3).
         let (schemas0, allowed0) = spawner
             .resolve_tools(&policy(), 0)
             .await
@@ -3912,6 +3918,8 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_selection_surfaces_only_valid_observer_specs() {
+        let _guard = crate::observer::observer_env_lock().lock().unwrap();
+        std::env::set_var("CLAUDE_CODE_EXPERIMENTAL_OBSERVER_AGENTS", "1");
         let runtime = Arc::new(MockRuntimeSpawner::default());
         let pool = Arc::new(StateMachinePool::new(runtime, 4));
 
@@ -3945,6 +3953,39 @@ mod tests {
         assert!(
             invalid.observer.is_none(),
             "invalid observer graphs must fail closed before spawn metadata"
+        );
+        std::env::remove_var("CLAUDE_CODE_EXPERIMENTAL_OBSERVER_AGENTS");
+    }
+
+    #[tokio::test]
+    async fn resolve_selection_strips_observer_when_experimental_gate_is_off() {
+        let _guard = crate::observer::observer_env_lock().lock().unwrap();
+        std::env::remove_var("CLAUDE_CODE_EXPERIMENTAL_OBSERVER_AGENTS");
+        std::env::remove_var("LINGXI_EXPERIMENTAL_OBSERVER_AGENTS");
+        std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
+        std::env::remove_var("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS");
+
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+
+        let mut reviewer = agent_def(AgentToolPolicy::All {
+            use_exact_tools: false,
+        });
+        reviewer.agent_type = "reviewer".into();
+
+        let mut worker = agent_def(AgentToolPolicy::All {
+            use_exact_tools: false,
+        });
+        worker.agent_type = "worker".into();
+        worker.observer = Some(traits::subagent_spawn::ObserverSpec::new("reviewer"));
+
+        let catalog = Arc::new(RwLock::new(vec![reviewer, worker]));
+        let spawner = PoolSubagentSpawner::new(pool).with_agent_catalog(catalog);
+
+        let meta = spawner.resolve_selection("worker", None).await;
+        assert!(
+            meta.observer.is_none(),
+            "observer declarations stay parsed but must not arm by default"
         );
     }
 

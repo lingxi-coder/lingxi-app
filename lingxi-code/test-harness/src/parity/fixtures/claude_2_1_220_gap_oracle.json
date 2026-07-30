@@ -8,8 +8,8 @@
     "notes": "Only hashes, lengths, headings, public help surfaces, and observable state are retained. Full private prompt text is not committed."
   },
   "fast_mode": {
-    "claude-opus-4-7": "on",
-    "capture": "stream-json init with flagSettings.fastMode=true"
+    "claude-opus-4-7": "off",
+    "capture": "public 2.1.219 changelog; Opus 4.7 was removed from fast mode"
   },
   "system_prompt_manifests": [
     {

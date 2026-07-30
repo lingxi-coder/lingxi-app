@@ -8,7 +8,7 @@ test('desktop errors distinguish credential, protocol, engine, workspace, and tr
     classifyDesktopError('macOS login keychain is locked or access is denied (deepseek)'),
     {
       title: 'Provider credential unavailable',
-      detail: 'This key was stored in the legacy login keychain. Reconnect the provider to use the modern store or this app session.',
+      detail: 'Allow LingXi Code in Keychain, or replace the stored API key in Settings, then retry.',
     },
   );
   assert.equal(classifyDesktopError('macOS Data Protection Keychain is unavailable for this app signature').title, 'Secure persistence unavailable');

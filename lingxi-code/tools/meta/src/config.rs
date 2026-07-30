@@ -328,6 +328,19 @@ pub static SUPPORTED_SETTINGS: Lazy<HashMap<&'static str, SettingConfig>> = Lazy
             path: None,
         },
     );
+    // Kairos push notifications are a two-part gate in Claude Code: the
+    // setting is exposed only when the feature flag is active.
+    if telemetry::flag_bool("tengu_kairos_push_notifications", false) {
+        m.insert(
+            "agentPushNotifEnabled",
+            SettingConfig {
+                source: Source::Settings,
+                ty: SettingType::Boolean,
+                options: None,
+                path: None,
+            },
+        );
+    }
     m
 });
 
@@ -817,6 +830,11 @@ impl Tool for ConfigTool {
         if let Err(e) = write_settings_obj(&file, &settings).await {
             emit_failed(&bus, "io_write", started.elapsed().as_millis() as u64).await;
             return Err(e);
+        }
+        if setting == "agentPushNotifEnabled" {
+            traits::session_flags::set_agent_push_notif_enabled(
+                final_value.as_bool().unwrap_or(false),
+            );
         }
 
         emit_completed(&bus, started, "set", &setting, &file).await;

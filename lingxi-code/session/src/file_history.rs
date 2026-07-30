@@ -756,6 +756,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resumed_history_continues_tracking_and_versioning() {
+        let (home, cwd) = scratch("resume-version");
+        let file = cwd.join("note.txt");
+        std::fs::write(&file, "before\n").unwrap();
+        let first = FileHistory::new(home.clone(), cwd.clone(), "sess-resume".into());
+        let first_message = Uuid::new_v4();
+        first.make_snapshot(first_message).await;
+        first.track_edit(file.to_str().unwrap()).await;
+        std::fs::write(&file, "after first turn\n").unwrap();
+        let first_record = first.snapshot_record(first_message).unwrap();
+        let content = format!(
+            "{}\n",
+            serde_json::to_string(&snapshot_line_json("sess-resume", &first_record)).unwrap()
+        );
+
+        let resumed = FileHistory::new(home, cwd, "sess-resume".into());
+        resumed.restore_from_records(parse_snapshot_records(&content));
+        let second_message = Uuid::new_v4();
+        let second_record = resumed.make_snapshot(second_message).await;
+        let backup = second_record
+            .tracked_file_backups
+            .get("note.txt")
+            .expect("restored tracked file must carry into the next turn");
+        assert_eq!(
+            backup.version, 2,
+            "resume must continue the per-file backup sequence"
+        );
+        assert!(
+            backup.backup_file_name.is_some(),
+            "the current file contents must be backed for the resumed turn"
+        );
+    }
+
+    #[tokio::test]
     async fn has_any_changes_and_missing_snapshot() {
         let (home, cwd) = scratch("changes");
         let file = cwd.join("b.txt");

@@ -17,6 +17,7 @@
 
 #![forbid(unsafe_code)]
 
+mod android_host_intent;
 pub mod net_intent;
 
 use async_trait::async_trait;
@@ -228,8 +229,26 @@ impl Tool for ShellMobileTool {
         }
         prompt.push_str(
             "Commands run rooted at the workspace directory. Output is captured and \
-             truncated if very large.\n\n",
+             truncated if very large. This is an app-sandboxed workspace shell, NOT \
+             Android's adb/system shell: do not use `monkey`, `am`, `cmd`, `pm`, \
+             `input`, `settings`, `dumpsys`, `/sdcard`, or other Android host paths. \
+             Use relative workspace paths. ",
         );
+        if self.ctx.computer_control.is_some() {
+            prompt.push_str(
+                "To open/control Android apps, call `android_use.status` and then \
+                 `android_use.open_app`/UI actions in a user-started authorized Computer \
+                 Use session. If that session is inactive, ask the user to enable/start \
+                 it; never fall back to host commands or hide permission errors with \
+                 `|| true`/`2>/dev/null`.\n\n",
+            );
+        } else {
+            prompt.push_str(
+                "Android Computer Use is unavailable in this build; ask the user to \
+                 complete Android UI/app operations manually. Never retry with host \
+                 commands or hide permission errors with `|| true`/`2>/dev/null`.\n\n",
+            );
+        }
         if bundled {
             prompt.push_str(&format!(
                 "Available bundled toybox applets (locked inventory): {applet_line}.\n"
@@ -282,9 +301,18 @@ impl Tool for ShellMobileTool {
             }
         }
 
-        // 2. Refuse network-intent commands BEFORE building/running anything —
-        // the shell is deny-net, so this is a clean advisory instead of a
-        // confusing seccomp EPERM.
+        // 2. Refuse Android host commands/paths and network-intent commands
+        // BEFORE building/running anything. The mobile shell runs as the app
+        // UID, not Android's privileged shell UID; trying `monkey`/`cmd` only
+        // produces misleading SELinux diagnostics.
+        if let Some(advice) =
+            android_host_intent::android_host_intent(&command, self.ctx.computer_control.is_some())
+        {
+            return Err(ToolError::InvalidInput(advice));
+        }
+
+        // The legacy shell is deny-net, so this is a clean advisory instead of
+        // a confusing seccomp EPERM.
         let mobile_linux_guest = self
             .ctx
             .mobile_shell()
@@ -355,22 +383,38 @@ impl Tool for ShellMobileTool {
         let (stdout, truncated_out) = truncate_shell_output(out.stdout, limit);
         let (stderr, truncated_err) = truncate_shell_output(out.stderr, limit);
 
+        let permission_denied = output_reports_permission_denial(&stdout, &stderr);
+        let command_failed = out.exit_code != 0 || permission_denied;
         Ok(ToolCallResult {
             data: json!({
                 "exit_code": out.exit_code,
                 "stdout":    stdout,
                 "stderr":    stderr,
-                "is_error":  out.exit_code != 0,
+                "is_error":  command_failed,
                 "timed_out": false,
                 "truncated": truncated_out || truncated_err,
             }),
             model_content: None,
             new_messages: vec![],
             context_modifier: None,
-            is_error: false,
+            // A command that masks Android/SELinux denial with `|| true` still
+            // reports failure to the model and Android timeline.
+            is_error: permission_denied,
             mcp_meta: None,
         })
     }
+}
+
+fn output_reports_permission_denial(stdout: &str, stderr: &str) -> bool {
+    let stderr = stderr.to_ascii_lowercase();
+    let stdout = stdout.to_ascii_lowercase();
+    stderr.contains("permission denied")
+        || stderr.contains("access denied")
+        || stderr.contains("permission denial:")
+        || stderr.contains("securityexception")
+        || stdout.contains("access denied finding property")
+        || stdout.contains("permission denial:")
+        || stdout.contains("securityexception")
 }
 
 /// Register the mobile `Shell` tool against `reg` — ONLY when the gate passes.
@@ -548,6 +592,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn android_host_command_is_refused_without_running() {
+        let (ctx, _, calls) = enabled_ctx(ok_output(""));
+        let tool = ShellMobileTool::new(ctx);
+        let err = tool
+            .call(
+                json!({"command": "monkey -p com.android.chrome 1 2>&1 || true"}),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect_err("Android host command should be refused");
+        let message = match err {
+            ToolError::InvalidInput(message) => message,
+            other => panic!("unexpected error: {other:?}"),
+        };
+        assert!(message.contains("unavailable in this build"), "{message}");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn masked_permission_denial_is_reported_as_error() {
+        let output = ProcessOutput {
+            stdout: "libc: Access denied finding property \"ro.debuggable\"\n".into(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        };
+        let (ctx, _, calls) = enabled_ctx(output);
+        let tool = ShellMobileTool::new(ctx);
+        let result = tool
+            .call(json!({"command": "echo safe"}), fresh_ctx(), fresh_tx())
+            .await
+            .expect("runner output still returns structured result");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(result.data["is_error"], true);
+        assert!(result.is_error);
+    }
+
+    #[tokio::test]
     async fn prompt_declares_mksh_dialect_and_lists_applets() {
         let (ctx, _, _) = enabled_ctx(ok_output(""));
         let tool = ShellMobileTool::new(ctx);
@@ -570,6 +653,10 @@ mod tests {
         assert!(
             prompt.contains("system"),
             "non-bundled prompt should say system mksh: {prompt}"
+        );
+        assert!(
+            prompt.contains("unavailable in this build") && prompt.contains("/sdcard"),
+            "prompt should route Android host work away from Shell: {prompt}"
         );
     }
 

@@ -2201,6 +2201,67 @@ mod async_path_tests {
         assert_eq!(got.exit_code, Some(0));
     }
 
+    #[tokio::test]
+    async fn successful_non_blocking_once_hook_is_removed_after_completion() {
+        let runtime = TestRuntime::new();
+        let (tx, mut rx) = mpsc::channel(4);
+        let async_reg = Arc::new(AsyncHookRegistry::new(runtime, tx));
+        let runner = CountingRunner::new(out("ok", "", 0));
+
+        let mut hook = command_hook(false);
+        hook.once = true;
+        let hook_id = hook.id;
+        let mut registry = HookRegistry::new();
+        registry.register(hook);
+        let registry = Arc::new(RwLock::new(registry));
+        let exec =
+            HookExecutorImpl::new(registry.clone(), Arc::new(UnusedHttp), TestRuntime::new())
+                .with_process_runner(runner.clone(), Arc::new(StubSandbox))
+                .with_async_registry(async_reg);
+
+        let agg = exec.execute(pre_event(), HookContext::default()).await;
+        assert!(agg.all_results.is_empty());
+        let (got_id, got) = rx.recv().await.expect("completion must publish");
+        assert_eq!(got_id, hook_id);
+        assert!(matches!(got.outcome, HookOutcome::Success));
+        assert!(
+            registry.read().await.all_hooks().is_empty(),
+            "a successful background once hook must be removed",
+        );
+
+        let second = exec.execute(pre_event(), HookContext::default()).await;
+        assert!(second.all_results.is_empty());
+        assert_eq!(
+            runner.runs.load(Ordering::SeqCst),
+            1,
+            "the removed background once hook must not fire again",
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_non_blocking_once_hook_is_removed_without_async_registry() {
+        let runner = CountingRunner::new(out("ok", "", 0));
+        let mut hook = command_hook(false);
+        hook.once = true;
+        let mut registry = HookRegistry::new();
+        registry.register(hook);
+        let registry = Arc::new(RwLock::new(registry));
+        let exec =
+            HookExecutorImpl::new(registry.clone(), Arc::new(UnusedHttp), TestRuntime::new())
+                .with_process_runner(runner.clone(), Arc::new(StubSandbox));
+
+        let agg = exec.execute(pre_event(), HookContext::default()).await;
+        assert!(agg.all_results.is_empty());
+        assert!(
+            registry.read().await.all_hooks().is_empty(),
+            "the inline fallback must preserve once semantics",
+        );
+
+        let second = exec.execute(pre_event(), HookContext::default()).await;
+        assert!(second.all_results.is_empty());
+        assert_eq!(runner.runs.load(Ordering::SeqCst), 1);
+    }
+
     /// (4) Regression guard: a `blocking == true` Command hook still runs
     /// SYNCHRONOUSLY — `execute` awaits it and its exit-2 Block is reflected in
     /// the aggregate exactly as before B5. (No async registry is even wired.)

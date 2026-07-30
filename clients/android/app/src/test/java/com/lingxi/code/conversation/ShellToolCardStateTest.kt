@@ -44,4 +44,18 @@ class ShellToolCardStateTest {
         assertEquals(ShellToolStatus.TimedOut, update.status)
         assertTrue(update.stderr.contains("late"))
     }
+
+    @Test
+    fun maskedPermissionDenialReportedByToolMapsToFailed() {
+        val update = shellFinished(
+            id = "task-denied",
+            resultJson = """
+                {"data":{"stdout":"Access denied","stderr":"","exit_code":0,"is_error":true}}
+            """.trimIndent(),
+            isError = false,
+        )
+
+        assertEquals(ShellToolStatus.Failed, update.status)
+        assertEquals(0, update.exitCode)
+    }
 }

@@ -47,12 +47,12 @@ use traits::OrchestratorHandle;
 
 /// The `${nyn}` model-family interpolation used by the `xhigh` Usage/description
 /// lines: `getEffortHelpText` (`XVn`) and `getEffortLevelDescription` (`NXu`)
-/// both embed it. v2.1.183 value.
-const XHIGH_MODELS: &str = "Fable 5, Opus 4.7+";
+/// both embed it. 2.1.220 value.
+const XHIGH_MODELS: &str = "Fable 5, Opus 4.7+, Sonnet 5";
 
 /// The `${gAi}` model-family interpolation used by the `- max:` Usage line
-/// (`XVn`). v2.1.183 value.
-const MAX_MODELS: &str = "Fable 5, Opus 4.6+, Sonnet 4.6";
+/// (`XVn`). 2.1.220 value.
+const MAX_MODELS: &str = "Fable 5, Opus 4.6+, Sonnet 4.6+";
 
 /// Render the `/effort` help block — a 1:1 port of `getEffortHelpText` (`XVn`).
 ///
@@ -687,8 +687,8 @@ Effort levels:\n\
 - low: Quick, straightforward implementation\n\
 - medium: Balanced approach with standard testing\n\
 - high: Comprehensive implementation with extensive testing\n\
-- xhigh: Extended reasoning with thorough analysis (Fable 5, Opus 4.7+)\n\
-- max: Maximum capability with deepest reasoning (Fable 5, Opus 4.6+, Sonnet 4.6)\n\
+- xhigh: Extended reasoning with thorough analysis (Fable 5, Opus 4.7+, Sonnet 5)\n\
+- max: Maximum capability with deepest reasoning (Fable 5, Opus 4.6+, Sonnet 4.6+)\n\
 - auto: Use the default effort level for your model"
         );
     }
@@ -704,8 +704,8 @@ Effort levels:\n\
 - low: Quick, straightforward implementation\n\
 - medium: Balanced approach with standard testing\n\
 - high: Comprehensive implementation with extensive testing\n\
-- xhigh: Extended reasoning with thorough analysis (Fable 5, Opus 4.7+)\n\
-- max: Maximum capability with deepest reasoning (Fable 5, Opus 4.6+, Sonnet 4.6)\n\
+- xhigh: Extended reasoning with thorough analysis (Fable 5, Opus 4.7+, Sonnet 5)\n\
+- max: Maximum capability with deepest reasoning (Fable 5, Opus 4.6+, Sonnet 4.6+)\n\
 - ultracode: xhigh + dynamic workflow orchestration (this session only)\n\
 - auto: Use the default effort level for your model"
         );
@@ -718,7 +718,7 @@ Effort levels:\n\
         assert_eq!(parse_effort_level("  XHIGH  "), Some(EffortLevel::Xhigh));
         assert_eq!(
             EffortLevel::Xhigh.description(),
-            "Deeper reasoning than high, just below maximum (Fable 5, Opus 4.7+)"
+            "Deeper reasoning than high, just below maximum (Fable 5, Opus 4.7+, Sonnet 5)"
         );
         // `_Ai = {med: "medium"}` alias.
         assert_eq!(parse_effort_level("med"), Some(EffortLevel::Medium));
@@ -733,7 +733,7 @@ Effort levels:\n\
         // written to settings.json.
         assert_eq!(
             run("xhigh").await,
-            "Set effort level to xhigh (saved as your default for new sessions): Deeper reasoning than high, just below maximum (Fable 5, Opus 4.7+)"
+            "Set effort level to xhigh (saved as your default for new sessions): Deeper reasoning than high, just below maximum (Fable 5, Opus 4.7+, Sonnet 5)"
         );
         assert_eq!(
             env.read_settings().unwrap().get("effortLevel"),
@@ -872,7 +872,7 @@ Effort levels:\n\
     }
 
     #[test]
-    fn max_description_and_usage_match_binary_v2_1_183() {
+    fn max_description_and_usage_match_binary_v2_1_220() {
         // `getEffortLevelDescription("max")` renders the TS template
         // `Maximum capability with deepest reasoning. ${qHt}`.
         assert_eq!(
@@ -881,9 +881,9 @@ Effort levels:\n\
         );
         // The Usage block's `- max:` line renders the Usage template
         // `Maximum capability with deepest reasoning (${gAi})` with
-        // `gAi="Fable 5, Opus 4.6+, Sonnet 4.6"`.
+        // `gAi="Fable 5, Opus 4.6+, Sonnet 4.6+"`.
         assert!(usage().contains(
-            "- max: Maximum capability with deepest reasoning (Fable 5, Opus 4.6+, Sonnet 4.6)\n"
+            "- max: Maximum capability with deepest reasoning (Fable 5, Opus 4.6+, Sonnet 4.6+)\n"
         ));
     }
 

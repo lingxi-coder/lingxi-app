@@ -56,13 +56,22 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// A source of the LIVE main-loop model id (claude-code `wi()` / `getModel()`),
-/// read by the auto `set_permission_mode` gate to evaluate `One()`'s model
-/// reason against the model the session is CURRENTLY on. Mirrors
-/// `agent::DefaultModelProvider`: returns `None` when the value cannot be read
-/// without blocking (a contended session lock), so the caller fails OPEN (no
-/// rejection) rather than stall the control_request.
-pub type LiveModelProvider = Arc<dyn Fn() -> Option<String> + Send + Sync>;
+/// Live model/provider inputs read by the auto-mode permission gate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveModelContext {
+    /// Canonical model id (`wi()` / `getModel()`).
+    pub model: String,
+    /// Claude provider tag (`"firstParty"`, `"anthropicAws"`, or another
+    /// non-first-party tag) used by `dUe`.
+    pub provider: String,
+}
+
+/// A source of the LIVE main-loop model and provider, read by the auto
+/// `set_permission_mode` gate to evaluate `One()` against the route the session
+/// is CURRENTLY on. Mirrors `agent::DefaultModelProvider`: returns `None` when
+/// the value cannot be read without blocking (a contended session lock), so the
+/// caller fails OPEN rather than stall the control request.
+pub type LiveModelProvider = Arc<dyn Fn() -> Option<LiveModelContext> + Send + Sync>;
 
 #[derive(Debug, Clone)]
 struct LivePermissionState {
@@ -205,19 +214,15 @@ impl PolicyPermissionGate {
     /// session is CURRENTLY on FAIL the auto-mode model gate? Reads the live-model
     /// provider ([`Self::live_model_provider_handle`]) and returns `false`
     /// (fail-open, no rejection) when the provider is unset or the model cannot be
-    /// read without blocking. The provider is resolved as `"firstParty"` here
-    /// (multi-provider provider-mapping into the gate is deferred — see
-    /// [`crate::auto_gate`]; the BOOT gate makes the same assumption), so the
-    /// shared exclusion list (`claude-3-*`, `opus-4-0/4-1/4-5`, `sonnet-4-0/4-5`,
-    /// `haiku-4-5`) is authoritative while the non-1P-only exclusions stay off.
+    /// read without blocking.
     fn live_model_unsupported_for_auto(&self) -> bool {
         let Some(provider) = self.live_model_provider.get() else {
             return false;
         };
-        let Some(model) = provider() else {
+        let Some(context) = provider() else {
             return false;
         };
-        !crate::auto_gate::model_supports_auto_mode(&model, "firstParty")
+        !crate::auto_gate::model_supports_auto_mode(&context.model, &context.provider)
     }
 
     /// Authorize under the LIVE mode: the `set_permission_mode` override when
@@ -1316,13 +1321,9 @@ impl PermissionGate for PolicyPermissionGate {
     ///   is now rejected here (`auto mode unavailable for this model`), matching
     ///   the binary — not only downgraded at boot.
     ///
-    ///   REMAINDER (documented): the live model gate resolves the provider as
-    ///   `"firstParty"` (multi-provider provider-mapping into the gate is
-    ///   deferred — the BOOT gate makes the same assumption), so `dUe`'s non-1P
-    ///   exclusions (`opus-4-6`/`sonnet-4-6`/`*haiku*` off Bedrock/Vertex) are
-    ///   not enforced at this surface; the shared exclusion list is. When the
-    ///   live-model cell is unset (headless / pre-orchestrator), the model check
-    ///   is skipped and the boot downgrade remains the authoritative enforcement.
+    ///   When the live model/provider cell is unset (headless /
+    ///   pre-orchestrator), the model check is skipped and the boot downgrade
+    ///   remains the authoritative enforcement.
     async fn set_permission_mode(&self, mode: &str) -> Result<(), String> {
         let Some(parsed) = parse_settable_mode(mode) else {
             // Unknown mode: accept + ack, but do not mutate the live mode.

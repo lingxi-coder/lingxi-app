@@ -950,6 +950,39 @@ async fn build_mobile_inner_with_ask(
         .collect();
     let (default_model_id, default_model_profile) =
         traits::parse_model_ref(&cfg.default_model, &default_listings);
+    let profile_auto_mode_provider: std::collections::BTreeMap<String, String> = assembled
+        .client_config
+        .providers
+        .iter()
+        .map(|profile| {
+            let provider = match &profile.provider_id {
+                llm_client::ProviderId::AnthropicFirstParty => "firstParty",
+                llm_client::ProviderId::BedrockClaude => "anthropicAws",
+                llm_client::ProviderId::VertexClaude => "vertex",
+                llm_client::ProviderId::FoundryClaude => "foundry",
+                _ => "other",
+            };
+            (profile.profile_name.clone(), provider.to_string())
+        })
+        .collect();
+    let model_provider_profiles: std::collections::BTreeMap<String, String> = assembled
+        .client_config
+        .providers
+        .iter()
+        .flat_map(|profile| {
+            let profile_name = profile.profile_name.clone();
+            profile
+                .models
+                .iter()
+                .map(move |model| (model.request_model.clone(), profile_name.clone()))
+        })
+        .collect();
+    let boot_auto_mode_provider = default_model_profile
+        .as_ref()
+        .or_else(|| model_provider_profiles.get(&default_model_id))
+        .and_then(|profile| profile_auto_mode_provider.get(profile))
+        .cloned()
+        .unwrap_or_else(|| "firstParty".to_string());
 
     // (3) Credential manager — built BEFORE the client so the same `Arc` serves
     //     BOTH the composite credential provider (below) and the OAuth client
@@ -1130,6 +1163,9 @@ async fn build_mobile_inner_with_ask(
     // the env half still applies independently). Threaded into
     // `register_core_batch_8` via `traits::agent_view::is_enabled_with_setting`.
     let mut disable_agent_view = false;
+    // `agentPushNotifEnabled` scalar override (user → project → local). The
+    // feature flag is checked independently by the cron/tool consumers.
+    let mut agent_push_notif_enabled = false;
     // (#3 shell-expansion) Capture the boot `Arc<PermissionPolicy>` before it is
     // consumed by `PolicyPermissionGate::new`, so `tool_ctx.permission_policy`
     // shares the SAME base policy the model-facing gate enforces (the prompt
@@ -1218,11 +1254,18 @@ async fn build_mobile_inner_with_ask(
                     {
                         disable_agent_view = b;
                     }
+                    if let Some(b) = v
+                        .get("agentPushNotifEnabled")
+                        .and_then(serde_json::Value::as_bool)
+                    {
+                        agent_push_notif_enabled = b;
+                    }
                 }
                 additional_working_dirs
                     .extend(permission::additional_directories_from_settings_json(&raw));
             }
         }
+        traits::session_flags::set_agent_push_notif_enabled(agent_push_notif_enabled);
         // Filesystem roots so file-path CONTENT rules (`Edit(src/**)`,
         // `Read(./secrets/**)`) match the call's path. `dirs` is not a mobile dep,
         // so HOME comes from the env (absent on a sandboxed device ⇒ `None`).
@@ -1242,8 +1285,8 @@ async fn build_mobile_inner_with_ask(
                 &permission::AutoGateInputs {
                     disabled_by_settings: auto_mode_disabled,
                     circuit_broken: false,
-                    model: cfg.default_model.clone(),
-                    provider: "firstParty".to_string(),
+                    model: default_model_id.clone(),
+                    provider: boot_auto_mode_provider.clone(),
                 },
             );
             mode = gated;
@@ -1707,8 +1750,23 @@ async fn build_mobile_inner_with_ask(
     // returns `None` and the model check is skipped (fail-open). Desktop mirror.
     if let Some(cell) = live_model_provider_cell.as_ref() {
         let session = orch.session();
+        let model_provider_profiles = model_provider_profiles.clone();
+        let profile_auto_mode_provider = profile_auto_mode_provider.clone();
         let _ = cell.set(std::sync::Arc::new(move || {
-            session.try_lock().ok().map(|s| s.model.clone())
+            session.try_lock().ok().map(|state| {
+                let profile = state
+                    .model_profile
+                    .as_ref()
+                    .or_else(|| model_provider_profiles.get(&state.model));
+                let provider = profile
+                    .and_then(|profile| profile_auto_mode_provider.get(profile))
+                    .cloned()
+                    .unwrap_or_else(|| "firstParty".to_string());
+                permission::LiveModelContext {
+                    model: state.model.clone(),
+                    provider,
+                }
+            })
         }));
     }
 

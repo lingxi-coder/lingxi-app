@@ -49,6 +49,43 @@ pub trait MemoryHierarchyProvider: Send + Sync {
 /// `conditional_rules_reminder_message`).
 pub struct RealMemoryHierarchyProvider;
 
+/// Discover external `@import` targets that would require project approval.
+///
+/// User-tier memory is intentionally excluded because Claude Code always
+/// allows its imports. Managed, project, and local files are scanned without
+/// opening any target outside `cwd`; the returned paths are de-duplicated in
+/// hierarchy order for the startup warning.
+#[must_use]
+pub fn pending_external_include_paths(cwd: &Path) -> Vec<std::path::PathBuf> {
+    if std::env::var_os("LINGXI_DISABLE_LINGXI_MDS").is_some_and(|v| !v.is_empty()) {
+        return Vec::new();
+    }
+    let Some(home) = dirs::home_dir() else {
+        return Vec::new();
+    };
+    let managed = memory::lingxi_md::hierarchy::managed_path();
+    let mut entries = memory::lingxi_md::hierarchy::walk(cwd, &home, Some(&managed)).entries;
+    entries.reverse();
+
+    let mut seen = std::collections::HashSet::new();
+    let mut paths = Vec::new();
+    for entry in entries {
+        if matches!(entry.tier, memory::lingxi_md::LingxiMdTier::User) {
+            continue;
+        }
+        for path in memory::lingxi_md::loader::discover_external_include_paths(
+            &entry.path,
+            cwd,
+            Some(&home),
+        ) {
+            if seen.insert(path.clone()) {
+                paths.push(path);
+            }
+        }
+    }
+    paths
+}
+
 #[async_trait]
 impl MemoryHierarchyProvider for RealMemoryHierarchyProvider {
     async fn load(&self, cwd: &Path) -> Vec<MemoryFile> {
@@ -86,9 +123,8 @@ impl MemoryHierarchyProvider for RealMemoryHierarchyProvider {
         // External-include approval (claudemd.ts:826-846): the User tier always
         // resolves external `@import`s; Managed/Project/Local do so ONLY when the
         // per-project `hasLingxiMdExternalIncludesApproved` flag is set in
-        // `~/.lingxi.json` (read once per load). The interactive approval PROMPT
-        // that sets the flag is a deferred follow-up; honoring an already-set
-        // flag is the value-plumbing parity.
+        // `~/.lingxi.json` (read once per load). Startup preflight owns the
+        // interactive warning and persists the decision before engine creation.
         let external_includes_approved = migrations::global_config::global_config_path()
             .map(|p| {
                 migrations::global_config::check_has_lingxi_md_external_includes_approved(&p, cwd)
@@ -189,7 +225,7 @@ fn include_external_for(tier: memory::lingxi_md::LingxiMdTier, approved: bool) -
 
 #[cfg(test)]
 mod external_include_tests {
-    use super::include_external_for;
+    use super::{include_external_for, pending_external_include_paths};
     use memory::lingxi_md::LingxiMdTier::{Local, Managed, Project, User};
 
     #[test]
@@ -208,6 +244,21 @@ mod external_include_tests {
                 "{tier:?} allowed when approved"
             );
         }
+    }
+
+    #[test]
+    fn pending_scan_reports_project_external_imports_once() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let cwd = root.path().join("project");
+        std::fs::create_dir_all(&cwd).expect("mkdir project");
+        let outside = root.path().join("shared.md");
+        std::fs::write(
+            cwd.join(branding::MEMORY_FILE),
+            format!("@{}\n@{}\n", outside.display(), outside.display()),
+        )
+        .expect("write memory file");
+
+        assert_eq!(pending_external_include_paths(&cwd), vec![outside]);
     }
 }
 

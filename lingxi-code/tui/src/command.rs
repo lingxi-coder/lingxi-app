@@ -581,8 +581,8 @@ pub const BUILTIN: &[SlashCommand] = &[
     SlashCommand {
         name: "/fast",
         aliases: &[],
-        description: "Toggle fast mode (Opus 4.8)",
-        dynamic_description: None,
+        description: "Toggle fast mode",
+        dynamic_description: Some(desc_fast),
         hint: "[on|off]",
         // Optional: `on`/`off` set the state; a bare `/fast` toggles it. Reaches
         // the handler either way rather than falling through as a prompt.
@@ -910,6 +910,13 @@ fn desc_terminal_setup() -> String {
     tui_core::terminal_setup::dynamic_description()
 }
 
+/// `/fast` description for the pinned 2.1.220 model table. Keep this local to
+/// the TUI registry: importing orchestrator prompt assembly here would create a
+/// production dependency cycle just to render one label.
+fn desc_fast() -> String {
+    "Toggle fast mode (Opus 5)".to_string()
+}
+
 /// `/exit` (alias `/quit`): exit the app. A free function (not a
 /// `ChatWidget` method) because it touches no widget state.
 fn cmd_exit(_widget: &mut ChatWidget, _args: &str) -> ChatOutcome {
@@ -1133,6 +1140,9 @@ mod tests {
     /// the detected terminal.
     #[test]
     fn dynamic_descriptions_reflect_live_state() {
+        let fast = BUILTIN.iter().find(|c| c.name == "/fast").unwrap();
+        assert_eq!(fast.describe(), "Toggle fast mode (Opus 5)");
+
         let sandbox = BUILTIN.iter().find(|c| c.name == "/sandbox").unwrap();
         // Unregistered (or registered-off) reads as disabled...
         let before = sandbox.describe();

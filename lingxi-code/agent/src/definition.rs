@@ -138,6 +138,14 @@ pub enum AgentPermissionMode {
     Bubble,
     /// Run isolated — never prompt; deny if not pre-approved.
     Isolated,
+    /// Use the session's default permission mode.
+    Default,
+    /// Allow edits without prompting, but still ask for higher-risk actions.
+    AcceptEdits,
+    /// Never ask; deny unresolved asks.
+    DontAsk,
+    /// Full bypass permissions mode.
+    BypassPermissions,
     /// Auto-approve every tool call (sandboxed contexts).
     Auto,
     /// Plan-only mode — read-only tools only.

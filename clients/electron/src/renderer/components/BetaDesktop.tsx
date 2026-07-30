@@ -355,6 +355,7 @@ export function BetaComposer({ bridge, ready }: { bridge: UseBridge; ready: bool
   const [selectedFiles, setSelectedFiles] = useState<string[]>([]);
   const [goalMode, setGoalMode] = useState(false);
   const [voiceState, setVoiceState] = useState<'idle' | 'listening' | 'unsupported' | 'denied'>('idle');
+  const [flowMode, setFlowMode] = useState(false);
   const [slashResultIndex, setSlashResultIndex] = useState(0);
   const input = useRef<HTMLDivElement>(null);
   const fileControl = useRef<HTMLDivElement>(null);
@@ -649,6 +650,21 @@ export function BetaComposer({ bridge, ready }: { bridge: UseBridge; ready: bool
     }
   };
 
+  const toggleStandardVoice = () => {
+    if (flowMode) setFlowMode(false);
+    toggleVoice();
+  };
+
+  const toggleFlowMode = () => {
+    if (flowMode) {
+      stopVoice();
+      setFlowMode(false);
+      return;
+    }
+    setFlowMode(true);
+    if (voiceState !== 'listening') toggleVoice();
+  };
+
   const submit = () => {
     const snapshot = input.current ? richPromptSnapshot(input.current) : { text, files: selectedFiles };
     const value = promptWithFileMentions(snapshot.text, snapshot.files);
@@ -852,6 +868,52 @@ export function BetaComposer({ bridge, ready }: { bridge: UseBridge; ready: bool
   const hasPrompt = Boolean(text.trim() || selectedFiles.length);
   return (
     <div style={{ flexShrink: 0, padding: '10px 18px 18px', background: t.stageBg }}>
+      {flowMode && (
+        <div
+          role="status"
+          aria-label="Flow mode is listening"
+          style={{
+            position: 'relative',
+            maxWidth: 980,
+            height: 156,
+            margin: '0 auto 10px',
+            overflow: 'hidden',
+            borderRadius: 22,
+            border: `1px solid ${t.accentBorder}`,
+            background: `radial-gradient(circle at 50% 48%, ${t.accentBg} 0%, ${t.surface} 72%)`,
+            boxShadow: '0 14px 36px rgba(0,0,0,.10)',
+          }}
+        >
+          <div style={{ position: 'absolute', left: 16, top: 13, display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ width: 7, height: 7, borderRadius: 99, background: t.accent, boxShadow: `0 0 12px ${t.accent}` }} />
+            <span style={{ color: t.text, fontSize: 12.5, fontWeight: 650 }}>心流模式</span>
+          </div>
+          <button
+            type="button"
+            aria-label="关闭心流模式"
+            title="关闭心流模式"
+            onClick={toggleFlowMode}
+            style={{ ...composerIconStyle(t), position: 'absolute', right: 12, top: 9, width: 32, height: 32, background: t.surfaceHover }}
+          >
+            <Icon name="x" size={13} color={t.text3} stroke={1.9} />
+          </button>
+          <svg
+            aria-hidden="true"
+            viewBox="0 0 180 64"
+            style={{ position: 'absolute', left: '50%', top: '48%', width: 210, height: 74, transform: 'translate(-50%, -50%)', color: t.accent }}
+          >
+            {[12, 23, 34, 48, 34, 23, 12].map((height, index) => (
+              <rect key={index} x={27 + index * 20} y={(64 - height) / 2} width="7" height={height} rx="3.5" fill="currentColor" opacity={0.5 + index * 0.06}>
+                <animate attributeName="height" values={`${height};${Math.max(12, 58 - Math.abs(3 - index) * 8)};${height}`} dur={`${1.05 + index * 0.09}s`} repeatCount="indefinite" />
+                <animate attributeName="y" values={`${(64 - height) / 2};${(64 - Math.max(12, 58 - Math.abs(3 - index) * 8)) / 2};${(64 - height) / 2}`} dur={`${1.05 + index * 0.09}s`} repeatCount="indefinite" />
+              </rect>
+            ))}
+          </svg>
+          <div style={{ position: 'absolute', left: 0, right: 0, bottom: 13, textAlign: 'center', color: t.text3, fontSize: 11.5 }}>
+            {voiceState === 'listening' ? '正在聆听 · 可继续使用下方输入框' : '轻点波形按钮继续聆听'}
+          </div>
+        </div>
+      )}
       <div className="beta-composer" style={{ position: 'relative', maxWidth: 980, margin: '0 auto', borderRadius: 26, border: `1px solid ${ready ? t.borderStrong : t.border}`, background: t.surface, boxShadow: '0 12px 34px rgba(0,0,0,.10)', overflow: 'visible' }}>
         <div
           ref={input}
@@ -1101,7 +1163,18 @@ export function BetaComposer({ bridge, ready }: { bridge: UseBridge; ready: bool
               ))}
             </div>}
           </div>
-          <button type="button" disabled={!ready || bridge.running} aria-label={voiceState === 'listening' ? 'Stop voice input' : 'Start voice input'} title={voiceState === 'unsupported' ? 'Voice input is unavailable in this environment' : voiceState === 'denied' ? 'Microphone permission was denied' : 'Voice input'} onClick={toggleVoice} style={{ ...composerIconStyle(t), color: voiceState === 'listening' ? t.accent : voiceState === 'denied' ? t.danger : t.text }}><Icon name="mic" size={20} color="currentColor" stroke={voiceState === 'listening' ? 2.1 : 1.7} /></button>
+          <button type="button" disabled={!ready || bridge.running} aria-label={voiceState === 'listening' && !flowMode ? 'Stop ordinary recording' : 'Start ordinary recording'} title={voiceState === 'unsupported' ? 'Voice input is unavailable in this environment' : voiceState === 'denied' ? 'Microphone permission was denied' : '普通录音'} onClick={toggleStandardVoice} style={{ ...composerIconStyle(t), width: 36, height: 36, color: voiceState === 'listening' && !flowMode ? t.accent : voiceState === 'denied' ? t.danger : t.text }}><Icon name="mic" size={20} color="currentColor" stroke={voiceState === 'listening' && !flowMode ? 2.1 : 1.7} /></button>
+          <button
+            type="button"
+            disabled={!ready || bridge.running}
+            aria-label={flowMode ? '关闭心流模式' : '开启心流模式'}
+            aria-pressed={flowMode}
+            title={flowMode ? '关闭心流模式' : '开启心流模式'}
+            onClick={toggleFlowMode}
+            style={{ ...composerIconStyle(t), width: 42, height: 42, background: flowMode ? t.accent : t.text, color: t.windowBg, boxShadow: flowMode ? `0 0 0 4px ${t.accentBg}` : 'none' }}
+          >
+            <Icon name="waveform" size={21} color={flowMode ? '#fff' : t.windowBg} stroke={2.15} />
+          </button>
           {bridge.running ? (
             <button type="button" onClick={() => invoke(() => bridge.cancel())} aria-label="Stop current turn" title="Stop" style={{ ...composerSendStyle(t, true), background: t.danger }}><Icon name="stop" size={15} color="#fff" /></button>
           ) : (

@@ -462,6 +462,7 @@ mod tests {
         std::env::remove_var("LINGXI_REMOTE");
         telemetry::test_clear_flag(AMBER_SENTINEL_FLAG);
         telemetry::test_clear_flag("tengu_kairos_push_notifications");
+        traits::session_flags::set_agent_push_notif_enabled(false);
         g
     }
     fn tool() -> MonitorTool {
@@ -508,11 +509,11 @@ mod tests {
     #[test]
     fn ljr_splice_appears_when_yke_on() {
         let _g = guard();
-        // Yke() = push flag && agentPushNotifEnabled. The setting has no port
-        // backend (always false), so even with the flag on Yke() is false — the
-        // splice stays absent, matching the binary default. Assert the gate wiring:
+        // Yke() = push flag && agentPushNotifEnabled.
         telemetry::test_set_flag("tengu_kairos_push_notifications", true);
         assert!(!cron::is_push_notif_enabled(), "Yke needs the setting too");
+        traits::session_flags::set_agent_push_notif_enabled(true);
+        assert!(cron::is_push_notif_enabled());
         let rt = tokio::runtime::Runtime::new().unwrap();
         let d = rt.block_on(tool().description(
             &json!({}),
@@ -520,11 +521,12 @@ mod tests {
                 is_non_interactive_session: false,
             },
         ));
-        assert!(!d.contains("send a PushNotification"));
+        assert!(d.contains("send a PushNotification"));
         // The lJr() helper itself produces the byte-exact splice when Yke() holds.
         // (Directly exercise the format to lock the string.)
         let splice = "\nWhen an event lands that the user would want to act on now \u{2014} an error appeared, the status they were waiting on flipped \u{2014} send a PushNotification. Not every event is worth a push; the ones that change what they'd do next are.";
         assert!(splice.contains("send a PushNotification"));
+        traits::session_flags::set_agent_push_notif_enabled(false);
         telemetry::test_clear_flag("tengu_kairos_push_notifications");
     }
 

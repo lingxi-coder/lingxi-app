@@ -2240,6 +2240,30 @@ fn diagnostic_row_survives(
     }
 }
 
+fn format_config_diagnostic_row(
+    warning: &mcp::config_diagnostics::McpConfigWarning,
+    is_last: bool,
+) -> String {
+    use mcp::config_diagnostics::McpConfigSeverity;
+
+    let tag = match warning.severity {
+        McpConfigSeverity::Fatal => "[Error]",
+        McpConfigSeverity::Warning => "[Warning]",
+    };
+    let name = warning
+        .server_name
+        .as_deref()
+        .map(|n| format!("[{n}] "))
+        .unwrap_or_default();
+    let path = if warning.path.is_empty() {
+        String::new()
+    } else {
+        format!("{}: ", warning.path)
+    };
+    let guide = if is_last { '└' } else { '├' };
+    format!(" {guide} {tag} {name}{path}{}", warning.message)
+}
+
 /// Print the oracle's "MCP config diagnostics" panel (`vgn`) as plain text
 /// under the `mcp list` output: title + docs link, then per-scope groups in
 /// the panel's order (user, project, local) with `[Error]` / `[Warning]` rows
@@ -2303,26 +2327,10 @@ fn print_config_diagnostics(suppress_warnings: bool) {
         }
         let row_count = rows.len();
         for (index, w) in rows.into_iter().enumerate() {
-            let tag = match w.severity {
-                McpConfigSeverity::Fatal => "[Error]",
-                McpConfigSeverity::Warning => "[Warning]",
-            };
-            let name = w
-                .server_name
-                .as_deref()
-                .map(|n| format!("[{n}] "))
-                .unwrap_or_default();
-            let path = if w.path.is_empty() {
-                String::new()
-            } else {
-                format!("{}: ", w.path)
-            };
-            let guide = if index + 1 == row_count {
-                "\u{2514}\u{2500}"
-            } else {
-                "\u{251c}\u{2500}"
-            };
-            println!("  {guide} {tag} {name}{path}{}", w.message);
+            println!(
+                "{}",
+                format_config_diagnostic_row(w, index + 1 == row_count)
+            );
         }
     }
 }
@@ -3089,9 +3097,10 @@ mod name_validation_tests {
 #[cfg(test)]
 mod pending_approval_tests {
     use super::{
-        classify_project_server, diagnostic_row_survives, is_pending_project_server,
-        is_rejected_project_server, listed_servers, project_server_is_approved,
-        unconnectable_status, ProjectServerState, NOT_CONFIGURED, PENDING_APPROVAL, REJECTED,
+        classify_project_server, diagnostic_row_survives, format_config_diagnostic_row,
+        is_pending_project_server, is_rejected_project_server, listed_servers,
+        project_server_is_approved, unconnectable_status, ProjectServerState, NOT_CONFIGURED,
+        PENDING_APPROVAL, REJECTED,
     };
     use mcp::connection::{ConfigScope, McpServerConfig};
     use std::collections::HashMap;
@@ -3316,6 +3325,30 @@ mod pending_approval_tests {
             &[],
             &["docs".to_string()]
         ));
+    }
+
+    #[test]
+    fn config_diagnostic_rows_use_tree_guides_and_full_path() {
+        use mcp::config_diagnostics::{McpConfigSeverity, McpConfigWarning};
+
+        let warning = McpConfigWarning {
+            scope: ConfigScope::Project,
+            severity: McpConfigSeverity::Warning,
+            server_name: Some("docs".into()),
+            path: "mcpServers.docs".into(),
+            message: "Skipped — invalid MCP server config for \"docs\": url: expected string, received undefined".into(),
+            suggestion: None,
+            file: None,
+        };
+
+        assert_eq!(
+            format_config_diagnostic_row(&warning, false),
+            " ├ [Warning] [docs] mcpServers.docs: Skipped — invalid MCP server config for \"docs\": url: expected string, received undefined"
+        );
+        assert_eq!(
+            format_config_diagnostic_row(&warning, true),
+            " └ [Warning] [docs] mcpServers.docs: Skipped — invalid MCP server config for \"docs\": url: expected string, received undefined"
+        );
     }
 
     /// `SZr` three-way classification: disabled always wins (rejected, even

@@ -79,8 +79,8 @@ impl BypassEnv for RealBypassEnv {
 
     async fn has_internet(&self) -> bool {
         // TS: axios HEAD http://1.1.1.1, 1s timeout, any success ⇒ true.
-        // NOTE: PosixHttp is a stub returning Err, so this is always `false`
-        // in the CLI build — inert (ant-only caller). See the module doc.
+        // `PosixHttp` is the production reqwest-backed transport; this remains
+        // unreachable in normal external builds because the caller is ant-only.
         let req = HttpRequest {
             method: HttpMethod::Head,
             url: "http://1.1.1.1".to_string(),

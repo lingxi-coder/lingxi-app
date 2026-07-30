@@ -25,7 +25,11 @@ pub struct SsrfGuard {
 }
 
 #[async_trait]
-pub(crate) trait DnsResolver: Send + Sync {
+/// DNS resolution seam used to validate every candidate address before an
+/// outbound HTTP hook is dispatched.
+pub trait DnsResolver: Send + Sync {
+    /// Resolve `host:port` to the candidate socket addresses the HTTP client
+    /// may use for a request.
     async fn lookup_host(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>, String>;
 }
 
@@ -130,14 +134,26 @@ impl SsrfGuard {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_test_resolver<R>(resolver: R) -> Self
+    /// Default guard with a caller-supplied DNS resolver.
+    ///
+    /// This keeps the production policy intact while allowing deterministic
+    /// resolution in integration tests or custom pinned-resolution flows.
+    #[must_use]
+    pub fn with_resolver<R>(resolver: R) -> Self
     where
         R: DnsResolver + 'static,
     {
         let mut guard = Self::with_defaults();
         guard.resolver = Arc::new(resolver);
         guard
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_resolver<R>(resolver: R) -> Self
+    where
+        R: DnsResolver + 'static,
+    {
+        Self::with_resolver(resolver)
     }
 
     /// Validate `url` against the configured policy.

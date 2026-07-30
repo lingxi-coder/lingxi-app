@@ -116,7 +116,7 @@ pub use persist::{
     PersistError,
 };
 pub use policy::{tool_wide_name_matches, PermissionPolicy};
-pub use policy_gate::{LiveModelProvider, PolicyPermissionGate};
+pub use policy_gate::{LiveModelContext, LiveModelProvider, PolicyPermissionGate};
 pub use prompting_gate::InteractivePromptingGate;
 pub use read_deny_globs::read_deny_exclude_globs;
 pub use read_only_command::command_is_read_only;

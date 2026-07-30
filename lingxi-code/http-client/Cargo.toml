@@ -16,6 +16,8 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # mTLS client-identity + custom CA-trust (CLAUDE_CODE_CLIENT_CERT/_KEY/_KEY_PASSPHRASE/CERT_STORE):
 # rustls-native-certs = OS trust store, pkcs8+pem = decrypt an encrypted PKCS#8 client key.
 rustls-native-certs = "0.8"
+rustls = "0.22"
+webpki-roots = "0.26"
 pkcs8 = { version = "0.10", features = ["encryption"] }
 pem = "3"
 eventsource-stream = "0.2"

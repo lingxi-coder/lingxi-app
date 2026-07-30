@@ -187,8 +187,8 @@ When the conversation grows long, some or all of the current context is summariz
 /// 1. The `! <command>` prompt tip — present when `Hr()` (isInteractive) is
 ///    true (the standard interactive path). Binary offset 206663224.
 /// 2. The Agent-tool delegation bullet — present when the Agent tool is in the
-///    tool set AND fork mode is disabled (`!Kz()`, the default). Binary offset
-///    206662560.
+///    tool set. Fork mode selects its context-inheriting background-fork
+///    variant; otherwise the standard specialized-agent guidance is used.
 ///
 /// Returns `None` when neither bullet applies (e.g. non-interactive session
 /// with no Agent tool), matching claude-code's "return null / empty" path.
@@ -225,13 +225,17 @@ fn session_guidance(
         bullets.push("If you need the user to run a shell command themselves (e.g., an interactive login like `gcloud auth login`), suggest they type `! <command>` in the prompt \u{2014} the `!` prefix runs the command in this session so its output lands directly in the conversation.".to_string());
     }
 
-    // Bullet 2: Agent-tool delegation guidance — fires when Agent tool present
-    // AND fork mode disabled. Binary: `a?zHm(n):null` where `a=e.has(ns)` and
-    // `zHm(n)` = `!n&&…Kz()? fork_text : standard_text`. When `n=false`
-    // (not isSimple) and `Kz()=false` (fork mode off, the default), the
-    // standard (non-fork) bullet fires.
+    // Binary `TMy(isSimple)`: simple/lean omits the bullet; fork mode selects
+    // the context-inheriting background-fork guidance; otherwise use the
+    // standard specialized-agent text.
+    if has_agent_tool && !lean {
+        if fork_mode_enabled {
+            bullets.push("Calling Agent with subagent_type: \"fork\" creates a fork \u{2014} it inherits your full conversation context, runs in the background, and keeps its tool output out of your context \u{2014} so you can keep chatting with the user while it works. Reach for it when research or multi-step implementation work would otherwise fill your context with raw output you won't need again. Other subagent_type values (or omitting it) start fresh agents with no context. **If you ARE the fork** \u{2014} execute directly; do not re-delegate.".to_string());
+        } else {
+            bullets.push("Use the Agent tool with specialized agents when the task at hand matches the agent's description. Subagents are valuable for parallelizing independent queries or for protecting the main context window from excessive results, but they should not be used excessively when not needed. Importantly, avoid duplicating work that subagents are already doing - if you delegate research to a subagent, do not also perform the same searches yourself.".to_string());
+        }
+    }
     if has_agent_tool && !fork_mode_enabled && !lean {
-        bullets.push("Use the Agent tool with specialized agents when the task at hand matches the agent's description. Subagents are valuable for parallelizing independent queries or for protecting the main context window from excessive results, but they should not be used excessively when not needed. Importantly, avoid duplicating work that subagents are already doing - if you delegate research to a subagent, do not also perform the same searches yourself.".to_string());
         let direct_search = if has_bash {
             "`find` or `grep` via the Bash tool"
         } else {
@@ -501,9 +505,8 @@ fn using_your_tools(tool_names: &[String]) -> Option<String> {
 ///   `# Session-specific guidance` `! <command>` bullet.
 /// * `has_agent_tool` — whether `"Agent"` is in the tool set. Used for the
 ///   Agent delegation bullet in `# Session-specific guidance`.
-/// * `fork_mode_enabled` — whether LINGXI_FORK_SUBAGENT is active
-///   (`Kz()`). Suppresses the standard Agent-tool bullet in favour of the
-///   fork variant (not implemented here; pass `false` for the default path).
+/// * `fork_mode_enabled` — whether LINGXI_FORK_SUBAGENT is active. Selects the
+///   context-inheriting background-fork Agent guidance.
 ///
 /// **Pre-environment section order** (claude-code `J0` / `cx()` ordering):
 /// 1. Opening paragraph (`Pym`)
@@ -1225,14 +1228,16 @@ mod tests {
     }
 
     #[test]
-    fn session_guidance_fork_mode_suppresses_agent_bullet() {
-        // When fork mode enabled, the standard Agent bullet is suppressed.
-        // The ! <command> bullet still fires (is_interactive=true).
+    fn session_guidance_fork_mode_uses_fork_specific_agent_bullet() {
         let sg =
             session_guidance(true, true, true, false, false, true).expect("still has ! bullet");
         assert!(sg.contains("suggest they type `! <command>`"));
-        // Standard Agent bullet absent; fork variant not yet implemented.
+        assert!(sg.contains("Calling Agent with subagent_type: \"fork\" creates a fork"));
+        assert!(
+            sg.contains("**If you ARE the fork** \u{2014} execute directly; do not re-delegate.")
+        );
         assert!(!sg.contains("Use the Agent tool with specialized"));
+        assert!(!sg.contains("For broad codebase exploration"));
     }
 
     #[test]

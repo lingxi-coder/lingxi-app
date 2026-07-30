@@ -21,6 +21,24 @@ pub struct HookResponse {
     pub decision: Option<HookDecision>,
     /// Human-readable reason for the decision (rendered to the user on Block).
     pub reason: Option<String>,
+    /// O2: the `command` half of this hook's `blockingError` object, when the
+    /// EXECUTOR synthesized the block rather than the hook's JSON declaring it.
+    ///
+    /// The plain-text **exit-2** arm renders `command` as `iSe(hook)` — the raw
+    /// per-arm text that ignores `statusMessage` — whereas the JSON
+    /// `decision:"block"` arm renders it as `qq(hook)`, which prefers
+    /// `statusMessage` (runner locals `te=iSe(q)` / `ee=qq(q)`, BIN off
+    /// ~237802650). The two differ ONLY for a hook that sets `statusMessage`,
+    /// which is exactly why the arm has to record its own choice here instead
+    /// of letting the merge step re-derive one.
+    ///
+    /// `None` — the common case — means "no arm-specific override", and the
+    /// merge step falls back to `qq(hook)`.
+    ///
+    /// NOT part of the hook's JSON wire contract: this is an internal channel
+    /// the executor fills in, so it is `#[serde(skip)]`.
+    #[serde(skip)]
+    pub block_command: Option<String>,
     /// Replacement input for the in-flight action (e.g. mutated tool input).
     pub updated_input: Option<Value>,
     /// Free-form `systemMessage` the hook returned (claude-code
@@ -263,6 +281,24 @@ pub struct AggregateHookResult {
     pub decision: Option<HookDecision>,
     /// Reason associated with the final decision.
     pub reason: Option<String>,
+    /// O2: the `command` half of the blocking hook's `blockingError` object,
+    /// frozen at the FIRST blocker exactly like [`Self::reason`] (with which it
+    /// forms one unit: `{blockingError: reason, command: block_command}`).
+    ///
+    /// `Some` only when [`Self::decision`] is [`HookDecision::Block`]. The
+    /// PostToolUse / PostToolUseFailure consumers need it to build the
+    /// `hook_blocking_error` attachment (BIN off 234726074 / 234728254), which
+    /// the executor deliberately does NOT build itself — the oracle's blocking
+    /// arm yields a bare signal with no attachment (BIN off 237805098).
+    ///
+    /// Which rendering lands here depends on the arm, per the runner's locals
+    /// `ee=qq(q)` / `te=iSe(q)` (BIN off ~237802650): the plain-text exit-2 arm
+    /// uses `iSe` (raw, ignores `statusMessage`), the JSON `decision:"block"`
+    /// arm uses `qq` (prefers `statusMessage`). See
+    /// [`HookResponse::block_command`].
+    ///
+    /// Additive default `None`, so callers that ignore it are unaffected.
+    pub block_command: Option<String>,
     /// Most recent `updated_input` if any hook mutated the action's input.
     pub modified_input: Option<Value>,
     /// All `systemMessage`s emitted by hooks, in execution order. These are

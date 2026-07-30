@@ -47,6 +47,7 @@ pub mod task_notifications_provider;
 pub mod teammate_idle_firer;
 pub mod todo_reminder_tasks_provider;
 pub mod token_budget;
+pub mod tool_result_persistence;
 pub mod transcript_paths;
 pub mod turn_loop;
 

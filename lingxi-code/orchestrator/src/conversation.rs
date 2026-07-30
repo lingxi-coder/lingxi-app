@@ -1082,6 +1082,49 @@ pub struct ConversationOrchestrator {
     /// history rather than on the message. Entries are removed on use, so a
     /// denial stamps exactly one line.
     pub(crate) tool_denial_kinds: Mutex<std::collections::HashMap<String, String>>,
+    /// `tool_use_id` → claude's message-level `toolUseResult` — the tool's RAW
+    /// STRUCTURED result (`se.data`, 2.1.220 BIN off **235420375**) on success,
+    /// or the plain string `` `Error: ${message}` `` on failure/denial
+    /// (BIN off **235424595**). Recorded at dispatch, consumed when the
+    /// `tool_result` user line is persisted.
+    ///
+    /// Same side-table rationale as [`Self::tool_denial_kinds`]: the value has
+    /// no place on the model wire, so it cannot ride on
+    /// `ConversationMessage`.
+    ///
+    /// RESIDUAL (deliberate): claude suppresses this field for SUBAGENT tool
+    /// results (`n.agentId && !preserveToolUseResults && …` in the same
+    /// expression). LingXi's `ConversationOrchestrator` has no `agent_id` —
+    /// subagents never run through it, so every orchestrator is a depth-0 main
+    /// chain, where claude writes the field on 17 280 / 17 280 real 2.1.220
+    /// lines. Porting the gate would mean inventing a field.
+    pub(crate) tool_use_results: Mutex<std::collections::HashMap<String, serde_json::Value>>,
+    /// `tool_use_id` → claude's message-level `mcpMeta`, a TOP-LEVEL sibling of
+    /// `toolUseResult` (never nested inside it). On the main chain
+    /// `Uks(agentId, meta)` (2.1.220 BIN off **232969604**) returns the MCP
+    /// server's meta verbatim when `agentId` is absent.
+    pub(crate) tool_use_mcp_meta: Mutex<std::collections::HashMap<String, serde_json::Value>>,
+    /// `tool_use_id` → claude's `sourceToolAssistantUUID`: the uuid of the
+    /// ASSISTANT transcript line that carried this `tool_use` block
+    /// (`sourceToolAssistantUUID: i.uuid` at every producer site). claude's
+    /// writer `insertMessageChain` (BIN off **237862200**) then derives
+    /// `parentUuid` FROM this field, which is why the two are equal on all
+    /// 96 794 real 2.1.220 lines that carry it.
+    pub(crate) tool_source_assistant_uuids: Mutex<std::collections::HashMap<String, String>>,
+    /// `tool_use_id` → hook `attachment` PAYLOADS produced while dispatching
+    /// that tool, awaiting persistence.
+    ///
+    /// claude yields a hook attachment INTO the message stream, so
+    /// `insertMessageChain` writes it after the `tool_result` it follows.
+    /// LingXi's `dispatch_tool_uses_tracked` runs the hooks but does not
+    /// persist anything — the driver persists the tool_result afterwards — so
+    /// the payloads are parked here and flushed by
+    /// [`Self::flush_hook_attachments`] immediately after that tool's
+    /// `tool_result` line lands, preserving claude's chain order. Keyed by
+    /// tool so a concurrent streaming batch cannot interleave one tool's
+    /// attachments behind another's result.
+    pub(crate) pending_hook_attachments:
+        Mutex<std::collections::HashMap<String, Vec<serde_json::Value>>>,
     /// Lazily-resolved git branch for the cwd — the parity analog of TS
     /// `getBranch()`, which claude-code calls once per `insertMessageChain`
     /// (`sessionStorage.ts:1012-1019`) and stamps onto every line of that chain.
@@ -1727,6 +1770,10 @@ impl ConversationOrchestrator {
             jsonl_writer: None,
             last_jsonl_uuid: Mutex::new(None),
             tool_denial_kinds: Mutex::new(std::collections::HashMap::new()),
+            tool_use_results: Mutex::new(std::collections::HashMap::new()),
+            tool_use_mcp_meta: Mutex::new(std::collections::HashMap::new()),
+            tool_source_assistant_uuids: Mutex::new(std::collections::HashMap::new()),
+            pending_hook_attachments: Mutex::new(std::collections::HashMap::new()),
             git_branch_cache: Mutex::new(None),
             current_prompt_id: Mutex::new(None),
             should_exit: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -1906,6 +1953,17 @@ impl ConversationOrchestrator {
             .insert(id.to_string(), kind.to_string());
     }
 
+    /// Drop a recorded kind whose block never reaches persistence.
+    ///
+    /// Needed because `take_tool_denial_kind` REMOVES on read: when the
+    /// streaming executor substitutes a synthetic result for a tool that
+    /// already recorded a kind at dispatch, the recorded kind must either be
+    /// rewritten to the synthetic's own kind or dropped, or it would both stamp
+    /// the wrong provenance and leak an entry for the rest of the session.
+    pub(crate) async fn remove_tool_denial_kind(&self, id: &protocol::ToolUseId) {
+        self.tool_denial_kinds.lock().await.remove(&id.to_string());
+    }
+
     /// Take the recorded kind for a message carrying EXACTLY ONE `tool_result`.
     ///
     /// The single-block guard is claude's own (`Tpr`): a user message with zero
@@ -1913,6 +1971,14 @@ impl ConversationOrchestrator {
     /// gets none. Taking (rather than reading) keeps a denial from stamping a
     /// second line if the same result were ever persisted twice.
     async fn take_tool_denial_kind(&self, msg: &ConversationMessage) -> Option<String> {
+        let only = Self::sole_tool_result_id(msg)?;
+        self.tool_denial_kinds.lock().await.remove(&only)
+    }
+
+    /// claude's `Tpr` guard, factored out so every tool-result head key shares
+    /// ONE definition: the id of the message's `tool_result` block when it
+    /// carries EXACTLY ONE, else `None`.
+    fn sole_tool_result_id(msg: &ConversationMessage) -> Option<String> {
         let ConversationMessage::User { content, .. } = msg else {
             return None;
         };
@@ -1920,10 +1986,113 @@ impl ConversationOrchestrator {
             protocol::ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id),
             _ => None,
         });
-        let (Some(only), None) = (results.next(), results.next()) else {
-            return None;
-        };
-        self.tool_denial_kinds.lock().await.remove(&only.to_string())
+        match (results.next(), results.next()) {
+            (Some(only), None) => Some(only.to_string()),
+            _ => None,
+        }
+    }
+
+    /// Record a tool's `toolUseResult` payload for its `tool_result` user line.
+    ///
+    /// `data` is claude's `se.data` on success (2.1.220 BIN off 235420375) —
+    /// the RAW structured result, not the model-facing string — or the plain
+    /// string `` `Error: ${message}` `` on the error/denial arms
+    /// (BIN off 235424595 / 235400200 / 232972524 / …).
+    pub(crate) async fn record_tool_use_result(
+        &self,
+        id: &protocol::ToolUseId,
+        data: serde_json::Value,
+    ) {
+        self.tool_use_results
+            .lock()
+            .await
+            .insert(id.to_string(), data);
+    }
+
+    /// Record an MCP tool's `mcpMeta` for its `tool_result` user line
+    /// (2.1.220 BIN off 232969604 — verbatim on the main chain).
+    pub(crate) async fn record_tool_use_mcp_meta(
+        &self,
+        id: &protocol::ToolUseId,
+        meta: serde_json::Value,
+    ) {
+        self.tool_use_mcp_meta
+            .lock()
+            .await
+            .insert(id.to_string(), meta);
+    }
+
+    /// Record the ASSISTANT line uuid that carried this `tool_use` block —
+    /// claude's `sourceToolAssistantUUID`.
+    pub(crate) async fn record_source_tool_assistant_uuid(
+        &self,
+        id: &protocol::ToolUseId,
+        assistant_line_uuid: String,
+    ) {
+        self.tool_source_assistant_uuids
+            .lock()
+            .await
+            .insert(id.to_string(), assistant_line_uuid);
+    }
+
+    /// Queue one hook `attachment` payload produced while dispatching `id`.
+    ///
+    /// Flushed by [`Self::flush_hook_attachments`] right after that tool's
+    /// `tool_result` line is written, which is where claude's own stream order
+    /// puts it.
+    pub(crate) async fn queue_hook_attachment(
+        &self,
+        id: &protocol::ToolUseId,
+        payload: serde_json::Value,
+    ) {
+        self.pending_hook_attachments
+            .lock()
+            .await
+            .entry(id.to_string())
+            .or_default()
+            .push(payload);
+    }
+
+    /// Remove and return the payloads queued for `id`, in production order.
+    pub(crate) async fn take_queued_hook_attachments(
+        &self,
+        id: &protocol::ToolUseId,
+    ) -> Vec<serde_json::Value> {
+        self.pending_hook_attachments
+            .lock()
+            .await
+            .remove(&id.to_string())
+            .unwrap_or_default()
+    }
+
+    /// Persist (and drain) every attachment queued for `id`.
+    pub(crate) async fn flush_hook_attachments(&self, id: &protocol::ToolUseId) {
+        for payload in self.take_queued_hook_attachments(id).await {
+            self.persist_hook_attachment_to_jsonl(payload).await;
+        }
+    }
+
+    /// Take the recorded `toolUseResult` under the same single-block guard.
+    async fn take_tool_use_result(&self, msg: &ConversationMessage) -> Option<serde_json::Value> {
+        let only = Self::sole_tool_result_id(msg)?;
+        self.tool_use_results.lock().await.remove(&only)
+    }
+
+    /// Take the recorded `mcpMeta` under the same single-block guard.
+    async fn take_tool_use_mcp_meta(&self, msg: &ConversationMessage) -> Option<serde_json::Value> {
+        let only = Self::sole_tool_result_id(msg)?;
+        self.tool_use_mcp_meta.lock().await.remove(&only)
+    }
+
+    /// Take the recorded `sourceToolAssistantUUID` under the same guard.
+    ///
+    /// Emitted ONLY on a map HIT: `run_turn`'s parent derivation falls back to
+    /// the turn's last assistant block uuid when the id is missing (a
+    /// defensive, in-practice-unreachable branch), and writing a uuid that is
+    /// not the tool_use's own line would be worse than omitting the key.
+    async fn take_source_tool_assistant_uuid(&self, msg: &ConversationMessage) -> Option<String> {
+        let only = Self::sole_tool_result_id(msg)?;
+        self.tool_source_assistant_uuids.lock().await.remove(&only)
     }
 
     pub async fn seed_last_jsonl_uuid(&self, last_uuid: Option<String>) {
@@ -5070,7 +5239,14 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             }
         }
         self.persist_message_to_jsonl(&tool_results_msg).await;
+        // O3: this recovery path dispatches exactly one tool — flush its hook
+        // attachment lines after its tool_result, and skip the ephemeral
+        // renderings (see the batched driver in `turn_loop.rs`).
+        self.flush_hook_attachments(tool_use_id).await;
         for (m, _source_id) in &injected_messages {
+            if m.is_meta() {
+                continue;
+            }
             self.persist_message_to_jsonl(m).await;
         }
         crate::turn_loop::apply_model_context_modifiers(self, context_modifiers).await;
@@ -5552,9 +5728,28 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // tool-result head places it after `timestamp` and before the common
         // trailer; the exactly-one-tool_result guard lives in
         // `take_tool_denial_kind`.
+        //
+        // O1: the same line also carries `toolUseResult` (the tool's raw
+        // structured result / the `Error: …` string), the MCP `mcpMeta`
+        // sibling, and `sourceToolAssistantUUID` (the assistant line that
+        // carried the `tool_use`). All four share the single-block guard and
+        // are emitted in `TOOL_RESULT_HEAD_EXTRA` order regardless of the
+        // order they are inserted here.
+        if let Some(result) = self.take_tool_use_result(msg).await {
+            jmsg.extra.insert("toolUseResult".to_string(), result);
+        }
         if let Some(kind) = self.take_tool_denial_kind(msg).await {
             jmsg.extra
                 .insert("toolDenialKind".to_string(), serde_json::Value::String(kind));
+        }
+        if let Some(meta) = self.take_tool_use_mcp_meta(msg).await {
+            jmsg.extra.insert("mcpMeta".to_string(), meta);
+        }
+        if let Some(src) = self.take_source_tool_assistant_uuid(msg).await {
+            jmsg.extra.insert(
+                "sourceToolAssistantUUID".to_string(),
+                serde_json::Value::String(src),
+            );
         }
         if msg.is_visible_in_transcript_only() || compact_summary {
             jmsg.extra.insert(
@@ -5698,6 +5893,13 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 }
             }
             if let protocol::ContentBlock::ToolUse { id, .. } = block {
+                // O1: the SAME uuid claude stamps as `sourceToolAssistantUUID`
+                // on this tool's `tool_result` user line (and from which its
+                // `parentUuid` is derived — BIN off 237862200). Recording it
+                // here keeps both turn-loop paths correct without touching any
+                // call site.
+                self.record_source_tool_assistant_uuid(id, line_uuid.clone())
+                    .await;
                 map.insert(id.clone(), line_uuid);
             }
         }
@@ -5770,6 +5972,17 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             Ok(()) => {
                 *self.last_jsonl_uuid.lock().await = Some(line_uuid.clone());
                 telemetry::emit_session_appended(&session_id_str, &line_uuid);
+                // O1: the batched path writes ONE merged line, so every
+                // `tool_use` block in it shares that line's uuid as its
+                // `sourceToolAssistantUUID`.
+                if let ConversationMessage::Assistant { content, .. } = msg {
+                    for block in content {
+                        if let protocol::ContentBlock::ToolUse { id, .. } = block {
+                            self.record_source_tool_assistant_uuid(id, line_uuid.clone())
+                                .await;
+                        }
+                    }
+                }
             }
             Err(e) => {
                 self.record_transcript_append_failure(&session_id_str, "assistant_merged", &e)
@@ -6796,6 +7009,24 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         let agg = self.run_session_start_hooks(source).await;
         let messages = Self::session_start_context_messages(&agg);
         if !messages.is_empty() {
+            // O3: the PERSISTED record is a `hook_additional_context`
+            // ATTACHMENT line (2.1.220 BIN off 232675554). Note the three
+            // LITERALS at that site — `hookName:"SessionStart"` (BARE, NOT
+            // `SessionStart:{source}` as the hook-RUN attachments use) and
+            // `toolUseID:"SessionStart"` (a literal, NOT a uuid). Confirmed by
+            // 129 real 2.1.220 records.
+            //
+            // The `user_meta` message below is the EPHEMERAL model rendering
+            // (`zr({content: Ww(…), isMeta:true})`, renderer BIN off
+            // 238107100); it only enters `history` and is never persisted from
+            // here, so this attachment is the sole on-disk record.
+            self.persist_hook_attachment_to_jsonl(hooks::additional_context_attachment(
+                "SessionStart",
+                "SessionStart",
+                "SessionStart",
+                &agg.additional_contexts,
+            ))
+            .await;
             self.session.lock().await.history.extend(messages);
         }
         // `initialUserMessage` → seed the initial user prompt (claude-code `$os`).
@@ -7245,6 +7476,30 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     /// (isMeta, `utils/messages.ts:4130-4137`). Best-effort persist, exactly like
     /// [`Self::append_stop_hook_feedback`].
     async fn append_stop_hook_stopped_continuation(&self, reason: &str) {
+        // O2: the PERSISTED record is a `hook_stopped_continuation` attachment
+        // (BIN off 233101239): `Va({type:"hook_stopped_continuation",
+        // message:N, hookName:"Stop", toolUseID:H, hookEvent:"Stop"})`, where
+        // `N = B.stopReason||"Stop hook prevented continuation"` and `H` is the
+        // Stop dispatch's `hook-${randomUUID()}` — the SAME id shape the
+        // dispatch's `hook_additional_context` record uses (BIN off 233240830).
+        //
+        // Written BEFORE the meta message so the transcript order matches the
+        // oracle's yield order.
+        //
+        // RESIDUAL: the oracle derives the meta message FROM this attachment at
+        // API-normalization time and persists only the attachment, whereas the
+        // port persists both. Left as-is deliberately — the existing message
+        // bytes are byte-locked by the FIX C tests and unpicking the double
+        // record is a separate change.
+        self.persist_hook_attachment_to_jsonl(hooks::stopped_continuation_attachment(
+            &hooks::HookAttachmentIdentity {
+                hook_name: "Stop".to_string(),
+                hook_event: "Stop".to_string(),
+                tool_use_id: format!("hook-{}", protocol::HookId::new().as_uuid()),
+            },
+            reason,
+        ))
+        .await;
         let content = format!(
             "<system-reminder>\nStop hook stopped continuation: {reason}\n</system-reminder>"
         );
@@ -8760,7 +9015,23 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 let mut all_modifiers: Vec<tool_api::ContextModifier> = Vec::new();
                 loop {
                     // (no-op unless a Bash sibling errored / the turn discarded)
-                    exec.apply_abort_to_pending();
+                    // A queued tool cancelled here gets the SAME
+                    // `user_interrupted` synthetic `drain_one` substitutes, and
+                    // claude-code stamps that message `user-rejected`
+                    // (`createSyntheticErrorMessage`, 2.1.220 @232972524), so
+                    // record the kind for the persisted tool_result line.
+                    for (id, reason) in exec.apply_abort_to_pending() {
+                        if reason == crate::streaming_executor::AbortReason::UserInterrupted {
+                            self.record_tool_denial_kind(&id, "user-rejected").await;
+                        }
+                        // O1: the synthetic that survives carries claude's own
+                        // short `toolUseResult` literal, not the block's text.
+                        self.record_tool_use_result(
+                            &id,
+                            crate::streaming_executor::synthetic_tool_use_result(reason),
+                        )
+                        .await;
+                    }
                     exec.process_queue();
                     // persist whatever just completed, in order
                     for drained in exec.take_newly_completed() {
@@ -8776,6 +9047,15 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                                 .or_else(|| assistant_uuid.clone()),
                             _ => assistant_uuid.clone(),
                         };
+                        // O3: keep this result's tool id so its hook
+                        // `attachment` lines can be flushed immediately after
+                        // its tool_result — claude's stream order.
+                        let drained_tool_use_id = match &drained.block {
+                            ContentBlock::ToolResult { tool_use_id, .. } => {
+                                Some(tool_use_id.clone())
+                            }
+                            _ => None,
+                        };
                         let user_msg = ConversationMessage::User {
                             id: MessageId::new(),
                             content: vec![drained.block],
@@ -8789,6 +9069,9 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                         }
                         self.persist_message_to_jsonl_with_parent(&user_msg, parent_uuid)
                             .await;
+                        if let Some(id) = &drained_tool_use_id {
+                            self.flush_hook_attachments(id).await;
+                        }
                         // SKILLEXEC.3 (streaming): replay tool-injected
                         // `new_messages` (the Skill tool's expanded prompt) right
                         // after the tool_result, recording each injected message's
@@ -8799,10 +9082,17 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                         // bytes stay byte-identical. Empty for every non-skill tool
                         // → strict no-op.
                         for (m, tool_use_id) in drained.injected {
+                            let is_ephemeral_rendering = m.is_meta();
                             {
                                 let mut s = self.session.lock().await;
                                 s.history.push(m.clone());
                                 s.injected_message_sources.insert(m.id(), tool_use_id);
+                            }
+                            // O3: an `is_meta` injected message is the
+                            // EPHEMERAL rendering of the attachment flushed
+                            // above — persisting it would duplicate the record.
+                            if is_ephemeral_rendering {
+                                continue;
                             }
                             self.persist_message_to_jsonl(&m).await;
                         }
@@ -11475,6 +11765,11 @@ DO NOT mention this to the user explicitly because they are already aware.\n</sy
         let (mut results, _prevent_continuation, _injected, modifiers) =
             crate::turn_loop::dispatch_tool_uses_tracked(self, &tool_uses, cancel).await?;
         crate::turn_loop::apply_model_context_modifiers(self, modifiers).await;
+        // O3: this host-driven path writes NO transcript line at all (the block
+        // is handed back to the caller), so a queued hook attachment would be a
+        // chain orphan. Drain it rather than leaving the entry in the map for
+        // the life of the session.
+        let _ = self.take_queued_hook_attachments(&tool_uses[0].0).await;
         Ok(results.pop())
     }
 
@@ -13300,6 +13595,68 @@ mod turn_recovery_tests {
                 .iter()
                 .map(protocol::ConversationMessage::text_content)
                 .collect::<Vec<_>>()
+        );
+    }
+
+    /// O2: the Stop hook's `preventContinuation` also PERSISTS a
+    /// `hook_stopped_continuation` attachment line (BIN off 233101239), not
+    /// just the meta message. `message` sits SECOND in key order and the
+    /// `toolUseID` is the dispatch's `hook-{uuid}`, matching the
+    /// `hook_additional_context` record the same Stop dispatch emits.
+    #[tokio::test]
+    async fn stop_prevent_continuation_persists_a_stopped_continuation_attachment() {
+        let et = mock_message_response(
+            vec![LlmContentBlock::Text {
+                text: "done".into(),
+                cache_control: None,
+            }],
+            Some("end_turn"),
+        );
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session.jsonl");
+        let fs: Arc<dyn traits::FileSystem> = Arc::new(
+            platform_posix::fs::PosixFileSystem::new(dir.path().to_path_buf()),
+        );
+        let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(
+            path.clone(),
+            fs,
+        ));
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![et])),
+            Arc::new(ToolRegistry::new()),
+            exec_prevent_stop(Some("STOP-CONTINUATION".into())).await,
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            dir.path().to_path_buf(),
+        )
+        .with_jsonl_writer(writer);
+
+        orch.run_turn("go").await.expect("turn ok");
+
+        let raw = std::fs::read_to_string(&path).expect("read jsonl");
+        let line = raw
+            .lines()
+            .find(|l| l.contains("hook_stopped_continuation"))
+            .unwrap_or_else(|| {
+                panic!("no hook_stopped_continuation attachment line in: {raw}")
+            });
+        let v: serde_json::Value = serde_json::from_str(line).expect("json line");
+        assert_eq!(v["type"], "attachment");
+        let a = &v["attachment"];
+        // Key ORDER is the contract — serde_json is pinned preserve_order.
+        let rendered = serde_json::to_string(a).expect("attachment json");
+        let tool_use_id = a["toolUseID"].as_str().expect("toolUseID").to_string();
+        assert_eq!(
+            rendered,
+            format!(
+                r#"{{"type":"hook_stopped_continuation","message":"STOP-CONTINUATION","hookName":"Stop","toolUseID":"{tool_use_id}","hookEvent":"Stop"}}"#
+            )
+        );
+        assert!(
+            tool_use_id.starts_with("hook-"),
+            "Stop mints `hook-${{randomUUID()}}`, got {tool_use_id}"
         );
     }
 
@@ -16791,6 +17148,73 @@ mod hook_attachment_persistence_tests {
         );
     }
 
+    /// O3: attachments queued during a tool dispatch are flushed — in
+    /// production order, as `attachment` lines — AFTER the `tool_result` they
+    /// follow, matching claude's stream order (`insertMessageChain` writes the
+    /// yielded attachment message right after the yielded tool_result), and the
+    /// queue is drained so a second flush is a no-op.
+    #[tokio::test]
+    async fn queued_hook_attachments_flush_after_the_tool_result_in_order() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session.jsonl");
+        let orch = orch_with_writer(dir.path(), path.clone());
+
+        let tuid = protocol::ToolUseId::new();
+        orch.queue_hook_attachment(
+            &tuid,
+            hooks::additional_context_attachment(
+                "PostToolUse:Edit",
+                tuid.as_str(),
+                "PostToolUse",
+                &["FIRST".to_string()],
+            ),
+        )
+        .await;
+        orch.queue_hook_attachment(
+            &tuid,
+            hooks::error_during_execution_attachment(
+                "SECOND",
+                "PostToolUse:Edit",
+                tuid.as_str(),
+                "PostToolUse",
+            ),
+        )
+        .await;
+
+        let msg = ConversationMessage::User {
+            id: protocol::MessageId::new(),
+            content: vec![protocol::ContentBlock::ToolResult {
+                tool_use_id: tuid.clone(),
+                content: "ok".into(),
+                is_error: false,
+                provider_tool_use_id: None,
+                content_blocks: None,
+            }],
+            is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+        };
+        orch.persist_message_to_jsonl(&msg).await;
+        orch.flush_hook_attachments(&tuid).await;
+        // Draining: a second flush writes nothing.
+        orch.flush_hook_attachments(&tuid).await;
+
+        let raw = std::fs::read_to_string(&path).expect("read jsonl");
+        let lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(lines.len(), 3, "tool_result + 2 attachments: {raw}");
+        let v0: serde_json::Value = serde_json::from_str(lines[0]).expect("json");
+        let v1: serde_json::Value = serde_json::from_str(lines[1]).expect("json");
+        let v2: serde_json::Value = serde_json::from_str(lines[2]).expect("json");
+        assert_eq!(v0["type"], "user");
+        assert_eq!(v1["attachment"]["type"], "hook_additional_context");
+        assert_eq!(v1["attachment"]["content"][0], "FIRST");
+        assert_eq!(v2["attachment"]["type"], "hook_error_during_execution");
+        assert_eq!(v2["attachment"]["content"], "SECOND");
+        // Linear chain: result → first attachment → second attachment.
+        assert_eq!(v1["parentUuid"], v0["uuid"]);
+        assert_eq!(v2["parentUuid"], v1["uuid"]);
+    }
+
     /// END-TO-END: a real `HookExecutorImpl` wired with the real sink and a
     /// real orchestrator writes ONE `attachment` transcript line for the hook
     /// run — the whole publish chain (executor → sink → JSONL writer), not just
@@ -17201,6 +17625,209 @@ mod persist_with_parent_tests {
             i_kind < i_trailer,
             "toolDenialKind must precede the common trailer, got: {line}"
         );
+    }
+
+    /// O1: a tool_result `user` line carries the tool's STRUCTURED result as
+    /// `toolUseResult` plus `sourceToolAssistantUUID` (== `parentUuid`).
+    ///
+    /// Oracle: the success arm at 2.1.220 BIN off **235420375** builds
+    /// `zr({content:Ft, …, toolUseResult: gt, …, sourceToolAssistantUUID:
+    /// i.uuid})` where `gt = se.data` is the tool's raw structured result
+    /// (NOT the model-facing string). The writer `insertMessageChain`
+    /// (BIN off **237862200**) then DERIVES `parentUuid` from
+    /// `sourceToolAssistantUUID`, which is why the two are equal on all
+    /// 96 794 real 2.1.220 lines carrying the field.
+    #[tokio::test]
+    async fn tool_result_line_carries_structured_result_and_source_assistant_uuid() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let session_path = dir.path().join("session.jsonl");
+        let orch = orch_with_writer(dir.path(), session_path.clone());
+
+        let tuid = protocol::ToolUseId::new();
+        // 1. The assistant line owning this tool_use.
+        let assistant = ConversationMessage::Assistant {
+            id: protocol::MessageId::new(),
+            content: vec![protocol::ContentBlock::ToolUse {
+                id: tuid.clone(),
+                name: "Bash".into(),
+                input: serde_json::json!({"command":"ls"}),
+                provider_id: None,
+            }],
+            stop_reason: None,
+        };
+        let map = orch.persist_assistant_per_block(&assistant, None, None).await;
+        let assistant_uuid = map.get(&tuid).cloned().expect("tool_use line uuid recorded");
+
+        // 2. The tool's structured result, recorded at dispatch.
+        orch.record_tool_use_result(
+            &tuid,
+            serde_json::json!({"stdout":"a\n","stderr":"","interrupted":false}),
+        )
+        .await;
+
+        let msg = ConversationMessage::User {
+            id: protocol::MessageId::new(),
+            content: vec![protocol::ContentBlock::ToolResult {
+                tool_use_id: tuid.clone(),
+                content: "a".into(),
+                is_error: false,
+                provider_tool_use_id: None,
+                content_blocks: None,
+            }],
+            is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+        };
+        orch.persist_message_to_jsonl_with_parent(&msg, Some(assistant_uuid.clone()))
+            .await;
+
+        let raw = std::fs::read_to_string(&session_path).expect("session file");
+        let line = raw.lines().nth(1).expect("tool_result line");
+        assert!(
+            line.contains(r#""toolUseResult":{"stdout":"a\n","stderr":"","interrupted":false}"#),
+            "structured result must ride verbatim, got: {line}"
+        );
+        assert!(
+            line.contains(&format!(r#""sourceToolAssistantUUID":"{assistant_uuid}""#)),
+            "source assistant uuid must be the tool_use's own line uuid, got: {line}"
+        );
+        assert!(
+            line.contains(&format!(r#""parentUuid":"{assistant_uuid}""#)),
+            "parentUuid must equal sourceToolAssistantUUID, got: {line}"
+        );
+        let i_res = line.find("toolUseResult").expect("result present");
+        let i_src = line
+            .find("sourceToolAssistantUUID")
+            .expect("source present");
+        let i_trailer = line.find("userType").expect("trailer present");
+        assert!(
+            i_res < i_src && i_src < i_trailer,
+            "head order must be toolUseResult < sourceToolAssistantUUID < trailer, got: {line}"
+        );
+    }
+
+    /// O1: a FAILED tool's `toolUseResult` is the plain string
+    /// `` `Error: ${message}` ``, NOT the `{"error":…}` object the port sends
+    /// on its stream-json wire (2.1.220 BIN off **235424595**).
+    #[tokio::test]
+    async fn error_tool_result_persists_the_bare_error_string() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let session_path = dir.path().join("session.jsonl");
+        let orch = orch_with_writer(dir.path(), session_path.clone());
+
+        let tuid = protocol::ToolUseId::new();
+        orch.record_tool_use_result(&tuid, serde_json::Value::String("Error: boom".into()))
+            .await;
+
+        let msg = ConversationMessage::User {
+            id: protocol::MessageId::new(),
+            content: vec![protocol::ContentBlock::ToolResult {
+                tool_use_id: tuid.clone(),
+                content: "Error: boom".into(),
+                is_error: true,
+                provider_tool_use_id: None,
+                content_blocks: None,
+            }],
+            is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+        };
+        orch.persist_message_to_jsonl(&msg).await;
+
+        let raw = std::fs::read_to_string(&session_path).expect("session file");
+        assert!(
+            raw.contains(r#""toolUseResult":"Error: boom""#),
+            "error result must be the bare string, got: {raw}"
+        );
+        assert!(
+            !raw.contains(r#""toolUseResult":{"error""#),
+            "the {{error:…}} object is the stream-json wire, not the transcript"
+        );
+    }
+
+    /// O1: an MCP tool's `mcpMeta` is a TOP-LEVEL sibling between
+    /// `toolDenialKind` and `sourceToolAssistantUUID`, never nested inside
+    /// `toolUseResult` (2.1.220 BIN off **232969604**: on the main chain
+    /// `Uks(undefined, meta)` returns the raw meta verbatim).
+    #[tokio::test]
+    async fn mcp_result_line_carries_mcp_meta_as_a_top_level_sibling() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let session_path = dir.path().join("session.jsonl");
+        let orch = orch_with_writer(dir.path(), session_path.clone());
+
+        let tuid = protocol::ToolUseId::new();
+        orch.record_tool_use_result(&tuid, serde_json::json!([{"type":"text","text":"hi"}]))
+            .await;
+        orch.record_tool_use_mcp_meta(&tuid, serde_json::json!({"_meta":{"claude/endTurn":true}}))
+            .await;
+
+        let msg = ConversationMessage::User {
+            id: protocol::MessageId::new(),
+            content: vec![protocol::ContentBlock::ToolResult {
+                tool_use_id: tuid.clone(),
+                content: "hi".into(),
+                is_error: false,
+                provider_tool_use_id: None,
+                content_blocks: None,
+            }],
+            is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+        };
+        orch.persist_message_to_jsonl(&msg).await;
+
+        let raw = std::fs::read_to_string(&session_path).expect("session file");
+        let line = raw.lines().next().expect("one line");
+        assert!(
+            line.contains(r#""mcpMeta":{"_meta":{"claude/endTurn":true}}"#),
+            "mcpMeta must ride verbatim, got: {line}"
+        );
+        let i_res = line.find(r#""toolUseResult""#).expect("result present");
+        let i_mcp = line.find(r#""mcpMeta""#).expect("meta present");
+        let i_trailer = line.find("userType").expect("trailer present");
+        assert!(
+            i_res < i_mcp && i_mcp < i_trailer,
+            "mcpMeta is a sibling AFTER toolUseResult and before the trailer, got: {line}"
+        );
+    }
+
+    /// O1: the exactly-one-`tool_result` guard (claude's `Tpr`) applies to
+    /// EVERY tool-result head key, not just `toolDenialKind` — a batched user
+    /// message carrying two results cannot attribute one message-level value.
+    #[tokio::test]
+    async fn two_tool_results_in_one_user_message_get_no_head_keys() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let session_path = dir.path().join("session.jsonl");
+        let orch = orch_with_writer(dir.path(), session_path.clone());
+
+        let a = protocol::ToolUseId::new();
+        let b = protocol::ToolUseId::new();
+        orch.record_tool_use_result(&a, serde_json::json!({"stdout":"a"}))
+            .await;
+        orch.record_tool_use_result(&b, serde_json::json!({"stdout":"b"}))
+            .await;
+        orch.record_source_tool_assistant_uuid(&a, "aaa".into())
+            .await;
+
+        let mk = |id: protocol::ToolUseId| protocol::ContentBlock::ToolResult {
+            tool_use_id: id,
+            content: "x".into(),
+            is_error: false,
+            provider_tool_use_id: None,
+            content_blocks: None,
+        };
+        let msg = ConversationMessage::User {
+            id: protocol::MessageId::new(),
+            content: vec![mk(a), mk(b)],
+            is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+        };
+        orch.persist_message_to_jsonl(&msg).await;
+
+        let raw = std::fs::read_to_string(&session_path).expect("session file");
+        assert!(!raw.contains("toolUseResult"), "got: {raw}");
+        assert!(!raw.contains("sourceToolAssistantUUID"), "got: {raw}");
     }
 
     /// An ALLOWED tool's line is byte-unchanged — no stray key.

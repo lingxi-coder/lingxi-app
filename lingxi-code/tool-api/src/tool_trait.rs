@@ -93,6 +93,38 @@ pub trait Tool: Send + Sync {
     /// truncation kicks in.
     fn max_result_size_chars(&self) -> usize;
 
+    /// BYTE length above which the model-facing `tool_result` content is
+    /// written to `<session>/tool-results/<id>.txt` and replaced by a
+    /// `<persisted-output>` reference
+    /// (see `orchestrator::tool_result_persistence`).
+    ///
+    /// This is claude-code 2.1.220's `maxResultSizeChars` folded through `M0u`
+    /// — a PERSISTENCE threshold, NOT a truncation cap. `None` is the oracle's
+    /// `maxResultSizeChars: 1/0` (`Infinity`, e.g. `Read` @ 2.1.220:235738242)
+    /// whose `!Number.isFinite(t)` arm returns early and never persists.
+    ///
+    /// Deliberately SEPARATE from [`Self::max_result_size_chars`]: the port
+    /// returns `30_000` there for `Read`/`Grep`/`Glob`/`Edit`, but a census of
+    /// every persisted result the real binary has written on this machine
+    /// (1 324 of them, across 3 271 transcripts) found **Bash and nothing
+    /// else** — reusing that value would persist output the oracle never does.
+    ///
+    /// This is the RAW declared value; the orchestrator folds it against
+    /// [`Self::persistence_threshold_ceiling`] exactly as `M0u` does
+    /// (`Math.min(maxResultSizeChars, ceiling ?? 50000)`).
+    fn persistence_threshold(&self) -> Option<usize> {
+        None
+    }
+
+    /// `persistenceThresholdCeiling` — the per-tool cap `M0u` folds
+    /// [`Self::persistence_threshold`] against. `None` selects the oracle's
+    /// `AKr = 50000` default (2.1.220 BIN off **230268660**); the MCP tool
+    /// factory (BIN off 232139111) is the only builtin that raises it, to
+    /// `gor = 500000`.
+    fn persistence_threshold_ceiling(&self) -> Option<usize> {
+        None
+    }
+
     /// Whether the tool is safe to run concurrently with other tools given
     /// this specific input. Read-only tools typically return `true`.
     fn is_concurrency_safe(&self, input: &Value) -> bool;

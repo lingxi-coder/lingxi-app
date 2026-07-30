@@ -897,28 +897,51 @@ fn lingxi_config_home_dir() -> PathBuf {
 // The former `CYBER_RISK_MITIGATION_REMINDER` const, `MITIGATION_EXEMPT_MODELS`,
 // and `should_include_file_read_mitigation` were deleted accordingly.
 
-/// Model-facing stub for the Read dedup (`file_unchanged`) long form — byte-locked
-/// to claude-code `tld` (`FileReadTool/prompt.ts:7`, binary offset ~196574xxx).
-/// Used when the model's prior Read result already contains the current content
-/// and the file hasn't changed on disk. The dedup gate (`Jbn`) checks for
-/// EITHER this long form (`tld`) or the short form (`jbi` = `FILE_UNCHANGED_SHORT`).
+/// Model-facing Read-dedup (`file_unchanged`) LONG form — byte-locked to
+/// claude-code `FOg` (2.1.220 binary offset 229141593; `tld` in older builds).
+///
+/// **DETECT-ONLY in 2.1.220.** `FOg` has NO PRODUCER in the current binary:
+/// `LC_ALL=C grep -abo -F 'FOg'` yields exactly two hits in the readable-JS
+/// region — its own definition (@229141593) and the detector
+/// `joo(e){return e.startsWith(FOg)||e.startsWith(Sou)||e.startsWith(Tou)}`
+/// (@229139264, `FOg` reference @229139291). It is retained solely to recognise
+/// dedup stubs written into transcripts by OLDER versions. The live producer is
+/// [`FILE_UNCHANGED_SHORT`] (`Sou`, @229141759) via `Eou(){return Sou}`
+/// (@229139080), selected by the result renderer at @235742950.
 pub const FILE_UNCHANGED_STUB: &str = "File unchanged since last read. The content from the earlier Read tool_result in this conversation is still current — refer to that instead of re-reading.";
 
-/// Short-form Read dedup message — byte-locked to claude-code `jbi`
-/// (binary offset ~196575xxx, returned by `Ybi(){return jbi}`).
-/// The dedup detector `Jbn(e)` checks `e.startsWith(tld)||e.startsWith(jbi)`,
-/// so the model must emit `jbi` when this short form is selected. The em-dash is
-/// U+2014, matching the binary literal exactly.
+/// Short-form Read dedup message — byte-locked to claude-code `Sou`
+/// (2.1.220 binary offset 229141759), returned by `Eou(){return Sou}`
+/// (@229139080). This is the ONLY string the non-seeded `file_unchanged` branch
+/// emits in 2.1.220 (renderer @235742950:
+/// `content: e.source==="seeded" ? vou(...) : Eou()`). The em-dash is U+2014,
+/// matching the binary literal exactly.
 pub const FILE_UNCHANGED_SHORT: &str =
     "Wasted call \u{2014} file unchanged since your last Read. Refer to that earlier tool_result instead.";
 
-/// `Jbn(e)` — byte-locked dedup detector: returns `true` when `e` starts with
-/// either the long form ([`FILE_UNCHANGED_STUB`] / `tld`) or the short form
-/// ([`FILE_UNCHANGED_SHORT`] / `jbi`). Used to detect a dedup response in
+/// `Tou` (2.1.220 binary offset 229141864) — the constant PREFIX of the SEEDED
+/// dedup stub built by
+/// ``vou(e){return `${Tou} (see "Contents of ${e}" above) and has not changed on
+/// disk. Use that content instead of re-reading.</system-reminder>`}`` (@229139106).
+///
+/// Detect-side only in LingXi: the port does not yet seed memory files into
+/// `read_file_state`, so nothing produces this form (see the `seeded_from_context`
+/// residual). It is still matched by [`is_dedup_result`] so the detector is a
+/// 1:1 port of `joo`.
+pub const FILE_UNCHANGED_SEEDED_PREFIX: &str =
+    "<system-reminder>This file is already in your context";
+
+/// `joo(e)` (2.1.220 binary offset 229139264) — byte-locked dedup detector:
+/// `e.startsWith(FOg)||e.startsWith(Sou)||e.startsWith(Tou)`, i.e. the legacy
+/// long form ([`FILE_UNCHANGED_STUB`]), the live short form
+/// ([`FILE_UNCHANGED_SHORT`]) or the seeded-stub prefix
+/// ([`FILE_UNCHANGED_SEEDED_PREFIX`]). Used to detect a dedup response in
 /// tool-result filtering / context compaction that must not re-expand.
 #[must_use]
 pub fn is_dedup_result(s: &str) -> bool {
-    s.starts_with(FILE_UNCHANGED_STUB) || s.starts_with(FILE_UNCHANGED_SHORT)
+    s.starts_with(FILE_UNCHANGED_STUB)
+        || s.starts_with(FILE_UNCHANGED_SHORT)
+        || s.starts_with(FILE_UNCHANGED_SEEDED_PREFIX)
 }
 
 /// Model-facing warning when a read targets an existing but empty file —
@@ -1828,13 +1851,20 @@ impl Tool for FileReadTool {
                 self.emit_completed(&invocation_id, 0, started.elapsed().as_millis() as u64)
                     .await;
                 return Ok(ToolCallResult {
-                    // binary `{type:"file_unchanged", file:{filePath}}`; the stub
-                    // rides on `model_content`, not inside `data`.
+                    // binary `{type:"file_unchanged", file:{filePath}}` (@235741168);
+                    // the stub rides on `model_content`, not inside `data`. The
+                    // oracle's third field `source:"seeded"` is only set by the
+                    // seeded branch, which LingXi does not have (no memory files
+                    // are seeded into `read_file_state`), so it is omitted here —
+                    // matching the oracle's non-seeded return exactly.
                     data: json!({
                         "type": "file_unchanged",
                         "file": { "filePath": canon.display().to_string() },
                     }),
-                    model_content: Some(FILE_UNCHANGED_STUB.to_string()),
+                    // Renderer @235742950 picks `Eou()` = `Sou` for a non-seeded
+                    // `file_unchanged`. The long form `FOg` has no producer in
+                    // 2.1.220 — see [`FILE_UNCHANGED_STUB`].
+                    model_content: Some(FILE_UNCHANGED_SHORT.to_string()),
                     new_messages: vec![],
                     context_modifier: None,
                     is_error: false,
@@ -2394,9 +2424,10 @@ mod tests {
 
     #[test]
     fn is_dedup_result_detects_both_forms() {
-        // `Jbn(e)` — checks startsWith(tld) || startsWith(jbi). The function
-        // uses the FULL constant as the prefix — a string must start with the
-        // full `FILE_UNCHANGED_STUB` or `FILE_UNCHANGED_SHORT` text to match.
+        // `joo(e)` (@229139264) — checks
+        //   startsWith(FOg) || startsWith(Sou) || startsWith(Tou).
+        // The first two use the FULL constant as the prefix; `Tou` is itself a
+        // proper prefix of the seeded stub built by `vou` (@229139106).
         assert!(is_dedup_result(FILE_UNCHANGED_STUB));
         assert!(is_dedup_result(FILE_UNCHANGED_SHORT));
         // A string that starts with the full long-form constant (e.g. with
@@ -2412,6 +2443,29 @@ mod tests {
         assert!(!is_dedup_result("File has been modified since read"));
         assert!(!is_dedup_result("File does not exist."));
         assert!(!is_dedup_result("Wasted call")); // too short to match jbi
+    }
+
+    #[test]
+    fn is_dedup_result_detects_the_seeded_prefix() {
+        // `joo`'s third arm: `e.startsWith(Tou)` where
+        // Tou = "<system-reminder>This file is already in your context" (@229141864).
+        // `vou(path)` (@229139106) builds the full seeded stub by appending
+        // ` (see "Contents of ${path}" above) and has not changed on disk. Use that
+        // content instead of re-reading.</system-reminder>`.
+        assert_eq!(
+            FILE_UNCHANGED_SEEDED_PREFIX,
+            "<system-reminder>This file is already in your context"
+        );
+        assert!(is_dedup_result(FILE_UNCHANGED_SEEDED_PREFIX));
+        let seeded = format!(
+            "{FILE_UNCHANGED_SEEDED_PREFIX} (see \"Contents of /repo/LINGXI.md\" above) and has not changed on disk. Use that content instead of re-reading.</system-reminder>"
+        );
+        assert!(is_dedup_result(&seeded));
+        // A near-miss system-reminder must NOT match.
+        assert!(!is_dedup_result(
+            "<system-reminder>This file is already"
+        ));
+        assert!(!is_dedup_result(EMPTY_FILE_WARNING));
     }
 
     #[test]
@@ -3370,7 +3424,48 @@ mod tests {
         // model_content channel, not inside data.
         assert!(second.data.get("content").is_none());
         assert!(second.data["file"]["filePath"].is_string());
-        assert_eq!(second.model_content.as_deref(), Some(FILE_UNCHANGED_STUB));
+        assert_eq!(second.model_content.as_deref(), Some(FILE_UNCHANGED_SHORT));
+    }
+
+    #[tokio::test]
+    async fn dedup_returns_the_short_form_wasted_call_stub() {
+        // 2.1.220 result renderer (binary @235742950):
+        //   case"file_unchanged": content = e.source==="seeded" ? vou(...) : Eou()
+        // and `function Eou(){return Sou}` (@229139080), where
+        //   Sou = "Wasted call — file unchanged since your last Read. …" (@229141759).
+        // The long form `FOg` (@229141593 = FILE_UNCHANGED_STUB) has NO PRODUCER in
+        // 2.1.220: `LC_ALL=C grep -abo -F 'FOg'` over the binary yields exactly two
+        // JS-region hits — its definition (@229141593) and the detector
+        // `joo(e){return e.startsWith(FOg)||e.startsWith(Sou)||e.startsWith(Tou)}`
+        // (@229139264/@229139291). It survives only to recognise stubs written by
+        // older versions, so the non-seeded dedup branch must emit `Sou`.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("short-stub.txt");
+        std::fs::write(&target, "one\ntwo\n").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileReadTool::new(ctx);
+        tool.call(
+            json!({ "file_path": target.to_str().unwrap() }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+        let second = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.data["type"], "file_unchanged");
+        assert_eq!(
+            second.model_content.as_deref(),
+            Some(
+                "Wasted call \u{2014} file unchanged since your last Read. Refer to that earlier tool_result instead."
+            )
+        );
     }
 
     #[tokio::test]

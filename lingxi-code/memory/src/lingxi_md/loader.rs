@@ -1134,7 +1134,7 @@ mod tests {
         );
         let small = mk("/y/LINGXI.md", "small".to_string());
         let files = vec![big.clone(), small];
-        let large = get_large_memory_files(&files);
+        let large = get_large_memory_files(&files, crate::MAX_MEMORY_CHARACTER_COUNT);
         assert_eq!(large.len(), 1, "only the >40k file is flagged");
         assert_eq!(large[0].path, big.path);
         // Body is NOT truncated — still fully loaded.

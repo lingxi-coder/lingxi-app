@@ -98,6 +98,28 @@ impl LspClient {
             InitializeParams {
                 process_id: Some(std::process::id()),
                 root_uri: Some(parsed_root),
+                // NOT A GAP — `workspace/didChangeWatchedFiles`. A 2.1.220
+                // whole-binary census finds the string exactly ONCE, at offset
+                // 254097974, inside the VENDORED
+                // `vscode-languageserver-protocol` bundle:
+                //   (function(oe){oe.method="workspace/didChangeWatchedFiles",…})
+                //     (de||(e.DidChangeWatchedFilesNotification=de={}))
+                // i.e. a library constant declaration with zero call sites.
+                // claude-code's OWN LSP client (@232392199) declares only
+                // `workspace = {configuration, workspaceFolders}` and sends
+                // exactly one workspace notification —
+                // `workspace/didChangeConfiguration`, and only when the server
+                // config carries `settings`. It never registers a file watcher
+                // and never sends `didChangeWatchedFiles`, so emitting one here
+                // would be ANTI-parity: real language servers act on it.
+                //
+                // STILL A GAP (separate cluster, not fixed here): LingXi sends
+                // no `workspace/didChangeConfiguration` at all —
+                // `traits::LspServerConfig` has no `settings` field to source
+                // the payload from — and the capability shape below diverges
+                // from the oracle's (`configuration: settings!=null`,
+                // `workspaceFolders:!1`, plus a large `textDocument` block and
+                // `general.positionEncodings:["utf-16"]`).
                 capabilities: ClientCapabilities {
                     workspace: Some(WorkspaceClientCapabilities {
                         workspace_folders: Some(true),

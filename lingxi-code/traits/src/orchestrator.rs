@@ -2094,10 +2094,20 @@ pub trait OutputStream: Send + Sync {
     /// implementors and a signature change would touch all of them for a field
     /// only the stream-json transport can carry.
     ///
-    /// NOT YET STAMPED by LingXi: the abort/cancel paths still call
-    /// [`Self::emit_tool_result`], so their frames carry no provenance where
-    /// 2.1.220 carries `cancelled` / `interrupted`. A missing value, not a
-    /// wrong one.
+    /// STAMPED by LingXi today: the five classifier kinds, plus `cancelled` on
+    /// the pre-cancel guard (which claude-code hardcodes rather than deriving).
+    ///
+    /// NOT yet stamped: `interrupted`. Its only site is a tool aborted
+    /// mid-execution, whose result the streaming executor replaces with a
+    /// synthetic block that never reaches an `emit_*` call at all — claude-code
+    /// generates its SDK frame from the message stream AFTER substitution,
+    /// whereas LingXi emits at dispatch time, before the abort is known. That
+    /// emission-point difference has to be resolved before the stamp has
+    /// anywhere to attach; adding it at the collection point would double-emit
+    /// for one `tool_use_id`. Note also that `YDd` (offset 235394375) splits
+    /// `cancelled` from `interrupted` on a `background` abort reason, a concept
+    /// LingXi has no equivalent of — every LingXi abort is the `interrupted`
+    /// branch today.
     async fn emit_tool_result_denied(
         &self,
         id: &protocol::ToolUseId,

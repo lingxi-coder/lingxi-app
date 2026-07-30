@@ -2510,12 +2510,19 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 provider_tool_use_id: provider_id.clone(),
                 content_blocks: None,
             };
+            // Denial provenance: claude-code HARDCODES `toolDenialKind:"cancelled"`
+            // at this site (binary offset 235399713) rather than routing through
+            // its `YDd` abort-reason classifier, so this needs no abort-reason
+            // plumbing to be faithful. `cancelled` is not one of the five kinds
+            // the permission classifier emits, but it IS an ordinary
+            // `toolDenialKind` value that produces a `tool_result_meta` entry.
             orch.output
-                .emit_tool_result(
+                .emit_tool_result_denied(
                     tool_use_id,
                     name,
                     CANCEL_MESSAGE,
                     &serde_json::json!({ "error": CANCEL_MESSAGE }),
+                    "cancelled",
                 )
                 .await;
             results.push(result_block);
@@ -4388,5 +4395,242 @@ mod tool_denial_kind_tests {
                 "{kind:?} is not a classifier decision, so the reason text is irrelevant"
             );
         }
+    }
+}
+
+// End-to-end pin for the denial-provenance WIRING (as opposed to the
+// `tool_denial_kind` unit tests above, which only cover the pure classifier).
+// Kept in its own module rather than in the concurrently-edited
+// turn_loop_test.rs, per the convention the modules above already follow.
+//
+// This seam is exactly where the first version of this feature was wrong:
+// `MockOutputStream` inherits the DEFAULTED `emit_tool_result_denied` unless it
+// overrides it, so before that override existed every deny-path test passed no
+// matter what kind the turn loop computed.
+#[cfg(test)]
+mod denial_kind_wiring_tests {
+    use crate::conversation::ConversationOrchestrator;
+    use crate::test_support::{
+        noop_hook_executor, MockApiClient, MockOutputStream, StaticMemoryProvider,
+    };
+    use crate::turn_loop::dispatch_tool_uses_tracked;
+    use crate::OrchestratorConfig;
+    use async_trait::async_trait;
+    use protocol::ToolUseId;
+    use serde_json::json;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tool_api::context::ToolUseContext;
+    use tool_api::progress::ToolProgressSender;
+    use tool_api::registry::ToolRegistry;
+    use tool_api::tool_trait::{
+        DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
+        ValidationError,
+    };
+    use traits::permission_gate::{
+        PermissionDecision, PermissionDecisionSource, PermissionGate, PermissionResolution,
+    };
+
+    /// A gate that always denies through the SOURCED resolution, with the
+    /// structured provenance fields under test control.
+    struct ProvenanceDenyGate {
+        decision_reason_type: Option<String>,
+        decision_reason: Option<String>,
+        behavior_ask: bool,
+    }
+
+    #[async_trait]
+    impl PermissionGate for ProvenanceDenyGate {
+        async fn check(&self, _t: &str, _i: &serde_json::Value) -> PermissionDecision {
+            PermissionDecision::Deny {
+                reason: "denied-for-test".into(),
+            }
+        }
+        async fn resolve_detailed(&self, _t: &str, _i: &serde_json::Value) -> PermissionResolution {
+            PermissionResolution::Deny {
+                reason: "denied-for-test".into(),
+                source: PermissionDecisionSource::Rule,
+                rule_source: None,
+                decision_reason_type: self.decision_reason_type.clone(),
+                decision_reason: self.decision_reason.clone(),
+                behavior_ask: self.behavior_ask,
+                content_blocks: Vec::new(),
+            }
+        }
+    }
+
+    struct DeniedTool;
+    #[async_trait]
+    impl Tool for DeniedTool {
+        fn name(&self) -> &str {
+            "Denied"
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
+                once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
+            &SCHEMA
+        }
+        fn is_enabled(&self, _: &ToolStaticContext) -> bool {
+            true
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1024 * 1024
+        }
+        fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
+            true
+        }
+        fn is_read_only(&self, _: &serde_json::Value) -> bool {
+            true
+        }
+        async fn validate_input(
+            &self,
+            _: &serde_json::Value,
+            _: &ToolUseContext,
+        ) -> Result<(), ValidationError> {
+            Ok(())
+        }
+        async fn check_permissions(
+            &self,
+            _: &serde_json::Value,
+            _: &ToolUseContext,
+        ) -> permission::PermissionResult {
+            permission::PermissionResult::Allow {
+                reason: permission::PermissionDecisionReason::Other {
+                    reason: "test".into(),
+                },
+                updated_input: None,
+                update_destination: None,
+                metadata: permission::result::PermissionMetadata::default(),
+            }
+        }
+        async fn description(&self, _: &serde_json::Value, _: &DescriptionOptions) -> String {
+            "denied".into()
+        }
+        async fn prompt(&self, _: &PromptOptions) -> String {
+            String::new()
+        }
+        async fn call(
+            &self,
+            _: serde_json::Value,
+            _: ToolUseContext,
+            _: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            panic!("DeniedTool::call must never run — the gate denies it");
+        }
+    }
+
+    /// Dispatch one denied tool through the given gate and return the
+    /// `(tool_use_id, denial_kind)` pairs the output stream observed.
+    async fn denial_kinds_for(gate: ProvenanceDenyGate) -> Vec<(ToolUseId, String)> {
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(DeniedTool) as Arc<dyn Tool>);
+        let output = MockOutputStream::new();
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(registry),
+            noop_hook_executor(),
+            Arc::new(gate),
+            Arc::new(output.clone()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        );
+        let uses = vec![(ToolUseId::new(), "Denied".to_string(), json!({}), None)];
+        dispatch_tool_uses_tracked(&orch, &uses, None)
+            .await
+            .expect("dispatch must succeed on a denied tool");
+        output.denial_snapshot().await
+    }
+
+    /// A plain rule denial reaches the output stream stamped `permission-rule`.
+    /// This is the value the SDK/stdio transport must carry: claude-code's
+    /// `JMn` preserves the host's `behavior`, so a host deny is
+    /// `behavior:"deny"` + a `permissionPromptTool` reason and never takes the
+    /// `ask` branch. An earlier revision stamped `user-rejected` here.
+    #[tokio::test]
+    async fn rule_denial_is_emitted_as_permission_rule() {
+        let kinds = denial_kinds_for(ProvenanceDenyGate {
+            decision_reason_type: Some("rule".into()),
+            decision_reason: None,
+            behavior_ask: false,
+        })
+        .await;
+        assert_eq!(
+            kinds.len(),
+            1,
+            "the denied tool must reach emit_tool_result_denied exactly once"
+        );
+        assert_eq!(kinds[0].1, "permission-rule");
+    }
+
+    /// An auto-mode classifier denial is carried through as `automode-blocked`
+    /// — proving the classifier reason really is threaded from the sourced
+    /// resolution arm to the emit site, not just computed locally.
+    #[tokio::test]
+    async fn classifier_denial_is_emitted_as_automode_blocked() {
+        let kinds = denial_kinds_for(ProvenanceDenyGate {
+            decision_reason_type: Some("classifier".into()),
+            decision_reason: None,
+            behavior_ask: false,
+        })
+        .await;
+        assert_eq!(kinds.len(), 1);
+        assert_eq!(kinds[0].1, "automode-blocked");
+    }
+
+    /// A tool skipped by the PRE-CANCEL guard is stamped `cancelled`.
+    ///
+    /// claude-code hardcodes `toolDenialKind:"cancelled"` at this site (binary
+    /// offset 235399713) — it does NOT route through the `YDd` abort-reason
+    /// classifier, so no abort-reason plumbing is needed to be faithful here.
+    #[tokio::test]
+    async fn pre_cancelled_tool_is_emitted_as_cancelled() {
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(DeniedTool) as Arc<dyn Tool>);
+        let output = MockOutputStream::new();
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(registry),
+            noop_hook_executor(),
+            Arc::new(ProvenanceDenyGate {
+                decision_reason_type: None,
+                decision_reason: None,
+                behavior_ask: false,
+            }),
+            Arc::new(output.clone()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        );
+        let cancel = tokio_util::sync::CancellationToken::new();
+        cancel.cancel(); // fire BEFORE dispatch
+        let uses = vec![(ToolUseId::new(), "Denied".to_string(), json!({}), None)];
+        dispatch_tool_uses_tracked(&orch, &uses, Some(cancel))
+            .await
+            .expect("dispatch must succeed on a pre-cancelled tool");
+
+        let kinds = output.denial_snapshot().await;
+        assert_eq!(
+            kinds.len(),
+            1,
+            "the pre-cancelled tool must report denial provenance"
+        );
+        assert_eq!(kinds[0].1, "cancelled");
+    }
+
+    /// An `ask`-behavior denial short-circuits to `user-rejected` end-to-end.
+    #[tokio::test]
+    async fn ask_behavior_denial_is_emitted_as_user_rejected() {
+        let kinds = denial_kinds_for(ProvenanceDenyGate {
+            decision_reason_type: Some("classifier".into()),
+            decision_reason: None,
+            behavior_ask: true,
+        })
+        .await;
+        assert_eq!(kinds.len(), 1);
+        assert_eq!(
+            kinds[0].1, "user-rejected",
+            "behavior_ask must outrank the classifier reason"
+        );
     }
 }

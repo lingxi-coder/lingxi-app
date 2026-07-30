@@ -40,6 +40,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -103,6 +107,12 @@ fun ChatScreen(
     modelProviderStatuses: List<ModelProviderStatus> = emptyList(),
     /** Opens the matching provider editor, or the provider list for null. */
     onOpenProviderSettings: (String?) -> Unit = { onOpenModelSettings() },
+    /** Missing Direct-build Computer Use prerequisites, or null when ready/unavailable. */
+    computerUseSetup: ComputerUseSetupStatus? = null,
+    /** Opens settings directly at the Computer Use configuration page. */
+    onOpenComputerUseSettings: () -> Unit = {},
+    /** Hides the setup banner until readiness changes or a new android_use call needs it. */
+    onDismissComputerUseSetup: () -> Unit = {},
     /** Opens the full-screen terminal with [initCommand] prefilled, not run. */
     onOpenTerminal: (sessionId: String, initCommand: String) -> Unit = { _, _ -> },
 ) {
@@ -150,6 +160,13 @@ fun ChatScreen(
                 onDismiss = onDismissOffline,
                 onRetry = onRetryOffline,
             )
+            computerUseSetup?.let {
+                ComputerUseSetupBanner(
+                    status = it,
+                    onOpenComputerUseSettings = onOpenComputerUseSettings,
+                    onDismiss = onDismissComputerUseSetup,
+                )
+            }
             if (modelSetupRequired) {
                 ModelSetupBanner(onOpenModelSettings = onOpenModelSettings)
             } else {
@@ -186,6 +203,28 @@ fun ChatScreen(
             )
         }
     }
+}
+
+/**
+ * Real Direct-build Computer Use readiness projected into the conversation UI.
+ *
+ * The feature is usable only when Accessibility is connected, Chrome is among
+ * the in-memory session grants, and the user-started session is active.
+ */
+data class ComputerUseSetupStatus(
+    val accessibilityEnabled: Boolean,
+    val chromeAuthorized: Boolean,
+    val sessionActive: Boolean,
+) {
+    val ready: Boolean
+        get() = accessibilityEnabled && chromeAuthorized && sessionActive
+
+    val missingSteps: String
+        get() = buildList {
+            if (!accessibilityEnabled) add("启用 LingXi 无障碍服务")
+            if (!chromeAuthorized) add("授权 Chrome")
+            if (!sessionActive) add("启动控制会话")
+        }.joinToString("、")
 }
 
 @Composable
@@ -423,6 +462,102 @@ private fun ModelSetupBanner(onOpenModelSettings: () -> Unit) {
                 fontWeight = FontWeight.SemiBold,
             )
             LXIcon(name = LXIconName.ChevronR, size = 11.dp, color = Color.White, stroke = 2f)
+        }
+    }
+}
+
+/** Direct link from an unavailable Computer Use state to its complete setup page. */
+@Composable
+internal fun ComputerUseSetupBanner(
+    status: ComputerUseSetupStatus,
+    onOpenComputerUseSettings: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val t = LingXiTheme.palette
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        modifier = Modifier
+            .testTag(UiTags.COMPUTER_USE_SETUP_BANNER)
+            .fillMaxWidth()
+            .padding(horizontal = 14.dp)
+            .padding(top = 4.dp, bottom = 4.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(t.accent.tint(0.10f))
+            .border(0.5.dp, t.accent.tint(0.35f), RoundedCornerShape(12.dp))
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(28.dp)
+                .clip(CircleShape)
+                .background(t.accent.tint(0.16f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            LXIcon(
+                name = LXIconName.Sparkle,
+                size = 15.dp,
+                color = t.accent,
+                stroke = 2f,
+            )
+        }
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = "Computer Use 尚未可用",
+                color = t.text,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                text = "请${status.missingSteps}",
+                color = t.text2,
+                fontSize = 12.5f.sp,
+                lineHeight = (12.5f * 1.4f).sp,
+            )
+        }
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(3.dp),
+            modifier = Modifier
+                .clip(RoundedCornerShape(8.dp))
+                .background(t.accent)
+                .clickable(onClick = onOpenComputerUseSettings)
+                .semantics { role = Role.Button }
+                .testTag(UiTags.COMPUTER_USE_SETUP_ACTION)
+                .heightIn(min = 48.dp)
+                .padding(horizontal = 10.dp, vertical = 7.dp),
+        ) {
+            Text(
+                text = "去启用",
+                color = Color.White,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            LXIcon(
+                name = LXIconName.ChevronR,
+                size = 11.dp,
+                color = Color.White,
+                stroke = 2f,
+            )
+        }
+        Box(
+            modifier = Modifier
+                .size(48.dp)
+                .clip(CircleShape)
+                .clickable(onClick = onDismiss)
+                .semantics {
+                    contentDescription = "关闭 Computer Use 配置提示"
+                    role = Role.Button
+                }
+                .testTag(UiTags.COMPUTER_USE_SETUP_DISMISS),
+            contentAlignment = Alignment.Center,
+        ) {
+            LXIcon(
+                name = LXIconName.X,
+                size = 15.dp,
+                color = t.text3,
+                stroke = 1.9f,
+            )
         }
     }
 }

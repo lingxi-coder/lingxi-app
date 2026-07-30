@@ -66,6 +66,8 @@ data class ChatState(
     val statusLine: String? = null,
     /** Live/completed shell calls for the current session, keyed by task id. */
     val shellTools: List<ShellToolCardState> = emptyList(),
+    /** Latest android_use invocation, used to reopen setup guidance after dismissal. */
+    val computerUseRequestKey: String? = null,
     /**
      * A persistent, dismissible turn error. Unlike [statusLine] (which the next
      * tool-activity event overwrites and a turn clears), this survives until the
@@ -104,6 +106,8 @@ enum class ChatErrorKind {
     /** Anything else. */
     GENERIC,
 }
+
+private const val ANDROID_COMPUTER_USE_TOOL = "android_use"
 
 /** Classify a raw engine error message into a [ChatErrorKind] for the banner. */
 internal fun classifyError(message: String): ChatErrorKind {
@@ -832,7 +836,19 @@ class ChatViewModel(
                 }
             }
 
-            is ReplyEvent.ToolActivity -> _state.update { it.copy(statusLine = event.label) }
+            is ReplyEvent.ToolActivity -> _state.update {
+                it.copy(
+                    statusLine = event.label,
+                    computerUseRequestKey = if (
+                        event.tool.equals(ANDROID_COMPUTER_USE_TOOL, ignoreCase = true) &&
+                        event.id != null
+                    ) {
+                        "$token:${event.id}"
+                    } else {
+                        it.computerUseRequestKey
+                    },
+                )
+            }
 
             is ReplyEvent.ShellTool -> _state.update { current ->
                 val sessionId = current.session.id

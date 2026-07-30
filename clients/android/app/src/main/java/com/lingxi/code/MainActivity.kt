@@ -245,6 +245,10 @@ class MainActivity : ComponentActivity() {
                                 ?: SettingsRoutes.providerList(ProviderKind.Llm.name)
                             settingsOpen = true
                         },
+                        onOpenComputerUseSettings = {
+                            settingsInitialRoute = SettingsRoutes.COMPUTER_USE
+                            settingsOpen = true
+                        },
                         onOpenCronSettings = { taskKey ->
                             settingsInitialRoute = SettingsRoutes.cron(taskKey)
                             settingsOpen = true

@@ -397,8 +397,12 @@ sealed interface ReplyEvent {
     /** An incremental assistant-text delta (the engine's streamed tokens). */
     data class Delta(val text: String) : ReplyEvent
 
-    /** Tool activity worth surfacing in the status row (start / result / failure). */
-    data class ToolActivity(val label: String) : ReplyEvent
+    /** Correlated tool activity worth surfacing in the status row. */
+    data class ToolActivity(
+        val label: String,
+        val id: String? = null,
+        val tool: String? = null,
+    ) : ReplyEvent
 
     /** Correlated shell lifecycle update rendered as an expandable terminal card. */
     data class ShellTool(val update: ShellToolUpdate) : ReplyEvent
@@ -433,7 +437,11 @@ fun clientEventToReply(event: ClientEvent): ReplyEvent? = when (event) {
         if (isShellTool(event.tool)) {
             ReplyEvent.ShellTool(shellStarted(event.id, event.inputJson))
         } else {
-            ReplyEvent.ToolActivity("调用工具 ${event.tool}…")
+            ReplyEvent.ToolActivity(
+                label = "调用工具 ${event.tool}…",
+                id = event.id,
+                tool = event.tool,
+            )
         }
     is ClientEvent.ToolHeartbeat ->
         if (isShellTool(event.tool)) {
@@ -441,15 +449,27 @@ fun clientEventToReply(event: ClientEvent): ReplyEvent? = when (event) {
                 ShellToolUpdate.Heartbeat(event.id, event.elapsedMs.toLong()),
             )
         } else {
-            ReplyEvent.ToolActivity("工具 ${event.tool} 运行中…")
+            ReplyEvent.ToolActivity(
+                label = "工具 ${event.tool} 运行中…",
+                id = event.id,
+                tool = event.tool,
+            )
         }
     is ClientEvent.ToolUseResult ->
         if (isShellTool(event.tool)) {
             ReplyEvent.ShellTool(shellFinished(event.id, event.resultJson, event.isError))
         } else if (event.isError) {
-            ReplyEvent.ToolActivity("工具 ${event.tool} 失败")
+            ReplyEvent.ToolActivity(
+                label = "工具 ${event.tool} 失败",
+                id = event.id,
+                tool = event.tool,
+            )
         } else {
-            ReplyEvent.ToolActivity("工具 ${event.tool} 完成")
+            ReplyEvent.ToolActivity(
+                label = "工具 ${event.tool} 完成",
+                id = event.id,
+                tool = event.tool,
+            )
         }
     is ClientEvent.MessageComplete -> event.message
         ?.let { ReplyEvent.Completed(messageDtoToMessage(it)) }

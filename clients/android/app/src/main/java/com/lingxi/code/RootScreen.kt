@@ -18,6 +18,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -32,11 +33,14 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import com.lingxi.code.conversation.ChatScreen
 import com.lingxi.code.conversation.ChatViewModel
+import com.lingxi.code.conversation.ComputerUseSetupStatus
 import com.lingxi.code.conversation.ComposerAttachment
 import com.lingxi.code.conversation.EngineConversationSource
 import com.lingxi.code.conversation.PermissionPromptDialog
 import com.lingxi.code.computeruse.ComputerUseApprovalDialog
 import com.lingxi.code.computeruse.ComputerUseFeatureProvider
+import com.lingxi.code.computeruse.ComputerUseSessionState
+import com.lingxi.code.computeruse.ComputerUseUiState
 import com.lingxi.code.connectivity.rememberOnlineState
 import com.lingxi.code.connectivity.shouldShowOfflineBanner
 import com.lingxi.code.cron.AndroidCronRepository
@@ -108,6 +112,7 @@ fun RootScreen(
     onOpenSettings: () -> Unit = {},
     onOpenModelSettings: () -> Unit = {},
     onOpenProviderSettings: (String?) -> Unit = { onOpenModelSettings() },
+    onOpenComputerUseSettings: () -> Unit = { onOpenSettings() },
     onOpenCronSettings: (String?) -> Unit = { onOpenSettings() },
     onOpenTerminal: (sessionId: String, initCommand: String?) -> Unit = { _, _ -> },
     modelSetupRequired: Boolean = false,
@@ -225,6 +230,38 @@ fun RootScreen(
         onDispose { }
     }
     val computerUseApproval by ComputerUseFeatureProvider.pendingApproval.collectAsState()
+    val computerUseState by ComputerUseFeatureProvider.state.collectAsState()
+    val computerUseReadiness = if (ComputerUseFeatureProvider.available) {
+        computerUseSetupStatus(computerUseState)
+    } else {
+        null
+    }
+    // Computer Use authorization is app-scoped, so a manual dismissal remains
+    // quiet across chat switches. A fresh android_use request below deliberately
+    // overrides it when the capability is actually needed.
+    var computerUseSetupDismissed by rememberSaveable { mutableStateOf(false) }
+    var handledComputerUseRequestKey by rememberSaveable { mutableStateOf<String?>(null) }
+    val computerUseRequestKey = state.computerUseRequestKey
+    LaunchedEffect(computerUseReadiness?.ready) {
+        if (computerUseReadiness?.ready != false) {
+            computerUseSetupDismissed = false
+        }
+    }
+    LaunchedEffect(computerUseRequestKey) {
+        if (
+            shouldReshowComputerUseSetup(
+                readiness = computerUseReadiness,
+                requestKey = computerUseRequestKey,
+                handledRequestKey = handledComputerUseRequestKey,
+            )
+        ) {
+            handledComputerUseRequestKey = computerUseRequestKey
+            computerUseSetupDismissed = false
+        }
+    }
+    val computerUseSetup = computerUseReadiness?.takeIf {
+        shouldShowComputerUseSetup(it, computerUseSetupDismissed)
+    }
     val pendingPermission by chatViewModel.pendingPermission.collectAsState()
     // The engine's REAL resumable-session catalog (out-of-band, sibling of the
     // model catalog). The drawer renders its loading / empty / error states
@@ -793,6 +830,9 @@ fun RootScreen(
                     onOpenModelSettings = onOpenModelSettings,
                     modelProviderStatuses = modelProviderStatuses,
                     onOpenProviderSettings = onOpenProviderSettings,
+                    computerUseSetup = computerUseSetup,
+                    onOpenComputerUseSettings = onOpenComputerUseSettings,
+                    onDismissComputerUseSetup = { computerUseSetupDismissed = true },
                     onOpenTerminal = { sessionId, command ->
                         onOpenTerminal(sessionId, command)
                     },
@@ -886,6 +926,35 @@ fun RootScreen(
         )
     }
 }
+
+private const val ANDROID_CHROME_PACKAGE = "com.android.chrome"
+
+internal fun computerUseSetupStatus(state: ComputerUseUiState): ComputerUseSetupStatus =
+    ComputerUseSetupStatus(
+        accessibilityEnabled = state.serviceEnabled,
+        chromeAuthorized = state.grants.any {
+            it.packageName == ANDROID_CHROME_PACKAGE
+        },
+        sessionActive = state.sessionState in setOf(
+            ComputerUseSessionState.Starting,
+            ComputerUseSessionState.Active,
+            ComputerUseSessionState.AwaitingApproval,
+        ),
+    )
+
+internal fun shouldShowComputerUseSetup(
+    readiness: ComputerUseSetupStatus?,
+    dismissed: Boolean,
+): Boolean = readiness?.ready == false && !dismissed
+
+internal fun shouldReshowComputerUseSetup(
+    readiness: ComputerUseSetupStatus?,
+    requestKey: String?,
+    handledRequestKey: String?,
+): Boolean =
+    readiness?.ready == false &&
+        requestKey != null &&
+        requestKey != handledRequestKey
 
 private fun formatCronTime(epochMs: Long): String =
     java.time.Instant.ofEpochMilli(epochMs)

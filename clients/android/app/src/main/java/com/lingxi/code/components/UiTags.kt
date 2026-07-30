@@ -35,6 +35,15 @@ object UiTags {
     /** The model-setup banner's direct link to LLM Provider settings. */
     const val MODEL_SETUP_ACTION = "tag.modelSetupAction"
 
+    /** The actionable banner shown while Direct Computer Use is not ready. */
+    const val COMPUTER_USE_SETUP_BANNER = "tag.computerUseSetupBanner"
+
+    /** The Computer Use setup banner's direct link to its settings page. */
+    const val COMPUTER_USE_SETUP_ACTION = "tag.computerUseSetupAction"
+
+    /** The Computer Use setup banner's dismiss (×) affordance. */
+    const val COMPUTER_USE_SETUP_DISMISS = "tag.computerUseSetupDismiss"
+
     /** The composer chip that becomes a setup action when no model exists. */
     const val MODEL_SETUP_CHIP = "tag.modelSetupChip"
 

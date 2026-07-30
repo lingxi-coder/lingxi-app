@@ -1017,14 +1017,17 @@ impl OrchestratorHandle for ConversationOrchestrator {
         // `context.readFileState`), populated by the file tools' own
         // `readFileState.set` (Read/Edit/Write/MultiEdit/NotebookEdit) over the
         // `Arc` the composition root shares into `BuiltinToolContext`. Keys are
-        // the tools' live-cwd absolutized paths in MRU→LRU order — 1:1 with TS
-        // `cacheKeys(context.readFileState)` (`Array.from(cache.keys())`),
-        // which `/files` renders via `relative(getCwd(), f)`. An empty cache
-        // still renders the locked "No files in context" branch.
+        // the MODEL-VISIBLE live-cwd absolutized paths in MRU→LRU order — 1:1
+        // with TS `cacheKeys(context.readFileState)` (`Array.from(cache.keys())`),
+        // which `/files` renders via `relative(getCwd(), f)`. Host-seeded
+        // snapshots stay in the shared cache for staleness/dedup but are
+        // intentionally filtered here because the model never saw them. An
+        // empty visible cache still renders the locked "No files in context"
+        // branch.
         self.read_state_map
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .keys()
+            .model_context_keys()
     }
 
     async fn context_usage_snapshot(&self) -> traits::ContextUsageSnapshot {
@@ -1364,15 +1367,14 @@ fn resolve_editor() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
+    };
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn hot_resume_restores_compaction_visibility_and_deferred_tools() {
-        use crate::test_support::{
-            noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
-            StaticMemoryProvider,
-        };
-        use std::sync::Arc;
-
         let tools = Arc::new(tool_api::registry::ToolRegistry::new());
         let orch = crate::ConversationOrchestrator::new(
             crate::OrchestratorConfig::default(),
@@ -1490,13 +1492,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hot_resume_preserves_explicit_launch_effort() {
-        use crate::test_support::{
-            noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
-            StaticMemoryProvider,
-        };
-        use std::sync::Arc;
+    async fn files_in_context_excludes_host_seed_entries() {
+        let orch = crate::ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(Vec::new())),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+        let visible = std::env::temp_dir().join("visible.txt");
+        let seeded = std::env::temp_dir().join("seeded.txt");
+        tool_api::read_file_state::set(
+            &orch.read_state_map,
+            visible.clone(),
+            tool_api::read_file_state::ReadFileEntry {
+                content: "visible".into(),
+                mtime_ms: 1,
+                offset: None,
+                limit: None,
+                from_read: true,
+            },
+        );
+        tool_api::read_file_state::set_with_model_context(
+            &orch.read_state_map,
+            seeded,
+            tool_api::read_file_state::ReadFileEntry {
+                content: "seeded".into(),
+                mtime_ms: 1,
+                offset: None,
+                limit: None,
+                from_read: false,
+            },
+            false,
+        );
 
+        assert_eq!(
+            traits::OrchestratorHandle::files_in_context(&orch).await,
+            vec![visible]
+        );
+    }
+
+    #[tokio::test]
+    async fn hot_resume_preserves_explicit_launch_effort() {
         let orch = crate::ConversationOrchestrator::new(
             crate::OrchestratorConfig {
                 effort: Some("low".to_string()),

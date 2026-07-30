@@ -1335,12 +1335,11 @@ pub struct ConversationOrchestrator {
     /// The ONE per-session read-state registry (`path → {content, mtime_ms,
     /// offset, limit}`) — the 1:1 port of claude-code's single
     /// `context.readFileState` LRU (`FileReadTool.ts:1032`). This is the sole
-    /// source of truth for every read-state consumer: `/files`
-    /// ([`Self::files_in_context`] via `keys()`), conditional-rule matching
-    /// ([`Self::conditional_rules_reminder_message`]), the relevant-memory
-    /// dedup ([`Self::relevant_memory_reminder_message`]), the Read dedup +
-    /// staleness guards inside the file tools, and the post-compact restore
-    /// ([`Self::restore_post_compact_attachments`]).
+    /// source of truth for every read-state consumer. Model-context consumers
+    /// (`/files`, conditional-rule matching, relevant-memory dedup, and
+    /// post-compact restore) read the MODEL-VISIBLE subset; the Read dedup +
+    /// staleness guards inside the file tools consume the full shared map,
+    /// including non-model host seed snapshots.
     /// The composition root creates ONE map, passes a clone into the file
     /// tools' `BuiltinToolContext`, and shares the SAME `Arc` here via
     /// [`Self::with_read_state_map`] (P1-06), so a tool's `readFileState.set`
@@ -1813,6 +1812,68 @@ impl ConversationOrchestrator {
     pub fn with_read_state_map(mut self, map: tool_api::read_file_state::ReadFileStateMap) -> Self {
         self.read_state_map = map;
         self
+    }
+
+    /// Seed the live read-state cache from an SDK host's `seed_read_state`
+    /// control request.
+    ///
+    /// Claude Code accepts the host snapshot only when the file is at most
+    /// 10 MiB and its floor-truncated on-disk mtime is no newer than the
+    /// supplied mtime. Failures are intentionally swallowed by the control
+    /// protocol; the boolean is exposed solely so callers and tests can observe
+    /// whether an entry was installed.
+    pub async fn seed_read_state_from_host(&self, path: &str, host_mtime_ms: f64) -> bool {
+        const MAX_SEED_BYTES: u64 = 10 * 1024 * 1024;
+
+        let requested = std::path::PathBuf::from(path);
+        let absolute = if requested.is_absolute() {
+            requested
+        } else {
+            self.session_cwd.cwd().join(requested)
+        };
+        let absolute = crate::turn_loop::normalize_lexically(&absolute);
+
+        let Ok(metadata) = tokio::fs::metadata(&absolute).await else {
+            return false;
+        };
+        if metadata.len() > MAX_SEED_BYTES {
+            return false;
+        }
+        let Ok(modified) = metadata.modified() else {
+            return false;
+        };
+        let Ok(since_epoch) = modified.duration_since(std::time::UNIX_EPOCH) else {
+            return false;
+        };
+        let mtime_ms = since_epoch.as_millis().min(i64::MAX as u128) as i64;
+        if (mtime_ms as f64) > host_mtime_ms.floor() {
+            return false;
+        }
+        let Ok(content) = tokio::fs::read_to_string(&absolute).await else {
+            return false;
+        };
+        let content = content
+            .strip_prefix('\u{feff}')
+            .unwrap_or(&content)
+            .replace("\r\n", "\n")
+            .replace('\r', "\n");
+
+        tool_api::read_file_state::set_with_model_context(
+            &self.read_state_map,
+            absolute,
+            tool_api::read_file_state::ReadFileEntry {
+                content,
+                mtime_ms,
+                offset: None,
+                limit: None,
+                // The host explicitly marks this content as not present in the
+                // model context. `from_read = false` preserves that invariant:
+                // the next Read must not deduplicate against this seed.
+                from_read: false,
+            },
+            false,
+        );
+        true
     }
 
     /// Seed the JSONL parent-uuid chain pointer so the FIRST append after a
@@ -3081,15 +3142,17 @@ impl ConversationOrchestrator {
         &self,
         boundary_context: &[protocol::ConversationMessage],
     ) -> Vec<protocol::ConversationMessage> {
-        // Snapshot then clear the ONE read-file-state registry (the `eOt`
-        // snapshot + `readFileState.clear()` step), so the post-compact context
-        // starts from the restored set only. `drain()` empties it.
+        // Snapshot then clear the MODEL-VISIBLE portion of the ONE read-file-
+        // state registry (the `eOt` snapshot + `readFileState.clear()` step),
+        // so the post-compact context starts from the restored set only.
+        // Host-seeded snapshots stay cached for staleness/dedup because the
+        // model never saw them and therefore they must not be restored.
         let snapshot: Vec<(std::path::PathBuf, tool_api::read_file_state::ReadFileEntry)> = {
             let mut map = self
                 .read_state_map
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            map.drain().collect()
+            map.drain_model_context()
         };
 
         // The two arms are independent: skills restore from the process-global
@@ -7463,14 +7526,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // threshold, so the locked streaming fixtures are unaffected. After
             // a proactive compact the snapshot below reads the NEW history.
             //
-            // Batch 5 streaming-PTL DIVERGENCE: the reactive 413/prompt-too-long
-            // recovery loop is applied to the BATCHED path only. On the
-            // streaming path a 413 surfaces as a stream error through
-            // `OrchestratorError::Streaming`; threading `ApiError::PromptTooLong`
-            // out of the SSE plumbing cleanly is deferred (the TS B5 test plan
-            // targets the batched `messages_create`). The proactive B4 trigger
-            // above still shrinks the prompt before the call, which is the
-            // common case; the reactive tail is a documented close divergence.
+            // The connect-phase streaming 413 path below reuses the same
+            // reactive truncate/compact recovery loop as the batched path.
             self.maybe_compact_before_call().await;
 
             // 2. Open the stream for this turn.
@@ -7767,6 +7824,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             let api_success_message_count = u32::try_from(snapshot.len()).unwrap_or(u32::MAX);
             let api_success_message_tokens =
                 compaction::grouping::estimate_tokens_for_range(&snapshot);
+            let mut did_fall_back_to_non_streaming = false;
 
             // Either an open stream to pump, or a turn already RECOVERED from a
             // connect-phase prompt-too-long (#1, see the ContextOverflow arm).
@@ -8180,6 +8238,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                                     .ok(),
                             ) =>
                         {
+                            did_fall_back_to_non_streaming = true;
                             // Seed: a streaming overload counts as 1 toward the consecutive
                             // 529 budget (LlmError::Overloaded = 529).  Other in-band errors
                             // (e.g. ProviderInternal) seed 0 — matching TS
@@ -8379,11 +8438,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                                 request_id: self.api.last_request_id(),
                                 message_count: api_success_message_count,
                                 message_tokens: api_success_message_tokens,
-                                // The 529 non-streaming fallback flows through this
-                                // SAME emit; threading a real flag through
-                                // `PumpedTurn` is deferred, so `false` uniformly
-                                // (documented close divergence vs claude `m`).
-                                did_fall_back_to_non_streaming: false,
+                                did_fall_back_to_non_streaming,
                                 is_non_interactive_session:
                                     traits::session_flags::is_non_interactive_session(),
                                 print: traits::session_flags::is_non_interactive_session(),
@@ -10666,7 +10721,7 @@ DO NOT mention this to the user explicitly because they are already aware.\n</sy
             .read_state_map
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .keys();
+            .model_context_keys();
         if touched.is_empty() {
             return None;
         }
@@ -10816,7 +10871,7 @@ DO NOT mention this to the user explicitly because they are already aware.\n</sy
             .read_state_map
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .keys()
+            .model_context_keys()
             .into_iter()
             .collect();
         let fresh: Vec<memory::surfacing::SurfacedMemory> = {
@@ -15575,6 +15630,21 @@ mod conditional_rules_reminder_tests {
         );
     }
 
+    fn push_host_seed(orch: &ConversationOrchestrator, path: &std::path::Path) {
+        tool_api::read_file_state::set_with_model_context(
+            &orch.read_state_map,
+            path.to_path_buf(),
+            tool_api::read_file_state::ReadFileEntry {
+                content: String::new(),
+                mtime_ms: 0,
+                offset: None,
+                limit: None,
+                from_read: false,
+            },
+            false,
+        );
+    }
+
     #[tokio::test]
     async fn matching_touched_file_injects_rule() {
         let cwd = PathBuf::from("/work/repo");
@@ -15606,6 +15676,17 @@ mod conditional_rules_reminder_tests {
         assert!(
             orch.conditional_rules_reminder_message().await.is_none(),
             "a non-matching touched file must not activate the rule"
+        );
+    }
+
+    #[tokio::test]
+    async fn host_seeded_file_does_not_activate_conditional_rule() {
+        let cwd = PathBuf::from("/work/repo");
+        let orch = orch_with_rules(cwd.clone(), vec![project_rule(&cwd, "scoped", &["src"])]);
+        push_host_seed(&orch, &cwd.join("src/x.rs"));
+        assert!(
+            orch.conditional_rules_reminder_message().await.is_none(),
+            "host-seeded paths are not model context and must not trigger rules"
         );
     }
 
@@ -15864,6 +15945,21 @@ mod relevant_memory_reminder_tests {
         );
     }
 
+    fn seed_host_read_state(orch: &ConversationOrchestrator, path: PathBuf) {
+        tool_api::read_file_state::set_with_model_context(
+            &orch.read_state_map,
+            path,
+            tool_api::read_file_state::ReadFileEntry {
+                content: String::new(),
+                mtime_ms: 0,
+                offset: None,
+                limit: None,
+                from_read: false,
+            },
+            false,
+        );
+    }
+
     #[tokio::test]
     async fn shared_dedup_skips_memory_already_in_read_state_map() {
         // A memory whose path was already loaded as a nested/conditional (P3.2)
@@ -15897,6 +15993,22 @@ mod relevant_memory_reminder_tests {
         assert!(
             !text.contains("/m/seen.md"),
             "already-read memory leaked: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn host_seeded_path_does_not_suppress_relevant_memory() {
+        let orch = orch_with_seed(vec![mem("/m/seeded.md", "SEEDED", 0)]);
+        seed_host_read_state(&orch, PathBuf::from("/m/seeded.md"));
+        orch.start_memory_prefetch().await;
+        let text = orch
+            .relevant_memory_reminder_message()
+            .await
+            .expect("host-seeded path must still surface as fresh memory")
+            .text_content();
+        assert!(
+            text.contains("Memory: /m/seeded.md:\n\nSEEDED"),
+            "got: {text}"
         );
     }
 }
@@ -18160,6 +18272,35 @@ mod post_compact_file_restore_tests {
     }
 
     #[tokio::test]
+    async fn host_seed_snapshot_is_not_restored_and_remains_cached() {
+        let _rg = registry_guard();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("seeded.txt");
+        std::fs::write(&path, "seeded on disk").expect("write file");
+        let map = tool_api::read_file_state::new_read_file_state_map();
+        tool_api::read_file_state::set_with_model_context(
+            &map,
+            path.clone(),
+            stale_entry("host seed snapshot"),
+            false,
+        );
+
+        let sink = Arc::new(telemetry::InMemorySink::new());
+        let orch = orch_with_bus(dir.path().to_path_buf(), map.clone(), sink.clone()).await;
+
+        let restored = orch.restore_post_compact_attachments().await;
+        assert!(
+            restored.is_empty(),
+            "host-seeded snapshots must not be restored into model context"
+        );
+        assert!(restore_names(&sink.events().await).is_empty());
+        assert!(
+            tool_api::read_file_state::get(&map, &path).is_some(),
+            "host-seeded snapshot must stay cached for staleness/dedup after compaction"
+        );
+    }
+
+    #[tokio::test]
     async fn success_and_error_events_fire_per_file() {
         let _rg = registry_guard();
         let dir = tempfile::tempdir().expect("tempdir");
@@ -18357,6 +18498,65 @@ mod post_compact_file_restore_tests {
         assert!(
             restored.is_empty(),
             "subagent skill must not restore on the main thread"
+        );
+    }
+}
+
+#[cfg(test)]
+mod seed_read_state_from_host_tests {
+    use super::*;
+    use crate::test_support::{
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
+    };
+    use crate::OrchestratorConfig;
+    use std::sync::Arc;
+    use tool_api::registry::ToolRegistry;
+
+    fn test_orchestrator(cwd: std::path::PathBuf) -> ConversationOrchestrator {
+        ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::with_files(vec![])),
+            cwd,
+        )
+    }
+
+    #[tokio::test]
+    async fn seed_read_state_normalizes_bom_and_crlf_to_lf() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("seeded.txt");
+        std::fs::write(&path, b"\xEF\xBB\xBFalpha\r\nbeta\rgamma\n").expect("write fixture");
+        let orch = test_orchestrator(dir.path().to_path_buf());
+        let host_mtime_ms = std::fs::metadata(&path)
+            .expect("metadata")
+            .modified()
+            .expect("mtime")
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("post epoch")
+            .as_millis() as f64
+            + 1.0;
+
+        assert!(
+            orch.seed_read_state_from_host("seeded.txt", host_mtime_ms)
+                .await
+        );
+
+        let entry = tool_api::read_file_state::get(&orch.read_state_map, &path)
+            .expect("seeded entry present");
+        assert_eq!(entry.content, "alpha\nbeta\ngamma\n");
+        assert!(!entry.from_read);
+        assert!(
+            orch.read_state_map
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .model_context_keys()
+                .is_empty(),
+            "host-seeded content must not appear as model-visible context"
         );
     }
 }

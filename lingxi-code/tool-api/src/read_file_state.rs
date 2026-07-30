@@ -83,6 +83,11 @@ pub struct ReadFileEntry {
 #[derive(Clone, Debug)]
 struct Node {
     entry: ReadFileEntry,
+    /// Whether this cache slot represents content the model has actually seen.
+    /// Host-provided seed snapshots participate in staleness/dedup but must
+    /// stay out of model-context consumers such as `/files` and post-compact
+    /// restore.
+    in_model_context: bool,
     /// Monotonic recency stamp; higher = more recently used.
     last_used: u64,
     /// Cached `entry.content.len().max(1)` (the lru-cache `sizeCalculation`).
@@ -133,6 +138,18 @@ impl ReadFileStateLru {
     /// Insert (or overwrite) the entry for `path` as most-recently-used, then
     /// evict least-recently-used entries while over the entry/byte budget.
     pub fn set(&mut self, path: PathBuf, entry: ReadFileEntry) {
+        self.set_with_model_context(path, entry, true);
+    }
+
+    /// Insert (or overwrite) the entry for `path` as most-recently-used with
+    /// explicit model-context provenance, then evict least-recently-used
+    /// entries while over the entry/byte budget.
+    pub fn set_with_model_context(
+        &mut self,
+        path: PathBuf,
+        entry: ReadFileEntry,
+        in_model_context: bool,
+    ) {
         let size = (entry.content.len() as u64).max(1);
         self.clock += 1;
         let last_used = self.clock;
@@ -140,6 +157,7 @@ impl ReadFileStateLru {
             path,
             Node {
                 entry,
+                in_model_context,
                 last_used,
                 size,
             },
@@ -194,18 +212,50 @@ impl ReadFileStateLru {
 
     /// Every cached path in most-recently-used → least-recently-used order
     /// (1:1 with lru-cache's `keys()` iteration, which yields MRU first). This
-    /// is the single source of truth for the `/files` listing
-    /// (`cacheKeys(context.readFileState)`), conditional-rule matching, and the
-    /// relevant-memory dedup — all of which key off the one shared read-state
-    /// map. A re-`set` (or `get`) promotes its key, so re-reading reorders the
-    /// list exactly as claude-code's LRU does (`a,b,c,a → [a, c, b]`).
+    /// includes host-seeded snapshots that participate in staleness/dedup but
+    /// are not necessarily model-visible.
     #[must_use]
     pub fn keys(&self) -> Vec<PathBuf> {
-        let mut nodes: Vec<(&PathBuf, u64)> =
-            self.map.iter().map(|(k, n)| (k, n.last_used)).collect();
+        self.ordered_paths(|_| true)
+    }
+
+    /// Every MODEL-VISIBLE cached path in most-recently-used →
+    /// least-recently-used order. This is the source of truth for `/files`,
+    /// conditional-rule matching, relevant-memory dedup against already-loaded
+    /// files, and post-compact restore candidate selection.
+    #[must_use]
+    pub fn model_context_keys(&self) -> Vec<PathBuf> {
+        self.ordered_paths(|node| node.in_model_context)
+    }
+
+    fn ordered_paths(&self, include: impl Fn(&Node) -> bool) -> Vec<PathBuf> {
+        let mut nodes: Vec<(&PathBuf, u64)> = self
+            .map
+            .iter()
+            .filter_map(|(k, n)| include(n).then_some((k, n.last_used)))
+            .collect();
         // MRU first = highest `last_used` first.
         nodes.sort_by(|a, b| b.1.cmp(&a.1));
         nodes.into_iter().map(|(k, _)| k.clone()).collect()
+    }
+
+    /// Drain only the MODEL-VISIBLE entries as `(path, entry)` and leave
+    /// non-model seed snapshots in place. This preserves host-seeded
+    /// staleness/dedup state across compaction while rebuilding model context
+    /// solely from files the model had actually seen.
+    pub fn drain_model_context(&mut self) -> Vec<(PathBuf, ReadFileEntry)> {
+        let model_paths = self.model_context_keys();
+        let mut drained = Vec::with_capacity(model_paths.len());
+        for path in model_paths {
+            if let Some(node) = self.map.remove(&path) {
+                self.total_bytes = self.total_bytes.saturating_sub(node.size);
+                drained.push((path, node.entry));
+            }
+        }
+        if self.map.is_empty() {
+            self.clock = 0;
+        }
+        drained
     }
 
     /// Number of cached entries.
@@ -279,6 +329,24 @@ pub fn mtime_ms_floor(mtime: std::time::SystemTime) -> i64 {
 pub fn set(map: &ReadFileStateMap, path: PathBuf, entry: ReadFileEntry) {
     if let Ok(mut guard) = map.lock() {
         guard.set(path, entry);
+    }
+}
+
+/// Insert (or overwrite) the read-state entry for `path` with explicit
+/// model-context provenance.
+///
+/// Ordinary Read/Edit/Write callers should keep using [`set`], which marks the
+/// entry as model-visible. Host seed snapshots use `in_model_context = false`
+/// so they remain available for staleness/dedup without leaking into
+/// orchestrator context consumers.
+pub fn set_with_model_context(
+    map: &ReadFileStateMap,
+    path: PathBuf,
+    entry: ReadFileEntry,
+    in_model_context: bool,
+) {
+    if let Ok(mut guard) = map.lock() {
+        guard.set_with_model_context(path, entry, in_model_context);
     }
 }
 
@@ -528,6 +596,21 @@ mod tests {
     }
 
     #[test]
+    fn model_context_keys_exclude_non_model_seed_entries() {
+        let map = new_read_file_state_map();
+        set(&map, PathBuf::from("/visible"), entry("v"));
+        set_with_model_context(&map, PathBuf::from("/seed"), entry("s"), false);
+        assert_eq!(
+            map.lock().unwrap().keys(),
+            vec![PathBuf::from("/seed"), PathBuf::from("/visible")]
+        );
+        assert_eq!(
+            map.lock().unwrap().model_context_keys(),
+            vec![PathBuf::from("/visible")]
+        );
+    }
+
+    #[test]
     fn drain_yields_all_entries_and_resets() {
         // The post-compact snapshot+clear seam: drain returns every (path, entry)
         // and leaves the registry empty with zero accounted bytes.
@@ -539,5 +622,21 @@ mod tests {
         let guard = map.lock().unwrap();
         assert!(guard.is_empty());
         assert_eq!(guard.total_bytes(), 0);
+    }
+
+    #[test]
+    fn drain_model_context_preserves_non_model_seed_entries() {
+        let map = new_read_file_state_map();
+        set(&map, PathBuf::from("/visible"), entry("seen"));
+        set_with_model_context(&map, PathBuf::from("/seed"), entry("host"), false);
+
+        let drained = map.lock().unwrap().drain_model_context();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].0, PathBuf::from("/visible"));
+
+        let guard = map.lock().unwrap();
+        assert_eq!(guard.keys(), vec![PathBuf::from("/seed")]);
+        assert_eq!(guard.model_context_keys(), Vec::<PathBuf>::new());
+        assert_eq!(guard.total_bytes(), 4);
     }
 }

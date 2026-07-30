@@ -9,11 +9,10 @@
 //! order stable across round-trips.
 //!
 //! Documented simplifications vs TS (`config.ts:797-864`):
-//! - No `proper-lockfile` cross-process lock and no in-memory mtime cache —
-//!   migrations run once at startup before any concurrent writer exists in
-//!   this process. The GH #3117 auth-loss fallback guard is therefore N/A:
-//!   we never write defaults over a failed read (a broken file aborts the
-//!   write instead).
+//! - Uses a crate-local cross-process lock dir with PID/start-time stale-owner
+//!   detection instead of `proper-lockfile`; the full read-modify-write
+//!   transaction is still serialized across processes so failed reads never
+//!   fall back to writing defaults (the GH #3117 auth-loss guard remains N/A).
 //! - TS NFC-normalizes the config-home path; macOS paths are already NFC, so
 //!   this port uses the path as-is.
 //! - TS `writeFileSyncAndFlush_DEPRECATED` (`file.ts:439-477`) falls back to
@@ -24,6 +23,7 @@
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value};
 
@@ -60,6 +60,44 @@ pub fn trust_homedir() -> Option<PathBuf> {
 
 /// A raw JSON object — the in-memory shape of `~/.lingxi.json`.
 pub type JsonMap = Map<String, Value>;
+
+const CONFIG_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
+const CONFIG_LOCK_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const CONFIG_LOCK_BROKEN_STALE_AGE: Duration = Duration::from_secs(10);
+const CONFIG_LOCK_PROC_START_RETRIES: usize = 3;
+const CONFIG_LOCK_PROC_START_RETRY_DELAY: Duration = Duration::from_millis(250);
+const CONFIG_LOCK_OWNER_FILE: &str = "owner.json";
+const CONFIG_LOCK_QUARANTINE_PREFIX: &str = ".lock-quarantine";
+
+#[derive(Clone, Copy)]
+struct ConfigLockOptions {
+    timeout: Duration,
+    poll_interval: Duration,
+    broken_stale_age: Duration,
+}
+
+const DEFAULT_CONFIG_LOCK_OPTIONS: ConfigLockOptions = ConfigLockOptions {
+    timeout: CONFIG_LOCK_TIMEOUT,
+    poll_interval: CONFIG_LOCK_POLL_INTERVAL,
+    broken_stale_age: CONFIG_LOCK_BROKEN_STALE_AGE,
+};
+
+enum LockCleanupCondition {
+    OwnerToken(String),
+    MissingOwnerStale(Duration),
+}
+
+#[derive(Debug)]
+struct ConfigLockGuard {
+    lock_dir: PathBuf,
+    owner_token: String,
+}
+
+struct ConfigLockOwner {
+    pid: i32,
+    proc_start: Option<String>,
+    token: String,
+}
 
 /// `$LINGXI_CONFIG_DIR`, treating set-but-EMPTY as unset. DELIBERATE
 /// divergence: in TS only `getGlobalClaudeFile`'s base (`env.ts:25`) is
@@ -160,13 +198,15 @@ pub fn save_map(
     path: &Path,
     mutator: impl FnOnce(JsonMap) -> JsonMap,
 ) -> Result<bool, GlobalConfigError> {
-    let current = read_map(path)?;
+    let target = resolve_write_target(path);
+    let _lock = ConfigLockGuard::acquire(&target)?;
+    let current = read_map(&target)?;
     let mut next = mutator(current.clone());
     if next == current {
         return Ok(false);
     }
     remove_project_history(&mut next);
-    write_atomic(path, &next)?;
+    write_atomic(&target, &next)?;
     Ok(true)
 }
 
@@ -184,6 +224,380 @@ fn remove_project_history(map: &mut JsonMap) {
     }
 }
 
+impl ConfigLockGuard {
+    fn acquire(target: &Path) -> Result<Self, GlobalConfigError> {
+        Self::acquire_with_options(target, DEFAULT_CONFIG_LOCK_OPTIONS)
+    }
+
+    fn acquire_with_options(
+        target: &Path,
+        options: ConfigLockOptions,
+    ) -> Result<Self, GlobalConfigError> {
+        let lock_dir = lock_dir_for_target(target);
+        let deadline = Instant::now() + options.timeout;
+
+        loop {
+            if let Some(lock) = try_create_lock_dir(&lock_dir)? {
+                return Ok(lock);
+            }
+
+            let cleanup = match read_lock_owner(&lock_dir)? {
+                Some(owner) if !lock_owner_is_active(&owner) => {
+                    Some(LockCleanupCondition::OwnerToken(owner.token))
+                }
+                Some(_) => None,
+                None if lock_dir_is_stale(&lock_dir, options.broken_stale_age)? => Some(
+                    LockCleanupCondition::MissingOwnerStale(options.broken_stale_age),
+                ),
+                None => None,
+            };
+
+            if let Some(cleanup) = cleanup {
+                let _ = quarantine_lock_dir_if_matches(&lock_dir, cleanup)?;
+                continue;
+            }
+
+            if Instant::now() >= deadline {
+                return Err(GlobalConfigError::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!(
+                        "timed out waiting for global config lock {}",
+                        lock_dir.display()
+                    ),
+                )));
+            }
+
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            std::thread::sleep(options.poll_interval.min(remaining));
+        }
+    }
+}
+
+impl Drop for ConfigLockGuard {
+    fn drop(&mut self) {
+        let _ = quarantine_lock_dir_if_matches(
+            &self.lock_dir,
+            LockCleanupCondition::OwnerToken(self.owner_token.clone()),
+        );
+    }
+}
+
+fn resolve_write_target(path: &Path) -> PathBuf {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    match std::fs::read_link(path) {
+        Ok(link) if link.is_absolute() => link,
+        Ok(link) => dir.join(link),
+        Err(_) => path.to_path_buf(),
+    }
+}
+
+fn lock_dir_for_target(target: &Path) -> PathBuf {
+    target
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!(
+            ".{}.lock",
+            target
+                .file_name()
+                .map(|n| n.to_string_lossy())
+                .unwrap_or_default()
+        ))
+}
+
+fn lock_tmp_dir_for_target(lock_dir: &Path, owner: &ConfigLockOwner) -> PathBuf {
+    lock_dir.with_file_name(format!(
+        "{}.tmp-{}-{}",
+        lock_dir
+            .file_name()
+            .map(|n| n.to_string_lossy())
+            .unwrap_or_default(),
+        owner.pid,
+        uuid::Uuid::new_v4().simple()
+    ))
+}
+
+fn try_create_lock_dir(lock_dir: &Path) -> Result<Option<ConfigLockGuard>, GlobalConfigError> {
+    let parent = lock_dir.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent).map_err(GlobalConfigError::Io)?;
+
+    let owner = current_lock_owner();
+    let tmp_dir = lock_tmp_dir_for_target(lock_dir, &owner);
+    create_secure_dir(&tmp_dir).map_err(GlobalConfigError::Io)?;
+    if let Err(err) = write_lock_owner(&tmp_dir.join(CONFIG_LOCK_OWNER_FILE), &owner) {
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        return Err(err);
+    }
+
+    match std::fs::rename(&tmp_dir, lock_dir) {
+        Ok(()) => Ok(Some(ConfigLockGuard {
+            lock_dir: lock_dir.to_path_buf(),
+            owner_token: owner.token,
+        })),
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists || lock_dir.exists() => {
+            let _ = std::fs::remove_dir_all(&tmp_dir);
+            Ok(None)
+        }
+        Err(err) => {
+            let _ = std::fs::remove_dir_all(&tmp_dir);
+            Err(GlobalConfigError::Io(err))
+        }
+    }
+}
+
+fn create_secure_dir(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        let mut builder = std::fs::DirBuilder::new();
+        builder.mode(0o700);
+        builder.create(path)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir(path)
+    }
+}
+
+fn current_lock_owner() -> ConfigLockOwner {
+    let pid = i32::try_from(std::process::id()).unwrap_or(i32::MAX);
+    ConfigLockOwner {
+        pid,
+        proc_start: read_process_start(pid),
+        token: uuid::Uuid::new_v4().simple().to_string(),
+    }
+}
+
+fn write_lock_owner(path: &Path, owner: &ConfigLockOwner) -> Result<(), GlobalConfigError> {
+    let serialized = serde_json::to_string_pretty(&serde_json::json!({
+        "pid": owner.pid,
+        "procStart": owner.proc_start,
+        "token": owner.token,
+    }))
+    .map_err(|e| GlobalConfigError::Broken(e.to_string()))?;
+    write_secure(path, &serialized).map_err(GlobalConfigError::Io)
+}
+
+fn read_lock_owner(lock_dir: &Path) -> Result<Option<ConfigLockOwner>, GlobalConfigError> {
+    let path = lock_dir.join(CONFIG_LOCK_OWNER_FILE);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(GlobalConfigError::Io(err)),
+    };
+    let value: Value = match serde_json::from_slice(&bytes) {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    let Some(pid) = value
+        .get("pid")
+        .and_then(Value::as_i64)
+        .and_then(|pid| i32::try_from(pid).ok())
+    else {
+        return Ok(None);
+    };
+    let Some(token) = value.get("token").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    Ok(Some(ConfigLockOwner {
+        pid,
+        proc_start: value
+            .get("procStart")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        token: token.to_string(),
+    }))
+}
+
+fn lock_owner_is_active(owner: &ConfigLockOwner) -> bool {
+    if owner.pid <= 1 {
+        return false;
+    }
+    if let Some(expected_start) = owner.proc_start.as_deref() {
+        for attempt in 0..CONFIG_LOCK_PROC_START_RETRIES {
+            if attempt > 0 {
+                std::thread::sleep(CONFIG_LOCK_PROC_START_RETRY_DELAY);
+            }
+            if let Some(live_start) = read_process_start(owner.pid) {
+                return live_start == expected_start;
+            }
+        }
+    }
+    process_is_alive(owner.pid)
+}
+
+fn lock_dir_is_stale(lock_dir: &Path, stale_age: Duration) -> Result<bool, GlobalConfigError> {
+    let metadata = match std::fs::metadata(lock_dir) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(GlobalConfigError::Io(err)),
+    };
+    Ok(metadata
+        .modified()
+        .ok()
+        .and_then(|mtime| mtime.elapsed().ok())
+        .is_some_and(|age| age >= stale_age))
+}
+
+fn remove_lock_dir(lock_dir: &Path) -> Result<(), GlobalConfigError> {
+    match std::fs::remove_dir_all(lock_dir) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(GlobalConfigError::Io(err)),
+    }
+}
+
+fn lock_quarantine_dir_for_token(lock_dir: &Path, token: &str) -> PathBuf {
+    lock_dir.with_file_name(format!(
+        "{}.{}-{}",
+        lock_dir
+            .file_name()
+            .map(|name| name.to_string_lossy())
+            .unwrap_or_default(),
+        CONFIG_LOCK_QUARANTINE_PREFIX,
+        token
+    ))
+}
+
+fn quarantine_lock_dir_if_matches(
+    lock_dir: &Path,
+    condition: LockCleanupCondition,
+) -> Result<bool, GlobalConfigError> {
+    let quarantine = match condition {
+        LockCleanupCondition::OwnerToken(ref expected_token) => {
+            let Some(owner) = read_lock_owner(lock_dir)? else {
+                return Ok(false);
+            };
+            if owner.token != *expected_token {
+                return Ok(false);
+            }
+            lock_quarantine_dir_for_token(lock_dir, expected_token)
+        }
+        LockCleanupCondition::MissingOwnerStale(stale_age) => {
+            if read_lock_owner(lock_dir)?.is_some() || !lock_dir_is_stale(lock_dir, stale_age)? {
+                return Ok(false);
+            }
+            lock_quarantine_dir_for_token(
+                lock_dir,
+                &format!("missing-owner-{}", uuid::Uuid::new_v4().simple()),
+            )
+        }
+    };
+    match std::fs::rename(lock_dir, &quarantine) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(GlobalConfigError::Io(err)),
+    }
+
+    let delete = match condition {
+        LockCleanupCondition::OwnerToken(expected_token) => matches!(
+            read_lock_owner(&quarantine)?,
+            Some(owner) if owner.token == expected_token
+        ),
+        LockCleanupCondition::MissingOwnerStale(stale_age) => {
+            read_lock_owner(&quarantine)?.is_none() && lock_dir_is_stale(&quarantine, stale_age)?
+        }
+    };
+    if delete {
+        remove_lock_dir(&quarantine).map(|()| true)
+    } else {
+        let _ = std::fs::rename(&quarantine, lock_dir);
+        Ok(false)
+    }
+}
+
+#[cfg(unix)]
+fn read_process_start(pid: i32) -> Option<String> {
+    if pid <= 1 {
+        return None;
+    }
+    let out = std::process::Command::new("ps")
+        .args(["-o", "lstart=", "-p", &pid.to_string()])
+        .env("LC_ALL", "C")
+        .env("TZ", "UTC")
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let start = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!start.is_empty()).then_some(start)
+}
+
+#[cfg(windows)]
+fn read_process_start(pid: i32) -> Option<String> {
+    if pid <= 1 {
+        return None;
+    }
+    let script = format!(
+        "(Get-Process -Id {pid} -ErrorAction Stop).StartTime.ToUniversalTime().ToString('o')"
+    );
+    let output = std::process::Command::new("powershell.exe")
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &script,
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let start = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!start.is_empty()).then_some(start)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn read_process_start(_pid: i32) -> Option<String> {
+    None
+}
+
+#[cfg(unix)]
+fn process_is_alive(pid: i32) -> bool {
+    if pid <= 1 {
+        return false;
+    }
+    let Ok(output) = std::process::Command::new("ps")
+        .args(["-o", "pid=", "-p", &pid.to_string()])
+        .env("LC_ALL", "C")
+        .output()
+    else {
+        return false;
+    };
+    output.status.success() && !String::from_utf8_lossy(&output.stdout).trim().is_empty()
+}
+
+#[cfg(windows)]
+fn process_is_alive(pid: i32) -> bool {
+    if pid <= 1 {
+        return false;
+    }
+    let filter = format!("PID eq {pid}");
+    let Ok(output) = std::process::Command::new("tasklist.exe")
+        .args(["/FI", &filter, "/FO", "CSV", "/NH"])
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    String::from_utf8_lossy(&output.stdout).lines().any(|line| {
+        let mut fields = line.split(',');
+        let _image = fields.next();
+        fields
+            .next()
+            .and_then(|field| field.trim().trim_matches('"').parse::<i32>().ok())
+            == Some(pid)
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn process_is_alive(pid: i32) -> bool {
+    pid > 1
+}
+
 /// Atomic global-config write: the port of `saveConfig`'s
 /// `writeFileSyncAndFlush_DEPRECATED(file, jsonStringify(.., null, 2),
 /// { mode: 0o600 })` call (`config.ts:1134-1141` → `file.ts:362-478`).
@@ -194,27 +608,18 @@ fn write_atomic(path: &Path, map: &JsonMap) -> Result<(), GlobalConfigError> {
     std::fs::create_dir_all(dir).map_err(GlobalConfigError::Io)?;
     let serialized = serde_json::to_string_pretty(&Value::Object(map.clone()))
         .map_err(|e| GlobalConfigError::Broken(e.to_string()))?;
-    // Symlink write-through (`file.ts:369-383`): if `path` is a symlink,
-    // readlink it (a relative link target resolves against the link's
-    // directory, like TS `resolve(dirname(filePath), linkTarget)`) and do the
-    // tmp-write + rename at the RESOLVED destination so the symlink itself
-    // is preserved. `read_link` fails for missing or regular files (the TS
-    // ENOENT/EINVAL catch) — keep `path` as the target.
-    let target = match std::fs::read_link(path) {
-        Ok(link) if link.is_absolute() => link,
-        Ok(link) => dir.join(link),
-        Err(_) => path.to_path_buf(),
-    };
+    let target = resolve_write_target(path);
     let tmp = target
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join(format!(
-            ".{}.tmp-{}",
+            ".{}.tmp-{}-{}",
             target
                 .file_name()
                 .map(|n| n.to_string_lossy())
                 .unwrap_or_default(),
-            std::process::id()
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
         ));
     write_tmp_and_rename(&tmp, &target, &serialized).map_err(|e| {
         // Best-effort tmp cleanup on ANY failure (`file.ts:445-451`): the
@@ -425,7 +830,9 @@ pub fn save_project_config(
     project_key: &str,
     mutator: impl FnOnce(JsonMap) -> JsonMap,
 ) -> Result<bool, GlobalConfigError> {
-    let current = read_map(path)?;
+    let target = resolve_write_target(path);
+    let _lock = ConfigLockGuard::acquire(&target)?;
+    let current = read_map(&target)?;
     let current_proj = current
         .get("projects")
         .and_then(Value::as_object)
@@ -444,7 +851,7 @@ pub fn save_project_config(
     if let Value::Object(projects) = projects {
         projects.insert(project_key.to_string(), Value::Object(next_proj));
     }
-    write_atomic(path, &next)?;
+    write_atomic(&target, &next)?;
     Ok(true)
 }
 
@@ -525,6 +932,41 @@ pub fn check_has_lingxi_md_external_includes_approved(config_path: &Path, cwd: &
     )
 }
 
+/// Whether the external-includes warning has already been answered for this
+/// exact project. A declined warning is remembered so startup does not prompt
+/// on every launch while external imports remain disabled.
+#[must_use]
+pub fn check_has_lingxi_md_external_includes_warning_shown(config_path: &Path, cwd: &Path) -> bool {
+    matches!(
+        get_project_config(config_path, &project_path_for_config(cwd)),
+        Ok(p) if p.get("hasLingxiMdExternalIncludesWarningShown") == Some(&Value::Bool(true))
+    )
+}
+
+/// Persist the external LINGXI.md import decision for this exact project while
+/// preserving every sibling project field and unknown global-config key.
+///
+/// Both choices mark the warning as shown. Only an affirmative choice enables
+/// imports outside the current working directory.
+pub fn save_lingxi_md_external_includes_decision(
+    config_path: &Path,
+    cwd: &Path,
+    approved: bool,
+) -> Result<(), GlobalConfigError> {
+    save_project_config(config_path, &project_path_for_config(cwd), |mut p| {
+        p.insert(
+            "hasLingxiMdExternalIncludesApproved".to_string(),
+            Value::Bool(approved),
+        );
+        p.insert(
+            "hasLingxiMdExternalIncludesWarningShown".to_string(),
+            Value::Bool(true),
+        );
+        p
+    })
+    .map(|_wrote| ())
+}
+
 /// Persist trust for `cwd` (the `TrustDialog` "Yes, I trust this folder"
 /// branch, which calls `saveCurrentProjectConfig({ hasTrustDialogAccepted:
 /// true })` against `getProjectPathForConfig()` — `config.ts:717`,
@@ -566,6 +1008,20 @@ pub fn record_trust_accept(config_path: &Path, cwd: &Path) {
 mod tests {
     use super::*;
     use crate::test_support::env_lock;
+
+    fn write_test_lock_dir(lock_dir: &Path, owner: &ConfigLockOwner) {
+        create_secure_dir(lock_dir).unwrap();
+        write_lock_owner(&lock_dir.join(CONFIG_LOCK_OWNER_FILE), owner).unwrap();
+    }
+
+    fn live_test_lock_owner(token: &str) -> ConfigLockOwner {
+        let pid = i32::try_from(std::process::id()).unwrap_or(i32::MAX);
+        ConfigLockOwner {
+            pid,
+            proc_start: read_process_start(pid),
+            token: token.to_string(),
+        }
+    }
 
     #[test]
     fn user_id_is_64_hex_persisted_and_reused() {
@@ -774,6 +1230,163 @@ mod tests {
         .unwrap();
         let proj = get_project_config(&t.global, "/proj").unwrap();
         assert!(proj.get("enabledMcpjsonServers").is_none());
+    }
+
+    #[test]
+    fn concurrent_project_writers_preserve_both_updates() {
+        let t = temp_config();
+        std::fs::write(&t.global, r#"{"projects":{"/proj":{"base":true}}}"#).unwrap();
+
+        let path = t.global.clone();
+        let entered = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let entered_worker = entered.clone();
+        let worker = std::thread::spawn(move || {
+            save_project_config(&path, "/proj", |mut p| {
+                p.insert("first".into(), serde_json::json!(1));
+                entered_worker.wait();
+                std::thread::sleep(Duration::from_millis(150));
+                p
+            })
+            .unwrap();
+        });
+
+        entered.wait();
+        save_project_config(&t.global, "/proj", |mut p| {
+            p.insert("second".into(), serde_json::json!(2));
+            p
+        })
+        .unwrap();
+        worker.join().unwrap();
+
+        let proj = get_project_config(&t.global, "/proj").unwrap();
+        assert_eq!(proj["base"], serde_json::json!(true));
+        assert_eq!(proj["first"], serde_json::json!(1));
+        assert_eq!(proj["second"], serde_json::json!(2));
+    }
+
+    #[test]
+    fn stale_dead_lock_is_recovered_and_removed() {
+        let t = temp_config();
+        let target = resolve_write_target(&t.global);
+        let lock_dir = lock_dir_for_target(&target);
+        write_test_lock_dir(
+            &lock_dir,
+            &ConfigLockOwner {
+                pid: 999_999,
+                proc_start: Some("definitely-not-live".to_string()),
+                token: "stale-owner".to_string(),
+            },
+        );
+
+        save_project_config(&t.global, "/proj", |mut p| {
+            p.insert("recovered".into(), serde_json::json!(true));
+            p
+        })
+        .unwrap();
+
+        let proj = get_project_config(&t.global, "/proj").unwrap();
+        assert_eq!(proj["recovered"], serde_json::json!(true));
+        assert!(!lock_dir.exists(), "stale lock must be cleaned up");
+    }
+
+    #[test]
+    fn lock_is_released_after_read_error() {
+        let t = temp_config();
+        let lock_dir = lock_dir_for_target(&resolve_write_target(&t.global));
+        std::fs::write(&t.global, "{ broken").unwrap();
+
+        let res = save_map(&t.global, |mut m| {
+            m.insert("x".into(), serde_json::json!(1));
+            m
+        });
+
+        assert!(res.is_err());
+        assert!(!lock_dir.exists(), "lock must not leak on read failure");
+    }
+
+    #[test]
+    fn old_guard_does_not_delete_replacement_lock() {
+        let t = temp_config();
+        let target = resolve_write_target(&t.global);
+        let guard = ConfigLockGuard::acquire(&target).unwrap();
+        let replacement_owner = live_test_lock_owner("replacement-owner");
+
+        std::fs::remove_dir_all(&guard.lock_dir).unwrap();
+        write_test_lock_dir(&guard.lock_dir, &replacement_owner);
+
+        drop(guard);
+
+        let current = read_lock_owner(&lock_dir_for_target(&target))
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.token, replacement_owner.token);
+    }
+
+    #[test]
+    fn stale_break_snapshot_does_not_delete_replacement_lock() {
+        let t = temp_config();
+        let target = resolve_write_target(&t.global);
+        let lock_dir = lock_dir_for_target(&target);
+        let stale_owner = ConfigLockOwner {
+            pid: 999_999,
+            proc_start: Some("dead-process".to_string()),
+            token: "stale-snapshot".to_string(),
+        };
+        write_test_lock_dir(&lock_dir, &stale_owner);
+        let stale_token = read_lock_owner(&lock_dir).unwrap().unwrap().token;
+
+        std::fs::remove_dir_all(&lock_dir).unwrap();
+        let replacement_owner = live_test_lock_owner("replacement-owner");
+        write_test_lock_dir(&lock_dir, &replacement_owner);
+
+        let cleaned = quarantine_lock_dir_if_matches(
+            &lock_dir,
+            LockCleanupCondition::OwnerToken(stale_token),
+        )
+        .unwrap();
+
+        assert!(!cleaned, "replacement lock must not be quarantined");
+        let current = read_lock_owner(&lock_dir).unwrap().unwrap();
+        assert_eq!(current.token, replacement_owner.token);
+    }
+
+    #[test]
+    fn live_lock_times_out_without_being_broken() {
+        let t = temp_config();
+        let target = resolve_write_target(&t.global);
+        let lock_dir = lock_dir_for_target(&target);
+        let guard = ConfigLockGuard::acquire_with_options(
+            &target,
+            ConfigLockOptions {
+                timeout: Duration::from_secs(1),
+                poll_interval: Duration::from_millis(25),
+                broken_stale_age: Duration::from_millis(25),
+            },
+        )
+        .unwrap();
+
+        let started = Instant::now();
+        let err = ConfigLockGuard::acquire_with_options(
+            &target,
+            ConfigLockOptions {
+                timeout: Duration::from_millis(150),
+                poll_interval: Duration::from_millis(25),
+                broken_stale_age: Duration::from_millis(25),
+            },
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(err, GlobalConfigError::Io(ref io) if io.kind() == std::io::ErrorKind::TimedOut)
+        );
+        assert!(
+            started.elapsed() >= Duration::from_millis(150),
+            "acquire should wait for the timeout budget"
+        );
+        assert!(lock_dir.exists(), "live holder lock must not be broken");
+
+        drop(guard);
+        assert!(!lock_dir.exists(), "dropping the holder removes the lock");
     }
 
     #[test]
@@ -1172,6 +1785,57 @@ mod tests {
         // Corrupt file → false, no panic.
         std::fs::write(&t.global, "{ broken").unwrap();
         assert!(!check_has_lingxi_md_external_includes_approved(
+            &t.global, &t.project
+        ));
+    }
+
+    #[test]
+    fn external_includes_decision_preserves_project_and_global_siblings() {
+        let t = temp_config();
+        let key = project_path_for_config(&t.project);
+        std::fs::write(
+            &t.global,
+            serde_json::to_vec(&serde_json::json!({
+                "numStartups": 9,
+                "projects": {
+                    key.clone(): { "allowedTools": ["Read"] },
+                    "/other": { "keep": true }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        save_lingxi_md_external_includes_decision(&t.global, &t.project, false).unwrap();
+
+        let back = read_map(&t.global).unwrap();
+        assert_eq!(
+            back["projects"][&key]["hasLingxiMdExternalIncludesApproved"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            back["projects"][&key]["hasLingxiMdExternalIncludesWarningShown"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            back["projects"][&key]["allowedTools"],
+            serde_json::json!(["Read"])
+        );
+        assert_eq!(back["projects"]["/other"]["keep"], serde_json::json!(true));
+        assert_eq!(back["numStartups"], serde_json::json!(9));
+        assert!(check_has_lingxi_md_external_includes_warning_shown(
+            &t.global, &t.project
+        ));
+    }
+
+    #[test]
+    fn external_includes_acceptance_sets_both_flags() {
+        let t = temp_config();
+        save_lingxi_md_external_includes_decision(&t.global, &t.project, true).unwrap();
+        assert!(check_has_lingxi_md_external_includes_approved(
+            &t.global, &t.project
+        ));
+        assert!(check_has_lingxi_md_external_includes_warning_shown(
             &t.global, &t.project
         ));
     }

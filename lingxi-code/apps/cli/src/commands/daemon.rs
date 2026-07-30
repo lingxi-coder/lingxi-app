@@ -41,6 +41,10 @@ use std::sync::Arc;
 /// Heartbeat cadence for the supervise loop (grounded engineering choice, NOT
 /// byte-parity).
 const HEARTBEAT_MS: u64 = 2000;
+const STALL_TERMINATION_POLL_MS: u64 = 50;
+const STALL_TERMINATION_POLL_ATTEMPTS: usize = 20;
+const STALL_RESTART_CONFIRMATION_FAILED_REASON: &str =
+    "could not confirm stalled worker exited before resume restart";
 
 /// Spawns a detached `__bg-run <short>` worker process. Abstracted (like
 /// [`crate::background_dispatch::DaemonSpawner`]) so the supervise loop's
@@ -295,42 +299,248 @@ fn stop_all_workers(runtime_dir: &Path) {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StallTerminationMode {
+    GracefulThenHard,
+    HardOnly,
+}
+
+#[derive(Debug, Clone)]
+struct ObservedProcessIdentity {
+    pid: i32,
+    proc_start: Option<String>,
+}
+
+impl ObservedProcessIdentity {
+    fn from_worker(record: &WorkerRecord) -> Self {
+        Self {
+            pid: record.pid,
+            proc_start: record.proc_start.clone(),
+        }
+    }
+
+    fn is_gone<PP: ProcProbe>(&self, probe: &PP) -> bool {
+        if self.pid <= 1 || !probe.is_alive(self.pid) {
+            return true;
+        }
+        match self.proc_start.as_deref() {
+            Some(expected) => probe.start_time(self.pid).as_deref() != Some(expected),
+            None => false,
+        }
+    }
+
+    fn matches_live_process<PP: ProcProbe>(&self, probe: &PP) -> bool {
+        if self.pid <= 1 || !probe.is_alive(self.pid) {
+            return false;
+        }
+        match self.proc_start.as_deref() {
+            Some(expected) => probe.start_time(self.pid).as_deref() == Some(expected),
+            // Legacy roster entries have no PID-reuse identity. Treat a live
+            // numeric PID as unverified: the restart barrier must fail closed
+            // rather than signal a potentially unrelated process.
+            None => false,
+        }
+    }
+}
+
+trait StallTerminator {
+    fn signal_worker(&mut self, pid: i32, hard: bool);
+    fn signal_pty_tree<PP: ProcProbe>(
+        &mut self,
+        runtime: &crate::background_launch::BackgroundPtyRuntime,
+        probe: &PP,
+        hard: bool,
+    );
+    fn sleep(&mut self, ms: u64);
+}
+
+struct SystemStallTerminator;
+
+impl StallTerminator for SystemStallTerminator {
+    fn signal_worker(&mut self, pid: i32, hard: bool) {
+        kill_worker(pid, hard);
+    }
+
+    fn signal_pty_tree<PP: ProcProbe>(
+        &mut self,
+        runtime: &crate::background_launch::BackgroundPtyRuntime,
+        probe: &PP,
+        hard: bool,
+    ) {
+        signal_pty_tree(runtime, probe, hard);
+    }
+
+    fn sleep(&mut self, ms: u64) {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
+}
+
+enum ObservedPtyRuntime {
+    Verified(crate::background_launch::BackgroundPtyRuntime),
+    UnverifiedPresent,
+}
+
+fn read_stall_pty_runtime(runtime_dir: &Path, short: &str) -> Option<ObservedPtyRuntime> {
+    if let Ok(runtime) = crate::background_launch::read_pty_runtime(runtime_dir, short) {
+        return Some(ObservedPtyRuntime::Verified(runtime));
+    }
+    std::fs::symlink_metadata(crate::background_launch::pty_runtime_path(
+        runtime_dir,
+        short,
+    ))
+    .ok()
+    .map(|_| ObservedPtyRuntime::UnverifiedPresent)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PtyRuntimeState {
+    Gone,
+    LiveVerified,
+    Unknown,
+}
+
+fn verified_pty_runtime_state<PP: ProcProbe>(
+    runtime: &crate::background_launch::BackgroundPtyRuntime,
+    probe: &PP,
+) -> PtyRuntimeState {
+    let Ok(child_pid) = i32::try_from(runtime.child_pid) else {
+        return PtyRuntimeState::Gone;
+    };
+    if !probe.is_alive(child_pid) {
+        return PtyRuntimeState::Gone;
+    }
+    match (
+        runtime.child_proc_start.as_deref(),
+        probe.start_time(child_pid),
+    ) {
+        (Some(expected), Some(actual)) if actual == expected => PtyRuntimeState::LiveVerified,
+        (Some(expected), Some(actual)) if actual != expected => PtyRuntimeState::Gone,
+        _ => PtyRuntimeState::Unknown,
+    }
+}
+
+fn pty_runtime_state<PP: ProcProbe>(runtime: &ObservedPtyRuntime, probe: &PP) -> PtyRuntimeState {
+    match runtime {
+        ObservedPtyRuntime::UnverifiedPresent => PtyRuntimeState::Unknown,
+        ObservedPtyRuntime::Verified(runtime) => verified_pty_runtime_state(runtime, probe),
+    }
+}
+
+fn pty_runtime_is_gone<PP: ProcProbe>(runtime: &ObservedPtyRuntime, probe: &PP) -> bool {
+    pty_runtime_state(runtime, probe) == PtyRuntimeState::Gone
+}
+
+fn identities_are_gone<PP: ProcProbe>(
+    probe: &PP,
+    worker: &ObservedProcessIdentity,
+    pty_runtime: Option<&ObservedPtyRuntime>,
+) -> bool {
+    worker.is_gone(probe) && pty_runtime.is_none_or(|runtime| pty_runtime_is_gone(runtime, probe))
+}
+
+fn wait_for_stall_termination<PP: ProcProbe, ST: StallTerminator>(
+    probe: &PP,
+    terminator: &mut ST,
+    worker: &ObservedProcessIdentity,
+    pty_runtime: Option<&ObservedPtyRuntime>,
+) -> bool {
+    if identities_are_gone(probe, worker, pty_runtime) {
+        return true;
+    }
+    for _ in 0..STALL_TERMINATION_POLL_ATTEMPTS {
+        terminator.sleep(STALL_TERMINATION_POLL_MS);
+        if identities_are_gone(probe, worker, pty_runtime) {
+            return true;
+        }
+    }
+    false
+}
+
+fn terminate_stalled_worker<PP: ProcProbe, ST: StallTerminator>(
+    runtime_dir: &Path,
+    short: &str,
+    record: &WorkerRecord,
+    probe: &PP,
+    terminator: &mut ST,
+    mode: StallTerminationMode,
+) -> bool {
+    let worker = ObservedProcessIdentity::from_worker(record);
+    let pty_runtime = read_stall_pty_runtime(runtime_dir, short);
+    let pty_runtime_ref = pty_runtime.as_ref();
+
+    match mode {
+        StallTerminationMode::GracefulThenHard => {
+            if worker.matches_live_process(probe) {
+                terminator.signal_worker(worker.pid, false);
+            }
+            if let Some(ObservedPtyRuntime::Verified(runtime)) = pty_runtime_ref.filter(|runtime| {
+                pty_runtime_state(runtime, probe) == PtyRuntimeState::LiveVerified
+            }) {
+                terminator.signal_pty_tree(runtime, probe, false);
+            }
+            if wait_for_stall_termination(probe, terminator, &worker, pty_runtime_ref) {
+                crate::background_launch::remove_pty_runtime(runtime_dir, short);
+                return true;
+            }
+            if worker.matches_live_process(probe) {
+                terminator.signal_worker(worker.pid, true);
+            }
+            if let Some(ObservedPtyRuntime::Verified(runtime)) = pty_runtime_ref.filter(|runtime| {
+                pty_runtime_state(runtime, probe) == PtyRuntimeState::LiveVerified
+            }) {
+                terminator.signal_pty_tree(runtime, probe, true);
+            }
+        }
+        StallTerminationMode::HardOnly => {
+            if worker.matches_live_process(probe) {
+                terminator.signal_worker(worker.pid, true);
+            }
+            if let Some(ObservedPtyRuntime::Verified(runtime)) = pty_runtime_ref.filter(|runtime| {
+                pty_runtime_state(runtime, probe) == PtyRuntimeState::LiveVerified
+            }) {
+                terminator.signal_pty_tree(runtime, probe, true);
+            }
+        }
+    }
+
+    let stopped = wait_for_stall_termination(probe, terminator, &worker, pty_runtime_ref);
+    if stopped {
+        crate::background_launch::remove_pty_runtime(runtime_dir, short);
+    }
+    stopped
+}
+
 /// Kill a PTY tree left behind by a vanished worker. Numeric identities are
 /// used only while the recorded creation time still matches, preventing stale
 /// `pty.json` files from targeting a recycled PID.
 fn cleanup_orphaned_pty<PP: ProcProbe>(runtime_dir: &Path, short: &str, probe: &PP) {
-    let Ok(runtime) = crate::background_launch::read_pty_runtime(runtime_dir, short) else {
+    let Some(runtime) = read_stall_pty_runtime(runtime_dir, short) else {
         return;
     };
-    let Ok(child_pid) = i32::try_from(runtime.child_pid) else {
+    match pty_runtime_state(&runtime, probe) {
+        PtyRuntimeState::Gone => {
+            crate::background_launch::remove_pty_runtime(runtime_dir, short);
+            return;
+        }
+        PtyRuntimeState::Unknown => {
+            return;
+        }
+        PtyRuntimeState::LiveVerified => {}
+    }
+    let ObservedPtyRuntime::Verified(runtime) = runtime else {
+        return;
+    };
+    signal_pty_tree(&runtime, probe, false);
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    if verified_pty_runtime_state(&runtime, probe) == PtyRuntimeState::Gone {
         crate::background_launch::remove_pty_runtime(runtime_dir, short);
         return;
-    };
-    let identity_matches = runtime
-        .child_proc_start
-        .as_deref()
-        .is_some_and(|expected| probe.start_time(child_pid).as_deref() == Some(expected));
-    if identity_matches && probe.is_alive(child_pid) {
-        #[cfg(unix)]
-        {
-            let group = runtime.process_group_id.unwrap_or(runtime.child_pid);
-            if let Ok(group) = i32::try_from(group) {
-                let target = nix::unistd::Pid::from_raw(-group);
-                let _ = nix::sys::signal::kill(target, Some(nix::sys::signal::Signal::SIGTERM));
-                std::thread::sleep(std::time::Duration::from_millis(100));
-                if probe.is_alive(child_pid) {
-                    let _ = nix::sys::signal::kill(target, Some(nix::sys::signal::Signal::SIGKILL));
-                }
-            }
-        }
-        #[cfg(windows)]
-        {
-            let _ = std::process::Command::new("taskkill.exe")
-                .args(["/PID", &child_pid.to_string(), "/T", "/F"])
-                .status();
-        }
     }
-    crate::background_launch::remove_pty_runtime(runtime_dir, short);
+    signal_pty_tree(&runtime, probe, true);
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    if verified_pty_runtime_state(&runtime, probe) == PtyRuntimeState::Gone {
+        crate::background_launch::remove_pty_runtime(runtime_dir, short);
+    }
 }
 
 /// Trip `stop` on the next SIGTERM or SIGINT (Ctrl-C). Best-effort: if the
@@ -517,6 +727,23 @@ fn service_stall_requests<PP: ProcProbe>(
     proc_probe: &PP,
     claimed: &mut HashSet<String>,
 ) {
+    let mut terminator = SystemStallTerminator;
+    service_stall_requests_with_terminator(
+        runtime_dir,
+        roster,
+        proc_probe,
+        claimed,
+        &mut terminator,
+    );
+}
+
+fn service_stall_requests_with_terminator<PP: ProcProbe, ST: StallTerminator>(
+    runtime_dir: &Path,
+    roster: &mut Roster,
+    proc_probe: &PP,
+    claimed: &mut HashSet<String>,
+    terminator: &mut ST,
+) {
     let jobs = agents_registry::jobs_dir(runtime_dir);
     let shorts: Vec<String> = roster.workers.keys().cloned().collect();
     for short in shorts {
@@ -524,16 +751,22 @@ fn service_stall_requests<PP: ProcProbe>(
             continue;
         }
         let attempt = read_respawn_count(runtime_dir, &short);
-        let Some(record) = roster.workers.get(&short) else {
+        let Some(record) = roster.workers.get(&short).cloned() else {
             continue;
         };
-        let worker_pid = record.pid;
 
         if attempt >= crate::bg_attach_stall::STALL_RESPAWN_BUDGET {
             // Budget spent. SIGKILL and fail closed with the oracle's reason —
             // a session that will not paint after two restarts is not going to.
             crate::bg_attach_stall::emit_stall_gave_up("starting", "daemon", attempt);
-            kill_worker(worker_pid, true);
+            let stopped = terminate_stalled_worker(
+                runtime_dir,
+                &short,
+                &record,
+                proc_probe,
+                terminator,
+                StallTerminationMode::HardOnly,
+            );
             let _ = agents_registry::update_job_state_with_detail(
                 runtime_dir,
                 &short,
@@ -541,12 +774,13 @@ fn service_stall_requests<PP: ProcProbe>(
                 None,
                 crate::bg_attach_stall::KEEPS_STALLING_KILL_REASON,
             );
-            roster.workers.remove(&short);
-            claimed.remove(&short);
+            if stopped {
+                roster.workers.remove(&short);
+                claimed.remove(&short);
+            }
             continue;
         }
 
-        crate::bg_attach_stall::emit_stall_respawn("starting", "daemon", attempt);
         // Flip the launch spec to a resume BEFORE killing, so a crash between
         // the two never leaves a spec that would re-run the prompt.
         if let Ok(mut spec) = crate::background_launch::read_launch_spec(runtime_dir, &short) {
@@ -556,11 +790,28 @@ fn service_stall_requests<PP: ProcProbe>(
             }
         }
         write_respawn_count(runtime_dir, &short, attempt + 1);
-        kill_worker(worker_pid, false);
-        // Drop the record and the claim so the SAME heartbeat's
-        // `spawn_pending_workers` treats the job as pending and spawns it
-        // afresh — as a resume, per the spec flip above.
-        let _ = proc_probe;
+        let stopped = terminate_stalled_worker(
+            runtime_dir,
+            &short,
+            &record,
+            proc_probe,
+            terminator,
+            StallTerminationMode::GracefulThenHard,
+        );
+        if !stopped {
+            let _ = agents_registry::update_job_state_with_detail(
+                runtime_dir,
+                &short,
+                "failed",
+                None,
+                STALL_RESTART_CONFIRMATION_FAILED_REASON,
+            );
+            continue;
+        }
+
+        crate::bg_attach_stall::emit_stall_respawn("starting", "daemon", attempt);
+        // Drop the record and the claim only AFTER the old writer is confirmed
+        // gone, so the same heartbeat cannot double-spawn concurrent writers.
         roster.workers.remove(&short);
         claimed.remove(&short);
         let _ = agents_registry::update_job_state(runtime_dir, &short, "working", None);
@@ -581,9 +832,53 @@ fn kill_worker(pid: i32, hard: bool) {
         };
         let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), Some(sig));
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        let mut command = std::process::Command::new("taskkill.exe");
+        command.args(["/PID", &pid.to_string(), "/T"]);
+        if hard {
+            command.arg("/F");
+        }
+        let _ = command.status();
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (pid, hard);
+    }
+}
+
+fn signal_pty_tree<PP: ProcProbe>(
+    runtime: &crate::background_launch::BackgroundPtyRuntime,
+    probe: &PP,
+    hard: bool,
+) {
+    if verified_pty_runtime_state(runtime, probe) != PtyRuntimeState::LiveVerified {
+        return;
+    }
+    #[cfg(unix)]
+    {
+        let group = runtime.process_group_id.unwrap_or(runtime.child_pid);
+        if let Ok(group) = i32::try_from(group) {
+            let target = nix::unistd::Pid::from_raw(-group);
+            let signal = if hard {
+                nix::sys::signal::Signal::SIGKILL
+            } else {
+                nix::sys::signal::Signal::SIGTERM
+            };
+            let _ = nix::sys::signal::kill(target, Some(signal));
+        }
+    }
+    #[cfg(windows)]
+    {
+        let Ok(child_pid) = i32::try_from(runtime.child_pid) else {
+            return;
+        };
+        let mut command = std::process::Command::new("taskkill.exe");
+        command.args(["/PID", &child_pid.to_string(), "/T"]);
+        if hard {
+            command.arg("/F");
+        }
+        let _ = command.status();
     }
 }
 
@@ -1032,6 +1327,7 @@ mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     /// Serializes every test that drives `run_supervisor`.
     ///
@@ -1093,6 +1389,138 @@ mod tests {
         }
         fn start_time(&self, pid: i32) -> Option<String> {
             self.start.get(&pid).cloned()
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct ProcTransition {
+        after_sleeps: usize,
+        pid: i32,
+        alive: bool,
+        start: Option<String>,
+    }
+
+    #[derive(Debug, Default)]
+    struct ScriptedProcState {
+        alive: HashMap<i32, bool>,
+        start: HashMap<i32, String>,
+        transitions: Vec<ProcTransition>,
+        worker_signals: Vec<(i32, bool)>,
+        pty_signals: Vec<(i32, bool)>,
+        sleeps: Vec<u64>,
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct ScriptedProc {
+        state: Arc<Mutex<ScriptedProcState>>,
+    }
+
+    impl ScriptedProc {
+        fn set_process(&self, pid: i32, start: &str) {
+            let mut state = self.state.lock().unwrap();
+            state.alive.insert(pid, true);
+            state.start.insert(pid, start.to_string());
+        }
+
+        fn schedule_exit(&self, pid: i32, after_sleeps: usize) {
+            self.schedule_state(pid, after_sleeps, false, None);
+        }
+
+        fn schedule_state(&self, pid: i32, after_sleeps: usize, alive: bool, start: Option<&str>) {
+            self.state.lock().unwrap().transitions.push(ProcTransition {
+                after_sleeps,
+                pid,
+                alive,
+                start: start.map(str::to_string),
+            });
+        }
+
+        fn worker_signals(&self) -> Vec<(i32, bool)> {
+            self.state.lock().unwrap().worker_signals.clone()
+        }
+
+        fn pty_signals(&self) -> Vec<(i32, bool)> {
+            self.state.lock().unwrap().pty_signals.clone()
+        }
+
+        fn sleep_count(&self) -> usize {
+            self.state.lock().unwrap().sleeps.len()
+        }
+
+        fn apply_due_transitions(state: &mut ScriptedProcState) {
+            let sleep_count = state.sleeps.len();
+            let mut pending = Vec::new();
+            for transition in state.transitions.drain(..) {
+                if transition.after_sleeps <= sleep_count {
+                    state.alive.insert(transition.pid, transition.alive);
+                    match transition.start {
+                        Some(start) => {
+                            state.start.insert(transition.pid, start);
+                        }
+                        None => {
+                            state.start.remove(&transition.pid);
+                        }
+                    }
+                } else {
+                    pending.push(transition);
+                }
+            }
+            state.transitions = pending;
+        }
+    }
+
+    impl ProcProbe for ScriptedProc {
+        fn is_alive(&self, pid: i32) -> bool {
+            self.state
+                .lock()
+                .unwrap()
+                .alive
+                .get(&pid)
+                .copied()
+                .unwrap_or(false)
+        }
+
+        fn start_time(&self, pid: i32) -> Option<String> {
+            self.state.lock().unwrap().start.get(&pid).cloned()
+        }
+    }
+
+    struct FakeStallTerminator {
+        state: Arc<Mutex<ScriptedProcState>>,
+    }
+
+    impl FakeStallTerminator {
+        fn new(proc: &ScriptedProc) -> Self {
+            Self {
+                state: Arc::clone(&proc.state),
+            }
+        }
+    }
+
+    impl StallTerminator for FakeStallTerminator {
+        fn signal_worker(&mut self, pid: i32, hard: bool) {
+            self.state.lock().unwrap().worker_signals.push((pid, hard));
+        }
+
+        fn signal_pty_tree<PP: ProcProbe>(
+            &mut self,
+            runtime: &crate::background_launch::BackgroundPtyRuntime,
+            _probe: &PP,
+            hard: bool,
+        ) {
+            if let Ok(child_pid) = i32::try_from(runtime.child_pid) {
+                self.state
+                    .lock()
+                    .unwrap()
+                    .pty_signals
+                    .push((child_pid, hard));
+            }
+        }
+
+        fn sleep(&mut self, ms: u64) {
+            let mut state = self.state.lock().unwrap();
+            state.sleeps.push(ms);
+            ScriptedProc::apply_due_transitions(&mut state);
         }
     }
 
@@ -1247,6 +1675,50 @@ mod tests {
             pty_auth: None,
             extra: serde_json::Map::new(),
         }
+    }
+
+    fn write_test_pty_runtime(
+        runtime_dir: &Path,
+        short: &str,
+        worker_pid: i32,
+        child_pid: u32,
+        child_proc_start: &str,
+    ) {
+        crate::background_launch::write_pty_runtime(
+            runtime_dir,
+            short,
+            &crate::background_launch::BackgroundPtyRuntime {
+                schema_version: 1,
+                short: short.to_string(),
+                worker_pid,
+                child_pid,
+                child_proc_start: Some(child_proc_start.to_string()),
+                process_group_id: Some(child_pid),
+            },
+        )
+        .unwrap();
+    }
+
+    fn write_legacy_test_pty_runtime(
+        runtime_dir: &Path,
+        short: &str,
+        worker_pid: i32,
+        child_pid: u32,
+    ) {
+        let path = crate::background_launch::pty_runtime_path(runtime_dir, short);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            path,
+            serde_json::json!({
+                "schemaVersion": 1,
+                "short": short,
+                "workerPid": worker_pid,
+                "childPid": child_pid,
+                "processGroupId": child_pid,
+            })
+            .to_string(),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -2064,6 +2536,7 @@ mod tests {
     fn a_stall_request_respawns_the_worker_and_bumps_the_durable_counter() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
+        seed_working_job(root, "cafe0001");
         let mut roster = empty_roster(1);
         roster.workers.insert("cafe0001".to_string(), worker(4242));
         let jobs = agents_registry::jobs_dir(root);
@@ -2082,6 +2555,260 @@ mod tests {
         assert!(!claimed.contains("cafe0001"));
         // The durable counter advanced — this is what the budget is applied to.
         assert_eq!(read_respawn_count(root, "cafe0001"), 1);
+    }
+
+    #[test]
+    fn a_stall_request_waits_for_old_writer_exit_before_respawning() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        seed_working_job(root, "cafe0101");
+        let mut roster = empty_roster(1);
+        let mut record = worker(4242);
+        record.proc_start = Some("WORKER-START".to_string());
+        roster.workers.insert("cafe0101".to_string(), record);
+        write_test_pty_runtime(root, "cafe0101", 4242, 9001, "CHILD-START");
+        let jobs = agents_registry::jobs_dir(root);
+        crate::bg_attach_stall::request_stall_respawn(&jobs, "cafe0101");
+
+        let proc = ScriptedProc::default();
+        proc.set_process(4242, "WORKER-START");
+        proc.set_process(9001, "CHILD-START");
+        proc.schedule_exit(4242, 3);
+        proc.schedule_exit(9001, 3);
+        let mut terminator = FakeStallTerminator::new(&proc);
+        let mut claimed: HashSet<String> = ["cafe0101".to_string()].into_iter().collect();
+
+        service_stall_requests_with_terminator(
+            root,
+            &mut roster,
+            &proc,
+            &mut claimed,
+            &mut terminator,
+        );
+
+        assert!(!roster.workers.contains_key("cafe0101"));
+        assert!(!claimed.contains("cafe0101"));
+        assert_eq!(read_respawn_count(root, "cafe0101"), 1);
+        assert_eq!(proc.worker_signals(), vec![(4242, false)]);
+        assert_eq!(proc.pty_signals(), vec![(9001, false)]);
+        assert_eq!(proc.sleep_count(), 3);
+        assert!(!crate::background_launch::pty_runtime_path(root, "cafe0101").exists());
+    }
+
+    #[test]
+    fn a_stall_request_fails_closed_if_restart_barrier_cannot_clear_the_old_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        seed_working_job(root, "cafe0102");
+        let mut roster = empty_roster(1);
+        let mut record = worker(4243);
+        record.proc_start = Some("WORKER-START".to_string());
+        roster.workers.insert("cafe0102".to_string(), record);
+        write_test_pty_runtime(root, "cafe0102", 4243, 9002, "CHILD-START");
+        let jobs = agents_registry::jobs_dir(root);
+        crate::bg_attach_stall::request_stall_respawn(&jobs, "cafe0102");
+
+        let proc = ScriptedProc::default();
+        proc.set_process(4243, "WORKER-START");
+        proc.set_process(9002, "CHILD-START");
+        let mut terminator = FakeStallTerminator::new(&proc);
+        let mut claimed: HashSet<String> = ["cafe0102".to_string()].into_iter().collect();
+
+        service_stall_requests_with_terminator(
+            root,
+            &mut roster,
+            &proc,
+            &mut claimed,
+            &mut terminator,
+        );
+
+        assert!(roster.workers.contains_key("cafe0102"));
+        assert!(claimed.contains("cafe0102"));
+        assert_eq!(read_respawn_count(root, "cafe0102"), 1);
+        assert_eq!(proc.worker_signals(), vec![(4243, false), (4243, true)]);
+        assert_eq!(proc.pty_signals(), vec![(9002, false), (9002, true)]);
+        assert!(
+            crate::background_launch::pty_runtime_path(root, "cafe0102").exists(),
+            "the runtime identity stays in place while the old writer is unconfirmed"
+        );
+        let job = agents_registry::read_job(root, "cafe0102").unwrap();
+        assert_eq!(job.state, "failed");
+        assert_eq!(
+            job.detail.as_deref(),
+            Some(STALL_RESTART_CONFIRMATION_FAILED_REASON)
+        );
+    }
+
+    #[test]
+    fn a_stall_request_escalates_to_hard_termination_before_respawning() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        seed_working_job(root, "cafe0103");
+        let mut roster = empty_roster(1);
+        let mut record = worker(4244);
+        record.proc_start = Some("WORKER-START".to_string());
+        roster.workers.insert("cafe0103".to_string(), record);
+        write_test_pty_runtime(root, "cafe0103", 4244, 9003, "CHILD-START");
+        let jobs = agents_registry::jobs_dir(root);
+        crate::bg_attach_stall::request_stall_respawn(&jobs, "cafe0103");
+
+        let proc = ScriptedProc::default();
+        proc.set_process(4244, "WORKER-START");
+        proc.set_process(9003, "CHILD-START");
+        proc.schedule_exit(4244, STALL_TERMINATION_POLL_ATTEMPTS + 1);
+        proc.schedule_exit(9003, STALL_TERMINATION_POLL_ATTEMPTS + 1);
+        let mut terminator = FakeStallTerminator::new(&proc);
+        let mut claimed: HashSet<String> = ["cafe0103".to_string()].into_iter().collect();
+
+        service_stall_requests_with_terminator(
+            root,
+            &mut roster,
+            &proc,
+            &mut claimed,
+            &mut terminator,
+        );
+
+        assert!(!roster.workers.contains_key("cafe0103"));
+        assert!(!claimed.contains("cafe0103"));
+        assert_eq!(read_respawn_count(root, "cafe0103"), 1);
+        assert_eq!(proc.worker_signals(), vec![(4244, false), (4244, true)]);
+        assert_eq!(proc.pty_signals(), vec![(9003, false), (9003, true)]);
+        assert_eq!(proc.sleep_count(), STALL_TERMINATION_POLL_ATTEMPTS + 1);
+        assert!(!crate::background_launch::pty_runtime_path(root, "cafe0103").exists());
+    }
+
+    #[test]
+    fn a_stall_request_does_not_signal_recycled_worker_or_pty_identities() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        seed_working_job(root, "cafe0104");
+        let mut roster = empty_roster(1);
+        let mut record = worker(4245);
+        record.proc_start = Some("WORKER-START".to_string());
+        roster.workers.insert("cafe0104".to_string(), record);
+        write_test_pty_runtime(root, "cafe0104", 4245, 9004, "CHILD-START");
+        let jobs = agents_registry::jobs_dir(root);
+        crate::bg_attach_stall::request_stall_respawn(&jobs, "cafe0104");
+
+        let proc = ScriptedProc::default();
+        proc.set_process(4245, "RECYCLED-WORKER");
+        proc.set_process(9004, "RECYCLED-CHILD");
+        let mut terminator = FakeStallTerminator::new(&proc);
+        let mut claimed: HashSet<String> = ["cafe0104".to_string()].into_iter().collect();
+
+        service_stall_requests_with_terminator(
+            root,
+            &mut roster,
+            &proc,
+            &mut claimed,
+            &mut terminator,
+        );
+
+        assert!(!roster.workers.contains_key("cafe0104"));
+        assert!(!claimed.contains("cafe0104"));
+        assert_eq!(proc.worker_signals(), Vec::<(i32, bool)>::new());
+        assert_eq!(proc.pty_signals(), Vec::<(i32, bool)>::new());
+        assert_eq!(proc.sleep_count(), 0);
+        assert_eq!(read_respawn_count(root, "cafe0104"), 1);
+        assert!(!crate::background_launch::pty_runtime_path(root, "cafe0104").exists());
+    }
+
+    #[test]
+    fn a_stall_request_fails_closed_for_live_legacy_pty_identity_without_signaling_or_respawning() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        seed_working_job(root, "cafe0105");
+        let mut roster = empty_roster(1);
+        let mut record = worker(4246);
+        record.proc_start = Some("WORKER-START".to_string());
+        roster.workers.insert("cafe0105".to_string(), record);
+        write_legacy_test_pty_runtime(root, "cafe0105", 4246, 9005);
+        let jobs = agents_registry::jobs_dir(root);
+        crate::bg_attach_stall::request_stall_respawn(&jobs, "cafe0105");
+
+        let proc = ScriptedProc::default();
+        proc.set_process(4246, "WORKER-START");
+        proc.set_process(9005, "CHILD-START");
+        proc.schedule_exit(4246, 1);
+        let mut terminator = FakeStallTerminator::new(&proc);
+        let mut claimed: HashSet<String> = ["cafe0105".to_string()].into_iter().collect();
+
+        service_stall_requests_with_terminator(
+            root,
+            &mut roster,
+            &proc,
+            &mut claimed,
+            &mut terminator,
+        );
+
+        assert!(roster.workers.contains_key("cafe0105"));
+        assert!(claimed.contains("cafe0105"));
+        assert_eq!(proc.worker_signals(), vec![(4246, false)]);
+        assert_eq!(proc.pty_signals(), Vec::<(i32, bool)>::new());
+        assert!(
+            proc.sleep_count() >= STALL_TERMINATION_POLL_ATTEMPTS,
+            "the barrier waited instead of assuming the legacy PTY was gone"
+        );
+        assert_eq!(read_respawn_count(root, "cafe0105"), 1);
+        assert!(crate::background_launch::pty_runtime_path(root, "cafe0105").exists());
+        let job = agents_registry::read_job(root, "cafe0105").unwrap();
+        assert_eq!(job.state, "failed");
+        assert_eq!(
+            job.detail.as_deref(),
+            Some(STALL_RESTART_CONFIRMATION_FAILED_REASON)
+        );
+    }
+
+    #[test]
+    fn cleanup_orphaned_pty_preserves_live_unverified_runtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_legacy_test_pty_runtime(root, "cafe0106", 4247, 9006);
+
+        let mut alive = HashMap::new();
+        alive.insert(9006, true);
+        let mut start = HashMap::new();
+        start.insert(9006, "CHILD-START".to_string());
+        let proc = FakeProc { alive, start };
+
+        cleanup_orphaned_pty(root, "cafe0106", &proc);
+
+        assert!(crate::background_launch::pty_runtime_path(root, "cafe0106").exists());
+    }
+
+    #[test]
+    fn a_stall_request_does_not_signal_live_legacy_worker_without_start_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        seed_working_job(root, "cafe0107");
+        let mut roster = empty_roster(1);
+        roster.workers.insert("cafe0107".to_string(), worker(4248));
+        let jobs = agents_registry::jobs_dir(root);
+        crate::bg_attach_stall::request_stall_respawn(&jobs, "cafe0107");
+
+        let proc = ScriptedProc::default();
+        proc.set_process(4248, "UNVERIFIED-START");
+        let mut terminator = FakeStallTerminator::new(&proc);
+        let mut claimed: HashSet<String> = ["cafe0107".to_string()].into_iter().collect();
+
+        service_stall_requests_with_terminator(
+            root,
+            &mut roster,
+            &proc,
+            &mut claimed,
+            &mut terminator,
+        );
+
+        assert!(roster.workers.contains_key("cafe0107"));
+        assert!(claimed.contains("cafe0107"));
+        assert_eq!(proc.worker_signals(), Vec::<(i32, bool)>::new());
+        assert_eq!(proc.sleep_count(), STALL_TERMINATION_POLL_ATTEMPTS * 2);
+        let job = agents_registry::read_job(root, "cafe0107").unwrap();
+        assert_eq!(job.state, "failed");
+        assert_eq!(
+            job.detail.as_deref(),
+            Some(STALL_RESTART_CONFIRMATION_FAILED_REASON)
+        );
     }
 
     #[test]

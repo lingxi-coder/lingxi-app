@@ -133,6 +133,12 @@ pub struct McpCatalogChanged {
     pub kind: McpCatalogKind,
 }
 
+#[derive(Clone)]
+struct RegisteredClient {
+    connection_id: Option<McpConnectionId>,
+    client: Arc<McpClient>,
+}
+
 /// In-memory registry of every known MCP connection.
 pub struct McpRegistry {
     /// Map of server name to current state.
@@ -147,18 +153,17 @@ pub struct McpRegistry {
     lifecycle_locks: StdMutex<HashMap<String, Arc<Mutex<()>>>>,
     /// Side-channel cache of [`McpClient`] handles per server name.
     ///
-    /// Populated by [`Self::register_client`] (M4-07) — production wiring
-    /// inserts an `Arc<McpClient>` for each `Connected` server so the
-    /// builtin MCP tools (`MCPTool`, `ListMcpResourcesTool`,
-    /// `ReadMcpResourceTool`) can dispatch through the wire-locked
-    /// client surface (in particular, `McpClientError::Timeout`).
+    /// Populated by [`Self::register_client`] / [`Self::register_connected_client`].
+    /// Production wiring records the exact connection generation alongside the
+    /// client so prompt dispatch can fail closed when a reconnect swaps the
+    /// live client between command discovery and `prompts/get`.
     ///
     /// Insertion-ordered ([`IndexMap`]) so [`Self::servers_with_tools`] returns
     /// server names in DISCOVERY order — claude builds `serversWithTools` by
     /// iterating `appState.mcp.tools` in order with no sort
     /// (`AgentTool.tsx:394-405`). A plain `HashMap` would make the required-MCP
     /// gate error text non-deterministic.
-    clients: RwLock<IndexMap<String, Arc<McpClient>>>,
+    clients: RwLock<IndexMap<String, RegisteredClient>>,
     /// Fan-out for inbound server catalog invalidations. The engine subscribes
     /// once and refreshes the shared tool registry after a successful
     /// `tools/list`; lagged consumers can safely refresh from the latest state.
@@ -522,7 +527,13 @@ impl McpRegistry {
     /// [`McpClient::send_roots_list_changed`]). Returns the number of clients
     /// notified. Parity 2.1.207 P1-08.
     pub async fn notify_roots_list_changed_all(&self) -> usize {
-        let clients: Vec<Arc<McpClient>> = self.clients.read().await.values().cloned().collect();
+        let clients: Vec<Arc<McpClient>> = self
+            .clients
+            .read()
+            .await
+            .values()
+            .map(|entry| Arc::clone(&entry.client))
+            .collect();
         for client in &clients {
             client.send_roots_list_changed();
         }
@@ -557,7 +568,28 @@ impl McpRegistry {
     /// alongside `connect`). Builtin tools then call [`Self::get_client`]
     /// to dispatch over the wire-locked client surface.
     pub async fn register_client(&self, name: &str, client: Arc<McpClient>) {
-        self.clients.write().await.insert(name.into(), client);
+        self.clients.write().await.insert(
+            name.into(),
+            RegisteredClient {
+                connection_id: None,
+                client,
+            },
+        );
+    }
+
+    async fn register_connected_client(
+        &self,
+        name: &str,
+        connection_id: McpConnectionId,
+        client: Arc<McpClient>,
+    ) {
+        self.clients.write().await.insert(
+            name.into(),
+            RegisteredClient {
+                connection_id: Some(connection_id),
+                client,
+            },
+        );
     }
 
     /// Return the cached `Arc<McpClient>` for `name`, if any (M4-07).
@@ -573,7 +605,7 @@ impl McpRegistry {
             .await
             .iter()
             .find(|(k, _)| normalize_name_for_mcp(k) == name)
-            .map(|(_, v)| Arc::clone(v))
+            .map(|(_, entry)| Arc::clone(&entry.client))
     }
 
     /// Return the [`McpServerConfig`] for `name`, if any (M4-07).
@@ -617,7 +649,13 @@ impl McpRegistry {
                 last_error: None,
             },
         );
-        self.clients.write().await.insert(name.into(), client);
+        self.clients.write().await.insert(
+            name.into(),
+            RegisteredClient {
+                connection_id: None,
+                client,
+            },
+        );
     }
 
     /// Connect, run `initialize`, and discover the server's catalog.
@@ -863,7 +901,8 @@ impl McpRegistry {
                     // P2-01 remainder).
                     .with_transport_kind(config_transport_kind),
                 );
-                self.register_client(&server_name, client).await;
+                self.register_connected_client(&server_name, connection_id, client)
+                    .await;
             }
         }
 
@@ -1789,7 +1828,13 @@ impl McpRegistry {
     /// `appState.mcp.tools` in order and pushing first-seen server names, with
     /// NO sort, so the required-MCP error lists servers in that same order.
     pub async fn servers_with_tools(&self) -> Vec<String> {
-        let clients: Vec<Arc<McpClient>> = self.clients.read().await.values().cloned().collect();
+        let clients: Vec<Arc<McpClient>> = self
+            .clients
+            .read()
+            .await
+            .values()
+            .map(|entry| Arc::clone(&entry.client))
+            .collect();
         let mut out: Vec<String> = Vec::new();
         for client in clients {
             let Ok(tools) = client.list_tools().await else {
@@ -1841,6 +1886,56 @@ impl McpRegistry {
             }
         }
         out
+    }
+
+    /// Render one prompt through the exact live connection that advertised it.
+    ///
+    /// Commands retain a [`McpConnectionId`] rather than only the logical server
+    /// name so reconnecting a server cannot accidentally dispatch a stale menu
+    /// entry through a newer connection generation.
+    pub async fn get_prompt(
+        &self,
+        connection_id: protocol::McpConnectionId,
+        prompt_name: &str,
+        arguments: serde_json::Value,
+    ) -> Result<serde_json::Value, McpError> {
+        let server_name = {
+            let connections = self.connections.read().await;
+            connections
+                .iter()
+                .find_map(|(name, state)| match state {
+                    crate::connection::McpConnectionState::Connected {
+                        connection_id: current,
+                        ..
+                    } if *current == connection_id => Some(name.clone()),
+                    _ => None,
+                })
+                .ok_or_else(|| {
+                    McpError::Internal(format!(
+                        "MCP prompt connection {connection_id} is no longer active"
+                    ))
+                })?
+        };
+
+        let client = {
+            let clients = self.clients.read().await;
+            let entry = clients.get(&server_name).ok_or_else(|| {
+                McpError::Internal(format!(
+                    "MCP prompt server {server_name} has no live client"
+                ))
+            })?;
+            if entry.connection_id != Some(connection_id) {
+                return Err(McpError::Internal(format!(
+                    "MCP prompt connection {connection_id} is no longer active"
+                )));
+            }
+            Arc::clone(&entry.client)
+        };
+
+        client
+            .get_prompt(prompt_name, arguments)
+            .await
+            .map_err(|error| McpError::Internal(error.to_string()))
     }
 
     /// Recover the RAW wire tool name for a model-facing MCP tool `full_name`.
@@ -2346,8 +2441,10 @@ mod tests {
     use jsonrpc::{Connection, Mode};
     use protocol::McpConnectionId as ConnId;
     use serde_json::Value;
+    use std::future::Future;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex as TestMutex;
+    use std::task::{Context, Poll, Wake, Waker};
     use tokio::sync::{mpsc, Notify};
     use traits::{
         ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
@@ -2520,6 +2617,12 @@ mod tests {
         fn connection_for(&self, id: ConnId) -> Option<Arc<Connection>> {
             self.conns.lock().unwrap().get(&id).cloned()
         }
+    }
+
+    struct NoopWake;
+
+    impl Wake for NoopWake {
+        fn wake(self: Arc<Self>) {}
     }
 
     fn cfg(name: &str) -> McpServerConfig {
@@ -2911,7 +3014,13 @@ mod tests {
             McpClient::new("srv", std::path::PathBuf::from("/tmp/work"), connection).await,
         );
         let connection_id = ConnId::new();
-        registry.clients.write().await.insert("srv".into(), client);
+        registry.clients.write().await.insert(
+            "srv".into(),
+            RegisteredClient {
+                connection_id: Some(connection_id),
+                client,
+            },
+        );
         registry.connections.write().await.insert(
             "srv".into(),
             McpConnectionState::Connected {
@@ -2972,6 +3081,103 @@ mod tests {
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].tool_name, "new tool");
         assert_eq!(tools[0].full_name, "mcp__srv__new_tool");
+    }
+
+    #[tokio::test]
+    async fn get_prompt_rejects_generation_swapped_client_after_validation() {
+        let registry = Arc::new(McpRegistry::new(Arc::new(BridgeMock::new(&[]))));
+        let (conn_a, mut peer_a) = observable_connection();
+        let (conn_b, mut peer_b) = observable_connection();
+        let client_a =
+            Arc::new(McpClient::new("srv", std::path::PathBuf::from("/tmp/work"), conn_a).await);
+        let client_b =
+            Arc::new(McpClient::new("srv", std::path::PathBuf::from("/tmp/work"), conn_b).await);
+        let old_id = ConnId::new();
+        let new_id = ConnId::new();
+
+        registry.connections.write().await.insert(
+            "srv".into(),
+            McpConnectionState::Connected {
+                config: cfg("srv"),
+                connection_id: old_id,
+                capabilities: ServerCapabilitiesDto {
+                    tools: false,
+                    resources: false,
+                    prompts: true,
+                    logging: false,
+                    experimental: HashMap::new(),
+                },
+                tools: Vec::new(),
+                resources: Vec::new(),
+                prompts: vec![McpPromptDto {
+                    name: "draft".into(),
+                    description: None,
+                    arguments: Vec::new(),
+                }],
+                connected_at: SystemTime::now(),
+            },
+        );
+        let mut clients = registry.clients.write().await;
+        clients.insert(
+            "srv".into(),
+            RegisteredClient {
+                connection_id: Some(old_id),
+                client: client_a,
+            },
+        );
+
+        let mut get_prompt = std::pin::pin!(registry.get_prompt(
+            old_id,
+            "draft",
+            serde_json::json!({ "topic": "release" })
+        ));
+        let waker = Waker::from(Arc::new(NoopWake));
+        let mut cx = Context::from_waker(&waker);
+        assert!(matches!(get_prompt.as_mut().poll(&mut cx), Poll::Pending));
+
+        registry.connections.write().await.insert(
+            "srv".into(),
+            McpConnectionState::Connected {
+                config: cfg("srv"),
+                connection_id: new_id,
+                capabilities: ServerCapabilitiesDto {
+                    tools: false,
+                    resources: false,
+                    prompts: true,
+                    logging: false,
+                    experimental: HashMap::new(),
+                },
+                tools: Vec::new(),
+                resources: Vec::new(),
+                prompts: vec![McpPromptDto {
+                    name: "draft".into(),
+                    description: None,
+                    arguments: Vec::new(),
+                }],
+                connected_at: SystemTime::now(),
+            },
+        );
+        clients.insert(
+            "srv".into(),
+            RegisteredClient {
+                connection_id: Some(new_id),
+                client: client_b,
+            },
+        );
+        drop(clients);
+
+        let error = get_prompt.await.unwrap_err();
+        assert!(error.to_string().contains(&format!(
+            "MCP prompt connection {old_id} is no longer active"
+        )));
+        assert!(
+            peer_a.try_recv().is_err(),
+            "the original generation must not receive prompts/get after replacement",
+        );
+        assert!(
+            peer_b.try_recv().is_err(),
+            "the new generation must not receive a stale prompts/get request",
+        );
     }
 
     #[tokio::test]

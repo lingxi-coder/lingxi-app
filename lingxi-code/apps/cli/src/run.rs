@@ -457,6 +457,394 @@ fn resolve_set_model_target(field: Option<&Value>, default_model: &str) -> SetMo
     }
 }
 
+const FILE_SUGGESTION_LIMIT: usize = 15;
+const FILE_SUGGESTION_MAX_INDEXED_PATHS: usize = 20_000;
+const FILE_SUGGESTION_INDEX_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Per-process file-index cache used by the stream-json `file_suggestions`
+/// control request. Claude Code starts the tracked-file refresh in the
+/// background and searches whatever portion of the index is already ready, so
+/// the first non-trivial query may legitimately return an empty list.
+#[derive(Clone, Default)]
+struct StreamFileSuggestionIndex {
+    paths: Arc<tokio::sync::RwLock<Vec<String>>>,
+    root: Arc<tokio::sync::RwLock<Option<PathBuf>>>,
+    generation: Arc<std::sync::atomic::AtomicU64>,
+    refresh_started: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl StreamFileSuggestionIndex {
+    async fn suggestions(&self, cwd: &std::path::Path, query: &str) -> Vec<String> {
+        self.prepare_root(cwd).await;
+        if matches!(query, "" | "." | "./") {
+            self.start_refresh(cwd.to_path_buf());
+            return list_cwd_suggestions(cwd).await;
+        }
+
+        self.start_refresh(cwd.to_path_buf());
+        let expanded_query = expand_home_query(query);
+        if std::path::Path::new(&expanded_query).is_absolute() {
+            return absolute_file_suggestions(query, &expanded_query).await;
+        }
+        fuzzy_file_suggestions(
+            &self.paths.read().await,
+            &expanded_query,
+            FILE_SUGGESTION_LIMIT,
+        )
+    }
+
+    async fn prepare_root(&self, cwd: &std::path::Path) {
+        use std::sync::atomic::Ordering;
+
+        let mut root = self.root.write().await;
+        if root.as_deref() == Some(cwd) {
+            return;
+        }
+        *root = Some(cwd.to_path_buf());
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        self.refresh_started.store(false, Ordering::Release);
+        self.paths.write().await.clear();
+    }
+
+    fn start_refresh(&self, cwd: PathBuf) {
+        use std::sync::atomic::Ordering;
+
+        if self
+            .refresh_started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let paths = Arc::clone(&self.paths);
+        let generation = Arc::clone(&self.generation);
+        let refresh_generation = generation.load(Ordering::Acquire);
+        tokio::spawn(async move {
+            let indexed = build_file_suggestion_index(&cwd).await;
+            if generation.load(Ordering::Acquire) == refresh_generation {
+                *paths.write().await = indexed;
+            }
+        });
+    }
+}
+
+async fn list_cwd_suggestions(cwd: &std::path::Path) -> Vec<String> {
+    let Ok(mut entries) = tokio::fs::read_dir(cwd).await else {
+        return Vec::new();
+    };
+    let mut suggestions = Vec::new();
+    while suggestions.len() < FILE_SUGGESTION_LIMIT {
+        let Ok(Some(entry)) = entries.next_entry().await else {
+            break;
+        };
+        let mut name = entry.file_name().to_string_lossy().into_owned();
+        if entry.file_type().await.is_ok_and(|kind| kind.is_dir()) {
+            name.push(std::path::MAIN_SEPARATOR);
+        }
+        suggestions.push(name);
+    }
+    suggestions
+}
+
+fn expand_home_query(query: &str) -> String {
+    let Some(rest) = query.strip_prefix('~') else {
+        return query.to_string();
+    };
+    let Some(home) = dirs::home_dir() else {
+        return query.to_string();
+    };
+    format!("{}{}", home.to_string_lossy(), rest)
+}
+
+async fn absolute_file_suggestions(original_query: &str, expanded_query: &str) -> Vec<String> {
+    let path = std::path::Path::new(expanded_query);
+    let has_trailing_separator = expanded_query
+        .chars()
+        .last()
+        .is_some_and(|character| matches!(character, '/' | '\\'));
+    let (directory, needle) = if has_trailing_separator {
+        (path, "")
+    } else {
+        (
+            path.parent().unwrap_or_else(|| std::path::Path::new(".")),
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default(),
+        )
+    };
+
+    let Ok(mut entries) = tokio::fs::read_dir(directory).await else {
+        return Vec::new();
+    };
+    let mut kinds = std::collections::HashMap::new();
+    while kinds.len() < FILE_SUGGESTION_MAX_INDEXED_PATHS {
+        let Ok(Some(entry)) = entries.next_entry().await else {
+            break;
+        };
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.is_empty() {
+            continue;
+        }
+        let is_dir = entry.file_type().await.is_ok_and(|kind| kind.is_dir());
+        kinds.insert(name, is_dir);
+    }
+
+    let mut names: Vec<String> = kinds.keys().cloned().collect();
+    names.sort();
+    let selected = if needle.is_empty() {
+        names.into_iter().take(FILE_SUGGESTION_LIMIT).collect()
+    } else {
+        fuzzy_file_suggestions(&names, needle, FILE_SUGGESTION_LIMIT)
+    };
+    let home = dirs::home_dir();
+    selected
+        .into_iter()
+        .map(|name| {
+            let full = directory.join(&name);
+            let mut rendered = render_absolute_suggestion(original_query, &full, home.as_deref());
+            if kinds.get(&name).copied().unwrap_or(false) {
+                rendered.push(std::path::MAIN_SEPARATOR);
+            }
+            rendered
+        })
+        .collect()
+}
+
+fn render_absolute_suggestion(
+    original_query: &str,
+    full: &std::path::Path,
+    home: Option<&std::path::Path>,
+) -> String {
+    if original_query.starts_with('~') {
+        if let Some(relative) = home.and_then(|home| full.strip_prefix(home).ok()) {
+            let mut rendered = String::from("~");
+            if !relative.as_os_str().is_empty() {
+                rendered.push(std::path::MAIN_SEPARATOR);
+                rendered.push_str(&relative.to_string_lossy());
+            }
+            return rendered;
+        }
+    }
+    full.to_string_lossy().into_owned()
+}
+
+async fn build_file_suggestion_index(cwd: &std::path::Path) -> Vec<String> {
+    let mut git = tokio::process::Command::new("git");
+    git.args([
+        "-c",
+        "core.quotepath=false",
+        "ls-files",
+        "--recurse-submodules",
+        "-z",
+    ])
+    .current_dir(cwd);
+    let mut files = match collect_command_items(
+        git,
+        FILE_SUGGESTION_MAX_INDEXED_PATHS,
+        FILE_SUGGESTION_INDEX_TIMEOUT,
+    )
+    .await
+    {
+        Some(files) => files,
+        None => {
+            let mut rg = tokio::process::Command::new("rg");
+            rg.args([
+                "--files", "--null", "--follow", "--hidden", "--glob", "!.git/", "--glob",
+                "!.svn/", "--glob", "!.hg/", "--glob", "!.jj/",
+            ])
+            .current_dir(cwd);
+            collect_command_items(
+                rg,
+                FILE_SUGGESTION_MAX_INDEXED_PATHS,
+                FILE_SUGGESTION_INDEX_TIMEOUT,
+            )
+            .await
+            .unwrap_or_default()
+        }
+    };
+
+    let mut directories = std::collections::BTreeSet::new();
+    for file in &files {
+        if directories.len() >= FILE_SUGGESTION_MAX_INDEXED_PATHS {
+            break;
+        }
+        let mut parent = std::path::Path::new(file).parent();
+        while let Some(path) = parent {
+            if path.as_os_str().is_empty() || path == std::path::Path::new(".") {
+                break;
+            }
+            directories.insert(format!(
+                "{}{}",
+                path.to_string_lossy(),
+                std::path::MAIN_SEPARATOR
+            ));
+            parent = path.parent();
+        }
+    }
+    let mut indexed: Vec<String> = directories
+        .into_iter()
+        .take(FILE_SUGGESTION_MAX_INDEXED_PATHS)
+        .collect();
+    let remaining = FILE_SUGGESTION_MAX_INDEXED_PATHS.saturating_sub(indexed.len());
+    indexed.extend(files.drain(..files.len().min(remaining)));
+    indexed
+}
+
+async fn collect_command_items(
+    mut command: tokio::process::Command,
+    limit: usize,
+    timeout: std::time::Duration,
+) -> Option<Vec<String>> {
+    use tokio::io::AsyncBufReadExt as _;
+
+    if limit == 0 {
+        return Some(Vec::new());
+    }
+    command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let mut child = command.spawn().ok()?;
+    let stdout = child.stdout.take()?;
+    let mut reader = tokio::io::BufReader::new(stdout);
+    let mut items = Vec::new();
+    let read = tokio::time::timeout(timeout, async {
+        loop {
+            let mut bytes = Vec::new();
+            let read = reader.read_until(0, &mut bytes).await?;
+            if read == 0 {
+                return Ok::<bool, std::io::Error>(false);
+            }
+            if bytes.last() == Some(&0) {
+                bytes.pop();
+            }
+            if bytes.is_empty() {
+                continue;
+            }
+            items.push(String::from_utf8_lossy(&bytes).into_owned());
+            if items.len() >= limit {
+                return Ok(true);
+            }
+        }
+    })
+    .await;
+
+    match read {
+        Ok(Ok(hit_limit)) => {
+            if hit_limit {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                Some(items)
+            } else {
+                child
+                    .wait()
+                    .await
+                    .ok()
+                    .filter(std::process::ExitStatus::success)
+                    .map(|_| items)
+            }
+        }
+        Ok(Err(_)) | Err(_) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            None
+        }
+    }
+}
+
+fn fuzzy_file_suggestions(paths: &[String], query: &str, limit: usize) -> Vec<String> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    if query.is_empty() {
+        let mut top_level = std::collections::BTreeSet::new();
+        for path in paths {
+            let component = path
+                .split(['/', '\\'])
+                .next()
+                .filter(|part| !part.is_empty());
+            if let Some(component) = component {
+                top_level.insert(component.to_string());
+            }
+        }
+        return top_level.into_iter().take(limit).collect();
+    }
+
+    let case_sensitive = query != query.to_lowercase();
+    let needle = if case_sensitive {
+        query.to_string()
+    } else {
+        query.to_lowercase()
+    };
+    let needle_chars: Vec<char> = needle.chars().take(64).collect();
+    if needle_chars.is_empty() {
+        return Vec::new();
+    }
+
+    let mut ranked = Vec::new();
+    for path in paths {
+        let candidate = if case_sensitive {
+            path.clone()
+        } else {
+            path.to_lowercase()
+        };
+        let chars: Vec<char> = candidate.chars().collect();
+        let mut positions = Vec::with_capacity(needle_chars.len());
+        let mut cursor = 0;
+        let mut matched = true;
+        for needle in &needle_chars {
+            let Some(relative) = chars[cursor..].iter().position(|ch| ch == needle) else {
+                matched = false;
+                break;
+            };
+            let position = cursor + relative;
+            positions.push(position);
+            cursor = position + 1;
+        }
+        if !matched {
+            continue;
+        }
+
+        let mut adjacency = 0_i64;
+        let mut gap_cost = 0_i64;
+        for pair in positions.windows(2) {
+            let gap = pair[1].saturating_sub(pair[0] + 1);
+            if gap == 0 {
+                adjacency += 4;
+            } else {
+                gap_cost += 3 + gap as i64;
+            }
+        }
+        let mut score = needle_chars.len() as i64 * 16 + adjacency - gap_cost;
+        for (index, position) in positions.iter().enumerate() {
+            if *position == 0 {
+                if index == 0 {
+                    score += 8;
+                }
+                continue;
+            }
+            let previous = chars[*position - 1];
+            if matches!(previous, '/' | '\\' | '-' | '_' | '.' | ' ') {
+                score += 8;
+            } else if previous.is_ascii_lowercase() && chars[*position].is_ascii_uppercase() {
+                score += 6;
+            }
+        }
+        score += 32_i64.saturating_sub((chars.len() / 4) as i64);
+        ranked.push((score, path));
+    }
+    ranked.sort_by(|(left_score, left_path), (right_score, right_path)| {
+        right_score
+            .cmp(left_score)
+            .then_with(|| left_path.cmp(right_path))
+    });
+    ranked
+        .into_iter()
+        .take(limit)
+        .map(|(_, path)| path.clone())
+        .collect()
+}
+
 async fn dispatch_control_request(
     subtype: &str,
     request_id: &str,
@@ -475,6 +863,7 @@ async fn dispatch_control_request(
     init_account: &serde_json::Value,
     init_fast_mode_state: &'static str,
     init_fast_mode_disabled_reason: Option<&'static str>,
+    file_suggestions: &StreamFileSuggestionIndex,
 ) {
     // Request body fields live at `frame.request.<field>` (already key-normalized).
     let field = |k: &str| frame.get("request").and_then(|r| r.get(k));
@@ -880,6 +1269,25 @@ async fn dispatch_control_request(
             writer.reply_success(request_id, None);
             end_notify.notify_one();
         }
+        "file_suggestions" => {
+            let query = field("query").and_then(Value::as_str).unwrap_or("");
+            let suggestions = file_suggestions
+                .suggestions(&session_cwd.cwd(), query)
+                .await
+                .into_iter()
+                .map(|path| json!({"path": path}))
+                .collect::<Vec<_>>();
+            writer.reply_success(request_id, Some(json!({"suggestions": suggestions})));
+        }
+        "seed_read_state" => {
+            if let (Some(path), Some(mtime)) = (
+                field("path").and_then(Value::as_str),
+                field("mtime").and_then(Value::as_f64),
+            ) {
+                let _ = orchestrator.seed_read_state_from_host(path, mtime).await;
+            }
+            writer.reply_success(request_id, None);
+        }
         "mcp_authenticate" | "mcp_reconnect" => {
             // ORACLE (2.1.201 `-p` handler): both branches first resolve the
             // MCP server config by `serverName`; when no server matches, they
@@ -915,7 +1323,6 @@ async fn dispatch_control_request(
             }
         }
         // The orchestrator-free arms (get_binary_version, message_rated,
-        // seed_read_state, file_suggestions,
         // mcp_oauth_callback_url), the CLI-originated guard subtypes (no-reply),
         // and the byte-exact `Unsupported control request subtype` fallthrough
         // are pure — classified by `pure_control_response` so the wire shapes
@@ -944,8 +1351,6 @@ enum PureControlReply {
 /// Classify the control arms that need no async orchestrator/registry access,
 /// including the byte-exact `Unsupported control request subtype` fallthrough.
 ///
-/// `seed_read_state` remains an accept-and-ack approximation because the
-/// stream-json protocol does not yet expose a read-state cache storage seam.
 fn pure_control_response(subtype: &str, frame: &serde_json::Value) -> PureControlReply {
     let field = |k: &str| frame.get("request").and_then(|r| r.get(k));
     match subtype {
@@ -956,17 +1361,6 @@ fn pure_control_response(subtype: &str, frame: &serde_json::Value) -> PureContro
         }))),
         // §2.2 #45: telemetry-only; ack with `{}`.
         "message_rated" => PureControlReply::Success(Some(json!({}))),
-        // §2.2 #21: seed read-state cache; errors swallowed ⇒ empty ack (no seam).
-        "seed_read_state" => PureControlReply::Success(None),
-        // ORACLE (2.1.201 `-p` handler): `file_suggestions` resolves against the
-        // session's FileIndex and replies `{suggestions:[...]}`. Verified live
-        // that a fresh `-p` session with no built file index returns
-        // `{suggestions:[]}` for arbitrary queries (including a query that
-        // name-matches a real cwd file). The port has no FileIndex seam wired
-        // into the stream-json server, so it faithfully returns the empty-index
-        // result. DEFERRED: index-backed suggestions once a FileIndex seam is
-        // exposed.
-        "file_suggestions" => PureControlReply::Success(Some(json!({ "suggestions": [] }))),
         // ORACLE (2.1.201 `-p` handler): `mcp_oauth_callback_url` looks up the
         // in-flight OAuth flow for `serverName`; with no active flow it replies
         // `error: "No active OAuth flow for server: {serverName}"` (verified
@@ -1453,6 +1847,7 @@ pub async fn run_stream_json_input_loop(
     let end_notify_ctrl = end_notify.clone();
     let resolver_plane_for_cancel = control_plane.clone();
     let ctrl_lifecycle = queue_lifecycle.clone();
+    let ctrl_file_suggestions = StreamFileSuggestionIndex::default();
     let ctrl_req_task = tokio::spawn(async move {
         // §2.2: a second `initialize` is an error, not a re-handshake — the
         // binary's handleInitializeRequest replies {subtype:'error', error:
@@ -1493,6 +1888,7 @@ pub async fn run_stream_json_input_loop(
                         &init_account,
                         fast_mode_state,
                         fast_mode_disabled_reason,
+                        &ctrl_file_suggestions,
                     )
                     .await;
                 }
@@ -3740,15 +4136,72 @@ mod tests {
     }
 
     #[test]
-    fn pure_file_suggestions_returns_empty_suggestions() {
-        // ORACLE 2.1.201 `-p`: unknown/no-index query → success {suggestions:[]}.
-        let frame = req("file_suggestions", json!({ "query": "probe" }));
-        let PureControlReply::Success(Some(payload)) =
-            pure_control_response("file_suggestions", &frame)
-        else {
-            panic!("expected success payload");
-        };
-        assert_eq!(payload, json!({ "suggestions": [] }));
+    fn file_suggestions_use_subsequence_ranking_and_limit() {
+        let paths = vec![
+            "src/main.rs".to_string(),
+            "src/manager.rs".to_string(),
+            "tests/main_test.rs".to_string(),
+            "README.md".to_string(),
+        ];
+        let suggestions = fuzzy_file_suggestions(&paths, "smr", 2);
+        assert_eq!(suggestions.len(), 2);
+        assert_eq!(suggestions[0], "src/main.rs");
+        assert!(suggestions.iter().all(|path| path.contains(".rs")));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn command_item_collection_stops_at_the_index_bound() {
+        let mut command = tokio::process::Command::new("sh");
+        command.args(["-c", "printf 'a\\0b\\0c\\0'"]);
+        assert_eq!(
+            collect_command_items(command, 2, std::time::Duration::from_secs(1)).await,
+            Some(vec!["a".to_string(), "b".to_string()])
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn command_item_collection_times_out_and_reaps_the_child() {
+        let mut command = tokio::process::Command::new("sh");
+        command.args(["-c", "sleep 1; printf 'late\\0'"]);
+        assert_eq!(
+            collect_command_items(command, 2, std::time::Duration::from_millis(20)).await,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn absolute_file_suggestions_use_the_filesystem_coordinate_space() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("alpha.txt"), "").expect("write alpha");
+        std::fs::write(dir.path().join("beta.txt"), "").expect("write beta");
+        std::fs::create_dir(dir.path().join("archive")).expect("create archive");
+
+        let query = dir.path().join("al");
+        let suggestions =
+            absolute_file_suggestions(&query.to_string_lossy(), &query.to_string_lossy()).await;
+        assert_eq!(
+            suggestions,
+            vec![dir.path().join("alpha.txt").to_string_lossy().into_owned()]
+        );
+    }
+
+    #[test]
+    fn home_relative_suggestions_preserve_the_tilde_prefix() {
+        let home = std::path::Path::new("/home/tester");
+        assert_eq!(
+            render_absolute_suggestion(
+                "~/Doc",
+                &home.join("Documents").join("notes.md"),
+                Some(home)
+            ),
+            format!(
+                "~{}Documents{}notes.md",
+                std::path::MAIN_SEPARATOR,
+                std::path::MAIN_SEPARATOR
+            )
+        );
     }
 
     #[test]
@@ -3894,15 +4347,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn pure_seed_read_state_acks_no_payload() {
-        let frame = req("seed_read_state", json!({}));
-        assert_eq!(
-            pure_control_response("seed_read_state", &frame),
-            PureControlReply::Success(None)
-        );
-    }
-
     fn outbound_line(msg: crate::stream_json::OutboundMsg) -> String {
         match msg {
             crate::stream_json::OutboundMsg::Line(line) => line,
@@ -3998,10 +4442,126 @@ mod tests {
             &json!({}),
             "off",
             None,
+            &StreamFileSuggestionIndex::default(),
         )
         .await;
         serde_json::from_str::<serde_json::Value>(&outbound_line(rx.recv().await.expect("reply")))
             .expect("valid control_response json")
+    }
+
+    #[tokio::test]
+    async fn seed_read_state_stays_out_of_model_context_and_rejects_stale_host_snapshot() {
+        let build = crate::init::build_runtime_for_tui(&tui_argv())
+            .await
+            .expect("build_runtime_for_tui");
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        std::fs::write(file.path(), "host snapshot").expect("write fixture");
+        let mtime_ms = std::fs::metadata(file.path())
+            .expect("metadata")
+            .modified()
+            .expect("mtime")
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("post epoch")
+            .as_millis() as u64;
+
+        let reply = dispatch_and_capture(
+            &build.runtime.orchestrator,
+            &build.runtime.task_registry,
+            req(
+                "seed_read_state",
+                json!({
+                    "path": file.path().to_string_lossy(),
+                    "mtime": mtime_ms + 1,
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(reply["response"]["subtype"], "success");
+        assert!(reply["response"].get("response").is_none());
+        assert!(
+            !build
+                .runtime
+                .orchestrator
+                .files_in_context()
+                .await
+                .contains(&file.path().to_path_buf()),
+            "accepted host snapshots are cache-only and must not enter model context"
+        );
+
+        let stale = tempfile::NamedTempFile::new().expect("stale temp file");
+        std::fs::write(stale.path(), "newer content").expect("write stale fixture");
+        assert!(
+            !build
+                .runtime
+                .orchestrator
+                .seed_read_state_from_host(&stale.path().to_string_lossy(), 0.0)
+                .await,
+            "an on-disk file newer than the host mtime must not be seeded"
+        );
+    }
+
+    #[tokio::test]
+    async fn dot_file_suggestions_list_cwd_entries_with_directory_suffix() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("Cargo.toml"), "").expect("write file");
+        std::fs::create_dir(dir.path().join("src")).expect("create directory");
+        let suggestions = StreamFileSuggestionIndex::default()
+            .suggestions(dir.path(), "./")
+            .await;
+        assert!(suggestions.contains(&"Cargo.toml".to_string()));
+        assert!(suggestions.contains(&format!("src{}", std::path::MAIN_SEPARATOR)));
+    }
+
+    #[tokio::test]
+    async fn file_suggestions_control_response_matches_shape() {
+        let build = crate::init::build_runtime_for_tui(&tui_argv())
+            .await
+            .expect("build_runtime_for_tui");
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("Cargo.toml"), "").expect("write file");
+        std::fs::create_dir(dir.path().join("src")).expect("create directory");
+
+        let reply = dispatch_and_capture_in(
+            &build.runtime.orchestrator,
+            &build.runtime.task_registry,
+            req("file_suggestions", json!({ "query": "./" })),
+            dir.path(),
+        )
+        .await;
+
+        assert_eq!(reply["type"], "control_response");
+        assert_eq!(reply["response"]["subtype"], "success");
+        assert_eq!(reply["response"]["request_id"], "r1");
+        let suggestions = reply["response"]["response"]["suggestions"]
+            .as_array()
+            .expect("suggestions array");
+        assert!(suggestions
+            .iter()
+            .any(|entry| entry == &json!({"path": "Cargo.toml"})));
+        assert!(suggestions.iter().any(|entry| {
+            entry == &json!({"path": format!("src{}", std::path::MAIN_SEPARATOR)})
+        }));
+    }
+
+    #[tokio::test]
+    async fn file_suggestion_cache_is_invalidated_when_session_cwd_changes() {
+        use std::sync::atomic::Ordering;
+
+        let first = tempfile::tempdir().expect("first tempdir");
+        let second = tempfile::tempdir().expect("second tempdir");
+        let index = StreamFileSuggestionIndex::default();
+
+        index.prepare_root(first.path()).await;
+        index.paths.write().await.push("first-only.rs".to_string());
+        index.refresh_started.store(true, Ordering::Release);
+
+        index.prepare_root(first.path()).await;
+        assert_eq!(&*index.paths.read().await, &["first-only.rs".to_string()]);
+        assert!(index.refresh_started.load(Ordering::Acquire));
+
+        index.prepare_root(second.path()).await;
+        assert!(index.paths.read().await.is_empty());
+        assert!(!index.refresh_started.load(Ordering::Acquire));
     }
 
     /// 2.1.220 interrupt receipt contract (live-captured against the binary
@@ -4057,6 +4617,7 @@ mod tests {
             &json!({}),
             "off",
             None,
+            &StreamFileSuggestionIndex::default(),
         )
         .await;
         assert!(*cancel_rx.borrow(), "interrupt must fire the cancel signal");
@@ -4089,6 +4650,7 @@ mod tests {
             &json!({}),
             "off",
             None,
+            &StreamFileSuggestionIndex::default(),
         )
         .await;
         for expected in ["u2", "u3"] {
@@ -4125,6 +4687,7 @@ mod tests {
             &json!({}),
             "off",
             None,
+            &StreamFileSuggestionIndex::default(),
         )
         .await;
         let receipt3: serde_json::Value =

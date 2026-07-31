@@ -2341,17 +2341,19 @@ impl Tool for FileReadTool {
                 // A Read never seeds; only the orchestrator's
                 // `seed_memory_read_state` does.
                 seeded_from_context: false,
-                // KNOWN RESIDUAL, named rather than silently claimed: the
-                // oracle sets `isPartialView: true` when the read was
-                // token-cap-truncated above (`partial_note.is_some()`). The
-                // field now EXISTS and is honoured by `read_covers_full_file` /
-                // both dedup gates, but wiring it at THIS site is a separate
-                // follow-up. Behaviour is unchanged from before this port and
-                // still correct in outcome: a truncated read stores a truncated
-                // slice, so the staleness content-equality fallback already
-                // fails, and the dedup `range_match` still compares the same
-                // offset/limit pair.
-                is_partial_view: false,
+                // `...x!==void 0&&{isPartialView:!0}` (@235732534). `x` is the
+                // truncation NOTE, assigned only inside
+                // `catch(U){if(U instanceof ZVe && O){…}}` — the token-cap
+                // overflow on a full-file read — so `isPartialView` means
+                // exactly "this read was token-truncated", which is
+                // `partial_note.is_some()` here.
+                //
+                // Load-bearing: `Aze` (@232453039) returns false for a partial
+                // view, and the Edit/Write guards (`if(!p||p.isPartialView)`,
+                // @232481342 / @232489643) then refuse to treat the file as
+                // read. Hard-coding `false` let a truncated read masquerade as a
+                // full one.
+                is_partial_view: partial_note.is_some(),
             },
         );
 
@@ -3728,6 +3730,56 @@ mod tests {
         assert!(validate_content_tokens(&"a".repeat(100_004), None, 25_000).is_err());
         // json density: 50_002 bytes / 2 = 25_001 > 25_000 → error.
         assert!(validate_content_tokens(&"a".repeat(50_002), Some("json"), 25_000).is_err());
+    }
+
+    /// A token-truncated read must record `is_partial_view: true`.
+    ///
+    /// Oracle @235732534 writes the entry as
+    /// `p.set(r,{content:A,timestamp,offset:i,limit:D,...x!==void 0&&{isPartialView:!0}})`,
+    /// and `x` is the truncation NOTE — assigned only inside
+    /// `catch(U){if(U instanceof ZVe && O){...}}`, i.e. the token-cap overflow on
+    /// a full-file read. So `isPartialView` is exactly "this read was
+    /// token-truncated".
+    ///
+    /// It matters because `Aze` (@232453039) returns false for a partial view,
+    /// and the Edit/Write guards (`if(!p||p.isPartialView)`, @232481342 /
+    /// @232489643) then refuse to treat the file as read. Recording `false` here
+    /// let a truncated read masquerade as a full one.
+    #[tokio::test]
+    async fn token_truncated_read_is_recorded_as_a_partial_view() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("dense.txt");
+        let mut body = String::new();
+        for i in 0..14_000u32 {
+            body.push_str(&format!("line {i:05}\n"));
+        }
+        std::fs::write(&target, &body).unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let map = Arc::clone(&ctx.read_file_state);
+        let tool = FileReadTool::new(ctx);
+        let r = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("truncating read still succeeds");
+        assert!(
+            r.model_content
+                .as_deref()
+                .unwrap()
+                .contains("[Truncated: PARTIAL view"),
+            "fixture must actually trigger the truncation branch"
+        );
+
+        let canon = std::fs::canonicalize(&target).unwrap();
+        let entry = tool_api::read_file_state::get(&map, &canon)
+            .expect("the read recorded an entry");
+        assert!(
+            entry.is_partial_view,
+            "a token-truncated read is a PARTIAL view, not a full read"
+        );
     }
 
     #[tokio::test]

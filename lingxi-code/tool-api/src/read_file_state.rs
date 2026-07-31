@@ -114,10 +114,11 @@ pub struct ReadFileEntry {
     /// `tool_file::read_covers_full_file`: `if((e.offset??1)>1||e.isPartialView)
     /// return false`) and by both Read-dedup gates (@235741459).
     ///
-    /// KNOWN RESIDUAL: the Read tool's token-truncation path
-    /// (`tools/file/src/read.rs`, the `partial_note` branch) still records
-    /// `false` here — wiring that is a separate follow-up item, not part of the
-    /// seeded-dedup port.
+    /// Two producers, both live: the memory seeding site (from
+    /// `content_differs_from_disk`) and the Read tool's token-truncation path
+    /// (`tools/file/src/read.rs`, `partial_note.is_some()` — the oracle's
+    /// `...x!==void 0&&{isPartialView:!0}` @235732534, where `x` is the
+    /// truncation note produced only on a token-cap overflow).
     pub is_partial_view: bool,
 }
 

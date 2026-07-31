@@ -69,21 +69,31 @@ fn oversized_file_loads_whole_no_size_drop_other_files_also_load() {
     fs::write(repo.join("LINGXI.md"), &big).unwrap();
 
     let h = walk(&repo, &home, None);
+    // The walk still DISCOVERS both files — the size guard lives in the reader,
+    // not the scanner, exactly as claude-code splits `Eds` (walk) from `EG`
+    // (stat + read).
+    assert_eq!(h.entries.len(), 2, "both files are discovered");
+
     let loaded: Vec<_> = h
         .entries
         .iter()
-        .map(|e| load_file(&e.path, None).expect("no file is dropped for size"))
+        .filter_map(|e| load_file(&e.path, None).ok())
         .collect();
-    assert_eq!(loaded.len(), 2, "both the small and oversized files load");
+    // CORRECTED from "both the small and oversized files load". The oversized
+    // one is 10 MiB + 1, over `ELu = 4194304`, so claude-code skips it
+    // (`EG`: `if(!o.isFile()||o.size>r) return n?.(o),null`). The old
+    // expectation followed from a module doc that claimed no size check and
+    // cited leaked TS; the binary disagrees.
+    assert_eq!(loaded.len(), 1, "the oversized file is skipped, not loaded");
+    assert_eq!(loaded[0].path, user_lingxi.join("LINGXI.md"));
+    assert_eq!(loaded[0].body, "# small\n");
 
-    let by_path = |p: &std::path::Path| loaded.iter().find(|f| f.path == p).unwrap();
-    let big_loaded = by_path(&repo.join("LINGXI.md"));
-    assert_eq!(
-        big_loaded.size_bytes,
-        (MAX_MEMORY_FILE_SIZE + 1) as u64,
-        "oversized file is read whole, not truncated"
-    );
-    assert_eq!(by_path(&user_lingxi.join("LINGXI.md")).body, "# small\n");
+    match load_file(&repo.join("LINGXI.md"), None) {
+        Err(memory::lingxi_md::loader::LoaderError::FileTooLarge { bytes, .. }) => {
+            assert_eq!(bytes, (MAX_MEMORY_FILE_SIZE + 1) as u64);
+        }
+        other => panic!("expected FileTooLarge for the oversized file, got {other:?}"),
+    }
 }
 
 #[test]

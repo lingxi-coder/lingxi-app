@@ -1,5 +1,5 @@
-//! LINGXI.md file reader. Currently applies NO size cap; claude-code does
-//! (4 MiB, on bytes) — see the correction below.
+//! LINGXI.md file reader. Skips any file that is not regular or exceeds
+//! [`MEMORY_FILE_BYTE_LIMIT`] (4 MiB on bytes), matching claude-code.
 //!
 //! Beyond the raw [`load_file`] reader this module also ports the
 //! claude-code `@import` / `@include` expansion and the per-file body
@@ -23,10 +23,11 @@
 //! repeatedly found stale against the shipped binary. Treat the binary as the
 //! oracle here.
 //!
-//! STILL UNPORTED: [`load_file`] is a bare `read_to_string` with no `stat`,
-//! no regular-file check and no 4 MiB cap, so LingXi loads files claude-code
-//! skips. Fixing that is a behaviour change and is deliberately NOT bundled
-//! with this comment correction.
+//! PORTED: [`load_file`] now stats first and returns
+//! [`LoaderError::FileTooLarge`] for a non-regular file or one over the limit,
+//! which every caller already treats as "no memory file here" — the oracle's
+//! `null`. Still unported is the one-shot `file_skipped_special_or_oversize`
+//! telemetry and its `[CLAUDE.md] skipping …` log line.
 //!
 //! Separately from the skip cap, claude-code surfaces a non-blocking warning
 //! list for files over
@@ -59,13 +60,13 @@ pub enum LoaderError {
     /// I/O error reading the file.
     #[error("io: {0}")]
     Io(String),
-    /// Retained for the `memdir`/TUI consumers that still pattern-match it.
+    /// Also carries the NON-REGULAR-file case, because the oracle folds both
+    /// into one `null` return (`!o.isFile() || o.size > r`) and every caller
+    /// treats them identically: there is no memory file to read here.
     ///
-    /// [`load_file`] NO LONGER produces this variant — LINGXI.md files are
-    /// read whole (parity with claude-code, which has no size drop). The
-    /// memdir scanner keeps its own [`crate::MAX_MEMORY_FILE_SIZE`] cap, and
-    /// the `/memory` TUI dialog still carries a match arm for it; the variant
-    /// stays so those out-of-subsystem callers compile unchanged.
+    /// Produced by [`load_file`] again as of the `ELu` port; the memdir scanner
+    /// keeps its own [`crate::MAX_MEMORY_FILE_SIZE`] cap and the `/memory` TUI
+    /// dialog's match arm is unchanged.
     #[error("file too large: {bytes} bytes at {path}")]
     FileTooLarge {
         /// Path of the oversized file.
@@ -82,21 +83,43 @@ pub enum LoaderError {
 /// mechanism it reports oversize files through.
 pub const TENGU_MEMORY_FILE_TOO_LARGE: &str = "tengu_memory_file_too_large";
 
-/// Load one LINGXI.md (or local override) file — whole, no size cap.
+/// claude-code `ELu` (2.1.220 binary offset 230811638, declared in the same run
+/// as the `gn_ = 40000` this crate cites elsewhere): the byte ceiling above
+/// which a memory file is SKIPPED rather than read.
+pub const MEMORY_FILE_BYTE_LIMIT: u64 = 4_194_304;
+
+/// Load one LINGXI.md (or local override) file, skipping it when it is not a
+/// regular file or exceeds [`MEMORY_FILE_BYTE_LIMIT`].
 ///
-/// Parity with claude-code `safelyReadMemoryFileAsync` (claudemd.ts:424-437):
-/// a plain `readFile` with no size check. Oversized files are NEVER dropped;
-/// the 40k-char recommendation is a non-blocking warning surfaced separately
-/// by [`crate::get_large_memory_files`].
+/// Ports claude-code `EG` (2.1.220 binary offset 229022173):
+/// `let o=await e.stat(t); if(!o.isFile()||o.size>r) return n?.(o),null;`
+/// called from `Eds` (@230805636) with `r = ELu`. Note `size > r` — a file
+/// EXACTLY at the limit still loads.
+///
+/// The size is taken from `stat`, not from the decoded string: the oracle
+/// tests the on-disk byte count BEFORE reading, so a file is skipped without
+/// ever being loaded into memory. Reading first and measuring after would both
+/// defeat the point and mis-measure, since `read_to_string` rejects non-UTF-8
+/// before any length is known.
 ///
 /// # Errors
 ///
-/// - [`LoaderError::Io`] for filesystem errors (file missing, unreadable,
-///   permissions). `load_file` never returns [`LoaderError::FileTooLarge`].
+/// - [`LoaderError::Io`] for filesystem errors (missing, unreadable,
+///   permissions, non-UTF-8).
+/// - [`LoaderError::FileTooLarge`] for a non-regular file or one over the
+///   limit — the caller treats both as "no memory file here", matching the
+///   oracle's `null` return.
 pub fn load_file(
     path: &Path,
     _bus: Option<&Arc<telemetry::AnalyticsBus>>,
 ) -> Result<LoadedFile, LoaderError> {
+    let meta = std::fs::metadata(path).map_err(|e| LoaderError::Io(e.to_string()))?;
+    if !meta.is_file() || meta.len() > MEMORY_FILE_BYTE_LIMIT {
+        return Err(LoaderError::FileTooLarge {
+            path: path.to_path_buf(),
+            bytes: meta.len(),
+        });
+    }
     let body = std::fs::read_to_string(path).map_err(|e| LoaderError::Io(e.to_string()))?;
     // `len()` of the UTF-8 string is the byte size we just read; avoids a
     // second `metadata` syscall and is exact for the bytes loaded.
@@ -1124,19 +1147,64 @@ mod tests {
         assert!(out.body.contains("hello"));
         assert_eq!(out.size_bytes, 14);
     }
-
+    /// SUPERSEDED by `file_over_the_byte_limit_is_skipped`.
+    ///
+    /// This asserted an 11 MiB file loads, which followed from a module doc
+    /// claiming claude-code applies no size check. That doc cited leaked TS;
+    /// the binary skips anything over `ELu = 4194304`. The assertion is
+    /// inverted rather than deleted so the correction stays visible.
     #[test]
-    fn oversized_file_is_loaded_not_dropped() {
-        // GAP 4: claude-code has no size drop (claudemd.ts:424-437 reads whole).
-        // A file far over the old 10 MB cap must now LOAD successfully.
-        let tmp = TempDir::new().unwrap();
-        let p = tmp.path().join("LINGXI.md");
-        let bytes = vec![b'a'; 11 * 1024 * 1024];
-        fs::write(&p, &bytes).unwrap();
-        let out = load_file(&p, None).expect("oversized file must load, not error");
-        assert_eq!(out.size_bytes, 11 * 1024 * 1024);
-        assert_eq!(out.body.len(), 11 * 1024 * 1024);
+    fn oversized_file_is_skipped_not_loaded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let p = dir.path().join("LINGXI.md");
+        std::fs::write(&p, "x".repeat(11 * 1024 * 1024)).unwrap();
+        assert!(
+            load_file(&p, None).is_err(),
+            "an 11 MiB memory file is over ELu and must be skipped"
+        );
     }
+    /// A memory file over the oracle's byte limit is SKIPPED, not read.
+    ///
+    /// `Eds` (@230805636) routes every memory file through `EG` (@229022173):
+    /// `let o=await e.stat(t); if(!o.isFile()||o.size>r) return n?.(o),null;`
+    /// with `r = ELu = 4194304` (@230811638). The old expectation here — that
+    /// an 11 MiB file loads — came from a module doc that cited leaked TS and
+    /// claimed claude applies no size check. The binary says otherwise.
+    #[test]
+    fn file_over_the_byte_limit_is_skipped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let p = dir.path().join("LINGXI.md");
+        std::fs::write(&p, "x".repeat(MEMORY_FILE_BYTE_LIMIT as usize + 1)).unwrap();
+        match load_file(&p, None) {
+            Err(LoaderError::FileTooLarge { bytes, .. }) => {
+                assert_eq!(bytes, MEMORY_FILE_BYTE_LIMIT + 1);
+            }
+            other => panic!("expected FileTooLarge, got {other:?}"),
+        }
+    }
+
+    /// EXACTLY at the limit still loads — the oracle's test is `size > r`.
+    #[test]
+    fn file_at_the_byte_limit_still_loads() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let p = dir.path().join("LINGXI.md");
+        std::fs::write(&p, "x".repeat(MEMORY_FILE_BYTE_LIMIT as usize)).unwrap();
+        let out = load_file(&p, None).expect("a file at the limit is not over it");
+        assert_eq!(out.size_bytes, MEMORY_FILE_BYTE_LIMIT);
+    }
+
+    /// A directory is skipped by the `!o.isFile()` half of the same guard.
+    #[test]
+    fn non_regular_file_is_skipped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sub = dir.path().join("LINGXI.md");
+        std::fs::create_dir(&sub).unwrap();
+        assert!(
+            load_file(&sub, None).is_err(),
+            "a directory must not be read as a memory file"
+        );
+    }
+
 
     #[test]
     fn get_large_memory_files_flags_but_does_not_drop_40k_body() {

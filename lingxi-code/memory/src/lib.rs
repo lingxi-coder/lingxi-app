@@ -216,6 +216,24 @@ pub fn memory_chars_per_token(model: &str) -> u64 {
         return 4;
     }
     let canonical = canonical_model_family(model).replace(['.', '_'], "-");
+    // MULTI-PROVIDER GATE (a LingXi divergence, not a port of `kC`).
+    //
+    // `isg.has(r) ? 4 : 3` is a two-way split over CLAUDE families: its `else`
+    // arm asserts "a Claude model that is not in the older 4-chars list".
+    // claude-code is Anthropic-only and never meets a third case. LingXi is
+    // multi-provider, so a foreign id reaches here, matches no family, and
+    // would otherwise inherit a claim about Claude tokenizers that cannot be
+    // made about GPT/Kimi/GLM — shrinking `max_memory_character_count` by 25%
+    // for every non-Anthropic model and firing the large-file warning early.
+    //
+    // 4 is claude-code's OWN answer when it cannot identify the model
+    // (`if(!e)return 4`), which is exactly the epistemic position here. Note
+    // `canonical_model_family` returns the lowercased id unchanged when it
+    // matches nothing, so a provider-qualified Claude id (`bedrock/claude-…`,
+    // `us.anthropic.claude-…`) still contains "claude" and is unaffected.
+    if !canonical.contains("claude") {
+        return 4;
+    }
     if ISG_FOUR_CHARS_PER_TOKEN.contains(&canonical.as_str()) {
         4
     } else {
@@ -416,9 +434,69 @@ mod large_memory_file_tests {
         assert_eq!(memory_chars_per_token("claude-opus-4-7"), 3);
         assert_eq!(memory_chars_per_token("claude-opus-4-8"), 3);
         assert_eq!(memory_chars_per_token("claude-opus-5"), 3);
+    }
+
+    /// A NON-ANTHROPIC model takes the unset-model default of 4, not the
+    /// newer-Claude-family 3.
+    ///
+    /// `kC`'s `isg.has(r) ? 4 : 3` is a two-way split over CLAUDE families: the
+    /// `else` arm asserts "a Claude model that is not in the older 4-chars
+    /// list". claude-code is Anthropic-only, so it never meets a third case.
+    /// LingXi is multi-provider (a user-confirmed accepted divergence), so a
+    /// foreign id reaches this function, matches no family, and would silently
+    /// inherit an assertion about Claude tokenizers that cannot be made about
+    /// GPT/Kimi/GLM. That would shrink `max_memory_character_count` by 25% for
+    /// every non-Anthropic model and fire the large-file warning early.
+    ///
+    /// 4 is claude-code's own answer when it cannot identify the model
+    /// (`if(!e)return 4`), which is exactly the epistemic position here.
+    #[test]
+    fn non_anthropic_models_take_the_unknown_model_default() {
+        for m in [
+            "gpt-5.4",
+            "gpt-4o",
+            "kimi-k2",
+            "glm-4.6",
+            "gemini-2.5-pro",
+            "deepseek-chat",
+            "llama-3.3-70b",
+        ] {
+            assert_eq!(
+                memory_chars_per_token(m),
+                4,
+                "{m} is not a Claude model — the isg/else split does not apply"
+            );
+        }
+        // A provider-qualified Claude id must be unaffected by the gate: it
+        // still resolves through the Claude path, whatever that path decides.
+        // Asserted as an EQUIVALENCE rather than a literal so this pins the
+        // gate's scope without also re-asserting the family cascade.
+        for (qualified, bare) in [
+            ("us.anthropic.claude-opus-4-8-v1:0", "claude-opus-4-8"),
+            ("bedrock/claude-opus-4-1", "claude-opus-4-1"),
+            ("vertex/claude-sonnet-4-5", "claude-sonnet-4-5"),
+        ] {
+            assert_eq!(
+                memory_chars_per_token(qualified),
+                memory_chars_per_token(bare),
+                "{qualified} must resolve exactly as {bare} — the gate must not \
+                 catch a provider-qualified Claude id"
+            );
+        }
         assert_eq!(memory_chars_per_token("claude-sonnet-5"), 3);
-        // Non-Claude routes also take the 3 branch.
-        assert_eq!(memory_chars_per_token("gpt-5.5"), 3);
+        // INTENTIONAL DIVERGENCE from `kC`, flipped from 3 to 4.
+        //
+        // `kC` is a pure two-way split and does give 3 for "gpt-5.5", so the
+        // old assertion was a faithful port — this is not a corrected bug, it
+        // is LingXi choosing different behavior, and it is recorded as such.
+        //
+        // The oracle is Anthropic-only, so its `else` arm can only ever mean
+        // "a Claude family not in the older 4-chars list". LingXi is
+        // multi-provider (a user-confirmed accepted divergence), so that arm
+        // would silently apply a Claude-tokenizer claim to GPT/Kimi/GLM and
+        // shrink the memory-file threshold by 25% for all of them. See the
+        // gate in `memory_chars_per_token` and the dedicated test below.
+        assert_eq!(memory_chars_per_token("gpt-5.5"), 4);
         // `if(!e)return 4` — the empty/unset model.
         assert_eq!(memory_chars_per_token(""), 4);
     }

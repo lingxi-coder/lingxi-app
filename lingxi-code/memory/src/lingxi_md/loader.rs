@@ -1,4 +1,5 @@
-//! LINGXI.md file reader (no size cap — parity with claude-code `readFile`).
+//! LINGXI.md file reader. Currently applies NO size cap; claude-code does
+//! (4 MiB, on bytes) — see the correction below.
 //!
 //! Beyond the raw [`load_file`] reader this module also ports the
 //! claude-code `@import` / `@include` expansion and the per-file body
@@ -6,12 +7,33 @@
 //! orchestrator can splice referenced files into the memory block exactly
 //! the way the TS reference does. See [`expand_memory_file`].
 //!
-//! claude-code reads every memory file whole (claudemd.ts:424-437 — plain
-//! `readFile`, no size check). It does NOT drop oversized files; it only
-//! surfaces a non-blocking warning list for files over
+//! ⚠️ CORRECTION — the paragraph below was wrong, and wrong in the direction
+//! that stops someone reinstating a real behaviour. It claimed claude-code
+//! applies "no size check" and that any byte cap was `LingXi`-invented. The
+//! 2.1.220 BINARY says otherwise: `Eds` (@230805636) routes every memory file
+//! through `EG` (@229022173) —
+//! `let o=await e.stat(t); if(!o.isFile()||o.size>r) return n?.(o),null;` —
+//! with `r = ELu = 4194304` (4 MiB, @230811638, declared in the same run as
+//! the `gn_ = 40000` this crate already cites). A non-regular or oversized
+//! file is SKIPPED, logged as
+//! `[CLAUDE.md] skipping {path}: not a regular file or exceeds {N} byte limit`,
+//! and reported once as `file_skipped_special_or_oversize`.
+//!
+//! The old claim cited `claudemd.ts:424-437` — LEAKED TS, which this repo has
+//! repeatedly found stale against the shipped binary. Treat the binary as the
+//! oracle here.
+//!
+//! STILL UNPORTED: [`load_file`] is a bare `read_to_string` with no `stat`,
+//! no regular-file check and no 4 MiB cap, so LingXi loads files claude-code
+//! skips. Fixing that is a behaviour change and is deliberately NOT bundled
+//! with this comment correction.
+//!
+//! Separately from the skip cap, claude-code surfaces a non-blocking warning
+//! list for files over
 //! [`crate::MAX_MEMORY_CHARACTER_COUNT`] (40k chars) via
 //! [`crate::get_large_memory_files`]. The 10 MB drop this loader used to
-//! enforce was a `LingXi`-invented behaviour with no TS analogue and has been
+//! enforce was still not the oracle's rule (the oracle's is 4 MiB on BYTES,
+//! before sanitisation) and has been
 //! removed.
 
 use regex::Regex;

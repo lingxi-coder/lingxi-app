@@ -4503,8 +4503,13 @@ pub(crate) async fn dispatch_tool_uses_tracked(
     // Strict no-op when no tool ran (empty batch). Best-effort: a
     // failing/absent PostToolBatch hook never breaks the turn (the executor is a
     // no-op when no PostToolBatch hook is registered, mirroring the per-tool
-    // PostToolUse fire). The aggregate decision/output are not consumed — this is
-    // an observational, post-batch event.
+    // PostToolUse fire).
+    //
+    // CORRECTED: this used to bind `let _batch_agg = …` under a comment saying
+    // "the aggregate decision/output are not consumed — this is an
+    // observational, post-batch event". It is not observational. The oracle
+    // (@233161375) ends the turn on it — see
+    // [`post_tool_batch_stop_reason`].
     if !post_tool_batch_calls.is_empty() {
         // FIX 2: populate `transcript_path` + `permission_mode` here too (the
         // batch firer builds its own context). Same sources as the PreToolUse
@@ -4530,7 +4535,18 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         let batch_event = HookEvent::PostToolBatch {
             tool_calls: post_tool_batch_calls,
         };
-        let _batch_agg = orch.hooks.execute(batch_event, batch_ctx).await;
+        let batch_agg = orch.hooks.execute(batch_event, batch_ctx).await;
+        if let Some(reason) = post_tool_batch_stop_reason(&batch_agg) {
+            // The oracle yields the record and returns `{reason:"hook_stopped"}`
+            // in one expression, so the attachment is persisted BEFORE the flag
+            // propagates — a stop must never reach the transcript unexplained.
+            orch.persist_hook_attachment_to_jsonl(hooks::stopped_continuation_attachment(
+                &post_tool_batch_identity(),
+                &reason,
+            ))
+            .await;
+            prevent_continuation = true;
+        }
     }
 
     Ok((
@@ -4539,6 +4555,56 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         injected_messages,
         context_modifiers,
     ))
+}
+
+/// Identity for the once-per-batch `PostToolBatch` records.
+///
+/// `hookName`/`hookEvent` are the bare literal `PostToolBatch` — NOT suffixed
+/// with a tool name the way `PostToolUse:${t.name}` is (@234726414), because the
+/// event covers the whole batch rather than one call.
+///
+/// `toolUseID` is the oracle's `rt`, bound at the top of the batch block as
+/// ``rt = `hook-${f.uuid()}` `` (@233159400) — a SYNTHETIC id, not any real
+/// tool's. The `Stop`-hook site builds its id the same way
+/// (`conversation.rs`), so the two stay consistent.
+fn post_tool_batch_identity() -> hooks::HookAttachmentIdentity {
+    hooks::HookAttachmentIdentity {
+        hook_name: "PostToolBatch".to_string(),
+        hook_event: "PostToolBatch".to_string(),
+        tool_use_id: format!("hook-{}", protocol::HookId::new().as_uuid()),
+    }
+}
+
+/// The stop reason a `PostToolBatch` aggregate implies, or `None` to continue.
+///
+/// Ports the oracle's `Mr`/`Qn` pair (@233161375):
+///
+/// ```js
+/// if(Mn.blockingError)Mr=!0,Qn??=Mn.blockingError.blockingError;
+/// if(Mn.preventContinuation)Mr=!0,Qn??=Mn.stopReason
+/// …
+/// if(Mr)… message:Qn||"Execution stopped by PostToolBatch hook" …
+/// ```
+///
+/// Two details worth keeping:
+///
+/// - `Mr` is set by EITHER a blocking error or `preventContinuation`. Gating on
+///   `prevent_continuation` alone would let a blocking batch hook run on.
+/// - `Qn` is `??=` (first-wins) and falls back to the literal below when empty.
+///   The aggregate's `reason` already freezes at the first blocker
+///   (`executor.rs`), so reading it here preserves that ordering.
+fn post_tool_batch_stop_reason(agg: &hooks::response::AggregateHookResult) -> Option<String> {
+    let stopped = agg.prevent_continuation
+        || matches!(agg.decision, Some(hooks::response::HookDecision::Block));
+    if !stopped {
+        return None;
+    }
+    Some(
+        agg.reason
+            .clone()
+            .filter(|r| !r.is_empty())
+            .unwrap_or_else(|| "Execution stopped by PostToolBatch hook".to_string()),
+    )
 }
 
 /// SKILLEXEC.3 (model scope): fold a tool batch's `context_modifier`s over a
@@ -5412,7 +5478,7 @@ mod interrupted_denial_stamp_tests {
 /// attachment.
 #[cfg(test)]
 mod hook_context_attachment_tests {
-    use super::{dispatch_tool_uses_tracked, ConversationOrchestrator};
+    use super::{dispatch_tool_uses_tracked, post_tool_batch_identity, ConversationOrchestrator};
     use crate::test_support::{MockApiClient, MockOutputStream, NoOpPermissionGate};
     use crate::OrchestratorConfig;
     use async_trait::async_trait;
@@ -5620,6 +5686,140 @@ mod hook_context_attachment_tests {
 
     fn uses() -> Vec<(ToolUseId, String, serde_json::Value, Option<String>)> {
         vec![(ToolUseId::new(), "Echo".into(), json!({}), None)]
+    }
+
+    /// Same as [`post_hook_executor`] but registered for `PostToolBatch`, the
+    /// once-per-batch event fired after every tool in the batch has run.
+    fn batch_hook_executor(response: HookResponse) -> Arc<HookExecutorImpl> {
+        let hook = HookDefinition {
+            id: HookId::new(),
+            name: "fixed-batch".into(),
+            events: vec![HookEventType::PostToolBatch],
+            if_condition: None,
+            // Must match `FixedPostHook::id()` — the registry resolves the
+            // builtin by handler id, and a mismatch silently never fires.
+            executor: DefHookExecutor::Builtin {
+                handler_id: "fixed-post".into(),
+            },
+            source: HookSource::Session,
+            blocking: true,
+            timeout: None,
+            priority: 0,
+            once: false,
+            status_message: None,
+        };
+        let mut registry = HookRegistry::new();
+        registry.register(hook);
+        let reg = Arc::new(tokio::sync::RwLock::new(registry));
+        let mut exec =
+            HookExecutorImpl::new(reg, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
+        exec.register_builtin(Arc::new(FixedPostHook { response }));
+        Arc::new(exec)
+    }
+
+    fn orch_with_batch_hook(response: HookResponse) -> ConversationOrchestrator {
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(EchoTool) as Arc<dyn Tool>);
+        ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(registry),
+            batch_hook_executor(response),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(crate::test_support::StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        )
+    }
+
+    /// A `PostToolBatch` hook's `preventContinuation` STOPS the turn.
+    ///
+    /// The batch fire used to discard its aggregate entirely
+    /// (`let _batch_agg = …`) under a comment calling `PostToolBatch`
+    /// "observational". The oracle disagrees (2.1.220 @233161375):
+    ///
+    /// ```js
+    /// if(Mn.blockingError)Mr=!0,Qn??=Mn.blockingError.blockingError;
+    /// if(Mn.preventContinuation)Mr=!0,Qn??=Mn.stopReason
+    /// …
+    /// if(Mr)return yield Va({type:"hook_stopped_continuation",
+    ///   message:Qn||"Execution stopped by PostToolBatch hook",
+    ///   hookName:"PostToolBatch",toolUseID:rt,hookEvent:"PostToolBatch"},f),
+    ///   n$e(er,a),{reason:"hook_stopped"}
+    /// ```
+    ///
+    /// `{reason:"hook_stopped"}` is a turn-ending return, so the flag must
+    /// propagate — unlike the PostToolUse case, where the port deliberately
+    /// leaves the open question noted rather than guessing.
+    #[tokio::test]
+    async fn post_tool_batch_prevent_continuation_stops_the_turn() {
+        let orch = orch_with_batch_hook(HookResponse {
+            prevent_continuation: true,
+            reason: Some("BATCH-STOP".into()),
+            ..HookResponse::default()
+        });
+        let (_results, prevent, _injected, _mods) =
+            dispatch_tool_uses_tracked(&orch, &uses(), None)
+                .await
+                .expect("dispatch");
+        assert!(
+            prevent,
+            "a PostToolBatch hook requesting preventContinuation must end the turn"
+        );
+    }
+
+    /// `Mr` is set by a blocking error too, not only by `preventContinuation`.
+    #[tokio::test]
+    async fn post_tool_batch_blocking_error_also_stops_the_turn() {
+        let orch = orch_with_batch_hook(HookResponse {
+            decision: Some(hooks::response::HookDecision::Block),
+            reason: Some("BATCH-BLOCK".into()),
+            ..HookResponse::default()
+        });
+        let (_results, prevent, _injected, _mods) =
+            dispatch_tool_uses_tracked(&orch, &uses(), None)
+                .await
+                .expect("dispatch");
+        assert!(
+            prevent,
+            "`if(Mn.blockingError)Mr=!0` — a batch blocking error stops the turn too"
+        );
+    }
+
+    /// A batch hook that asks for nothing leaves the turn alone — the guard
+    /// must not turn every batch into a stop.
+    #[tokio::test]
+    async fn a_quiet_post_tool_batch_hook_does_not_stop_the_turn() {
+        let orch = orch_with_batch_hook(HookResponse::default());
+        let (_results, prevent, _injected, _mods) =
+            dispatch_tool_uses_tracked(&orch, &uses(), None)
+                .await
+                .expect("dispatch");
+        assert!(!prevent, "a no-op PostToolBatch hook must not end the turn");
+    }
+
+    /// The record the oracle yields alongside the stop: `hookName` and
+    /// `hookEvent` are the bare literal `PostToolBatch` (NOT suffixed with a
+    /// tool name the way `PostToolUse:{tool}` is), and `toolUseID` is the
+    /// SYNTHETIC `hook-${uuid}` the oracle binds as `rt` — no real tool's id,
+    /// because the event covers the whole batch.
+    #[test]
+    fn post_tool_batch_stopped_continuation_matches_the_oracle_shape() {
+        let attachment = hooks::stopped_continuation_attachment(
+            &post_tool_batch_identity(),
+            "Execution stopped by PostToolBatch hook",
+        );
+        let id = attachment["toolUseID"].as_str().expect("toolUseID");
+        assert!(
+            id.starts_with("hook-"),
+            "the batch attachment carries a synthetic `hook-<uuid>` id, got {id}"
+        );
+        assert_eq!(
+            serde_json::to_string(&attachment).unwrap(),
+            format!(
+                r#"{{"type":"hook_stopped_continuation","message":"Execution stopped by PostToolBatch hook","hookName":"PostToolBatch","toolUseID":"{id}","hookEvent":"PostToolBatch"}}"#
+            )
+        );
     }
 
     /// The PostToolUse `additionalContext` reaches the model EXACTLY ONCE — as

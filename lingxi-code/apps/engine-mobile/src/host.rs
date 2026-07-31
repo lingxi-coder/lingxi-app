@@ -2007,6 +2007,13 @@ pub struct MobileEngineHandle {
     /// `AppOperationFailed` replies on every app command instead of bricking
     /// engine construction.
     local_apps: Result<Arc<AppService>, AppError>,
+    /// LOCAL-APPS: the bridge-owned ordered emission channel every app-surface
+    /// client event rides to the sink — domain events via the installed
+    /// `SinkAppEventObserver`, engine-synthesized events (`AppOperationFailed`,
+    /// checkpoint reply rows) via the handlers here. One channel ⇒ one total
+    /// order (channel order = commit order), and the forwarder task awaits the
+    /// sink with NO service lock held (see `local_apps_bridge`).
+    app_emissions: crate::local_apps_bridge::AppEmissionQueue,
 }
 
 /// Default `ListSessions` row cap when the command omits an explicit `limit`
@@ -2418,14 +2425,16 @@ impl MobileEngineHandle {
         }
     }
 
-    /// Lower one typed [`AppError`] onto the `AppOperationFailed` event.
+    /// Lower one typed [`AppError`] onto the `AppOperationFailed` event,
+    /// routed through the bridge's ordered emission channel so every
+    /// app-surface event shares one total order. When the service is alive
+    /// the queue flushes its emission tasks first, so the synthesized failure
+    /// can never overtake the domain events of its own cause (e.g.
+    /// `AppDesignConflict` always precedes the `revision_conflict` failure).
     async fn emit_app_failure(&self, app_id: Option<String>, error: &AppError) {
-        self.event_sink
-            .emit(ClientEvent::AppOperationFailed {
-                app_id,
-                code: crate::local_apps_bridge::lower_error_code(error.code()),
-                message: error.to_string(),
-            })
+        let service = self.local_apps.as_ref().ok().cloned();
+        self.app_emissions
+            .emit_failure(service.as_deref(), app_id, error)
             .await;
     }
 
@@ -2436,15 +2445,33 @@ impl MobileEngineHandle {
     /// service's emission-order lock (through the installed
     /// `SinkAppEventObserver`), so a concurrent mutation on another `submit`
     /// can never get its events overtaken by a stale snapshot.
-    async fn emit_apps_snapshot(&self, service: &AppService) {
+    async fn emit_apps_snapshot(service: &AppService) {
         service.announce_apps().await;
+    }
+
+    /// Await one detached app-mutation task (the seven mutate-then-announce
+    /// handlers below). The body — service mutation AND its post-mutation
+    /// snapshot announce — runs in a task spawned on the engine runtime, so
+    /// dropping the `submit` future that awaits here abandons the AWAIT, not
+    /// the work: a mutation that commits always gets its `AppsChanged`
+    /// (contract C8), mirroring the core's dropped-caller completion-task
+    /// hardening. A panic inside the body is resumed on the caller (the same
+    /// observable behavior as running the body inline); a cancelled join can
+    /// only mean the runtime itself is shutting down, where nothing is left
+    /// to do.
+    async fn join_app_mutation(task: tokio::task::JoinHandle<()>) {
+        if let Err(error) = task.await {
+            if error.is_panic() {
+                std::panic::resume_unwind(error.into_panic());
+            }
+        }
     }
 
     async fn handle_list_apps(&self) {
         let Some(service) = self.local_apps_or_report(None).await else {
             return;
         };
-        self.emit_apps_snapshot(&service).await;
+        Self::emit_apps_snapshot(&service).await;
     }
 
     async fn handle_create_app(
@@ -2464,13 +2491,21 @@ impl MobileEngineHandle {
                 return;
             }
         };
+        // Raising the origin is fallible like every other inbound DTO raise
+        // (W1): an unknown `#[non_exhaustive]` future origin must fail typed
+        // instead of silently laundering into a library create.
+        let origin = match crate::local_apps_bridge::raise_origin(origin) {
+            Ok(origin) => origin,
+            Err(error) => {
+                self.emit_app_failure(None, &error).await;
+                return;
+            }
+        };
         // The record keeps a conversation binding only for chat-origin creates
         // (`AppRecord.conversation_id` doc: "origin: chat"); a library create
-        // never binds one.
-        let conversation_id = match origin {
-            AppCreateOriginDto::Chat => conversation_id,
-            _ => None,
-        };
+        // never binds one. Derived from the RAISED origin (an exhaustive
+        // match — see `AppCreateOrigin::conversation_binding`).
+        let conversation_id = origin.conversation_binding(conversation_id);
         // Success needs no extra emit: `create_app` announces the new record
         // set via its own `AppsChanged` domain event.
         if let Err(error) = service.create_app(name, template, conversation_id).await {
@@ -2478,14 +2513,28 @@ impl MobileEngineHandle {
         }
     }
 
+    // The seven mutate-then-announce handlers below are cancellation-atomic:
+    // each body runs in a detached task joined via `join_app_mutation`, so a
+    // caller dropped after the mutation commits cannot lose the mutation's
+    // only `AppsChanged` snapshot. (`CreateApp` / `DeleteApp` need no such
+    // wrap for their announce: it rides the core's own completion task.)
+
     async fn handle_open_app_designer(&self, app_id: String) {
         let Some(service) = self.local_apps_or_report(Some(&app_id)).await else {
             return;
         };
-        match service.open_designer(&app_id).await {
-            Ok(_interaction) => self.emit_apps_snapshot(&service).await,
-            Err(error) => self.emit_app_failure(Some(app_id), &error).await,
-        }
+        let emissions = self.app_emissions.clone();
+        Self::join_app_mutation(self.runtime.handle().spawn(async move {
+            match service.open_designer(&app_id).await {
+                Ok(_interaction) => Self::emit_apps_snapshot(&service).await,
+                Err(error) => {
+                    emissions
+                        .emit_failure(Some(&service), Some(app_id), &error)
+                        .await;
+                }
+            }
+        }))
+        .await;
     }
 
     async fn handle_update_app_design_draft(
@@ -2504,12 +2553,21 @@ impl MobileEngineHandle {
                 return;
             }
         };
-        match service.update_draft(&app_id, expected_revision, &patch).await {
-            Ok(_revision) => self.emit_apps_snapshot(&service).await,
-            // A stale revision already emitted `AppDesignConflict` from the
-            // service; the typed failure rides alongside it.
-            Err(error) => self.emit_app_failure(Some(app_id), &error).await,
-        }
+        let emissions = self.app_emissions.clone();
+        Self::join_app_mutation(self.runtime.handle().spawn(async move {
+            match service.update_draft(&app_id, expected_revision, &patch).await {
+                Ok(_revision) => Self::emit_apps_snapshot(&service).await,
+                // A stale revision already emitted `AppDesignConflict` from
+                // the service; the typed failure rides BEHIND it on the
+                // ordered emission channel.
+                Err(error) => {
+                    emissions
+                        .emit_failure(Some(&service), Some(app_id), &error)
+                        .await;
+                }
+            }
+        }))
+        .await;
     }
 
     async fn handle_apply_agent_design_suggestion(
@@ -2521,53 +2579,97 @@ impl MobileEngineHandle {
         let Some(service) = self.local_apps_or_report(Some(&app_id)).await else {
             return;
         };
-        match service
-            .apply_suggestion(&app_id, suggestion_id, expected_revision)
-            .await
-        {
-            Ok(_revision) => self.emit_apps_snapshot(&service).await,
-            Err(error) => self.emit_app_failure(Some(app_id), &error).await,
-        }
+        let emissions = self.app_emissions.clone();
+        let suggestion_id = suggestion_id.to_string();
+        Self::join_app_mutation(self.runtime.handle().spawn(async move {
+            match service
+                .apply_suggestion(&app_id, &suggestion_id, expected_revision)
+                .await
+            {
+                Ok(_revision) => Self::emit_apps_snapshot(&service).await,
+                Err(error) => {
+                    emissions
+                        .emit_failure(Some(&service), Some(app_id), &error)
+                        .await;
+                }
+            }
+        }))
+        .await;
     }
 
     async fn handle_confirm_app_design(&self, app_id: String, interaction_id: &str, revision: u64) {
         let Some(service) = self.local_apps_or_report(Some(&app_id)).await else {
             return;
         };
-        match service.confirm_design(&app_id, interaction_id, revision).await {
-            Ok(()) => self.emit_apps_snapshot(&service).await,
-            Err(error) => self.emit_app_failure(Some(app_id), &error).await,
-        }
+        let emissions = self.app_emissions.clone();
+        let interaction_id = interaction_id.to_string();
+        Self::join_app_mutation(self.runtime.handle().spawn(async move {
+            match service.confirm_design(&app_id, &interaction_id, revision).await {
+                Ok(()) => Self::emit_apps_snapshot(&service).await,
+                Err(error) => {
+                    emissions
+                        .emit_failure(Some(&service), Some(app_id), &error)
+                        .await;
+                }
+            }
+        }))
+        .await;
     }
 
     async fn handle_cancel_app_design(&self, app_id: String) {
         let Some(service) = self.local_apps_or_report(Some(&app_id)).await else {
             return;
         };
-        match service.cancel_design(&app_id).await {
-            Ok(()) => self.emit_apps_snapshot(&service).await,
-            Err(error) => self.emit_app_failure(Some(app_id), &error).await,
-        }
+        let emissions = self.app_emissions.clone();
+        Self::join_app_mutation(self.runtime.handle().spawn(async move {
+            match service.cancel_design(&app_id).await {
+                Ok(()) => Self::emit_apps_snapshot(&service).await,
+                Err(error) => {
+                    emissions
+                        .emit_failure(Some(&service), Some(app_id), &error)
+                        .await;
+                }
+            }
+        }))
+        .await;
     }
 
     async fn handle_confirm_app_preview(&self, app_id: String, interaction_id: &str, revision: u64) {
         let Some(service) = self.local_apps_or_report(Some(&app_id)).await else {
             return;
         };
-        match service.confirm_preview(&app_id, interaction_id, revision).await {
-            Ok(()) => self.emit_apps_snapshot(&service).await,
-            Err(error) => self.emit_app_failure(Some(app_id), &error).await,
-        }
+        let emissions = self.app_emissions.clone();
+        let interaction_id = interaction_id.to_string();
+        Self::join_app_mutation(self.runtime.handle().spawn(async move {
+            match service.confirm_preview(&app_id, &interaction_id, revision).await {
+                Ok(()) => Self::emit_apps_snapshot(&service).await,
+                Err(error) => {
+                    emissions
+                        .emit_failure(Some(&service), Some(app_id), &error)
+                        .await;
+                }
+            }
+        }))
+        .await;
     }
 
     async fn handle_request_app_revision(&self, app_id: String, prompt: &str) {
         let Some(service) = self.local_apps_or_report(Some(&app_id)).await else {
             return;
         };
-        match service.request_revision(&app_id, prompt).await {
-            Ok(()) => self.emit_apps_snapshot(&service).await,
-            Err(error) => self.emit_app_failure(Some(app_id), &error).await,
-        }
+        let emissions = self.app_emissions.clone();
+        let prompt = prompt.to_string();
+        Self::join_app_mutation(self.runtime.handle().spawn(async move {
+            match service.request_revision(&app_id, &prompt).await {
+                Ok(()) => Self::emit_apps_snapshot(&service).await,
+                Err(error) => {
+                    emissions
+                        .emit_failure(Some(&service), Some(app_id), &error)
+                        .await;
+                }
+            }
+        }))
+        .await;
     }
 
     async fn handle_list_app_checkpoints(&self, app_id: String) {
@@ -2577,15 +2679,16 @@ impl MobileEngineHandle {
         match service.list_checkpoints(&app_id).await {
             // The protocol has no list event — each checkpoint rides its own
             // `AppCheckpointCreated`, so an empty list is zero events. Phase 1
-            // always returns the empty list (git wiring is phase 5).
+            // always returns the empty list (git wiring is phase 5). The rows
+            // ride the ordered emission channel like every other app-surface
+            // event, so they can never overtake or interleave a domain batch.
             Ok(checkpoints) => {
                 for checkpoint in &checkpoints {
-                    self.event_sink
-                        .emit(ClientEvent::AppCheckpointCreated {
+                    self.app_emissions
+                        .enqueue_engine(ClientEvent::AppCheckpointCreated {
                             app_id: app_id.clone(),
                             checkpoint: crate::local_apps_bridge::lower_checkpoint(checkpoint),
-                        })
-                        .await;
+                        });
                 }
             }
             Err(error) => self.emit_app_failure(Some(app_id), &error).await,
@@ -4740,23 +4843,31 @@ pub fn build_mobile_engine_inner(
     }
 
     // LOCAL-APPS (phase 1): the engine-owned `AppService`, rebuilt from disk
-    // alone at every boot and observed straight onto the connection's event
-    // sink. Continuations get the `NoopContinuationSink` — no conversation
-    // -injection seam exists yet (mobile `NewSession` ignores `cwd`, so an
-    // app-workspace-scoped conversation cannot be opened on the live engine;
-    // phase 3 swaps in the real conversation sink). A load failure must not
-    // brick the engine: it is held on the handle and every app command reports
-    // it as a typed `AppOperationFailed` instead.
+    // alone at every boot and observed onto the connection's event sink
+    // through the bridge's ordered emission channel (`AppEmissionQueue`): the
+    // observer enqueues under the service's emission-order guard, ONE
+    // detached forwarder task delivers to the sink with no lock held, so a
+    // listener that drives an app command from inside its event callback can
+    // never deadlock the app surface. Continuations get the
+    // `NoopContinuationSink` — no conversation-injection seam exists yet
+    // (mobile `NewSession` ignores `cwd`, so an app-workspace-scoped
+    // conversation cannot be opened on the live engine; phase 3 swaps in the
+    // real conversation sink). A load failure must not brick the engine: it
+    // is held on the handle and every app command reports it as a typed
+    // `AppOperationFailed` instead (the channel is built regardless, so those
+    // reports ride the same ordered path).
     // `AppService::load` is async (it announces still-pending gate events after
     // rebuilding from disk); engine construction runs on the FFI caller's plain
     // thread, so blocking on the engine runtime here is safe.
+    let app_emissions =
+        crate::local_apps_bridge::AppEmissionQueue::spawn(runtime.handle(), event_sink.clone());
     let local_apps = runtime
         .block_on(AppService::load(
             mobile_apps_data_root(&firer_cfg),
             firer_platform.clock(),
             Arc::new(NoopContinuationSink),
             Arc::new(crate::local_apps_bridge::SinkAppEventObserver::new(
-                event_sink.clone(),
+                app_emissions.clone(),
             )),
         ))
         .map(Arc::new);
@@ -4799,6 +4910,7 @@ pub fn build_mobile_engine_inner(
         firer_cfg,
         firer_platform,
         local_apps,
+        app_emissions,
     }))
 }
 
@@ -6476,19 +6588,22 @@ mod tests {
 
     use client_protocol::local_apps::{
         AppCreateOriginDto, AppDesignPatchDto, AppDesignPatchOpDto, AppErrorCodeDto,
-        AppTemplateKindDto, AppWorkflowStateDto, DesignValueDto,
+        AppRuntimeStateDto, AppTemplateKindDto, AppWorkflowStateDto, DesignValueDto,
     };
 
     /// Drain and return every event delivered to the fake listener so far.
-    /// Wait for the local-apps spawned emission queue to drain, then take
-    /// everything the listener has received. Event delivery is asynchronous
-    /// (`AppService` hands events to a spawned ordered emitter), so a bare
-    /// take races the emitter; the `flush_events` barrier makes this
-    /// deterministic.
+    /// Event delivery is asynchronous, in two ordered stages: `AppService`
+    /// hands events to spawned emission tasks (commit → enqueue onto the
+    /// bridge's emission channel), and the bridge's single forwarder drains
+    /// that channel to the sink (enqueue → deliver). A bare take races both,
+    /// so the barrier is two-stage too: `flush_events` waits until everything
+    /// committed is ENQUEUED, then the queue flush waits until everything
+    /// enqueued is DELIVERED.
     async fn drain_events(handle: &MobileEngineHandle, listener: &FakeListener) -> Vec<Ev> {
         if let Ok(service) = handle.local_apps() {
             service.flush_events().await;
         }
+        handle.app_emissions.flush().await;
         std::mem::take(&mut *listener.received.lock().await)
     }
 
@@ -6509,6 +6624,17 @@ mod tests {
             Ev::AppsChanged { apps } => Some(apps.clone()),
             _ => None,
         })
+    }
+
+    /// Index of the first event matching `pred`, or a panic naming what was
+    /// expected and the whole batch. The app surface delivers through ONE
+    /// ordered channel (channel order = commit order), so multi-event batches
+    /// assert relative POSITIONS, not mere membership (W5).
+    fn position_of(events: &[Ev], what: &str, pred: impl Fn(&Ev) -> bool) -> usize {
+        events
+            .iter()
+            .position(pred)
+            .unwrap_or_else(|| panic!("{what} not found in {events:?}"))
     }
 
     #[test]
@@ -6560,16 +6686,34 @@ mod tests {
                 })
                 .expect("AppDesignerRequested must be emitted");
             assert_eq!(designer_revision, 0);
-            assert!(events.iter().any(|event| matches!(
-                event,
-                Ev::AppWorkflowChanged {
-                    state: AppWorkflowStateDto::AwaitingSpecConfirmation,
-                    ..
-                }
-            )));
+            // Order-sensitive (W5): the gate-opening batch is
+            // state-change-first (`WorkflowChanged` before the gate
+            // announcement), and domain events precede the trailing
+            // `AppsChanged` snapshot.
+            let workflow_at = position_of(&events, "AppWorkflowChanged(awaiting_spec)", |event| {
+                matches!(
+                    event,
+                    Ev::AppWorkflowChanged {
+                        state: AppWorkflowStateDto::AwaitingSpecConfirmation,
+                        ..
+                    }
+                )
+            });
+            let designer_at = position_of(&events, "AppDesignerRequested", |event| {
+                matches!(event, Ev::AppDesignerRequested { .. })
+            });
+            let snapshot_at = position_of(&events, "AppsChanged snapshot", |event| {
+                matches!(event, Ev::AppsChanged { .. })
+            });
             assert!(
-                apps_changed_rows(&events).is_some(),
-                "every mutation announces the new record set via AppsChanged"
+                workflow_at < designer_at,
+                "state-change-first: WorkflowChanged must precede DesignerRequested \
+                 (got {events:?})"
+            );
+            assert!(
+                designer_at < snapshot_at,
+                "domain events must precede the trailing AppsChanged snapshot \
+                 (got {events:?})"
             );
 
             // A conflicting update is rejected: conflict event + typed
@@ -6583,21 +6727,32 @@ mod tests {
                 .await
                 .expect("submit(UpdateAppDesignDraft stale)");
             let events = drain_events(&handle, &listener).await;
-            assert!(events.iter().any(|event| matches!(
-                event,
-                Ev::AppDesignConflict {
-                    expected_revision: 7,
-                    actual_revision: 0,
-                    ..
-                }
-            )));
-            assert!(events.iter().any(|event| matches!(
-                event,
-                Ev::AppOperationFailed {
-                    code: AppErrorCodeDto::RevisionConflict,
-                    ..
-                }
-            )));
+            // Order-sensitive (W5): the spec-required cause precedes the
+            // synthesized failure on the wire.
+            let conflict_at = position_of(&events, "AppDesignConflict", |event| {
+                matches!(
+                    event,
+                    Ev::AppDesignConflict {
+                        expected_revision: 7,
+                        actual_revision: 0,
+                        ..
+                    }
+                )
+            });
+            let failed_at = position_of(&events, "AppOperationFailed(revision_conflict)", |event| {
+                matches!(
+                    event,
+                    Ev::AppOperationFailed {
+                        code: AppErrorCodeDto::RevisionConflict,
+                        ..
+                    }
+                )
+            });
+            assert!(
+                conflict_at < failed_at,
+                "AppDesignConflict (the cause) must precede AppOperationFailed \
+                 (got {events:?})"
+            );
             assert!(
                 !events
                     .iter()
@@ -6682,17 +6837,31 @@ mod tests {
                 .await
                 .expect("submit(ConfirmAppDesign)");
             let events = drain_events(&handle, &listener).await;
-            assert!(events.iter().any(|event| matches!(
-                event,
-                Ev::AppWorkflowChanged {
-                    state: AppWorkflowStateDto::Generating,
-                    ..
-                }
-            )));
+            // Order-sensitive (W5): the workflow move precedes its trailing
+            // snapshot.
+            let generating_at = position_of(&events, "AppWorkflowChanged(generating)", |event| {
+                matches!(
+                    event,
+                    Ev::AppWorkflowChanged {
+                        state: AppWorkflowStateDto::Generating,
+                        ..
+                    }
+                )
+            });
+            let snapshot_at = position_of(&events, "AppsChanged snapshot", |event| {
+                matches!(event, Ev::AppsChanged { .. })
+            });
+            assert!(
+                generating_at < snapshot_at,
+                "WorkflowChanged(generating) must precede the AppsChanged snapshot \
+                 (got {events:?})"
+            );
 
             // Generation/validation transitions are AppService seams (the
             // phase-3 generator drives them); their domain events must ride
-            // the SAME outbound sink as the command replies.
+            // the SAME outbound sink as the command replies — and in commit
+            // order: Validating first, then the gate-opening pair
+            // state-change-first (WorkflowChanged before PreviewReady).
             service
                 .generation_complete(&app_id)
                 .await
@@ -6702,13 +6871,36 @@ mod tests {
                 .await
                 .expect("validation_passed");
             let events = drain_events(&handle, &listener).await;
-            assert!(events.iter().any(|event| matches!(
-                event,
-                Ev::AppWorkflowChanged {
-                    state: AppWorkflowStateDto::Validating,
-                    ..
-                }
-            )));
+            let validating_at = position_of(&events, "AppWorkflowChanged(validating)", |event| {
+                matches!(
+                    event,
+                    Ev::AppWorkflowChanged {
+                        state: AppWorkflowStateDto::Validating,
+                        ..
+                    }
+                )
+            });
+            let awaiting_preview_at = position_of(
+                &events,
+                "AppWorkflowChanged(awaiting_preview_confirmation)",
+                |event| {
+                    matches!(
+                        event,
+                        Ev::AppWorkflowChanged {
+                            state: AppWorkflowStateDto::AwaitingPreviewConfirmation,
+                            ..
+                        }
+                    )
+                },
+            );
+            let preview_at = position_of(&events, "AppPreviewReady", |event| {
+                matches!(event, Ev::AppPreviewReady { .. })
+            });
+            assert!(
+                validating_at < awaiting_preview_at && awaiting_preview_at < preview_at,
+                "seam events must arrive in commit order, state-change-first \
+                 (got {events:?})"
+            );
             let (preview_interaction, preview_revision) = events
                 .iter()
                 .find_map(|event| match event {
@@ -6733,13 +6925,25 @@ mod tests {
                 .await
                 .expect("submit(ConfirmAppPreview)");
             let events = drain_events(&handle, &listener).await;
-            assert!(events.iter().any(|event| matches!(
-                event,
-                Ev::AppWorkflowChanged {
-                    state: AppWorkflowStateDto::Ready,
-                    ..
-                }
-            )));
+            // Order-sensitive (W5): the workflow move precedes its trailing
+            // snapshot.
+            let ready_at = position_of(&events, "AppWorkflowChanged(ready)", |event| {
+                matches!(
+                    event,
+                    Ev::AppWorkflowChanged {
+                        state: AppWorkflowStateDto::Ready,
+                        ..
+                    }
+                )
+            });
+            let snapshot_at = position_of(&events, "AppsChanged snapshot", |event| {
+                matches!(event, Ev::AppsChanged { .. })
+            });
+            assert!(
+                ready_at < snapshot_at,
+                "WorkflowChanged(ready) must precede the AppsChanged snapshot \
+                 (got {events:?})"
+            );
             assert_eq!(
                 service.record(&app_id).await.unwrap().workflow_state,
                 local_apps::AppWorkflowState::Ready
@@ -7339,6 +7543,529 @@ mod tests {
             assert_eq!(
                 service.record(&app_id).await.unwrap().workflow_state,
                 local_apps::AppWorkflowState::Revising
+            );
+        });
+    }
+
+    /// W3 regression listener: reacts to `AppDesignerRequested` by driving
+    /// ANOTHER submit on the same engine handle from inside `on_event`,
+    /// hopping through the runtime the way a real Swift/Kotlin callback
+    /// would (a separate task the callback then awaits). Pre-W3 the observer
+    /// awaited the sink INSIDE the service's emission-order guard, so the
+    /// inner submit's emission-order acquisition waited (cross-task, so the
+    /// core's task-local reentrancy panic could not see it) on the very
+    /// guard whose release waited on this callback — a silent deadlock of
+    /// the whole app surface.
+    #[derive(Default)]
+    struct ResubmittingListener {
+        received: tokio::sync::Mutex<Vec<Ev>>,
+        engine: StdMutex<Option<Arc<MobileEngineHandle>>>,
+        resubmitted: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait]
+    impl ClientEventListener for ResubmittingListener {
+        async fn on_event(&self, event: Ev) {
+            if let Ev::AppDesignerRequested { app_id, .. } = &event {
+                if !self
+                    .resubmitted
+                    .swap(true, std::sync::atomic::Ordering::SeqCst)
+                {
+                    let engine = self
+                        .engine
+                        .lock()
+                        .unwrap()
+                        .clone()
+                        .expect("engine registered before the designer opens");
+                    let app_id = app_id.clone();
+                    let inner = tokio::spawn(async move {
+                        engine
+                            .submit(ClientCommand::UpdateAppDesignDraft {
+                                app_id,
+                                expected_revision: 0,
+                                patch: title_patch("From listener"),
+                            })
+                            .await
+                    });
+                    inner
+                        .await
+                        .expect("inner submit task")
+                        .expect("inner submit");
+                }
+            }
+            self.received.lock().await.push(event);
+        }
+    }
+
+    /// `drain_events` twin for [`ResubmittingListener`] (same two-stage
+    /// barrier: commit → enqueue, then enqueue → deliver).
+    async fn drain_resubmitting(
+        handle: &MobileEngineHandle,
+        listener: &ResubmittingListener,
+    ) -> Vec<Ev> {
+        if let Ok(service) = handle.local_apps() {
+            service.flush_events().await;
+        }
+        handle.app_emissions.flush().await;
+        std::mem::take(&mut *listener.received.lock().await)
+    }
+
+    #[test]
+    fn local_apps_listener_driving_a_submit_from_on_event_cannot_deadlock() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let platform: Arc<dyn traits::Platform> =
+            Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
+        let listener = Arc::new(ResubmittingListener::default());
+        let listener_dyn: Arc<dyn ClientEventListener> = listener.clone();
+        let perm_sink: Arc<dyn PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+        let handle = build_mobile_engine(test_config(tmp.path()), platform, listener_dyn, perm_sink)
+            .expect("build_mobile_engine failed");
+        *listener.engine.lock().unwrap() = Some(handle.clone());
+
+        handle.runtime().block_on(async {
+            // Bounded so a reintroduced lock-across-listener-code regression
+            // FAILS fast instead of hanging CI.
+            tokio::time::timeout(std::time::Duration::from_secs(30), async {
+                handle
+                    .submit(ClientCommand::CreateApp {
+                        name: "Reentrant".into(),
+                        template: AppTemplateKindDto::Dashboard,
+                        origin: AppCreateOriginDto::Library,
+                        conversation_id: None,
+                    })
+                    .await
+                    .expect("submit(CreateApp)");
+                let events = drain_resubmitting(&handle, &listener).await;
+                let app_id = apps_changed_rows(&events)
+                    .expect("CreateApp must announce AppsChanged")[0]
+                    .id
+                    .clone();
+
+                // Delivering AppDesignerRequested makes the listener drive
+                // the draft edit from inside `on_event`; both the outer and
+                // the inner command must complete.
+                handle
+                    .submit(ClientCommand::OpenAppDesigner {
+                        app_id: app_id.clone(),
+                    })
+                    .await
+                    .expect("submit(OpenAppDesigner)");
+                let mut events = drain_resubmitting(&handle, &listener).await;
+                // The inner submit finished inside the designer event's
+                // delivery, so its own events land behind the first flush
+                // barrier; a second barrier round collects them.
+                events.extend(drain_resubmitting(&handle, &listener).await);
+                assert!(
+                    listener
+                        .resubmitted
+                        .load(std::sync::atomic::Ordering::SeqCst),
+                    "the listener never saw AppDesignerRequested"
+                );
+                assert!(
+                    events
+                        .iter()
+                        .any(|event| matches!(event, Ev::AppDesignDraftChanged { revision: 1, .. })),
+                    "the listener-driven draft edit must complete and deliver (got {events:?})"
+                );
+                let service = handle.local_apps().expect("local-apps service");
+                assert_eq!(
+                    service.draft(&app_id).await.expect("draft").revision,
+                    1,
+                    "the listener-driven edit must have committed"
+                );
+            })
+            .await
+            .expect(
+                "app surface deadlocked: a listener driving a submit from on_event \
+                 must complete now that no lock is held while listener code runs",
+            );
+        });
+        // Break the listener ↔ engine strong-reference cycle so the engine
+        // (and its runtime) can drop with the test.
+        *listener.engine.lock().unwrap() = None;
+    }
+
+    /// W2 regression, mirroring the core's dropped-caller completion-task
+    /// tests: abort the mutating `submit` at a sweep of yield offsets. Any
+    /// mutation that actually COMMITTED (probe: the draft revision bump)
+    /// must still deliver its `DesignDraftChanged` FOLLOWED by an
+    /// `AppsChanged` snapshot — the announce lives in a detached task, not
+    /// in the droppable caller future (contract C8).
+    #[test]
+    fn local_apps_dropped_submit_caller_never_loses_a_committed_mutations_snapshot() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, listener) = build_submit_handle(tmp.path());
+
+        handle.runtime().block_on(async {
+            handle
+                .submit(ClientCommand::CreateApp {
+                    name: "Sweep".into(),
+                    template: AppTemplateKindDto::CrudTracker,
+                    origin: AppCreateOriginDto::Library,
+                    conversation_id: None,
+                })
+                .await
+                .expect("submit(CreateApp)");
+            let events = drain_events(&handle, &listener).await;
+            let app_id = apps_changed_rows(&events)
+                .expect("CreateApp must announce AppsChanged")[0]
+                .id
+                .clone();
+            handle
+                .submit(ClientCommand::OpenAppDesigner {
+                    app_id: app_id.clone(),
+                })
+                .await
+                .expect("submit(OpenAppDesigner)");
+            drain_events(&handle, &listener).await;
+            let service = handle.local_apps().expect("local-apps service");
+
+            let mut committed_iterations = 0usize;
+            for yields in 0..16u32 {
+                let revision = service.draft(&app_id).await.expect("draft").revision;
+                let submit_handle = Arc::clone(&handle);
+                let submit_app_id = app_id.clone();
+                let submit = tokio::spawn(async move {
+                    submit_handle
+                        .submit(ClientCommand::UpdateAppDesignDraft {
+                            app_id: submit_app_id,
+                            expected_revision: revision,
+                            patch: title_patch(&format!("v{revision}")),
+                        })
+                        .await
+                });
+                for _ in 0..yields {
+                    tokio::task::yield_now().await;
+                }
+                submit.abort();
+                let _ = submit.await;
+
+                // Classify by the committed-state probe: the detached
+                // mutation (if the handler reached its spawn) runs to
+                // completion regardless of the abort, so poll briefly.
+                let mut events: Vec<Ev> = Vec::new();
+                let settle = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                let committed = loop {
+                    events.extend(drain_events(&handle, &listener).await);
+                    if service.draft(&app_id).await.expect("draft").revision == revision + 1 {
+                        break true;
+                    }
+                    if std::time::Instant::now() > settle {
+                        break false;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                };
+                if !committed {
+                    continue;
+                }
+                committed_iterations += 1;
+                // The committed edit's domain event (which rides the core's
+                // own completion task) must be FOLLOWED by the announce-side
+                // AppsChanged — exactly the event a droppable caller future
+                // used to lose. Bounded poll: a regression fails loudly.
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                loop {
+                    let draft_at = events.iter().position(|event| {
+                        matches!(
+                            event,
+                            Ev::AppDesignDraftChanged { revision: r, .. } if *r == revision + 1
+                        )
+                    });
+                    if draft_at.is_some_and(|at| {
+                        events[at..]
+                            .iter()
+                            .any(|event| matches!(event, Ev::AppsChanged { .. }))
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "committed draft revision {} lost its AppsChanged snapshot \
+                         (yields={yields}; got {events:?})",
+                        revision + 1
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    events.extend(drain_events(&handle, &listener).await);
+                }
+            }
+            assert!(
+                committed_iterations > 0,
+                "the abort sweep never committed a mutation; the probe (or the \
+                 sweep width) is broken"
+            );
+        });
+    }
+
+    /// W4: the generation-progress and runtime seams (the phase-3 generator /
+    /// phase-4 runtime drive them) must reach the client through the same
+    /// lowered wire path as command replies — field-exact.
+    #[test]
+    fn local_apps_progress_and_runtime_seams_deliver_field_exact_events() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, listener) = build_submit_handle(tmp.path());
+
+        handle.runtime().block_on(async {
+            handle
+                .submit(ClientCommand::CreateApp {
+                    name: "Telemetry".into(),
+                    template: AppTemplateKindDto::Dashboard,
+                    origin: AppCreateOriginDto::Library,
+                    conversation_id: None,
+                })
+                .await
+                .expect("submit(CreateApp)");
+            let events = drain_events(&handle, &listener).await;
+            let app_id = apps_changed_rows(&events)
+                .expect("CreateApp must announce AppsChanged")[0]
+                .id
+                .clone();
+            let service = handle.local_apps().expect("local-apps service");
+
+            service
+                .report_generation_progress(local_apps::AppGenerationProgress {
+                    app_id: app_id.clone(),
+                    stage: "pages".into(),
+                    percent: Some(42),
+                    detail: Some("3/7 screens".into()),
+                })
+                .await
+                .expect("report_generation_progress");
+            let events = drain_events(&handle, &listener).await;
+            assert!(
+                events.iter().any(|event| matches!(
+                    event,
+                    Ev::AppGenerationProgress {
+                        app_id: id,
+                        stage,
+                        percent: Some(42),
+                        detail: Some(detail),
+                    } if *id == app_id && stage == "pages" && detail == "3/7 screens"
+                )),
+                "AppGenerationProgress must arrive field-exact (got {events:?})"
+            );
+
+            // Runtime record: stopped -> starting (pins the port)…
+            service
+                .update_runtime_record(
+                    &app_id,
+                    local_apps::AppRuntimeState::Starting,
+                    Some(3001),
+                    Some(77),
+                    None,
+                )
+                .await
+                .expect("update_runtime_record(starting)");
+            // …then starting -> failed, carrying the failure detail.
+            service
+                .update_runtime_record(
+                    &app_id,
+                    local_apps::AppRuntimeState::Failed,
+                    None,
+                    None,
+                    Some("dev server exited: code 1".into()),
+                )
+                .await
+                .expect("update_runtime_record(failed)");
+            let events = drain_events(&handle, &listener).await;
+            let starting_at = position_of(&events, "AppRuntimeChanged(starting)", |event| {
+                matches!(
+                    event,
+                    Ev::AppRuntimeChanged {
+                        app_id: id,
+                        state: AppRuntimeStateDto::Starting,
+                        last_error: None,
+                    } if *id == app_id
+                )
+            });
+            let failed_at = position_of(&events, "AppRuntimeChanged(failed)", |event| {
+                matches!(
+                    event,
+                    Ev::AppRuntimeChanged {
+                        app_id: id,
+                        state: AppRuntimeStateDto::Failed,
+                        last_error: Some(last_error),
+                    } if *id == app_id && last_error == "dev server exited: code 1"
+                )
+            });
+            assert!(
+                starting_at < failed_at,
+                "runtime transitions must arrive in commit order (got {events:?})"
+            );
+        });
+    }
+
+    /// W5: failure-vs-cause order on the suggestion conflict path. The
+    /// suggestion announcement is consumed EARLIER; the stale apply's batch
+    /// must then deliver `AppDesignConflict` (the spec-required cause)
+    /// BEFORE the synthesized `AppOperationFailed { revision_conflict }`.
+    #[test]
+    fn local_apps_stale_suggestion_apply_orders_conflict_before_failure() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, listener) = build_submit_handle(tmp.path());
+
+        handle.runtime().block_on(async {
+            handle
+                .submit(ClientCommand::CreateApp {
+                    name: "Conflicted".into(),
+                    template: AppTemplateKindDto::ContentShowcase,
+                    origin: AppCreateOriginDto::Library,
+                    conversation_id: None,
+                })
+                .await
+                .expect("submit(CreateApp)");
+            let events = drain_events(&handle, &listener).await;
+            let app_id = apps_changed_rows(&events)
+                .expect("CreateApp must announce AppsChanged")[0]
+                .id
+                .clone();
+            handle
+                .submit(ClientCommand::OpenAppDesigner {
+                    app_id: app_id.clone(),
+                })
+                .await
+                .expect("submit(OpenAppDesigner)");
+            handle
+                .submit(ClientCommand::UpdateAppDesignDraft {
+                    app_id: app_id.clone(),
+                    expected_revision: 0,
+                    patch: title_patch("Base"),
+                })
+                .await
+                .expect("submit(UpdateAppDesignDraft)");
+            let service = handle.local_apps().expect("local-apps service");
+            let suggestion = service
+                .store_suggestion(
+                    &app_id,
+                    local_apps::AppDesignPatch {
+                        ops: vec![local_apps::AppDesignPatchOp::Set {
+                            field_id: "accent".into(),
+                            value: local_apps::DesignValue::Color("#3366ff".into()),
+                        }],
+                        note: None,
+                    },
+                )
+                .await
+                .expect("store_suggestion");
+            // Consume everything so far — the suggestion announcement rode an
+            // earlier batch by design.
+            let events = drain_events(&handle, &listener).await;
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, Ev::AppDesignSuggestionAvailable { .. })),
+                "setup must have delivered the suggestion announcement"
+            );
+
+            // The stale apply: cause first, failure second — deterministic
+            // now that both ride the single ordered emission channel.
+            handle
+                .submit(ClientCommand::ApplyAgentDesignSuggestion {
+                    app_id: app_id.clone(),
+                    suggestion_id: suggestion.suggestion_id.clone(),
+                    expected_revision: 0,
+                })
+                .await
+                .expect("submit(ApplyAgentDesignSuggestion stale)");
+            let events = drain_events(&handle, &listener).await;
+            let conflict_at = position_of(&events, "AppDesignConflict", |event| {
+                matches!(
+                    event,
+                    Ev::AppDesignConflict {
+                        expected_revision: 0,
+                        actual_revision: 1,
+                        ..
+                    }
+                )
+            });
+            let failed_at =
+                position_of(&events, "AppOperationFailed(revision_conflict)", |event| {
+                    matches!(
+                        event,
+                        Ev::AppOperationFailed {
+                            code: AppErrorCodeDto::RevisionConflict,
+                            ..
+                        }
+                    )
+                });
+            assert!(
+                conflict_at < failed_at,
+                "AppDesignConflict (the cause) must precede AppOperationFailed \
+                 (got {events:?})"
+            );
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, Ev::AppDesignDraftChanged { .. })),
+                "a stale apply must not change the draft"
+            );
+        });
+    }
+
+    /// W5: cross-batch FIFO. Two rapid mutations with no intermediate flush
+    /// must deliver the full interleaved sequence in commit order — each
+    /// batch's domain event, then ITS trailing snapshot, then the next
+    /// batch. Asserted as the EXACT sequence, so any reordering (or a
+    /// snapshot jumping its batch) fails.
+    #[test]
+    fn local_apps_two_rapid_mutations_deliver_the_exact_commit_ordered_sequence() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, listener) = build_submit_handle(tmp.path());
+
+        handle.runtime().block_on(async {
+            handle
+                .submit(ClientCommand::CreateApp {
+                    name: "Fifo".into(),
+                    template: AppTemplateKindDto::FormUtility,
+                    origin: AppCreateOriginDto::Library,
+                    conversation_id: None,
+                })
+                .await
+                .expect("submit(CreateApp)");
+            let events = drain_events(&handle, &listener).await;
+            let app_id = apps_changed_rows(&events)
+                .expect("CreateApp must announce AppsChanged")[0]
+                .id
+                .clone();
+            handle
+                .submit(ClientCommand::OpenAppDesigner {
+                    app_id: app_id.clone(),
+                })
+                .await
+                .expect("submit(OpenAppDesigner)");
+            drain_events(&handle, &listener).await;
+
+            // Two mutations, no flush in between.
+            handle
+                .submit(ClientCommand::UpdateAppDesignDraft {
+                    app_id: app_id.clone(),
+                    expected_revision: 0,
+                    patch: title_patch("One"),
+                })
+                .await
+                .expect("submit(UpdateAppDesignDraft #1)");
+            handle
+                .submit(ClientCommand::UpdateAppDesignDraft {
+                    app_id: app_id.clone(),
+                    expected_revision: 1,
+                    patch: title_patch("Two"),
+                })
+                .await
+                .expect("submit(UpdateAppDesignDraft #2)");
+
+            let events = drain_events(&handle, &listener).await;
+            let sequence: Vec<String> = events
+                .iter()
+                .map(|event| match event {
+                    Ev::AppDesignDraftChanged { revision, .. } => format!("draft@{revision}"),
+                    Ev::AppsChanged { .. } => "apps".into(),
+                    other => format!("unexpected({other:?})"),
+                })
+                .collect();
+            assert_eq!(
+                sequence,
+                vec!["draft@1", "apps", "draft@2", "apps"],
+                "the interleaved two-command sequence must be exactly commit-ordered"
             );
         });
     }

@@ -248,6 +248,8 @@ mod tests {
                 offset: None,
                 limit: None,
                 from_read: true,
+                seeded_from_context: false,
+                is_partial_view: false,
             },
         );
     }

@@ -379,7 +379,10 @@ pub const LSP_FAILED: &str = "tengu_tool_lsp_failed";
 // the global tail of `ALL_EVENT_NAMES` (append-only convention).
 
 /// `tengu_file_read_dedup` — Read dedup short-circuit fired (`file_unchanged`).
-/// `FileReadTool.ts:559-561`. Metadata: `ext` (string, only when present).
+/// `FileReadTool.ts:559-561`. Metadata: `ext` (string, only when present) and,
+/// on the SEEDED branch only (2.1.220 @235741459
+/// `{source:Te("seeded"), ...b!==void 0&&{ext:b}}`), `source: "seeded"`.
+/// Metadata keys are free-form; only the event NAME is registered here.
 pub const FILE_READ_DEDUP: &str = "tengu_file_read_dedup";
 /// `tengu_session_file_read` — a successful TEXT read completed.
 /// `FileReadTool.ts:1069-1083`. Metadata: totalLines/readLines/totalBytes/
@@ -395,9 +398,11 @@ pub const FILE_READ_LIMITS_OVERRIDE: &str = "tengu_file_read_limits_override";
 
 /// `tengu_file_read_reread` (#13) — fired when reading a file that ALREADY has a
 /// read-file-state entry, BEFORE the dedup short-circuit (claude-code:
-/// `if(f) j("tengu_file_read_reread",{priorOp: f.offset===void 0?"edit_write":
-/// "read"})`). Metadata: `priorOp` = `"read"` when the prior entry came from a
-/// Read, `"edit_write"` when it came from an Edit/Write.
+/// 2.1.220 @235740900:
+/// `if(m)M("tengu_file_read_reread",{priorOp:Te(m.seededFromContext?"seeded"
+/// :m.offset===void 0?"edit_write":"read")})`). Metadata: `priorOp` =
+/// `"seeded"` for a memory-seeded entry (tested FIRST), `"read"` when the prior
+/// entry came from a Read, `"edit_write"` when it came from an Edit/Write.
 pub const FILE_READ_REREAD: &str = "tengu_file_read_reread";
 
 /// Order-locked array of all 134 names; consumed by `tengu::ALL_EVENT_NAMES`.

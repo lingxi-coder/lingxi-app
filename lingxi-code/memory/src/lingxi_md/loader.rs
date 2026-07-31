@@ -304,6 +304,26 @@ pub struct MemoryEntry {
     /// match-all `**` dropped. `None` means the rule applies unconditionally;
     /// `Some(_)` marks a CONDITIONAL rule that must NOT be eagerly injected.
     pub globs: Option<Vec<String>>,
+    /// The file's RAW on-disk text, byte-verbatim (claude-code `rawContent`).
+    ///
+    /// [`load_file`] returns `std::fs::read_to_string` output unmodified, so
+    /// this IS the disk text — no trim, no newline normalization, frontmatter
+    /// and HTML comments still present.
+    ///
+    /// The seeded read-state entry uses this (not [`Self::body`], which the
+    /// memory-block renderer later `.trim()`s) so a `Read` of the file can be
+    /// compared against the bytes on disk.
+    pub raw_content: String,
+    /// claude-code `contentDiffersFromDisk` — `bn_` @230803364 computes it as
+    /// `let p = d !== e`: an EXACT string compare of the stripped body `d`
+    /// against the raw disk text `e`, with **no trim**.
+    ///
+    /// `false` for an ordinary LINGXI.md (no frontmatter, no HTML comments —
+    /// stripping is a no-op), which is precisely the case the seeded Read
+    /// dedup fires on. `true` once frontmatter or a block HTML comment was
+    /// stripped, which seeds the entry with `is_partial_view: true` and so
+    /// refuses both the dedup and the staleness content-equality fallback.
+    pub content_differs_from_disk: bool,
 }
 
 /// Result of parsing one memory file's raw bytes.
@@ -460,10 +480,20 @@ pub fn expand_memory_file<S: std::hash::BuildHasher>(
     }
 
     // Parent before children (claudemd.ts:663-664).
+    //
+    // `content_differs_from_disk` is `bn_`'s `p = d !== e` (@230803364): the
+    // stripped body compared EXACTLY against the raw disk text, no trim. It
+    // must be computed HERE, before the memory-block renderer's later
+    // `.trim()`, or every file would falsely report "differs". `loaded.body` is
+    // `read_to_string` output verbatim (see `load_file`), so it IS the disk
+    // text.
+    let content_differs_from_disk = parsed.body != loaded.body;
     let mut result = vec![MemoryEntry {
         path: path.to_path_buf(),
         body: parsed.body,
         globs: parsed.globs,
+        raw_content: loaded.body,
+        content_differs_from_disk,
     }];
 
     for inc in parsed.include_paths {
@@ -1232,6 +1262,55 @@ mod tests {
     use std::fs;
     use std::sync::atomic::AtomicBool;
     use tempfile::TempDir;
+
+    #[test]
+    fn expand_memory_file_reports_disk_fidelity() {
+        // Pins the oracle rule `bn_` @230803364: `let p = d !== e` — an EXACT
+        // string compare of the frontmatter/HTML-comment-stripped body against
+        // the RAW disk text, with NO trim. This is what keeps the seeded Read
+        // dedup from being inert: an ordinary LINGXI.md with a trailing newline
+        // and no frontmatter has `differs === false`, so its seeded entry holds
+        // the byte-exact disk text and CAN dedup.
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path();
+
+        let plain = cwd.join("LINGXI.md");
+        fs::write(&plain, "# rules\nbe good\n").unwrap();
+        let mut seen = HashSet::new();
+        let out = expand_memory_file(&plain, &mut seen, false, cwd, None, 0);
+        assert_eq!(out.len(), 1);
+        assert!(
+            !out[0].content_differs_from_disk,
+            "plain file with a trailing newline must NOT differ from disk"
+        );
+        assert_eq!(
+            out[0].raw_content, "# rules\nbe good\n",
+            "raw_content must be the byte-exact disk text, trailing newline included"
+        );
+
+        let fm = cwd.join("cond.md");
+        fs::write(&fm, "---\npaths: src/**\n---\nbody\n").unwrap();
+        let mut seen = HashSet::new();
+        let out = expand_memory_file(&fm, &mut seen, false, cwd, None, 0);
+        assert_eq!(out.len(), 1);
+        assert!(
+            out[0].content_differs_from_disk,
+            "stripped frontmatter must mark the entry as differing from disk"
+        );
+        assert_eq!(out[0].raw_content, "---\npaths: src/**\n---\nbody\n");
+        assert_ne!(out[0].body, out[0].raw_content);
+
+        let com = cwd.join("comment.md");
+        fs::write(&com, "start\n<!-- hidden -->\nend\n").unwrap();
+        let mut seen = HashSet::new();
+        let out = expand_memory_file(&com, &mut seen, false, cwd, None, 0);
+        assert_eq!(out.len(), 1);
+        assert!(
+            out[0].content_differs_from_disk,
+            "a stripped HTML comment must mark the entry as differing from disk"
+        );
+        assert_eq!(out[0].raw_content, "start\n<!-- hidden -->\nend\n");
+    }
 
     #[test]
     fn text_include_extension_gate_matches_binary() {

@@ -802,6 +802,8 @@ impl Tool for FileEditTool {
                 limit: None,
                 // Post-edit entry — not a Read; the dedup gate skips it.
                 from_read: false,
+                seeded_from_context: false,
+                is_partial_view: false,
             },
         );
 

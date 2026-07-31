@@ -924,12 +924,30 @@ pub const FILE_UNCHANGED_SHORT: &str =
 /// ``vou(e){return `${Tou} (see "Contents of ${e}" above) and has not changed on
 /// disk. Use that content instead of re-reading.</system-reminder>`}`` (@229139106).
 ///
-/// Detect-side only in LingXi: the port does not yet seed memory files into
-/// `read_file_state`, so nothing produces this form (see the `seeded_from_context`
-/// residual). It is still matched by [`is_dedup_result`] so the detector is a
-/// 1:1 port of `joo`.
+/// PRODUCED by the seeded Read-dedup branch via
+/// [`format_file_unchanged_seeded`], and matched by [`is_dedup_result`] so the
+/// detector stays a 1:1 port of `joo`.
 pub const FILE_UNCHANGED_SEEDED_PREFIX: &str =
     "<system-reminder>This file is already in your context";
+
+/// `vou(e)` (2.1.220 @229139106) — the SEEDED `file_unchanged` stub:
+///
+/// ```text
+/// vou(e){return `${Tou} (see "Contents of ${e}" above) and has not changed on
+///                disk. Use that content instead of re-reading.</system-reminder>`}
+/// ```
+///
+/// where `Tou` = [`FILE_UNCHANGED_SEEDED_PREFIX`]. The result renderer
+/// (@235742950) calls it as `vou(e.file.filePath)`, i.e. with the SAME
+/// `fullFilePath` the dedup branch put into `data.file.filePath` — the
+/// canonicalized absolute path on the Rust side.
+#[must_use]
+pub fn format_file_unchanged_seeded(path: &std::path::Path) -> String {
+    format!(
+        "{FILE_UNCHANGED_SEEDED_PREFIX} (see \"Contents of {}\" above) and has not changed on disk. Use that content instead of re-reading.</system-reminder>",
+        path.display()
+    )
+}
 
 /// `joo(e)` (2.1.220 binary offset 229139264) — byte-locked dedup detector:
 /// `e.startsWith(FOg)||e.startsWith(Sou)||e.startsWith(Tou)`, i.e. the legacy
@@ -1119,8 +1137,18 @@ impl FileReadTool {
     /// short-circuit (the `file_unchanged` path). Metadata: `ext` ONLY when
     /// present (TS spreads `...(analyticsExt !== undefined && { ext })`); the
     /// analytics ext comes from [`get_file_extension_for_analytics`].
-    async fn emit_file_read_dedup(&self, path: &std::path::Path) {
+    ///
+    /// `source` is `Some("seeded")` for the SEEDED branch (@235741459:
+    /// `{source:Te("seeded"), ...b!==void 0&&{ext:b}}` — BOTH keys) and `None`
+    /// for the ordinary Read→Read branch, whose payload is `{...ext}` only.
+    async fn emit_file_read_dedup(&self, path: &std::path::Path, source: Option<&'static str>) {
         let mut md: LogEventMetadata = HashMap::new();
+        if let Some(source) = source {
+            md.insert(
+                "source".to_string(),
+                AnalyticsValue::String(Verified::assert_safe(source.to_string()).into_inner()),
+            );
+        }
         if let Some(ext) = get_file_extension_for_analytics(path) {
             md.insert(
                 "ext".to_string(),
@@ -1131,10 +1159,13 @@ impl FileReadTool {
     }
 
     /// `tengu_file_read_reread` (#13) — fired when reading a file that already
-    /// has a read-file-state entry, BEFORE the dedup short-circuit (claude-code:
-    /// `if(f) j("tengu_file_read_reread",{priorOp: f.offset===void 0?"edit_write"
-    /// :"read"})`). `prior_op` is `"read"` for a prior Read-origin entry,
-    /// `"edit_write"` for a prior Edit/Write-origin entry.
+    /// has a read-file-state entry, BEFORE the dedup short-circuit. 2.1.220
+    /// @235740900:
+    /// `if(m)M("tengu_file_read_reread",{priorOp:Te(m.seededFromContext?"seeded"
+    /// :m.offset===void 0?"edit_write":"read")})` — a THREE-way with `seeded`
+    /// tested FIRST. `prior_op` is `"seeded"` for a memory-seeded entry,
+    /// `"read"` for a prior Read-origin entry, `"edit_write"` for a prior
+    /// Edit/Write-origin entry.
     async fn emit_file_read_reread(&self, prior_op: &'static str) {
         let mut md: LogEventMetadata = HashMap::new();
         md.insert(
@@ -1819,22 +1850,75 @@ impl Tool for FileReadTool {
         //     `mtimeMs === existingState.timestamp`).
         // The GB killswitch (`tengu_read_dedup_killswitch`) is unported — LingXi
         // has no GrowthBook; dedup is always enabled (3P default = killswitch
-        // off). NOTE: the partial-view (`isPartialView`) flag set by TS's
-        // LINGXI.md / memory auto-injection has no LingXi analog; the
-        // offset/limit approximation matches for normal `Read`-sourced entries.
+        // off).
+        //
+        // The SEEDED branch (@235741459) runs FIRST and is a different shape:
+        //   if(_&&_.seededFromContext&&!_.isPartialView&&t===1&&r===void 0)
+        //     if(await b0e(f)===_.timestamp) → {type:"file_unchanged", …,
+        //                                      source:"seeded"}
+        // It covers memory files (LINGXI.md / rules) seeded into the registry at
+        // session start by `ConversationOrchestrator::seed_memory_read_state` —
+        // content the model already received inside the system prompt's memory
+        // block, so re-sending it is pure waste. Two deltas from the branch
+        // below, both deliberate:
+        //   * it does NOT consult `from_read` — a seeded entry has
+        //     `from_read: false` by construction, and the oracle's gate never
+        //     mentions `offset`/`rangeMatch` here;
+        //   * it gates on the DEFAULTED `offset` (`t===1`), not the raw
+        //     `input_offset`, so an explicit `offset: 1` still dedups — whereas
+        //     the non-seeded `range_match` below would refuse it.
         if let Some(entry) = tool_api::read_file_state::get(&self.ctx.read_file_state, &canon) {
             // #13: `tengu_file_read_reread` fires whenever the file ALREADY has a
-            // read-state entry (the `if(f)` in claude-code), BEFORE the dedup
-            // short-circuit. `priorOp` distinguishes the prior origin — the
-            // binary tests `f.offset===void 0` ("edit_write"); LingXi's
-            // `from_read` flag is the faithful Read-vs-Edit/Write discriminator
+            // read-state entry (the `if(m)` in claude-code), BEFORE the dedup
+            // short-circuit. `priorOp` is a THREE-way (@235740900:
+            // `m.seededFromContext?"seeded":m.offset===void 0?"edit_write":"read"`)
+            // with `seeded` tested FIRST; LingXi's `from_read` flag is the
+            // faithful Read-vs-Edit/Write discriminator for the other two arms
             // (a full Read also has `offset==None`, so `offset` alone is wrong).
-            self.emit_file_read_reread(if entry.from_read {
+            self.emit_file_read_reread(if entry.seeded_from_context {
+                "seeded"
+            } else if entry.from_read {
                 "read"
             } else {
                 "edit_write"
             })
             .await;
+            if entry.seeded_from_context
+                && !entry.is_partial_view
+                && offset == 1
+                && input_limit.is_none()
+                && mtime_ms == entry.mtime_ms
+            {
+                self.emit_file_read_dedup(&canon, Some("seeded")).await;
+                self.emit_completed(&invocation_id, 0, started.elapsed().as_millis() as u64)
+                    .await;
+                return Ok(ToolCallResult {
+                    // binary `{type:"file_unchanged", file:{filePath:f},
+                    // source:"seeded"}` (@235741583) — `f` is `fullFilePath`,
+                    // the canonicalized path on the Rust side.
+                    data: json!({
+                        "type": "file_unchanged",
+                        "file": { "filePath": canon.display().to_string() },
+                        "source": "seeded",
+                    }),
+                    // Renderer @235742950:
+                    // `content = e.source==="seeded" ? vou(e.file.filePath) : Eou()`.
+                    // The stub names the LEXICAL path, not `canon`. The oracle's
+                    // `f` here is `Li(e)` (@226620214), which is pure
+                    // `path.normalize`/`path.resolve` — it does NOT resolve
+                    // symlinks. LingXi's `canonicalize_and_validate` does, for
+                    // sandbox containment, so under a symlinked cwd `canon`
+                    // would read `/private/var/...` while the memory block that
+                    // this stub points at printed `/var/...`. Since the whole
+                    // point of the stub is "see the block above", it has to name
+                    // the path the block used.
+                    model_content: Some(format_file_unchanged_seeded(&path)),
+                    new_messages: vec![],
+                    context_modifier: None,
+                    is_error: false,
+                    mcp_meta: None,
+                });
+            }
             let is_full_view = entry.offset.is_none() && entry.limit.is_none();
             let range_match = entry.offset == input_offset && entry.limit == input_limit;
             if entry.from_read && is_full_view && range_match && mtime_ms == entry.mtime_ms {
@@ -1843,7 +1927,7 @@ impl Tool for FileReadTool {
                 // stub. Metadata: `ext` only when present (the analytics ext of
                 // the resolved path). TS uses `fullFilePath` (`expandPath`); the
                 // Rust analog is the canonicalized path.
-                self.emit_file_read_dedup(&canon).await;
+                self.emit_file_read_dedup(&canon, None).await;
                 // Behaves like the TS early return: the model sees the stub via
                 // `model_content`; the TUI payload `content` mirrors it (there
                 // is no fresh file body to render). `total_lines`/`line_range`
@@ -1853,10 +1937,9 @@ impl Tool for FileReadTool {
                 return Ok(ToolCallResult {
                     // binary `{type:"file_unchanged", file:{filePath}}` (@235741168);
                     // the stub rides on `model_content`, not inside `data`. The
-                    // oracle's third field `source:"seeded"` is only set by the
-                    // seeded branch, which LingXi does not have (no memory files
-                    // are seeded into `read_file_state`), so it is omitted here —
-                    // matching the oracle's non-seeded return exactly.
+                    // oracle's third field `source:"seeded"` is set ONLY by the
+                    // seeded branch above, so it is omitted here — matching the
+                    // oracle's non-seeded return exactly.
                     data: json!({
                         "type": "file_unchanged",
                         "file": { "filePath": canon.display().to_string() },
@@ -1969,6 +2052,8 @@ impl Tool for FileReadTool {
                     offset: input_offset,
                     limit: input_limit,
                     from_read: true,
+                    seeded_from_context: false,
+                    is_partial_view: false,
                 },
             );
             self.emit_session_file_read(
@@ -2135,6 +2220,8 @@ impl Tool for FileReadTool {
                     offset: input_offset,
                     limit: input_limit,
                     from_read: true,
+                    seeded_from_context: false,
+                    is_partial_view: false,
                 },
             );
 
@@ -2251,6 +2338,20 @@ impl Tool for FileReadTool {
                 // (`FileReadTool.ts:550` `offset !== undefined`) only short-
                 // circuits against Read-sourced entries.
                 from_read: true,
+                // A Read never seeds; only the orchestrator's
+                // `seed_memory_read_state` does.
+                seeded_from_context: false,
+                // KNOWN RESIDUAL, named rather than silently claimed: the
+                // oracle sets `isPartialView: true` when the read was
+                // token-cap-truncated above (`partial_note.is_some()`). The
+                // field now EXISTS and is honoured by `read_covers_full_file` /
+                // both dedup gates, but wiring it at THIS site is a separate
+                // follow-up. Behaviour is unchanged from before this port and
+                // still correct in outcome: a truncated read stores a truncated
+                // slice, so the staleness content-equality fallback already
+                // fails, and the dedup `range_match` still compares the same
+                // offset/limit pair.
+                is_partial_view: false,
             },
         );
 
@@ -3562,6 +3663,8 @@ mod tests {
                 offset: None,
                 limit: None,
                 from_read: false,
+                seeded_from_context: false,
+                is_partial_view: false,
             },
         );
         let tool = FileReadTool::new(ctx);
@@ -3904,6 +4007,266 @@ mod tests {
         ));
         // ext "txt" present.
         assert!(matches!(md.get("ext"), Some(AnalyticsValue::String(s)) if s == "txt"));
+    }
+
+    // ─────────────────── SEEDED Read dedup (source:"seeded") ────────────────
+    //
+    // Oracle @235741459:
+    //   if(_&&_.seededFromContext&&!_.isPartialView&&t===1&&r===void 0)
+    //     if(await b0e(f)===_.timestamp){
+    //       let b=vq(f);
+    //       return M("tengu_file_read_dedup",{source:Te("seeded"),...b!==void 0&&{ext:b}}),
+    //              {data:{type:"file_unchanged",file:{filePath:f},source:"seeded"}}}
+    //
+    // Note `t===1` is the DEFAULTED offset (`call({file_path:e,offset:t=1,…})`
+    // @235740900), so an explicit `offset:1` still dedups — unlike the
+    // non-seeded branch, whose `rangeMatch` compares the raw `offset`.
+
+    /// Seed `path` into the tool's read-state exactly as
+    /// `ConversationOrchestrator::seed_memory_read_state` does.
+    fn seed_entry(
+        ctx: &BuiltinToolContext,
+        path: &std::path::Path,
+        content: &str,
+        is_partial_view: bool,
+    ) {
+        let mtime_ms = std::fs::metadata(path)
+            .and_then(|m| m.modified())
+            .map(tool_api::read_file_state::mtime_ms_floor)
+            .unwrap();
+        tool_api::read_file_state::set_with_model_context(
+            &ctx.read_file_state,
+            path.to_path_buf(),
+            tool_api::read_file_state::ReadFileEntry {
+                content: content.to_string(),
+                mtime_ms,
+                offset: None,
+                limit: None,
+                from_read: false,
+                seeded_from_context: true,
+                is_partial_view,
+            },
+            true,
+        );
+    }
+
+    #[tokio::test]
+    async fn seeded_full_read_returns_the_seeded_stub() {
+        // T1: seeded + not partial + no offset/limit + unchanged mtime.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("LINGXI.md");
+        std::fs::write(&target, "# rules\nbe good\n").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let canon = std::fs::canonicalize(&target).unwrap();
+        seed_entry(&ctx, &canon, "# rules\nbe good\n", false);
+        let tool = FileReadTool::new(ctx);
+
+        let r = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.data["type"], "file_unchanged");
+        assert_eq!(r.data["source"], "seeded");
+        // The stub names the LEXICAL path (`target`), not `canon`. The oracle's
+        // `f` is `Li(e)` (@226620214) — `path.normalize`/`resolve`, no symlink
+        // resolution — and the stub has to name the same path the memory block
+        // above it printed. This expectation previously used `canon`, which only
+        // agreed because the fixture happened to sit under a resolved path.
+        assert_eq!(
+            r.model_content.as_deref(),
+            Some(
+                format!(
+                    "<system-reminder>This file is already in your context (see \"Contents of {}\" above) and has not changed on disk. Use that content instead of re-reading.</system-reminder>",
+                    target.display()
+                )
+                .as_str()
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn seeded_dedup_fires_on_explicit_offset_one() {
+        // T2: the DEFAULTED-offset gate. `offset: 1` is what the oracle's
+        // `t=1` default produces, so an explicit `offset:1` must still dedup —
+        // even though the non-seeded branch's `rangeMatch` (which compares the
+        // raw, un-defaulted `input_offset`) would refuse it.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("LINGXI.md");
+        std::fs::write(&target, "# rules\n").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let canon = std::fs::canonicalize(&target).unwrap();
+        seed_entry(&ctx, &canon, "# rules\n", false);
+        let tool = FileReadTool::new(ctx);
+
+        let r = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap(), "offset": 1 }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.data["type"], "file_unchanged");
+        assert_eq!(r.data["source"], "seeded");
+    }
+
+    #[tokio::test]
+    async fn seeded_dedup_refuses_ranged_reads() {
+        // T3: `t===1 && r===void 0` — any other offset, or ANY limit, skips
+        // the seeded branch and returns the full/ranged content.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("LINGXI.md");
+        std::fs::write(&target, "a\nb\nc\n").unwrap();
+        let canon = std::fs::canonicalize(&target).unwrap();
+
+        for input in [
+            json!({ "file_path": target.to_str().unwrap(), "offset": 2 }),
+            json!({ "file_path": target.to_str().unwrap(), "limit": 2 }),
+        ] {
+            let (ctx, _sink) = make_ctx(&tmp);
+            seed_entry(&ctx, &canon, "a\nb\nc\n", false);
+            let tool = FileReadTool::new(ctx);
+            let r = tool.call(input.clone(), fresh_ctx(), fresh_tx()).await.unwrap();
+            assert_ne!(
+                r.data["type"], "file_unchanged",
+                "ranged read must not dedup: {input}"
+            );
+            assert!(r.data["file"]["content"].is_string(), "{input}");
+        }
+    }
+
+    #[tokio::test]
+    async fn seeded_dedup_refuses_a_partial_view() {
+        // T4: `!_.isPartialView` — a memory file whose recorded content differs
+        // from disk (frontmatter/HTML comments stripped) must NOT dedup; the
+        // model never saw the on-disk bytes.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("cond.md");
+        std::fs::write(&target, "---\npaths: src/**\n---\nbody\n").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let canon = std::fs::canonicalize(&target).unwrap();
+        seed_entry(&ctx, &canon, "---\npaths: src/**\n---\nbody\n", true);
+        let tool = FileReadTool::new(ctx);
+
+        let r = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(r.data["type"], "file_unchanged");
+        assert!(r.data["file"]["content"].is_string());
+    }
+
+    #[tokio::test]
+    async fn seeded_dedup_refuses_when_mtime_changed() {
+        // T5: `await b0e(f)===_.timestamp`.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("LINGXI.md");
+        std::fs::write(&target, "v1\n").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let canon = std::fs::canonicalize(&target).unwrap();
+        seed_entry(&ctx, &canon, "v1\n", false);
+        // Rewrite with a clearly-advanced mtime.
+        std::fs::write(&target, "v2\n").unwrap();
+        filetime::set_file_mtime(
+            &target,
+            filetime::FileTime::from_unix_time(2_000_000_000, 0),
+        )
+        .unwrap();
+        let tool = FileReadTool::new(ctx);
+
+        let r = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(r.data["type"], "file_unchanged");
+        assert_eq!(r.data["file"]["content"], "v2\n");
+    }
+
+    #[tokio::test]
+    async fn seeded_dedup_telemetry_carries_source_and_ext_and_prior_op() {
+        // T6: `{source:Te("seeded"), ...b!==void 0&&{ext:b}}` — BOTH keys; and
+        // the sibling `tengu_file_read_reread` picks `priorOp:"seeded"`
+        // (@235740900: `m.seededFromContext?"seeded":…`).
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("LINGXI.md");
+        std::fs::write(&target, "# rules\n").unwrap();
+        let (ctx, sink) = make_ctx(&tmp);
+        ctx.bus.attach_sink(sink.clone()).await;
+        let canon = std::fs::canonicalize(&target).unwrap();
+        seed_entry(&ctx, &canon, "# rules\n", false);
+        let tool = FileReadTool::new(ctx);
+
+        tool.call(
+            json!({ "file_path": target.to_str().unwrap() }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+
+        let events = sink.events().await;
+        let md = &find_event(&events, "tengu_file_read_dedup")
+            .expect("seeded dedup must fire tengu_file_read_dedup")
+            .metadata;
+        assert!(matches!(md.get("source"), Some(AnalyticsValue::String(s)) if s == "seeded"));
+        assert!(matches!(md.get("ext"), Some(AnalyticsValue::String(s)) if s == "md"));
+        let rr = &find_event(&events, "tengu_file_read_reread")
+            .expect("reread fires whenever an entry already exists")
+            .metadata;
+        assert!(matches!(rr.get("priorOp"), Some(AnalyticsValue::String(s)) if s == "seeded"));
+    }
+
+    #[tokio::test]
+    async fn non_seeded_dedup_still_omits_source() {
+        // T7 (regression): the ordinary Read→Read dedup keeps the SHORT form
+        // and emits NO `source` key (the oracle's non-seeded return is
+        // `{data:{type:"file_unchanged",file:{filePath:e}}}` — no third field).
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("plain.rs");
+        std::fs::write(&target, "alpha\n").unwrap();
+        let (ctx, sink) = make_ctx(&tmp);
+        ctx.bus.attach_sink(sink.clone()).await;
+        let tool = FileReadTool::new(ctx);
+        tool.call(
+            json!({ "file_path": target.to_str().unwrap() }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+        sink.clear().await;
+        let second = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.data["type"], "file_unchanged");
+        assert!(second.data.get("source").is_none());
+        assert_eq!(second.model_content.as_deref(), Some(FILE_UNCHANGED_SHORT));
+        let events = sink.events().await;
+        let md = &find_event(&events, "tengu_file_read_dedup")
+            .expect("non-seeded dedup still fires")
+            .metadata;
+        assert!(md.get("source").is_none(), "non-seeded dedup has no source");
+        let rr = &find_event(&events, "tengu_file_read_reread")
+            .unwrap()
+            .metadata;
+        assert!(matches!(rr.get("priorOp"), Some(AnalyticsValue::String(s)) if s == "read"));
     }
 
     #[tokio::test]

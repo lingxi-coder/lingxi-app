@@ -171,6 +171,13 @@ impl MemoryHierarchyProvider for RealMemoryHierarchyProvider {
                     // Carry the `paths:` globs through: `None` = unconditional
                     // (eager); `Some(_)` = conditional (lazy activation only).
                     globs: entry.globs,
+                    // Disk-fidelity pair (claude-code `rawContent` /
+                    // `contentDiffersFromDisk`). NOTE these ride the UNtrimmed
+                    // loader values on purpose: `body` above is trimmed for the
+                    // prompt block, but the read-state seed must record the
+                    // bytes on disk.
+                    raw_content: entry.raw_content,
+                    content_differs_from_disk: entry.content_differs_from_disk,
                 });
             }
         }
@@ -289,6 +296,8 @@ mod exclude_filter_tests {
             is_local_override: matches!(tier, LingxiMdTier::Local),
             tier,
             globs: None,
+            raw_content: "x".into(),
+            content_differs_from_disk: false,
         }
     }
 
@@ -439,6 +448,50 @@ fn tier_description(tier: memory::lingxi_md::LingxiMdTier) -> &'static str {
     }
 }
 
+/// Whether `f`'s content is actually RENDERED into the model's context by
+/// [`format`] — i.e. the model has already seen this file's body.
+///
+/// This is LingXi's analog of claude-code `MLu` (2.1.220 @230809370):
+///
+/// ```text
+/// function MLu(e){
+///   if(e.type==="AutoMem"&&ARe())return!1;
+///   if((e.type==="Project"||e.type==="Local")&&Ke("tengu_paper_halyard",!1))return!1;
+///   if(!e.content)return!1;
+///   return!0}
+/// ```
+///
+/// which the seeding loop `xCt` (@245883373) uses as `seededFromContext: jn`.
+///
+/// # Deliberate structural divergence
+/// The oracle HAND-WRITES `MLu` as a duplicate of the renderer's own drops
+/// (`dfo`/`pfo`, @230812024) — two copies that can drift. LingXi instead makes
+/// [`format`] call THIS function, so the predicate and the renderer are one
+/// source of truth (pinned by
+/// `orchestrator/tests/prompt_memory_block_test.rs::rendered_into_context_matches_format_output`).
+///
+/// Of the oracle's three drops, only the last has a LingXi analog:
+/// - `ARe()` (memory-stores mode / `CLAUDE_MEMORY_STORES`) — Divergence(reason):
+///   unported, there is no `AutoMem` tier in LingXi at all.
+/// - `tengu_paper_halyard` — Divergence(reason): a GrowthBook gate; LingXi has
+///   no GrowthBook.
+/// - `!e.content` → `f.body.trim().is_empty()`.
+///
+/// The surviving LingXi-only drop is the CONDITIONAL-rule filter
+/// (`globs.is_some()`).
+///
+/// CORRECTED: an earlier draft of this doc added "which lives in the renderer in
+/// the oracle too". It does not. `pfo` (@230812024) drops on exactly three
+/// things — a caller-supplied type filter, the `tengu_paper_halyard`
+/// Project/Local gate, and empty content — and carries no conditional-rule arm.
+/// `conditionalRule:!0` appears in `lfo`, the LAZY conditional loader, not in
+/// the eager path. So this filter is a LingXi structural choice, and citing the
+/// oracle for it would have made a divergence look like parity.
+#[must_use]
+pub fn is_rendered_into_context(f: &MemoryFile) -> bool {
+    f.globs.is_none() && !f.body.trim().is_empty()
+}
+
 /// Format the memory section from a slice of loaded files, 1:1 with claude-code
 /// `getLingxiMds` (claudemd.ts:1153-1195).
 ///
@@ -471,8 +524,10 @@ fn tier_description(tier: memory::lingxi_md::LingxiMdTier) -> &'static str {
 pub fn format(files: &[MemoryFile]) -> String {
     let blocks: Vec<String> = files
         .iter()
-        // §F: eager block = unconditional files only.
-        .filter(|f| f.globs.is_none())
+        // §F: eager block = unconditional files only. Derived from
+        // [`is_rendered_into_context`] so the seeding predicate cannot drift
+        // from what the model actually receives.
+        .filter(|f| is_rendered_into_context(f))
         .map(|f| {
             // Binary `_9t` (getLingxiMds): `Contents of ${o.path}${s}:\n\n${i}`
             // — DOUBLE `\n` between the header and the trimmed body (od -c

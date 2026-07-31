@@ -1271,6 +1271,8 @@ mod read_file_state_tests {
                 offset: None,
                 limit: None,
                 from_read: true,
+                seeded_from_context: false,
+                is_partial_view: false,
             },
         );
     }
@@ -1314,6 +1316,8 @@ mod read_file_state_tests {
                 offset: Some(2),
                 limit: Some(1),
                 from_read: true,
+                seeded_from_context: false,
+                is_partial_view: false,
             },
         );
         let entry = tool_api::read_file_state::get(
@@ -1429,6 +1433,8 @@ mod read_file_state_tests {
                 offset: None,
                 limit: None,
                 from_read: true,
+                seeded_from_context: false,
+                is_partial_view: false,
             },
         );
         tool_api::read_file_state::set(
@@ -1440,6 +1446,8 @@ mod read_file_state_tests {
                 offset: None,
                 limit: None,
                 from_read: true,
+                seeded_from_context: false,
+                is_partial_view: false,
             },
         );
 
@@ -1515,6 +1523,8 @@ mod read_file_state_tests {
                 offset: None,
                 limit: None,
                 from_read: true,
+                seeded_from_context: false,
+                is_partial_view: false,
             },
         );
         assert!(
@@ -1585,6 +1595,8 @@ mod read_file_state_tests {
                 offset: None,
                 limit: None,
                 from_read: true,
+                seeded_from_context: false,
+                is_partial_view: false,
             },
         );
 

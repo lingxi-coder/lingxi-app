@@ -12838,6 +12838,8 @@ mod tests {
             is_local_override: false,
             tier: orchestrator::prompt::LingxiMdTier::Project,
             globs: None,
+            raw_content: memory_body.to_string(),
+            content_differs_from_disk: false,
         };
         cfg.memory_provider = Some(Arc::new(
             orchestrator::test_support::StaticMemoryProvider::with_files(vec![memory_file]),

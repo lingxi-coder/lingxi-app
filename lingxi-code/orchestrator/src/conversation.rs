@@ -1955,10 +1955,162 @@ impl ConversationOrchestrator {
                 // model context. `from_read = false` preserves that invariant:
                 // the next Read must not deduplicate against this seed.
                 from_read: false,
+                seeded_from_context: false,
+                is_partial_view: false,
             },
             false,
         );
         true
+    }
+
+    /// Seed the loaded memory files (LINGXI.md + `.lingxi/rules/**`) into the
+    /// shared read-state registry — the port of claude-code's startup loop
+    /// `xCt` (2.1.220 @245883373):
+    ///
+    /// ```text
+    /// for(let Fr of yt){
+    ///   if(tHt(Fr.path))continue;
+    ///   let jn=MLu(Fr),Ao;
+    ///   try{Ao=jn?FQ(Fr.path):Date.now()}catch{Ao=Date.now()}
+    ///   vM.current.set(Fr.path,{
+    ///     content: Fr.contentDiffersFromDisk?Fr.rawContent??Fr.content:X9(Fr.content),
+    ///     timestamp: Ao, offset:void 0, limit:void 0,
+    ///     isPartialView: Fr.contentDiffersFromDisk,
+    ///     seededFromContext: jn,
+    ///     ...!jn&&{contentNotInModelContext:!0},
+    ///     keepContent:!0}), …}
+    /// ```
+    ///
+    /// This is what makes the Read tool's seeded dedup branch
+    /// (`tool_file::read`, @235741459) reachable: the model already received
+    /// these files' bodies in the system prompt's memory block, so re-`Read`ing
+    /// one returns `FILE_UNCHANGED_SEEDED_PREFIX` instead of a second copy.
+    ///
+    /// Per-file decisions, each matching the oracle:
+    /// - **Skip when already present.** `!readFileState.has(path)` (the site-2
+    ///   guard @237715046). Uses the NON-promoting
+    ///   [`tool_api::read_file_state::ReadFileStateLru::contains`] so seeding
+    ///   never reshuffles LRU order, and so a file the model genuinely `Read`
+    ///   is never overwritten by a seed. This is also what makes the
+    ///   `reason = Compact` re-entry into
+    ///   [`Self::fire_instructions_loaded_with_reason`] idempotent.
+    /// - **`seeded_from_context = MLu(f)`** =
+    ///   [`crate::prompt::memory_block::is_rendered_into_context`], derived from
+    ///   the renderer so the two cannot drift. A `paths:`-gated conditional rule
+    ///   is NOT rendered, so it seeds with `false` — its content is NOT in
+    ///   context and must never dedup.
+    /// - **`mtime_ms`** = the on-disk mtime for a rendered file (`FQ(path)`),
+    ///   `Date.now()` otherwise. ANY stat error falls back to `now` — the
+    ///   oracle wraps the whole thing in `try{…}catch{Ao=Date.now()}`, so this
+    ///   never propagates and never panics.
+    /// - **`content`**. LingXi-local adaptation, deliberate: the oracle
+    ///   normalizes the non-differing branch with `X9` (BOM strip + CRLF→LF),
+    ///   but LingXi's `Read` stores `decode_utf8_strict`
+    ///   (`tools/file/src/shared.rs` — BOM strip ONLY, no CRLF collapse) and
+    ///   `edit.rs` feeds that same raw-decoded form to the staleness
+    ///   comparator. Collapsing CRLF here would make every CRLF memory file
+    ///   fail `check_read_before_write`'s content-equality fallback forever.
+    ///   The oracle's asymmetry IS preserved: normalize only on the
+    ///   `!differs` branch; store `raw_content` verbatim on the `differs`
+    ///   branch.
+    /// - **`in_model_context`** carries the `...!jn && {contentNotInModelContext:!0}`
+    ///   spread: LingXi's existing LRU-slot flag is that field's inverted
+    ///   analog, already consumed by `model_context_keys()` /
+    ///   `drain_model_context()`, so no entry-level twin is introduced.
+    ///
+    /// # Divergence (reason)
+    /// The oracle also skips sentinel paths via `tHt` (`"<policyHelper>"`
+    /// @226886661 / `"<managed-settings>"` @230811638). LingXi's loader emits
+    /// only real walked filesystem paths — verified, no analog exists — so the
+    /// skip is omitted rather than approximated with a `starts_with('<')`
+    /// heuristic, which would be WIDER than the oracle.
+    ///
+    /// The oracle's AutoMem eviction pass (@245883373-655: delete seeded
+    /// entries once memory-stores mode latches on) likewise has no LingXi
+    /// analog — `ARe()` / `CLAUDE_MEMORY_STORES` is unported and there is no
+    /// `AutoMem` tier. No latch is invented here.
+    async fn seed_memory_read_state(&self, files: &[crate::prompt::MemoryFile]) {
+        for f in files {
+            // The registry is keyed by CANONICAL paths: `FileReadTool` looks up
+            // `canonicalize_and_validate(..)`'s output. The memory hierarchy's
+            // `f.path` is built from the orchestrator's cwd verbatim, symlinks
+            // and all — on macOS a `/var/...` cwd resolves to `/private/var/...`
+            // — so seeding under the raw path silently never matches and the
+            // dedup simply never fires. Canonicalize once here and use it for
+            // BOTH the `has` guard and the key, or the two halves disagree.
+            //
+            // Falls back to the raw path if canonicalization fails; the file was
+            // just read by the loader, so that is close to unreachable, and the
+            // fallback is no worse than not seeding at all.
+            let key = tokio::fs::canonicalize(&f.path)
+                .await
+                .unwrap_or_else(|_| f.path.clone());
+            // `!readFileState.has(path)` — never clobber a real Read, never
+            // MRU-promote (see `contains`' doc).
+            if self
+                .read_state_map
+                .lock()
+                .is_ok_and(|guard| guard.contains(&key))
+            {
+                continue;
+            }
+            let in_context = crate::prompt::memory_block::is_rendered_into_context(f);
+            let now_ms = i64::try_from(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_millis()),
+            )
+            .unwrap_or(i64::MAX);
+            // `try{Ao = jn ? FQ(Fr.path) : Date.now()}catch{Ao = Date.now()}`.
+            let mtime_ms = if in_context {
+                match tokio::fs::metadata(&f.path).await.and_then(|m| m.modified()) {
+                    Ok(t) => tool_api::read_file_state::mtime_ms_floor(t),
+                    Err(_) => now_ms,
+                }
+            } else {
+                now_ms
+            };
+            // `contentDiffersFromDisk ? (rawContent ?? content) : X9(content)`,
+            // with LingXi's BOM-strip-only normalization (see the doc above).
+            let content = if f.content_differs_from_disk {
+                f.raw_content.clone()
+            } else {
+                f.raw_content
+                    .strip_prefix('\u{feff}')
+                    .unwrap_or(&f.raw_content)
+                    .to_string()
+            };
+            tool_api::read_file_state::set_with_model_context(
+                &self.read_state_map,
+                key,
+                tool_api::read_file_state::ReadFileEntry {
+                    content,
+                    mtime_ms,
+                    offset: None,
+                    limit: None,
+                    // A seed is not a Read; the non-seeded dedup branch must
+                    // never fire off it.
+                    from_read: false,
+                    seeded_from_context: in_context,
+                    is_partial_view: f.content_differs_from_disk,
+                },
+                // ALWAYS false — deliberately NOT `in_context`.
+                //
+                // Two different axes that an earlier draft conflated:
+                //   * `seeded_from_context` (above) is the oracle's `jn`/`MLu`
+                //     and gates ONLY the seeded dedup stub.
+                //   * this flag is LingXi's post-compact RESTORE set
+                //     (`drain_model_context` -> `restore_post_compact_attachments`)
+                //     and the "files touched this turn" input to
+                //     `conditional_rules_reminder_message`.
+                //
+                // A memory file is re-injected by the SYSTEM PROMPT on every
+                // turn, so enrolling it here would re-attach LINGXI.md after
+                // every compaction and report it as touched. It belongs with the
+                // host-seeded snapshots the drain doc already excludes.
+                false,
+            );
+        }
     }
 
     /// Seed the JSONL parent-uuid chain pointer so the FIRST append after a
@@ -7202,6 +7354,14 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         if memory_files.is_empty() {
             return;
         }
+        // Seed the read-state registry BEFORE (and OUTSIDE) the hook loop.
+        // Outside is load-bearing: the loop's `if file.globs.is_some() {
+        // continue; }` skips conditional rules for the InstructionsLoaded fire,
+        // but the oracle's `xCt` seeds them too — with `seededFromContext:
+        // false` — so folding this into the loop would silently drop them.
+        // Re-entry with `load_reason = Compact` is safe: `seed_memory_read_state`
+        // skips every path already present.
+        self.seed_memory_read_state(&memory_files).await;
         for file in memory_files {
             // §F: `load()` now also returns conditional (`paths:`-gated) rules.
             // Those are NOT eagerly loaded, so they must not fire a
@@ -13503,6 +13663,8 @@ mod turn_recovery_tests {
                 offset: None,
                 limit: None,
                 from_read: true,
+                seeded_from_context: false,
+                is_partial_view: false,
             },
         );
         orch.spawn_startup_responses_websocket_prewarm();
@@ -14293,6 +14455,8 @@ mod additional_context_tests {
             is_local_override: false,
             tier: memory::lingxi_md::LingxiMdTier::Project,
             globs: None,
+            raw_content: "MD BODY".into(),
+            content_differs_from_disk: false,
         }]));
         let orch = orch_with(mem, Some("u@example.com"));
         let msg = orch.additional_context_message().await.expect("present");
@@ -16205,6 +16369,8 @@ mod conditional_rules_reminder_tests {
             is_local_override: false,
             tier: LingxiMdTier::Project,
             globs: Some(globs.iter().map(|s| (*s).to_string()).collect()),
+            raw_content: format!("BODY OF {name}"),
+            content_differs_from_disk: false,
         }
     }
 
@@ -16236,6 +16402,8 @@ mod conditional_rules_reminder_tests {
                 offset: None,
                 limit: None,
                 from_read: true,
+                seeded_from_context: false,
+                is_partial_view: false,
             },
         );
     }
@@ -16250,6 +16418,8 @@ mod conditional_rules_reminder_tests {
                 offset: None,
                 limit: None,
                 from_read: false,
+                seeded_from_context: false,
+                is_partial_view: false,
             },
             false,
         );
@@ -16339,6 +16509,8 @@ mod conditional_rules_reminder_tests {
             is_local_override: false,
             tier: LingxiMdTier::Project,
             globs: None,
+            raw_content: "always".into(),
+            content_differs_from_disk: false,
         };
         let orch = orch_with_rules(cwd.clone(), vec![unconditional]);
         push_touched(&orch, &cwd.join("src/x.rs"));
@@ -16551,6 +16723,8 @@ mod relevant_memory_reminder_tests {
                 offset: None,
                 limit: None,
                 from_read: true,
+                seeded_from_context: false,
+                is_partial_view: false,
             },
         );
     }
@@ -16565,6 +16739,8 @@ mod relevant_memory_reminder_tests {
                 offset: None,
                 limit: None,
                 from_read: false,
+                seeded_from_context: false,
+                is_partial_view: false,
             },
             false,
         );
@@ -19416,6 +19592,8 @@ mod post_compact_file_restore_tests {
             offset: None,
             limit: None,
             from_read: true,
+            seeded_from_context: false,
+            is_partial_view: false,
         }
     }
 

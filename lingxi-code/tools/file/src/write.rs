@@ -423,6 +423,8 @@ impl Tool for FileWriteTool {
                 // A post-write entry is NOT a Read — the Read-dedup gate must
                 // skip it (TS stores `offset: undefined` here; we flag it).
                 from_read: false,
+                seeded_from_context: false,
+                is_partial_view: false,
             },
         );
 
@@ -557,6 +559,8 @@ mod tests {
                 limit: None,
                 // Simulates a prior full `Read`.
                 from_read: true,
+                seeded_from_context: false,
+                is_partial_view: false,
             },
         );
     }

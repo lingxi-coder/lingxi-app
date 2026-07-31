@@ -4537,14 +4537,31 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         };
         let batch_agg = orch.hooks.execute(batch_event, batch_ctx).await;
         if let Some(reason) = post_tool_batch_stop_reason(&batch_agg) {
+            // ONE identity for both records, so the persisted attachment and the
+            // model-facing prose describe the same event and cannot drift.
+            let identity = post_tool_batch_identity();
+            let batch_id = protocol::ToolUseId::from(identity.tool_use_id.clone());
             // The oracle yields the record and returns `{reason:"hook_stopped"}`
             // in one expression, so the attachment is persisted BEFORE the flag
             // propagates — a stop must never reach the transcript unexplained.
             orch.persist_hook_attachment_to_jsonl(hooks::stopped_continuation_attachment(
-                &post_tool_batch_identity(),
-                &reason,
+                &identity, &reason,
             ))
             .await;
+            // The oracle derives this prose from the attachment at
+            // `normalizeAttachmentForAPI` time (@238107808). This port has no
+            // such layer — `Stop`, `PreToolUse` and `PostToolUse` each build it
+            // explicitly — so without this the model would never learn why the
+            // turn ended.
+            injected_messages.push((
+                ConversationMessage::user(
+                    MessageId::new(),
+                    format!(
+                        "<system-reminder>\nPostToolBatch hook stopped continuation: {reason}\n</system-reminder>"
+                    ),
+                ),
+                batch_id,
+            ));
             prevent_continuation = true;
         }
     }
@@ -5765,6 +5782,62 @@ mod hook_context_attachment_tests {
         assert!(
             prevent,
             "a PostToolBatch hook requesting preventContinuation must end the turn"
+        );
+    }
+
+    /// The MODEL must be told why the turn stopped.
+    ///
+    /// The oracle yields the attachment into the message stream and derives the
+    /// prose from it later, in `normalizeAttachmentForAPI` (@238107808):
+    /// `hook_stopped_continuation:(e)=>[zr({content:Ww(`${e.hookName} hook
+    /// stopped continuation: ${e.message}`),isMeta:!0})]`. This port has no such
+    /// normalize layer — every other site (`Stop`, `PreToolUse`, `PostToolUse`)
+    /// builds the `<system-reminder>` prose explicitly beside the attachment —
+    /// so the batch site must too, or the stop reaches the transcript but never
+    /// the model.
+    ///
+    /// Both records carry the SAME synthetic `hook-<uuid>` id, so the prose and
+    /// the attachment describe one event rather than drifting apart.
+    #[tokio::test]
+    async fn post_tool_batch_stop_is_explained_to_the_model() {
+        let orch = orch_with_batch_hook(HookResponse {
+            prevent_continuation: true,
+            reason: Some("BATCH-STOP".into()),
+            ..HookResponse::default()
+        });
+        let (_results, _prevent, injected, _mods) =
+            dispatch_tool_uses_tracked(&orch, &uses(), None)
+                .await
+                .expect("dispatch");
+        let stop_msg = injected
+            .iter()
+            .find(|(m, _)| m.text_content().contains("hook stopped continuation"))
+            .expect("the batch stop must be explained to the model");
+        assert_eq!(
+            stop_msg.0.text_content(),
+            "<system-reminder>\nPostToolBatch hook stopped continuation: BATCH-STOP\n</system-reminder>"
+        );
+        assert!(
+            stop_msg.1.as_str().starts_with("hook-"),
+            "prose and attachment must share the synthetic batch id, got {}",
+            stop_msg.1.as_str()
+        );
+    }
+
+    /// A quiet batch hook injects nothing — the guard must not add a message to
+    /// every turn.
+    #[tokio::test]
+    async fn a_quiet_post_tool_batch_hook_injects_no_message() {
+        let orch = orch_with_batch_hook(HookResponse::default());
+        let (_results, _prevent, injected, _mods) =
+            dispatch_tool_uses_tracked(&orch, &uses(), None)
+                .await
+                .expect("dispatch");
+        assert!(
+            !injected
+                .iter()
+                .any(|(m, _)| m.text_content().contains("hook stopped continuation")),
+            "no stop, no explanation"
         );
     }
 

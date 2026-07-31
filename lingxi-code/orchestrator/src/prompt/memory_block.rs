@@ -32,9 +32,15 @@ use std::sync::Arc;
 pub trait MemoryHierarchyProvider: Send + Sync {
     /// Load all LINGXI.md files relevant to `cwd`. May be empty.
     ///
-    /// Errors are NOT propagated — unreadable files are skipped
-    /// silently (M3-02 already emits telemetry for oversized files
-    /// via `loader::emit_file_too_large`).
+    /// Errors are NOT propagated — unreadable files are skipped silently.
+    ///
+    /// CORRECTED: this used to credit `loader::emit_file_too_large`, which has
+    /// no production caller and fires an event absent from the binary. A file
+    /// skipped by the loader's 4 MiB / non-regular stat guard is logged and
+    /// reported by `loader::report_skipped_memory_file`; a file that fails to
+    /// read (ENOENT, perms, non-UTF-8) really is silent here, matching the
+    /// oracle, whose `read_eacces` / `read_failed` reports are a separate
+    /// unported family.
     async fn load(&self, cwd: &Path) -> Vec<MemoryFile>;
 }
 

@@ -33,13 +33,21 @@ pub use tier::MemoryTier;
 
 // ------ M3-02 wire-identifier constants ------
 
-/// Per-file cap (10 MB). Files larger than this are skipped with
-/// `tengu_memory_file_too_large`.
+/// Per-file cap (10 MB) for the **memdir** scanner.
 ///
-/// NB: this is the **memdir** scanner cap, NOT the LINGXI.md hierarchy loader,
-/// which reads every file whole (no size drop — parity with claude-code
-/// `safelyReadMemoryFileAsync`). See [`get_large_memory_files`] for the
-/// non-blocking 40k-char *warning* the LINGXI.md path surfaces instead.
+/// ⚠️ Both halves of the old note were wrong. It said files over this cap are
+/// "skipped with `tengu_memory_file_too_large`" — that event does not exist in
+/// the 2.1.220 binary (0 occurrences) and its emitter has no production caller;
+/// see [`lingxi_md::loader::TENGU_MEMORY_FILE_TOO_LARGE`]. And it said the
+/// LINGXI.md hierarchy loader "reads every file whole (no size drop — parity
+/// with claude-code `safelyReadMemoryFileAsync`)", citing leaked TS; the binary
+/// skips at [`lingxi_md::loader::MEMORY_FILE_BYTE_LIMIT`] (4 MiB), which is
+/// SMALLER than this constant.
+///
+/// This value is a LingXi memdir-scanner cap with no oracle counterpart, kept
+/// because memdir depends on it. See [`get_large_memory_files`] for the
+/// non-blocking 40k-char *warning* the LINGXI.md path surfaces on top of the
+/// 4 MiB skip.
 pub const MAX_MEMORY_FILE_SIZE: usize = 10 * 1024 * 1024;
 
 /// FLOOR of the per-file memory-size warning threshold — claude-code `gn_`

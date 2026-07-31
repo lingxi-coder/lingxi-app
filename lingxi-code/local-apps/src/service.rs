@@ -2715,6 +2715,182 @@ mod tests {
         assert!(reloaded.undelivered.is_empty());
     }
 
+    /// Sink that, on its first delivery, plants an extra continuation
+    /// straight onto DISK — modelling a racing commit whose interactions
+    /// write landed while the delivery was in flight (and whose memory copy
+    /// was rolled back). Wraps a [`RecordingContinuationSink`] for the
+    /// assertion surface.
+    struct PlantingSink {
+        inner: Arc<RecordingContinuationSink>,
+        root: std::path::PathBuf,
+        plant_for: std::sync::Mutex<Option<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ContinuationSink for PlantingSink {
+        async fn deliver(
+            &self,
+            app_id: &str,
+            continuation: &AppContinuation,
+        ) -> Result<(), AppError> {
+            self.inner.deliver(app_id, continuation).await?;
+            let target = self.plant_for.lock().expect("planting sink lock").take();
+            if let Some(planted_app) = target {
+                let mut disk = storage::load_interactions(&self.root, &planted_app)
+                    .expect("planting sink reads a valid store");
+                let seq = disk.next_seq;
+                disk.undelivered.push(AppContinuation {
+                    seq,
+                    app_id: planted_app.clone(),
+                    kind: AppContinuationKind::RevisionRequested,
+                    payload: serde_json::json!({ "prompt": "raced in mid-delivery" }),
+                    created_at_ms: 9,
+                });
+                disk.next_seq += 1;
+                storage::save_interactions(&self.root, &planted_app, &disk)
+                    .expect("planting sink writes a valid store");
+            }
+            Ok(())
+        }
+    }
+
+    /// Redelivery horn A regression (the review's finding 4, verified for
+    /// real): a continuation that lands on DISK while a delivery is IN
+    /// FLIGHT must survive the post-delivery bookkeeping — the old code
+    /// persisted a memory-derived view there, erasing the disk-only seq and
+    /// rewinding `nextSeq`; the merge-on-both-sides loop must deliver it in
+    /// the same drain instead.
+    #[tokio::test]
+    async fn in_flight_disk_continuation_survives_post_delivery_bookkeeping() {
+        let dir = tempfile::tempdir().unwrap();
+        let recording = Arc::new(RecordingContinuationSink::new());
+        let sink = Arc::new(PlantingSink {
+            inner: Arc::clone(&recording),
+            root: dir.path().to_path_buf(),
+            plant_for: std::sync::Mutex::new(None),
+        });
+        let observer = Arc::new(RecordingAppEventObserver::new());
+        let service = AppService::load(
+            dir.path(),
+            Arc::new(FixedClock::new(1_700_000_000_000)),
+            Arc::clone(&sink) as Arc<dyn ContinuationSink>,
+            observer as Arc<dyn AppEventObserver>,
+        )
+        .await
+        .unwrap();
+        recording.set_fail(true);
+        let record = service
+            .create_app("Race", AppTemplateKind::Dashboard, None)
+            .await
+            .unwrap();
+        service.open_designer(&record.id).await.unwrap();
+        service.cancel_design(&record.id).await.unwrap(); // seq 1 queued
+        recording.set_fail(false);
+
+        // Arm the plant: the NEXT deliver (seq 1) gets seq 2 written to disk
+        // mid-flight.
+        *sink.plant_for.lock().unwrap() = Some(record.id.clone());
+        assert_eq!(
+            service.redeliver_undelivered(&record.id).await.unwrap(),
+            2,
+            "the mid-flight disk continuation must be delivered in the same drain"
+        );
+        let seqs: Vec<u64> = recording.accepted().iter().map(|(_, c)| c.seq).collect();
+        assert_eq!(seqs, vec![1, 2], "both seqs delivered, in order");
+        let drained = service.interactions(&record.id).await.unwrap();
+        assert!(drained.undelivered.is_empty(), "nothing clobbered, nothing left");
+        assert_eq!(drained.last_delivered_seq, 2);
+        assert_eq!(
+            drained.next_seq, 3,
+            "the counter adopted the mid-flight mint — never rewound"
+        );
+    }
+
+    /// Redelivery horn B regression (the review's finding 4, verified for
+    /// real): when DISK proves memory's armed gate was consumed (pending
+    /// cleared + a seq memory never minted), the merge must resolve the
+    /// state FORWARD through the shared repair table instead of persisting
+    /// an armed-gate + consumption-evidence hybrid — and a second user
+    /// confirm must be refused rather than minting a duplicate
+    /// `design_confirmed`.
+    #[tokio::test]
+    async fn disk_proof_of_consumed_gate_resolves_forward_not_double_confirm() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = harness(dir.path()).await;
+        let record = h
+            .service
+            .create_app("Proof", AppTemplateKind::Dashboard, None)
+            .await
+            .unwrap();
+        let gate = h.service.open_designer(&record.id).await.unwrap();
+
+        // Residual window by hand: on DISK the confirm committed (gate
+        // cleared + design_confirmed minted) while MEMORY still holds the
+        // armed gate.
+        let mut on_disk = storage::load_interactions(dir.path(), &record.id).unwrap();
+        assert!(on_disk.pending.is_some(), "precondition: gate armed on disk too");
+        on_disk.pending = None;
+        on_disk.undelivered.push(AppContinuation {
+            seq: 1,
+            app_id: record.id.clone(),
+            kind: AppContinuationKind::DesignConfirmed,
+            payload: serde_json::json!({ "revision": 0 }),
+            created_at_ms: 9,
+        });
+        on_disk.next_seq = 2;
+        storage::save_interactions(dir.path(), &record.id, &on_disk).unwrap();
+
+        assert_eq!(
+            h.service.redeliver_undelivered(&record.id).await.unwrap(),
+            1,
+            "the proven confirm is delivered exactly once"
+        );
+        assert_eq!(
+            h.sink.accepted().iter().map(|(_, c)| c.kind).collect::<Vec<_>>(),
+            vec![AppContinuationKind::DesignConfirmed]
+        );
+        // The contradiction resolved FORWARD: gate gone, state follows the
+        // evidence, and the mirror was persisted with it.
+        assert!(h
+            .service
+            .pending_interaction(&record.id)
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            h.service.record(&record.id).await.unwrap().workflow_state,
+            AppWorkflowState::Generating
+        );
+        let mirror = std::fs::read_to_string(
+            dir.path()
+                .join("apps")
+                .join(&record.id)
+                .join("workspace/.lingxi/app.json"),
+        )
+        .unwrap();
+        assert!(mirror.contains("\"generating\""), "{mirror}");
+        // No hybrid on disk: the persisted store passes its own invariants
+        // and holds no armed gate alongside the evidence.
+        let persisted = storage::load_interactions(dir.path(), &record.id).unwrap();
+        assert!(persisted.pending.is_none());
+        assert!(persisted.undelivered.is_empty());
+        assert_eq!(persisted.last_delivered_seq, 1);
+        // A second confirm of the stale gate is REFUSED — no duplicate
+        // design_confirmed at a fresh seq.
+        let err = h
+            .service
+            .confirm_design(&record.id, &gate.interaction_id, 0)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), AppErrorCode::WorkflowStateInvalid);
+        let after = h.service.interactions(&record.id).await.unwrap();
+        assert_eq!(after.next_seq, 2, "no second continuation was minted");
+        assert!(after.undelivered.is_empty());
+        // The rolled-forward state is live: the generator's completion is
+        // accepted.
+        h.service.generation_complete(&record.id).await.unwrap();
+    }
+
     /// Finding 4: `last_error` is the one persisted string that TRUNCATES
     /// instead of rejecting — refusing a runtime failure report would lose
     /// the evidence entirely.

@@ -975,6 +975,17 @@ struct WireToolSchemaCache {
 /// Reminders are outgoing-only, so the delivered date is carried here and must
 /// survive compaction; otherwise a long-lived session would receive the same
 /// midnight reminder again after every compact. The whole struct is re-seeded
+/// One `tool_result` SDK frame held until the collection point releases it.
+#[derive(Debug, Clone)]
+pub(crate) struct PendingToolFrame {
+    pub(crate) tool: String,
+    /// The model-facing text dispatch buffered. Compared against the released
+    /// content to detect a substitution.
+    pub(crate) model_text: String,
+    pub(crate) result: serde_json::Value,
+    pub(crate) denial_kind: Option<String>,
+}
+
 /// only when the live `SessionId` changes (`/clear` mints a new one; in-place
 /// resume adopts the named one).
 #[derive(Debug, Default)]
@@ -1082,6 +1093,21 @@ pub struct ConversationOrchestrator {
     /// history rather than on the message. Entries are removed on use, so a
     /// denial stamps exactly one line.
     pub(crate) tool_denial_kinds: Mutex<std::collections::HashMap<String, String>>,
+    /// Buffered `tool_result` SDK frames, keyed by `tool_use_id`.
+    ///
+    /// `None` = emit as soon as the tool finishes (the batched driver, which
+    /// dispatches in received order anyway, so completion order IS received
+    /// order there). `Some` = the STREAMING driver is active: frames are held
+    /// here and released by the collection point.
+    ///
+    /// claude-code builds its SDK frames from the message stream, which the
+    /// streaming executor has already reordered into received order and in
+    /// which a cancelled tool's real outcome has already been replaced by the
+    /// synthetic. LingXi emits at dispatch time instead, which is completion
+    /// order, and emits the REAL result of a tool whose outcome is about to be
+    /// discarded — while a queued-then-cancelled tool emits nothing at all.
+    /// Buffering here and releasing at the collection point closes both.
+    pub(crate) tool_frames: Mutex<Option<std::collections::HashMap<String, PendingToolFrame>>>,
     /// `tool_use_id` → claude's message-level `toolUseResult` — the tool's RAW
     /// STRUCTURED result (`se.data`, 2.1.220 BIN off **235420375**) on success,
     /// or the plain string `` `Error: ${message}` `` on failure/denial
@@ -1770,6 +1796,7 @@ impl ConversationOrchestrator {
             jsonl_writer: None,
             last_jsonl_uuid: Mutex::new(None),
             tool_denial_kinds: Mutex::new(std::collections::HashMap::new()),
+            tool_frames: Mutex::new(None),
             tool_use_results: Mutex::new(std::collections::HashMap::new()),
             tool_use_mcp_meta: Mutex::new(std::collections::HashMap::new()),
             tool_source_assistant_uuids: Mutex::new(std::collections::HashMap::new()),
@@ -1940,6 +1967,97 @@ impl ConversationOrchestrator {
     /// resume-into-TUI seed alongside adopting the resumed history + id; without
     /// it the first appended message would be a chain orphan (recoverable, but
     /// this keeps the on-disk chain linear).
+    /// Emit a `tool_result` SDK frame, or buffer it when the streaming driver
+    /// has ordering active. Every dispatch-side emission goes through here.
+    pub(crate) async fn emit_tool_result_frame(
+        &self,
+        id: &protocol::ToolUseId,
+        tool: &str,
+        model_text: &str,
+        result: &serde_json::Value,
+        denial_kind: Option<&str>,
+    ) {
+        if let Some(buf) = self.tool_frames.lock().await.as_mut() {
+            buf.insert(
+                id.to_string(),
+                PendingToolFrame {
+                    tool: tool.to_string(),
+                    model_text: model_text.to_string(),
+                    result: result.clone(),
+                    denial_kind: denial_kind.map(str::to_string),
+                },
+            );
+            return;
+        }
+        match denial_kind {
+            Some(kind) => {
+                self.output
+                    .emit_tool_result_denied(id, tool, model_text, result, kind)
+                    .await;
+            }
+            None => self.output.emit_tool_result(id, tool, model_text, result).await,
+        }
+    }
+
+    /// Turn frame buffering on for the streaming driver, and off again.
+    pub(crate) async fn set_tool_frame_buffering(&self, on: bool) {
+        let mut slot = self.tool_frames.lock().await;
+        *slot = on.then(std::collections::HashMap::new);
+    }
+
+    /// Release one buffered frame, in the CALLER's order.
+    ///
+    /// `content` is the block's FINAL model-facing text, so a synthetic that
+    /// replaced a cancelled tool's real outcome wins over whatever the dispatch
+    /// buffered. A tool that never dispatched (queued, then cancelled) has no
+    /// buffered frame and still gets one, which is the case that previously
+    /// emitted nothing at all.
+    pub(crate) async fn release_tool_frame(
+        &self,
+        id: &protocol::ToolUseId,
+        content: &str,
+        is_error: bool,
+    ) {
+        let pending = self
+            .tool_frames
+            .lock()
+            .await
+            .as_mut()
+            .and_then(|b| b.remove(&id.to_string()));
+        let (tool, result, denial_kind) = match pending {
+            // A substitution replaced the model-facing text, so the buffered
+            // payload describes an outcome that was DISCARDED. claude-code's
+            // synthetic carries a synthetic `toolUseResult` too, so the real
+            // one must not reach the SDK.
+            Some(p) if p.model_text != content => (
+                p.tool,
+                serde_json::json!({ "error": content }),
+                p.denial_kind,
+            ),
+            Some(p) => (p.tool, p.result, p.denial_kind),
+            // Never dispatched: synthesize the payload the dispatch would have
+            // carried, matching the shape used by every other error result.
+            None => (
+                String::new(),
+                serde_json::json!({ "error": content }),
+                None,
+            ),
+        };
+        let result = if is_error && !result.is_object() {
+            serde_json::json!({ "error": content })
+        } else {
+            result
+        };
+        match denial_kind {
+            Some(kind) => {
+                self.output
+                    .emit_tool_result_denied(id, &tool, content, &result, &kind)
+                    .await;
+            }
+            None => self.output.emit_tool_result(id, &tool, content, &result).await,
+        }
+    }
+
     /// Record the `toolDenialKind` for a tool that was denied rather than run,
     /// so its `tool_result` user line carries the provenance when persisted.
     ///
@@ -8178,6 +8296,11 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 }
                 None => crate::streaming_executor::StreamingToolExecutor::new(self),
             };
+            // Hold `tool_result` frames until the collection point below can
+            // release them in RECEIVED order, with a cancelled tool's synthetic
+            // already substituted. Off again after the drive, so any later
+            // emission on this orchestrator goes straight out.
+            self.set_tool_frame_buffering(true).await;
 
             // #5: wall-clock from stream-open through pump completion (incl. any
             // 529→non-stream fallback) so the CostTracker records a REAL duration
@@ -9047,6 +9170,23 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                                 .or_else(|| assistant_uuid.clone()),
                             _ => assistant_uuid.clone(),
                         };
+                        // Release this tool's SDK frame HERE — `take_newly_completed`
+                        // yields in received order, and `drained.block` is the
+                        // post-substitution content, so a cancelled tool reports
+                        // its synthetic rather than the real outcome the executor
+                        // discarded. A queued-then-cancelled tool never dispatched
+                        // and so has no buffered frame; it gets one from here,
+                        // where previously it got none at all.
+                        if let ContentBlock::ToolResult {
+                            tool_use_id,
+                            content,
+                            is_error,
+                            ..
+                        } = &drained.block
+                        {
+                            self.release_tool_frame(tool_use_id, content, *is_error)
+                                .await;
+                        }
                         // O3: keep this result's tool id so its hook
                         // `attachment` lines can be flushed immediately after
                         // its tool_result — claude's stream order.
@@ -9117,6 +9257,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 // Empty for every non-`model:` tool → strict no-op.
                 crate::turn_loop::apply_model_context_modifiers(self, all_modifiers).await;
             }
+            // Drive finished: stop holding frames.
+            self.set_tool_frame_buffering(false).await;
 
             // DEFERRED-3 / esc-interrupt FIX: "we were aborted" — the single
             // post-drive abort checkpoint. Once the user-interrupt token has fired,
@@ -17084,6 +17226,135 @@ mod hook_attachment_persistence_tests {
     use platform_posix::fs::PosixFileSystem;
     use std::sync::Arc;
     use tool_api::registry::ToolRegistry;
+    /// Frame buffering holds `tool_result` frames until the collection point
+    /// releases them, so the SDK sees RECEIVED order rather than completion
+    /// order — and so a cancelled tool reports its synthetic instead of the
+    /// real outcome the executor discarded.
+    ///
+    /// These pin the mechanism. They do NOT prove the streaming driver's
+    /// ordering end-to-end; that would need two tools whose completion order
+    /// differs from their received order.
+    mod tool_frame_ordering_tests {
+        use super::*;
+
+        fn orch_for_frames(output: Arc<MockOutputStream>) -> ConversationOrchestrator {
+            ConversationOrchestrator::new(
+                OrchestratorConfig::default(),
+                Arc::new(MockApiClient::new(vec![])),
+                Arc::new(ToolRegistry::new()),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                output,
+                Arc::new(StaticMemoryProvider::empty()),
+                std::env::temp_dir(),
+            )
+        }
+
+        fn result_ids(events: &[traits::orchestrator::OutputEvent]) -> Vec<String> {
+            events
+                .iter()
+                .filter_map(|e| match e {
+                    traits::orchestrator::OutputEvent::ToolResult { id, .. } => {
+                        Some(id.to_string())
+                    }
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// With buffering OFF the frame goes straight out — the batched driver,
+        /// which dispatches in received order anyway, is unchanged.
+        #[tokio::test]
+        async fn buffering_off_emits_immediately() {
+            let output = Arc::new(MockOutputStream::new());
+            let orch = orch_for_frames(output.clone());
+            let id = protocol::ToolUseId::new();
+            orch.emit_tool_result_frame(&id, "Bash", "out", &serde_json::json!({}), None)
+                .await;
+            assert_eq!(result_ids(&output.snapshot().await), vec![id.to_string()]);
+        }
+
+        /// With buffering ON nothing reaches the stream until release.
+        #[tokio::test]
+        async fn buffered_frames_are_withheld_then_released_in_caller_order() {
+            let output = Arc::new(MockOutputStream::new());
+            let orch = orch_for_frames(output.clone());
+            orch.set_tool_frame_buffering(true).await;
+
+            let first = protocol::ToolUseId::new();
+            let second = protocol::ToolUseId::new();
+            // Buffered in COMPLETION order: `second` finished first.
+            orch.emit_tool_result_frame(&second, "Bash", "b", &serde_json::json!({}), None)
+                .await;
+            orch.emit_tool_result_frame(&first, "Read", "a", &serde_json::json!({}), None)
+                .await;
+            assert!(
+                result_ids(&output.snapshot().await).is_empty(),
+                "nothing may reach the stream while buffering is on"
+            );
+
+            // Released in RECEIVED order by the collection point.
+            orch.release_tool_frame(&first, "a", false).await;
+            orch.release_tool_frame(&second, "b", false).await;
+            assert_eq!(
+                result_ids(&output.snapshot().await),
+                vec![first.to_string(), second.to_string()],
+                "release order wins over completion order"
+            );
+        }
+
+        /// A tool that never dispatched (queued, then cancelled) has no buffered
+        /// frame and still gets one. Before the collection point released
+        /// frames, this case emitted nothing at all.
+        #[tokio::test]
+        async fn releasing_an_undispatched_tool_still_emits() {
+            let output = Arc::new(MockOutputStream::new());
+            let orch = orch_for_frames(output.clone());
+            orch.set_tool_frame_buffering(true).await;
+
+            let id = protocol::ToolUseId::new();
+            orch.release_tool_frame(&id, "The user doesn't want to proceed", true)
+                .await;
+            assert_eq!(
+                result_ids(&output.snapshot().await),
+                vec![id.to_string()],
+                "a never-dispatched tool must still report a frame"
+            );
+        }
+
+        /// The released content is the block's FINAL text, so a synthetic that
+        /// replaced a cancelled tool's real outcome wins over what dispatch
+        /// buffered.
+        #[tokio::test]
+        async fn substituted_content_wins_over_the_buffered_result() {
+            let output = Arc::new(MockOutputStream::new());
+            let orch = orch_for_frames(output.clone());
+            orch.set_tool_frame_buffering(true).await;
+
+            let id = protocol::ToolUseId::new();
+            orch.emit_tool_result_frame(
+                &id,
+                "Bash",
+                "REAL OUTPUT",
+                &serde_json::json!({ "stdout": "REAL OUTPUT" }),
+                None,
+            )
+            .await;
+            orch.release_tool_frame(&id, "SYNTHETIC", true).await;
+
+            let events = output.snapshot().await;
+            let found = events.iter().any(|e| matches!(
+                e,
+                traits::orchestrator::OutputEvent::ToolResult { id: gid, .. } if gid.to_string() == id.to_string()
+            ));
+            assert!(found, "the released frame must be emitted");
+            assert!(
+                !format!("{events:?}").contains("REAL OUTPUT"),
+                "the discarded real outcome must not reach the SDK: {events:?}"
+            );
+        }
+    }
+
 
     fn orch_with_writer(
         dir: &std::path::Path,

@@ -2592,12 +2592,12 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 serde_json::Value::String(format!("Error: No such tool available: {name}")),
             )
             .await;
-            orch.output
-                .emit_tool_result(
+            orch.emit_tool_result_frame(
                     tool_use_id,
                     name,
                     &model_text,
                     &serde_json::json!({ "error": format!("tool not found: {name}") }),
+                    None,
                 )
                 .await;
             results.push(result_block);
@@ -2637,12 +2637,12 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 serde_json::Value::String(format!("InputValidationError: {detail}")),
             )
             .await;
-            orch.output
-                .emit_tool_result(
+            orch.emit_tool_result_frame(
                     tool_use_id,
                     name,
                     &model_text,
                     &serde_json::json!({ "error": detail }),
+                    None,
                 )
                 .await;
             results.push(result_block);
@@ -2738,12 +2738,12 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 serde_json::Value::String(format!("Error: {msg}")),
             )
             .await;
-            orch.output
-                .emit_tool_result(
+            orch.emit_tool_result_frame(
                     tool_use_id,
                     name,
                     &model_text,
                     &serde_json::json!({ "error": msg }),
+                    None,
                 )
                 .await;
             results.push(result_block);
@@ -2780,13 +2780,12 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 serde_json::Value::String(CANCEL_MESSAGE.to_string()),
             )
             .await;
-            orch.output
-                .emit_tool_result_denied(
+            orch.emit_tool_result_frame(
                     tool_use_id,
                     name,
                     CANCEL_MESSAGE,
                     &serde_json::json!({ "error": CANCEL_MESSAGE }),
-                    "cancelled",
+                    Some("cancelled"),
                 )
                 .await;
             results.push(result_block);
@@ -3111,12 +3110,12 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 provider_tool_use_id: provider_id.clone(),
                 content_blocks: None,
             };
-            orch.output
-                .emit_tool_result(
+            orch.emit_tool_result_frame(
                     tool_use_id,
                     name,
                     &model_text,
                     &serde_json::json!({ "error": model_text.clone() }),
+                    None,
                 )
                 .await;
             results.push(result_block);
@@ -3652,13 +3651,12 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                     serde_json::Value::String(format!("Error: {reason}")),
                 )
                 .await;
-                orch.output
-                    .emit_tool_result_denied(
+                orch.emit_tool_result_frame(
                         tool_use_id,
                         name,
                         &reason,
                         &serde_json::json!({ "error": reason }),
-                        denial_kind,
+                        Some(denial_kind),
                     )
                     .await;
                 results.push(result_block);
@@ -3905,18 +3903,16 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             // the same kind on the stream-json frame. Same shape as the
             // hardcoded `"cancelled"` on the pre-cancel guard above.
             orch.record_tool_denial_kind(tool_use_id, "interrupted").await;
-            orch.output
-                .emit_tool_result_denied(
+            orch.emit_tool_result_frame(
                     tool_use_id,
                     name,
                     &content,
                     &emit_payload,
-                    "interrupted",
+                    Some("interrupted"),
                 )
                 .await;
         } else {
-            orch.output
-                .emit_tool_result(tool_use_id, name, &content, &emit_payload)
+            orch.emit_tool_result_frame(tool_use_id, name, &content, &emit_payload, None)
                 .await;
         }
 

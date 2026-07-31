@@ -4536,6 +4536,44 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             tool_calls: post_tool_batch_calls,
         };
         let batch_agg = orch.hooks.execute(batch_event, batch_ctx).await;
+
+        // `additionalContext` FIRST: the oracle yields it inside the per-hook
+        // loop, while the stop record is only reached after that loop ends, so a
+        // hook doing both produces the context ahead of the stop. Independent of
+        // `preventContinuation` — a batch hook may contribute context without
+        // stopping anything.
+        //
+        // FIDELITY: the oracle emits one attachment PER HOOK RESULT, each
+        // carrying that hook's own `additionalContexts` array. This port's
+        // aggregate flattens contexts across hooks, so it emits ONE attachment
+        // with the combined array — identical for a single batch hook (every
+        // observed case) and the same compromise the PostToolUse site already
+        // makes.
+        if !batch_agg.additional_contexts.is_empty() {
+            let identity = post_tool_batch_identity();
+            let batch_id = protocol::ToolUseId::from(identity.tool_use_id.clone());
+            orch.persist_hook_attachment_to_jsonl(hooks::additional_context_attachment(
+                &identity.hook_name,
+                &identity.tool_use_id,
+                &identity.hook_event,
+                &batch_agg.additional_contexts,
+            ))
+            .await;
+            for ctx in &batch_agg.additional_contexts {
+                injected_messages.push((
+                    // `user_meta`: the rendering is ephemeral (`zr({isMeta:true})`);
+                    // the attachment above is the on-disk record.
+                    ConversationMessage::user_meta(
+                        MessageId::new(),
+                        format!(
+                            "<system-reminder>\nPostToolBatch hook additional context: {ctx}\n</system-reminder>"
+                        ),
+                    ),
+                    batch_id.clone(),
+                ));
+            }
+        }
+
         if let Some(reason) = post_tool_batch_stop_reason(&batch_agg) {
             // ONE identity for both records, so the persisted attachment and the
             // model-facing prose describe the same event and cannot drift.
@@ -5821,6 +5859,71 @@ mod hook_context_attachment_tests {
             stop_msg.1.as_str().starts_with("hook-"),
             "prose and attachment must share the synthetic batch id, got {}",
             stop_msg.1.as_str()
+        );
+    }
+
+    /// A `PostToolBatch` hook's `additionalContext` reaches the model.
+    ///
+    /// The same discarded aggregate carried this too (@233161375, inside the
+    /// per-hook loop and therefore BEFORE the stop check):
+    ///
+    /// ```js
+    /// if(Mn.additionalContexts&&Mn.additionalContexts.length>0){
+    ///   let ko=Va({type:"hook_additional_context",content:Mn.additionalContexts,
+    ///     hookName:"PostToolBatch",toolUseID:rt,hookEvent:"PostToolBatch"},f);
+    ///   yield ko,Qe.push(ko)}
+    /// ```
+    ///
+    /// It is independent of `preventContinuation`: a batch hook can contribute
+    /// context without stopping anything.
+    #[tokio::test]
+    async fn post_tool_batch_additional_context_reaches_the_model() {
+        let orch = orch_with_batch_hook(HookResponse {
+            additional_context: Some("BATCH-CTX".into()),
+            ..HookResponse::default()
+        });
+        let (_results, prevent, injected, _mods) =
+            dispatch_tool_uses_tracked(&orch, &uses(), None)
+                .await
+                .expect("dispatch");
+        assert!(!prevent, "additionalContext alone must not stop the turn");
+        let ctx_msg = injected
+            .iter()
+            .find(|(m, _)| m.text_content().contains("BATCH-CTX"))
+            .expect("the batch additionalContext must reach the model");
+        assert_eq!(
+            ctx_msg.0.text_content(),
+            "<system-reminder>\nPostToolBatch hook additional context: BATCH-CTX\n</system-reminder>"
+        );
+    }
+
+    /// Ordering: the oracle yields `hook_additional_context` inside the per-hook
+    /// loop and the stop record only AFTER it, so a hook doing both produces the
+    /// context first.
+    #[tokio::test]
+    async fn batch_additional_context_is_ordered_before_the_stop() {
+        let orch = orch_with_batch_hook(HookResponse {
+            additional_context: Some("CTX".into()),
+            prevent_continuation: true,
+            reason: Some("STOP".into()),
+            ..HookResponse::default()
+        });
+        let (_results, prevent, injected, _mods) =
+            dispatch_tool_uses_tracked(&orch, &uses(), None)
+                .await
+                .expect("dispatch");
+        assert!(prevent);
+        let texts: Vec<String> = injected
+            .iter()
+            .map(|(m, _)| m.text_content())
+            .filter(|t| t.contains("PostToolBatch"))
+            .collect();
+        assert_eq!(
+            texts,
+            vec![
+                "<system-reminder>\nPostToolBatch hook additional context: CTX\n</system-reminder>",
+                "<system-reminder>\nPostToolBatch hook stopped continuation: STOP\n</system-reminder>",
+            ]
         );
     }
 

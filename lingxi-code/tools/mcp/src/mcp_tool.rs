@@ -518,7 +518,7 @@ static READ_MCP_RESOURCE_SCHEMA: Lazy<Value> = Lazy::new(|| {
 #[allow(clippy::too_many_arguments)]
 async fn process_mcp_call_result(
     bus: Arc<AnalyticsBus>,
-    cwd: std::path::PathBuf,
+    output_dir: std::path::PathBuf,
     token_counter: Arc<tool_api::AnthropicRequestBuilder>,
     default_model: String,
     server: String,
@@ -586,7 +586,6 @@ async fn process_mcp_call_result(
                 });
             }
 
-            let output_dir = cwd.join(branding::DOT_DIR).join("tool-results");
             let (now_millis, rand_tag) = persist_id_seed();
             // MCP.2: structuredContent takes PRIORITY over `content` for the
             // model (transformMCPResult, `client.ts:2675-2684`): when the
@@ -1002,7 +1001,7 @@ impl Tool for MCPTool {
         // `BuiltinToolContext`), cloned so the future is `'static + Send` and
         // can be detached on the background path.
         let bus = self.ctx.bus.clone();
-        let cwd = self.ctx.cwd();
+        let output_dir = self.ctx.tool_results_dir();
         let token_counter = self.ctx.provider.clone();
         let default_model = self.ctx.default_model.clone();
 
@@ -1025,7 +1024,7 @@ impl Tool for MCPTool {
                 .await;
             return process_mcp_call_result(
                 bus,
-                cwd,
+                output_dir,
                 token_counter,
                 default_model,
                 server,
@@ -1061,7 +1060,7 @@ impl Tool for MCPTool {
         let mut call_task = {
             let client = client.clone();
             let bus = bus.clone();
-            let cwd = cwd.clone();
+            let output_dir = output_dir.clone();
             let token_counter = token_counter.clone();
             let default_model = default_model.clone();
             let server = server.clone();
@@ -1102,7 +1101,7 @@ impl Tool for MCPTool {
                     res = &mut call_fut => {
                         process_mcp_call_result(
                             bus,
-                            cwd,
+                            output_dir,
                             token_counter,
                             default_model,
                             server,
@@ -1751,7 +1750,7 @@ impl Tool for ReadMcpResourceTool {
         // `mimeType`, distinguishing text from base64 blobs, persisting decoded
         // blobs to disk under a project-local tool-results dir, and surfacing
         // `blobSavedTo` paths. Mirrors `ReadMcpResourceTool.ts:95-143`.
-        let output_dir = self.ctx.cwd().join(branding::DOT_DIR).join("tool-results");
+        let output_dir = self.ctx.tool_results_dir();
         match client.read_resource_rich(&uri, &output_dir).await {
             Ok(contents) => {
                 let bytes_approx = serde_json::to_vec(&contents)

@@ -1475,6 +1475,8 @@ async fn build_mobile_inner_with_ask(
     // a mobile worktree tool without a second staleness bug to fix later.
     let session_cwd = SessionCwd::new(cwd.clone(), vec![cwd.clone()]);
     let tool_ctx = BuiltinToolContext {
+        // No session: this context never persists tool output.
+        session_id: None,
         // FILE.B / P1-06: file tools share the ONE per-session read-state map
         // (see engine-desktop note).
         read_file_state: read_state_map.clone(),

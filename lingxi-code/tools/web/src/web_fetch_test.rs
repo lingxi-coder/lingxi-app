@@ -1882,6 +1882,12 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             )),
             "missing binary footer: {content}"
         );
+        // NOTE: this asserts the NO-SESSION FALLBACK, not the production path.
+        // `ctx_for_file_tools` leaves `session_id` unset, so
+        // `BuiltinToolContext::tool_results_dir` returns the workspace-local dir.
+        // With a session — which the live desktop context always sets — output
+        // goes to `<config>/projects/<cwd>/<session-id>/tool-results` instead
+        // (claude-code `xke()`); that branch is covered in `tool-api`.
         // The persisted file exists under <workspace>/.lingxi/tool-results with a
         // .pdf extension.
         let results_dir = tmp.path().join(".lingxi").join("tool-results");

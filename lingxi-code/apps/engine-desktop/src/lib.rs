@@ -7835,6 +7835,12 @@ pub async fn build(
     // (and the staleness / `/files` consumers).
     let read_state_map = tool_api::read_file_state::new_read_file_state_map();
     let tool_ctx = BuiltinToolContext {
+        // The live session, so tools that persist oversized output can write to
+        // claude-code's session-scoped `<projects>/<session-id>/tool-results/`
+        // instead of dropping artifacts inside the user's repository. Same
+        // `main_session_id` the orchestrator gets via `.with_session_id`, so the
+        // tool-results dir sits beside this session's transcript.
+        session_id: Some(main_session_id),
         // FILE.B / P1-06: file tools share the ONE per-session read-state map
         // (staleness guard, Read-dedup) — the SAME `Arc` the orchestrator adopts
         // via `.with_read_state_map(read_state_map)` below.

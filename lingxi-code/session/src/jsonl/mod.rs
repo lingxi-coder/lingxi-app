@@ -15,6 +15,7 @@
 pub mod djb2;
 pub mod loader;
 pub mod path;
+pub mod re_append;
 pub mod reader;
 pub mod recover;
 pub mod schema;
@@ -34,6 +35,11 @@ pub use path::{project_dir_name, session_path, tool_results_dir};
 // `session::JsonlSessionMetadata` (crate-root alias) or the
 // fully-qualified `session::jsonl::reader::SessionMetadata`.
 pub use reader::JsonlReader;
+// Metadata re-append (`reAppendSessionMetadata`, 2.1.220 offset 237852347).
+pub use re_append::{
+    extract_quoted_field, find_last_typed_field, normalize_last_prompt, plan_re_append, read_tail,
+    ReAppendPlan, SessionMetadataState, METADATA_REAPPEND_BACKSTOP_BYTES,
+};
 // Tolerant-reader surface (real-transcript gap fix): the two-phase routed
 // loader output + its line-router + the transcript-message type predicate.
 pub use reader::{is_transcript_message_type, parse_pr_number, route_lines, LoadedTranscript};

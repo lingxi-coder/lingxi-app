@@ -4,8 +4,12 @@
 //! Lock: serialize via `serde_json::to_string` (no whitespace, no indent),
 //! terminate every line with a single `\n`, file mode `0o600`, dir mode `0o700`.
 
+use crate::jsonl::re_append::{
+    plan_re_append, read_tail, SessionMetadataState, METADATA_REAPPEND_BACKSTOP_BYTES,
+};
 use crate::jsonl::schema::JsonlMessage;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::Mutex;
@@ -32,6 +36,25 @@ pub struct JsonlWriter {
     active_path: std::sync::RwLock<PathBuf>,
     fs: Arc<dyn FileSystem>,
     lock: Mutex<()>,
+    /// Bytes appended to the active transcript since the last metadata
+    /// re-append — the oracle's `bytesSinceMetadataReAppend` (increment site
+    /// 2.1.220 @237850612: `bytesSinceMetadataReAppend += Buffer.byteLength(t,"utf8")`,
+    /// gated on the write target being the CURRENT session file, which is
+    /// always true for this writer).
+    ///
+    /// Once it reaches [`METADATA_REAPPEND_BACKSTOP_BYTES`] the metadata set
+    /// must be re-appended so it stays inside the 64 KiB tail window every
+    /// session-index reader scans. See [`Self::metadata_re_append_due`].
+    bytes_since_metadata_re_append: AtomicUsize,
+    /// The metadata this writer will re-append when the backstop fires.
+    ///
+    /// The writer OWNS this rather than taking it per call: it is the single
+    /// funnel every metadata record already goes through
+    /// ([`Self::append_custom_title`] and friends), and it already owns the
+    /// file, the lock and the byte counter. Any other owner would have to be
+    /// threaded from the composition root through the resume path to reach the
+    /// same place.
+    metadata_state: Mutex<SessionMetadataState>,
 }
 
 impl JsonlWriter {
@@ -46,6 +69,8 @@ impl JsonlWriter {
             path,
             fs,
             lock: Mutex::new(()),
+            bytes_since_metadata_re_append: AtomicUsize::new(0),
+            metadata_state: Mutex::new(SessionMetadataState::default()),
         }
     }
 
@@ -88,8 +113,29 @@ impl JsonlWriter {
     /// virtualize for tests (each `FileSystem` impl that hosts real files
     /// would do the same syscall internally). M5-08 may extend the trait.
     pub async fn append(&self, msg: &JsonlMessage) -> Result<(), WriterError> {
-        let _g = self.lock.lock().await;
-        let line = serde_json::to_string(msg)?;
+        {
+            let _g = self.lock.lock().await;
+            let line = serde_json::to_string(msg)?;
+            let mut payload = String::with_capacity(line.len() + 1);
+            payload.push_str(&line);
+            payload.push('\n');
+            self.append_payload(&payload).await?;
+        }
+        // Drive the backstop from the ordinary append path. Deliberately AFTER
+        // the critical section above: `maybe_re_append_metadata` re-takes
+        // `self.lock`, so polling inside would deadlock.
+        self.maybe_re_append_metadata().await;
+        Ok(())
+    }
+
+    /// Write `payload` verbatim to the active transcript and account it against
+    /// the metadata-re-append backstop counter.
+    ///
+    /// The caller MUST already hold [`Self::lock`] — this is the shared body of
+    /// every append path and takes no lock of its own so that
+    /// [`Self::re_append_session_metadata`] can read the tail and write the
+    /// plan under one critical section.
+    async fn append_payload(&self, payload: &str) -> Result<(), WriterError> {
         let path = self.active_path();
         let path_str = path.to_str().expect("session paths are UTF-8");
         if let Some(parent) = path.parent() {
@@ -111,15 +157,137 @@ impl JsonlWriter {
                 std::fs::create_dir_all(parent).map_err(|e| FsError::Io(e.to_string()))?;
             }
         }
-        let mut payload = String::with_capacity(line.len() + 1);
-        payload.push_str(&line);
-        payload.push('\n');
         // claude-code `appendToFile`: `fsAppendFile(path, data, { mode: 0o600 })`
         // — the `<uuid>.jsonl` transcript is owner-only (prompt + tool content).
         self.fs
-            .append_file_with_mode(path_str, &payload, 0o600)
+            .append_file_with_mode(path_str, payload, 0o600)
             .await?;
+        // `bytesSinceMetadataReAppend += Buffer.byteLength(t,"utf8")` — counted
+        // only on a SUCCESSFUL write, matching the oracle's post-await position.
+        self.bytes_since_metadata_re_append
+            .fetch_add(payload.len(), Ordering::Relaxed);
         Ok(())
+    }
+
+    /// Bytes appended since the last metadata re-append
+    /// (`bytesSinceMetadataReAppend`).
+    #[must_use]
+    pub fn bytes_since_metadata_re_append(&self) -> usize {
+        self.bytes_since_metadata_re_append.load(Ordering::Relaxed)
+    }
+
+    /// `true` once [`METADATA_REAPPEND_BACKSTOP_BYTES`] have been appended since
+    /// the last re-append — the oracle's periodic backstop condition at the tail
+    /// of `drainQueuesOnce` (`if(this.bytesSinceMetadataReAppend>=kI/2)`,
+    /// 2.1.220 @237851998), which fires
+    /// `reAppendSessionMetadataAsync(false, /*skip_dedup=*/true)`.
+    #[must_use]
+    pub fn metadata_re_append_due(&self) -> bool {
+        self.bytes_since_metadata_re_append() >= METADATA_REAPPEND_BACKSTOP_BYTES
+    }
+
+    /// Clear the backstop counter without writing — the oracle's
+    /// `resetSessionFile()` also zeroes `bytesSinceMetadataReAppend`.
+    pub fn reset_metadata_re_append_counter(&self) {
+        self.bytes_since_metadata_re_append
+            .store(0, Ordering::Relaxed);
+    }
+
+    /// The session id this writer is writing, i.e. the transcript's file stem.
+    ///
+    /// The oracle passes the id in; here the writer already knows which session
+    /// it targets, so nothing has to thread it. `<uuid>.jsonl` -> `<uuid>`,
+    /// which is exactly the BARE form the loader keys its maps by (see
+    /// [`Self::append_custom_title`]'s contract).
+    fn session_id_from_path(&self) -> Option<String> {
+        self.active_path()
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(ToString::to_string)
+    }
+
+    /// Fire the metadata backstop if enough bytes have accumulated.
+    ///
+    /// THIS is what makes the port live. Without it `re_append_session_metadata`
+    /// is a mechanism nobody invokes, and metadata still scrolls out of the
+    /// 64 KiB window that every session-index reader scans.
+    ///
+    /// Uses the backstop polarity `(skip_title_adopt: false, skip_dedup: true)`
+    /// — the oracle's periodic/post-compaction call. Best-effort: a write error
+    /// here must not fail the append that triggered it, so it is swallowed (the
+    /// counter has already been reset, so the next window retries).
+    ///
+    /// Takes NO lock of its own; `re_append_session_metadata` takes it.
+    pub async fn maybe_re_append_metadata(&self) -> usize {
+        if !self.metadata_re_append_due() {
+            return 0;
+        }
+        let Some(sid) = self.session_id_from_path() else {
+            return 0;
+        };
+        let mut state = self.metadata_state.lock().await;
+        match self
+            .re_append_session_metadata(&mut state, &sid, false, true)
+            .await
+        {
+            Ok(n) => n,
+            Err(e) => {
+                // `catch(e){…w(`Metadata re-append failed (${$t(e)}): ${le(e)}`,
+                // {level:"error"})…}` — the oracle LOGS this rather than letting
+                // it escape, because the append that triggered the backstop has
+                // already succeeded and must not fail retroactively.
+                tracing::error!("Metadata re-append failed: {e}");
+                0
+            }
+        }
+    }
+
+    /// Re-append the session's metadata sidecar records — 1:1 with
+    /// `Isp.reAppendSessionMetadata` (2.1.220 @237852347) and its async twin
+    /// `reAppendSessionMetadataAsync` (@237852577).
+    ///
+    /// Reads the last 64 KiB of the active transcript, runs
+    /// [`plan_re_append`] over it (adopt-back → rebuild → dedup, mutating
+    /// `state` in place), and appends the surviving records. Follows the ASYNC
+    /// variant's write shape: all entries in ONE append (`jsonlJoin`), which is
+    /// byte-identical to the sync variant's per-entry appends.
+    ///
+    /// Both flags are SKIP flags — see [`plan_re_append`]. The three production
+    /// polarities at the oracle are:
+    /// - resume adopt (`adoptResumedSessionFile`): `(true, false)`
+    /// - periodic backstop / post-compaction: `(false, true)`
+    /// - process exit (`reAppendSessionMetadataAtExit`): `(false, false)`
+    ///
+    /// The counter is zeroed FIRST, exactly as the oracle does, so a failure
+    /// mid-way does not immediately re-arm the backstop.
+    ///
+    /// Returns the number of records written (0 when everything deduped away).
+    pub async fn re_append_session_metadata(
+        &self,
+        state: &mut SessionMetadataState,
+        session_id: &str,
+        skip_title_adopt: bool,
+        skip_dedup: bool,
+    ) -> Result<usize, WriterError> {
+        let _g = self.lock.lock().await;
+        self.bytes_since_metadata_re_append
+            .store(0, Ordering::Relaxed);
+        let path = self.active_path();
+        let tail = read_tail(&path);
+        let Some(plan) = plan_re_append(&tail, state, session_id, skip_title_adopt, skip_dedup)
+        else {
+            return Ok(0);
+        };
+        if plan.is_empty() {
+            return Ok(0);
+        }
+        let count = plan.entries.len();
+        self.append_payload(&plan.to_jsonl()).await?;
+        // The re-appended bytes are the metadata itself; they must not count
+        // toward the next backstop.
+        self.bytes_since_metadata_re_append
+            .store(0, Ordering::Relaxed);
+        Ok(count)
     }
 
     /// Append a user-set `custom-title` metadata line for `session_id` — the
@@ -140,30 +308,10 @@ impl JsonlWriter {
     ) -> Result<(), WriterError> {
         let line = serde_json::to_string(value)?;
         let _g = self.lock.lock().await;
-        let path = self.active_path();
-        let path_str = path.to_str().expect("session paths are UTF-8");
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() && !parent.exists() {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::DirBuilderExt;
-                    std::fs::DirBuilder::new()
-                        .recursive(true)
-                        .mode(0o700)
-                        .create(parent)
-                        .map_err(|e| FsError::Io(e.to_string()))?;
-                }
-                #[cfg(not(unix))]
-                std::fs::create_dir_all(parent).map_err(|e| FsError::Io(e.to_string()))?;
-            }
-        }
         let mut payload = String::with_capacity(line.len() + 1);
         payload.push_str(&line);
         payload.push('\n');
-        self.fs
-            .append_file_with_mode(path_str, &payload, 0o600)
-            .await?;
-        Ok(())
+        self.append_payload(&payload).await
     }
 
     pub async fn append_custom_title(
@@ -176,6 +324,14 @@ impl JsonlWriter {
             "customTitle": custom_title,
             "sessionId": session_id,
         });
+        // Mirror the oracle's `currentSessionTitle`. NOTE this is belt-and-braces,
+        // not the load-bearing path: `plan_re_append` ADOPTS the title back out
+        // of the tail, and the backstop (32 KiB) is deliberately half the tail
+        // window (64 KiB) so it fires while the record is still readable.
+        // Removing this line does NOT fail `appends_alone_drive_the_metadata_backstop`
+        // — verified by mutation. It matters only when state is set without a
+        // corresponding record already on disk.
+        self.metadata_state.lock().await.title = Some(custom_title.to_string());
         self.append_side_record(&value).await
     }
 
@@ -283,32 +439,37 @@ impl JsonlWriter {
     /// [`Self::append_agent_setting`]): serialize one JSON object + `\n` and append
     /// it under the same lock / dir-mode (0o700) / file-mode (0o600) contract as
     /// [`Self::append`].
-    async fn append_side_record(&self, value: &serde_json::Value) -> Result<(), WriterError> {
-        let line = serde_json::to_string(value)?;
+    /// Test-only raw append, so re-append tests can plant arbitrary filler /
+    /// hand-written lines without going through a typed appender.
+    #[cfg(test)]
+    async fn append_payload_for_test(&self, payload: &str) {
         let _g = self.lock.lock().await;
-        let path = self.active_path();
-        let path_str = path.to_str().expect("session paths are UTF-8");
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() && !parent.exists() {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::DirBuilderExt;
-                    std::fs::DirBuilder::new()
-                        .recursive(true)
-                        .mode(0o700)
-                        .create(parent)
-                        .map_err(|e| FsError::Io(e.to_string()))?;
-                }
-                #[cfg(not(unix))]
-                std::fs::create_dir_all(parent).map_err(|e| FsError::Io(e.to_string()))?;
-            }
+        self.append_payload(payload).await.expect("raw append");
+    }
+
+    /// Test-only wrapper over the REAL [`Self::append_side_record`] path, so a
+    /// test can generate bulk transcript without bypassing the backstop poll
+    /// the way [`Self::append_payload_for_test`] does.
+    #[cfg(test)]
+    async fn append_side_record_for_test(&self, value: &serde_json::Value) {
+        self.append_side_record(value).await.expect("side record");
+    }
+
+    async fn append_side_record(&self, value: &serde_json::Value) -> Result<(), WriterError> {
+        {
+            let line = serde_json::to_string(value)?;
+            let _g = self.lock.lock().await;
+            let mut payload = String::with_capacity(line.len() + 1);
+            payload.push_str(&line);
+            payload.push('\n');
+            self.append_payload(&payload).await?;
         }
-        let mut payload = String::with_capacity(line.len() + 1);
-        payload.push_str(&line);
-        payload.push('\n');
-        self.fs
-            .append_file_with_mode(path_str, &payload, 0o600)
-            .await?;
+        // Every write path can trip the backstop: the oracle polls once at the
+        // end of its write-queue DRAIN (@237852006), which all writes funnel
+        // through. LingXi writes immediately, so the analog is a poll at the end
+        // of each public append path — outside the critical section, since
+        // `maybe_re_append_metadata` re-takes the lock.
+        self.maybe_re_append_metadata().await;
         Ok(())
     }
 }
@@ -316,6 +477,221 @@ impl JsonlWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn temp_writer(tag: &str) -> (PathBuf, PathBuf, JsonlWriter) {
+        let dir = std::env::temp_dir().join(format!(
+            "lingxi-writer-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("11111111-2222-3333-4444-555555555555.jsonl");
+        let fs: Arc<dyn FileSystem> =
+            Arc::new(platform_posix::fs::PosixFileSystem::new(dir.clone()));
+        (dir, path.clone(), JsonlWriter::new(path, fs))
+    }
+
+    /// The backstop counter accounts every appended byte (payload INCLUDING the
+    /// trailing newline) and arms at `kI/2` = 32768, matching the oracle's
+    /// `bytesSinceMetadataReAppend >= kI/2` gate.
+    #[tokio::test]
+    async fn appends_accumulate_the_backstop_counter() {
+        let (dir, path, writer) = temp_writer("backstop");
+
+        assert_eq!(writer.bytes_since_metadata_re_append(), 0);
+        assert!(!writer.metadata_re_append_due());
+
+        writer
+            .append_custom_title("11111111-2222-3333-4444-555555555555", "t")
+            .await
+            .expect("append");
+        let on_disk = std::fs::metadata(&path).expect("stat").len() as usize;
+        assert_eq!(
+            writer.bytes_since_metadata_re_append(),
+            on_disk,
+            "counter must equal the bytes actually written"
+        );
+        assert!(!writer.metadata_re_append_due());
+
+        // Push it over the 32 KiB line with one big title.
+        writer
+            .append_custom_title(
+                "11111111-2222-3333-4444-555555555555",
+                &"p".repeat(METADATA_REAPPEND_BACKSTOP_BYTES),
+            )
+            .await
+            .expect("append big");
+        // CORRECTED. This used to assert `metadata_re_append_due()` is still
+        // true here. That held only while nothing polled the backstop: the
+        // public append paths now fire `maybe_re_append_metadata` on the way
+        // out, so crossing the line SELF-CLEARS the counter. Asserting it stays
+        // due would now be asserting that the wiring does not work.
+        assert!(
+            !writer.metadata_re_append_due(),
+            "crossing the backstop must have triggered a re-append and reset the counter"
+        );
+
+        writer.reset_metadata_re_append_counter();
+        assert_eq!(writer.bytes_since_metadata_re_append(), 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// THE WIRING TEST: a long session re-appends its metadata on its own.
+    ///
+    /// The mechanism was previously driven only by an explicit call nobody made,
+    /// which made the whole port inert. The writer now owns the state and polls
+    /// the backstop itself after every append, so metadata that scrolls out of
+    /// the 64 KiB tail window comes back without anyone asking.
+    ///
+    /// `session_id` is derived from the transcript's own file stem — the writer
+    /// already knows which session it is writing, so no caller has to thread it.
+    #[tokio::test]
+    async fn appends_alone_drive_the_metadata_backstop() {
+        let (_dir, path, writer) = temp_writer("22222222-3333-4444-5555-666666666666");
+
+        // A title recorded through the writer is remembered in its own state.
+        writer
+            .append_custom_title("22222222-3333-4444-5555-666666666666", "Long Session")
+            .await
+            .unwrap();
+
+        // Bury it under more than a full TAIL WINDOW of transcript — not merely
+        // the backstop. The backstop (32 KiB) is half the window (64 KiB), so
+        // filling only past the backstop leaves the title still visible in the
+        // tail and the assertion below would pass without anything being
+        // re-appended at all.
+        // Through a REAL append path — `append_payload_for_test` bypasses the
+        // public entry points and so would never trip the poll, making this test
+        // green for the wrong reason.
+        let mut wrote = 0usize;
+        while wrote < super::METADATA_REAPPEND_BACKSTOP_BYTES * 2 + 8192 {
+            let rec = serde_json::json!({ "type": "filler", "pad": "f".repeat(4000) });
+            writer.append_side_record_for_test(&rec).await;
+            wrote += 4050;
+        }
+
+        let tail = crate::jsonl::read_tail(&path);
+        assert!(
+            tail.contains("custom-title") && tail.contains("Long Session"),
+            "the backstop must have restored the title into the tail window \
+             without an explicit re_append call"
+        );
+    }
+
+
+    /// End-to-end: metadata that has scrolled out of the 64 KiB tail window is
+    /// re-appended so a tail-scanning reader sees it again — the entire point
+    /// of `reAppendSessionMetadata`.
+    #[tokio::test]
+    async fn re_append_restores_metadata_into_the_tail_window() {
+        let (dir, path, writer) = temp_writer("restore");
+        let sid = "11111111-2222-3333-4444-555555555555";
+
+        writer.append_custom_title(sid, "Kept Title").await.unwrap();
+        // Bury it under more than a full tail window of transcript.
+        let filler = format!("{}\n", "f".repeat(4095));
+        for _ in 0..20 {
+            writer.append_payload_for_test(&filler).await;
+        }
+        let scrolled = crate::jsonl::read_tail(&path);
+        assert!(
+            !scrolled.contains("custom-title"),
+            "precondition: the title must have scrolled out of the tail"
+        );
+
+        let mut state = SessionMetadataState {
+            title: Some("Kept Title".into()),
+            mode: Some("default".into()),
+            ..Default::default()
+        };
+        let written = writer
+            .re_append_session_metadata(&mut state, sid, true, false)
+            .await
+            .expect("re-append");
+        assert_eq!(written, 2, "custom-title + mode");
+
+        let tail = crate::jsonl::read_tail(&path);
+        let routed = crate::jsonl::route_lines(&tail);
+        assert_eq!(routed.custom_titles.get(sid).map(String::as_str), Some("Kept Title"));
+        assert_eq!(routed.modes.get(sid).map(String::as_str), Some("default"));
+        assert_eq!(
+            writer.bytes_since_metadata_re_append(),
+            0,
+            "the counter is zeroed by the re-append"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Called twice back to back, the second call writes NOTHING: the dedup
+    /// pass finds its own records in the tail. Without this the 32 KiB backstop
+    /// would bloat every transcript without bound.
+    #[tokio::test]
+    async fn back_to_back_re_appends_write_nothing_the_second_time() {
+        let (dir, path, writer) = temp_writer("dedup");
+        let sid = "11111111-2222-3333-4444-555555555555";
+        writer.append_payload_for_test("{\"type\":\"user\"}\n").await;
+
+        let mut state = SessionMetadataState {
+            title: Some("T".into()),
+            mode: Some("default".into()),
+            pr_number: Some(7),
+            pr_url: Some("https://example.test/pull/7".into()),
+            pr_repository: Some("acme/widgets".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            writer
+                .re_append_session_metadata(&mut state, sid, true, false)
+                .await
+                .unwrap(),
+            3
+        );
+        let after_first = std::fs::read_to_string(&path).unwrap();
+
+        assert_eq!(
+            writer
+                .re_append_session_metadata(&mut state, sid, true, false)
+                .await
+                .unwrap(),
+            0,
+            "identical metadata must not be written again (pr-link included, \
+             despite its timestamp differing)"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            after_first,
+            "the file must be byte-identical after the no-op re-append"
+        );
+
+        // …but `skip_dedup = true` forces it.
+        assert_eq!(
+            writer
+                .re_append_session_metadata(&mut state, sid, true, true)
+                .await
+                .unwrap(),
+            3
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A writer with nothing to say writes nothing and creates no file.
+    #[tokio::test]
+    async fn re_append_with_empty_state_is_a_no_op() {
+        let (dir, path, writer) = temp_writer("noop");
+        let mut state = SessionMetadataState::default();
+        assert_eq!(
+            writer
+                .re_append_session_metadata(&mut state, "11111111-2222-3333-4444-555555555555", true, false)
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(!path.exists(), "no file may be created for an empty plan");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[tokio::test]
     async fn retarget_moves_subsequent_appends_to_the_new_session_file() {

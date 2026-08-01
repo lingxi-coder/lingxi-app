@@ -6463,6 +6463,20 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 crate::api_error_copy::oauth_revoked_text(self.config.interactive_session)
                     .to_string()
             }
+            // Org policy turned API-key auth off (403 naming it). Checked
+            // before the generic credential branch, and names the specific
+            // thing THIS user has to unset.
+            LlmError::Authentication | LlmError::PermissionDenied
+                if crate::api_error_copy::is_api_key_auth_disabled(
+                    err.http_status(),
+                    &err.to_string(),
+                ) =>
+            {
+                crate::api_error_copy::api_key_auth_disabled_text(
+                    self.config.credential_origin,
+                    self.config.has_oauth_token,
+                )
+            }
             // Credential rejection. The oracle gates this on the MESSAGE naming
             // `x-api-key`, not on the status, then splits on where the key came
             // from: an env var or `apiKeyHelper` gets "fix that", everything
@@ -6494,7 +6508,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 crate::api_error_copy::cloud_credential_text(&route, err.http_status())
                     .unwrap_or_else(|| {
                         crate::api_error_copy::credential_rejected_text(
-                            self.config.external_api_key,
+                            self.config.credential_origin,
                         )
                         .to_string()
                     })

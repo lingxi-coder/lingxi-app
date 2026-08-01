@@ -201,10 +201,18 @@ pub struct OrchestratorConfig {
     /// === "apiKeyHelper"`). `false` — the default — yields the /login copy,
     /// which is the right advice for a stored or OAuth credential.
     ///
-    /// Set from `llm_client::oauth::anthropic::AuthSource`
-    /// (`EnvApiKey` / `ApiKeyHelper` ⇒ true) at the composition root.
+    /// Set from `llm_client::oauth::anthropic::AuthSource` at the composition
+    /// root. Started life as a `bool`; widened because the org-disabled copy
+    /// tells an env-var user and an `apiKeyHelper` user to unset DIFFERENT
+    /// things, which a single flag cannot express.
     #[serde(default)]
-    pub external_api_key: bool,
+    pub credential_origin: crate::api_error_copy::CredentialOrigin,
+    /// Whether a claude.ai OAuth access token is present — oracle `zv()`
+    /// (`ms()?.accessToken != null`). With an account already signed in,
+    /// unsetting `ANTHROPIC_API_KEY` suffices; without one the user must also
+    /// run `/login`.
+    #[serde(default)]
+    pub has_oauth_token: bool,
 
     /// OUTSTYLE.2: the active output-style name from `settings.outputStyle`
     /// (TS types it `z.string()`). `None` / `"default"` → no style section;
@@ -384,7 +392,8 @@ impl Default for OrchestratorConfig {
             is_enterprise: false,
             include_first_party_betas: false,
             error_route: None,
-            external_api_key: false,
+            credential_origin: crate::api_error_copy::CredentialOrigin::Other,
+            has_oauth_token: false,
             output_style: None,
             output_style_dirs: Vec::new(),
             max_budget_nano_usd: None,
@@ -445,7 +454,8 @@ mod tests {
             is_enterprise: true,
             include_first_party_betas: false,
             error_route: None,
-            external_api_key: false,
+            credential_origin: crate::api_error_copy::CredentialOrigin::Other,
+            has_oauth_token: false,
             output_style: Some("Explanatory".into()),
             output_style_dirs: vec![std::path::PathBuf::from("/home/u/.lingxi/output-styles")],
             max_budget_nano_usd: Some(5_000_000_000),

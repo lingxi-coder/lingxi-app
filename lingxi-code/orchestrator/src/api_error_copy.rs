@@ -72,6 +72,79 @@ pub(crate) fn is_remote_session() -> bool {
     traits::env::is_env_truthy(std::env::var("LINGXI_REMOTE").ok().as_deref())
 }
 
+/// Where the Anthropic credential came from — the oracle's `e1().source`,
+/// kept at the granularity the error copy actually branches on.
+///
+/// A boolean was not enough: the org-disabled branch tells an env-var user and
+/// an `apiKeyHelper` user to unset DIFFERENT things.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CredentialOrigin {
+    /// `ANTHROPIC_API_KEY` in the environment.
+    EnvApiKey,
+    /// An `apiKeyHelper` script.
+    ApiKeyHelper,
+    /// A managed key issued by `/login`.
+    LoginManagedKey,
+    /// Stored key, OAuth, or nothing — none of which the user "unsets".
+    #[default]
+    Other,
+}
+
+impl CredentialOrigin {
+    /// Is this credential supplied from OUTSIDE the app, so `/login` cannot fix
+    /// it? Oracle: `source==="ANTHROPIC_API_KEY" || source==="apiKeyHelper"`.
+    #[must_use]
+    pub(crate) fn is_external(self) -> bool {
+        matches!(self, Self::EnvApiKey | Self::ApiKeyHelper)
+    }
+}
+
+/// Oracle `re_`/`ne_`/`oe_`/`ie_` — the org has turned API-key auth off.
+const ORG_DISABLED_PREFIX: &str = "Your organization has disabled API key authentication";
+
+/// Oracle gate for that branch: a 403 naming the disablement.
+#[must_use]
+pub(crate) fn is_api_key_auth_disabled(status: Option<u16>, message: &str) -> bool {
+    status == Some(403)
+        && message
+            .to_ascii_lowercase()
+            .contains("api key authentication is disabled")
+}
+
+/// Which org-disabled remedy to offer.
+///
+/// ```js
+/// if (i==="ANTHROPIC_API_KEY" && env.ANTHROPIC_API_KEY) return zv() ? re_ : ne_;
+/// if (i==="apiKeyHelper") return oe_;
+/// if (i==="/login managed key") return ie_;
+/// ```
+///
+/// `has_oauth_token` is `zv()` (`ms()?.accessToken != null`): with an account
+/// already signed in, unsetting the variable is enough; without one, the user
+/// also has to run `/login`.
+#[must_use]
+pub(crate) fn api_key_auth_disabled_text(
+    origin: CredentialOrigin,
+    has_oauth_token: bool,
+) -> String {
+    let tail = match origin {
+        CredentialOrigin::EnvApiKey if has_oauth_token => {
+            "Unset ANTHROPIC_API_KEY to use your claude.ai account instead"
+        }
+        CredentialOrigin::EnvApiKey => {
+            "Unset ANTHROPIC_API_KEY and run /login to sign in with your claude.ai account"
+        }
+        CredentialOrigin::ApiKeyHelper => {
+            "Unset the apiKeyHelper setting and run /login to sign in with your claude.ai account"
+        }
+        CredentialOrigin::LoginManagedKey | CredentialOrigin::Other => {
+            "Run /login to sign in with your claude.ai account"
+        }
+    };
+    format!("{ORG_DISABLED_PREFIX} \u{b7} {tail}")
+}
+
 /// Oracle `uir` — the interactive form of the revoked-token surface.
 const OAUTH_TOKEN_REVOKED: &str = "OAuth token revoked \u{b7} Please run /login";
 
@@ -120,8 +193,8 @@ pub(crate) fn mentions_api_key_header(message: &str) -> bool {
 /// helper script). Everything else — stored keys, OAuth, nothing at all — gets
 /// the sign-in copy, because `/login` is the fix.
 #[must_use]
-pub(crate) fn credential_rejected_text(external: bool) -> &'static str {
-    if external {
+pub(crate) fn credential_rejected_text(origin: CredentialOrigin) -> &'static str {
+    if origin.is_external() {
         INVALID_API_KEY
     } else {
         NOT_LOGGED_IN
@@ -644,8 +717,60 @@ mod tests {
     /// THAT, because /login cannot. Anything else → /login.
     #[test]
     fn credential_copy_splits_on_where_the_key_came_from() {
-        assert_eq!(credential_rejected_text(true), INVALID_API_KEY);
-        assert_eq!(credential_rejected_text(false), NOT_LOGGED_IN);
+        assert_eq!(
+            credential_rejected_text(CredentialOrigin::EnvApiKey),
+            INVALID_API_KEY
+        );
+        assert_eq!(
+            credential_rejected_text(CredentialOrigin::ApiKeyHelper),
+            INVALID_API_KEY
+        );
+        // A managed key or a stored/OAuth credential IS fixable by /login.
+        assert_eq!(
+            credential_rejected_text(CredentialOrigin::LoginManagedKey),
+            NOT_LOGGED_IN
+        );
+        assert_eq!(
+            credential_rejected_text(CredentialOrigin::Other),
+            NOT_LOGGED_IN
+        );
+    }
+
+    /// Each origin is told to unset a DIFFERENT thing — the reason a boolean
+    /// could not carry this and the field had to be widened.
+    #[test]
+    fn org_disabled_names_the_right_thing_to_unset() {
+        assert_eq!(
+            api_key_auth_disabled_text(CredentialOrigin::EnvApiKey, true),
+            "Your organization has disabled API key authentication \u{b7} Unset \
+             ANTHROPIC_API_KEY to use your claude.ai account instead"
+        );
+        // No account signed in yet → also has to run /login.
+        assert_eq!(
+            api_key_auth_disabled_text(CredentialOrigin::EnvApiKey, false),
+            "Your organization has disabled API key authentication \u{b7} Unset \
+             ANTHROPIC_API_KEY and run /login to sign in with your claude.ai account"
+        );
+        assert_eq!(
+            api_key_auth_disabled_text(CredentialOrigin::ApiKeyHelper, true),
+            "Your organization has disabled API key authentication \u{b7} Unset the \
+             apiKeyHelper setting and run /login to sign in with your claude.ai account"
+        );
+        assert_eq!(
+            api_key_auth_disabled_text(CredentialOrigin::LoginManagedKey, true),
+            "Your organization has disabled API key authentication \u{b7} Run /login \
+             to sign in with your claude.ai account"
+        );
+    }
+
+    #[test]
+    fn the_org_disabled_gate_needs_a_403_and_the_phrase() {
+        assert!(is_api_key_auth_disabled(
+            Some(403),
+            "403 API Key authentication is disabled for this organization"
+        ));
+        assert!(!is_api_key_auth_disabled(Some(401), "api key authentication is disabled"));
+        assert!(!is_api_key_auth_disabled(Some(403), "forbidden"));
     }
 
     /// On a remote session a rejected key is reported as possibly transient,

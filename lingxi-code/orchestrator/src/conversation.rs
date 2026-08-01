@@ -6443,6 +6443,16 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // 413 request-too-large (accumulated images/attachments): render the
             // byte-exact `$Vi()` notice instead of the opaque "request too large".
             LlmError::RequestTooLarge => request_too_large_notice(),
+            // Billing (`Flp`: `yu({content:LYr,error:"billing_error"})`) and
+            // prompt-too-long (`content:Jq`) both render BARE — no `API Error:`
+            // prefix. Both used to fall through to `Display`, i.e. the words
+            // "quota exceeded" and "context overflow".
+            LlmError::QuotaExceeded => {
+                crate::api_error_copy::CREDIT_BALANCE_TOO_LOW.to_string()
+            }
+            LlmError::ContextOverflow { .. } => {
+                crate::api_error_copy::PROMPT_TOO_LONG.to_string()
+            }
             // 429: the oracle renders `API Error: Request rejected (429) · …`,
             // pulling the detail out of the JSON body the decoder stringified
             // into the message. This used to fall through to `Display`, which is

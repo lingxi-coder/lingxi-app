@@ -49,6 +49,18 @@ pub(crate) fn usage_credits_required_for_1m_context(non_interactive: bool) -> St
 /// Oracle `xYr`.
 const USAGE_SETTINGS_URL: &str = "claude.ai/settings/usage?from=cc_cli_limit_message";
 
+/// Oracle `LYr` — the billing surface for `LlmError::QuotaExceeded`.
+///
+/// Rendered BARE: `yu({content:LYr,error:"billing_error"})` carries no
+/// `API Error:` prefix, unlike the 429 family. Getting that wrong would be
+/// invisible in review and wrong on screen.
+pub(crate) const CREDIT_BALANCE_TOO_LOW: &str = "Credit balance is too low";
+
+/// Oracle `Jq` — the prompt-too-long surface for `LlmError::ContextOverflow`.
+///
+/// Also bare: `yu({content:Jq,error:"invalid_request"})`.
+pub(crate) const PROMPT_TOO_LONG: &str = "Prompt is too long";
+
 /// Oracle `le_` — the first-party variant of the rejection label, used instead
 /// of `Request rejected (429)` when the limit is the server's rather than the
 /// account's.
@@ -131,6 +143,17 @@ pub(crate) const TEMPORARY_CAPACITY: &str = "this may be a temporary capacity is
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Both of these render BARE — no `API Error:` prefix — which is the easy
+    /// thing to get wrong when every neighbouring string has one.
+    #[test]
+    fn the_bare_surfaces_carry_no_prefix() {
+        assert_eq!(CREDIT_BALANCE_TOO_LOW, "Credit balance is too low");
+        assert_eq!(PROMPT_TOO_LONG, "Prompt is too long");
+        for s in [CREDIT_BALANCE_TOO_LOW, PROMPT_TOO_LONG] {
+            assert!(!s.starts_with(API_ERROR), "{s} must not be prefixed");
+        }
+    }
 
     #[test]
     fn the_rendered_429_is_byte_exact() {

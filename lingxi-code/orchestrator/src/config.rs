@@ -192,6 +192,19 @@ pub struct OrchestratorConfig {
     /// which is the only layer that knows the resolved provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_route: Option<crate::api_error_copy::ErrorRouteTag>,
+    /// Whether the Anthropic credential came from OUTSIDE the app — the
+    /// `ANTHROPIC_API_KEY` env var or an `apiKeyHelper` script.
+    ///
+    /// Selects between `Invalid API key · Fix external API key` and
+    /// `Not logged in · Please run /login` when the server rejects the
+    /// credential (oracle: `e1().source === "ANTHROPIC_API_KEY" ||
+    /// === "apiKeyHelper"`). `false` — the default — yields the /login copy,
+    /// which is the right advice for a stored or OAuth credential.
+    ///
+    /// Set from `llm_client::oauth::anthropic::AuthSource`
+    /// (`EnvApiKey` / `ApiKeyHelper` ⇒ true) at the composition root.
+    #[serde(default)]
+    pub external_api_key: bool,
 
     /// OUTSTYLE.2: the active output-style name from `settings.outputStyle`
     /// (TS types it `z.string()`). `None` / `"default"` → no style section;
@@ -371,6 +384,7 @@ impl Default for OrchestratorConfig {
             is_enterprise: false,
             include_first_party_betas: false,
             error_route: None,
+            external_api_key: false,
             output_style: None,
             output_style_dirs: Vec::new(),
             max_budget_nano_usd: None,
@@ -431,6 +445,7 @@ mod tests {
             is_enterprise: true,
             include_first_party_betas: false,
             error_route: None,
+            external_api_key: false,
             output_style: Some("Explanatory".into()),
             output_style_dirs: vec![std::path::PathBuf::from("/home/u/.lingxi/output-styles")],
             max_budget_nano_usd: Some(5_000_000_000),

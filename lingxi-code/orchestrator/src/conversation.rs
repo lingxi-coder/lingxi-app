@@ -6450,6 +6450,19 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             LlmError::QuotaExceeded => {
                 crate::api_error_copy::CREDIT_BALANCE_TOO_LOW.to_string()
             }
+            // Credential rejection. The oracle gates this on the MESSAGE naming
+            // `x-api-key`, not on the status, then splits on where the key came
+            // from: an env var or `apiKeyHelper` gets "fix that", everything
+            // else gets "/login" — because /login cannot fix an external key.
+            //
+            // A 401/403 that does NOT name the header falls through to the
+            // variant's own text, matching the oracle's outer `if`.
+            LlmError::Authentication | LlmError::PermissionDenied
+                if crate::api_error_copy::mentions_api_key_header(&err.to_string()) =>
+            {
+                crate::api_error_copy::credential_rejected_text(self.config.external_api_key)
+                    .to_string()
+            }
             LlmError::ContextOverflow { .. } => {
                 crate::api_error_copy::PROMPT_TOO_LONG.to_string()
             }

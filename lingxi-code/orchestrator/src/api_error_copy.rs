@@ -49,6 +49,47 @@ pub(crate) fn usage_credits_required_for_1m_context(non_interactive: bool) -> St
 /// Oracle `xYr`.
 const USAGE_SETTINGS_URL: &str = "claude.ai/settings/usage?from=cc_cli_limit_message";
 
+/// Oracle `lir` — no usable credential, so the user has to sign in.
+pub(crate) const NOT_LOGGED_IN: &str = "Not logged in \u{b7} Please run /login";
+
+/// Oracle `cir` — a credential EXISTS but the server rejected it. "External"
+/// because it came from outside the app: an env var or an `apiKeyHelper`
+/// script, neither of which `/login` can fix.
+pub(crate) const INVALID_API_KEY: &str = "Invalid API key \u{b7} Fix external API key";
+
+/// Oracle `UOu` — an auth failure the client believes is transient.
+pub(crate) const AUTH_TRANSIENT: &str =
+    "Authentication error \u{b7} This may be a temporary network issue, please try again";
+
+/// Does this error message name the `x-api-key` header?
+///
+/// The oracle's gate for the whole credential-rejection branch,
+/// `message.toLowerCase().includes("x-api-key")` — it keys on the header the
+/// server complained about, not on the status.
+#[must_use]
+pub(crate) fn mentions_api_key_header(message: &str) -> bool {
+    message.to_ascii_lowercase().contains("x-api-key")
+}
+
+/// Which credential-rejection copy to show — oracle:
+///
+/// ```js
+/// let {source:i} = e1();
+/// return i==="ANTHROPIC_API_KEY" || i==="apiKeyHelper" ? cir : lir;
+/// ```
+///
+/// `external` means the credential came from outside the app (the env var or a
+/// helper script). Everything else — stored keys, OAuth, nothing at all — gets
+/// the sign-in copy, because `/login` is the fix.
+#[must_use]
+pub(crate) fn credential_rejected_text(external: bool) -> &'static str {
+    if external {
+        INVALID_API_KEY
+    } else {
+        NOT_LOGGED_IN
+    }
+}
+
 /// Oracle `LYr` — the billing surface for `LlmError::QuotaExceeded`.
 ///
 /// Rendered BARE: `yu({content:LYr,error:"billing_error"})` carries no
@@ -481,6 +522,40 @@ mod tests {
             let s = persistence_suffix(r);
             assert!(s.starts_with(' '), "missing leading space: {s:?}");
         }
+    }
+
+    /// These are BARE too, and use U+00B7 like the 429 clause separator.
+    ///
+    /// NOTE the binary stores the JS escape `\xB7`, not the encoded character,
+    /// so verifying these needs the escaped form — grepping for the decoded `·`
+    /// returns 0 and looks like the string is absent.
+    #[test]
+    fn the_credential_copy_is_byte_exact() {
+        assert_eq!(NOT_LOGGED_IN, "Not logged in \u{b7} Please run /login");
+        assert_eq!(INVALID_API_KEY, "Invalid API key \u{b7} Fix external API key");
+        assert_eq!(
+            AUTH_TRANSIENT,
+            "Authentication error \u{b7} This may be a temporary network issue, please try again"
+        );
+        for s in [NOT_LOGGED_IN, INVALID_API_KEY, AUTH_TRANSIENT] {
+            assert!(!s.starts_with(API_ERROR), "{s} renders bare");
+            assert!(s.contains('\u{b7}'), "{s} separates with U+00B7");
+        }
+    }
+
+    /// An externally supplied credential was rejected → tell the user to fix
+    /// THAT, because /login cannot. Anything else → /login.
+    #[test]
+    fn credential_copy_splits_on_where_the_key_came_from() {
+        assert_eq!(credential_rejected_text(true), INVALID_API_KEY);
+        assert_eq!(credential_rejected_text(false), NOT_LOGGED_IN);
+    }
+
+    #[test]
+    fn the_api_key_header_gate_is_case_insensitive() {
+        assert!(mentions_api_key_header("invalid X-Api-Key header"));
+        assert!(mentions_api_key_header("401 {\"error\":\"bad x-api-key\"}"));
+        assert!(!mentions_api_key_header("authentication_error"));
     }
 
     #[test]

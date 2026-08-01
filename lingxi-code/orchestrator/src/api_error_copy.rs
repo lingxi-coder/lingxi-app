@@ -134,11 +134,79 @@ pub(crate) fn rate_limited_text(message: &str, label: &str, fallback: &str) -> S
 /// The default rejection label — oracle's non-first-party branch.
 pub(crate) const REQUEST_REJECTED_429: &str = "Request rejected (429)";
 
-/// The fallback clause's stem. The oracle appends `hpo()`, which names the
-/// status page for a first-party route and the configured gateway host
-/// otherwise; that suffix needs provider plumbing this module does not have, so
-/// callers pass the whole fallback in.
+/// The fallback clause's stem. The oracle appends [`persistence_suffix`].
 pub(crate) const TEMPORARY_CAPACITY: &str = "this may be a temporary capacity issue.";
+
+/// Oracle `jcs`.
+const STATUS_PAGE: &str = "https://status.claude.com";
+
+/// Which upstream a request is routed to — the oracle's `xn()` tags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ErrorRoute<'a> {
+    /// `"firstParty"`. `default_endpoint` is the oracle's `Yd()`: false means a
+    /// custom `ANTHROPIC_BASE_URL`, i.e. an inference gateway.
+    FirstParty {
+        /// Whether the request goes to the official endpoint.
+        default_endpoint: bool,
+        /// The configured base URL, named when it is a gateway.
+        base_url: &'a str,
+    },
+    /// `"anthropicAws"`.
+    AnthropicAws,
+    /// `"anthropicGoogleCloud"`.
+    AnthropicGoogleCloud,
+    /// Anything else; `display` is the oracle's `rK[e]` provider name.
+    Other {
+        /// Provider display name.
+        display: &'a str,
+    },
+}
+
+/// Oracle `hpo()` — the clause appended to
+/// [`TEMPORARY_CAPACITY`], naming where to look if the trouble persists.
+///
+/// EVERY branch starts with a leading space; the caller concatenates without
+/// one. Dropping it silently joins two words.
+///
+/// ```js
+/// if (xn()==="firstParty") {
+///   if (Yd()) return ` If it persists, check ${jcs}.`;
+///   return ` If it persists, check your inference gateway (${URL.parse(t)?.host||t}).`
+/// }
+/// if (…==="anthropicAws") return ` If it persists, check ${jcs}.`;
+/// if (…==="anthropicGoogleCloud") return ` If it persists, check ${jcs} and Google Cloud's status page.`;
+/// return ` If it persists, check your ${rK[e]} service status.`;
+/// ```
+#[must_use]
+pub(crate) fn persistence_suffix(route: ErrorRoute<'_>) -> String {
+    match route {
+        ErrorRoute::FirstParty {
+            default_endpoint: true,
+            ..
+        }
+        | ErrorRoute::AnthropicAws => format!(" If it persists, check {STATUS_PAGE}."),
+        ErrorRoute::FirstParty { base_url, .. } => {
+            // `URL.parse(t)?.host || t` — the HOST when it parses, else the raw
+            // string. `host` keeps the port, unlike `hostname`.
+            let host = url::Url::parse(base_url)
+                .ok()
+                .and_then(|u| {
+                    u.host_str().map(|h| match u.port() {
+                        Some(p) => format!("{h}:{p}"),
+                        None => h.to_string(),
+                    })
+                })
+                .unwrap_or_else(|| base_url.to_string());
+            format!(" If it persists, check your inference gateway ({host}).")
+        }
+        ErrorRoute::AnthropicGoogleCloud => {
+            format!(" If it persists, check {STATUS_PAGE} and Google Cloud's status page.")
+        }
+        ErrorRoute::Other { display } => {
+            format!(" If it persists, check your {display} service status.")
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -146,6 +214,69 @@ mod tests {
 
     /// Both of these render BARE — no `API Error:` prefix — which is the easy
     /// thing to get wrong when every neighbouring string has one.
+    #[test]
+    fn the_persistence_suffix_is_byte_exact_on_every_branch() {
+        assert_eq!(
+            persistence_suffix(ErrorRoute::FirstParty {
+                default_endpoint: true,
+                base_url: ""
+            }),
+            " If it persists, check https://status.claude.com."
+        );
+        assert_eq!(
+            persistence_suffix(ErrorRoute::AnthropicAws),
+            " If it persists, check https://status.claude.com."
+        );
+        assert_eq!(
+            persistence_suffix(ErrorRoute::AnthropicGoogleCloud),
+            " If it persists, check https://status.claude.com and Google Cloud's status page."
+        );
+        assert_eq!(
+            persistence_suffix(ErrorRoute::Other { display: "Bedrock" }),
+            " If it persists, check your Bedrock service status."
+        );
+        // A custom base URL is named by HOST, not the whole URL.
+        assert_eq!(
+            persistence_suffix(ErrorRoute::FirstParty {
+                default_endpoint: false,
+                base_url: "https://gw.example.com/v1/messages"
+            }),
+            " If it persists, check your inference gateway (gw.example.com)."
+        );
+        // `URL.host` keeps the port (unlike `hostname`).
+        assert_eq!(
+            persistence_suffix(ErrorRoute::FirstParty {
+                default_endpoint: false,
+                base_url: "https://gw.example.com:8443/v1"
+            }),
+            " If it persists, check your inference gateway (gw.example.com:8443)."
+        );
+        // Unparseable → the raw string, per `|| t`.
+        assert_eq!(
+            persistence_suffix(ErrorRoute::FirstParty {
+                default_endpoint: false,
+                base_url: "not a url"
+            }),
+            " If it persists, check your inference gateway (not a url)."
+        );
+    }
+
+    /// Every branch begins with a space — the caller concatenates without one,
+    /// so losing it joins "issue." to "If".
+    #[test]
+    fn every_persistence_suffix_branch_leads_with_a_space() {
+        for r in [
+            ErrorRoute::FirstParty { default_endpoint: true, base_url: "" },
+            ErrorRoute::FirstParty { default_endpoint: false, base_url: "https://x.test" },
+            ErrorRoute::AnthropicAws,
+            ErrorRoute::AnthropicGoogleCloud,
+            ErrorRoute::Other { display: "X" },
+        ] {
+            let s = persistence_suffix(r);
+            assert!(s.starts_with(' '), "missing leading space: {s:?}");
+        }
+    }
+
     #[test]
     fn the_bare_surfaces_carry_no_prefix() {
         assert_eq!(CREDIT_BALANCE_TOO_LOW, "Credit balance is too low");

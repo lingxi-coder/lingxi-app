@@ -3,7 +3,7 @@
 //! Filenames come from the `branding` constants, so these fixtures build
 //! `LINGXI.md` / `.lingxi` trees, not the oracle's literals.
 
-use orchestrator::prompt::nested_memory::{discover, DiscoveryState};
+use orchestrator::prompt::nested_memory::discover;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
@@ -37,8 +37,7 @@ fn nested_dirs_between_cwd_and_the_file_are_discovered_outermost_first() {
     touch(&cwd.join("pkg").join(MEM), "pkg guidance");
     touch(&cwd.join("pkg").join("api").join(MEM), "api guidance");
 
-    let mut st = DiscoveryState::new();
-    let got = discover(&trigger, &cwd, &home, None, &mut st);
+    let got = discover(&trigger, &cwd, &home, None);
     let paths: Vec<PathBuf> = got.iter().map(|f| f.path.clone()).collect();
 
     assert_eq!(
@@ -56,27 +55,41 @@ fn cwd_s_own_memory_file_is_not_surfaced() {
     touch(&cwd.join(MEM), "repo-root guidance");
     touch(&cwd.join("pkg").join(MEM), "pkg guidance");
 
-    let mut st = DiscoveryState::new();
-    let got = discover(&trigger, &cwd, &home, None, &mut st);
+    let got = discover(&trigger, &cwd, &home, None);
     let paths: Vec<PathBuf> = got.iter().map(|f| f.path.clone()).collect();
 
     assert_eq!(paths, vec![cwd.join("pkg").join(MEM)]);
 }
 
-/// The session-scoped state makes discovery idempotent: a second call for the
-/// same trigger yields nothing new, which is what stops every turn re-sending
-/// the same guidance.
+/// Discovery is PURE and re-runs from scratch: the oracle's `seen` set is
+/// `let o=new Set()` INSIDE `Rop`, created per call, so a second call re-finds
+/// the same files. Session-level "don't send this twice" is
+/// `loadedNestedMemoryPaths`, which lives at the CALLER (see
+/// `nested_memory_reminder_message`) — not here. Keeping the two apart is what
+/// lets a LINGXI.md created mid-session still be discovered.
 #[test]
-fn a_second_discovery_pass_surfaces_nothing_new() {
+fn discovery_is_per_call_and_re_finds_the_same_files() {
     let (_tmp, cwd, home, trigger) = fixture();
     touch(&cwd.join("pkg").join(MEM), "pkg guidance");
 
-    let mut st = DiscoveryState::new();
-    assert_eq!(discover(&trigger, &cwd, &home, None, &mut st).len(), 1);
-    assert!(
-        discover(&trigger, &cwd, &home, None, &mut st).is_empty(),
-        "state is session-scoped, not per-call"
+    assert_eq!(discover(&trigger, &cwd, &home, None).len(), 1);
+    assert_eq!(
+        discover(&trigger, &cwd, &home, None).len(),
+        1,
+        "`seen` is per-call (oracle `Rop`: `let o=new Set()`), not session-scoped"
     );
+}
+
+/// A memory file that appears mid-session is discovered on the NEXT call — the
+/// direct consequence of the per-call `seen` set, and the behaviour a
+/// session-scoped probe set would have silently broken.
+#[test]
+fn a_memory_file_created_mid_session_is_discovered() {
+    let (_tmp, cwd, home, trigger) = fixture();
+    assert!(discover(&trigger, &cwd, &home, None).is_empty());
+
+    touch(&cwd.join("pkg").join(MEM), "pkg guidance");
+    assert_eq!(discover(&trigger, &cwd, &home, None).len(), 1);
 }
 
 /// A `paths:`-gated rule in a nested dir is surfaced ONLY when its globs match
@@ -99,8 +112,7 @@ fn conditional_rules_are_matched_against_the_trigger_and_ordered_last() {
         "---\npaths:\n  - \"web/**\"\n---\nweb rule\n",
     );
 
-    let mut st = DiscoveryState::new();
-    let got = discover(&trigger, &cwd, &home, None, &mut st);
+    let got = discover(&trigger, &cwd, &home, None);
     let names: Vec<String> = got
         .iter()
         .map(|f| f.path.file_name().unwrap().to_string_lossy().to_string())
@@ -122,6 +134,74 @@ fn conditional_rules_are_matched_against_the_trigger_and_ordered_last() {
     );
 }
 
+/// The USER tier resolves external `@import`s; every other tier does not.
+///
+/// `NLu` is explicit: `lfo(e,n,"Managed",t,!1)` then `lfo(e,o,"User",t,!0)`.
+/// The only OBSERVABLE consequence is an imported file that carries its OWN
+/// matching `paths:` — `lfo`'s tail filter (`if(!l.globs||l.globs.length===0)
+/// return!1`) drops every parentless import, so a plain `@import` inside a
+/// conditional rule never surfaces regardless of the flag. This test therefore
+/// gives the import its own globs; without them it would pass vacuously.
+#[test]
+fn a_user_tier_rule_resolves_its_external_imports() {
+    let (_tmp, cwd, home, trigger) = fixture();
+    // A User-tier rule's globs resolve against CWD (oracle: the Project branch
+    // takes `dirname^2` of the rules dir, everything else takes cwd).
+    let outside = home.join("shared-rule.md");
+    touch(&outside, "---\npaths:\n  - \"pkg/**\"\n---\nshared rule body\n");
+    touch(
+        &home.join(DOT).join("rules").join("u.md"),
+        &format!(
+            "---\npaths:\n  - \"pkg/**\"\n---\nuser rule\n@{}\n",
+            outside.display()
+        ),
+    );
+
+    let got = discover(&trigger, &cwd, &home, None);
+    let names: Vec<String> = got
+        .iter()
+        .map(|f| f.path.file_name().unwrap().to_string_lossy().to_string())
+        .collect();
+
+    assert!(names.contains(&"u.md".to_string()), "the rule itself: {names:?}");
+    assert!(
+        names.contains(&"shared-rule.md".to_string()),
+        "its external @import must be spliced in: {names:?}"
+    );
+}
+
+/// The MANAGED half of the same pass gets `includeExternal:!1`, so the mirror
+/// fixture must NOT surface its import. This is the half that would silently
+/// break if discovery routed through `memory_block::include_external_for`,
+/// which returns `true` for Managed once the project approves external
+/// includes.
+#[test]
+fn a_managed_tier_rule_does_not_resolve_external_imports() {
+    let (_tmp, cwd, home, trigger) = fixture();
+    let managed = home.parent().unwrap().join("managed");
+    let outside = managed.join("shared-rule.md");
+    touch(&outside, "---\npaths:\n  - \"pkg/**\"\n---\nshared rule body\n");
+    touch(
+        &managed.join(DOT).join("rules").join("m.md"),
+        &format!(
+            "---\npaths:\n  - \"pkg/**\"\n---\nmanaged rule\n@{}\n",
+            outside.display()
+        ),
+    );
+
+    let got = discover(&trigger, &cwd, &home, Some(&managed));
+    let names: Vec<String> = got
+        .iter()
+        .map(|f| f.path.file_name().unwrap().to_string_lossy().to_string())
+        .collect();
+
+    assert!(names.contains(&"m.md".to_string()), "the rule itself: {names:?}");
+    assert!(
+        !names.contains(&"shared-rule.md".to_string()),
+        "Managed gets includeExternal:!1 — the import must NOT surface: {names:?}"
+    );
+}
+
 /// A file outside cwd has no nested ancestors under cwd, so nothing is
 /// discovered from the nested pass.
 #[test]
@@ -131,6 +211,5 @@ fn a_trigger_outside_cwd_discovers_no_nested_memory() {
     touch(&outside, "x");
     touch(&cwd.join("pkg").join(MEM), "pkg guidance");
 
-    let mut st = DiscoveryState::new();
-    assert!(discover(&outside, &cwd, &home, None, &mut st).is_empty());
+    assert!(discover(&outside, &cwd, &home, None).is_empty());
 }

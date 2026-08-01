@@ -8220,6 +8220,17 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 snapshot.insert(0, ctx_msg);
             }
 
+            // Per-turn TRANSIENT reminders are collected here rather than
+            // pushed straight onto `snapshot`, because `snapshot` is MOVED into
+            // `stream()` and every recovery path below rebuilds it from
+            // `session.history`. Each of these advances session state when it
+            // is computed (sent-sets, delta trackers, consume-once drains), so
+            // recomputing them on a retry would return `None` and the reminder
+            // would be silently lost for the rest of the session. Computed
+            // ONCE, re-appended on every re-snapshot — the same discipline
+            // `deferred_reminder` and `date_change_reminder` already follow.
+            let mut turn_reminders: Vec<ConversationMessage> = Vec::new();
+
             // OUTSTYLE.3 (streaming twin): per-turn, transient output-style
             // reminder. Appended to THIS turn's OUTGOING snapshot only — never to
             // `session.history` / JSONL — so it is recomputed each turn and never
@@ -8230,7 +8241,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // message, keeping the locked streaming fixtures byte-identical. See
             // [`Self::output_style_reminder_message`].
             if let Some(reminder) = self.output_style_reminder_message().await {
-                snapshot.push(reminder);
+                turn_reminders.push(reminder);
             }
 
             // PLANMODE (streaming twin): per-turn, transient `plan_mode` reminder
@@ -8246,7 +8257,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // the blocking-limit estimate below so its tokens are counted in the
             // prompt size. See [`Self::plan_mode_reminder_message`].
             if let Some(reminder) = self.plan_mode_reminder_message().await {
-                snapshot.push(reminder);
+                turn_reminders.push(reminder);
             }
 
             // SKILLLIST.1 (streaming twin): per-turn, transient `skill_listing`
@@ -8257,7 +8268,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // provider is wired / no skills / the Skill tool is absent. See
             // [`Self::skill_listing_reminder_message`].
             if let Some(reminder) = self.skill_listing_reminder_message().await {
-                snapshot.push(reminder);
+                turn_reminders.push(reminder);
             }
 
             // §F (streaming twin): per-turn, transient `conditional_rules`
@@ -8269,7 +8280,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // provider / no conditional rules / nothing newly active. See
             // [`Self::conditional_rules_reminder_message`].
             if let Some(reminder) = self.conditional_rules_reminder_message().await {
-                snapshot.push(reminder);
+                turn_reminders.push(reminder);
             }
 
             // Nested memory (streaming twin): the LINGXI.md governing the
@@ -8281,7 +8292,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // claude-code has ONE main loop, so both LingXi twins must inject
             // it. See [`Self::nested_memory_reminder_message`].
             if let Some(reminder) = self.nested_memory_reminder_message().await {
-                snapshot.push(reminder);
+                turn_reminders.push(reminder);
             }
 
             // `<new-diagnostics>` (streaming twin — #3 main-loop parity):
@@ -8296,7 +8307,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // fixtures byte-identical. See
             // [`Self::new_diagnostics_reminder_message`].
             if let Some(reminder) = self.new_diagnostics_reminder_message().await {
-                snapshot.push(reminder);
+                turn_reminders.push(reminder);
             }
 
             // `agent_listing_delta` (streaming twin): per-turn, transient agent
@@ -8307,7 +8318,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // snapshot only (never `session.history` / JSONL). See
             // [`Self::agent_listing_reminder_message`].
             if let Some(reminder) = self.agent_listing_reminder_message().await {
-                snapshot.push(reminder);
+                turn_reminders.push(reminder);
             }
 
             // Finding #73 (streaming twin): per-turn, transient `todo_reminder`
@@ -8322,7 +8333,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // `session.history` / JSONL). `None` keeps the locked streaming
             // fixtures byte-identical. See [`Self::todo_reminder_message`].
             if let Some(reminder) = self.todo_reminder_message().await {
-                snapshot.push(reminder);
+                turn_reminders.push(reminder);
             }
 
             // async_hook_response (streaming twin): fold completed background
@@ -8331,7 +8342,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // when no source is wired / nothing completed since the last turn.
             // See [`Self::async_hook_response_reminder_message`].
             if let Some(reminder) = self.async_hook_response_reminder_message().await {
-                snapshot.push(reminder);
+                turn_reminders.push(reminder);
             }
 
             // T35: fold the terminal background tasks finished since the last
@@ -8341,7 +8352,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // is wired / nothing finished. See
             // [`Self::task_notification_reminder_message`].
             if let Some(reminder) = self.task_notification_reminder_message().await {
-                snapshot.push(reminder);
+                turn_reminders.push(reminder);
             }
 
             // P0.1 (streaming twin): per-turn, transient `relevant_memories`
@@ -8354,7 +8365,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // no prefetch is wired / empty result / everything already injected.
             // See [`Self::relevant_memory_reminder_message`].
             if let Some(reminder) = self.relevant_memory_reminder_message().await {
-                snapshot.push(reminder);
+                turn_reminders.push(reminder);
             }
 
             // EXPERIMENTAL_SKILL_SEARCH (streaming twin): per-turn, transient
@@ -8364,7 +8375,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // prefetch is wired (default OFF) / empty / everything already
             // surfaced. See [`Self::skill_discovery_reminder_message`].
             if let Some(reminder) = self.skill_discovery_reminder_message().await {
-                snapshot.push(reminder);
+                turn_reminders.push(reminder);
             }
 
             // Rebuild on every model step: a ToolSearch result marks schemas as
@@ -8375,6 +8386,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // ADVANCES the announced-set tracking, so compute it ONCE per model
             // step here and reuse this value on every retry/fallback re-snapshot
             // below (each of which rebuilds the SAME step's request).
+            snapshot.extend(turn_reminders.iter().cloned());
+
             let wire_tools = self.build_wire_tools().await;
             let deferred_reminder = self.deferred_tools_reminder_message();
             if let Some(reminder) = deferred_reminder.clone() {
@@ -8559,6 +8572,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                         let s = self.session.lock().await;
                         (s.history.clone(), s.model.clone(), s.model_profile.clone())
                     };
+                    // Re-append THIS step's reminders (computed once above).
+                    recov_snapshot.extend(turn_reminders.iter().cloned());
                     if let Some(ctx_msg) = self.additional_context_message().await {
                         recov_snapshot.insert(0, ctx_msg);
                     }
@@ -8581,6 +8596,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                         wire_tools.clone(),
                         None,
                         date_change_reminder.clone(),
+                        &turn_reminders,
                     )
                     .await?
                     {
@@ -8797,6 +8813,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                                     let s = self.session.lock().await;
                                     (s.history.clone(), s.model.clone(), s.model_profile.clone())
                                 };
+                                // Re-append THIS step's reminders (computed once above).
+                                re_snapshot.extend(turn_reminders.iter().cloned());
                                 if let Some(ctx_msg) = self.additional_context_message().await {
                                     re_snapshot.insert(0, ctx_msg);
                                 }
@@ -8948,6 +8966,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                             // R-P1c/R-P1d: claude-code's `A6n` prepends the additional-
                             // context meta message on EVERY `callModel`, including this
                             // non-streaming fallback. Prepend it to the re-snapshot too.
+                            // Re-append THIS step's reminders (computed once above).
+                            non_stream_snapshot.extend(turn_reminders.iter().cloned());
                             if let Some(ctx_msg) = self.additional_context_message().await {
                                 non_stream_snapshot.insert(0, ctx_msg);
                             }

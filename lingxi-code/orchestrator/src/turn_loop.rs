@@ -379,6 +379,12 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         history_snapshot.insert(0, ctx_msg);
     }
 
+    // Collected, not pushed: `call_api_with_ptl_recovery` rebuilds the request
+    // from raw `session.history` on every retry, and each of these advances
+    // session state when computed, so they must be reused rather than
+    // recomputed. See the `turn_reminders` param there.
+    let mut turn_reminders: Vec<ConversationMessage> = Vec::new();
+
     // OUTSTYLE.3: per-turn, transient output-style reminder. When a non-default
     // output style is active, claude-code injects a meta user message into EVERY
     // turn's model input (the `output_style` attachment). We append it to THIS
@@ -389,7 +395,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // keeping the locked turn-loop fixtures byte-identical. See
     // [`ConversationOrchestrator::output_style_reminder_message`].
     if let Some(reminder) = orch.output_style_reminder_message().await {
-        history_snapshot.push(reminder);
+        turn_reminders.push(reminder);
     }
 
     // PLANMODE (batched twin): per-turn, transient `plan_mode` reminder (206
@@ -403,7 +409,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // `session.history` / JSONL). See
     // [`ConversationOrchestrator::plan_mode_reminder_message`].
     if let Some(reminder) = orch.plan_mode_reminder_message().await {
-        history_snapshot.push(reminder);
+        turn_reminders.push(reminder);
     }
 
     // SKILLLIST.1: per-turn, transient `skill_listing` reminder so the model can
@@ -413,7 +419,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // provider is wired / no skills / the Skill tool is absent. See
     // [`ConversationOrchestrator::skill_listing_reminder_message`].
     if let Some(reminder) = orch.skill_listing_reminder_message().await {
-        history_snapshot.push(reminder);
+        turn_reminders.push(reminder);
     }
 
     // §F: per-turn, transient `conditional_rules` reminder — path-gated LINGXI.md
@@ -423,7 +429,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // byte-identical. `None` when no provider / no conditional rules / nothing
     // newly active. See [`ConversationOrchestrator::conditional_rules_reminder_message`].
     if let Some(reminder) = orch.conditional_rules_reminder_message().await {
-        history_snapshot.push(reminder);
+        turn_reminders.push(reminder);
     }
 
     // Nested memory (`k$o` / `Rop`): the LINGXI.md governing the directory of a
@@ -435,7 +441,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // `None` when nothing has been touched / no ancestor memory / everything
     // already sent. See [`ConversationOrchestrator::nested_memory_reminder_message`].
     if let Some(reminder) = orch.nested_memory_reminder_message().await {
-        history_snapshot.push(reminder);
+        turn_reminders.push(reminder);
     }
 
     // Per-turn, transient `<new-diagnostics>` reminder — newly-reported LSP
@@ -444,7 +450,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // is wired (no servers) or no new diagnostics. See
     // [`ConversationOrchestrator::new_diagnostics_reminder_message`].
     if let Some(reminder) = orch.new_diagnostics_reminder_message().await {
-        history_snapshot.push(reminder);
+        turn_reminders.push(reminder);
     }
 
     // `agent_listing_delta`: per-turn, transient agent catalog reminder, emitted
@@ -455,7 +461,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // only (never `session.history` / JSONL), after the conditional-rules
     // reminder. See [`ConversationOrchestrator::agent_listing_reminder_message`].
     if let Some(reminder) = orch.agent_listing_reminder_message().await {
-        history_snapshot.push(reminder);
+        turn_reminders.push(reminder);
     }
 
     // Finding #73 (batched twin): per-turn, transient `todo_reminder` (V1) /
@@ -472,7 +478,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // turn-loop fixtures byte-identical (default: counters start at 0). See
     // [`ConversationOrchestrator::todo_reminder_message`].
     if let Some(reminder) = orch.todo_reminder_message().await {
-        history_snapshot.push(reminder);
+        turn_reminders.push(reminder);
     }
 
     // async_hook_response (batched twin): fold completed background (`async`)
@@ -481,7 +487,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // wired / nothing completed since the last turn. See
     // [`ConversationOrchestrator::async_hook_response_reminder_message`].
     if let Some(reminder) = orch.async_hook_response_reminder_message().await {
-        history_snapshot.push(reminder);
+        turn_reminders.push(reminder);
     }
 
     // T35 (batched twin — #3 main-loop parity): fold the terminal background
@@ -493,7 +499,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // inject this reminder. `None` when no registry is wired / nothing finished.
     // See [`ConversationOrchestrator::task_notification_reminder_message`].
     if let Some(reminder) = orch.task_notification_reminder_message().await {
-        history_snapshot.push(reminder);
+        turn_reminders.push(reminder);
     }
 
     // P0.1 (batched twin): per-turn, transient `relevant_memories` SURFACING
@@ -506,7 +512,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // when no prefetch is wired / empty result / everything already injected. See
     // [`ConversationOrchestrator::relevant_memory_reminder_message`].
     if let Some(reminder) = orch.relevant_memory_reminder_message().await {
-        history_snapshot.push(reminder);
+        turn_reminders.push(reminder);
     }
 
     // EXPERIMENTAL_SKILL_SEARCH (batched twin): per-turn, transient
@@ -529,6 +535,8 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     //    `PROMPT_TOO_LONG_ERROR_MESSAGE` assistant message instead of bubbling a
     //    hard error.
     let tools = orch.build_wire_tools().await;
+    history_snapshot.extend(turn_reminders.iter().cloned());
+
     if let Some(reminder) = orch.deferred_tools_reminder_message() {
         history_snapshot.insert(0, reminder);
     }
@@ -571,6 +579,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         tools,
         max_tokens_override,
         date_change_reminder,
+        &turn_reminders,
     )
     .await
     {
@@ -1149,6 +1158,14 @@ pub(crate) async fn call_api_with_ptl_recovery(
     // from raw `session.history`, where the transient does not live, so it is
     // re-prepended there — the streaming twin threads it the same way.
     date_change_reminder: Option<ConversationMessage>,
+    // This step's per-turn transient reminders (skill listing, conditional
+    // rules, nested memory, diagnostics, …), already appended to
+    // `history_snapshot`. Computing them ADVANCES session state — sent-sets,
+    // delta trackers, consume-once drains — so they can never be recomputed for
+    // a retry; recomputing returns `None` and the reminder is lost for the rest
+    // of the session. Re-appended below wherever the request is rebuilt from
+    // raw `session.history`.
+    turn_reminders: &[ConversationMessage],
 ) -> Result<PtlCallOutcome, OrchestratorError> {
     // (1) Blocking-limit preempt. `is_at_blocking_limit` is
     // `token_usage >= effective_window − MANUAL_COMPACT_BUFFER_TOKENS`
@@ -1293,6 +1310,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
         if let Some(reminder) = date_change_reminder.clone() {
             truncated.insert(0, reminder);
         }
+        truncated.extend(turn_reminders.iter().cloned());
         match orch
             .api
             .messages_create(model, profile, system, truncated, tools.clone())
@@ -1391,10 +1409,11 @@ pub(crate) async fn call_api_with_ptl_recovery(
                 .await;
                 // PostCompact fires AFTER the transition is applied.
                 orch.fire_post_compact("auto", summary, tokens_freed).await;
-                let history = {
+                let mut history = {
                     let s = orch.session.lock().await;
                     s.history.clone()
                 };
+                history.extend(turn_reminders.iter().cloned());
                 match orch
                     .api
                     .messages_create(model, profile, system, history, tools)

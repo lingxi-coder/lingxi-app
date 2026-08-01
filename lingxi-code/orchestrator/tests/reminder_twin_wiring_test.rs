@@ -50,3 +50,43 @@ fn every_per_turn_reminder_is_injected_by_both_drivers() {
         );
     }
 }
+
+/// Every request assembly must carry THIS step's per-turn reminders.
+///
+/// Computing a reminder advances session state — sent-sets, delta trackers,
+/// consume-once drains — so a retry can never recompute one: it comes back
+/// `None` and the reminder is lost for the rest of the session. Only
+/// `deferred_tools` and `date_change` used to be reused this way; every other
+/// reminder was silently dropped whenever a request was rebuilt from raw
+/// `session.history` (context-overflow recovery, the 529 fallback, the
+/// non-streaming fallback, the PTL truncation retry, the post-compact retry).
+///
+/// Structural, like the check above, and for the same reason: there is no
+/// harness that can drive a real recovery and inspect the retried request. It
+/// pins the invariant "wherever a snapshot is rebuilt, the reminders go back
+/// on", which is exactly what was violated.
+#[test]
+fn every_rebuilt_request_snapshot_re_appends_the_turn_reminders() {
+    const EXTEND: &str = "extend(turn_reminders.iter().cloned())";
+
+    // In the streaming driver each assembly of an outgoing request prepends the
+    // additional-context message, so that count IS the number of assemblies.
+    let assemblies = STREAMING.matches("insert(0, ctx_msg)").count();
+    assert!(assemblies >= 4, "expected the main path plus its recoveries");
+    assert_eq!(
+        STREAMING.matches(EXTEND).count(),
+        assemblies,
+        "every request assembly in the STREAMING driver must re-append this \
+         step's reminders; one that does not silently drops them"
+    );
+
+    // The batched driver assembles once itself and twice more inside
+    // `call_api_with_ptl_recovery` (the truncation retry and the post-compact
+    // retry), both of which rebuild from raw `session.history`.
+    assert_eq!(
+        BATCHED.matches(EXTEND).count(),
+        3,
+        "batched driver: one main assembly plus the two rebuilds inside \
+         call_api_with_ptl_recovery"
+    );
+}

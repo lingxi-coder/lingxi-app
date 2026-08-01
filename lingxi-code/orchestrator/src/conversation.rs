@@ -6464,6 +6464,15 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 // "run gcloud auth ..." is useful advice, "/login" is not. The
                 // 401-vs-other split inside is only decidable because the status
                 // now survives in the message.
+                // `if(qOu()) return UOu` comes FIRST in the oracle: on a
+                // remote session the failure is reported as possibly transient
+                // before anything looks at the credential's source.
+                if crate::api_error_copy::is_remote_session() {
+                    return crate::api_error_copy::AUTH_TRANSIENT.to_string();
+                }
+                // The oracle checks `xn()==="gateway"` next. Skipped: that comes
+                // from a runtime `gatewayAuth` object the port has no equivalent
+                // of, so the branch is unreachable here rather than mis-selected.
                 let route = self
                     .config
                     .error_route

@@ -61,6 +61,17 @@ pub(crate) const INVALID_API_KEY: &str = "Invalid API key \u{b7} Fix external AP
 pub(crate) const AUTH_TRANSIENT: &str =
     "Authentication error \u{b7} This may be a temporary network issue, please try again";
 
+/// Is this a REMOTE session? — oracle `qOu()` = `Yt(process.env.CLAUDE_CODE_REMOTE)`.
+///
+/// Rebranded to `LINGXI_REMOTE`, matching the existing
+/// `tool_ui::push_notification::is_remote` which ports the same predicate. This
+/// is LingXi's OWN runtime flag, unlike the `CLAUDE_CODE_USE_*` provider
+/// variables, which keep their names.
+#[must_use]
+pub(crate) fn is_remote_session() -> bool {
+    traits::env::is_env_truthy(std::env::var("LINGXI_REMOTE").ok().as_deref())
+}
+
 /// Does this error message name the `x-api-key` header?
 ///
 /// The oracle's gate for the whole credential-rejection branch,
@@ -608,6 +619,23 @@ mod tests {
     fn credential_copy_splits_on_where_the_key_came_from() {
         assert_eq!(credential_rejected_text(true), INVALID_API_KEY);
         assert_eq!(credential_rejected_text(false), NOT_LOGGED_IN);
+    }
+
+    /// On a remote session a rejected key is reported as possibly transient,
+    /// BEFORE the source split — the remote host may just have lost the network.
+    #[test]
+    fn a_remote_session_reports_the_failure_as_transient() {
+        let saved = std::env::var("LINGXI_REMOTE").ok();
+        std::env::remove_var("LINGXI_REMOTE");
+        assert!(!is_remote_session());
+        std::env::set_var("LINGXI_REMOTE", "1");
+        assert!(is_remote_session());
+        std::env::set_var("LINGXI_REMOTE", "0");
+        assert!(!is_remote_session(), "`0` is falsy, matching the oracle's `Yt`");
+        match saved {
+            Some(v) => std::env::set_var("LINGXI_REMOTE", v),
+            None => std::env::remove_var("LINGXI_REMOTE"),
+        }
     }
 
     #[test]

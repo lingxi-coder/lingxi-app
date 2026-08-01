@@ -6460,8 +6460,22 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             LlmError::Authentication | LlmError::PermissionDenied
                 if crate::api_error_copy::mentions_api_key_header(&err.to_string()) =>
             {
-                crate::api_error_copy::credential_rejected_text(self.config.external_api_key)
-                    .to_string()
+                // A cloud-hosted route names ITS credential problem instead —
+                // "run gcloud auth ..." is useful advice, "/login" is not. The
+                // 401-vs-other split inside is only decidable because the status
+                // now survives in the message.
+                let route = self
+                    .config
+                    .error_route
+                    .clone()
+                    .unwrap_or_else(crate::api_error_copy::ErrorRouteTag::from_env);
+                crate::api_error_copy::cloud_credential_text(&route, err.http_status())
+                    .unwrap_or_else(|| {
+                        crate::api_error_copy::credential_rejected_text(
+                            self.config.external_api_key,
+                        )
+                        .to_string()
+                    })
             }
             LlmError::ContextOverflow { .. } => {
                 crate::api_error_copy::PROMPT_TOO_LONG.to_string()

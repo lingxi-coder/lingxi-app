@@ -90,6 +90,65 @@ pub(crate) fn credential_rejected_text(external: bool) -> &'static str {
     }
 }
 
+/// Oracle `GOu` / `VOu` / `zOu` / `KOu` — cloud-provider credential failures.
+const AWS_CREDS_EXPIRED: &str = "AWS credentials expired or invalid";
+const AWS_AUTH_FAILED: &str = "AWS authentication failed";
+const GCP_CREDS_EXPIRED: &str = "Google Cloud credentials expired or invalid";
+const GCP_AUTH_FAILED: &str = "Google Cloud authentication failed";
+/// Appended when the AWS failure is NOT a plain 401 — a live credential that
+/// still cannot reach the model is a permissions problem, not an expiry one.
+const AWS_PERMISSIONS_HINT: &str =
+    " \u{b7} if credentials are current, check AWS permissions and model access";
+/// Oracle default for the GCP re-auth command.
+const GCLOUD_ADC_LOGIN: &str = "gcloud auth application-default login";
+
+/// Credential copy for a cloud-hosted route — oracle's AWS branch @230606080
+/// and Google Cloud branch @230606640.
+///
+/// ```js
+/// let c = e.status===401 && (l==="anthropicAws"||l==="mantle"), u = c?GOu:VOu,
+///     d = c ? "" : " \xB7 if credentials are current, check AWS permissions and model access";
+/// // GCP: d = e.status===401, p = d?zOu:KOu, f = ` \xB7 run \`${u}\` and retry`
+/// ```
+///
+/// The 401-vs-other split is only decidable because the status survives into the
+/// message (`llm_client::api_error_status`); before that both collapsed to one
+/// variant and this could not have been ported.
+///
+/// `None` for routes that are not cloud-hosted — the caller falls through to the
+/// credential-rejection copy.
+#[must_use]
+pub(crate) fn cloud_credential_text(route: &ErrorRouteTag, status: Option<u16>) -> Option<String> {
+    let is_401 = status == Some(401);
+    match route {
+        // `anthropicAws` and `mantle` take the expiry wording on a 401; Bedrock
+        // reaches this branch too but never satisfies `l==="anthropicAws"`, so it
+        // always gets the generic failure plus the permissions hint.
+        ErrorRouteTag::AnthropicAws => Some(if is_401 {
+            AWS_CREDS_EXPIRED.to_string()
+        } else {
+            format!("{AWS_AUTH_FAILED}{AWS_PERMISSIONS_HINT}")
+        }),
+        ErrorRouteTag::Other { display } if display == "Bedrock" || display == "Mantle" => {
+            let expiry = is_401 && display == "Mantle";
+            Some(if expiry {
+                AWS_CREDS_EXPIRED.to_string()
+            } else {
+                format!("{AWS_AUTH_FAILED}{AWS_PERMISSIONS_HINT}")
+            })
+        }
+        ErrorRouteTag::AnthropicGoogleCloud => {
+            let head = if is_401 {
+                GCP_CREDS_EXPIRED
+            } else {
+                GCP_AUTH_FAILED
+            };
+            Some(format!("{head} \u{b7} run `{GCLOUD_ADC_LOGIN}` and retry"))
+        }
+        _ => None,
+    }
+}
+
 /// Oracle `LYr` — the billing surface for `LlmError::QuotaExceeded`.
 ///
 /// Rendered BARE: `yu({content:LYr,error:"billing_error"})` carries no
@@ -556,6 +615,49 @@ mod tests {
         assert!(mentions_api_key_header("invalid X-Api-Key header"));
         assert!(mentions_api_key_header("401 {\"error\":\"bad x-api-key\"}"));
         assert!(!mentions_api_key_header("authentication_error"));
+    }
+
+    #[test]
+    fn cloud_credential_copy_splits_on_401() {
+        // anthropicAws: 401 means the credential expired; anything else means it
+        // is live but cannot reach the model.
+        assert_eq!(
+            cloud_credential_text(&ErrorRouteTag::AnthropicAws, Some(401)).unwrap(),
+            "AWS credentials expired or invalid"
+        );
+        assert_eq!(
+            cloud_credential_text(&ErrorRouteTag::AnthropicAws, Some(403)).unwrap(),
+            "AWS authentication failed \u{b7} if credentials are current, check AWS \
+             permissions and model access"
+        );
+        // Bedrock reaches the same branch but never takes the expiry wording:
+        // the oracle's inner test is `l==="anthropicAws"||l==="mantle"`.
+        assert_eq!(
+            cloud_credential_text(
+                &ErrorRouteTag::Other { display: "Bedrock".into() },
+                Some(401)
+            )
+            .unwrap(),
+            "AWS authentication failed \u{b7} if credentials are current, check AWS \
+             permissions and model access"
+        );
+        // GCP always names the re-auth command.
+        assert_eq!(
+            cloud_credential_text(&ErrorRouteTag::AnthropicGoogleCloud, Some(401)).unwrap(),
+            "Google Cloud credentials expired or invalid \u{b7} run \
+             `gcloud auth application-default login` and retry"
+        );
+        assert_eq!(
+            cloud_credential_text(&ErrorRouteTag::AnthropicGoogleCloud, Some(500)).unwrap(),
+            "Google Cloud authentication failed \u{b7} run \
+             `gcloud auth application-default login` and retry"
+        );
+        // A first-party route is not cloud-hosted → the caller falls through.
+        assert!(cloud_credential_text(
+            &ErrorRouteTag::FirstParty { default_endpoint: true, base_url: String::new() },
+            Some(401)
+        )
+        .is_none());
     }
 
     #[test]

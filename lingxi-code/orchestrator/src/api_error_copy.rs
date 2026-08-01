@@ -70,7 +70,6 @@ pub(crate) const PROMPT_TOO_LONG: &str = "Prompt is too long";
 /// not have. Kept (and tested) so the string is already byte-verified when that
 /// plumbing lands — deleting and re-deriving it later is how transcription
 /// errors get in.
-#[allow(dead_code)]
 pub(crate) const SERVER_LIMITING: &str = "Server is temporarily limiting requests (not your usage limit)";
 
 /// Recover the detail clause from a 429 message — oracle:

@@ -6473,9 +6473,25 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 if crate::api_error_copy::is_long_context_credit_message(&source) {
                     crate::api_error_copy::usage_credits_required_for_1m_context(false)
                 } else {
+                    // `let p = i ? le_ : "Request rejected (429)"`.
+                    //
+                    // INFERRED, not read off `eir`'s body: `i = eir(ii())` gates
+                    // three branches here — the 1M-credits clamp, the
+                    // overage-disabled-reason lookup, and this label — all of
+                    // which are subscription concepts, so it reads as "this is a
+                    // claude.ai subscriber". `is_subscriber` is LingXi's
+                    // equivalent and is already threaded from the composition
+                    // root. The distinction matters: telling a subscriber their
+                    // request was "rejected" implies they hit their own limit,
+                    // which is exactly what `le_` exists to deny.
+                    let label = if self.config.is_subscriber {
+                        crate::api_error_copy::SERVER_LIMITING
+                    } else {
+                        crate::api_error_copy::REQUEST_REJECTED_429
+                    };
                     crate::api_error_copy::rate_limited_text(
                         &source,
-                        crate::api_error_copy::REQUEST_REJECTED_429,
+                        label,
                         &crate::api_error_copy::capacity_fallback(Some(
                             &self
                                 .config

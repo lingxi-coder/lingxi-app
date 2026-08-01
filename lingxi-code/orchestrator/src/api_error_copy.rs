@@ -72,6 +72,33 @@ pub(crate) fn is_remote_session() -> bool {
     traits::env::is_env_truthy(std::env::var("LINGXI_REMOTE").ok().as_deref())
 }
 
+/// Oracle `uir` — the interactive form of the revoked-token surface.
+const OAUTH_TOKEN_REVOKED: &str = "OAuth token revoked \u{b7} Please run /login";
+
+/// Oracle's non-interactive form, where `/login` is not something the caller can
+/// run, so it names the administrator instead.
+const OAUTH_REVOKED_NON_INTERACTIVE: &str =
+    "Your account does not have access to Claude. Please login again or contact your administrator.";
+
+/// Oracle `Uke` — `status===403 && message.includes("OAuth token has been revoked")`.
+///
+/// Both halves matter: a 403 alone is an ordinary permission failure, and the
+/// phrase alone could appear in unrelated text.
+#[must_use]
+pub(crate) fn is_oauth_revoked(status: Option<u16>, message: &str) -> bool {
+    status == Some(403) && message.contains("OAuth token has been revoked")
+}
+
+/// Oracle `ue_()` — the revoked-token copy, split on interactivity.
+#[must_use]
+pub(crate) fn oauth_revoked_text(interactive: bool) -> &'static str {
+    if interactive {
+        OAUTH_TOKEN_REVOKED
+    } else {
+        OAUTH_REVOKED_NON_INTERACTIVE
+    }
+}
+
 /// Does this error message name the `x-api-key` header?
 ///
 /// The oracle's gate for the whole credential-rejection branch,
@@ -636,6 +663,30 @@ mod tests {
             Some(v) => std::env::set_var("LINGXI_REMOTE", v),
             None => std::env::remove_var("LINGXI_REMOTE"),
         }
+    }
+
+    #[test]
+    fn the_oauth_revoked_gate_needs_both_halves() {
+        assert!(is_oauth_revoked(Some(403), "403 OAuth token has been revoked"));
+        // A 403 alone is an ordinary permission failure.
+        assert!(!is_oauth_revoked(Some(403), "403 forbidden"));
+        // The phrase alone, on another status, is not this case.
+        assert!(!is_oauth_revoked(Some(401), "OAuth token has been revoked"));
+        assert!(!is_oauth_revoked(None, "OAuth token has been revoked"));
+    }
+
+    #[test]
+    fn the_revoked_copy_splits_on_interactivity() {
+        assert_eq!(
+            oauth_revoked_text(true),
+            "OAuth token revoked \u{b7} Please run /login"
+        );
+        // Non-interactive callers cannot run /login, so it names the admin.
+        assert_eq!(
+            oauth_revoked_text(false),
+            "Your account does not have access to Claude. Please login again or \
+             contact your administrator."
+        );
     }
 
     #[test]

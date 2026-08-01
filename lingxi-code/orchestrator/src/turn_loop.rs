@@ -1236,7 +1236,39 @@ pub(crate) async fn call_api_with_ptl_recovery(
     // `ProviderApiAdapter`, which handles the 529-triggered switch internally.
     // With NO fallback configured the plain `messages_create` seam is taken,
     // byte-identical to before — locked turn-loop fixtures are unaffected.
-    let first = if let Some(max_tokens) = max_tokens_override {
+    // Context-hint negotiation (oracle `e1y`): offer the server a compact we
+    // could perform, and act on a 422/424 asking us to. `None` unless BOTH the
+    // route allows first-party betas and the controller's own env gate is on —
+    // and the latter is off by default because the oracle's server-delivered
+    // `tengu_hazel_osprey` is false. So this is inert on every ordinary turn.
+    //
+    // `repl_main_thread` is this driver by definition: `call_api_with_ptl_recovery`
+    // is the MAIN turn's API seam. Subagents and side queries run their own
+    // paths and never reach here, which is what the oracle's querySource prefix
+    // check expresses.
+    let mut hint_controller = compaction::context_hint::create_context_hint_controller(
+        orch.config.include_first_party_betas,
+        "repl_main_thread",
+    );
+    let hint_params = hint_controller
+        .as_mut()
+        .and_then(|c| c.build_request_params(&history_snapshot));
+
+    let first = if let Some(params) = hint_params {
+        // The controller is live: take the hint-carrying seam. `params.body` is
+        // `None` when the estimated savings are under the floor — the oracle
+        // still sends the beta in that case and omits only the body.
+        orch.api
+            .messages_create_with_context_hint(
+                model,
+                profile,
+                system,
+                history_snapshot,
+                tools.clone(),
+                params.body,
+            )
+            .await
+    } else if let Some(max_tokens) = max_tokens_override {
         // REC.A1 escalated single-shot (TS `query.ts:1199-1221`): re-issue with
         // the override `max_tokens` (8k→64k). The escalation is orthogonal to the
         // Opus-fallback gate, so it takes the plain `_with_opts` seam regardless
@@ -1283,7 +1315,46 @@ pub(crate) async fn call_api_with_ptl_recovery(
     let token_gap: u64 = match first {
         Ok(resp) => return Ok(PtlCallOutcome::Response(Box::new(resp))),
         Err(LlmError::ContextOverflow { token_gap }) => token_gap,
-        Err(other) => return Err(other.into()),
+        Err(other) => {
+            // Context-hint error half (oracle `onRequestError`). A 422/424 is
+            // the server asking for the compact we offered: apply the edits and
+            // re-issue ONCE. Every other outcome (beta unsupported, 409, 529)
+            // falls through to the normal error return, exactly as the oracle
+            // does — those branches edit nothing.
+            //
+            // The status is recoverable because the decoder writes it into the
+            // message (`providers::api_error_message`); before that, a 422 and a
+            // 400 were the same `LlmError`.
+            if let Some(c) = hint_controller.as_mut() {
+                let facts = compaction::context_hint::HttpErrorFacts::from_error(&other);
+                // Re-snapshot rather than clone the history up front: the
+                // snapshot was moved into the call, and every other recovery
+                // path here rebuilds the same way.
+                let history = {
+                    let s = orch.session.lock().await;
+                    s.history.clone()
+                };
+                if let compaction::context_hint::HintErrorOutcome::Reject(edits, _event) =
+                    c.on_request_error(&facts, history)
+                {
+                    let mut retry = edits.messages.clone();
+                    {
+                        let mut s = orch.session.lock().await;
+                        s.history.clone_from(&edits.messages);
+                    }
+                    retry.extend(turn_reminders.iter().cloned());
+                    return match orch
+                        .api
+                        .messages_create(model, profile, system, retry, tools.clone())
+                        .await
+                    {
+                        Ok(resp) => Ok(PtlCallOutcome::Response(Box::new(resp))),
+                        Err(e) => Err(e.into()),
+                    };
+                }
+            }
+            return Err(other.into());
+        }
     };
 
     // (3) PTL retry loop: drop oldest API-round groups and retry, ≤ MAX retries.

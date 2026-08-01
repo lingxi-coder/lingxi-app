@@ -80,13 +80,20 @@ fn every_rebuilt_request_snapshot_re_appends_the_turn_reminders() {
          step's reminders; one that does not silently drops them"
     );
 
-    // The batched driver assembles once itself and twice more inside
-    // `call_api_with_ptl_recovery` (the truncation retry and the post-compact
-    // retry), both of which rebuild from raw `session.history`.
+    // The batched driver assembles once itself and three times more inside
+    // `call_api_with_ptl_recovery` — the truncation retry, the post-compact
+    // retry, and the context-hint reject retry — each rebuilding from raw
+    // `session.history`.
+    //
+    // This count is a tripwire, not a fact about the code: when it fires, the
+    // question is "did the new rebuild site re-append?" A new site that DOES is
+    // a legitimate bump (the context-hint retry was); a new site that does NOT
+    // is the bug this test exists to catch, and bumping the number to silence
+    // it defeats the whole check.
     assert_eq!(
         BATCHED.matches(EXTEND).count(),
-        3,
-        "batched driver: one main assembly plus the two rebuilds inside \
+        4,
+        "batched driver: one main assembly plus the three rebuilds inside \
          call_api_with_ptl_recovery"
     );
 }

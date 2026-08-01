@@ -170,6 +170,20 @@ pub struct OrchestratorConfig {
     /// construction.
     #[serde(default)]
     pub is_enterprise: bool,
+    /// Whether this route may carry claude-code's FIRST-PARTY beta headers.
+    ///
+    /// Gates the context-hint negotiation
+    /// (`compaction::context_hint::create_context_hint_controller`), whose
+    /// oracle returns no controller at all without it. Custom Anthropic-wire
+    /// gateways understand the stable Messages schema but must never inherit a
+    /// private first-party beta, which is the same rule
+    /// `service::direct_anthropic_api_route` enforces one layer down.
+    ///
+    /// `false` by default, so the negotiation is inert unless a composition
+    /// root opts in — on top of the controller's own env gate, which is also
+    /// off by default because the ORACLE's `tengu_hazel_osprey` is.
+    #[serde(default)]
+    pub include_first_party_betas: bool,
 
     /// OUTSTYLE.2: the active output-style name from `settings.outputStyle`
     /// (TS types it `z.string()`). `None` / `"default"` → no style section;
@@ -347,6 +361,7 @@ impl Default for OrchestratorConfig {
             token_budget: None,
             is_subscriber: false,
             is_enterprise: false,
+            include_first_party_betas: false,
             output_style: None,
             output_style_dirs: Vec::new(),
             max_budget_nano_usd: None,
@@ -405,6 +420,7 @@ mod tests {
             token_budget: Some(500_000),
             is_subscriber: true,
             is_enterprise: true,
+            include_first_party_betas: false,
             output_style: Some("Explanatory".into()),
             output_style_dirs: vec![std::path::PathBuf::from("/home/u/.lingxi/output-styles")],
             max_budget_nano_usd: Some(5_000_000_000),

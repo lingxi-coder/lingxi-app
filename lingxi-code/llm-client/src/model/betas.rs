@@ -75,6 +75,12 @@ pub const EFFORT: &str = "effort-2025-11-24";
 pub const TASK_BUDGETS: &str = "task-budgets-2026-03-13";
 /// Prompt-caching scope control (`fYe`, experimental).
 pub const PROMPT_CACHING_SCOPE: &str = "prompt-caching-scope-2026-01-05";
+/// Context-hint negotiation (`_9i`, per-request `context_hint` body key).
+///
+/// Gated OFF by default at the caller — the oracle's `tengu_hazel_osprey` is
+/// false in the binary AND server-delivered as false, so this header only ever
+/// goes out when a host explicitly opts in.
+pub const CONTEXT_HINT: &str = "context-hint-2026-04-09";
 /// Fast-mode / `speed: "fast"` (`AYe`, per-request).
 pub const FAST_MODE: &str = "fast-mode-2026-02-01";
 /// Redact thinking-block output (`Zvt`, experimental ∧ thinking ∧ interactive).
@@ -165,6 +171,9 @@ pub struct BetaContext {
     /// Request uses ToolSearch/deferred schemas. Appends the first-party
     /// `advanced-tool-use` beta after the ordinary model betas.
     pub tool_search: bool,
+    /// The request body sets `context_hint`. Gates the [`CONTEXT_HINT`] beta.
+    /// Defaults to `false`.
+    pub context_hint: bool,
 }
 
 impl BetaContext {
@@ -179,6 +188,7 @@ impl BetaContext {
             fast_mode: false,
             effort: false,
             tool_search: false,
+            context_hint: false,
         }
     }
 
@@ -214,6 +224,13 @@ impl BetaContext {
     #[must_use]
     pub fn with_tool_search(mut self, on: bool) -> Self {
         self.tool_search = on;
+        self
+    }
+
+    /// Set [`Self::context_hint`] — the request body carries `context_hint`.
+    #[must_use]
+    pub fn with_context_hint(mut self, on: bool) -> Self {
+        self.context_hint = on;
         self
     }
 
@@ -338,6 +355,10 @@ fn first_party_betas(ctx: &BetaContext) -> Vec<&'static str> {
     // Per-feature: effort when the request sets output_config.effort.
     if ctx.effort {
         betas.push(EFFORT);
+    }
+    // Per-feature: context-hint when the request sets the `context_hint` key.
+    if ctx.context_hint {
+        betas.push(CONTEXT_HINT);
     }
     // claude.ts appends the provider-specific tool-search header after the
     // ordinary model/request beta list once `useToolSearch` is resolved.
@@ -531,6 +552,7 @@ mod tests {
         assert_eq!(ADVANCED_TOOL_USE_1P, "advanced-tool-use-2025-11-20");
         assert_eq!(TOOL_SEARCH_TOOL_3P, "tool-search-tool-2025-10-19");
         assert_eq!(EFFORT, "effort-2025-11-24");
+        assert_eq!(CONTEXT_HINT, "context-hint-2026-04-09");
         assert_eq!(TASK_BUDGETS, "task-budgets-2026-03-13");
         assert_eq!(PROMPT_CACHING_SCOPE, "prompt-caching-scope-2026-01-05");
         assert_eq!(FAST_MODE, "fast-mode-2026-02-01");
@@ -792,6 +814,26 @@ mod tests {
                 "Bedrock must not carry {excluded}; got: {h}"
             );
         }
+    }
+
+    /// The `context_hint` body key must actually light its beta header.
+    ///
+    /// Without this, deleting the push compiles and every other test passes —
+    /// the request would carry the body key and no header, which the server
+    /// rejects as an unknown field rather than negotiating.
+    #[test]
+    fn context_hint_body_lights_the_beta_header() {
+        let model = "claude-opus-4-6";
+        let off = first_party_betas(&BetaContext::for_model(model));
+        assert!(
+            !off.contains(&CONTEXT_HINT),
+            "no `context_hint` in the body ⇒ no beta: {off:?}"
+        );
+        let on = first_party_betas(&BetaContext::for_model(model).with_context_hint(true));
+        assert!(
+            on.contains(&CONTEXT_HINT),
+            "`context_hint` in the body ⇒ the beta rides along: {on:?}"
+        );
     }
 
     #[test]

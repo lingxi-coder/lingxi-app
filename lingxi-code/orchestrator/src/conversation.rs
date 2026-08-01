@@ -62,6 +62,30 @@ pub trait OrchestratorApiClient: Send + Sync {
         tools: Vec<serde_json::Value>,
     ) -> Result<LlmResponse, LlmError>;
 
+    /// Non-streaming `messages.create` carrying a `context_hint` offer.
+    ///
+    /// The DEFAULT body delegates to [`Self::messages_create`], DROPPING the
+    /// hint — so every mock and non-Anthropic impl compiles unchanged and the
+    /// negotiation is a strict no-op there. Only [`ProviderApiAdapter`]
+    /// overrides it. Same shape as [`Self::messages_create_with_opts`] and for
+    /// the same reason: this trait has 13 implementors and is extended by
+    /// defaulted methods, never by signature changes.
+    ///
+    /// The turn loop calls this ONLY when the context-hint controller is active
+    /// (gated off by default); otherwise it stays on [`Self::messages_create`].
+    async fn messages_create_with_context_hint(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&str>,
+        msgs: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        _context_hint: Option<serde_json::Value>,
+    ) -> Result<LlmResponse, LlmError> {
+        self.messages_create(model, profile, system, msgs, tools)
+            .await
+    }
+
     /// Non-streaming `messages.create` with an explicit `max_tokens` override
     /// (REC.A1 8k→64k escalation, TS `query.ts:1199-1221`). The turn loop calls
     /// this ONLY when a prior `max_tokens` recovery armed

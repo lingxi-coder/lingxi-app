@@ -257,6 +257,11 @@ fn base_body(request: &LlmRequest) -> Result<serde_json::Map<String, Value>, Llm
             oc.insert("effort".to_string(), effort.clone());
         }
     }
+    if let Some(hint) = &request.context_hint {
+        // claude-code `context_hint: {enabled, target_tokens_saved?}` — the
+        // offer the server may reject with 422/424 to ask for a compact.
+        body.insert("context_hint".to_string(), hint.clone());
+    }
     if let Some(speed) = &request.speed {
         // claude-code fast mode: the top-level `speed` body key (read back by
         // `service::beta_context` to add the fast-mode beta). First-party only.

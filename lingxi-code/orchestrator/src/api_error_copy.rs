@@ -52,6 +52,13 @@ const USAGE_SETTINGS_URL: &str = "claude.ai/settings/usage?from=cc_cli_limit_mes
 /// Oracle `le_` — the first-party variant of the rejection label, used instead
 /// of `Request rejected (429)` when the limit is the server's rather than the
 /// account's.
+///
+/// Not selected yet: choosing between this and [`REQUEST_REJECTED_429`] needs
+/// the provider-route signal the oracle's `i` carries, which this layer does
+/// not have. Kept (and tested) so the string is already byte-verified when that
+/// plumbing lands — deleting and re-deriving it later is how transcription
+/// errors get in.
+#[allow(dead_code)]
 pub(crate) const SERVER_LIMITING: &str = "Server is temporarily limiting requests (not your usage limit)";
 
 /// Recover the detail clause from a 429 message — oracle:

@@ -11547,7 +11547,12 @@ DO NOT mention this to the user explicitly because they are already aware.\n</sy
     /// read-permission check on the TRIGGER file. LingXi's permission context
     /// is not plumbed to this layer, and the trigger is by construction a file
     /// a tool already read, so the gate would be a no-op here. Not invented.
-    pub(crate) async fn nested_memory_reminder_message(&self) -> Option<ConversationMessage> {
+    ///
+    /// `pub` (unlike its `pub(crate)` siblings) only so `test-harness` can drive
+    /// it against a real `FileReadTool`: `orchestrator` does not depend on
+    /// `tool-file`, so the end-to-end seed-then-dedup proof cannot live here.
+    /// Both turn drivers are still the only production callers.
+    pub async fn nested_memory_reminder_message(&self) -> Option<ConversationMessage> {
         // Same env kill-switch the eager loader honors (`Rop`'s
         // `CLAUDE_CODE_DISABLE_CLAUDE_MDS` guard). ANY non-empty value disables.
         if std::env::var_os("LINGXI_DISABLE_LINGXI_MDS").is_some_and(|v| !v.is_empty()) {
@@ -11568,7 +11573,19 @@ DO NOT mention this to the user explicitly because they are already aware.\n</sy
                 Some(memory::lingxi_md::hierarchy::managed_path()),
             ),
         };
-        let cwd = self.session_cwd.cwd();
+        // CANONICAL cwd, not the raw one. `split_ancestors` decides "is the
+        // touched file under cwd" with a prefix test, and the two sides reach
+        // it in different forms: `read_state_map` keys are whatever
+        // `canonicalize_and_validate` produced, while `session_cwd` is whatever
+        // the user launched in. On macOS that is `/private/var/...` against
+        // `/var/...`, so every touched file looks OUTSIDE cwd and nothing is
+        // ever discovered. The oracle has no such split (its `Li` is purely
+        // lexical, so both halves agree); LingXi has to normalize on ONE side,
+        // and cwd is the side that makes every derived path match the registry
+        // the seed writes to. Falls back to the raw cwd if it does not exist.
+        let cwd = tokio::fs::canonicalize(self.session_cwd.cwd())
+            .await
+            .unwrap_or_else(|_| self.session_cwd.cwd());
 
         let mut surfaced: Vec<crate::prompt::MemoryFile> = Vec::new();
         {

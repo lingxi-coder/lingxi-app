@@ -67,6 +67,7 @@ telemetry = { path = "../telemetry" }
 # Used by the M3-02 Phase 11 parity drivers (memory_loading + memory_relevance)
 # to exercise `claude_md::hierarchy::walk` + `memdir::find::find_relevant`
 # against fixed reference fixtures. Dev-only.
+branding = { path = "../branding" }
 memory = { path = "../memory" }
 filetime = "0.2"
 # Used by the M3-04 Phase 10 parity driver (oauth_pkce_refresh) to exercise

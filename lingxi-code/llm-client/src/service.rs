@@ -1760,8 +1760,12 @@ impl ApiService {
     /// | *(llm-client only)*    | `UnsupportedCapability`            | `"unsupported_capability"` |
     fn error_kind(err: &LlmError) -> &'static str {
         match err {
-            // "unauthorized" — api-client `Unauthorized(_) => "unauthorized"` (:1153)
-            LlmError::Authentication | LlmError::PermissionDenied => "unauthorized",
+            // "unauthorized" — api-client `Unauthorized(_) => "unauthorized"` (:1153).
+            // A dead OAuth session is an auth failure like any other here; it
+            // differs only in the copy the orchestrator renders for it.
+            LlmError::Authentication
+            | LlmError::OAuthRefreshDead
+            | LlmError::PermissionDenied => "unauthorized",
             // "server" — api-client `Server { .. } => "server"` (:1157)
             LlmError::ProviderInternal => "server",
             // "http" — api-client `Http(_) => "http"` (:1146)
@@ -2135,7 +2139,11 @@ impl ApiService {
             LlmError::ModelUnavailable => Some(404),
             LlmError::ProviderInternal => Some(500),
             LlmError::Overloaded { .. } => Some(529),
-            LlmError::Transport { .. }
+            // No HTTP status: the request never reached the model API. The
+            // refresh call to the IdP failed locally, so inventing a 401 here
+            // would put a status in the transcript that no server ever sent.
+            LlmError::OAuthRefreshDead
+            | LlmError::Transport { .. }
             | LlmError::TlsCert { .. }
             | LlmError::StreamInterrupted { .. }
             | LlmError::CostUnavailable { .. }

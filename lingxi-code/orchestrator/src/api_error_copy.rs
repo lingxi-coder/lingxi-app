@@ -145,11 +145,26 @@ pub(crate) fn api_key_auth_disabled_text(
     format!("{ORG_DISABLED_PREFIX} \u{b7} {tail}")
 }
 
-/// Oracle `uir` — the interactive form of the revoked-token surface.
-const OAUTH_TOKEN_REVOKED: &str = "OAuth token revoked \u{b7} Please run /login";
+/// The auth command this product actually tells users to run.
+///
+/// ⚠️ **DELIBERATE DIVERGENCE from the oracle — do not "align" it back.**
+/// claude-code says `/login`, which is Anthropic-specific. LingXi is a
+/// MULTI-PROVIDER product, so every user-facing auth instruction names the
+/// provider-neutral `/connect` instead. User decision, 2026-08-01.
+///
+/// A byte-parity audit will flag every string below as divergent; that is the
+/// intended state. Record it as Divergence(multi-provider), not a gap.
+pub(crate) const AUTH_COMMAND: &str = "/connect";
 
-/// Oracle's non-interactive form, where `/login` is not something the caller can
-/// run, so it names the administrator instead.
+/// Oracle `uir` — the interactive form of the revoked-token surface.
+///
+/// ⚠️ DELIBERATE DIVERGENCE — see [`AUTH_COMMAND`]. The oracle's bytes are
+/// `OAuth token revoked \xB7 Please run /login`.
+const OAUTH_TOKEN_REVOKED: &str = "OAuth token revoked \u{b7} Please run /connect";
+
+/// Oracle's non-interactive form, where the auth command is not something the
+/// caller can run, so it names the administrator instead. Names no command, so
+/// it is byte-identical to the oracle.
 const OAUTH_REVOKED_NON_INTERACTIVE: &str =
     "Your account does not have access to Claude. Please login again or contact your administrator.";
 
@@ -169,6 +184,36 @@ pub(crate) fn oauth_revoked_text(interactive: bool) -> &'static str {
         OAUTH_TOKEN_REVOKED
     } else {
         OAUTH_REVOKED_NON_INTERACTIVE
+    }
+}
+
+/// Oracle `se_` — the interactive form of the dead-refresh-token surface.
+///
+/// ⚠️ DELIBERATE DIVERGENCE — see [`AUTH_COMMAND`]. The oracle's bytes are
+/// `Login expired \xB7 Please run /login`.
+const LOGIN_EXPIRED: &str = "Login expired \u{b7} Please run /connect";
+
+/// Oracle's non-interactive twin, taken from the same render site
+/// (`_n() ? … : se_`): a caller with no TTY cannot run the auth command, so the
+/// copy states what happened instead of giving an instruction it cannot follow.
+/// This half names no command, so it is byte-identical to the oracle.
+const LOGIN_EXPIRED_NON_INTERACTIVE: &str =
+    "Failed to authenticate: OAuth session expired and could not be refreshed";
+
+/// Oracle's `e instanceof qQt` render arm, split on interactivity.
+///
+/// `qQt` is a distinct error CLASS (`OAuthRefreshDeadError`, "OAuth refresh
+/// token is no longer valid; run /login to re-authenticate"), not a message
+/// match — so the port keys on a distinct [`LlmError`] variant rather than
+/// sniffing text. It fires only when the IdP actually REJECTED the refresh
+/// token: a stale token hash or an unreachable IdP are different failures and
+/// must not tell the user their login expired.
+#[must_use]
+pub(crate) fn oauth_refresh_dead_text(interactive: bool) -> &'static str {
+    if interactive {
+        LOGIN_EXPIRED
+    } else {
+        LOGIN_EXPIRED_NON_INTERACTIVE
     }
 }
 
@@ -803,14 +848,34 @@ mod tests {
     #[test]
     fn the_revoked_copy_splits_on_interactivity() {
         assert_eq!(
+            // `/connect`, NOT the oracle's `/login` — deliberate
+            // multi-provider divergence, see `AUTH_COMMAND`.
             oauth_revoked_text(true),
-            "OAuth token revoked \u{b7} Please run /login"
+            "OAuth token revoked \u{b7} Please run /connect"
         );
         // Non-interactive callers cannot run /login, so it names the admin.
         assert_eq!(
             oauth_revoked_text(false),
             "Your account does not have access to Claude. Please login again or \
              contact your administrator."
+        );
+    }
+
+    #[test]
+    fn the_login_expired_copy_splits_on_interactivity() {
+        // Oracle `se_` @230618923, verified in the binary in ESCAPED form
+        // (`\xB7`) — a literal `·` grep against the binary returns zero.
+        // The command is `/connect`, not the oracle's `/login`: deliberate
+        // multi-provider divergence, see `AUTH_COMMAND`.
+        assert_eq!(
+            oauth_refresh_dead_text(true),
+            "Login expired \u{b7} Please run /connect"
+        );
+        // Oracle's `_n()` branch: a non-interactive caller cannot run /login,
+        // so it states the fact instead of giving an unusable instruction.
+        assert_eq!(
+            oauth_refresh_dead_text(false),
+            "Failed to authenticate: OAuth session expired and could not be refreshed"
         );
     }
 

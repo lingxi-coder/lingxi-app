@@ -24,6 +24,9 @@ impl RetryPolicy {
             // just burns the budget).
             LlmError::TlsCert { .. }
             | LlmError::Authentication
+            // The IdP rejected the refresh token: no number of retries will
+            // make it valid again, and each one burns the budget.
+            | LlmError::OAuthRefreshDead
             | LlmError::PermissionDenied
             | LlmError::InvalidRequest { .. }
             | LlmError::QuotaExceeded

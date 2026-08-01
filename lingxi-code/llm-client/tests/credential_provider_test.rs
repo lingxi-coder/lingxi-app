@@ -162,8 +162,17 @@ async fn load_refreshes_expired_token_single_flight() {
     );
 }
 
+/// `FailingTransport` answers the refresh with `401 {"error":"invalid_grant"}`
+/// — the IdP REJECTING the stored refresh token, which is the real dead-session
+/// case. It must surface as [`LlmError::OAuthRefreshDead`] so the orchestrator
+/// can render "Login expired" instead of the generic auth text.
+///
+/// This assertion changed deliberately on 2026-08-01: it previously expected
+/// `Authentication`, back when `credential_provider` collapsed all three
+/// `OAuthHookError` variants into one and a dead session was indistinguishable
+/// from a transient network failure.
 #[tokio::test]
-async fn refresh_failure_maps_to_authentication_error() {
+async fn a_rejected_refresh_token_maps_to_the_dead_oauth_session_error() {
     let provider = OAuthCredentialProvider::new(expired_driver_fail());
 
     let err = provider
@@ -175,7 +184,7 @@ async fn refresh_failure_maps_to_authentication_error() {
         .expect_err("must fail");
 
     assert!(
-        matches!(err, LlmError::Authentication),
-        "expected LlmError::Authentication, got {err:?}"
+        matches!(err, LlmError::OAuthRefreshDead),
+        "expected LlmError::OAuthRefreshDead, got {err:?}"
     );
 }

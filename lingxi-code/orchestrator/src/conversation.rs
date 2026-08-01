@@ -633,6 +633,11 @@ pub(crate) fn classify_api_error(e: &OrchestratorError) -> ApiErrorEnvelope {
             LlmError::Authentication => (Some("authentication_failed"), Some(401)),
             // 403 → "authentication_failed".
             LlmError::PermissionDenied => (Some("authentication_failed"), Some(403)),
+            // Dead OAuth session (`e instanceof qQt`) → the oracle renders it
+            // with `yu({error:"authentication_failed"})` and passes NO status:
+            // the refresh call failed against the IdP, so there is no
+            // `APIError` status to carry. Omit rather than invent a 401.
+            LlmError::OAuthRefreshDead => (Some("authentication_failed"), None),
             // Billing (`Fio`) is an Error-message match in `Flp`, not a status
             // branch → category only, no `apiErrorStatus`.
             LlmError::QuotaExceeded => (Some("billing_error"), None),
@@ -6449,6 +6454,14 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // "quota exceeded" and "context overflow".
             LlmError::QuotaExceeded => {
                 crate::api_error_copy::CREDIT_BALANCE_TOO_LOW.to_string()
+            }
+            // Dead OAuth session (`e instanceof qQt`): the IdP REJECTED the
+            // stored refresh token, so no retry can help and only a fresh
+            // sign-in will. Keyed on the variant, mirroring the oracle's
+            // instanceof check rather than sniffing message text.
+            LlmError::OAuthRefreshDead => {
+                crate::api_error_copy::oauth_refresh_dead_text(self.config.interactive_session)
+                    .to_string()
             }
             // Revoked OAuth token (`Uke`): a 403 whose message names it. Checked
             // BEFORE the x-api-key branch, matching the oracle's order, and
@@ -20875,6 +20888,46 @@ mod main_thread_agent_tests {
                     .map(str::to_string)
             })
             .collect()
+    }
+
+    /// A dead OAuth session must actually REACH the user as "Login expired",
+    /// not as the variant's bare `Display`. This is the wiring half of
+    /// `api_error_copy::oauth_refresh_dead_text` — the copy constants have their
+    /// own byte-exact tests, but a `match` arm that is never taken renders
+    /// nothing, and a unit test of the constant cannot detect that.
+    #[tokio::test]
+    async fn a_dead_oauth_session_renders_the_login_expired_copy() {
+        let mut config = OrchestratorConfig::default();
+        config.interactive_session = true;
+        let orch = orch_with_config(config);
+        assert_eq!(
+            orch.model_error_text(&LlmError::OAuthRefreshDead).await,
+            "Login expired \u{b7} Please run /connect"
+        );
+
+        // Same error, no TTY: the copy must stop naming a command the caller
+        // cannot run.
+        let mut headless = OrchestratorConfig::default();
+        headless.interactive_session = false;
+        let orch = orch_with_config(headless);
+        assert_eq!(
+            orch.model_error_text(&LlmError::OAuthRefreshDead).await,
+            "Failed to authenticate: OAuth session expired and could not be refreshed"
+        );
+    }
+
+    /// The sibling failures must NOT claim the login expired: a plain auth
+    /// failure keeps its own text, so the new arm cannot swallow them.
+    #[tokio::test]
+    async fn an_ordinary_auth_failure_is_not_reported_as_an_expired_login() {
+        let mut config = OrchestratorConfig::default();
+        config.interactive_session = true;
+        let orch = orch_with_config(config);
+        let text = orch.model_error_text(&LlmError::Authentication).await;
+        assert!(
+            !text.contains("Login expired"),
+            "a generic auth failure must not be rendered as an expired login: {text}"
+        );
     }
 
     /// A resolved `--agent` with a prompt REPLACES the assembled default system

@@ -8,6 +8,17 @@ pub enum LlmError {
     /// Authentication failed or credentials are missing/invalid.
     #[error("authentication failed")]
     Authentication,
+    /// The stored OAuth refresh token was REJECTED by the IdP — the session is
+    /// dead and only a fresh `/login` can revive it.
+    ///
+    /// Parity: claude-code models this as a distinct error class
+    /// (`OAuthRefreshDeadError`, minified `qQt`) rather than a flavour of
+    /// [`Self::Authentication`], and renders it with its own copy ("Login
+    /// expired · Please run /login"). Kept a separate variant here for the same
+    /// reason: a stale token hash or an unreachable IdP are also refresh
+    /// failures, but neither means the user has to log in again.
+    #[error("oauth session expired")]
+    OAuthRefreshDead,
     /// Caller is authenticated but not allowed to perform the request.
     #[error("permission denied")]
     PermissionDenied,

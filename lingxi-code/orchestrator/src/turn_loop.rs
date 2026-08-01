@@ -426,6 +426,18 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         history_snapshot.push(reminder);
     }
 
+    // Nested memory (`k$o` / `Rop`): the LINGXI.md governing the directory of a
+    // file the session has touched. Appended to THIS call's OUTGOING snapshot
+    // only (never `session.history` / JSONL), directly AFTER conditional rules
+    // — the order matters, because a `paths:`-gated rule claimed there is
+    // skipped here via the shared `sent_conditional_rules` set, so running the
+    // two the other way round would change which mechanism reports the rule.
+    // `None` when nothing has been touched / no ancestor memory / everything
+    // already sent. See [`ConversationOrchestrator::nested_memory_reminder_message`].
+    if let Some(reminder) = orch.nested_memory_reminder_message().await {
+        history_snapshot.push(reminder);
+    }
+
     // Per-turn, transient `<new-diagnostics>` reminder — newly-reported LSP
     // diagnostics not yet surfaced (claude-code `formatDiagnosticsBlock`).
     // Appended to THIS call's OUTGOING snapshot only. `None` when no LSP source

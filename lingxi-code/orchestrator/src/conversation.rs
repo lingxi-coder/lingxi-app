@@ -1542,6 +1542,33 @@ pub struct ConversationOrchestrator {
     /// and never re-injected on later turns. 1:1 with TS `loadedNestedMemoryPaths`
     /// (attachments.ts:1722-1732 — a non-evicting Set keyed by rule path).
     pub(crate) sent_conditional_rules: Mutex<std::collections::HashSet<std::path::PathBuf>>,
+    /// Nested-memory sent-tracking — 1:1 with the oracle's
+    /// `loadedNestedMemoryPaths` as `k$o` (@237714543) uses it:
+    /// `if(t.loadedNestedMemoryPaths?.[i.path])continue`. Session-lifetime and
+    /// non-evicting, so each discovered memory file is surfaced ONCE.
+    ///
+    /// This is the ONLY dedup state the feature keeps.
+    /// [`crate::prompt::nested_memory::discover`] is deliberately stateless
+    /// (the oracle's `seen` is per-call), so a `LINGXI.md` written mid-session
+    /// is still found — it is this set, not the walk, that stops re-sending.
+    ///
+    /// NOT cleared on a worktree swap, unlike
+    /// [`Self::conditional_rules_cache`]: that is a CACHE (stale after a swap),
+    /// while this is a record of what the model has already been told, which a
+    /// change of cwd does not undo.
+    pub(crate) sent_nested_memory: Mutex<std::collections::HashSet<std::path::PathBuf>>,
+    /// Test-only override for the two filesystem roots nested-memory discovery
+    /// needs: `(home, managed_dir)`. `None` (production) resolves them exactly
+    /// as `RealMemoryHierarchyProvider::load` does — `dirs::home_dir()` and
+    /// `hierarchy::managed_path()`.
+    ///
+    /// Discovery probes `<home>/<config-dir>/rules` on every call, so without
+    /// an override a test would read the developer's REAL user memory and its
+    /// result would depend on the machine it ran on. Mirrors
+    /// `StaticMemoryProvider`'s role for the eager block. Set via
+    /// [`Self::with_nested_memory_roots`].
+    pub(crate) nested_memory_roots:
+        Option<(std::path::PathBuf, Option<std::path::PathBuf>)>,
     /// SKILLLIST.1 delta: skill names already emitted in a prior turn's
     /// `skill_listing` reminder. Turn-0 emits the FULL listing; later turns emit
     /// ONLY newly-appeared skills (mirrors TS `sentSkillNames` per-agent delta,
@@ -1851,6 +1878,8 @@ impl ConversationOrchestrator {
             todo_reminder_tasks: None,
             conditional_rules_cache: Arc::new(std::sync::Mutex::new(None)),
             sent_conditional_rules: Mutex::new(std::collections::HashSet::new()),
+            sent_nested_memory: Mutex::new(std::collections::HashSet::new()),
+            nested_memory_roots: None,
             sent_skill_names: Mutex::new(std::collections::HashSet::new()),
             date_change: std::sync::Mutex::new(DateChangeState::default()),
             sent_agent_names: Mutex::new(std::collections::HashSet::new()),
@@ -8243,6 +8272,18 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 snapshot.push(reminder);
             }
 
+            // Nested memory (streaming twin): the LINGXI.md governing the
+            // directory of a touched file. Appended to THIS turn's OUTGOING
+            // snapshot only (never `session.history` / JSONL), directly after
+            // the conditional-rules reminder and BEFORE the blocking-limit
+            // estimate below so its tokens are counted in the prompt size —
+            // identical position to the batched twin (`turn_loop.rs`).
+            // claude-code has ONE main loop, so both LingXi twins must inject
+            // it. See [`Self::nested_memory_reminder_message`].
+            if let Some(reminder) = self.nested_memory_reminder_message().await {
+                snapshot.push(reminder);
+            }
+
             // `<new-diagnostics>` (streaming twin — #3 main-loop parity):
             // per-turn, transient reminder of newly-reported LSP diagnostics not
             // yet surfaced (claude-code `formatDiagnosticsBlock`). Appended to
@@ -11458,6 +11499,196 @@ DO NOT mention this to the user explicitly because they are already aware.\n</sy
             .collect::<Vec<_>>()
             .join("\n\n");
         Some(ConversationMessage::user(MessageId::new(), content))
+    }
+
+    /// Hermetic override for the roots [`Self::nested_memory_reminder_message`]
+    /// probes. See [`Self::nested_memory_roots`].
+    #[must_use]
+    pub fn with_nested_memory_roots(
+        mut self,
+        home: std::path::PathBuf,
+        managed_dir: Option<std::path::PathBuf>,
+    ) -> Self {
+        self.nested_memory_roots = Some((home, managed_dir));
+        self
+    }
+
+    /// The per-turn NESTED MEMORY reminder: the `LINGXI.md` (and matching
+    /// `paths:`-gated rules) governing the directories of files the session has
+    /// TOUCHED. Guidance that lives next to the code reaches the model when the
+    /// model reaches the code.
+    ///
+    /// 1:1 with claude-code `k$o` (@237714543) driven by `Rop` (@237715260):
+    ///
+    /// ```js
+    /// for(let i of e){
+    ///   if(t.loadedNestedMemoryPaths?.[i.path])continue;
+    ///   if(!t.readFileState.has(i.path)){ n.push({type:"nested_memory",…});
+    ///     t.loadedNestedMemoryPaths[i.path]=!0;
+    ///     t.readFileState.set(i.path,{…,seededFromContext:!0,keepContent:!0}) }}
+    /// ```
+    ///
+    /// 1. DISCOVER — [`crate::prompt::nested_memory::discover`] per touched
+    ///    file. Stateless by design; see [`Self::sent_nested_memory`].
+    /// 2. SKIP — anything already sent (`loadedNestedMemoryPaths`), already
+    ///    claimed by [`Self::conditional_rules_reminder_message`], or already in
+    ///    `read_file_state` (the model has the real thing).
+    /// 3. SEED — [`Self::seed_nested_memory_read_state`], so the next `Read` of
+    ///    a surfaced file returns the dedup stub instead of the bytes again.
+    /// 4. RENDER — [`crate::prompt::conditional_rules::render_reminder`], the
+    ///    same bare `Contents of {path}:` shape the oracle's `nested_memory`
+    ///    attachment renders to.
+    ///
+    /// MUTATES the sent-set, so it must be called at most ONCE per outgoing
+    /// model step — the same constraint every reminder in this family carries.
+    ///
+    /// # Divergence (reason)
+    /// `Rop` opens with `if(!zK(e,r.toolPermissionContext))return n` — a
+    /// read-permission check on the TRIGGER file. LingXi's permission context
+    /// is not plumbed to this layer, and the trigger is by construction a file
+    /// a tool already read, so the gate would be a no-op here. Not invented.
+    pub(crate) async fn nested_memory_reminder_message(&self) -> Option<ConversationMessage> {
+        // Same env kill-switch the eager loader honors (`Rop`'s
+        // `CLAUDE_CODE_DISABLE_CLAUDE_MDS` guard). ANY non-empty value disables.
+        if std::env::var_os("LINGXI_DISABLE_LINGXI_MDS").is_some_and(|v| !v.is_empty()) {
+            return None;
+        }
+        let touched: Vec<std::path::PathBuf> = self
+            .read_state_map
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .model_context_keys();
+        if touched.is_empty() {
+            return None;
+        }
+        let (home, managed) = match &self.nested_memory_roots {
+            Some((home, managed)) => (home.clone(), managed.clone()),
+            None => (
+                dirs::home_dir()?,
+                Some(memory::lingxi_md::hierarchy::managed_path()),
+            ),
+        };
+        let cwd = self.session_cwd.cwd();
+
+        let mut surfaced: Vec<crate::prompt::MemoryFile> = Vec::new();
+        {
+            let mut sent = self.sent_nested_memory.lock().await;
+            let mut sent_rules = self.sent_conditional_rules.lock().await;
+            for trigger in &touched {
+                for f in crate::prompt::nested_memory::discover(
+                    trigger,
+                    &cwd,
+                    &home,
+                    managed.as_deref(),
+                ) {
+                    if sent.contains(&f.path) {
+                        continue;
+                    }
+                    // A `paths:`-gated rule is owned by BOTH mechanisms; the
+                    // shared set means whichever reaches the model first wins
+                    // and the other stands down. Unconditional memory files
+                    // never enter this set — conditional rules is not their
+                    // owner and marking them would be a lie.
+                    if f.globs.is_some() && sent_rules.contains(&f.path) {
+                        continue;
+                    }
+                    // `!t.readFileState.has(i.path)`, canonical-keyed like the
+                    // registry itself. Note the oracle does NOT mark such a
+                    // path as loaded — it stays in `readFileState` forever, so
+                    // it stays skipped either way.
+                    let key = tokio::fs::canonicalize(&f.path)
+                        .await
+                        .unwrap_or_else(|_| f.path.clone());
+                    if self
+                        .read_state_map
+                        .lock()
+                        .is_ok_and(|guard| guard.contains(&key))
+                    {
+                        continue;
+                    }
+                    sent.insert(f.path.clone());
+                    if f.globs.is_some() {
+                        sent_rules.insert(f.path.clone());
+                    }
+                    surfaced.push(f);
+                }
+            }
+        }
+        if surfaced.is_empty() {
+            return None;
+        }
+        self.seed_nested_memory_read_state(&surfaced).await;
+        let content = surfaced
+            .iter()
+            .map(crate::prompt::conditional_rules::render_reminder)
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        Some(ConversationMessage::user(MessageId::new(), content))
+    }
+
+    /// Seed `read_file_state` for files surfaced as NESTED MEMORY — `k$o`'s
+    /// `readFileState.set` half.
+    ///
+    /// Deliberately NOT [`Self::seed_memory_read_state`], which ports the
+    /// EAGER-block seeding site (`xCt` @245883373). The two sites disagree on
+    /// two fields, and the difference is load-bearing:
+    ///
+    /// | | eager (`xCt`) | nested (`k$o`) |
+    /// |---|---|---|
+    /// | `seededFromContext` | `MLu(file)` — only if actually rendered | `!0` always |
+    /// | `timestamp` | mtime when rendered, else `Date.now()` | mtime always |
+    ///
+    /// A conditional rule is NOT in the eager block, so the eager site would
+    /// seed it `seeded_from_context:false` — and the dedup stub would never
+    /// fire for exactly the files this reminder just put in the context.
+    async fn seed_nested_memory_read_state(&self, files: &[crate::prompt::MemoryFile]) {
+        for f in files {
+            // Canonical key, lexical render — the fork that already shipped one
+            // silent bug: `FileReadTool` looks up `canonicalize_and_validate`'s
+            // output, so seeding under the raw path never matches on a macOS
+            // `/var` -> `/private/var` cwd.
+            let key = tokio::fs::canonicalize(&f.path)
+                .await
+                .unwrap_or_else(|_| f.path.clone());
+            let now_ms = i64::try_from(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_millis()),
+            )
+            .unwrap_or(i64::MAX);
+            // `try{s=FQ(i.path)}catch{s=Date.now()}` — unconditional mtime.
+            let mtime_ms = match tokio::fs::metadata(&f.path).await.and_then(|m| m.modified()) {
+                Ok(t) => tool_api::read_file_state::mtime_ms_floor(t),
+                Err(_) => now_ms,
+            };
+            let content = if f.content_differs_from_disk {
+                f.raw_content.clone()
+            } else {
+                f.raw_content
+                    .strip_prefix('\u{feff}')
+                    .unwrap_or(&f.raw_content)
+                    .to_string()
+            };
+            tool_api::read_file_state::set_with_model_context(
+                &self.read_state_map,
+                key,
+                tool_api::read_file_state::ReadFileEntry {
+                    content,
+                    mtime_ms,
+                    offset: None,
+                    limit: None,
+                    from_read: false,
+                    seeded_from_context: true,
+                    is_partial_view: f.content_differs_from_disk,
+                },
+                // ALWAYS false, for the reason spelled out on
+                // `seed_memory_read_state`, plus one specific to this site: the
+                // touched-file set is this reminder's own INPUT, so enrolling a
+                // surfaced memory file would make it a trigger for the next
+                // turn's discovery — a feedback loop walking its own ancestors.
+                false,
+            );
+        }
     }
 
     /// P0.1: arm the memory-selector prefetch for THIS turn, firing it
@@ -16549,6 +16780,202 @@ mod conditional_rules_reminder_tests {
         assert!(
             !t1.contains("src-rule.md"),
             "already-sent src-rule must not re-inject: {t1}"
+        );
+    }
+}
+
+// Nested memory (`k$o` @237714543 fed by `Rop` @237715260): the per-turn
+// reminder that surfaces the LINGXI.md governing a TOUCHED file's directory.
+#[cfg(test)]
+mod nested_memory_reminder_tests {
+    use super::*;
+    use crate::test_support::{
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
+    };
+    use crate::OrchestratorConfig;
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use tool_api::registry::ToolRegistry;
+
+    const MEM: &str = branding::MEMORY_FILE;
+    const DOT: &str = branding::DOT_DIR;
+
+    fn touch(p: &Path, body: &str) {
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+
+    /// cwd=`<root>/repo`, trigger `<root>/repo/pkg/api/handler.rs`, and a HOME
+    /// under the same temp root so the User tier can never reach the real one.
+    struct Fixture {
+        _tmp: tempfile::TempDir,
+        cwd: PathBuf,
+        home: PathBuf,
+        trigger: PathBuf,
+    }
+
+    fn fixture() -> Fixture {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let cwd = root.join("repo");
+        let home = root.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let trigger = cwd.join("pkg").join("api").join("handler.rs");
+        touch(&trigger, "fn main(){}");
+        Fixture {
+            _tmp: tmp,
+            cwd,
+            home,
+            trigger,
+        }
+    }
+
+    fn orch(f: &Fixture) -> ConversationOrchestrator {
+        ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::with_files(vec![])),
+            f.cwd.clone(),
+        )
+        // Hermetic roots: without this the User/Managed pass would probe the
+        // developer's real `~/.lingxi/rules`.
+        .with_nested_memory_roots(f.home.clone(), None)
+    }
+
+    fn push_touched(orch: &ConversationOrchestrator, path: &Path) {
+        tool_api::read_file_state::set(
+            &orch.read_state_map,
+            path.to_path_buf(),
+            tool_api::read_file_state::ReadFileEntry {
+                content: String::new(),
+                mtime_ms: 0,
+                offset: None,
+                limit: None,
+                from_read: true,
+                seeded_from_context: false,
+                is_partial_view: false,
+            },
+        );
+    }
+
+    #[tokio::test]
+    async fn surfaces_ancestor_memory_once_then_never_again() {
+        let f = fixture();
+        touch(&f.cwd.join("pkg").join(MEM), "pkg guidance");
+        let orch = orch(&f);
+        push_touched(&orch, &f.trigger);
+
+        let text = orch
+            .nested_memory_reminder_message()
+            .await
+            .expect("the memory governing the touched file must surface")
+            .text_content();
+        assert!(text.starts_with("<system-reminder>"), "got: {text}");
+        assert!(text.contains("pkg guidance"), "got: {text}");
+
+        assert!(
+            orch.nested_memory_reminder_message().await.is_none(),
+            "`loadedNestedMemoryPaths` must stop a second emission"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_touched_file_yields_none() {
+        let f = fixture();
+        touch(&f.cwd.join("pkg").join(MEM), "pkg guidance");
+        assert!(orch(&f).nested_memory_reminder_message().await.is_none());
+    }
+
+    /// The sent-set must survive the read-state entry disappearing.
+    ///
+    /// In the happy path the seed itself blocks a second emission, which makes
+    /// the two guards indistinguishable — dropping `sent_nested_memory` passes
+    /// every other test here. But `read_state_map` is an LRU with entry and
+    /// byte caps, so a long session evicts; the oracle's
+    /// `loadedNestedMemoryPaths` is a plain non-evicting Set precisely so
+    /// eviction cannot resurrect an already-sent file.
+    #[tokio::test]
+    async fn eviction_from_read_state_does_not_resurrect_a_sent_file() {
+        let f = fixture();
+        let mem = f.cwd.join("pkg").join(MEM);
+        touch(&mem, "pkg guidance");
+        let orch = orch(&f);
+        push_touched(&orch, &f.trigger);
+        assert!(orch.nested_memory_reminder_message().await.is_some());
+
+        // Simulate the LRU dropping the seeded entry.
+        let canon = std::fs::canonicalize(&mem).unwrap();
+        assert!(
+            orch.read_state_map
+                .lock()
+                .unwrap()
+                .remove(&canon)
+                .is_some(),
+            "the seed must have been there to evict"
+        );
+
+        assert!(
+            orch.nested_memory_reminder_message().await.is_none(),
+            "already-sent memory must stay sent after its read-state entry is evicted"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_file_the_model_already_read_is_not_surfaced() {
+        // `k$o`: `if(!t.readFileState.has(i.path))` — a memory file the model
+        // already Read is in context verbatim; re-sending it is pure waste.
+        let f = fixture();
+        let mem = f.cwd.join("pkg").join(MEM);
+        touch(&mem, "pkg guidance");
+        let orch = orch(&f);
+        push_touched(&orch, &f.trigger);
+        push_touched(&orch, &mem);
+
+        assert!(orch.nested_memory_reminder_message().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn surfacing_seeds_read_state_so_a_later_read_dedups() {
+        let f = fixture();
+        let mem = f.cwd.join("pkg").join(MEM);
+        touch(&mem, "pkg guidance");
+        let orch = orch(&f);
+        push_touched(&orch, &f.trigger);
+        assert!(orch.nested_memory_reminder_message().await.is_some());
+
+        let entry = tool_api::read_file_state::get(
+            &orch.read_state_map,
+            &std::fs::canonicalize(&mem).unwrap(),
+        )
+        .expect("the surfaced file must be seeded under its CANONICAL path");
+        assert!(
+            entry.seeded_from_context,
+            "`seededFromContext:!0` is unconditional at this site — it is what \
+             makes the next Read return the dedup stub"
+        );
+        assert!(!entry.from_read, "a seed is not a Read");
+    }
+
+    #[tokio::test]
+    async fn a_rule_already_sent_by_conditional_rules_is_not_resent() {
+        // LingXi runs BOTH mechanisms; the oracle has one. They share
+        // `sent_conditional_rules` so a `paths:`-gated rule reaches the model
+        // at most once, whichever gets there first.
+        let f = fixture();
+        let rule = f.cwd.join("pkg").join(DOT).join("rules").join("api.md");
+        touch(&rule, "---\npaths:\n  - \"api/**\"\n---\napi rule\n");
+        let orch = orch(&f);
+        push_touched(&orch, &f.trigger);
+
+        orch.sent_conditional_rules.lock().await.insert(rule.clone());
+        assert!(
+            orch.nested_memory_reminder_message().await.is_none(),
+            "conditional-rules already sent this rule"
         );
     }
 }

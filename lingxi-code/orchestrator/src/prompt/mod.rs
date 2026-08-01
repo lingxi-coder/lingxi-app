@@ -8,6 +8,7 @@ pub mod async_hook_response;
 pub mod bg_session;
 pub mod body_sections;
 pub mod conditional_rules;
+pub mod nested_memory;
 pub mod end_conversation;
 pub mod env_block;
 pub mod env_meta;

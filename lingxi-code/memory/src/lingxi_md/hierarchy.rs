@@ -355,6 +355,41 @@ pub fn probe_dir_nested(
     );
 }
 
+/// Probe the MANAGED tier's rules dir — the Managed half of claude-code `NLu`
+/// (@230809780), which loads Managed + User rules for a trigger file.
+///
+/// Rules only: the tier's unconditional memory file is already in the eager
+/// block, so only the `paths:`-gated half can be news for a touched file.
+pub fn probe_managed_rules(
+    managed_dir: &Path,
+    out: &mut Vec<HierarchyEntry>,
+    processed: &mut std::collections::HashSet<PathBuf>,
+) {
+    collect_rules(
+        &managed_dir.join(DOT_LINGXI).join(RULES_DIR),
+        super::LingxiMdTier::Managed,
+        out,
+        processed,
+    );
+}
+
+/// Probe the USER tier's rules dir — the User half of `NLu`.
+///
+/// Resolves through [`user_config_dir`], so `$LINGXI_CONFIG_DIR` is honored
+/// exactly as the eager walk honors it.
+pub fn probe_user_rules(
+    home: &Path,
+    out: &mut Vec<HierarchyEntry>,
+    processed: &mut std::collections::HashSet<PathBuf>,
+) {
+    collect_rules(
+        &user_config_dir(home).join(RULES_DIR),
+        super::LingxiMdTier::User,
+        out,
+        processed,
+    );
+}
+
 /// Probe ONE cwd-level directory — claude-code `FLu` (@230810574), which loads
 /// `.lingxi/rules` ONLY (no `LINGXI.md`, no local override) and, at the oracle,
 /// only the CONDITIONAL half. The caller applies the conditional filter.

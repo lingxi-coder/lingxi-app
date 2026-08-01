@@ -203,6 +203,31 @@ pub struct ContextHintBusyEvent {
     pub status: u16,
 }
 
+/// The `[CONTEXT_HINT_REJECT]` log line — oracle `jtp`'s
+/// ``w(`[CONTEXT_HINT_REJECT] mc=${!!n} tokensSaved=${n?.tokensSaved??0}`)``.
+///
+/// A function, not an inline `format!`, so the exact bytes are assertable. The
+/// oracle logs this UNCONDITIONALLY — including the below-floor case, where it
+/// reads `mc=false tokensSaved=0`. An early return that skips it is a silent
+/// byte-level divergence (this port had one).
+#[must_use]
+pub fn hint_reject_log_line(mc_applied: bool, tokens_saved: u64) -> String {
+    format!("[CONTEXT_HINT_REJECT] mc={mc_applied} tokensSaved={tokens_saved}")
+}
+
+/// The `[KEEP-RECENT MC]` log line as `qsd` emits it on the context-hint
+/// trigger: ``[KEEP-RECENT MC] context_hint trigger, cleared ${s.size} tool
+/// results (~${o} tokens), kept last ${n.size}``.
+///
+/// Note `(~` and the comma placement — both are easy to paraphrase and both are
+/// load-bearing for a log-scraping comparison.
+#[must_use]
+pub fn keep_recent_mc_log_line(cleared: usize, tokens_saved: u64, kept: usize) -> String {
+    format!(
+        "[KEEP-RECENT MC] context_hint trigger, cleared {cleared} tool results (~{tokens_saved} tokens), kept last {kept}"
+    )
+}
+
 /// Result of `applyHintEdits` (`jtp`).
 #[derive(Debug, Clone)]
 pub struct HintEdits {
@@ -219,6 +244,14 @@ pub struct HintEdits {
     pub pre_compact_token_estimate: u64,
     /// Token estimate after the edits.
     pub post_compact_token_estimate: u64,
+    /// The `[CONTEXT_HINT_REJECT]` line that was logged for these edits.
+    ///
+    /// Surfaced for the same reason the telemetry payloads are returned rather
+    /// than emitted: this crate has no analytics dependency and no log-capture
+    /// harness, so a line that is only handed to `tracing` cannot be asserted.
+    /// Dropping the no-op branch's log is otherwise an invisible regression —
+    /// it was one, until this field made it testable.
+    pub log_line: String,
 }
 
 /// `applyHintEdits` (`jtp`) — run the keep-recent microcompact the hint promised.
@@ -240,7 +273,12 @@ pub fn apply_hint_edits(messages: Vec<ConversationMessage>) -> HintEdits {
     // `qsd` returns null below the floor, and `jtp` then keeps the ORIGINAL
     // messages (`o = n ? n.messages : e`) with empty cleared sets.
     if estimate.clear_set.is_empty() || estimate.tokens_saved < MICROCOMPACT_MIN_TOKENS_SAVED {
+        // Logged here too: `jtp` calls `w(...)` after the `qsd` null-check, not
+        // inside it, so the no-op case still reports `mc=false tokensSaved=0`.
+        let log_line = hint_reject_log_line(false, 0);
+        tracing::debug!("{}", log_line);
         return HintEdits {
+            log_line,
             cleared_ids: HashSet::new(),
             mc_applied: false,
             mc_tokens_saved: 0,
@@ -259,11 +297,19 @@ pub fn apply_hint_edits(messages: Vec<ConversationMessage>) -> HintEdits {
     };
     let result = compactor.compact(messages, SystemTime::now());
     let post = estimate_message_tokens(&result.messages);
+    // `qsd`'s own line fires first (it logs inside the compact), then `jtp`'s.
     tracing::debug!(
-        "[CONTEXT_HINT_REJECT] mc=true tokensSaved={}",
-        result.tokens_saved
+        "{}",
+        keep_recent_mc_log_line(
+            result.cleared_count,
+            result.tokens_saved,
+            estimate.keep_set.len()
+        )
     );
+    let log_line = hint_reject_log_line(true, result.tokens_saved);
+    tracing::debug!("{}", log_line);
     HintEdits {
+        log_line,
         messages: result.messages,
         cleared_ids: estimate.clear_set,
         mc_applied: true,
@@ -583,6 +629,10 @@ mod tests {
         match c.on_request_error(&facts, msgs) {
             HintErrorOutcome::Reject(edits, event) => {
                 assert!(edits.mc_applied, "422 must actually compact");
+                assert_eq!(
+                    edits.log_line,
+                    format!("[CONTEXT_HINT_REJECT] mc=true tokensSaved={}", edits.mc_tokens_saved)
+                );
                 assert!(!edits.cleared_ids.is_empty());
                 assert_eq!(event.request_id.as_deref(), Some("req_1"));
                 assert!(event.post_compact_token_estimate < event.pre_compact_token_estimate);
@@ -759,6 +809,30 @@ mod tests {
         assert_eq!(
             edits.pre_compact_token_estimate, edits.post_compact_token_estimate,
             "no edits, no change in the estimate"
+        );
+        assert_eq!(
+            edits.log_line, "[CONTEXT_HINT_REJECT] mc=false tokensSaved=0",
+            "the oracle logs this branch too — `w(...)` sits after the null-check, not inside it"
+        );
+    }
+
+    /// Byte-exact log lines. The oracle's are template literals, so a
+    /// paraphrase ("cleared 3 tool results (~40000 tokens)" vs "~40000") is
+    /// invisible until someone diffs logs across the two clients.
+    #[test]
+    fn log_lines_are_byte_exact() {
+        assert_eq!(
+            hint_reject_log_line(true, 40_000),
+            "[CONTEXT_HINT_REJECT] mc=true tokensSaved=40000"
+        );
+        // The no-op shape the oracle still emits — `mc=${!!n}` on a null `n`.
+        assert_eq!(
+            hint_reject_log_line(false, 0),
+            "[CONTEXT_HINT_REJECT] mc=false tokensSaved=0"
+        );
+        assert_eq!(
+            keep_recent_mc_log_line(3, 40_000, 5),
+            "[KEEP-RECENT MC] context_hint trigger, cleared 3 tool results (~40000 tokens), kept last 5"
         );
     }
 

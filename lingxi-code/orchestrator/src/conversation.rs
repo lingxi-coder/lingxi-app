@@ -6419,6 +6419,33 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // 413 request-too-large (accumulated images/attachments): render the
             // byte-exact `$Vi()` notice instead of the opaque "request too large".
             LlmError::RequestTooLarge => request_too_large_notice(),
+            // 429: the oracle renders `API Error: Request rejected (429) · …`,
+            // pulling the detail out of the JSON body the decoder stringified
+            // into the message. This used to fall through to `Display`, which is
+            // the bare words "rate limited".
+            //
+            // Two first-party variants are NOT selected here and are documented
+            // as such in `api_error_copy`: the `Server is temporarily limiting
+            // requests` label and the `hpo()` status-page/gateway suffix both
+            // need provider-route plumbing this layer does not have. The
+            // fallback clause only shows when the body carries no detail, which
+            // a real 429 does.
+            LlmError::RateLimited { .. } => {
+                let raw = err.to_string();
+                let source = self
+                    .api
+                    .last_rate_limit_error_message()
+                    .unwrap_or(raw);
+                if crate::api_error_copy::is_long_context_credit_message(&source) {
+                    crate::api_error_copy::usage_credits_required_for_1m_context(false)
+                } else {
+                    crate::api_error_copy::rate_limited_text(
+                        &source,
+                        crate::api_error_copy::REQUEST_REJECTED_429,
+                        crate::api_error_copy::TEMPORARY_CAPACITY,
+                    )
+                }
+            }
             other => other.to_string(),
         }
     }

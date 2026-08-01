@@ -32,10 +32,13 @@
 //!   claude's positions).
 //!
 //! Common trailer (every kind): `userType, [entrypoint,] cwd, sessionId,
-//! version, [gitBranch,] [slug]`. Any UNRECOGNIZED `extra` key (an unported
-//! claude field, e.g. `agentId`/`toolUseResult`/`attachment`) is appended after
-//! the trailer in `extra` iteration order, so read→write round-trips of
-//! unported fields stay byte-faithful.
+//! version, [gitBranch,] [slug]`. On a `user` line carrying exactly one
+//! `tool_result`, claude's TOOL-RESULT HEAD (`toolUseResult, toolDenialKind,
+//! mcpMeta, toolEndsTurn, sourceToolAssistantUUID` — see
+//! [`TOOL_RESULT_HEAD_EXTRA`]) rides between `timestamp` and that trailer. Any
+//! UNRECOGNIZED `extra` key (an unported claude field, e.g. `agentId`) is
+//! appended after the trailer in `extra` iteration order, so read→write
+//! round-trips of unported fields stay byte-faithful.
 
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize, Serializer};
@@ -207,13 +210,34 @@ const USER_HEAD_EXTRA: &[&str] = &["isVisibleInTranscriptOnly", "isCompactSummar
 /// Order comes from THIS list, not from `extra` insertion order, so the bytes
 /// do not depend on the order a producer happens to fill the map in.
 ///
-/// Only `toolDenialKind` has a producer today; `toolUseResult` and
-/// `sourceToolAssistantUUID` are still absent from LingXi's transcript
-/// (verified against port-written sessions) and are listed here so that
-/// whoever adds them lands them in the right slot by construction.
+/// The full order comes from the in-memory user-message factory `zr()`
+/// (2.1.220 BIN off **238011637**):
+///
+/// ```text
+/// {type, message, isMeta, isVisibleInTranscriptOnly, isVirtual,
+///  isCompactSummary, summarizeMetadata, uuid, timestamp,
+///  toolUseResult, classifierMetaLines, toolDenialKind, userFeedback,
+///  mcpMeta, toolEndsTurn, imagePasteIds, sourceToolAssistantUUID,
+///  permissionMode, origin, promptSource, interruptedMessageId,
+///  interruptedByShutdown}
+/// ```
+///
+/// `JSON.stringify` drops the `undefined` slots, so the on-disk order falls
+/// straight out. `mcpMeta`/`toolEndsTurn` sit between `toolDenialKind` and
+/// `sourceToolAssistantUUID` — confirmed on disk by 2 146 real 2.1.220 lines
+/// carrying the adjacent tuple `[toolEndsTurn, sourceToolAssistantUUID,
+/// userType]`.
+///
+/// RESIDUAL: `classifierMetaLines`, `userFeedback` and `imagePasteIds` are
+/// omitted from this table — the port has no producer for any of them, so
+/// listing them would encode an unverifiable slot. A foreign line carrying one
+/// still round-trips (via the unrecognized-key tail), just not in claude's
+/// head slot.
 const TOOL_RESULT_HEAD_EXTRA: &[&str] = &[
     "toolUseResult",
     "toolDenialKind",
+    "mcpMeta",
+    "toolEndsTurn",
     "sourceToolAssistantUUID",
 ];
 
@@ -523,7 +547,7 @@ mod attachment_envelope_tests {
 // transcripts (14 records, 5 envelope variants differing only in the optional
 // `agentId` / `session_id` / `slug`) agrees on:
 //
-//   …, uuid, timestamp, toolUseResult, toolDenialKind,
+//   …, uuid, timestamp, toolUseResult, toolDenialKind, mcpMeta, toolEndsTurn,
 //   sourceToolAssistantUUID, userType, entrypoint, cwd, sessionId, version,
 //   gitBranch[, slug]
 #[cfg(test)]
@@ -586,6 +610,45 @@ mod tool_result_head_tests {
         assert!(
             i_res < i_kind && i_kind < i_src && i_src < i_trailer,
             "claude order is toolUseResult < toolDenialKind < sourceToolAssistantUUID < trailer, got {s}"
+        );
+    }
+
+    /// `mcpMeta` and `toolEndsTurn` ride BETWEEN `toolDenialKind` and
+    /// `sourceToolAssistantUUID`.
+    ///
+    /// Oracle: the in-memory user-message factory `zr()` (2.1.220 BIN off
+    /// **238011637**) fixes the field order
+    /// `… uuid, timestamp, toolUseResult, classifierMetaLines, toolDenialKind,
+    /// userFeedback, mcpMeta, toolEndsTurn, imagePasteIds,
+    /// sourceToolAssistantUUID, permissionMode, …`; `JSON.stringify` drops the
+    /// `undefined` slots, so the on-disk order falls straight out. Confirmed
+    /// on disk by 2 146 real 2.1.220 lines carrying the adjacent tuple
+    /// `[toolEndsTurn, sourceToolAssistantUUID, userType]`.
+    #[test]
+    fn mcp_meta_and_ends_turn_ride_between_denial_kind_and_source() {
+        let mut m = base();
+        m.extra
+            .insert("sourceToolAssistantUUID".into(), json!("a-uuid"));
+        m.extra.insert("toolEndsTurn".into(), json!(true));
+        m.extra
+            .insert("mcpMeta".into(), json!({"_meta":{"claude/endTurn":true}}));
+        m.extra
+            .insert("toolDenialKind".into(), json!("permission-rule"));
+        m.extra.insert("toolUseResult".into(), json!("x"));
+        let s = serde_json::to_string(&m).unwrap();
+        let i_res = s.find("toolUseResult").unwrap();
+        let i_kind = s.find("toolDenialKind").unwrap();
+        let i_mcp = s.find("mcpMeta").unwrap();
+        let i_ends = s.find("toolEndsTurn").unwrap();
+        let i_src = s.find("sourceToolAssistantUUID").unwrap();
+        let i_trailer = s.find("userType").unwrap();
+        assert!(
+            i_res < i_kind
+                && i_kind < i_mcp
+                && i_mcp < i_ends
+                && i_ends < i_src
+                && i_src < i_trailer,
+            "claude order is toolUseResult < toolDenialKind < mcpMeta < toolEndsTurn < sourceToolAssistantUUID < trailer, got {s}"
         );
     }
 

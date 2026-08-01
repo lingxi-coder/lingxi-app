@@ -9,6 +9,8 @@ fn mf(path: &str, body: &str, tier: LingxiMdTier) -> MemoryFile {
         is_local_override: tier == LingxiMdTier::Local,
         tier,
         globs: None,
+        raw_content: body.into(),
+        content_differs_from_disk: false,
     }
 }
 
@@ -92,6 +94,8 @@ fn conditional_rule_with_paths_is_excluded_from_eager_block() {
         is_local_override: false,
         tier: LingxiMdTier::Project,
         globs: None,
+        raw_content: "always".into(),
+        content_differs_from_disk: false,
     };
     // The provider would have dropped this one (globs.is_some()); assert that a
     // hand-rolled eager set excludes it and keeps only the unconditional rule.
@@ -101,6 +105,8 @@ fn conditional_rule_with_paths_is_excluded_from_eager_block() {
         is_local_override: false,
         tier: LingxiMdTier::Project,
         globs: Some(vec!["src".into()]),
+        raw_content: "scoped".into(),
+        content_differs_from_disk: false,
     };
     let eager: Vec<MemoryFile> = [included.clone(), conditional]
         .into_iter()
@@ -183,4 +189,40 @@ async fn real_provider_loads_in_spec_splice_order_via_temp_repo() {
         !eager.contains("SCOPED"),
         "conditional (paths:-gated) rule must NOT appear in the eager block"
     );
+}
+
+#[test]
+fn rendered_into_context_matches_format_output() {
+    // Anti-drift: the seeding site (`seed_memory_read_state`) must decide
+    // `seededFromContext` with the SAME predicate the memory-block renderer
+    // uses to decide what the model actually sees. The oracle hand-writes
+    // `MLu` (@230809370) as a duplicate of the renderer's drops; LingXi
+    // DERIVES the renderer's filter from `is_rendered_into_context`, so this
+    // test pins that they cannot diverge.
+    let mut cond = mf("/proj/.lingxi/rules/cond.md", "conditional body", LingxiMdTier::Project);
+    cond.globs = Some(vec!["src".into()]);
+    let mut blank = mf("/proj/blank.md", "   \n  ", LingxiMdTier::Project);
+    blank.globs = None;
+    let files = vec![
+        mf("/home/u/.lingxi/LINGXI.md", "home", LingxiMdTier::User),
+        cond,
+        mf("/proj/LINGXI.md", "repo", LingxiMdTier::Project),
+        blank,
+    ];
+
+    let rendered = memory_block::format(&files);
+    for f in &files {
+        let header = format!("Contents of {}", f.path.display());
+        assert_eq!(
+            memory_block::is_rendered_into_context(f),
+            rendered.contains(&header),
+            "predicate disagrees with the renderer for {}",
+            f.path.display()
+        );
+    }
+    // Sanity: the fixture actually exercises both outcomes.
+    assert!(memory_block::is_rendered_into_context(&files[0]));
+    assert!(!memory_block::is_rendered_into_context(&files[1]));
+    assert!(memory_block::is_rendered_into_context(&files[2]));
+    assert!(!memory_block::is_rendered_into_context(&files[3]));
 }

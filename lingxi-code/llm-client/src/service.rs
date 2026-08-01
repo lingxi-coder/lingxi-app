@@ -1207,6 +1207,13 @@ impl ApiService {
             .with_fast_mode(fast_mode)
             .with_effort(has_effort)
             .with_tool_search(has_tool_search)
+            .with_context_hint(
+                prepared
+                    .provider_request
+                    .body_json
+                    .get("context_hint")
+                    .is_some(),
+            )
     }
 
     /// Return host-validated CLI betas only for the first-party Anthropic
@@ -2564,6 +2571,37 @@ impl ApiService {
         tools: Vec<serde_json::Value>,
     ) -> Result<LlmResponse, LlmError> {
         let req = self.build_request(model, profile, system, messages, tools, false, None)?;
+        let ctl = resolve_retry_control_with_settings(
+            model,
+            None,
+            self.effective_subscriber().is_subscriber,
+            &ResolveRetryEnv::from_process_env(),
+            self.settings_max_retries,
+        );
+        self.drive_non_stream(req, ctl, DispatchHeaderState::default())
+            .await
+    }
+
+    /// Non-streaming call carrying a `context_hint` offer.
+    ///
+    /// Identical to [`Self::messages_create`] except the request sets
+    /// [`crate::LlmRequest::context_hint`], which the Anthropic codec emits as
+    /// the top-level `context_hint` body key and [`Self::beta_context`] reads
+    /// back to add the `context-hint-2026-04-09` beta.
+    ///
+    /// `None` is byte-identical to [`Self::messages_create`] — which is the
+    /// state every request is in unless a host turns the controller on.
+    pub async fn messages_create_with_context_hint(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&str>,
+        messages: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        context_hint: Option<serde_json::Value>,
+    ) -> Result<LlmResponse, LlmError> {
+        let mut req = self.build_request(model, profile, system, messages, tools, false, None)?;
+        req.context_hint = context_hint;
         let ctl = resolve_retry_control_with_settings(
             model,
             None,

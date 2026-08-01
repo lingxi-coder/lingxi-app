@@ -948,11 +948,25 @@ impl HookExecutorImpl {
         agg
     }
 
-    /// Build + publish the ONE transcript attachment for a completed hook run.
+    /// Build + publish the transcript attachments for a completed hook run.
     ///
     /// Pushed onto `agg.hook_attachments` and, when a sink is wired, persisted
-    /// through it. A BLOCKING run publishes nothing (claude yields a
-    /// `hook_blocking_error` attachment on that arm — unported).
+    /// through it.
+    ///
+    /// Up to TWO records are emitted, in the oracle's order (BIN off
+    /// **237807875**, the runner `uL`'s per-result loop):
+    ///
+    /// 1. the run-OUTCOME record (`hook_success` / `hook_non_blocking_error` /
+    ///    `hook_cancelled`), from `if(q.message)yield{message:q.message,…}`. A
+    ///    BLOCKING run contributes none — the oracle yields a bare
+    ///    `{blockingError, outcome:"blocking"}` signal there (BIN off
+    ///    **237805098**) and it is the CALLER that builds the
+    ///    `hook_blocking_error` record (BIN off 234726074).
+    /// 2. O2 — a `hook_system_message` record, from the SEPARATE
+    ///    `if(q.systemMessage){…}` immediately after. Because those two `if`s
+    ///    are independent in the oracle, a hook that BLOCKS *and* sets
+    ///    `systemMessage` still emits this second record; hence the run-outcome
+    ///    `None` must not short-circuit it.
     async fn publish_run_attachment(
         &self,
         agg: &mut AggregateHookResult,
@@ -961,9 +975,28 @@ impl HookExecutorImpl {
         result: &HookResult,
         elapsed_ms: u64,
     ) {
-        let Some(value) = build_run_attachment(hook, id, result, elapsed_ms) else {
-            return;
-        };
+        if let Some(value) = build_run_attachment(hook, id, result, elapsed_ms) {
+            self.publish_attachment(agg, value).await;
+        }
+        // O2: `hook_system_message` — transcript + TUI only. Its renderer entry
+        // is `hook_system_message:()=>[]` (BIN off 238109329), so this record
+        // must NEVER reach the model; it exists so the systemMessage the hook
+        // emitted is recoverable from the transcript. The oracle guards on
+        // truthiness (`if(q.systemMessage)`), so an empty string emits nothing.
+        // ONE record per hook result, not one per aggregate.
+        let system_message = result
+            .response
+            .as_ref()
+            .and_then(|r| r.system_message.as_deref())
+            .unwrap_or_default();
+        if !system_message.is_empty() {
+            let value = attachment::system_message_attachment(id, system_message);
+            self.publish_attachment(agg, value).await;
+        }
+    }
+
+    /// Carry one attachment on the aggregate and, when wired, the sink.
+    async fn publish_attachment(&self, agg: &mut AggregateHookResult, value: serde_json::Value) {
         agg.hook_attachments.push(value.clone());
         if let Some(sink) = &self.attachment_sink {
             sink.record(value).await;
@@ -1487,6 +1520,21 @@ impl HookExecutorImpl {
                 if !already_blocked {
                     agg.reason = Some(reason.clone());
                 }
+            }
+            // O2: freeze the blocking hook's `command` the SAME way, so
+            // `reason` + `block_command` always describe the one hook that
+            // blocked — they are the two halves of a single `blockingError`
+            // object (BIN off 237775430) and must not come from different hooks.
+            // The exit-2 arm supplies `iSe`; every other blocking arm (JSON
+            // `decision:"block"`, PreToolUse `permissionDecision:"deny"`) is
+            // reached through `Tfn({command: ee})`, i.e. `qq`.
+            if !already_blocked && matches!(resp.decision, Some(crate::response::HookDecision::Block))
+            {
+                agg.block_command = Some(
+                    resp.block_command
+                        .clone()
+                        .unwrap_or_else(|| attachment::attachment_command(hook)),
+                );
             }
             if let Some(input) = &resp.updated_input {
                 agg.modified_input = Some(input.clone());
@@ -2493,6 +2541,11 @@ fn map_command_output(
                             response: Some(HookResponse {
                                 decision: Some(HookDecision::Block),
                                 reason: Some(reason),
+                                // O2: `command:te` on this arm — `te=iSe(q)`,
+                                // the SAME display text bracketed above, which
+                                // never consults `statusMessage` (unlike the
+                                // JSON arm's `ee=qq(q)`). BIN off 237805098.
+                                block_command: Some(display),
                                 ..HookResponse::default()
                             }),
                         },
@@ -3010,6 +3063,129 @@ mod attachment_wiring_tests {
         assert_eq!(agg.hook_attachments.len(), 1);
         assert_eq!(sink.seen.lock().unwrap().as_slice(), agg.hook_attachments);
         assert_eq!(agg.hook_attachments[0]["content"], "background complete");
+    }
+
+    /// O2: the aggregate carries the blocking hook's `command` so the CALLER
+    /// (the PostToolUse consumer) can build the `hook_blocking_error` record.
+    ///
+    /// The two blocking arms use DIFFERENT renderings, confirmed by reading the
+    /// runner's own locals (`ee=qq(q)`, `te=iSe(q)` near BIN off 237802650):
+    ///
+    /// * plain-text **exit 2** (BIN off **237805098**) —
+    ///   `{blockingError: `[${te}]: …`, command: te}`, i.e. `iSe`, the raw
+    ///   per-arm rendering that NEVER consults `statusMessage`.
+    /// * JSON **`decision:"block"`** (BIN off **237775430**, reached via
+    ///   `Tfn({json, command: ee, …})`) — `{blockingError: reason || "Blocked
+    ///   by hook", command: ee}`, i.e. `qq`, which prefers `statusMessage`.
+    ///
+    /// They coincide for a hook with no `statusMessage`, so the fixtures below
+    /// SET one — otherwise the test could not tell the two apart.
+    #[tokio::test]
+    async fn exit_two_block_carries_the_ise_command_not_the_status_message() {
+        let mut hook = post_hook();
+        hook.status_message = Some("Formatting".into());
+        let mut registry = HookRegistry::new();
+        registry.register(hook);
+        let exec = HookExecutorImpl::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(UnusedHttp),
+            Arc::new(UnusedRuntime),
+        )
+        .with_process_runner(
+            Arc::new(FixedRunner(Mutex::new(Some(Ok(out("", "nope\n", 2)))))),
+            Arc::new(StubSandbox),
+        );
+
+        let agg = exec.execute(post_event(), HookContext::default()).await;
+
+        assert_eq!(agg.decision, Some(HookDecision::Block));
+        assert_eq!(
+            agg.reason.as_deref(),
+            Some("[./hooks/fmt.sh]: nope\n"),
+            "the exit-2 `blockingError` STRING brackets the iSe display text"
+        );
+        assert_eq!(
+            agg.block_command.as_deref(),
+            Some("./hooks/fmt.sh"),
+            "`command:te` is iSe — statusMessage must NOT win on this arm"
+        );
+    }
+
+    #[tokio::test]
+    async fn json_block_carries_the_qq_command_which_prefers_status_message() {
+        let mut hook = post_hook();
+        hook.status_message = Some("Formatting".into());
+        let mut registry = HookRegistry::new();
+        registry.register(hook);
+        let exec = HookExecutorImpl::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(UnusedHttp),
+            Arc::new(UnusedRuntime),
+        )
+        .with_process_runner(
+            Arc::new(FixedRunner(Mutex::new(Some(Ok(out(
+                r#"{"decision":"block","reason":"unformatted"}"#,
+                "",
+                0,
+            )))))),
+            Arc::new(StubSandbox),
+        );
+
+        let agg = exec.execute(post_event(), HookContext::default()).await;
+
+        assert_eq!(agg.decision, Some(HookDecision::Block));
+        assert_eq!(agg.reason.as_deref(), Some("unformatted"));
+        assert_eq!(
+            agg.block_command.as_deref(),
+            Some("Formatting"),
+            "`command:ee` is qq — statusMessage wins on the JSON arm"
+        );
+    }
+
+    /// O2: a hook that returns `systemMessage` publishes a SECOND attachment —
+    /// `hook_system_message` — right after its run-outcome record.
+    ///
+    /// The oracle's runner emits the run-outcome `q.message` first, then the
+    /// system-message payload on the same loop iteration (BIN off 237807875),
+    /// so the transcript order is `[hook_success, hook_system_message]`.
+    #[tokio::test]
+    async fn system_message_publishes_a_second_attachment_after_the_run_record() {
+        let sink = Arc::new(RecordingSink::default());
+        let exec = exec_with(
+            Ok(out(r#"{"systemMessage":"reformatted 3 files"}"#, "", 0)),
+            sink.clone(),
+        );
+
+        let agg = exec.execute(post_event(), HookContext::default()).await;
+
+        let seen = sink.seen.lock().unwrap().clone();
+        assert_eq!(seen, agg.hook_attachments, "sink sees the same records");
+        assert_eq!(
+            seen.len(),
+            2,
+            "run-outcome record plus the system-message record, got {seen:?}"
+        );
+        assert_eq!(seen[0]["type"], "hook_success", "run outcome comes FIRST");
+        assert_eq!(
+            serde_json::to_string(&seen[1]).unwrap(),
+            r#"{"type":"hook_system_message","content":"reformatted 3 files","hookName":"PostToolUse:Bash","toolUseID":"toolu_01ApkBwAZMCAza47B5nAWiGS","hookEvent":"PostToolUse"}"#
+        );
+    }
+
+    /// The system-message record is emitted ONLY when the hook actually set a
+    /// non-empty `systemMessage` — a plain hook still publishes exactly one.
+    #[tokio::test]
+    async fn no_system_message_means_no_second_attachment() {
+        let sink = Arc::new(RecordingSink::default());
+        let exec = exec_with(Ok(out(r#"{"systemMessage":""}"#, "", 0)), sink.clone());
+
+        let agg = exec.execute(post_event(), HookContext::default()).await;
+
+        assert_eq!(
+            agg.hook_attachments.len(),
+            1,
+            "an EMPTY systemMessage is falsy in the oracle's `if(q.systemMessage)` guard"
+        );
     }
 
     /// A JSON-returning hook takes claude's `Tfn` path, whose `hook_success`

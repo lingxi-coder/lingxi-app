@@ -36,6 +36,12 @@
 //! normalization (Rust callers already pass canonicalized absolute keys — see
 //! `tools/file/src/lib.rs`), and the `file_state_cache:{entries, bytes}`
 //! telemetry.
+//!
+//! [`ReadFileStateLru::strip_seeded_from_context`] belongs to that deferred
+//! group: it is the `Gxe(e,{stripSeededFromContext})` half of the clone seam
+//! and therefore has NO caller yet. It is implemented and tested rather than
+//! omitted so the seam does not have to re-derive the semantics — a named
+//! pending consumer, not dead code.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -77,6 +83,43 @@ pub struct ReadFileEntry {
     /// wrongly point the model at pre-edit content). The staleness guard does
     /// NOT read this field.
     pub from_read: bool,
+    /// TS `seededFromContext` — the entry was seeded from a memory file
+    /// (LINGXI.md / rules) whose content the model ALREADY received inside the
+    /// system prompt's memory block, rather than from a tool call.
+    ///
+    /// Set by the startup memory-load loop `xCt` (2.1.220 @245883373:
+    /// `seededFromContext: jn` where `jn = MLu(Fr)` — i.e. TRUE only when the
+    /// file's content is actually rendered into model context; a
+    /// `paths:`-gated conditional rule seeds with FALSE) and by the
+    /// nested-memory attachment path (@237715046, unconditionally `!0`).
+    ///
+    /// Consumed by the Read tool's SEEDED dedup branch (@235741459:
+    /// `_.seededFromContext && !_.isPartialView && t===1 && r===void 0`) and by
+    /// `tengu_file_read_reread`'s `priorOp` (@235740900:
+    /// `m.seededFromContext?"seeded":m.offset===void 0?"edit_write":"read"`).
+    ///
+    /// Cleared wholesale by [`ReadFileStateLru::strip_seeded_from_context`]
+    /// (`Gxe(e,{stripSeededFromContext})` @232454658).
+    pub seeded_from_context: bool,
+    /// TS `isPartialView` — the recorded content is NOT the file's on-disk
+    /// bytes.
+    ///
+    /// Seeded memory files set this to `contentDiffersFromDisk` (@245883373 /
+    /// @237715046): the memory loader strips YAML frontmatter and HTML
+    /// comments, so what the model saw differs from disk. `bn_` (@230803364)
+    /// computes it as `p = d !== e` — an EXACT string compare of the stripped
+    /// content against the raw disk text, with no trim.
+    ///
+    /// Consumed by `Aze`/`wMe` (@232452900, LingXi
+    /// `tool_file::read_covers_full_file`: `if((e.offset??1)>1||e.isPartialView)
+    /// return false`) and by both Read-dedup gates (@235741459).
+    ///
+    /// Two producers, both live: the memory seeding site (from
+    /// `content_differs_from_disk`) and the Read tool's token-truncation path
+    /// (`tools/file/src/read.rs`, `partial_note.is_some()` — the oracle's
+    /// `...x!==void 0&&{isPartialView:!0}` @235732534, where `x` is the
+    /// truncation note produced only on a token-cap overflow).
+    pub is_partial_view: bool,
 }
 
 /// One LRU slot: the entry plus its recency stamp and cached byte size.
@@ -133,6 +176,39 @@ impl ReadFileStateLru {
         self.clock = next;
         node.last_used = next;
         Some(node.entry.clone())
+    }
+
+    /// Whether `path` has an entry, WITHOUT promoting it to most-recently-used.
+    ///
+    /// The Rust equal of TS `readFileState.has(path)` — the guard on the
+    /// nested-memory seeding site (@237715046 `if(!t.readFileState.has(i.path))`)
+    /// and on LingXi's startup memory seeding. Deliberately NOT implemented via
+    /// [`Self::get`]: seeding runs over every memory file at session start, and
+    /// an MRU bump there would silently reorder eviction (and `/files`) behind
+    /// the model's back. `lru-cache`'s `has()` likewise defaults to
+    /// `updateRecency: false`.
+    #[must_use]
+    pub fn contains(&self, path: &Path) -> bool {
+        self.map.contains_key(path)
+    }
+
+    /// Clear [`ReadFileEntry::seeded_from_context`] on EVERY entry, leaving all
+    /// other state untouched.
+    ///
+    /// The Rust equal of `Gxe(e,{stripSeededFromContext})` (2.1.220
+    /// @232454658), which clones the LRU dump and rewrites each slot
+    /// `value = {...value, seededFromContext:!1}`.
+    ///
+    /// CURRENTLY UNUSED in LingXi: the oracle only reaches this through the
+    /// `dump()`/`load()` + `cloneFileStateCache` persistence seam used to
+    /// snapshot read-state into forked agents, which is on this module's
+    /// DEFERRED list (see the module docs). It is implemented and tested here
+    /// so that seam does not have to re-derive the semantics — it is a named
+    /// pending consumer, not dead code.
+    pub fn strip_seeded_from_context(&mut self) {
+        for node in self.map.values_mut() {
+            node.entry.seeded_from_context = false;
+        }
     }
 
     /// Insert (or overwrite) the entry for `path` as most-recently-used, then
@@ -371,6 +447,8 @@ mod tests {
             offset: None,
             limit: None,
             from_read: true,
+            seeded_from_context: false,
+            is_partial_view: false,
         }
     }
 
@@ -384,6 +462,8 @@ mod tests {
             offset: Some(2),
             limit: Some(10),
             from_read: true,
+            seeded_from_context: false,
+            is_partial_view: false,
         };
         set(&map, path.clone(), e.clone());
         assert_eq!(get(&map, &path), Some(e));
@@ -408,6 +488,8 @@ mod tests {
                 offset: None,
                 limit: None,
                 from_read: true,
+                seeded_from_context: false,
+                is_partial_view: false,
             },
         );
         set(
@@ -419,6 +501,8 @@ mod tests {
                 offset: Some(5),
                 limit: Some(7),
                 from_read: true,
+                seeded_from_context: false,
+                is_partial_view: false,
             },
         );
         let got = get(&map, &path).unwrap();
@@ -442,6 +526,8 @@ mod tests {
                 offset: None,
                 limit: None,
                 from_read: true,
+                seeded_from_context: false,
+                is_partial_view: false,
             },
         );
         // A write through `clone` is visible through the original handle.
@@ -622,6 +708,85 @@ mod tests {
         let guard = map.lock().unwrap();
         assert!(guard.is_empty());
         assert_eq!(guard.total_bytes(), 0);
+    }
+
+    #[test]
+    fn seeded_entry_roundtrips_its_flags() {
+        // The two new oracle fields survive a set/get round-trip on the very
+        // entry `get` returns (the consumers are per-ENTRY predicates:
+        // @235741459 `_.seededFromContext && !_.isPartialView`).
+        let map = new_read_file_state_map();
+        let path = PathBuf::from("/tmp/LINGXI.md");
+        let e = ReadFileEntry {
+            content: "# rules\n".to_string(),
+            mtime_ms: 42,
+            offset: None,
+            limit: None,
+            from_read: false,
+            seeded_from_context: true,
+            is_partial_view: true,
+        };
+        set(&map, path.clone(), e.clone());
+        let got = get(&map, &path).unwrap();
+        assert!(got.seeded_from_context);
+        assert!(got.is_partial_view);
+        assert_eq!(got, e);
+    }
+
+    #[test]
+    fn contains_does_not_promote_mru() {
+        // The seeding guard (`!readFileState.has(path)` @237715046) must use a
+        // presence check that does NOT reshuffle LRU order — otherwise seeding
+        // at startup would rewrite eviction order behind the model's back.
+        let map = new_read_file_state_map_with_limits(2, u64::MAX);
+        set(&map, PathBuf::from("/A"), entry("a"));
+        set(&map, PathBuf::from("/B"), entry("b"));
+        assert!(map.lock().unwrap().contains(Path::new("/A")));
+        set(&map, PathBuf::from("/C"), entry("c"));
+        assert_eq!(
+            get(&map, Path::new("/A")),
+            None,
+            "contains must NOT promote: /A was still LRU and must be evicted"
+        );
+        assert!(get(&map, Path::new("/B")).is_some());
+        assert!(map.lock().unwrap().contains(Path::new("/C")));
+        assert!(!map.lock().unwrap().contains(Path::new("/nope")));
+    }
+
+    #[test]
+    fn strip_seeded_from_context_clears_every_entry() {
+        // `Gxe(e,{stripSeededFromContext})` @232454658 — a per-entry flip of
+        // `seededFromContext` to false, touching nothing else.
+        let map = new_read_file_state_map();
+        let seeded = ReadFileEntry {
+            seeded_from_context: true,
+            is_partial_view: true,
+            ..entry("s1")
+        };
+        set(&map, PathBuf::from("/s1"), seeded);
+        set(
+            &map,
+            PathBuf::from("/s2"),
+            ReadFileEntry {
+                seeded_from_context: true,
+                ..entry("s2")
+            },
+        );
+        set(&map, PathBuf::from("/plain"), entry("plain"));
+
+        map.lock().unwrap().strip_seeded_from_context();
+
+        for p in ["/s1", "/s2", "/plain"] {
+            assert!(
+                !get(&map, Path::new(p)).unwrap().seeded_from_context,
+                "{p} must be cleared"
+            );
+        }
+        // Nothing else changed.
+        let s1 = get(&map, Path::new("/s1")).unwrap();
+        assert!(s1.is_partial_view, "is_partial_view must be untouched");
+        assert_eq!(s1.content, "s1");
+        assert_eq!(map.lock().unwrap().len(), 3);
     }
 
     #[test]

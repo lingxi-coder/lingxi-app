@@ -1,11 +1,16 @@
-//! Parity fixture: LINGXI.md hierarchy walk (no size drop).
+//! Parity fixture: LINGXI.md hierarchy walk + the loader's stat guard.
 //!
 //! Locks the shape of `lingxi_md::hierarchy::walk` + `lingxi_md::loader::load_file`
-//! against claude-code's reference (`src/memory/hierarchy.ts:22-71`,
-//! `src/memory/loader.ts:14-38`). Each scenario builds a tempdir layout
-//! and asserts the walk order. GAP 4: claude-code reads every file whole (no
-//! size drop), so no file is ever skipped for size — `expected_skipped` is
-//! always empty and an oversized file appears in `expected_order`.
+//! against claude-code. Each scenario builds a tempdir layout and asserts both
+//! the walk order and which files the reader drops.
+//!
+//! ⚠️ CORRECTED. This header used to read "GAP 4: claude-code reads every file
+//! whole (no size drop), so no file is ever skipped for size", and the harness
+//! below hard-coded `skipped` to an empty vec while PANICKING on any load
+//! error — so the fixture could not have expressed a skip even if a scenario
+//! wanted one. Both the claim and the harness came from leaked TS
+//! (`loader.ts:14-38`). The 2.1.220 binary skips anything non-regular or over
+//! `ELu = 4194304` (`EG` @229022173, called from `Eds` @230805636).
 
 use memory::lingxi_md::hierarchy::walk;
 use memory::lingxi_md::loader::load_file;
@@ -68,12 +73,18 @@ fn memory_loading_matches_claude_code() {
         // system path); pass `None` for a hermetic walk.
         let h = walk(&cwd, &home, None);
         let mut loaded: Vec<PathBuf> = Vec::new();
-        // No file is ever skipped for size (GAP 4) — kept for the fixture's
-        // `expected_skipped: []` assertion.
-        let skipped: Vec<PathBuf> = Vec::new();
+        let mut skipped: Vec<PathBuf> = Vec::new();
         for entry in &h.entries {
             match load_file(&entry.path, None) {
                 Ok(_) => loaded.push(entry.path.clone()),
+                // The oracle's `null` return: not a regular file, or over
+                // `ELu`. Recorded, not fatal — one skipped file must not stop
+                // the rest of the hierarchy loading.
+                Err(memory::lingxi_md::loader::LoaderError::FileTooLarge { .. }) => {
+                    skipped.push(entry.path.clone());
+                }
+                // Anything else (ENOENT, perms, non-UTF-8) is a fixture bug:
+                // the walk only yields paths it just saw on disk.
                 Err(other) => panic!("scenario {}: unexpected error {other:?}", sc.name),
             }
         }

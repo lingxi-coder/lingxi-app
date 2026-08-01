@@ -556,11 +556,16 @@ impl WebFetchTool {
     /// body or on a write failure (matching `if(!("error"in h))`, which silently
     /// skips persistence and the footer on error).
     ///
-    /// Temp dir: `<workspace>/.lingxi/tool-results` (the same project-local
-    /// tool-results dir other tools use, e.g. `tools/mcp`'s binary-blob persist).
-    /// claude-code uses `<config>/<session>/tool-results`; LingXi's tool context
-    /// exposes the workspace root, not the config/session root, so the artifact is
-    /// written under the project's `.lingxi/tool-results`. (Residual: see report.)
+    /// Writes to claude-code's session-scoped
+    /// `<config>/projects/<sanitized-cwd>/<session-id>/tool-results/` via
+    /// [`tool_results_dir`].
+    ///
+    /// CORRECTED: this used to hard-code `<workspace>/.lingxi/tool-results`
+    /// under a note claiming "LingXi's tool context exposes the workspace root,
+    /// not the config/session root". The blocker was real but narrower than the
+    /// note said — `BuiltinToolContext` simply had no session id — and the fix
+    /// was adding one field, not re-plumbing. Until then every persisted binary
+    /// was written inside the user's repository.
     fn persist_binary(&self, content_type: &str, body: &[u8]) -> (Option<String>, Option<usize>) {
         if !is_binary_content_type(content_type) {
             return (None, None);
@@ -578,7 +583,7 @@ impl WebFetchTool {
             ns ^ (body.len() as u64).rotate_left(17) ^ (body.as_ptr() as u64)
         };
         let stem = crate::persist::persisted_filename(unix_ms, seed);
-        let output_dir = self.ctx.cwd().join(branding::DOT_DIR).join("tool-results");
+        let output_dir = self.ctx.tool_results_dir();
         match crate::persist::persist_binary_content(body, content_type, &stem, &output_dir) {
             crate::persist::PersistResult::Ok { filepath, size } => (Some(filepath), Some(size)),
             crate::persist::PersistResult::Err { .. } => (None, None),

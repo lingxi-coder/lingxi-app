@@ -239,6 +239,17 @@ async fn two_tools_dispatched_concurrently_results_ordered() {
     assert_eq!(call_tools, vec!["Slow", "Fast"]);
 
     // ToolResults fire in COMPLETION order — Fast finishes first.
+    //
+    // DO NOT "correct" this to received order. It looks like a bug and is not.
+    // claude-code's `getCompletedResults` (2.1.220 binary @232976312) walks the
+    // tools in received order but only stops early on
+    // `e.status==="executing" && !e.isConcurrencySafe` — an executing tool that
+    // IS concurrency-safe falls through, so a later tool that already finished
+    // gets yielded ahead of it. Both tools here are concurrency-safe, so
+    // completion order is the correct parity outcome.
+    //
+    // The `break` arm — the one real ordering guarantee — is locked separately
+    // in `streaming_frame_order_test`.
     let result_tools: Vec<&str> = events
         .iter()
         .filter_map(|e| match e {

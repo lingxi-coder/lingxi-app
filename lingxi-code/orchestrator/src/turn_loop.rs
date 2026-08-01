@@ -379,6 +379,12 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         history_snapshot.insert(0, ctx_msg);
     }
 
+    // Collected, not pushed: `call_api_with_ptl_recovery` rebuilds the request
+    // from raw `session.history` on every retry, and each of these advances
+    // session state when computed, so they must be reused rather than
+    // recomputed. See the `turn_reminders` param there.
+    let mut turn_reminders: Vec<ConversationMessage> = Vec::new();
+
     // OUTSTYLE.3: per-turn, transient output-style reminder. When a non-default
     // output style is active, claude-code injects a meta user message into EVERY
     // turn's model input (the `output_style` attachment). We append it to THIS
@@ -389,7 +395,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // keeping the locked turn-loop fixtures byte-identical. See
     // [`ConversationOrchestrator::output_style_reminder_message`].
     if let Some(reminder) = orch.output_style_reminder_message().await {
-        history_snapshot.push(reminder);
+        turn_reminders.push(reminder);
     }
 
     // PLANMODE (batched twin): per-turn, transient `plan_mode` reminder (206
@@ -403,7 +409,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // `session.history` / JSONL). See
     // [`ConversationOrchestrator::plan_mode_reminder_message`].
     if let Some(reminder) = orch.plan_mode_reminder_message().await {
-        history_snapshot.push(reminder);
+        turn_reminders.push(reminder);
     }
 
     // SKILLLIST.1: per-turn, transient `skill_listing` reminder so the model can
@@ -413,7 +419,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // provider is wired / no skills / the Skill tool is absent. See
     // [`ConversationOrchestrator::skill_listing_reminder_message`].
     if let Some(reminder) = orch.skill_listing_reminder_message().await {
-        history_snapshot.push(reminder);
+        turn_reminders.push(reminder);
     }
 
     // §F: per-turn, transient `conditional_rules` reminder — path-gated LINGXI.md
@@ -423,7 +429,19 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // byte-identical. `None` when no provider / no conditional rules / nothing
     // newly active. See [`ConversationOrchestrator::conditional_rules_reminder_message`].
     if let Some(reminder) = orch.conditional_rules_reminder_message().await {
-        history_snapshot.push(reminder);
+        turn_reminders.push(reminder);
+    }
+
+    // Nested memory (`k$o` / `Rop`): the LINGXI.md governing the directory of a
+    // file the session has touched. Appended to THIS call's OUTGOING snapshot
+    // only (never `session.history` / JSONL), directly AFTER conditional rules
+    // — the order matters, because a `paths:`-gated rule claimed there is
+    // skipped here via the shared `sent_conditional_rules` set, so running the
+    // two the other way round would change which mechanism reports the rule.
+    // `None` when nothing has been touched / no ancestor memory / everything
+    // already sent. See [`ConversationOrchestrator::nested_memory_reminder_message`].
+    if let Some(reminder) = orch.nested_memory_reminder_message().await {
+        turn_reminders.push(reminder);
     }
 
     // Per-turn, transient `<new-diagnostics>` reminder — newly-reported LSP
@@ -432,7 +450,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // is wired (no servers) or no new diagnostics. See
     // [`ConversationOrchestrator::new_diagnostics_reminder_message`].
     if let Some(reminder) = orch.new_diagnostics_reminder_message().await {
-        history_snapshot.push(reminder);
+        turn_reminders.push(reminder);
     }
 
     // `agent_listing_delta`: per-turn, transient agent catalog reminder, emitted
@@ -443,7 +461,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // only (never `session.history` / JSONL), after the conditional-rules
     // reminder. See [`ConversationOrchestrator::agent_listing_reminder_message`].
     if let Some(reminder) = orch.agent_listing_reminder_message().await {
-        history_snapshot.push(reminder);
+        turn_reminders.push(reminder);
     }
 
     // Finding #73 (batched twin): per-turn, transient `todo_reminder` (V1) /
@@ -460,7 +478,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // turn-loop fixtures byte-identical (default: counters start at 0). See
     // [`ConversationOrchestrator::todo_reminder_message`].
     if let Some(reminder) = orch.todo_reminder_message().await {
-        history_snapshot.push(reminder);
+        turn_reminders.push(reminder);
     }
 
     // async_hook_response (batched twin): fold completed background (`async`)
@@ -469,7 +487,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // wired / nothing completed since the last turn. See
     // [`ConversationOrchestrator::async_hook_response_reminder_message`].
     if let Some(reminder) = orch.async_hook_response_reminder_message().await {
-        history_snapshot.push(reminder);
+        turn_reminders.push(reminder);
     }
 
     // T35 (batched twin — #3 main-loop parity): fold the terminal background
@@ -481,7 +499,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // inject this reminder. `None` when no registry is wired / nothing finished.
     // See [`ConversationOrchestrator::task_notification_reminder_message`].
     if let Some(reminder) = orch.task_notification_reminder_message().await {
-        history_snapshot.push(reminder);
+        turn_reminders.push(reminder);
     }
 
     // P0.1 (batched twin): per-turn, transient `relevant_memories` SURFACING
@@ -494,7 +512,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // when no prefetch is wired / empty result / everything already injected. See
     // [`ConversationOrchestrator::relevant_memory_reminder_message`].
     if let Some(reminder) = orch.relevant_memory_reminder_message().await {
-        history_snapshot.push(reminder);
+        turn_reminders.push(reminder);
     }
 
     // EXPERIMENTAL_SKILL_SEARCH (batched twin): per-turn, transient
@@ -517,6 +535,8 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     //    `PROMPT_TOO_LONG_ERROR_MESSAGE` assistant message instead of bubbling a
     //    hard error.
     let tools = orch.build_wire_tools().await;
+    history_snapshot.extend(turn_reminders.iter().cloned());
+
     if let Some(reminder) = orch.deferred_tools_reminder_message() {
         history_snapshot.insert(0, reminder);
     }
@@ -559,6 +579,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         tools,
         max_tokens_override,
         date_change_reminder,
+        &turn_reminders,
     )
     .await
     {
@@ -882,12 +903,29 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         }
         // M5-07 T13: persist the tool_result user message. Best-effort.
         orch.persist_message_to_jsonl(&tool_results_msg).await;
+        // O3: flush this batch's hook `attachment` lines, in tool-dispatch
+        // order, right after the tool_result they follow — where claude's own
+        // stream order puts them (`insertMessageChain` writes the yielded
+        // attachment message immediately after the yielded tool_result).
+        for (tool_use_id, _, _, _) in &tool_uses {
+            orch.flush_hook_attachments(tool_use_id).await;
+        }
         // Persist the injected skill messages too (best-effort), mirroring the
         // tool_result persist above. No-op when empty. NOTE: the originating
         // tool_use_id is deliberately NOT persisted — TS does not write
         // `sourceToolUseID` to the transcript, so the JSONL bytes stay
         // byte-identical to before this change.
+        //
+        // O3: an `is_meta` injected message is the EPHEMERAL RENDERING of an
+        // attachment (claude builds it from the attachment at
+        // API-normalization time, renderer BIN off 238107100) — the attachment
+        // line flushed above IS its on-disk record, so persisting it too would
+        // duplicate it. Every non-hook injected message (the Skill tool's
+        // expanded prompt) is non-meta and still persists.
         for (m, _tool_use_id) in &injected_messages {
+            if m.is_meta() {
+                continue;
+            }
             orch.persist_message_to_jsonl(m).await;
         }
         // SKILLEXEC.3 (model scope): fold this batch's `context_modifier`s and
@@ -1120,6 +1158,14 @@ pub(crate) async fn call_api_with_ptl_recovery(
     // from raw `session.history`, where the transient does not live, so it is
     // re-prepended there — the streaming twin threads it the same way.
     date_change_reminder: Option<ConversationMessage>,
+    // This step's per-turn transient reminders (skill listing, conditional
+    // rules, nested memory, diagnostics, …), already appended to
+    // `history_snapshot`. Computing them ADVANCES session state — sent-sets,
+    // delta trackers, consume-once drains — so they can never be recomputed for
+    // a retry; recomputing returns `None` and the reminder is lost for the rest
+    // of the session. Re-appended below wherever the request is rebuilt from
+    // raw `session.history`.
+    turn_reminders: &[ConversationMessage],
 ) -> Result<PtlCallOutcome, OrchestratorError> {
     // (1) Blocking-limit preempt. `is_at_blocking_limit` is
     // `token_usage >= effective_window − MANUAL_COMPACT_BUFFER_TOKENS`
@@ -1190,7 +1236,39 @@ pub(crate) async fn call_api_with_ptl_recovery(
     // `ProviderApiAdapter`, which handles the 529-triggered switch internally.
     // With NO fallback configured the plain `messages_create` seam is taken,
     // byte-identical to before — locked turn-loop fixtures are unaffected.
-    let first = if let Some(max_tokens) = max_tokens_override {
+    // Context-hint negotiation (oracle `e1y`): offer the server a compact we
+    // could perform, and act on a 422/424 asking us to. `None` unless BOTH the
+    // route allows first-party betas and the controller's own env gate is on —
+    // and the latter is off by default because the oracle's server-delivered
+    // `tengu_hazel_osprey` is false. So this is inert on every ordinary turn.
+    //
+    // `repl_main_thread` is this driver by definition: `call_api_with_ptl_recovery`
+    // is the MAIN turn's API seam. Subagents and side queries run their own
+    // paths and never reach here, which is what the oracle's querySource prefix
+    // check expresses.
+    let mut hint_controller = compaction::context_hint::create_context_hint_controller(
+        orch.config.include_first_party_betas,
+        "repl_main_thread",
+    );
+    let hint_params = hint_controller
+        .as_mut()
+        .and_then(|c| c.build_request_params(&history_snapshot));
+
+    let first = if let Some(params) = hint_params {
+        // The controller is live: take the hint-carrying seam. `params.body` is
+        // `None` when the estimated savings are under the floor — the oracle
+        // still sends the beta in that case and omits only the body.
+        orch.api
+            .messages_create_with_context_hint(
+                model,
+                profile,
+                system,
+                history_snapshot,
+                tools.clone(),
+                params.body,
+            )
+            .await
+    } else if let Some(max_tokens) = max_tokens_override {
         // REC.A1 escalated single-shot (TS `query.ts:1199-1221`): re-issue with
         // the override `max_tokens` (8k→64k). The escalation is orthogonal to the
         // Opus-fallback gate, so it takes the plain `_with_opts` seam regardless
@@ -1237,7 +1315,46 @@ pub(crate) async fn call_api_with_ptl_recovery(
     let token_gap: u64 = match first {
         Ok(resp) => return Ok(PtlCallOutcome::Response(Box::new(resp))),
         Err(LlmError::ContextOverflow { token_gap }) => token_gap,
-        Err(other) => return Err(other.into()),
+        Err(other) => {
+            // Context-hint error half (oracle `onRequestError`). A 422/424 is
+            // the server asking for the compact we offered: apply the edits and
+            // re-issue ONCE. Every other outcome (beta unsupported, 409, 529)
+            // falls through to the normal error return, exactly as the oracle
+            // does — those branches edit nothing.
+            //
+            // The status is recoverable because the decoder writes it into the
+            // message (`providers::api_error_message`); before that, a 422 and a
+            // 400 were the same `LlmError`.
+            if let Some(c) = hint_controller.as_mut() {
+                let facts = compaction::context_hint::HttpErrorFacts::from_error(&other);
+                // Re-snapshot rather than clone the history up front: the
+                // snapshot was moved into the call, and every other recovery
+                // path here rebuilds the same way.
+                let history = {
+                    let s = orch.session.lock().await;
+                    s.history.clone()
+                };
+                if let compaction::context_hint::HintErrorOutcome::Reject(edits, _event) =
+                    c.on_request_error(&facts, history)
+                {
+                    let mut retry = edits.messages.clone();
+                    {
+                        let mut s = orch.session.lock().await;
+                        s.history.clone_from(&edits.messages);
+                    }
+                    retry.extend(turn_reminders.iter().cloned());
+                    return match orch
+                        .api
+                        .messages_create(model, profile, system, retry, tools.clone())
+                        .await
+                    {
+                        Ok(resp) => Ok(PtlCallOutcome::Response(Box::new(resp))),
+                        Err(e) => Err(e.into()),
+                    };
+                }
+            }
+            return Err(other.into());
+        }
     };
 
     // (3) PTL retry loop: drop oldest API-round groups and retry, ≤ MAX retries.
@@ -1264,6 +1381,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
         if let Some(reminder) = date_change_reminder.clone() {
             truncated.insert(0, reminder);
         }
+        truncated.extend(turn_reminders.iter().cloned());
         match orch
             .api
             .messages_create(model, profile, system, truncated, tools.clone())
@@ -1362,10 +1480,11 @@ pub(crate) async fn call_api_with_ptl_recovery(
                 .await;
                 // PostCompact fires AFTER the transition is applied.
                 orch.fire_post_compact("auto", summary, tokens_freed).await;
-                let history = {
+                let mut history = {
                     let s = orch.session.lock().await;
                     s.history.clone()
                 };
+                history.extend(turn_reminders.iter().cloned());
                 match orch
                     .api
                     .messages_create(model, profile, system, history, tools)
@@ -2263,6 +2382,212 @@ pub(crate) fn rule_decision_otel_source(rule_source: Option<&str>, allow: bool) 
 /// step (TS `query.ts:1518-1521` `{ reason: 'hook_stopped' }`); the streaming
 /// concurrent path keeps the plain [`dispatch_tool_uses`] wrapper.
 #[allow(clippy::too_many_lines)]
+/// `Gzg` (2.1.220 BIN off **230270568**, immediately above `F0u`):
+///
+/// ```text
+/// if(!e)return!0;
+/// if(typeof e==="string")return e.trim()==="";
+/// if(!Array.isArray(e))return!1;
+/// if(e.length===0)return!0;
+/// return e.every(t=>typeof t==="object"&&"type"in t&&t.type==="text"
+///                 &&"text"in t&&(typeof t.text!=="string"||t.text.trim()===""))
+/// ```
+///
+/// The port's `tool_result` carries EITHER a plain string (`content_blocks ==
+/// None`) or the verbatim block array — so the array arm is driven by
+/// `content_blocks` and the string arm by `content`.
+fn tool_result_is_blank(content: &str, content_blocks: Option<&[serde_json::Value]>) -> bool {
+    match content_blocks {
+        None => content.trim().is_empty(),
+        Some(blocks) => {
+            blocks.is_empty()
+                || blocks.iter().all(|b| {
+                    b.get("type").and_then(serde_json::Value::as_str) == Some("text")
+                        && b.get("text").is_some()
+                        && b.get("text")
+                            .and_then(serde_json::Value::as_str)
+                            .is_none_or(|t| t.trim().is_empty())
+                })
+        }
+    }
+}
+
+/// `U0u` (2.1.220 BIN off **230271605**): an array containing ANY `image` or
+/// `document` block is never persisted, regardless of size.
+fn tool_result_has_media(content_blocks: Option<&[serde_json::Value]>) -> bool {
+    content_blocks.is_some_and(|blocks| {
+        blocks.iter().any(|b| {
+            matches!(
+                b.get("type").and_then(serde_json::Value::as_str),
+                Some("image" | "document")
+            )
+        })
+    })
+}
+
+/// `q0u` (2.1.220 BIN off **230271734**): a string's own length, or the sum of
+/// the `text` block lengths in an array (non-text blocks contribute 0).
+fn tool_result_size(content: &str, content_blocks: Option<&[serde_json::Value]>) -> usize {
+    match content_blocks {
+        None => content.len(),
+        Some(blocks) => blocks
+            .iter()
+            .map(|b| {
+                if b.get("type").and_then(serde_json::Value::as_str) == Some("text") {
+                    b.get("text")
+                        .and_then(serde_json::Value::as_str)
+                        .map_or(0, str::len)
+                } else {
+                    0
+                }
+            })
+            .sum(),
+    }
+}
+
+/// A1 — port of claude-code `F0u` (2.1.220 BIN off **230270568**), the
+/// post-processor every SUCCESSFUL `tool_result` passes through on its way to
+/// the model. Guards run in the oracle's order:
+///
+/// 1. `Gzg` — a blank result becomes `` `(${toolName} completed with no output)` ``
+///    and fires `tengu_tool_empty_result`.
+/// 2. `U0u` — an image/document-bearing result is returned UNCHANGED.
+/// 3. `o<=i` — only a STRICTLY larger body is persisted.
+/// 4. A persist failure returns the ORIGINAL content (the error never reaches
+///    the model).
+/// 5. On success, `tengu_tool_result_persisted` is fired and the envelope is
+///    substituted.
+///
+/// `threshold == None` is the oracle's `maxResultSizeChars: 1/0`
+/// (`!Number.isFinite(t)` → early return), i.e. NEVER persist. A missing
+/// `config_home` (library/test callers) is likewise a strict no-op for the
+/// persistence arm — the blank-result arm still applies, since it needs no
+/// filesystem.
+/// Outcome of [`apply_tool_result_persistence`].
+///
+/// `replaced` is load-bearing, not informational. claude-code's `F0u` returns
+/// `{...e, content: a}` where `content` is the ONE model-facing payload — a
+/// string OR an array — so a substitution replaces the whole payload. LingXi
+/// splits that payload across `ContentBlock::ToolResult`'s `content` string and
+/// its `content_blocks` array, and the wire conversion prefers the array when
+/// present (`llm-client/src/convert.rs`: `content_blocks.map_or_else(|| String(content), Array)`).
+/// So substituting only `content` would leave the oversized array to win at the
+/// wire: the file gets written, the telemetry fires, and the model still
+/// receives the full payload. The caller MUST clear `content_blocks` whenever
+/// this reports `true`.
+struct PersistenceOutcome {
+    content: String,
+    replaced: bool,
+}
+
+async fn apply_tool_result_persistence(
+    orch: &ConversationOrchestrator,
+    tool_name: &str,
+    tool_use_id: &ToolUseId,
+    threshold: Option<usize>,
+    content: String,
+    content_blocks: Option<&[serde_json::Value]>,
+) -> PersistenceOutcome {
+    use crate::tool_result_persistence as trp;
+
+    if tool_result_is_blank(&content, content_blocks) {
+        if let Some(bus) = orch.analytics_bus.as_ref() {
+            let mut metadata = telemetry::LogEventMetadata::new();
+            metadata.insert(
+                "toolName".into(),
+                telemetry::AnalyticsValue::String(tool_name.to_string()),
+            );
+            bus.log_event("tengu_tool_empty_result", metadata).await;
+        }
+        return PersistenceOutcome {
+            content: format!("({tool_name} completed with no output)"),
+            replaced: true,
+        };
+    }
+    if tool_result_has_media(content_blocks) {
+        return PersistenceOutcome { content, replaced: false };
+    }
+    let Some(threshold) = threshold else {
+        return PersistenceOutcome { content, replaced: false };
+    };
+    let size = tool_result_size(&content, content_blocks);
+    if size <= threshold {
+        return PersistenceOutcome { content, replaced: false };
+    }
+    let Some(home) = orch.config_home.as_ref() else {
+        return PersistenceOutcome { content, replaced: false };
+    };
+
+    // `x2e` serializes an ARRAY body with `JSON.stringify(e,null,2)` and a
+    // string body verbatim; the extension follows (`kKr`).
+    let (body, is_json) = match content_blocks {
+        Some(blocks) => match serde_json::to_string_pretty(blocks) {
+            Ok(s) => (s, true),
+            // `e.some(l=>l.type!=="text")` already returned an error above in
+            // the oracle; an unserializable array is the same "leave it alone".
+            Err(_) => return PersistenceOutcome { content, replaced: false },
+        },
+        None => (content.clone(), false),
+    };
+
+    let session_uuid = {
+        let session = orch.session.lock().await;
+        session.session_id.as_uuid().to_string()
+    };
+    let dir = trp::tool_results_dir(home, &orch.current_cwd().to_string_lossy(), &session_uuid);
+    // The on-disk stem is the port's INTERNAL `ToolUseId`, matching the
+    // oracle's `${e.tool_use_id}.txt` — claude-code's internal block-param id
+    // likewise differs from the `toolu_…` id it records in the transcript.
+    let persisted = match trp::persist(&dir, tool_use_id.as_str(), &body, is_json).await {
+        Ok(p) => p,
+        Err(msg) => {
+            tracing::error!(
+                path = %dir.join(tool_use_id.as_str()).display(),
+                "Failed to persist tool result: {msg}"
+            );
+            return PersistenceOutcome { content, replaced: false };
+        }
+    };
+    let path_display = persisted.filepath.display().to_string();
+    tracing::info!(
+        "Persisted tool result to {path_display} ({})",
+        trp::format_bytes(persisted.original_size)
+    );
+    let replacement = trp::wrap(
+        persisted.original_size,
+        &path_display,
+        &persisted.preview,
+        persisted.has_more,
+    );
+    if let Some(bus) = orch.analytics_bus.as_ref() {
+        #[allow(clippy::cast_possible_wrap)]
+        fn int(v: usize) -> telemetry::AnalyticsValue {
+            telemetry::AnalyticsValue::Int(i64::try_from(v).unwrap_or(i64::MAX))
+        }
+        let mut metadata = telemetry::LogEventMetadata::new();
+        metadata.insert(
+            "toolName".into(),
+            telemetry::AnalyticsValue::String(tool_name.to_string()),
+        );
+        metadata.insert("originalSizeBytes".into(), int(persisted.original_size));
+        metadata.insert("persistedSizeBytes".into(), int(replacement.len()));
+        metadata.insert(
+            "estimatedOriginalTokens".into(),
+            int(persisted.original_size.div_ceil(trp::CHARS_PER_TOKEN)),
+        );
+        metadata.insert(
+            "estimatedPersistedTokens".into(),
+            int(replacement.len().div_ceil(trp::CHARS_PER_TOKEN)),
+        );
+        metadata.insert("thresholdUsed".into(), int(threshold));
+        bus.log_event("tengu_tool_result_persisted", metadata).await;
+    }
+    PersistenceOutcome {
+        content: replacement,
+        replaced: true,
+    }
+}
+
 pub(crate) async fn dispatch_tool_uses_tracked(
     orch: &ConversationOrchestrator,
     tool_uses: &[(ToolUseId, String, serde_json::Value, Option<String>)],
@@ -2357,12 +2682,24 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                     "<tool_use_error>Error: No such tool available: {name}</tool_use_error>"
                 ),
             };
-            orch.output
-                .emit_tool_result(
+            // O1: claude's unknown-tool arm (2.1.220 BIN off 235398500 /
+            // 232971680) stamps the persisted line with the BARE string
+            // `` `Error: No such tool available: ${name}${suffix}` `` — the
+            // unwrapped twin of the `<tool_use_error>` model text. `suffix` is
+            // claude's `Gks` "did you mean" hint, which the port does not
+            // produce, so it is empty here (same as claude when no alias
+            // matches).
+            orch.record_tool_use_result(
+                tool_use_id,
+                serde_json::Value::String(format!("Error: No such tool available: {name}")),
+            )
+            .await;
+            orch.emit_tool_result_frame(
                     tool_use_id,
                     name,
                     &model_text,
                     &serde_json::json!({ "error": format!("tool not found: {name}") }),
+                    None,
                 )
                 .await;
             results.push(result_block);
@@ -2390,12 +2727,24 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 provider_tool_use_id: provider_id.clone(),
                 content_blocks: None,
             };
-            orch.output
-                .emit_tool_result(
+            // O1: the schema-gate arm (2.1.220 BIN off 235405560) stamps
+            // `` toolUseResult: `InputValidationError: ${zodError.message}` `` —
+            // the unwrapped twin of the model text. claude uses the RAW zod
+            // message here while the model text carries its ENRICHED `ce`
+            // rendering; the port has one detail string, which it reuses, so
+            // these two bytes coincide (the detail bytes already diverge from
+            // Zod's by design — see the comment above).
+            orch.record_tool_use_result(
+                tool_use_id,
+                serde_json::Value::String(format!("InputValidationError: {detail}")),
+            )
+            .await;
+            orch.emit_tool_result_frame(
                     tool_use_id,
                     name,
                     &model_text,
                     &serde_json::json!({ "error": detail }),
+                    None,
                 )
                 .await;
             results.push(result_block);
@@ -2483,12 +2832,20 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 provider_tool_use_id: provider_id.clone(),
                 content_blocks: None,
             };
-            orch.output
-                .emit_tool_result(
+            // O1: claude's validate_input arm (2.1.220 BIN off 235407190)
+            // stamps `` toolUseResult: `Error: ${T.message}` `` — the unwrapped
+            // twin of the `<tool_use_error>` model text.
+            orch.record_tool_use_result(
+                tool_use_id,
+                serde_json::Value::String(format!("Error: {msg}")),
+            )
+            .await;
+            orch.emit_tool_result_frame(
                     tool_use_id,
                     name,
                     &model_text,
                     &serde_json::json!({ "error": msg }),
+                    None,
                 )
                 .await;
             results.push(result_block);
@@ -2517,13 +2874,20 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             // the permission classifier emits, but it IS an ordinary
             // `toolDenialKind` value that produces a `tool_result_meta` entry.
             orch.record_tool_denial_kind(tool_use_id, "cancelled").await;
-            orch.output
-                .emit_tool_result_denied(
+            // O1: the same site sets `toolUseResult: FK` (2.1.220 BIN off
+            // 235398916), where `FK` (BIN off 229154836) IS `CANCEL_MESSAGE` —
+            // the identical string this block's model content already carries.
+            orch.record_tool_use_result(
+                tool_use_id,
+                serde_json::Value::String(CANCEL_MESSAGE.to_string()),
+            )
+            .await;
+            orch.emit_tool_result_frame(
                     tool_use_id,
                     name,
                     CANCEL_MESSAGE,
                     &serde_json::json!({ "error": CANCEL_MESSAGE }),
-                    "cancelled",
+                    Some("cancelled"),
                 )
                 .await;
             results.push(result_block);
@@ -2623,8 +2987,26 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         let pre_context_message: Option<ConversationMessage> = if pre_hook_messages.is_empty() {
             None
         } else {
+            // O3: the PERSISTED record is a `hook_additional_context`
+            // ATTACHMENT line (2.1.220 BIN off 234733097 for the PreToolUse
+            // producer), queued here and flushed after this tool's tool_result.
+            orch.queue_hook_attachment(
+                tool_use_id,
+                hooks::additional_context_attachment(
+                    &format!("PreToolUse:{name}"),
+                    tool_use_id.as_str(),
+                    "PreToolUse",
+                    &pre_hook_messages,
+                ),
+            )
+            .await;
             let body = pre_hook_messages.join("\n");
-            Some(ConversationMessage::user(
+            // O3: the model-facing rendering is `zr({content: Ww(…),
+            // isMeta:true})` (renderer table BIN off 238107100) and is
+            // EPHEMERAL — built from the attachment at API-normalization time
+            // and never persisted. `user_meta` marks it so both drivers skip
+            // persisting it; the attachment above IS the on-disk record.
+            Some(ConversationMessage::user_meta(
                 MessageId::new(),
                 format!(
                     "<system-reminder>\nPreToolUse:{name} hook additional context: {body}\n</system-reminder>"
@@ -2645,16 +3027,33 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         // never fires there. `pre_agg.reason` carries the parsed `stopReason`
         // (`hook_payload.rs:1113`). `None` when the hook did not request
         // preventContinuation (the common case), a strict no-op.
-        let pre_prevent_message: Option<ConversationMessage> = if pre_agg.prevent_continuation {
+        // O2: the message is paired with the `hook_stopped_continuation`
+        // ATTACHMENT the oracle records beside it (BIN off 235403061). Both are
+        // built here but published together on the success path below, so the
+        // record cannot drift away from the prose it describes.
+        let pre_prevent: Option<(ConversationMessage, serde_json::Value)> = if pre_agg
+            .prevent_continuation
+        {
             let reason = pre_agg
                 .reason
                 .clone()
                 .unwrap_or_else(|| "Execution stopped by hook".to_string());
-            Some(ConversationMessage::user(
-                MessageId::new(),
-                format!(
-                    "<system-reminder>\nPreToolUse:{name} hook stopped continuation: {reason}\n</system-reminder>"
+            let attachment = hooks::stopped_continuation_attachment(
+                &hooks::HookAttachmentIdentity {
+                    hook_name: format!("PreToolUse:{name}"),
+                    hook_event: "PreToolUse".to_string(),
+                    tool_use_id: tool_use_id.as_str().to_string(),
+                },
+                &reason,
+            );
+            Some((
+                ConversationMessage::user(
+                    MessageId::new(),
+                    format!(
+                        "<system-reminder>\nPreToolUse:{name} hook stopped continuation: {reason}\n</system-reminder>"
+                    ),
                 ),
+                attachment,
             ))
         } else {
             None
@@ -2668,6 +3067,17 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         // `is_non_interactive_session = !interactive_permissions`; DORMANT on the
         // default REPL (interactive ignores defer).
         if matches!(pre_agg.decision, Some(HookDecision::Defer)) {
+            // DIVERGENCE (`hookName` on the deferred-tool record): the oracle
+            // sets `c = p.hookSource || `PreToolUse:${t.name}`` (BIN off
+            // 234731960), and `hookSource` IS populated on every yield (BIN off
+            // 237809684), so in practice its record carries the SOURCE LABEL
+            // (`"settings"`, `"plugin:{name}"`, `"skill:{name}"` — from `$Ws`)
+            // rather than the tool-qualified name. LingXi's `AggregateHookResult`
+            // does not carry the deferring hook's source, and the exact label
+            // strings cannot be inferred from `HookSource`'s variant NAMES
+            // without reading `$Ws` directly. Rather than guess a mapping, the
+            // port keeps the documented fallback the oracle itself uses when
+            // `hookSource` is absent. Recorded as a known gap.
             let hook_name = format!("PreToolUse:{name}");
             let is_non_interactive = !orch.config.interactive_permissions;
             // batch size = the number of tool_use blocks this dispatch is
@@ -2694,6 +3104,15 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 // untouched), push the `hook_deferred_tool` meta message, and
                 // terminate the turn (`tool_deferred` stop-reason — the tool is
                 // not executed).
+                // DIVERGENCE (`permissionMode`): the oracle writes
+                // `Tn(n).mode`, the live tool-permission mode, whose full
+                // domain is `default` / `plan` / `acceptEdits` /
+                // `bypassPermissions`. LingXi's session models only
+                // `plan_mode: bool` — there is no session-level
+                // `PermissionMode` to read — so plan-vs-default is the port's
+                // fidelity ceiling here. Deliberately NOT widened by guessing:
+                // it is the SAME approximation `hook_ctx.permission_mode` above
+                // already makes, so the two stay consistent.
                 let permission_mode = if orch.session.lock().await.plan_mode {
                     "plan"
                 } else {
@@ -2709,27 +3128,49 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                     decision = "defer",
                     duration_ms = pre_dur_ms,
                 );
-                // `hook_deferred_tool` meta message (BIN off 202454844:
-                // `{type:"hook_deferred_tool",toolUseID,toolName,toolInput,
-                // hookName,hookEvent:"PreToolUse",permissionMode}`). LingXi has no
-                // protocol `isMeta`/structured-meta channel, so the deferred-tool
-                // record is surfaced as a plain meta user message carrying the
-                // faithful fields, ordered after this tool's pre-hook context.
-                let meta = serde_json::json!({
-                    "type": "hook_deferred_tool",
-                    "toolUseID": tool_use_id.to_string(),
-                    "toolName": name,
-                    "toolInput": input,
-                    "hookName": hook_name,
-                    "hookEvent": "PreToolUse",
-                    "permissionMode": permission_mode,
-                });
-                injected_messages.push((
-                    ConversationMessage::user(MessageId::new(), meta.to_string()),
-                    tool_use_id.clone(),
-                ));
-                // HOOK.1: surface any PreToolUse additionalContext (built above),
-                // ordered after the deferred-tool record, matching the Block arm.
+                // O2: the `hook_deferred_tool` record is PERSISTED, never sent
+                // to the model. Its renderer is `hook_deferred_tool:()=>[]`
+                // (BIN off 238109388), and the record is FUNCTIONAL rather than
+                // cosmetic — it is the resume protocol:
+                //   * `QAs` (BIN off 237925753) scans the transcript's last
+                //     1 MiB backwards for `'"hook_deferred_tool"'`, requiring
+                //     `type:"attachment"` with that inner type, and rejects the
+                //     deferral if a LATER line carries this `toolUseID`.
+                //   * the stream-json engine (BIN off 240899919) rebuilds
+                //     `{id, name, input}` from it with `stop_reason`
+                //     `"tool_deferred"`.
+                //
+                // Previously the port pushed the raw JSON as a plain (non-meta)
+                // user message: the model read a blob claude suppresses AND no
+                // resume scanner could ever find the deferral. BEHAVIOR CHANGE:
+                // the `-p`/print-mode defer path no longer sends that message.
+                //
+                // Persisted IMMEDIATELY rather than queued — the tool-keyed
+                // queue is flushed after a `tool_result`, and a deferred tool
+                // never produces one, so a queued record would strand.
+                //
+                // `toolInput` is the HOOK-UPDATED input (oracle `b`, set by the
+                // `case"hookUpdatedInput"` arm before the defer yield at BIN
+                // off 235409134) — NOT the raw model input. `effective_input`
+                // is computed further down, after this block, so the same
+                // `modified_input` fold is applied here.
+                let deferred_input = pre_agg
+                    .modified_input
+                    .clone()
+                    .unwrap_or_else(|| input.clone());
+                orch.persist_hook_attachment_to_jsonl(hooks::deferred_tool_attachment(
+                    tool_use_id.as_str(),
+                    name,
+                    &deferred_input,
+                    &hook_name,
+                    permission_mode,
+                ))
+                .await;
+                // HOOK.1: any PreToolUse additionalContext, ordered AFTER the
+                // deferred-tool record (matching the Block arm). Its attachment
+                // was queued above against this tool id; drain it now, since
+                // the usual post-`tool_result` flush will never run here.
+                orch.flush_hook_attachments(tool_use_id).await;
                 if let Some(msg) = pre_context_message {
                     injected_messages.push((msg, tool_use_id.clone()));
                 }
@@ -2771,12 +3212,12 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 provider_tool_use_id: provider_id.clone(),
                 content_blocks: None,
             };
-            orch.output
-                .emit_tool_result(
+            orch.emit_tool_result_frame(
                     tool_use_id,
                     name,
                     &model_text,
                     &serde_json::json!({ "error": model_text.clone() }),
+                    None,
                 )
                 .await;
             results.push(result_block);
@@ -3301,13 +3742,23 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 // this record, consumed when the tool_result user line is
                 // written.
                 orch.record_tool_denial_kind(tool_use_id, denial_kind).await;
-                orch.output
-                    .emit_tool_result_denied(
+                // O1: claude's permission-deny arm (2.1.220 BIN off 235400200)
+                // stamps `` toolUseResult: `Error: ${denyMessage}` `` — the
+                // deny message with an `Error: ` prefix, while the model
+                // content carries it wrapped in `<tool_use_error>`. LingXi
+                // sends the deny message verbatim as the model content, so only
+                // the persisted line gets the prefix.
+                orch.record_tool_use_result(
+                    tool_use_id,
+                    serde_json::Value::String(format!("Error: {reason}")),
+                )
+                .await;
+                orch.emit_tool_result_frame(
                         tool_use_id,
                         name,
                         &reason,
                         &serde_json::json!({ "error": reason }),
-                        denial_kind,
+                        Some(denial_kind),
                     )
                     .await;
                 results.push(result_block);
@@ -3453,7 +3904,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         #[allow(clippy::cast_possible_truncation)]
         let tool_duration_ms = tool_started.elapsed().as_millis() as u64;
 
-        let (content, is_error, emit_payload) = match tool_outcome {
+        let (content, is_error, emit_payload, is_abort) = match tool_outcome {
             Ok(result) => {
                 let text = result
                     .model_content
@@ -3484,11 +3935,26 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 if let Some(modifier) = result.context_modifier {
                     context_modifiers.push(modifier);
                 }
+                // O1: claude stamps the tool's RAW STRUCTURED result on the
+                // persisted `tool_result` user line as `toolUseResult`
+                // (2.1.220 BIN off 235420375: `toolUseResult: gt` where
+                // `gt = se.data`) — NOT the model-facing string. Same value the
+                // stream-json frame carries; recorded against the tool_use id
+                // and consumed when the user line is persisted.
+                orch.record_tool_use_result(tool_use_id, result.data.clone())
+                    .await;
+                // O1: an MCP server's `_meta`/`structuredContent` passthrough
+                // rides as the TOP-LEVEL `mcpMeta` sibling. `Uks(agentId, meta)`
+                // (BIN off 232969604) returns it verbatim on the main chain,
+                // which is the only chain this orchestrator serves.
+                if let Some(meta) = result.mcp_meta.clone() {
+                    orch.record_tool_use_mcp_meta(tool_use_id, meta).await;
+                }
                 // `is_error` rides on the result (set by MCP tools from the
                 // server's `isError`; `false` for every native success). A native
                 // FAILURE is an `Err` handled below — this Ok arm only flags an
                 // MCP logical-error RESULT.
-                (text, result.is_error, result.data)
+                (text, result.is_error, result.data, false)
             }
             Err(err) => {
                 // Bare error string — no <tool_use_error> wrapper.
@@ -3501,15 +3967,56 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 // BARE inner message (claude's `error.message`) — NOT the
                 // `Display` form, which would leak a LingXi-internal variant
                 // prefix (`invalid input: ` / `internal: `) into the wire bytes.
+                //
+                // O4-A: claude-code's `oQ_` catch (2.1.220 @235424972) also
+                // stamps `toolDenialKind: YDd(err, signal)` on this very frame.
+                // `YDd` (@235394375) returns a kind ONLY for an AbortError
+                // (`tl`), an interrupted `ShellError` (`hW`), or an
+                // abort-signalled `$7e`; LingXi's 1:1 analog of `tl` is
+                // `ToolError::Aborted`. The `hW.interrupted` branch has NO port
+                // analog today — `tools/shell/src/bash.rs` returns
+                // `Ok(build_interrupted_result())` for a killed shell rather
+                // than an `Err`, so it never reaches here; that branch is
+                // deliberately UNMODELED. `YDd`'s `background` abort reason
+                // (which maps to `"cancelled"`) likewise has no LingXi
+                // equivalent, so every LingXi abort takes the `interrupted`
+                // branch.
+                let is_abort = matches!(err, tool_api::ToolError::Aborted);
                 let bare = err.model_facing_message();
                 let text = format!("Error: {bare}");
-                (text, true, serde_json::json!({ "error": bare }))
+                // O1: on the ERROR arm claude stores the plain STRING
+                // `` `Error: ${ae}` `` in `toolUseResult` (2.1.220 BIN off
+                // 235424595), NOT a structured object. The `{"error": …}`
+                // object below is the port's stream-json SDK frame — a
+                // different wire that legitimately differs here.
+                orch.record_tool_use_result(
+                    tool_use_id,
+                    serde_json::Value::String(text.clone()),
+                )
+                .await;
+                (text, true, serde_json::json!({ "error": bare }), is_abort)
             }
         };
 
-        orch.output
-            .emit_tool_result(tool_use_id, name, &content, &emit_payload)
-            .await;
+        if is_abort {
+            // Denial provenance for an aborted tool. `record_tool_denial_kind`
+            // feeds the persisted `tool_result` user line's `toolDenialKind`
+            // (via `take_tool_denial_kind`); `emit_tool_result_denied` carries
+            // the same kind on the stream-json frame. Same shape as the
+            // hardcoded `"cancelled"` on the pre-cancel guard above.
+            orch.record_tool_denial_kind(tool_use_id, "interrupted").await;
+            orch.emit_tool_result_frame(
+                    tool_use_id,
+                    name,
+                    &content,
+                    &emit_payload,
+                    Some("interrupted"),
+                )
+                .await;
+        } else {
+            orch.emit_tool_result_frame(tool_use_id, name, &content, &emit_payload, None)
+                .await;
+        }
 
         // (code-change stats for /usage — claude-code `Bhn(added, removed)`)
         // Only file-edit tools (Edit/Write/MultiEdit) put a `structuredPatch`
@@ -3562,6 +4069,22 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 duration_ms: Some(tool_duration_ms),
             }
         };
+        // O2: the identity the post-hook ATTACHMENT records carry. claude keys
+        // both off the event it actually fired, so the failure path renders as
+        // `PostToolUseFailure:{tool}` (BIN off 234728254 / 234728470), not
+        // `PostToolUse:{tool}`.
+        //
+        // RESIDUAL: the pre-existing model-facing `additionalContext` and
+        // `stopped continuation` prose a few blocks below still hardcode
+        // `PostToolUse:{tool}` on BOTH paths. That divergence predates this
+        // change and its bytes are asserted by the sibling test file, so it is
+        // left alone here and reported rather than silently rewritten.
+        let post_hook_event = if is_error {
+            "PostToolUseFailure"
+        } else {
+            "PostToolUse"
+        };
+        let post_hook_name = format!("{post_hook_event}:{name}");
         let post_started = std::time::Instant::now();
         tracing::info!(
             event = orch_events::HOOK_POST_STARTED,
@@ -3603,11 +4126,77 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         // tool_result by both drivers, matching claude's ordering. `post_agg.reason`
         // carries the parsed `stopReason` (`hook_payload.rs:1113`). Strict no-op
         // when the hook did not request preventContinuation.
+        // O2: `hook_blocking_error`. The oracle's PostToolUse consumer
+        // (BIN off 234726074) re-emits the runner's bare `{blockingError}`
+        // signal as an attachment, positioned AFTER the pass-through run record
+        // and BEFORE the `preventContinuation` yield — so this block sits above
+        // the stopped-continuation one.
+        //
+        // The EXECUTOR deliberately publishes nothing on a blocking run (its
+        // `build_run_attachment` returns `None` for a `Block` decision, matching
+        // BIN off 237805098, where the exit-2 arm yields no `message`); the
+        // CALLER owns this record. Do not move it into the executor.
+        //
+        // Unlike almost every other hook attachment, this one IS model-facing:
+        // the normalizer renders it as an `isMeta` user message
+        // (BIN off 238107476). Previously `post_agg.decision` was never read
+        // here, so a blocking PostToolUse hook produced nothing at all.
+        if matches!(post_agg.decision, Some(hooks::response::HookDecision::Block)) {
+            let err = hooks::BlockingError {
+                // `e.reason || "Blocked by hook"` (BIN off 237775430). On the
+                // plain-text exit-2 arm the executor already parked the fully
+                // rendered `[{display}]: {stderr}` string in `reason`.
+                blocking_error: post_agg
+                    .reason
+                    .clone()
+                    .unwrap_or_else(|| "Blocked by hook".to_string()),
+                // Frozen at the first blocker alongside `reason`; the executor
+                // picks `iSe` vs `qq` per arm.
+                command: post_agg.block_command.clone().unwrap_or_default(),
+            };
+            orch.queue_hook_attachment(
+                tool_use_id,
+                hooks::blocking_error_attachment(
+                    &hooks::HookAttachmentIdentity {
+                        hook_name: post_hook_name.clone(),
+                        hook_event: post_hook_event.to_string(),
+                        tool_use_id: tool_use_id.as_str().to_string(),
+                    },
+                    &err,
+                ),
+            )
+            .await;
+            let body = hooks::blocking_error_prose(&post_hook_name, &err);
+            injected_messages.push((
+                ConversationMessage::user_meta(
+                    MessageId::new(),
+                    format!("<system-reminder>\n{body}\n</system-reminder>"),
+                ),
+                tool_use_id.clone(),
+            ));
+        }
+
         if post_agg.prevent_continuation {
             let reason = post_agg
                 .reason
                 .clone()
                 .unwrap_or_else(|| "Execution stopped by PostToolUse hook".to_string());
+            // O2: the PERSISTED record. The model-facing prose below was
+            // already byte-correct, but nothing reached the transcript —
+            // the oracle yields a `hook_stopped_continuation` attachment
+            // (BIN off 234726408) whose `message` sits SECOND in key order.
+            orch.queue_hook_attachment(
+                tool_use_id,
+                hooks::stopped_continuation_attachment(
+                    &hooks::HookAttachmentIdentity {
+                        hook_name: post_hook_name.clone(),
+                        hook_event: post_hook_event.to_string(),
+                        tool_use_id: tool_use_id.as_str().to_string(),
+                    },
+                    &reason,
+                ),
+            )
+            .await;
             injected_messages.push((
                 ConversationMessage::user(
                     MessageId::new(),
@@ -3626,12 +4215,33 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         // hookName prefix is `PostToolUse:{tool}`. `systemMessage` stays folded
         // (handled by `final_content` below); only additionalContext splits out.
         // Strict no-op when no PostToolUse hook returned additionalContext.
+        //
+        // O3: claude emits ONE attachment carrying the whole `content` ARRAY
+        // (BIN off 234726655), not one per entry; the renderer joins them with
+        // `\n` into a single `<system-reminder>` message. The port keeps its
+        // per-entry renderings on the injected channel (same model bytes when
+        // there is one entry, which is every observed case) but the PERSISTED
+        // record is the single attachment queued below.
+        if !post_additional_contexts.is_empty() {
+            orch.queue_hook_attachment(
+                tool_use_id,
+                hooks::additional_context_attachment(
+                    &format!("PostToolUse:{name}"),
+                    tool_use_id.as_str(),
+                    "PostToolUse",
+                    &post_additional_contexts,
+                ),
+            )
+            .await;
+        }
         for ctx in &post_additional_contexts {
             let wrapped = format!(
                 "<system-reminder>\nPostToolUse:{name} hook additional context: {ctx}\n</system-reminder>"
             );
+            // `user_meta`: the rendering is `zr({isMeta:true})` and is
+            // ephemeral — the attachment line above is the on-disk record.
             injected_messages.push((
-                ConversationMessage::user(MessageId::new(), wrapped),
+                ConversationMessage::user_meta(MessageId::new(), wrapped),
                 tool_use_id.clone(),
             ));
         }
@@ -3678,10 +4288,23 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                             "PostToolUse hook returned updatedToolOutput that does not match {name}'s output shape; using original output. {detail}"
                         );
                         tracing::warn!(tool_name = %name, "{msg}");
-                        injected_messages.push((
-                            ConversationMessage::user(MessageId::new(), msg),
-                            tool_use_id.clone(),
-                        ));
+                        // O3: this is a `hook_error_during_execution`
+                        // attachment (2.1.220 BIN off 235421957 — the exact
+                        // same message text). Its renderer entry is
+                        // `hook_error_during_execution: () => []` (BIN off
+                        // 238107100), so the MODEL NEVER SEES IT — the port
+                        // previously pushed it onto the injected channel, which
+                        // sent the model text claude suppresses.
+                        orch.queue_hook_attachment(
+                            tool_use_id,
+                            hooks::error_during_execution_attachment(
+                                &msg,
+                                &format!("PostToolUse:{name}"),
+                                tool_use_id.as_str(),
+                                "PostToolUse",
+                            ),
+                        )
+                        .await;
                         (content, false)
                     }
                 }
@@ -3689,31 +4312,29 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             None => (content, false),
         };
 
-        // HOOK.1: the PreToolUse `additionalContext`/`systemMessage` rides the
-        // `injected` channel as its OWN message (`pre_context_message`, queued
-        // just below this tool's tool_result) — it is NO LONGER folded into the
-        // tool-result content (claude-code `toolExecution.ts:845` pushes it as a
-        // standalone `resultingMessages` entry). The PostToolUse hooks'
-        // model-facing context (`additional_contexts`) IS folded onto the
-        // tool-result content here — a separate concern (TS surfaces PostToolUse
-        // `additionalContext` to the model), each on its own line. We use
-        // `additional_contexts` ONLY, never `system_messages`: a PostToolUse
+        // HOOK.1: BOTH the PreToolUse and the PostToolUse `additionalContext`
+        // ride the `injected` channel as their OWN messages — neither is folded
+        // into the tool-result content.
+        //
+        // O3 fix: the port used to ALSO concatenate every
+        // `post_additional_contexts` entry onto the tool_result string, so a
+        // PostToolUse hook's context reached the model TWICE. claude does
+        // neither fold: its success arm (2.1.220 BIN off 235420375) assembles
+        // the result blocks as `[formattedResult, acceptFeedback?,
+        // ...contentBlocks?]` with no hook context, and the PostToolUse
+        // consumer (BIN off 234726655) only yields the
+        // `hook_additional_context` ATTACHMENT.
+        //
+        // `system_messages` was never folded and still is not: a PostToolUse
         // `systemMessage` is transcript/user-facing only and must NOT reach the
         // model (claude-code `hook_system_message` → `normalizeAttachmentForAPI`
-        // returns `[]`, `messages.ts:4258`). A strict no-op when empty, so the
-        // result text is byte-identical to before for the locked turn-loop
-        // fixtures (noop hooks).
-        let mutated = !post_additional_contexts.is_empty() || mcp_output_mutated;
-        let final_content = if mutated {
-            let mut out = content;
-            for msg in &post_additional_contexts {
-                out.push('\n');
-                out.push_str(msg);
-            }
-            out
-        } else {
-            content
-        };
+        // returns `[]`, `messages.ts:4258`).
+        //
+        // `mutated` now tracks ONLY a genuine output REPLACEMENT
+        // (`updatedToolOutput` / `updatedMCPToolOutput`), which is what the
+        // `mutated_response` telemetry field means.
+        let mutated = mcp_output_mutated;
+        let final_content = content;
 
         tracing::info!(
             event = orch_events::HOOK_POST_COMPLETED,
@@ -3898,6 +4519,38 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             image_tool_result_blocks(&emit_payload)
                 .or_else(|| bash_image_tool_result_blocks(&emit_payload))
         };
+        // A1: the LAST thing that touches a successful `tool_result` before it
+        // is handed to the model — claude-code's `yor` wrapper around the
+        // result mapper (BIN off **235420440**:
+        // `let Ft=[Dt ? await N0u(…) : await yor(e,gt,t)]`). Blank results get
+        // the `(<tool> completed with no output)` sentinel; oversized ones are
+        // written to `<session>/tool-results/` and replaced by a
+        // `<persisted-output>` envelope.
+        let persistence = apply_tool_result_persistence(
+            orch,
+            &name,
+            &tool_use_id,
+            tool_handle.persistence_threshold().map(|raw| {
+                crate::tool_result_persistence::resolve_threshold(
+                    raw,
+                    tool_handle.persistence_threshold_ceiling(),
+                )
+            }),
+            final_content,
+            content_blocks.as_deref(),
+        )
+        .await;
+        // claude-code's `F0u` substitutes the ONE model-facing payload
+        // (`{...e, content: a}`, where `content` is a string OR an array).
+        // LingXi splits that payload in two and the wire prefers the array when
+        // present, so a substitution must drop the array too — otherwise the
+        // envelope is computed, the file written, the telemetry fired, and the
+        // model still receives the full oversized payload.
+        let (final_content, content_blocks) = if persistence.replaced {
+            (persistence.content, None)
+        } else {
+            (persistence.content, content_blocks)
+        };
         results.push(ContentBlock::ToolResult {
             tool_use_id: tool_use_id.clone(),
             content: final_content,
@@ -3936,7 +4589,12 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         // 1571). Success path only — a Block/Defer `continue`d above without ever
         // executing the tool, so this site is unreached there. No-op when the
         // hook did not request preventContinuation.
-        if let Some(msg) = pre_prevent_message {
+        if let Some((msg, attachment)) = pre_prevent {
+            // O2: the persisted record rides the same tool-keyed queue as the
+            // additionalContext one, so it is flushed right after this tool's
+            // tool_result — the position the oracle's post-execution yield puts
+            // it in.
+            orch.queue_hook_attachment(tool_use_id, attachment).await;
             injected_messages.push((msg, tool_use_id.clone()));
         }
     }
@@ -3947,8 +4605,13 @@ pub(crate) async fn dispatch_tool_uses_tracked(
     // Strict no-op when no tool ran (empty batch). Best-effort: a
     // failing/absent PostToolBatch hook never breaks the turn (the executor is a
     // no-op when no PostToolBatch hook is registered, mirroring the per-tool
-    // PostToolUse fire). The aggregate decision/output are not consumed — this is
-    // an observational, post-batch event.
+    // PostToolUse fire).
+    //
+    // CORRECTED: this used to bind `let _batch_agg = …` under a comment saying
+    // "the aggregate decision/output are not consumed — this is an
+    // observational, post-batch event". It is not observational. The oracle
+    // (@233161375) ends the turn on it — see
+    // [`post_tool_batch_stop_reason`].
     if !post_tool_batch_calls.is_empty() {
         // FIX 2: populate `transcript_path` + `permission_mode` here too (the
         // batch firer builds its own context). Same sources as the PreToolUse
@@ -3974,7 +4637,73 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         let batch_event = HookEvent::PostToolBatch {
             tool_calls: post_tool_batch_calls,
         };
-        let _batch_agg = orch.hooks.execute(batch_event, batch_ctx).await;
+        let batch_agg = orch.hooks.execute(batch_event, batch_ctx).await;
+
+        // `additionalContext` FIRST: the oracle yields it inside the per-hook
+        // loop, while the stop record is only reached after that loop ends, so a
+        // hook doing both produces the context ahead of the stop. Independent of
+        // `preventContinuation` — a batch hook may contribute context without
+        // stopping anything.
+        //
+        // FIDELITY: the oracle emits one attachment PER HOOK RESULT, each
+        // carrying that hook's own `additionalContexts` array. This port's
+        // aggregate flattens contexts across hooks, so it emits ONE attachment
+        // with the combined array — identical for a single batch hook (every
+        // observed case) and the same compromise the PostToolUse site already
+        // makes.
+        if !batch_agg.additional_contexts.is_empty() {
+            let identity = post_tool_batch_identity();
+            let batch_id = protocol::ToolUseId::from(identity.tool_use_id.clone());
+            orch.persist_hook_attachment_to_jsonl(hooks::additional_context_attachment(
+                &identity.hook_name,
+                &identity.tool_use_id,
+                &identity.hook_event,
+                &batch_agg.additional_contexts,
+            ))
+            .await;
+            for ctx in &batch_agg.additional_contexts {
+                injected_messages.push((
+                    // `user_meta`: the rendering is ephemeral (`zr({isMeta:true})`);
+                    // the attachment above is the on-disk record.
+                    ConversationMessage::user_meta(
+                        MessageId::new(),
+                        format!(
+                            "<system-reminder>\nPostToolBatch hook additional context: {ctx}\n</system-reminder>"
+                        ),
+                    ),
+                    batch_id.clone(),
+                ));
+            }
+        }
+
+        if let Some(reason) = post_tool_batch_stop_reason(&batch_agg) {
+            // ONE identity for both records, so the persisted attachment and the
+            // model-facing prose describe the same event and cannot drift.
+            let identity = post_tool_batch_identity();
+            let batch_id = protocol::ToolUseId::from(identity.tool_use_id.clone());
+            // The oracle yields the record and returns `{reason:"hook_stopped"}`
+            // in one expression, so the attachment is persisted BEFORE the flag
+            // propagates — a stop must never reach the transcript unexplained.
+            orch.persist_hook_attachment_to_jsonl(hooks::stopped_continuation_attachment(
+                &identity, &reason,
+            ))
+            .await;
+            // The oracle derives this prose from the attachment at
+            // `normalizeAttachmentForAPI` time (@238107808). This port has no
+            // such layer — `Stop`, `PreToolUse` and `PostToolUse` each build it
+            // explicitly — so without this the model would never learn why the
+            // turn ended.
+            injected_messages.push((
+                ConversationMessage::user(
+                    MessageId::new(),
+                    format!(
+                        "<system-reminder>\nPostToolBatch hook stopped continuation: {reason}\n</system-reminder>"
+                    ),
+                ),
+                batch_id,
+            ));
+            prevent_continuation = true;
+        }
     }
 
     Ok((
@@ -3983,6 +4712,56 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         injected_messages,
         context_modifiers,
     ))
+}
+
+/// Identity for the once-per-batch `PostToolBatch` records.
+///
+/// `hookName`/`hookEvent` are the bare literal `PostToolBatch` — NOT suffixed
+/// with a tool name the way `PostToolUse:${t.name}` is (@234726414), because the
+/// event covers the whole batch rather than one call.
+///
+/// `toolUseID` is the oracle's `rt`, bound at the top of the batch block as
+/// ``rt = `hook-${f.uuid()}` `` (@233159400) — a SYNTHETIC id, not any real
+/// tool's. The `Stop`-hook site builds its id the same way
+/// (`conversation.rs`), so the two stay consistent.
+fn post_tool_batch_identity() -> hooks::HookAttachmentIdentity {
+    hooks::HookAttachmentIdentity {
+        hook_name: "PostToolBatch".to_string(),
+        hook_event: "PostToolBatch".to_string(),
+        tool_use_id: format!("hook-{}", protocol::HookId::new().as_uuid()),
+    }
+}
+
+/// The stop reason a `PostToolBatch` aggregate implies, or `None` to continue.
+///
+/// Ports the oracle's `Mr`/`Qn` pair (@233161375):
+///
+/// ```js
+/// if(Mn.blockingError)Mr=!0,Qn??=Mn.blockingError.blockingError;
+/// if(Mn.preventContinuation)Mr=!0,Qn??=Mn.stopReason
+/// …
+/// if(Mr)… message:Qn||"Execution stopped by PostToolBatch hook" …
+/// ```
+///
+/// Two details worth keeping:
+///
+/// - `Mr` is set by EITHER a blocking error or `preventContinuation`. Gating on
+///   `prevent_continuation` alone would let a blocking batch hook run on.
+/// - `Qn` is `??=` (first-wins) and falls back to the literal below when empty.
+///   The aggregate's `reason` already freezes at the first blocker
+///   (`executor.rs`), so reading it here preserves that ordering.
+fn post_tool_batch_stop_reason(agg: &hooks::response::AggregateHookResult) -> Option<String> {
+    let stopped = agg.prevent_continuation
+        || matches!(agg.decision, Some(hooks::response::HookDecision::Block));
+    if !stopped {
+        return None;
+    }
+    Some(
+        agg.reason
+            .clone()
+            .filter(|r| !r.is_empty())
+            .unwrap_or_else(|| "Execution stopped by PostToolBatch hook".to_string()),
+    )
 }
 
 /// SKILLEXEC.3 (model scope): fold a tool batch's `context_modifier`s over a
@@ -4639,5 +5418,1525 @@ mod denial_kind_wiring_tests {
             kinds[0].1, "user-rejected",
             "behavior_ask must outrank the classifier reason"
         );
+    }
+}
+
+/// O4-A: the `interrupted` denial stamp.
+///
+/// claude-code stamps `toolDenialKind` for an ABORTED tool inside the per-tool
+/// execution catch (`oQ_`, 2.1.220 @235424972):
+/// ```js
+/// toolDenialKind: YDd(ce, n.abortController.signal)
+/// ```
+/// with (`YDd` @235394375)
+/// ```js
+/// function YDd(e,t){
+///   let r = e instanceof hW && e.interrupted;              // ShellError.interrupted
+///   if(!(e instanceof tl || r || $7e(e)&&t.aborted)) return; // tl = AbortError
+///   return t.aborted && H_(t.reason)==="background" ? "cancelled" : "interrupted";
+/// }
+/// ```
+/// The LingXi analog of `tl` is [`tool_api::ToolError::Aborted`], and the
+/// analog of `oQ_`'s catch is the `Err(err)` arm of
+/// [`dispatch_tool_uses_tracked`] — so the stamp attaches at exactly the site
+/// claude-code stamps at, with no emission-point change.
+///
+/// Real-transcript ground truth (2.1.220, `~/.claude/projects/**/*.jsonl`):
+/// `toolDenialKind` census is `user-rejected` ×13 and `interrupted` ×1; the
+/// `interrupted` line carries `"toolUseResult": "Error: [Request interrupted by
+/// user for tool use]"`.
+#[cfg(test)]
+mod interrupted_denial_stamp_tests {
+    use super::{dispatch_tool_uses_tracked, ConversationOrchestrator};
+    use crate::test_support::{
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
+    };
+    use crate::OrchestratorConfig;
+    use async_trait::async_trait;
+    use protocol::ToolUseId;
+    use serde_json::json;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tool_api::context::ToolUseContext;
+    use tool_api::progress::ToolProgressSender;
+    use tool_api::registry::ToolRegistry;
+    use tool_api::tool_trait::{
+        DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
+        ValidationError,
+    };
+
+    /// A tool whose `call` returns the requested `ToolError` immediately.
+    struct FailingTool {
+        name: &'static str,
+        abort: bool,
+    }
+
+    #[async_trait]
+    impl Tool for FailingTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
+                once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
+            &SCHEMA
+        }
+        fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
+            true
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1024 * 1024
+        }
+        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+        async fn validate_input(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> Result<(), ValidationError> {
+            Ok(())
+        }
+        async fn check_permissions(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> permission::PermissionResult {
+            permission::PermissionResult::Allow {
+                reason: permission::PermissionDecisionReason::Other {
+                    reason: "test".into(),
+                },
+                updated_input: None,
+                update_destination: None,
+                metadata: permission::result::PermissionMetadata::default(),
+            }
+        }
+        async fn description(
+            &self,
+            _input: &serde_json::Value,
+            _opts: &DescriptionOptions,
+        ) -> String {
+            "failing-tool".into()
+        }
+        async fn prompt(&self, _opts: &PromptOptions) -> String {
+            String::new()
+        }
+        async fn call(
+            &self,
+            _input: serde_json::Value,
+            _ctx: ToolUseContext,
+            _tx: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            if self.abort {
+                Err(ToolError::Aborted)
+            } else {
+                Err(ToolError::Internal("boom".into()))
+            }
+        }
+    }
+
+    fn orch_with(out: MockOutputStream) -> ConversationOrchestrator {
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(FailingTool {
+            name: "AbortTool",
+            abort: true,
+        }) as Arc<dyn Tool>);
+        registry.register_builtin(Arc::new(FailingTool {
+            name: "BoomTool",
+            abort: false,
+        }) as Arc<dyn Tool>);
+        ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(registry),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(out),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        )
+    }
+
+    /// `ToolError::Aborted` from a tool's own `call` ⇒ `toolDenialKind:
+    /// "interrupted"`, both on the SDK frame and in the orchestrator's
+    /// persistence side-table.
+    #[tokio::test]
+    async fn aborted_tool_is_stamped_interrupted() {
+        let out = MockOutputStream::new();
+        let orch = orch_with(out.clone());
+        let id = ToolUseId::new();
+        let uses = vec![(id.clone(), "AbortTool".to_string(), json!({}), None)];
+        let (blocks, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses, None)
+            .await
+            .expect("dispatch");
+        assert_eq!(blocks.len(), 1);
+
+        let denials = out.denial_snapshot().await;
+        assert_eq!(
+            denials,
+            vec![(id.clone(), "interrupted".to_string())],
+            "an aborted tool must emit exactly one `interrupted` denial frame"
+        );
+        assert_eq!(
+            orch.tool_denial_kinds
+                .lock()
+                .await
+                .get(&id.to_string())
+                .map(String::as_str),
+            Some("interrupted"),
+            "the kind must also be recorded for the persisted tool_result line"
+        );
+    }
+
+    /// A NON-abort tool failure is an ordinary error result — no denial kind
+    /// (claude-code `YDd` returns `undefined` unless the error is an
+    /// AbortError / interrupted ShellError).
+    #[tokio::test]
+    async fn ordinary_tool_error_is_not_stamped() {
+        let out = MockOutputStream::new();
+        let orch = orch_with(out.clone());
+        let id = ToolUseId::new();
+        let uses = vec![(id.clone(), "BoomTool".to_string(), json!({}), None)];
+        let _ = dispatch_tool_uses_tracked(&orch, &uses, None)
+            .await
+            .expect("dispatch");
+        assert!(
+            out.denial_snapshot().await.is_empty(),
+            "a plain tool failure must not carry a toolDenialKind"
+        );
+        assert!(orch.tool_denial_kinds.lock().await.is_empty());
+    }
+}
+
+/// O3: hook `additionalContext` / `hook_error_during_execution` become
+/// TRANSCRIPT ATTACHMENTS, and the model-facing rendering is EPHEMERAL.
+///
+/// Oracle — the attachment→model renderer table (2.1.220 BIN off 238107100):
+/// ```text
+/// hook_additional_context: (e) => { if (e.content.length === 0) return [];
+///     return [ zr({ content: Ww(`${e.hookName} hook additional context: ${e.content.join("\n")}`), isMeta:!0 }) ] },
+/// hook_error_during_execution: () => [],
+/// ```
+/// `Ww` (BIN off 238046823) is the `<system-reminder>` wrapper. The `zr(…)`
+/// message is built at API-normalization time from the attachment and is never
+/// written to the transcript — census of real 2.1.220 sessions finds 145
+/// `hook_additional_context` attachment lines and ZERO persisted `user` lines
+/// carrying the rendered text. `hook_error_during_execution` renders to `[]`,
+/// so the MODEL NEVER SEES IT.
+///
+/// claude also never folds a PostToolUse `additionalContext` into the
+/// tool_result string — the success arm (BIN off 235420375) assembles
+/// `[formattedResult, acceptFeedback?, ...contentBlocks?]` with no hook
+/// context, and the PostToolUse consumer (BIN off 234726655) only yields the
+/// attachment.
+#[cfg(test)]
+mod hook_context_attachment_tests {
+    use super::{dispatch_tool_uses_tracked, post_tool_batch_identity, ConversationOrchestrator};
+    use crate::test_support::{MockApiClient, MockOutputStream, NoOpPermissionGate};
+    use crate::OrchestratorConfig;
+    use async_trait::async_trait;
+    use hooks::definition::{HookDefinition, HookExecutor as DefHookExecutor, HookSource};
+    use hooks::events::{HookEvent, HookEventType};
+    use hooks::executor::{BuiltinHookHandler, HookExecutorImpl};
+    use hooks::registry::HookRegistry;
+    use hooks::response::HookResponse;
+    use hooks::{HookContext, HookOutcome, HookResult};
+    use protocol::{ContentBlock, ConversationMessage, HookId, ToolUseId};
+    use serde_json::json;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tool_api::context::ToolUseContext;
+    use tool_api::progress::ToolProgressSender;
+    use tool_api::registry::ToolRegistry;
+    use tool_api::tool_trait::{
+        DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
+        ValidationError,
+    };
+
+    struct EchoTool;
+
+    #[async_trait]
+    impl Tool for EchoTool {
+        fn name(&self) -> &str {
+            "Echo"
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
+                once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
+            &SCHEMA
+        }
+        /// Declared so a PostToolUse `updatedToolOutput` can FAIL validation
+        /// and exercise the `hook_error_during_execution` arm.
+        fn output_schema(&self) -> Option<&serde_json::Value> {
+            static OUT: once_cell::sync::Lazy<serde_json::Value> =
+                once_cell::sync::Lazy::new(|| {
+                    json!({
+                        "type": "object",
+                        "properties": { "out": { "type": "string" } },
+                        "required": ["out"]
+                    })
+                });
+            Some(&OUT)
+        }
+        fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
+            true
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1024 * 1024
+        }
+        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+        async fn validate_input(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> Result<(), ValidationError> {
+            Ok(())
+        }
+        async fn check_permissions(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> permission::PermissionResult {
+            permission::PermissionResult::Allow {
+                reason: permission::PermissionDecisionReason::Other {
+                    reason: "test".into(),
+                },
+                updated_input: None,
+                update_destination: None,
+                metadata: permission::result::PermissionMetadata::default(),
+            }
+        }
+        async fn description(
+            &self,
+            _input: &serde_json::Value,
+            _opts: &DescriptionOptions,
+        ) -> String {
+            "echo".into()
+        }
+        async fn prompt(&self, _opts: &PromptOptions) -> String {
+            String::new()
+        }
+        async fn call(
+            &self,
+            _input: serde_json::Value,
+            _ctx: ToolUseContext,
+            _tx: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            Ok(ToolCallResult {
+                data: json!({ "out": "ECHOED-OUTPUT" }),
+                model_content: Some("ECHOED-OUTPUT".into()),
+                new_messages: vec![],
+                context_modifier: None,
+                is_error: false,
+                mcp_meta: None,
+            })
+        }
+    }
+
+    struct UnusedHttp;
+    #[async_trait]
+    impl traits::HttpTransport for UnusedHttp {
+        async fn request(
+            &self,
+            _req: protocol::HttpRequest,
+        ) -> Result<protocol::HttpResponse, traits::HttpError> {
+            Err(traits::HttpError::InvalidRequest("unused".into()))
+        }
+        async fn stream_sse(
+            &self,
+            _req: protocol::HttpRequest,
+        ) -> Result<traits::http::SseStream, traits::HttpError> {
+            Err(traits::HttpError::InvalidRequest("unused".into()))
+        }
+    }
+
+    struct UnusedRuntime;
+    #[async_trait]
+    impl traits::RuntimeSpawner for UnusedRuntime {
+        async fn spawn(
+            &self,
+            _name: &str,
+            _task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
+        ) -> Result<traits::BackgroundTaskHandle, traits::RuntimeError> {
+            Err(traits::RuntimeError::Internal("unused".into()))
+        }
+        async fn sleep(&self, _d: std::time::Duration) {}
+        async fn cancel(
+            &self,
+            _h: &traits::BackgroundTaskHandle,
+        ) -> Result<(), traits::RuntimeError> {
+            Ok(())
+        }
+    }
+
+    struct FixedPostHook {
+        response: HookResponse,
+    }
+
+    #[async_trait]
+    impl BuiltinHookHandler for FixedPostHook {
+        async fn handle(&self, _event: &HookEvent, _ctx: &HookContext) -> HookResult {
+            HookResult {
+                outcome: HookOutcome::Success,
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: Some(0),
+                response: Some(self.response.clone()),
+            }
+        }
+        fn id(&self) -> &str {
+            "fixed-post"
+        }
+    }
+
+    fn post_hook_executor(response: HookResponse) -> Arc<HookExecutorImpl> {
+        let hook = HookDefinition {
+            id: HookId::new(),
+            name: "fixed-post".into(),
+            events: vec![HookEventType::PostToolUse],
+            if_condition: None,
+            executor: DefHookExecutor::Builtin {
+                handler_id: "fixed-post".into(),
+            },
+            source: HookSource::Session,
+            blocking: true,
+            timeout: None,
+            priority: 0,
+            once: false,
+            status_message: None,
+        };
+        let mut registry = HookRegistry::new();
+        registry.register(hook);
+        let reg = Arc::new(tokio::sync::RwLock::new(registry));
+        let mut exec = HookExecutorImpl::new(
+            reg,
+            Arc::new(UnusedHttp),
+            Arc::new(UnusedRuntime),
+        );
+        exec.register_builtin(Arc::new(FixedPostHook { response }));
+        Arc::new(exec)
+    }
+
+    fn orch_with_post_hook(response: HookResponse) -> ConversationOrchestrator {
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(EchoTool) as Arc<dyn Tool>);
+        ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(registry),
+            post_hook_executor(response),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(crate::test_support::StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        )
+    }
+
+    fn uses() -> Vec<(ToolUseId, String, serde_json::Value, Option<String>)> {
+        vec![(ToolUseId::new(), "Echo".into(), json!({}), None)]
+    }
+
+    /// Same as [`post_hook_executor`] but registered for `PostToolBatch`, the
+    /// once-per-batch event fired after every tool in the batch has run.
+    fn batch_hook_executor(response: HookResponse) -> Arc<HookExecutorImpl> {
+        let hook = HookDefinition {
+            id: HookId::new(),
+            name: "fixed-batch".into(),
+            events: vec![HookEventType::PostToolBatch],
+            if_condition: None,
+            // Must match `FixedPostHook::id()` — the registry resolves the
+            // builtin by handler id, and a mismatch silently never fires.
+            executor: DefHookExecutor::Builtin {
+                handler_id: "fixed-post".into(),
+            },
+            source: HookSource::Session,
+            blocking: true,
+            timeout: None,
+            priority: 0,
+            once: false,
+            status_message: None,
+        };
+        let mut registry = HookRegistry::new();
+        registry.register(hook);
+        let reg = Arc::new(tokio::sync::RwLock::new(registry));
+        let mut exec =
+            HookExecutorImpl::new(reg, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
+        exec.register_builtin(Arc::new(FixedPostHook { response }));
+        Arc::new(exec)
+    }
+
+    fn orch_with_batch_hook(response: HookResponse) -> ConversationOrchestrator {
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(EchoTool) as Arc<dyn Tool>);
+        ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(registry),
+            batch_hook_executor(response),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(crate::test_support::StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        )
+    }
+
+    /// A `PostToolBatch` hook's `preventContinuation` STOPS the turn.
+    ///
+    /// The batch fire used to discard its aggregate entirely
+    /// (`let _batch_agg = …`) under a comment calling `PostToolBatch`
+    /// "observational". The oracle disagrees (2.1.220 @233161375):
+    ///
+    /// ```js
+    /// if(Mn.blockingError)Mr=!0,Qn??=Mn.blockingError.blockingError;
+    /// if(Mn.preventContinuation)Mr=!0,Qn??=Mn.stopReason
+    /// …
+    /// if(Mr)return yield Va({type:"hook_stopped_continuation",
+    ///   message:Qn||"Execution stopped by PostToolBatch hook",
+    ///   hookName:"PostToolBatch",toolUseID:rt,hookEvent:"PostToolBatch"},f),
+    ///   n$e(er,a),{reason:"hook_stopped"}
+    /// ```
+    ///
+    /// `{reason:"hook_stopped"}` is a turn-ending return, so the flag must
+    /// propagate — unlike the PostToolUse case, where the port deliberately
+    /// leaves the open question noted rather than guessing.
+    #[tokio::test]
+    async fn post_tool_batch_prevent_continuation_stops_the_turn() {
+        let orch = orch_with_batch_hook(HookResponse {
+            prevent_continuation: true,
+            reason: Some("BATCH-STOP".into()),
+            ..HookResponse::default()
+        });
+        let (_results, prevent, _injected, _mods) =
+            dispatch_tool_uses_tracked(&orch, &uses(), None)
+                .await
+                .expect("dispatch");
+        assert!(
+            prevent,
+            "a PostToolBatch hook requesting preventContinuation must end the turn"
+        );
+    }
+
+    /// The MODEL must be told why the turn stopped.
+    ///
+    /// The oracle yields the attachment into the message stream and derives the
+    /// prose from it later, in `normalizeAttachmentForAPI` (@238107808):
+    /// `hook_stopped_continuation:(e)=>[zr({content:Ww(`${e.hookName} hook
+    /// stopped continuation: ${e.message}`),isMeta:!0})]`. This port has no such
+    /// normalize layer — every other site (`Stop`, `PreToolUse`, `PostToolUse`)
+    /// builds the `<system-reminder>` prose explicitly beside the attachment —
+    /// so the batch site must too, or the stop reaches the transcript but never
+    /// the model.
+    ///
+    /// Both records carry the SAME synthetic `hook-<uuid>` id, so the prose and
+    /// the attachment describe one event rather than drifting apart.
+    #[tokio::test]
+    async fn post_tool_batch_stop_is_explained_to_the_model() {
+        let orch = orch_with_batch_hook(HookResponse {
+            prevent_continuation: true,
+            reason: Some("BATCH-STOP".into()),
+            ..HookResponse::default()
+        });
+        let (_results, _prevent, injected, _mods) =
+            dispatch_tool_uses_tracked(&orch, &uses(), None)
+                .await
+                .expect("dispatch");
+        let stop_msg = injected
+            .iter()
+            .find(|(m, _)| m.text_content().contains("hook stopped continuation"))
+            .expect("the batch stop must be explained to the model");
+        assert_eq!(
+            stop_msg.0.text_content(),
+            "<system-reminder>\nPostToolBatch hook stopped continuation: BATCH-STOP\n</system-reminder>"
+        );
+        assert!(
+            stop_msg.1.as_str().starts_with("hook-"),
+            "prose and attachment must share the synthetic batch id, got {}",
+            stop_msg.1.as_str()
+        );
+    }
+
+    /// A `PostToolBatch` hook's `additionalContext` reaches the model.
+    ///
+    /// The same discarded aggregate carried this too (@233161375, inside the
+    /// per-hook loop and therefore BEFORE the stop check):
+    ///
+    /// ```js
+    /// if(Mn.additionalContexts&&Mn.additionalContexts.length>0){
+    ///   let ko=Va({type:"hook_additional_context",content:Mn.additionalContexts,
+    ///     hookName:"PostToolBatch",toolUseID:rt,hookEvent:"PostToolBatch"},f);
+    ///   yield ko,Qe.push(ko)}
+    /// ```
+    ///
+    /// It is independent of `preventContinuation`: a batch hook can contribute
+    /// context without stopping anything.
+    #[tokio::test]
+    async fn post_tool_batch_additional_context_reaches_the_model() {
+        let orch = orch_with_batch_hook(HookResponse {
+            additional_context: Some("BATCH-CTX".into()),
+            ..HookResponse::default()
+        });
+        let (_results, prevent, injected, _mods) =
+            dispatch_tool_uses_tracked(&orch, &uses(), None)
+                .await
+                .expect("dispatch");
+        assert!(!prevent, "additionalContext alone must not stop the turn");
+        let ctx_msg = injected
+            .iter()
+            .find(|(m, _)| m.text_content().contains("BATCH-CTX"))
+            .expect("the batch additionalContext must reach the model");
+        assert_eq!(
+            ctx_msg.0.text_content(),
+            "<system-reminder>\nPostToolBatch hook additional context: BATCH-CTX\n</system-reminder>"
+        );
+    }
+
+    /// Ordering: the oracle yields `hook_additional_context` inside the per-hook
+    /// loop and the stop record only AFTER it, so a hook doing both produces the
+    /// context first.
+    #[tokio::test]
+    async fn batch_additional_context_is_ordered_before_the_stop() {
+        let orch = orch_with_batch_hook(HookResponse {
+            additional_context: Some("CTX".into()),
+            prevent_continuation: true,
+            reason: Some("STOP".into()),
+            ..HookResponse::default()
+        });
+        let (_results, prevent, injected, _mods) =
+            dispatch_tool_uses_tracked(&orch, &uses(), None)
+                .await
+                .expect("dispatch");
+        assert!(prevent);
+        let texts: Vec<String> = injected
+            .iter()
+            .map(|(m, _)| m.text_content())
+            .filter(|t| t.contains("PostToolBatch"))
+            .collect();
+        assert_eq!(
+            texts,
+            vec![
+                "<system-reminder>\nPostToolBatch hook additional context: CTX\n</system-reminder>",
+                "<system-reminder>\nPostToolBatch hook stopped continuation: STOP\n</system-reminder>",
+            ]
+        );
+    }
+
+    /// A quiet batch hook injects nothing — the guard must not add a message to
+    /// every turn.
+    #[tokio::test]
+    async fn a_quiet_post_tool_batch_hook_injects_no_message() {
+        let orch = orch_with_batch_hook(HookResponse::default());
+        let (_results, _prevent, injected, _mods) =
+            dispatch_tool_uses_tracked(&orch, &uses(), None)
+                .await
+                .expect("dispatch");
+        assert!(
+            !injected
+                .iter()
+                .any(|(m, _)| m.text_content().contains("hook stopped continuation")),
+            "no stop, no explanation"
+        );
+    }
+
+    /// `Mr` is set by a blocking error too, not only by `preventContinuation`.
+    #[tokio::test]
+    async fn post_tool_batch_blocking_error_also_stops_the_turn() {
+        let orch = orch_with_batch_hook(HookResponse {
+            decision: Some(hooks::response::HookDecision::Block),
+            reason: Some("BATCH-BLOCK".into()),
+            ..HookResponse::default()
+        });
+        let (_results, prevent, _injected, _mods) =
+            dispatch_tool_uses_tracked(&orch, &uses(), None)
+                .await
+                .expect("dispatch");
+        assert!(
+            prevent,
+            "`if(Mn.blockingError)Mr=!0` — a batch blocking error stops the turn too"
+        );
+    }
+
+    /// A batch hook that asks for nothing leaves the turn alone — the guard
+    /// must not turn every batch into a stop.
+    #[tokio::test]
+    async fn a_quiet_post_tool_batch_hook_does_not_stop_the_turn() {
+        let orch = orch_with_batch_hook(HookResponse::default());
+        let (_results, prevent, _injected, _mods) =
+            dispatch_tool_uses_tracked(&orch, &uses(), None)
+                .await
+                .expect("dispatch");
+        assert!(!prevent, "a no-op PostToolBatch hook must not end the turn");
+    }
+
+    /// The record the oracle yields alongside the stop: `hookName` and
+    /// `hookEvent` are the bare literal `PostToolBatch` (NOT suffixed with a
+    /// tool name the way `PostToolUse:{tool}` is), and `toolUseID` is the
+    /// SYNTHETIC `hook-${uuid}` the oracle binds as `rt` — no real tool's id,
+    /// because the event covers the whole batch.
+    #[test]
+    fn post_tool_batch_stopped_continuation_matches_the_oracle_shape() {
+        let attachment = hooks::stopped_continuation_attachment(
+            &post_tool_batch_identity(),
+            "Execution stopped by PostToolBatch hook",
+        );
+        let id = attachment["toolUseID"].as_str().expect("toolUseID");
+        assert!(
+            id.starts_with("hook-"),
+            "the batch attachment carries a synthetic `hook-<uuid>` id, got {id}"
+        );
+        assert_eq!(
+            serde_json::to_string(&attachment).unwrap(),
+            format!(
+                r#"{{"type":"hook_stopped_continuation","message":"Execution stopped by PostToolBatch hook","hookName":"PostToolBatch","toolUseID":"{id}","hookEvent":"PostToolBatch"}}"#
+            )
+        );
+    }
+
+    /// The PostToolUse `additionalContext` reaches the model EXACTLY ONCE — as
+    /// the injected `isMeta` rendering — and is NOT also concatenated onto the
+    /// tool_result string.
+    #[tokio::test]
+    async fn post_tool_use_additional_context_is_not_folded_into_the_tool_result() {
+        let orch = orch_with_post_hook(HookResponse {
+            additional_context: Some("POST-CTX".into()),
+            ..HookResponse::default()
+        });
+        let uses = uses();
+        let (results, _prevent, injected, _mods) = dispatch_tool_uses_tracked(&orch, &uses, None)
+            .await
+            .expect("dispatch");
+        let ContentBlock::ToolResult { content, .. } = &results[0] else {
+            panic!("expected ToolResult");
+        };
+        assert!(
+            !content.contains("POST-CTX"),
+            "claude never folds PostToolUse additionalContext into the \
+             tool_result string (BIN off 235420375 / 234726655), got: {content}"
+        );
+        assert_eq!(injected.len(), 1, "exactly one model-facing rendering");
+        assert!(
+            injected[0].0.is_meta(),
+            "the rendering is `zr({{isMeta:true}})` (BIN off 238107100)"
+        );
+    }
+
+    /// The same context is queued as ONE `hook_additional_context` attachment
+    /// keyed to the tool, ready for the driver to flush after the tool_result.
+    #[tokio::test]
+    async fn post_tool_use_additional_context_is_queued_as_an_attachment() {
+        let orch = orch_with_post_hook(HookResponse {
+            additional_context: Some("POST-CTX".into()),
+            ..HookResponse::default()
+        });
+        let uses = uses();
+        let id = uses[0].0.clone();
+        let _ = dispatch_tool_uses_tracked(&orch, &uses, None)
+            .await
+            .expect("dispatch");
+        let queued = orch.take_queued_hook_attachments(&id).await;
+        assert_eq!(queued.len(), 1, "one attachment, got {queued:?}");
+        assert_eq!(
+            serde_json::to_string(&queued[0]).unwrap(),
+            format!(
+                r#"{{"type":"hook_additional_context","content":["POST-CTX"],"hookName":"PostToolUse:Echo","toolUseID":"{id}","hookEvent":"PostToolUse"}}"#
+            )
+        );
+    }
+
+    /// O2: a PostToolUse hook that BLOCKS produces a `hook_blocking_error`
+    /// attachment AND a model-facing `isMeta` rendering.
+    ///
+    /// Before this, `post_agg.decision` was never read at all — a PostToolUse
+    /// hook exiting 2 produced NOTHING in the port, while the oracle produces
+    /// both records (BIN off 234726074 for the attachment, 238107476 for the
+    /// prose, which is one of the few hook attachments that IS model-facing).
+    ///
+    /// `blockingError.command` is `qq(hook)`; the fixture hook is a Builtin, so
+    /// that renders as its handler id.
+    #[tokio::test]
+    async fn post_tool_use_block_emits_a_blocking_error_attachment_and_meta() {
+        let orch = orch_with_post_hook(HookResponse {
+            decision: Some(hooks::response::HookDecision::Block),
+            reason: Some("nope".into()),
+            ..HookResponse::default()
+        });
+        let uses = uses();
+        let id = uses[0].0.clone();
+        let (_results, _prevent, injected, _mods) = dispatch_tool_uses_tracked(&orch, &uses, None)
+            .await
+            .expect("dispatch");
+
+        let queued = orch.take_queued_hook_attachments(&id).await;
+        assert_eq!(queued.len(), 1, "one attachment, got {queued:?}");
+        assert_eq!(
+            serde_json::to_string(&queued[0]).unwrap(),
+            format!(
+                r#"{{"type":"hook_blocking_error","hookName":"PostToolUse:Echo","toolUseID":"{id}","hookEvent":"PostToolUse","blockingError":{{"blockingError":"nope","command":"fixed-post"}}}}"#
+            )
+        );
+        assert_eq!(injected.len(), 1, "one model-facing rendering");
+        assert_eq!(
+            injected[0].0.text_content(),
+            "<system-reminder>\nPostToolUse:Echo hook blocking error from command: \"fixed-post\": nope\n</system-reminder>"
+        );
+    }
+
+    /// The blocking-error default reason is `"Blocked by hook"` (capital B) —
+    /// `e.reason||"Blocked by hook"` at BIN off 237775430.
+    #[tokio::test]
+    async fn post_tool_use_block_without_a_reason_uses_the_oracle_default() {
+        let orch = orch_with_post_hook(HookResponse {
+            decision: Some(hooks::response::HookDecision::Block),
+            ..HookResponse::default()
+        });
+        let uses = uses();
+        let id = uses[0].0.clone();
+        let _ = dispatch_tool_uses_tracked(&orch, &uses, None)
+            .await
+            .expect("dispatch");
+        let queued = orch.take_queued_hook_attachments(&id).await;
+        assert_eq!(queued[0]["blockingError"]["blockingError"], "Blocked by hook");
+    }
+
+    /// O2: the PostToolUse `preventContinuation` message was already
+    /// byte-correct for the MODEL, but nothing was ever PERSISTED. The oracle
+    /// records a `hook_stopped_continuation` attachment beside it
+    /// (BIN off 234726408), whose `message` sits SECOND in key order.
+    #[tokio::test]
+    async fn post_tool_use_prevent_continuation_is_persisted_as_an_attachment() {
+        let orch = orch_with_post_hook(HookResponse {
+            prevent_continuation: true,
+            reason: Some("POST-STOP".into()),
+            ..HookResponse::default()
+        });
+        let uses = uses();
+        let id = uses[0].0.clone();
+        // NOTE: the returned `prevent` flag is deliberately NOT asserted here.
+        // The port sets its loop flag from the PRE-hook aggregate only
+        // (`turn_loop.rs:2646`); `post_agg.prevent_continuation` reaches the
+        // message/attachment but not the flag. Whether the oracle's `return` at
+        // BIN off 234726408 ends the whole turn or only the post-hook generator
+        // is a SEPARATE question this cluster did not investigate — see the
+        // residual note rather than assuming an answer here.
+        let (_results, _prevent, injected, _mods) = dispatch_tool_uses_tracked(&orch, &uses, None)
+            .await
+            .expect("dispatch");
+
+        let queued = orch.take_queued_hook_attachments(&id).await;
+        assert_eq!(queued.len(), 1, "one attachment, got {queued:?}");
+        assert_eq!(
+            serde_json::to_string(&queued[0]).unwrap(),
+            format!(
+                r#"{{"type":"hook_stopped_continuation","message":"POST-STOP","hookName":"PostToolUse:Echo","toolUseID":"{id}","hookEvent":"PostToolUse"}}"#
+            )
+        );
+        // The model-facing prose is UNCHANGED by this work.
+        assert_eq!(
+            injected[0].0.text_content(),
+            "<system-reminder>\nPostToolUse:Echo hook stopped continuation: POST-STOP\n</system-reminder>"
+        );
+    }
+
+    /// Both records for one hook, in the oracle's yield order: the
+    /// blocking-error comes BEFORE the stopped-continuation (BIN off 234726074
+    /// yields `hook_blocking_error`, then `preventContinuation` returns).
+    #[tokio::test]
+    async fn blocking_error_is_ordered_before_stopped_continuation() {
+        let orch = orch_with_post_hook(HookResponse {
+            decision: Some(hooks::response::HookDecision::Block),
+            reason: Some("both".into()),
+            prevent_continuation: true,
+            ..HookResponse::default()
+        });
+        let uses = uses();
+        let id = uses[0].0.clone();
+        let _ = dispatch_tool_uses_tracked(&orch, &uses, None)
+            .await
+            .expect("dispatch");
+        let queued = orch.take_queued_hook_attachments(&id).await;
+        let kinds: Vec<_> = queued
+            .iter()
+            .map(|v| v["type"].as_str().unwrap_or_default())
+            .collect();
+        assert_eq!(kinds, ["hook_blocking_error", "hook_stopped_continuation"]);
+    }
+
+    /// END-TO-END (O1): the value recorded at DISPATCH reaches the transcript
+    /// LINE. Guards against `record_tool_use_result` being computed but never
+    /// published — the record site lives in `turn_loop.rs` and the consume site
+    /// in `conversation.rs`, so neither file's unit tests alone prove the seam.
+    #[tokio::test]
+    async fn dispatched_tool_result_reaches_the_transcript_as_tool_use_result() {
+        use protocol::MessageId;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session.jsonl");
+        let fs: Arc<dyn traits::FileSystem> =
+            Arc::new(platform_posix::fs::PosixFileSystem::new(dir.path().to_path_buf()));
+        let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(path.clone(), fs));
+        let mut tools = ToolRegistry::new();
+        tools.register_builtin(Arc::new(EchoTool) as Arc<dyn Tool>);
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(tools),
+            crate::test_support::noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(crate::test_support::StaticMemoryProvider::empty()),
+            dir.path().to_path_buf(),
+        )
+        .with_jsonl_writer(writer);
+
+        let uses = uses();
+        let (results, _prevent, _injected, _mods) = dispatch_tool_uses_tracked(&orch, &uses, None)
+            .await
+            .expect("dispatch");
+        let msg = ConversationMessage::User {
+            id: MessageId::new(),
+            content: results,
+            is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+        };
+        orch.persist_message_to_jsonl(&msg).await;
+
+        let raw = std::fs::read_to_string(&path).expect("read jsonl");
+        assert!(
+            raw.contains(r#""toolUseResult":{"out":"ECHOED-OUTPUT"}"#),
+            "the tool's structured `data` must reach the line verbatim, got: {raw}"
+        );
+    }
+
+    /// O3: a PostToolUse `updatedToolOutput` that fails the tool's output
+    /// schema produces a `hook_error_during_execution` ATTACHMENT and NOTHING
+    /// the model can see — the renderer maps that attachment type to `[]`
+    /// (BIN off 238107100). The port used to push the notice text onto the
+    /// injected channel, so the model read a warning claude suppresses.
+    #[tokio::test]
+    async fn schema_mismatch_notice_is_an_attachment_the_model_never_sees() {
+        let orch = orch_with_post_hook(HookResponse {
+            updated_tool_output: Some(Some(json!({ "unexpected": true }))),
+            ..HookResponse::default()
+        });
+        let uses = uses();
+        let id = uses[0].0.clone();
+        let (_results, _prevent, injected, _mods) = dispatch_tool_uses_tracked(&orch, &uses, None)
+            .await
+            .expect("dispatch");
+        assert!(
+            !injected
+                .iter()
+                .any(|(m, _)| m.text_content().contains("does not match")),
+            "the schema-mismatch notice must not reach the model: {injected:?}"
+        );
+        let queued = orch.take_queued_hook_attachments(&id).await;
+        assert_eq!(queued.len(), 1, "one attachment, got {queued:?}");
+        assert_eq!(
+            queued[0].get("type").and_then(serde_json::Value::as_str),
+            Some("hook_error_during_execution")
+        );
+        assert!(queued[0]
+            .get("content")
+            .and_then(serde_json::Value::as_str)
+            .expect("string content")
+            .contains("does not match Echo's output shape"));
+    }
+
+    /// Build an orchestrator whose only hook is a PreToolUse hook returning
+    /// `response`, optionally with a JSONL writer so persisted attachment
+    /// LINES (not just queued payloads) can be inspected.
+    fn orch_with_pre_hook(
+        response: HookResponse,
+        jsonl: Option<&std::path::Path>,
+    ) -> ConversationOrchestrator {
+        let hook = HookDefinition {
+            id: HookId::new(),
+            name: "fixed-pre".into(),
+            events: vec![HookEventType::PreToolUse],
+            if_condition: None,
+            executor: DefHookExecutor::Builtin {
+                handler_id: "fixed-post".into(),
+            },
+            source: HookSource::Session,
+            blocking: true,
+            timeout: None,
+            priority: 0,
+            once: false,
+            status_message: None,
+        };
+        let mut registry = HookRegistry::new();
+        registry.register(hook);
+        let mut exec = HookExecutorImpl::new(
+            Arc::new(tokio::sync::RwLock::new(registry)),
+            Arc::new(UnusedHttp),
+            Arc::new(UnusedRuntime),
+        );
+        exec.register_builtin(Arc::new(FixedPostHook { response }));
+        let mut tools = ToolRegistry::new();
+        tools.register_builtin(Arc::new(EchoTool) as Arc<dyn Tool>);
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(tools),
+            Arc::new(exec),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(crate::test_support::StaticMemoryProvider::empty()),
+            jsonl.map_or_else(|| PathBuf::from("/tmp"), |p| {
+                p.parent().expect("parent").to_path_buf()
+            }),
+        );
+        match jsonl {
+            None => orch,
+            Some(path) => {
+                let root = path.parent().expect("parent").to_path_buf();
+                let fs: Arc<dyn traits::FileSystem> =
+                    Arc::new(platform_posix::fs::PosixFileSystem::new(root));
+                orch.with_jsonl_writer(Arc::new(session::jsonl::writer::JsonlWriter::new(
+                    path.to_path_buf(),
+                    fs,
+                )))
+            }
+        }
+    }
+
+    /// O2: the PreToolUse `preventContinuation` record. The model-facing prose
+    /// was already byte-correct (`Execution stopped by hook` default, BIN off
+    /// 235403061); only the persisted attachment was missing.
+    #[tokio::test]
+    async fn pre_tool_use_prevent_continuation_is_persisted_as_an_attachment() {
+        let orch = orch_with_pre_hook(
+            HookResponse {
+                prevent_continuation: true,
+                ..HookResponse::default()
+            },
+            None,
+        );
+        let uses = uses();
+        let id = uses[0].0.clone();
+        let (_results, _prevent, injected, _mods) = dispatch_tool_uses_tracked(&orch, &uses, None)
+            .await
+            .expect("dispatch");
+        let queued = orch.take_queued_hook_attachments(&id).await;
+        assert_eq!(queued.len(), 1, "one attachment, got {queued:?}");
+        assert_eq!(
+            serde_json::to_string(&queued[0]).unwrap(),
+            format!(
+                r#"{{"type":"hook_stopped_continuation","message":"Execution stopped by hook","hookName":"PreToolUse:Echo","toolUseID":"{id}","hookEvent":"PreToolUse"}}"#
+            )
+        );
+        assert!(
+            injected.iter().any(|(m, _)| m.text_content()
+                == "<system-reminder>\nPreToolUse:Echo hook stopped continuation: Execution stopped by hook\n</system-reminder>"),
+            "the existing prose is unchanged: {injected:?}"
+        );
+    }
+
+    /// O2 / Phase 4: a DEFERRED tool persists a `hook_deferred_tool` attachment
+    /// LINE and sends the model NOTHING.
+    ///
+    /// The port previously pushed the raw JSON payload onto the injected
+    /// channel as a plain user message, so the model read a blob the oracle
+    /// suppresses (`hook_deferred_tool:()=>[]`, BIN off 238109388) while the
+    /// resume scanner `QAs` (BIN off 237925753) — which greps the transcript
+    /// for `'"hook_deferred_tool"'` inside a `type:"attachment"` line — found
+    /// nothing at all.
+    ///
+    /// The record must be persisted IMMEDIATELY rather than queued: the queue
+    /// is flushed after a tool_result, and a deferred tool never produces one.
+    #[tokio::test]
+    async fn deferred_tool_is_persisted_and_never_shown_to_the_model() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session.jsonl");
+        let orch = orch_with_pre_hook(
+            HookResponse {
+                decision: Some(hooks::response::HookDecision::Defer),
+                ..HookResponse::default()
+            },
+            Some(&path),
+        );
+        let uses = uses();
+        let id = uses[0].0.clone();
+        let (results, prevent, injected, _mods) = dispatch_tool_uses_tracked(&orch, &uses, None)
+            .await
+            .expect("dispatch");
+
+        assert!(prevent, "a deferred tool terminates the turn");
+        assert!(results.is_empty(), "the deferred tool never ran");
+        assert!(
+            !injected
+                .iter()
+                .any(|(m, _)| m.text_content().contains("hook_deferred_tool")),
+            "the model must NEVER see the deferred-tool payload: {injected:?}"
+        );
+
+        let raw = std::fs::read_to_string(&path).expect("read jsonl");
+        let line = raw
+            .lines()
+            .find(|l| l.contains("hook_deferred_tool"))
+            .unwrap_or_else(|| panic!("no hook_deferred_tool attachment line in: {raw}"));
+        let v: serde_json::Value = serde_json::from_str(line).expect("json line");
+        assert_eq!(
+            v["type"], "attachment",
+            "`QAs` requires the enclosing line to be type:\"attachment\""
+        );
+        assert_eq!(
+            serde_json::to_string(&v["attachment"]).unwrap(),
+            format!(
+                r#"{{"type":"hook_deferred_tool","toolUseID":"{id}","toolName":"Echo","toolInput":{{}},"hookName":"PreToolUse:Echo","hookEvent":"PreToolUse","permissionMode":"default"}}"#
+            )
+        );
+    }
+
+    /// A PreToolUse `additionalContext` gets the same treatment.
+    #[tokio::test]
+    async fn pre_tool_use_additional_context_is_queued_and_rendered_as_meta() {
+        let hook = HookDefinition {
+            id: HookId::new(),
+            name: "fixed-pre".into(),
+            events: vec![HookEventType::PreToolUse],
+            if_condition: None,
+            executor: DefHookExecutor::Builtin {
+                handler_id: "fixed-post".into(),
+            },
+            source: HookSource::Session,
+            blocking: true,
+            timeout: None,
+            priority: 0,
+            once: false,
+            status_message: None,
+        };
+        let mut registry = HookRegistry::new();
+        registry.register(hook);
+        let reg = Arc::new(tokio::sync::RwLock::new(registry));
+        let mut exec = HookExecutorImpl::new(
+            reg,
+            Arc::new(UnusedHttp),
+            Arc::new(UnusedRuntime),
+        );
+        exec.register_builtin(Arc::new(FixedPostHook {
+            response: HookResponse {
+                additional_context: Some("PRE-CTX".into()),
+                ..HookResponse::default()
+            },
+        }));
+        let mut tools = ToolRegistry::new();
+        tools.register_builtin(Arc::new(EchoTool) as Arc<dyn Tool>);
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(tools),
+            Arc::new(exec),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(crate::test_support::StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        );
+        let uses = uses();
+        let id = uses[0].0.clone();
+        let (_results, _prevent, injected, _mods) = dispatch_tool_uses_tracked(&orch, &uses, None)
+            .await
+            .expect("dispatch");
+        let queued = orch.take_queued_hook_attachments(&id).await;
+        assert_eq!(queued.len(), 1, "one attachment, got {queued:?}");
+        assert_eq!(
+            queued[0].get("hookName").and_then(serde_json::Value::as_str),
+            Some("PreToolUse:Echo")
+        );
+        let rendering = injected
+            .iter()
+            .find(|(m, _)| matches!(m, ConversationMessage::User { .. }))
+            .expect("a rendering");
+        assert!(
+            rendering.0.is_meta(),
+            "the PreToolUse rendering is isMeta too"
+        );
+    }
+}
+
+/// A1 — the `<persisted-output>` substitution wired into the SUCCESS-path
+/// `tool_result` push (claude-code 2.1.220 `F0u`, BIN off **230270568**).
+#[cfg(test)]
+mod tool_result_persistence_wiring_tests {
+    use super::{dispatch_tool_uses_tracked, ConversationOrchestrator};
+    use crate::test_support::{MockApiClient, MockOutputStream, NoOpPermissionGate};
+    use crate::tool_result_persistence::{PERSISTED_OUTPUT_OPEN, TOOL_RESULTS_DIR};
+    use crate::OrchestratorConfig;
+    use async_trait::async_trait;
+    use protocol::{ContentBlock, ToolUseId};
+    use serde_json::json;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tool_api::context::ToolUseContext;
+    use tool_api::progress::ToolProgressSender;
+    use tool_api::registry::ToolRegistry;
+    use tool_api::tool_trait::{
+        DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
+        ValidationError,
+    };
+
+    /// Emits `input.len` bytes of `x` as its model content, plus (when
+    /// `input.blocks` is set) a raw `content_blocks` array. Declares a 100-byte
+    /// persistence threshold so the boundary is cheap to drive.
+    struct SizedTool;
+
+    const THRESHOLD: usize = 100;
+
+    #[async_trait]
+    impl Tool for SizedTool {
+        fn name(&self) -> &str {
+            "Sized"
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
+                once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
+            &SCHEMA
+        }
+        fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
+            true
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1024 * 1024
+        }
+        fn persistence_threshold(&self) -> Option<usize> {
+            Some(THRESHOLD)
+        }
+        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+        async fn validate_input(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> Result<(), ValidationError> {
+            Ok(())
+        }
+        async fn check_permissions(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> permission::PermissionResult {
+            permission::PermissionResult::Allow {
+                reason: permission::PermissionDecisionReason::Other {
+                    reason: "test".into(),
+                },
+                updated_input: None,
+                update_destination: None,
+                metadata: permission::result::PermissionMetadata::default(),
+            }
+        }
+        async fn description(
+            &self,
+            _input: &serde_json::Value,
+            _opts: &DescriptionOptions,
+        ) -> String {
+            "sized".into()
+        }
+        async fn prompt(&self, _opts: &PromptOptions) -> String {
+            String::new()
+        }
+        async fn call(
+            &self,
+            input: serde_json::Value,
+            _ctx: ToolUseContext,
+            _tx: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            let len = usize::try_from(input.get("len").and_then(serde_json::Value::as_u64).unwrap())
+                .unwrap();
+            let body = "x".repeat(len);
+            Ok(ToolCallResult {
+                data: json!(body),
+                model_content: Some(body),
+                new_messages: vec![],
+                context_modifier: None,
+                is_error: false,
+                mcp_meta: None,
+            })
+        }
+    }
+
+    fn orch_with(tool: Arc<dyn Tool>, config_home: Option<PathBuf>) -> ConversationOrchestrator {
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(tool);
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(registry),
+            crate::test_support::noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(crate::test_support::StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp/wsp"),
+        );
+        match config_home {
+            Some(h) => orch.with_config_home(h),
+            None => orch,
+        }
+    }
+
+    fn use_of(name: &str, len: usize) -> Vec<(ToolUseId, String, serde_json::Value, Option<String>)> {
+        vec![(
+            ToolUseId::new(),
+            name.into(),
+            json!({ "len": len }),
+            None,
+        )]
+    }
+
+    async fn dispatch_content(
+        orch: &ConversationOrchestrator,
+        uses: &[(ToolUseId, String, serde_json::Value, Option<String>)],
+    ) -> String {
+        let (results, _p, _i, _m) = dispatch_tool_uses_tracked(orch, uses, None)
+            .await
+            .expect("dispatch");
+        let ContentBlock::ToolResult { content, .. } = &results[0] else {
+            panic!("expected ToolResult");
+        };
+        content.clone()
+    }
+
+    /// T5 — `o<=i` returns the result UNCHANGED; only a STRICTLY larger body
+    /// is persisted.
+    #[tokio::test]
+    async fn exactly_at_the_threshold_is_not_persisted() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let orch = orch_with(Arc::new(SizedTool), Some(tmp.path().to_path_buf()));
+        let content = dispatch_content(&orch, &use_of("Sized", THRESHOLD)).await;
+        assert_eq!(content, "x".repeat(THRESHOLD));
+    }
+
+    #[tokio::test]
+    async fn one_byte_over_the_threshold_is_persisted() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let orch = orch_with(Arc::new(SizedTool), Some(tmp.path().to_path_buf()));
+        let content = dispatch_content(&orch, &use_of("Sized", THRESHOLD + 1)).await;
+        assert!(
+            content.starts_with(PERSISTED_OUTPUT_OPEN),
+            "expected the persisted envelope, got: {content}"
+        );
+        assert!(content.contains("Output too large (101 bytes)."));
+    }
+
+    /// T8 — the file lands at
+    /// `<config_home>/projects/<project_dir_name(cwd)>/<uuid>/tool-results/<id>.txt`.
+    #[tokio::test]
+    async fn persisted_file_is_session_scoped_and_holds_the_full_body() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let orch = orch_with(Arc::new(SizedTool), Some(tmp.path().to_path_buf()));
+        let uses = use_of("Sized", 5_000);
+        let content = dispatch_content(&orch, &uses).await;
+        let session_uuid = {
+            let s = orch.session.lock().await;
+            s.session_id.as_uuid().to_string()
+        };
+        let dir = tmp
+            .path()
+            .join("projects")
+            .join(session::jsonl::path::project_dir_name(
+                &orch.current_cwd().to_string_lossy(),
+            ))
+            .join(session_uuid)
+            .join(TOOL_RESULTS_DIR);
+        let file = dir.join(format!("{}.txt", uses[0].0.as_str()));
+        assert!(
+            file.exists(),
+            "expected {} to exist; envelope was: {content}",
+            file.display()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&file).expect("read back").len(),
+            5_000
+        );
+        assert!(content.contains(&file.display().to_string()));
+    }
+
+    /// T6 — `U0u`: a block array containing an image (or document) is NEVER
+    /// persisted, however large its TEXT blocks are. The control below proves
+    /// the same array WITHOUT the media block does persist, so the assertion
+    /// isolates the guard rather than the size check.
+    #[tokio::test]
+    async fn media_bearing_block_arrays_are_never_persisted() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let orch = orch_with(Arc::new(SizedTool), Some(tmp.path().to_path_buf()));
+        let big_text = json!({ "type": "text", "text": "z".repeat(5_000) });
+        let id = ToolUseId::new();
+
+        for media in ["image", "document"] {
+            let blocks = vec![big_text.clone(), json!({ "type": media })];
+            let out = super::apply_tool_result_persistence(
+                &orch,
+                "Sized",
+                &id,
+                Some(THRESHOLD),
+                "IGNORED".into(),
+                Some(&blocks),
+            )
+            .await.content;
+            assert_eq!(out, "IGNORED", "{media} block must suppress persistence");
+        }
+        assert!(!tmp.path().join("projects").exists());
+
+        // Control: the identical array minus the media block IS persisted.
+        let blocks = vec![big_text];
+        let out = super::apply_tool_result_persistence(
+            &orch,
+            "Sized",
+            &id,
+            Some(THRESHOLD),
+            "IGNORED".into(),
+            Some(&blocks),
+        )
+        .await.content;
+        assert!(out.starts_with(PERSISTED_OUTPUT_OPEN), "control: {out}");
+        // An ARRAY body is written as pretty JSON under a `.json` stem (`kKr`).
+        assert!(out.contains(&format!("{}.json", id.as_str())), "{out}");
+    }
+
+    /// An MCP-shaped result (array `data` ⇒ `content_blocks: Some(..)`) must
+    /// have its ARRAY dropped when the payload is persisted.
+    ///
+    /// claude-code's `F0u` substitutes the ONE model-facing payload
+    /// (`{...e, content: a}`, where `content` is a string OR an array). LingXi
+    /// splits it across `content` and `content_blocks`, and the wire prefers
+    /// the array when present (`llm-client/src/convert.rs`:
+    /// `content_blocks.map_or_else(|| String(content), Array)`). Substituting
+    /// only `content` therefore wrote the file, fired the telemetry, and still
+    /// handed the model the full oversized array — the defect this pins.
+    #[tokio::test]
+    async fn persisting_an_mcp_array_result_drops_the_array() {
+        struct McpArrayTool;
+        #[async_trait]
+        impl Tool for McpArrayTool {
+            fn name(&self) -> &str {
+                "mcp__srv__big"
+            }
+            fn input_schema(&self) -> &serde_json::Value {
+                static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
+                    once_cell::sync::Lazy::new(|| json!({ "type": "object" }));
+                &SCHEMA
+            }
+            fn is_enabled(&self, _: &ToolStaticContext) -> bool {
+                true
+            }
+            fn is_mcp(&self) -> bool {
+                true
+            }
+            fn max_result_size_chars(&self) -> usize {
+                1024 * 1024
+            }
+            fn persistence_threshold(&self) -> Option<usize> {
+                Some(THRESHOLD)
+            }
+            fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
+                true
+            }
+            fn is_read_only(&self, _: &serde_json::Value) -> bool {
+                true
+            }
+            async fn validate_input(
+                &self,
+                _: &serde_json::Value,
+                _: &ToolUseContext,
+            ) -> Result<(), ValidationError> {
+                Ok(())
+            }
+            async fn check_permissions(
+                &self,
+                _: &serde_json::Value,
+                _: &ToolUseContext,
+            ) -> permission::PermissionResult {
+                permission::PermissionResult::Allow {
+                    reason: permission::PermissionDecisionReason::Other {
+                        reason: "test".into(),
+                    },
+                    updated_input: None,
+                    update_destination: None,
+                    metadata: permission::result::PermissionMetadata::default(),
+                }
+            }
+            async fn description(&self, _: &serde_json::Value, _: &DescriptionOptions) -> String {
+                "big".into()
+            }
+            async fn prompt(&self, _: &PromptOptions) -> String {
+                String::new()
+            }
+            async fn call(
+                &self,
+                _: serde_json::Value,
+                _: ToolUseContext,
+                _: ToolProgressSender,
+            ) -> Result<ToolCallResult, ToolError> {
+                let body = "y".repeat(THRESHOLD * 4);
+                Ok(ToolCallResult {
+                    data: json!([{ "type": "text", "text": body }]),
+                    model_content: Some(body),
+                    new_messages: vec![],
+                    context_modifier: None,
+                    is_error: false,
+                    mcp_meta: None,
+                })
+            }
+        }
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let orch = orch_with(Arc::new(McpArrayTool), Some(tmp.path().to_path_buf()));
+        let uses = vec![(
+            ToolUseId::new(),
+            "mcp__srv__big".to_string(),
+            json!({}),
+            None,
+        )];
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses, None)
+            .await
+            .expect("dispatch");
+
+        match &results[0] {
+            ContentBlock::ToolResult {
+                content,
+                content_blocks,
+                ..
+            } => {
+                assert!(
+                    content.starts_with(PERSISTED_OUTPUT_OPEN),
+                    "oversized MCP result must be persisted, got: {content}"
+                );
+                assert!(
+                    content_blocks.is_none(),
+                    "the array must be dropped once the payload is substituted, \
+                     else the wire sends it and the envelope is discarded"
+                );
+            }
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+    }
+
+    /// T7 — no `config_home` (library/test callers) is a STRICT no-op.
+    #[tokio::test]
+    async fn without_a_config_home_the_content_is_untouched() {
+        let orch = orch_with(Arc::new(SizedTool), None);
+        let content = dispatch_content(&orch, &use_of("Sized", 5_000)).await;
+        assert_eq!(content, "x".repeat(5_000));
+    }
+
+    /// `Gzg` — a blank result becomes `(${toolName} completed with no output)`.
+    /// 1 933 occurrences in the real binary's own transcripts; the port emitted
+    /// 57 EMPTY Bash tool_results instead.
+    #[tokio::test]
+    async fn blank_results_become_the_no_output_sentinel() {
+        let orch = orch_with(Arc::new(SizedTool), None);
+        let content = dispatch_content(&orch, &use_of("Sized", 0)).await;
+        assert_eq!(content, "(Sized completed with no output)");
     }
 }

@@ -7,6 +7,86 @@ pub const FILE_NAME: &str = branding::MEMORY_FILE;
 /// Filename of the local-override memory file.
 pub const LOCAL_OVERRIDE_NAME: &str = branding::MEMORY_LOCAL_FILE;
 
+/// The two ancestor lists a nested-memory lookup walks for `file`.
+///
+/// See [`split_ancestors`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ancestors {
+    /// Directories from `file`'s own directory up to, but NOT including, `cwd`
+    /// — ordered outermost-first (closest to `cwd` first).
+    pub nested: Vec<PathBuf>,
+    /// `cwd` and each of ITS ancestors up to the filesystem root, ordered
+    /// outermost-first (root first).
+    pub cwd_level: Vec<PathBuf>,
+}
+
+/// Split `file`'s ancestor directories into the two lists claude-code walks when
+/// loading nested memory.
+///
+/// 1:1 port of `Aop` (2.1.220 @237714114):
+///
+/// ```js
+/// function Aop(e,t){
+///   let r=Vx.dirname(Vx.resolve(e));
+///   if(!r.startsWith(t)) try{ let s=Jt().realpathSync(r); if(s.startsWith(t)) r=s }catch{}
+///   let n=[],o=r;
+///   while(o!==t&&o!==Vx.parse(o).root){ if(o.startsWith(t)) n.push(o); o=Vx.dirname(o) }
+///   n.reverse();
+///   let i=[]; o=t;
+///   while(o!==Vx.parse(o).root) i.push(o), o=Vx.dirname(o);
+///   return i.reverse(),{nestedDirs:n,cwdLevelDirs:i}
+/// }
+/// ```
+///
+/// Three details that are easy to lose:
+///
+/// - The **realpath fallback**. When `file`'s directory is not LEXICALLY under
+///   `cwd`, it is retried through symlinks and only adopted if that brings it
+///   under `cwd`. On macOS a `/var/...` cwd really lives at `/private/var/...`,
+///   so without this the nested list comes back empty for every such session.
+///   Failure is swallowed — a missing directory just means "no nested dirs".
+/// - The `if(o.startsWith(t))` guard INSIDE the loop is not redundant with the
+///   loop condition: it drops any component that escaped `cwd`.
+/// - `cwd_level` includes `cwd` itself and stops BEFORE the root, whereas
+///   `nested` stops before `cwd`. The two lists are disjoint.
+#[must_use]
+pub fn split_ancestors(file: &Path, cwd: &Path) -> Ancestors {
+    let mut dir = file.parent().map_or_else(PathBuf::new, Path::to_path_buf);
+    if !dir.starts_with(cwd) {
+        if let Ok(real) = std::fs::canonicalize(&dir) {
+            if real.starts_with(cwd) {
+                dir = real;
+            }
+        }
+    }
+
+    let mut nested: Vec<PathBuf> = Vec::new();
+    let mut cur = dir;
+    while cur != cwd && cur.parent().is_some() {
+        if cur.starts_with(cwd) {
+            nested.push(cur.clone());
+        }
+        match cur.parent() {
+            Some(p) => cur = p.to_path_buf(),
+            None => break,
+        }
+    }
+    nested.reverse();
+
+    let mut cwd_level: Vec<PathBuf> = Vec::new();
+    let mut cur = cwd.to_path_buf();
+    while cur.parent().is_some() {
+        cwd_level.push(cur.clone());
+        match cur.parent() {
+            Some(p) => cur = p.to_path_buf(),
+            None => break,
+        }
+    }
+    cwd_level.reverse();
+
+    Ancestors { nested, cwd_level }
+}
+
 /// Resolve the USER-tier `.claude` config directory, honoring
 /// `$LINGXI_CONFIG_DIR` (claude-code `tr()`: `process.env.LINGXI_CONFIG_DIR ??
 /// join(homedir(), ".lingxi")`). When the env var is SET its value is the config
@@ -221,6 +301,111 @@ pub fn walk(cwd: &Path, home: &Path, managed_dir: Option<&Path>) -> Hierarchy {
 /// Probe `dir` for a file named `want` (case-insensitive) and, when found and
 /// not already emitted, push a [`HierarchyEntry`]. Mirrors a single
 /// `processMemoryFile` call guarded by the shared `processedPaths` set.
+/// Probe ONE directory for nested memory, in claude-code's `ffo` order.
+///
+/// 1:1 with `ffo` (2.1.220 @230809989):
+///
+/// ```js
+/// if(o){ CLAUDE.md ; .claude/CLAUDE.md }
+/// if(localSettings){ CLAUDE.local.md }
+/// if(o){ .claude/rules  (unconditional, then conditional) }
+/// ```
+///
+/// Every name comes from the `branding` constants ([`FILE_NAME`],
+/// [`LOCAL_OVERRIDE_NAME`], [`DOT_LINGXI`], [`RULES_DIR`]) — this project's
+/// files are `LINGXI.md` / `.lingxi`, NOT the oracle's literals.
+///
+/// ⚠️ This ORDER DIFFERS from [`walk`]'s per-directory order, which probes rules
+/// BEFORE the local override. That is not a bug in either: `walk` ports the
+/// eager hierarchy builder and is byte-parity tested, while this ports the
+/// nested-memory probe. They must NOT be refactored into a shared body — doing
+/// so silently changes one of them.
+///
+/// The unconditional/conditional split inside `rules` is one scan here rather
+/// than the oracle's two (`ZPt` then `lfo`): [`collect_rules`] yields both and
+/// `globs.is_some()` distinguishes them, so the caller splits. Callers MUST emit
+/// the unconditional ones first to preserve the oracle's ordering.
+pub fn probe_dir_nested(
+    dir: &Path,
+    out: &mut Vec<HierarchyEntry>,
+    processed: &mut std::collections::HashSet<PathBuf>,
+) {
+    emit_probe(dir, FILE_NAME, false, super::LingxiMdTier::Project, out, processed);
+    emit_probe(
+        &dir.join(DOT_LINGXI),
+        FILE_NAME,
+        false,
+        super::LingxiMdTier::Project,
+        out,
+        processed,
+    );
+    emit_probe(
+        dir,
+        LOCAL_OVERRIDE_NAME,
+        true,
+        super::LingxiMdTier::Local,
+        out,
+        processed,
+    );
+    collect_rules(
+        &dir.join(DOT_LINGXI).join(RULES_DIR),
+        super::LingxiMdTier::Project,
+        out,
+        processed,
+    );
+}
+
+/// Probe the MANAGED tier's rules dir — the Managed half of claude-code `NLu`
+/// (@230809780), which loads Managed + User rules for a trigger file.
+///
+/// Rules only: the tier's unconditional memory file is already in the eager
+/// block, so only the `paths:`-gated half can be news for a touched file.
+pub fn probe_managed_rules(
+    managed_dir: &Path,
+    out: &mut Vec<HierarchyEntry>,
+    processed: &mut std::collections::HashSet<PathBuf>,
+) {
+    collect_rules(
+        &managed_dir.join(DOT_LINGXI).join(RULES_DIR),
+        super::LingxiMdTier::Managed,
+        out,
+        processed,
+    );
+}
+
+/// Probe the USER tier's rules dir — the User half of `NLu`.
+///
+/// Resolves through [`user_config_dir`], so `$LINGXI_CONFIG_DIR` is honored
+/// exactly as the eager walk honors it.
+pub fn probe_user_rules(
+    home: &Path,
+    out: &mut Vec<HierarchyEntry>,
+    processed: &mut std::collections::HashSet<PathBuf>,
+) {
+    collect_rules(
+        &user_config_dir(home).join(RULES_DIR),
+        super::LingxiMdTier::User,
+        out,
+        processed,
+    );
+}
+
+/// Probe ONE cwd-level directory — claude-code `FLu` (@230810574), which loads
+/// `.lingxi/rules` ONLY (no `LINGXI.md`, no local override) and, at the oracle,
+/// only the CONDITIONAL half. The caller applies the conditional filter.
+pub fn probe_dir_cwd_level(
+    dir: &Path,
+    out: &mut Vec<HierarchyEntry>,
+    processed: &mut std::collections::HashSet<PathBuf>,
+) {
+    collect_rules(
+        &dir.join(DOT_LINGXI).join(RULES_DIR),
+        super::LingxiMdTier::Project,
+        out,
+        processed,
+    );
+}
+
 fn emit_probe(
     dir: &Path,
     want: &str,
@@ -767,5 +952,144 @@ mod telemetry_tests {
             Some(AnalyticsValue::String(s)) => assert_eq!(s, "claude.md"),
             _ => panic!("actual must be a string"),
         }
+    }
+}
+
+#[cfg(test)]
+mod split_ancestors_tests {
+    use super::*;
+
+    /// The ordinary case: dirs between cwd and the file, outermost-first, with
+    /// cwd itself excluded from `nested` and included in `cwd_level`.
+    #[test]
+    fn splits_nested_and_cwd_level_at_the_cwd_boundary() {
+        let a = split_ancestors(Path::new("/w/repo/pkg/api/handler.rs"), Path::new("/w/repo"));
+        assert_eq!(
+            a.nested,
+            vec![PathBuf::from("/w/repo/pkg"), PathBuf::from("/w/repo/pkg/api")],
+            "outermost-first, cwd excluded"
+        );
+        assert_eq!(
+            a.cwd_level,
+            vec![PathBuf::from("/w"), PathBuf::from("/w/repo")],
+            "root-first, cwd included, root itself excluded"
+        );
+    }
+
+    /// A file directly in cwd has NO nested dirs — the loop stops immediately.
+    #[test]
+    fn a_file_in_cwd_has_no_nested_dirs() {
+        let a = split_ancestors(Path::new("/w/repo/main.rs"), Path::new("/w/repo"));
+        assert!(a.nested.is_empty());
+        assert_eq!(a.cwd_level.last().unwrap(), &PathBuf::from("/w/repo"));
+    }
+
+    /// A file OUTSIDE cwd contributes no nested dirs; `cwd_level` is unaffected
+    /// because it is derived from cwd alone.
+    #[test]
+    fn a_file_outside_cwd_yields_no_nested_dirs() {
+        let a = split_ancestors(Path::new("/elsewhere/x/y.rs"), Path::new("/w/repo"));
+        assert!(a.nested.is_empty(), "nothing under cwd, got {:?}", a.nested);
+        assert!(!a.cwd_level.is_empty());
+    }
+
+    /// THE REALPATH BRANCH. A cwd reached through a symlink is not a lexical
+    /// prefix of the file's real directory, so without the fallback `nested`
+    /// comes back empty. This is the macOS `/var` -> `/private/var` shape that
+    /// already shipped a silent bug once in the seeded-dedup port.
+    #[test]
+    fn a_symlinked_path_is_resolved_before_the_prefix_test() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let real = tmp.path().join("real");
+        std::fs::create_dir_all(real.join("pkg")).unwrap();
+        let link = tmp.path().join("link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        #[cfg(not(unix))]
+        return;
+
+        // cwd is the RESOLVED root; the file is addressed through the symlink,
+        // so `dirname(file)` is not lexically under cwd.
+        let cwd = std::fs::canonicalize(&real).unwrap();
+        let file = link.join("pkg").join("f.rs");
+        let a = split_ancestors(&file, &cwd);
+        assert_eq!(
+            a.nested,
+            vec![cwd.join("pkg")],
+            "the symlinked dir must resolve under cwd; got {:?}",
+            a.nested
+        );
+    }
+}
+
+#[cfg(test)]
+mod nested_probe_tests {
+    use super::*;
+
+    fn touch(p: &Path, body: &str) {
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+
+    /// `ffo`'s order: memory file, dot-dir memory file, LOCAL OVERRIDE, then
+    /// rules. Note the local override comes BEFORE rules here — the opposite of
+    /// `walk`'s per-directory order.
+    #[test]
+    fn nested_probe_uses_the_ffo_order_not_walks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        touch(&d.join(FILE_NAME), "a");
+        touch(&d.join(DOT_LINGXI).join(FILE_NAME), "b");
+        touch(&d.join(LOCAL_OVERRIDE_NAME), "c");
+        touch(&d.join(DOT_LINGXI).join(RULES_DIR).join("r.md"), "d");
+
+        let mut out = Vec::new();
+        let mut processed = std::collections::HashSet::new();
+        probe_dir_nested(d, &mut out, &mut processed);
+
+        let got: Vec<PathBuf> = out.iter().map(|e| e.path.clone()).collect();
+        assert_eq!(
+            got,
+            vec![
+                d.join(FILE_NAME),
+                d.join(DOT_LINGXI).join(FILE_NAME),
+                d.join(LOCAL_OVERRIDE_NAME),
+                d.join(DOT_LINGXI).join(RULES_DIR).join("r.md"),
+            ],
+            "local override must precede rules (ffo), unlike walk"
+        );
+    }
+
+    /// `FLu` loads rules ONLY — a cwd-level directory contributes no LINGXI.md
+    /// and no local override.
+    #[test]
+    fn cwd_level_probe_loads_rules_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        touch(&d.join(FILE_NAME), "a");
+        touch(&d.join(LOCAL_OVERRIDE_NAME), "c");
+        touch(&d.join(DOT_LINGXI).join(RULES_DIR).join("r.md"), "d");
+
+        let mut out = Vec::new();
+        let mut processed = std::collections::HashSet::new();
+        probe_dir_cwd_level(d, &mut out, &mut processed);
+
+        let got: Vec<PathBuf> = out.iter().map(|e| e.path.clone()).collect();
+        assert_eq!(got, vec![d.join(DOT_LINGXI).join(RULES_DIR).join("r.md")]);
+    }
+
+    /// The shared `processed` set is what stops one file being surfaced twice
+    /// when two ancestors resolve to the same path.
+    #[test]
+    fn the_processed_set_suppresses_a_repeat_probe() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        touch(&d.join(FILE_NAME), "a");
+        let mut out = Vec::new();
+        let mut processed = std::collections::HashSet::new();
+        probe_dir_nested(d, &mut out, &mut processed);
+        let first = out.len();
+        probe_dir_nested(d, &mut out, &mut processed);
+        assert_eq!(out.len(), first, "second probe of the same dir adds nothing");
     }
 }

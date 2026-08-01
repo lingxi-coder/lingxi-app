@@ -591,8 +591,38 @@ impl AgentTool {
     /// removed; `_mcp_server_names` is retained for signature stability.
     fn build_prompt(
         agents: &[traits::subagent_spawn::SubagentListingEntry],
+        mcp_server_names: &[String],
+        is_coordinator: bool,
+    ) -> String {
+        // Binary `l=!DT()&&!aZ()` @234652470.
+        //   `DT()` @230660586 = `return Z.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`
+        //     → the port's `LINGXI_DISABLE_BACKGROUND_TASKS`, read the same way
+        //     as the dispatch-site gate at the bottom of `call`.
+        //   `aZ()` @227950071 = `a6i.getStore()!==void 0`, an in-process-SDK
+        //     `AsyncLocalStorage` probe. LingXi has no in-process SDK host
+        //     (CLI/TUI/desktop are always out-of-process), so it is modeled as
+        //     a constant `false` — matching the binary's CLI/TUI default.
+        // ⇒ `l` is TRUE unless the kill-switch env is set.
+        let async_agents_available = !traits::env::is_env_truthy(
+            std::env::var("LINGXI_DISABLE_BACKGROUND_TASKS")
+                .ok()
+                .as_deref(),
+        );
+        Self::build_prompt_with_async_agents(
+            agents,
+            mcp_server_names,
+            is_coordinator,
+            async_agents_available,
+        )
+    }
+
+    /// `build_prompt` with the binary's `l` gate supplied explicitly, so tests
+    /// can exercise both arms without touching the process-global env.
+    fn build_prompt_with_async_agents(
+        agents: &[traits::subagent_spawn::SubagentListingEntry],
         _mcp_server_names: &[String],
         is_coordinator: bool,
+        async_agents_available: bool,
     ) -> String {
         // Catalog placement (binary intro `p`): the 2.1.193 default externalizes
         // the catalog to the orchestrator's `<system-reminder>` attachment, so the
@@ -674,9 +704,12 @@ impl AgentTool {
         // default): `## When to use` + four terse bullets. NO `## When not to
         // use`, NO `## Usage notes`, NO `<example>`s (those are the FULL form).
         // Em-dashes are U+2014. The `run_in_background` bullet is the
-        // background-enabled 2.1.206 default (the binary's `h`; the
-        // `LINGXI_DISABLE_BACKGROUND_TASKS` / teammate suppressions are not
-        // modeled here).
+        // background-enabled 2.1.206 default (the binary's `T`). The
+        // `LINGXI_DISABLE_BACKGROUND_TASKS` suppression IS modeled — see the
+        // `async_agents_available` (`l`) gate on the tail bullets below. The
+        // teammate suppressions (binary `v = aZ()?…:o_()?…:""`) and the remote
+        // isolation bullet (`b = ian()?…:""`, gate `tengu_neapolitan`) are
+        // gated OFF by default and remain unmodeled.
         //
         // `## When to use` is SUPPRESSED on the pro plan (binary `${d?"":…}`):
         // when the pro-block is present, the discouragement replaces the
@@ -719,13 +752,39 @@ Reach for this when the task matches an available agent type, when you have inde
         // \`agents\`).`). Ported verbatim except the path is rebranded
         // `.claude/agents/*.md` → `.lingxi/agents/*.md` per the accepted .lingxi
         // naming divergence (cf. sandbox-runtime path_utils.rs `.lingxi/agents`).
+        //
+        // FIRST tail bullet — binary @234659244 is a TERNARY on `l`:
+        //   `- ${l?"The agent's final report is not shown to the user — relay
+        //         what matters.":"The agent's final message is returned to you
+        //         as the tool result; it is not shown to the user — relay what
+        //         matters."}`
+        // (the two "relay what matters" occurrences are @234659308 / @234659430).
+        // `l` is TRUE by default, so the port previously emitted the WRONG arm.
+        let final_report_bullet = if async_agents_available {
+            "- The agent's final report is not shown to the user — relay what matters."
+        } else {
+            "- The agent's final message is returned to you as the tool result; it is not shown to the user — relay what matters."
+        };
+        // BACKGROUND bullet — binary @234657319:
+        //   `let T = l && !o ? (n ? <SHORT> : <LONG>) : ""`
+        // where `n` is the fork FEATURE flag (`TSe()` @230723430, default
+        // "disabled") and `o = n && (allowFork ?? true)` is the port's
+        // `is_fork`. The port has no separate `n`, so the `n=true && o=false`
+        // SHORT arm ("Subagents run in the background; …", no
+        // `run_in_background: false` sentence) is UNMODELED — unreachable while
+        // `is_fork` implies the feature is on. `l=false` OR `is_fork` ⇒ the
+        // bullet is dropped entirely, not shortened.
+        let background_bullet = if async_agents_available && !is_fork {
+            "\n- Subagents run in the background by default; you'll be notified when one completes. Pass `run_in_background: false` for a synchronous run when you need the result before continuing. Never fabricate or predict a pending agent's results — the notification is never something you write yourself; if the user asks before it arrives, say it's still running."
+        } else {
+            ""
+        };
         format!(
             "{intro}{when_to_use}{fork_addendum}\n\n\
-- The agent's final message is returned to you as the tool result; it is not shown to the user — relay what matters.\n\
+{final_report_bullet}\n\
 {send_message_bullet}\n\
 - Each agent type's model, reasoning effort, and tools come from its definition (`.lingxi/agents/*.md` frontmatter or SDK `agents`).\n\
-- `isolation: \"worktree\"` gives the agent its own git worktree (auto-cleaned if unchanged).\n\
-- Subagents run in the background by default; you'll be notified when one completes. Pass `run_in_background: false` for a synchronous run when you need the result before continuing."
+- `isolation: \"worktree\"` gives the agent its own git worktree (auto-cleaned if unchanged).{background_bullet}"
         )
     }
 
@@ -2269,3 +2328,116 @@ Use /mcp to configure and authenticate the required MCP servers.",
 #[cfg(test)]
 #[path = "agent_test.rs"]
 mod agent_test;
+
+/// F-cluster: the two `l`-gated bullets at the tail of the Agent tool
+/// description (binary `mvd` @234647480).
+///
+/// These tests drive [`AgentTool::build_prompt_with_async_agents`] with an
+/// EXPLICIT `async_agents_available`, never the process-global env, so they
+/// cannot race the `LINGXI_DISABLE_BACKGROUND_TASKS` manipulation in
+/// `agent_test.rs` (which serializes on a lock this module cannot reach).
+#[cfg(test)]
+mod f_description_l_gate_tests {
+    use super::AgentTool;
+
+    fn agents() -> Vec<traits::subagent_spawn::SubagentListingEntry> {
+        vec![traits::subagent_spawn::SubagentListingEntry {
+            agent_type: "general-purpose".into(),
+            when_to_use: "anything".into(),
+            tools_description: "All tools".into(),
+        }]
+    }
+
+    /// Binary @234659244: the first tail bullet is a TERNARY on
+    /// `l=!DT()&&!aZ()`. `l` is TRUE by default (`DT()` @230660586 reads an
+    /// unset env; `aZ()` @227950071 is the in-process-SDK
+    /// `AsyncLocalStorage.getStore()!==void 0`, false outside the SDK), so the
+    /// DEFAULT description carries the "final report" arm, NOT the
+    /// "final message is returned to you as the tool result" arm.
+    #[test]
+    fn first_tail_bullet_uses_the_l_true_arm_by_default() {
+        let p = AgentTool::build_prompt_with_async_agents(&agents(), &[], false, true);
+        assert!(
+            p.contains(
+                "\n\n- The agent's final report is not shown to the user \u{2014} relay what matters.\n- Use "
+            ),
+            "l=true must emit the final-REPORT bullet as the first tail bullet"
+        );
+        assert!(
+            !p.contains("The agent's final message is returned to you as the tool result"),
+            "the l=false arm must not appear when l is true"
+        );
+        // Exactly one "relay what matters" bullet — a ternary, not two bullets.
+        assert_eq!(p.matches("relay what matters").count(), 1);
+    }
+
+    /// The `l=false` arm (binary @234659430) — reachable when background tasks
+    /// are disabled.
+    #[test]
+    fn first_tail_bullet_uses_the_l_false_arm_when_async_agents_unavailable() {
+        let p = AgentTool::build_prompt_with_async_agents(&agents(), &[], false, false);
+        assert!(p.contains(
+            "\n\n- The agent's final message is returned to you as the tool result; it is not shown to the user \u{2014} relay what matters.\n- Use "
+        ));
+        assert!(!p.contains("The agent's final report is not shown to the user"));
+    }
+
+    /// Binary @234657319: `T = l && !o ? (n ? SHORT : LONG) : ""`. With the
+    /// fork feature off (`n=false`) the LONG arm runs, and it does NOT stop at
+    /// "before continuing." — two more sentences follow. Anchored with
+    /// `ends_with` because the truncated text is a strict PREFIX of the correct
+    /// text, so `contains` on the old string does not discriminate.
+    #[test]
+    fn background_bullet_carries_the_full_long_arm() {
+        let p = AgentTool::build_prompt_with_async_agents(&agents(), &[], false, true);
+        assert!(
+            p.ends_with(
+                "\n- Subagents run in the background by default; you'll be notified when one completes. Pass `run_in_background: false` for a synchronous run when you need the result before continuing. Never fabricate or predict a pending agent's results \u{2014} the notification is never something you write yourself; if the user asks before it arrives, say it's still running."
+            ),
+            "background bullet must be the FULL long arm and must be last; got tail: {:?}",
+            &p[p.len().saturating_sub(400)..]
+        );
+    }
+
+    /// `T = l && !o ? … : ""` — when `l` is false there is NO background bullet
+    /// at all, not a shortened one.
+    #[test]
+    fn background_bullet_absent_when_async_agents_unavailable() {
+        let p = AgentTool::build_prompt_with_async_agents(&agents(), &[], false, false);
+        assert!(
+            !p.contains("Subagents run in the background"),
+            "l=false must drop the background bullet entirely"
+        );
+        assert!(p.ends_with(
+            "- `isolation: \"worktree\"` gives the agent its own git worktree (auto-cleaned if unchanged)."
+        ));
+    }
+
+    /// Binary tail order: `${C}\n\n- <final-report>\n- Use ${mf} …\n- Each agent
+    /// type's …\n- \`isolation: "worktree"\` …${b}${T}${v}` with `b`/`v` empty
+    /// by default ⇒ the background bullet is LAST.
+    #[test]
+    fn tail_bullet_order_matches_the_binary() {
+        let p = AgentTool::build_prompt_with_async_agents(&agents(), &[], false, true);
+        let i1 = p.find("- The agent's final report is not shown").unwrap();
+        let i2 = p.find("- Use SendMessage").unwrap();
+        let i3 = p.find("- Each agent type's model").unwrap();
+        let i4 = p.find("- `isolation: \"worktree\"`").unwrap();
+        let i5 = p.find("- Subagents run in the background").unwrap();
+        assert!(
+            i1 < i2 && i2 < i3 && i3 < i4 && i4 < i5,
+            "tail bullet order: {i1} {i2} {i3} {i4} {i5}"
+        );
+    }
+
+    /// The coordinator branch (`if(t) return g`) returns before any tail bullet,
+    /// so the `l` gate cannot leak into it.
+    #[test]
+    fn coordinator_branch_has_no_tail_bullets_either_way() {
+        for l in [true, false] {
+            let p = AgentTool::build_prompt_with_async_agents(&agents(), &[], true, l);
+            assert!(!p.contains("relay what matters"));
+            assert!(!p.contains("Subagents run in the background"));
+        }
+    }
+}

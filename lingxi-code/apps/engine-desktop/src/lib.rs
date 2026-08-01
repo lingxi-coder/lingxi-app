@@ -4834,6 +4834,12 @@ pub struct LlmStack {
     pub cost_estimator: Arc<llm_client::CostEstimator>,
     /// See [`build`] for the resolution rules behind `subscriber_state`.
     pub subscriber_state: SubscriberState,
+    /// Where the Anthropic credential came from, for the API-key-disabled error
+    /// copy. Carried here rather than on [`SubscriberState`], which lives in
+    /// `llm-client` and is shared.
+    pub credential_origin: orchestrator::api_error_copy::CredentialOrigin,
+    /// Whether a claude.ai OAuth access token is present (oracle `zv()`).
+    pub has_oauth_token: bool,
 }
 
 /// The single credential composition shared by CLI, TUI, and Desktop.
@@ -4968,6 +4974,13 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
     //        subscriber flag from its scopes (see [`oauth_subscriber_flag`]).
     let mut is_subscriber = false;
     let mut persisted_subscription_type: Option<String> = None;
+    // Where the Anthropic credential came from, for the error copy that names
+    // WHICH setting to unset when a 403 says API-key auth is off. Accumulated
+    // beside `is_subscriber` because `auth_source` below is scoped to the match
+    // arm. Defaults keep the `/login` wording, which is right for a stored or
+    // OAuth credential.
+    let mut credential_origin = orchestrator::api_error_copy::CredentialOrigin::Other;
+    let mut has_oauth_token = false;
     match credentials.get_oauth_tokens().await {
         Ok(Some(tokens)) => {
             // (M13) Drive the documented auth-source resolver with the full
@@ -5012,6 +5025,22 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
             // from request #1 — no async profile-fetch window — but only while
             // the stored session is the effective auth source (see
             // [`subscription_seed`]).
+            // Oracle `e1().source`, narrowed to what the copy branches on.
+            // Only the two EXTERNAL sources map: `/login managed key` has no
+            // LingXi equivalent, and everything else takes the `/login` wording
+            // anyway.
+            credential_origin = match &auth_source {
+                llm_client::oauth::anthropic::resolver::AuthSource::EnvApiKey => {
+                    orchestrator::api_error_copy::CredentialOrigin::EnvApiKey
+                }
+                llm_client::oauth::anthropic::resolver::AuthSource::ApiKeyHelper { .. } => {
+                    orchestrator::api_error_copy::CredentialOrigin::ApiKeyHelper
+                }
+                _ => orchestrator::api_error_copy::CredentialOrigin::Other,
+            };
+            // Oracle `zv()` = `ms()?.accessToken != null` — reaching this arm
+            // means stored OAuth tokens were read.
+            has_oauth_token = true;
             let seed = subscription_seed(
                 &auth_source,
                 &tokens.scopes,
@@ -5625,6 +5654,8 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
         llm_transport,
         cost_estimator,
         subscriber_state,
+        credential_origin,
+        has_oauth_token,
     })
 }
 
@@ -5856,6 +5887,8 @@ pub async fn build(
         llm_transport,
         cost_estimator,
         subscriber_state,
+        credential_origin,
+        has_oauth_token,
         // `profile_first_party` is an input to the resolution itself (the
         // Explore firstParty gate consumes it inside `resolve_llm_stack`); the
         // session half below reads the resolved outputs instead. Headless
@@ -6057,6 +6090,12 @@ pub async fn build(
     // misclassification window before the background freshener lands.
     orch_cfg.is_subscriber = is_subscriber;
     orch_cfg.is_enterprise = subscriber_state.is_enterprise;
+    // The API-key-disabled / credential-rejection copy names the specific
+    // setting THIS user has to unset, so it needs the RESOLVED source — not
+    // "is ANTHROPIC_API_KEY set", which is wrong whenever a higher-precedence
+    // source wins.
+    orch_cfg.credential_origin = credential_origin;
+    orch_cfg.has_oauth_token = has_oauth_token;
     // OUTSTYLE.2: thread the merged `settings.outputStyle` (TS string) into the
     // orchestrator config so `build_system_prompt` injects the active style's
     // `# Output Style: <name>` section (Explanatory / Learning builtins). `None`
@@ -7835,6 +7874,12 @@ pub async fn build(
     // (and the staleness / `/files` consumers).
     let read_state_map = tool_api::read_file_state::new_read_file_state_map();
     let tool_ctx = BuiltinToolContext {
+        // The live session, so tools that persist oversized output can write to
+        // claude-code's session-scoped `<projects>/<session-id>/tool-results/`
+        // instead of dropping artifacts inside the user's repository. Same
+        // `main_session_id` the orchestrator gets via `.with_session_id`, so the
+        // tool-results dir sits beside this session's transcript.
+        session_id: Some(main_session_id),
         // FILE.B / P1-06: file tools share the ONE per-session read-state map
         // (staleness guard, Read-dedup) — the SAME `Arc` the orchestrator adopts
         // via `.with_read_state_map(read_state_map)` below.
@@ -12832,6 +12877,8 @@ mod tests {
             is_local_override: false,
             tier: orchestrator::prompt::LingxiMdTier::Project,
             globs: None,
+            raw_content: memory_body.to_string(),
+            content_differs_from_disk: false,
         };
         cfg.memory_provider = Some(Arc::new(
             orchestrator::test_support::StaticMemoryProvider::with_files(vec![memory_file]),

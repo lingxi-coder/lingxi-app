@@ -13,6 +13,7 @@
 //! See spec §2.2 (data flow diagram) and §4.2 (turn loop limits).
 #![forbid(unsafe_code)]
 
+pub mod api_error_copy;
 pub mod bg_snapshot;
 pub mod config;
 pub mod conversation;
@@ -47,6 +48,7 @@ pub mod task_notifications_provider;
 pub mod teammate_idle_firer;
 pub mod todo_reminder_tasks_provider;
 pub mod token_budget;
+pub mod tool_result_persistence;
 pub mod transcript_paths;
 pub mod turn_loop;
 

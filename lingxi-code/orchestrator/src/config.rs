@@ -170,6 +170,49 @@ pub struct OrchestratorConfig {
     /// construction.
     #[serde(default)]
     pub is_enterprise: bool,
+    /// Whether this route may carry claude-code's FIRST-PARTY beta headers.
+    ///
+    /// Gates the context-hint negotiation
+    /// (`compaction::context_hint::create_context_hint_controller`), whose
+    /// oracle returns no controller at all without it. Custom Anthropic-wire
+    /// gateways understand the stable Messages schema but must never inherit a
+    /// private first-party beta, which is the same rule
+    /// `service::direct_anthropic_api_route` enforces one layer down.
+    ///
+    /// `false` by default, so the negotiation is inert unless a composition
+    /// root opts in — on top of the controller's own env gate, which is also
+    /// off by default because the ORACLE's `tengu_hazel_osprey` is.
+    #[serde(default)]
+    pub include_first_party_betas: bool,
+    /// Which upstream this session talks to, for the error copy that names
+    /// where to look when trouble persists (oracle `xn()` feeding `hpo()`).
+    ///
+    /// `None` (the default) renders the capacity clause without its suffix —
+    /// see `api_error_copy::capacity_fallback`. Supplied by a composition root,
+    /// which is the only layer that knows the resolved provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_route: Option<crate::api_error_copy::ErrorRouteTag>,
+    /// Whether the Anthropic credential came from OUTSIDE the app — the
+    /// `ANTHROPIC_API_KEY` env var or an `apiKeyHelper` script.
+    ///
+    /// Selects between `Invalid API key · Fix external API key` and
+    /// `Not logged in · Please run /login` when the server rejects the
+    /// credential (oracle: `e1().source === "ANTHROPIC_API_KEY" ||
+    /// === "apiKeyHelper"`). `false` — the default — yields the /login copy,
+    /// which is the right advice for a stored or OAuth credential.
+    ///
+    /// Set from `llm_client::oauth::anthropic::AuthSource` at the composition
+    /// root. Started life as a `bool`; widened because the org-disabled copy
+    /// tells an env-var user and an `apiKeyHelper` user to unset DIFFERENT
+    /// things, which a single flag cannot express.
+    #[serde(default)]
+    pub credential_origin: crate::api_error_copy::CredentialOrigin,
+    /// Whether a claude.ai OAuth access token is present — oracle `zv()`
+    /// (`ms()?.accessToken != null`). With an account already signed in,
+    /// unsetting `ANTHROPIC_API_KEY` suffices; without one the user must also
+    /// run `/login`.
+    #[serde(default)]
+    pub has_oauth_token: bool,
 
     /// OUTSTYLE.2: the active output-style name from `settings.outputStyle`
     /// (TS types it `z.string()`). `None` / `"default"` → no style section;
@@ -347,6 +390,10 @@ impl Default for OrchestratorConfig {
             token_budget: None,
             is_subscriber: false,
             is_enterprise: false,
+            include_first_party_betas: false,
+            error_route: None,
+            credential_origin: crate::api_error_copy::CredentialOrigin::Other,
+            has_oauth_token: false,
             output_style: None,
             output_style_dirs: Vec::new(),
             max_budget_nano_usd: None,
@@ -405,6 +452,10 @@ mod tests {
             token_budget: Some(500_000),
             is_subscriber: true,
             is_enterprise: true,
+            include_first_party_betas: false,
+            error_route: None,
+            credential_origin: crate::api_error_copy::CredentialOrigin::Other,
+            has_oauth_token: false,
             output_style: Some("Explanatory".into()),
             output_style_dirs: vec![std::path::PathBuf::from("/home/u/.lingxi/output-styles")],
             max_budget_nano_usd: Some(5_000_000_000),

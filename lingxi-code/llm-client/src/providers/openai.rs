@@ -228,7 +228,12 @@ pub(crate) fn decode_error_response(response: &ProviderResponse) -> LlmError {
         "context_length_exceeded" => LlmError::ContextOverflow { token_gap: 0 },
         "invalid_api_key" | "invalid_authentication" => LlmError::Authentication,
         "model_not_found" => LlmError::ModelUnavailable,
-        _ => super::map_error_status(response.status, message, retry_after),
+        _ => super::map_error_status(
+            response.status,
+            &message,
+            super::api_error_message(response.status, &response.body_json, &message),
+            retry_after,
+        ),
     }
 }
 

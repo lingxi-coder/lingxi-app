@@ -1514,6 +1514,8 @@ mod tests {
                 offset: None,
                 limit: None,
                 from_read: true,
+                seeded_from_context: false,
+                is_partial_view: false,
             },
         );
         tool_api::read_file_state::set_with_model_context(
@@ -1525,6 +1527,8 @@ mod tests {
                 offset: None,
                 limit: None,
                 from_read: false,
+                seeded_from_context: false,
+                is_partial_view: false,
             },
             false,
         );

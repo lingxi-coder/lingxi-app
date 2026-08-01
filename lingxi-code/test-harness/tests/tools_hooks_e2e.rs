@@ -22,6 +22,12 @@ impl BuiltinHookHandler for BlockingBuiltin {
             response: Some(HookResponse {
                 decision: Some(HookDecision::Block),
                 reason: Some("test policy".into()),
+                // O2 `hook_blocking_error`: the `command` half of the blocking
+                // hook's `{blockingError, command}` pair, frozen at the first
+                // blocker alongside `reason`. `None` here — this mock returns a
+                // decision directly rather than running a command, so there is
+                // no command to attribute the block to.
+                block_command: None,
                 updated_input: None,
                 system_message: None,
                 attachments: vec![],

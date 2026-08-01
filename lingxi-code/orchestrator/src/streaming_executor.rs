@@ -39,6 +39,26 @@ pub(crate) enum AbortReason {
     StreamingFallback,
 }
 
+/// The `toolUseResult` claude persists alongside a synthetic abort block.
+///
+/// These do NOT mirror the block's model-facing content — claude uses two
+/// SHORTER literals on the transcript line:
+/// * `user_interrupted` → `vld` (2.1.220 BIN off **238097321**), used at the
+///   synthetic site BIN off **232972524** — `"User rejected tool use"`, while
+///   the model block carries the long `<tool_use_error>`-wrapped rejection.
+/// * `streaming_fallback` → BIN off **232973166** —
+///   `"Streaming fallback - tool execution discarded"`, i.e. the model block's
+///   text with the `<tool_use_error>Error: ` wrapper stripped.
+pub(crate) fn synthetic_tool_use_result(reason: AbortReason) -> serde_json::Value {
+    serde_json::Value::String(
+        match reason {
+            AbortReason::UserInterrupted => "User rejected tool use",
+            AbortReason::StreamingFallback => "Streaming fallback - tool execution discarded",
+        }
+        .to_string(),
+    )
+}
+
 /// Build the synthetic `tool_result` for a cancelled tool (TS
 /// `createSyntheticErrorMessage`). `provider_tool_use_id` is left `None` —
 /// the caller copies the tracked tool's `provider_id` in before persisting.
@@ -454,6 +474,32 @@ impl<'a> StreamingToolExecutor<'a> {
         let abort_reason = self.abort_reason_for(i);
         // Cancelled in-flight tool: discard its real outcome for the synthetic.
         if let Some(reason) = abort_reason {
+            // Denial-kind housekeeping: the dispatch-site catch may already have
+            // recorded a kind (`interrupted` for a `ToolError::Aborted`, or
+            // `cancelled` from the pre-cancel guard) for the block we are about
+            // to THROW AWAY. `take_tool_denial_kind` removes on read, so a stale
+            // entry would both mis-stamp the synthetic and leak. claude-code's
+            // `createSyntheticErrorMessage` (2.1.220 @232972360) attaches
+            // `toolDenialKind:"user-rejected"` to the `user_interrupted`
+            // synthetic (@232972524) and NO kind to `streaming_fallback` /
+            // `conversation_ended`, so follow the block that actually survives.
+            match reason {
+                AbortReason::UserInterrupted => {
+                    self.orch
+                        .record_tool_denial_kind(&self.tools[i].id, "user-rejected")
+                        .await;
+                }
+                AbortReason::StreamingFallback => {
+                    self.orch.remove_tool_denial_kind(&self.tools[i].id).await;
+                }
+            }
+            // O1: the discarded real outcome may already have recorded a
+            // `toolUseResult`; the synthetic that survives carries claude's own
+            // literal instead. `record_tool_use_result` overwrites, so this both
+            // corrects the value and prevents a stale entry.
+            self.orch
+                .record_tool_use_result(&self.tools[i].id, synthetic_tool_use_result(reason))
+                .await;
             let mut block = synthetic_error_block(self.tools[i].id.clone(), reason);
             set_provider_id(&mut block, self.tools[i].provider_id.clone());
             self.tools[i].result = Some(block);
@@ -499,7 +545,26 @@ impl<'a> StreamingToolExecutor<'a> {
     /// their next completion (mirroring `collectResults` 335-345). The two are
     /// complementary: queued tools never enter `inflight`, so `drain_one` never
     /// sees them, and an executing tool is never `Queued` here.
-    pub(crate) fn apply_abort_to_pending(&mut self) {
+    ///
+    /// RETURNS every substituted id WITH its reason, so the async caller can
+    /// stamp the transcript side-tables:
+    /// * [`AbortReason::UserInterrupted`] ⇒ `toolDenialKind:"user-rejected"` —
+    ///   the synthetic claude-code builds here (`createSyntheticErrorMessage`,
+    ///   2.1.220 @232972360) carries it (@232972524) exactly as the in-flight
+    ///   substitution in [`Self::drain_one`] does. `StreamingFallback` carries
+    ///   NO kind, and a queued tool never reached dispatch, so there is no
+    ///   prior entry to clear.
+    /// * BOTH reasons ⇒ a `toolUseResult` literal
+    ///   ([`synthetic_tool_use_result`]).
+    ///
+    /// Recording cannot happen inline because this method is sync and the
+    /// recorders take the orchestrator's async mutexes.
+    ///
+    /// NOT `#[must_use]`: `streaming_executor_test.rs` calls this as a bare
+    /// statement to assert only the synthetic block, and that file is owned by
+    /// a concurrent session.
+    pub(crate) fn apply_abort_to_pending(&mut self) -> Vec<(ToolUseId, AbortReason)> {
+        let mut substituted = Vec::new();
         for i in 0..self.tools.len() {
             if !matches!(self.tools[i].status, ToolStatus::Queued) || self.tools[i].result.is_some()
             {
@@ -512,11 +577,13 @@ impl<'a> StreamingToolExecutor<'a> {
             let Some(reason) = self.abort_reason_for(i) else {
                 continue;
             };
+            substituted.push((self.tools[i].id.clone(), reason));
             let mut block = synthetic_error_block(self.tools[i].id.clone(), reason);
             set_provider_id(&mut block, self.tools[i].provider_id.clone());
             self.tools[i].result = Some(block);
             self.tools[i].status = ToolStatus::Completed;
         }
+        substituted
     }
 
     /// Mark the turn discarded (streaming fallback). Pending tools get a
@@ -536,7 +603,14 @@ impl<'a> StreamingToolExecutor<'a> {
         &mut self,
     ) -> Result<Vec<ContentBlock>, crate::error::OrchestratorError> {
         loop {
-            self.apply_abort_to_pending();
+            for (id, reason) in self.apply_abort_to_pending() {
+                if reason == AbortReason::UserInterrupted {
+                    self.orch.record_tool_denial_kind(&id, "user-rejected").await;
+                }
+                self.orch
+                    .record_tool_use_result(&id, synthetic_tool_use_result(reason))
+                    .await;
+            }
             self.process_queue();
             if self.inflight.is_empty() {
                 break;
@@ -657,3 +731,218 @@ pub(crate) fn synthetic_unknown_tool(
 #[cfg(test)]
 #[path = "streaming_executor_test.rs"]
 mod streaming_executor_test;
+
+/// O4-A step 3: denial-kind housekeeping across the executor's synthetic
+/// substitution.
+///
+/// The dispatch-site catch (`turn_loop.rs`) records `"interrupted"` for a tool
+/// that returned `ToolError::Aborted`. When the executor then DISCARDS that
+/// real outcome for a synthetic (claude-code `createSyntheticErrorMessage`,
+/// 2.1.220 @232972360), the persisted block is no longer the interrupted one,
+/// so the recorded kind must follow the block that actually survives:
+///   * `user_interrupted` ⇒ `toolDenialKind:"user-rejected"` (@232972524)
+///   * `streaming_fallback` / `conversation_ended` ⇒ NO `toolDenialKind`
+/// Leaving the dispatch-site entry in place would both stamp the wrong kind on
+/// the synthetic and orphan the map entry (`take_tool_denial_kind` removes on
+/// read, and the interrupted block never reaches persistence).
+#[cfg(test)]
+mod synthetic_denial_kind_tests {
+    use super::*;
+    use crate::conversation::ConversationOrchestrator;
+    use crate::test_support::{
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
+    };
+    use crate::OrchestratorConfig;
+    use async_trait::async_trait;
+    use protocol::MessageId;
+    use serde_json::json;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tool_api::context::ToolUseContext;
+    use tool_api::progress::ToolProgressSender;
+    use tool_api::registry::ToolRegistry;
+    use tool_api::tool_trait::{
+        DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
+        ToolStaticContext, ValidationError,
+    };
+
+    /// Cancel-behavior tool that returns `ToolError::Aborted` the moment its
+    /// `ctx.cancel` fires — the same shape as the real Bash/MCP abort seams.
+    struct CancelTool;
+
+    #[async_trait]
+    impl Tool for CancelTool {
+        fn name(&self) -> &str {
+            "CancelTool"
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
+                once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
+            &SCHEMA
+        }
+        fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
+            true
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1024 * 1024
+        }
+        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+        fn interrupt_behavior(&self, _input: &serde_json::Value) -> InterruptBehavior {
+            InterruptBehavior::Cancel
+        }
+        async fn validate_input(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> Result<(), ValidationError> {
+            Ok(())
+        }
+        async fn check_permissions(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> permission::PermissionResult {
+            permission::PermissionResult::Allow {
+                reason: permission::PermissionDecisionReason::Other {
+                    reason: "test".into(),
+                },
+                updated_input: None,
+                update_destination: None,
+                metadata: permission::result::PermissionMetadata::default(),
+            }
+        }
+        async fn description(
+            &self,
+            _input: &serde_json::Value,
+            _opts: &DescriptionOptions,
+        ) -> String {
+            "cancel-tool".into()
+        }
+        async fn prompt(&self, _opts: &PromptOptions) -> String {
+            String::new()
+        }
+        async fn call(
+            &self,
+            _input: serde_json::Value,
+            ctx: ToolUseContext,
+            _tx: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            let token = ctx.cancel.clone();
+            tokio::select! {
+                () = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
+                    Ok(ToolCallResult {
+                        data: json!({ "content": "ran-to-end" }),
+                        model_content: None,
+                        new_messages: vec![],
+                        context_modifier: None,
+                        is_error: false,
+                        mcp_meta: None,
+                    })
+                }
+                () = async { match token { Some(t) => t.cancelled().await, None => std::future::pending().await } } => {
+                    Err(ToolError::Aborted)
+                }
+            }
+        }
+    }
+
+    fn orch() -> ConversationOrchestrator {
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(CancelTool) as Arc<dyn Tool>);
+        ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(registry),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        )
+    }
+
+    #[tokio::test]
+    async fn user_interrupt_substitution_rewrites_the_kind_to_user_rejected() {
+        let orch = orch();
+        let user_cancel = tokio_util::sync::CancellationToken::new();
+        let a = MessageId::new();
+        let id = ToolUseId::new();
+        let mut exec = StreamingToolExecutor::new_with_user_cancel(&orch, user_cancel.clone());
+        exec.add_tool(id.clone(), "CancelTool".into(), json!({}), None, a);
+        exec.process_queue();
+        user_cancel.cancel();
+        let results = exec.run_to_completion().await.unwrap();
+        let ContentBlock::ToolResult { content, .. } = &results[0] else {
+            panic!("expected a tool_result")
+        };
+        assert_eq!(content, REJECT_MESSAGE, "synthetic must survive");
+        assert_eq!(
+            orch.tool_denial_kinds
+                .lock()
+                .await
+                .get(&id.to_string())
+                .map(String::as_str),
+            Some("user-rejected"),
+            "the substituted synthetic carries `user-rejected`, not the \
+             dispatch-site `interrupted`"
+        );
+    }
+
+    #[tokio::test]
+    async fn streaming_fallback_substitution_clears_the_kind() {
+        let orch = orch();
+        let a = MessageId::new();
+        let id = ToolUseId::new();
+        let mut exec = StreamingToolExecutor::new(&orch);
+        exec.add_tool(id.clone(), "CancelTool".into(), json!({}), None, a);
+        exec.process_queue();
+        exec.discard();
+        let _ = exec.run_to_completion().await.unwrap();
+        assert!(
+            !orch.tool_denial_kinds.lock().await.contains_key(&id.to_string()),
+            "a streaming-fallback synthetic carries NO toolDenialKind"
+        );
+    }
+
+    /// A tool cancelled while still QUEUED never reaches dispatch, so nothing
+    /// records a kind there — but `apply_abort_to_pending` still persists the
+    /// very same `user_interrupted` synthetic that `drain_one` produces, and
+    /// claude-code's `createSyntheticErrorMessage` (2.1.220 @232972360) stamps
+    /// `toolDenialKind:"user-rejected"` (@232972524) on that message regardless
+    /// of whether the tool had started. Without this the persisted JSONL line
+    /// silently loses the stamp on the queued path while keeping it on the
+    /// in-flight path.
+    #[tokio::test]
+    async fn queued_tool_cancelled_before_dispatch_is_stamped_user_rejected() {
+        let orch = orch();
+        let user_cancel = tokio_util::sync::CancellationToken::new();
+        let a = MessageId::new();
+        let id = ToolUseId::new();
+        let mut exec = StreamingToolExecutor::new_with_user_cancel(&orch, user_cancel.clone());
+        exec.add_tool(id.clone(), "CancelTool".into(), json!({}), None, a);
+        // Cancel while the tool is still Queued — `process_queue` never runs it,
+        // so `apply_abort_to_pending` is the path that produces the synthetic.
+        user_cancel.cancel();
+        let results = exec.run_to_completion().await.unwrap();
+        let ContentBlock::ToolResult { content, .. } = &results[0] else {
+            panic!("expected a tool_result")
+        };
+        assert_eq!(content, REJECT_MESSAGE, "queued tool gets the synthetic");
+        assert_eq!(
+            orch.tool_denial_kinds
+                .lock()
+                .await
+                .get(&id.to_string())
+                .map(String::as_str),
+            Some("user-rejected"),
+            "the queued-path synthetic must carry the same kind as the \
+             in-flight-path synthetic"
+        );
+    }
+}

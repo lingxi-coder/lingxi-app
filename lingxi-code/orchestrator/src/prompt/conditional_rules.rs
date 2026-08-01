@@ -206,6 +206,8 @@ mod tests {
             is_local_override: tier == LingxiMdTier::Local,
             tier,
             globs: globs.map(|v| v.into_iter().map(String::from).collect()),
+            raw_content: "RULE BODY".into(),
+            content_differs_from_disk: false,
         }
     }
 

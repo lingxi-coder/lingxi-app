@@ -257,6 +257,11 @@ fn base_body(request: &LlmRequest) -> Result<serde_json::Map<String, Value>, Llm
             oc.insert("effort".to_string(), effort.clone());
         }
     }
+    if let Some(hint) = &request.context_hint {
+        // claude-code `context_hint: {enabled, target_tokens_saved?}` — the
+        // offer the server may reject with 422/424 to ask for a compact.
+        body.insert("context_hint".to_string(), hint.clone());
+    }
     if let Some(speed) = &request.speed {
         // claude-code fast mode: the top-level `speed` body key (read back by
         // `service::beta_context` to add the fast-mode beta). First-party only.
@@ -705,16 +710,21 @@ fn decode_stream_event(value: &Value) -> Result<Vec<LlmEvent>, LlmError> {
 
 fn decode_error_event(value: &Value) -> LlmError {
     let (error_type, message) = error_envelope(value);
-    map_error(error_type, message, None)
+    // Status 0: a stream `error` event carries no HTTP status, so `makeMessage`
+    // takes its no-status branch and the text stays unprefixed. That is exactly
+    // what the oracle's `Htp` keys on (`if(e.status!==void 0)return!1`).
+    let display = super::api_error_message(0, value, &message);
+    map_error(error_type, &message, display, None)
 }
 
 fn decode_error_response(response: &ProviderResponse) -> LlmError {
     let retry_after = crate::retry::retry_after_from_headers(&response.headers);
     let (error_type, message) = error_envelope(&response.body_json);
+    let display = super::api_error_message(response.status, &response.body_json, &message);
     if error_type.is_empty() {
-        super::map_error_status(response.status, message, retry_after)
+        super::map_error_status(response.status, &message, display, retry_after)
     } else {
-        map_error(error_type, message, retry_after)
+        map_error(error_type, &message, display, retry_after)
     }
 }
 
@@ -778,7 +788,13 @@ fn ptl_token_gap(message: &str) -> u64 {
     }
 }
 
-fn map_error(error_type: &str, message: String, retry_after: Option<Duration>) -> LlmError {
+/// `message` classifies, `display` is stored — see [`super::map_error_status`].
+fn map_error(
+    error_type: &str,
+    message: &str,
+    display: String,
+    retry_after: Option<Duration>,
+) -> LlmError {
     match error_type {
         "authentication_error" => LlmError::Authentication,
         "permission_error" => LlmError::PermissionDenied,
@@ -797,10 +813,12 @@ fn map_error(error_type: &str, message: String, retry_after: Option<Duration>) -
         "request_too_large" => LlmError::RequestTooLarge,
         "invalid_request_error" if message.to_ascii_lowercase().contains("prompt is too long") => {
             LlmError::ContextOverflow {
-                token_gap: ptl_token_gap(&message),
+                // The RAW message: the gap parser looks for a digit run, and a
+                // leading status would be the first one it found.
+                token_gap: ptl_token_gap(message),
             }
         }
-        "invalid_request_error" => LlmError::InvalidRequest { message },
+        "invalid_request_error" => LlmError::InvalidRequest { message: display },
         "overloaded_error" => LlmError::Overloaded { repeated: false },
         // api_error, and unknown types stay retryable.
         _ => LlmError::ProviderInternal,

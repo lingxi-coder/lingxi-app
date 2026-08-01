@@ -37,7 +37,7 @@ use tool_api::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
     ValidationError,
 };
-use tool_api::util::output_truncation::{truncate_shell_output, MAX_TOOL_OUTPUT_LENGTH};
+use tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH;
 use tool_api::BuiltinToolContext;
 
 // ===== Locked constants =====================================================
@@ -627,9 +627,16 @@ fn is_within_allowed(cwd: &std::path::Path, dir: &std::path::Path) -> bool {
     e.starts_with(&t_with_sep)
 }
 
-// Bash output truncation is the shared shell-command form (claude-code `Qyu()`
-// / `BashTool/utils.ts:156-158`): see [`tool_api::util::output_truncation::truncate_shell_output`].
-// REPL and PowerShell route through the same helper.
+// no-truncation: A1/STEP-4. Bash no longer truncates its model-facing output.
+// claude-code 2.1.220 dropped the shared shell truncator entirely — the only
+// `[N lines truncated] ...` sites left in the binary are prompt prose
+// (@231867509), the diff renderer (@232474811), and the NOTEBOOK formatter
+// `vtd` (@232559907, sole caller `CCs`). Oversized Bash results are handled by
+// the orchestrator's `<persisted-output>` layer keyed on
+// [`tool_api::tool_trait::Tool::persistence_threshold`]; the REPL/notebook path
+// still routes through
+// [`tool_api::util::output_truncation::truncate_shell_output`], which is the
+// port of `vtd`.
 
 /// The interrupt/abort marker appended to stderr (`BashTool.tsx:602-604`).
 const ABORT_MARKER: &str = "<error>Command was aborted before completion</error>";
@@ -809,9 +816,12 @@ fn build_interrupted_result(
     };
     let normalized =
         crate::shared::strip_empty_lines(&crate::shared::normalize_stdout(&stdout_clean));
-    // `truncated` is telemetry-only, not part of the result data — discard it.
-    let (stdout_final, _truncated_out) =
-        truncate_shell_output(normalized, bash_max_output_length());
+    // no-truncation: A1/STEP-4. 2.1.220 hands `data.stdout` to the result
+    // mapper VERBATIM (BIN off 235703218 uses `Jst()` only as the
+    // `D.length>Jst()` nudge predicate); oversized output is handled by the
+    // orchestrator's `<persisted-output>` layer instead. See
+    // `persistence_threshold` below and `orchestrator::tool_result_persistence`.
+    let stdout_final = normalized;
 
     // claude-code appends the abort marker to stderr, preceded by EOL when
     // stderr is non-empty (`BashTool.tsx:602-604`).
@@ -1307,6 +1317,20 @@ impl Tool for BashTool {
 
     fn max_result_size_chars(&self) -> usize {
         MAX_TOOL_OUTPUT_LENGTH
+    }
+
+    /// `maxResultSizeChars:30000` on the Bash tool descriptor (2.1.220 BIN off
+    /// **235694594**), folded through `M0u` → `min(30000, AKr=50000)` = 30 000.
+    ///
+    /// Deliberately a STATIC literal, NOT [`bash_max_output_length`]: the
+    /// oracle's descriptor field is the constant `30000`, and its `Jst()`
+    /// (`BASH_MAX_OUTPUT_LENGTH`) reader appears on the Bash path only as the
+    /// `D.length>Jst()` nudge predicate (BIN off 235703218). Raising
+    /// `BASH_MAX_OUTPUT_LENGTH` therefore does NOT raise the persistence
+    /// threshold in claude-code — and `M0u`'s `AKr` ceiling would have clamped
+    /// it to 50 000 even if it did.
+    fn persistence_threshold(&self) -> Option<usize> {
+        Some(MAX_TOOL_OUTPUT_LENGTH)
     }
 
     fn is_concurrency_safe(&self, input: &Value) -> bool {
@@ -1964,8 +1988,8 @@ impl Tool for BashTool {
                 // model-facing stdout is a base64 `data:image/…;base64,…` URI
                 // (matplotlib/screenshot helpers), return it as an IMAGE rather
                 // than truncating it as text. Detection runs on `normalized`
-                // (= TS `stripEmptyLines(stdout)`), BEFORE `truncate_shell_output`
-                // — truncated base64 would decode to a corrupt image. The image
+                // (= TS `stripEmptyLines(stdout)`); the URI is never truncated
+                // (nothing on this path truncates any more). The image
                 // rides on `new_messages` via the Rust image contract (mirrors
                 // FileRead `read.rs:718-759`); `data` carries `isImage: true` +
                 // the `model_content` placeholder. Oversized images are resized
@@ -2035,13 +2059,17 @@ impl Tool for BashTool {
                     }
                 }
 
-                // BASH.3: honor the `BASH_MAX_OUTPUT_LENGTH` env override
-                // (claude-code `outputLimits.ts` `getMaxOutputLength`); falls
-                // back to the 30_000-char default when unset/invalid. The
-                // truncation message matches claude-code `formatOutput`
-                // (`BashTool/utils.ts:156-158`): `... [N lines truncated] ...`.
-                let (stdout_final, truncated_out) =
-                    truncate_shell_output(normalized, bash_max_output_length());
+                // no-truncation: A1/STEP-4. The model-facing stdout is NOT
+                // truncated — 2.1.220 dropped the shared shell truncator and
+                // routes oversized results through the orchestrator's
+                // `<persisted-output>` layer keyed on
+                // `persistence_threshold()`. `BASH_MAX_OUTPUT_LENGTH` still
+                // resolves the boundary (claude-code `Jst()`), but it now only
+                // decides whether the result EXCEEDED the limit — the oracle's
+                // own `D.length>Jst()` predicate (BIN off 235703218) — which is
+                // what the `truncated` analytics field reports.
+                let truncated_out = normalized.len() > bash_max_output_length();
+                let stdout_final = normalized;
                 // Exit-code reinterpretation (claude-code interpretCommandResult):
                 // e.g. `grep` no-match (exit 1) is NOT an error.
                 let interp =
@@ -3365,12 +3393,22 @@ mod tests {
         assert_eq!(res.data["interrupted"], false);
     }
 
+    /// A1/STEP-4 — 2.1.220 does NOT truncate the model-facing Bash output.
+    ///
+    /// The shared shell truncator is GONE from the 2.1.220 binary: the only
+    /// three `lines truncated] ...` sites left are prose in a prompt
+    /// (@231867509), the diff/patch renderer (@232474811), and the NOTEBOOK
+    /// output formatter `vtd` (@232559907, whose sole caller is `CCs`). The
+    /// Bash tool's own `Jst()` use (@235703218) is just
+    /// `D.length>Jst()` handed to the read-state nudge — `data.stdout` is the
+    /// un-mutated `W`. `maxResultSizeChars:30000` (@235694594) is a
+    /// PERSISTENCE threshold instead.
+    ///
+    /// Ground truth: across 3 271 real 2.1.220 transcripts the largest
+    /// non-persisted Bash `tool_result` is 29 977 chars and 1 324 larger ones
+    /// carry a `<persisted-output>` envelope. Zero carry a truncation suffix.
     #[tokio::test]
-    async fn foreground_truncates_at_30k_chars_with_lines_truncated_suffix() {
-        // Head of 30_000 `a`s (no newlines) then a 5-newline tail: the kept head
-        // is the first 30_000 chars; the truncated tail holds 5 `\n`, so the TS
-        // `formatOutput` count is `5 + 1 = 6` lines truncated
-        // (`BashTool/utils.ts:156-158`).
+    async fn foreground_output_over_30k_is_passed_through_untruncated() {
         let head = "a".repeat(30_000);
         let tail = format!("{}tail", "\n".repeat(5));
         let out = ProcessOutput {
@@ -3385,20 +3423,32 @@ mod tests {
             .await
             .expect("ok");
         let s = res.data["stdout"].as_str().unwrap();
-        // New TS-form truncation message with a correct N (6). (`truncated` is
-        // telemetry-only — the truncation is observable in the stdout suffix.)
         assert!(
-            s.ends_with("... [6 lines truncated] ..."),
-            "expected TS lines-truncated suffix with N=6, got tail: {:?}",
-            &s[s.len().saturating_sub(40)..]
+            !s.contains("lines truncated] ..."),
+            "2.1.220 has no shell output truncator; got tail: {:?}",
+            &s[s.len().saturating_sub(60)..]
         );
-        // Head preserved verbatim, joined by the literal `\n\n` separator.
-        assert!(
-            s.starts_with(&format!("{head}\n\n... [")),
-            "head must be the kept prefix followed by the separator",
+        assert_eq!(
+            s,
+            format!("{head}{}tail", "\n".repeat(5)),
+            "stdout must reach the result mapper verbatim"
         );
-        // The old generic suffix is gone.
-        assert!(!s.contains("[Output truncated due to length]"));
+    }
+
+    /// The threshold the orchestrator's persistence layer reads for Bash —
+    /// `maxResultSizeChars:30000` (2.1.220 BIN off **235694594**) folded
+    /// through `M0u` as `min(30000, AKr=50000)`.
+    #[test]
+    fn bash_declares_a_30k_persistence_threshold() {
+        use tool_api::tool_trait::Tool as _;
+        let out = ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        };
+        let tool = BashTool::new(shell_test_ctx(out));
+        assert_eq!(tool.persistence_threshold(), Some(30_000));
     }
 
     // ----- Background path: bespoke stub that returns a fake ProcessHandle. -----

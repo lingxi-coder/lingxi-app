@@ -2,9 +2,14 @@
 //!
 //! Exercises `lingxi_md::hierarchy::walk` + `lingxi_md::loader::load_file`
 //! together. The hierarchy must surface entries in cwd-first order with
-//! `LINGXI.local.md` shadowing `LINGXI.md` at the same depth. GAP 4: the
-//! LINGXI.md loader has NO size drop (parity with claude-code `readFile`), so
-//! an oversized file loads in full rather than being skipped.
+//! `LINGXI.local.md` shadowing `LINGXI.md` at the same depth.
+//!
+//! ⚠️ CORRECTED — this header claimed "GAP 4: the LINGXI.md loader has NO size
+//! drop (parity with claude-code `readFile`), so an oversized file loads in
+//! full rather than being skipped". The 2.1.220 binary drops it: `EG`
+//! (@229022173) stats first and returns `null` for anything non-regular or over
+//! `ELu = 4194304`. The walk still DISCOVERS such a file — the guard is in the
+//! reader, not the scanner — which is why the oversize test asserts on both.
 
 use memory::lingxi_md::hierarchy::walk;
 use memory::lingxi_md::loader::load_file;
@@ -54,9 +59,10 @@ fn full_hierarchy_walk_then_load_returns_innermost_first() {
 }
 
 #[test]
-fn oversized_file_loads_whole_no_size_drop_other_files_also_load() {
-    // GAP 4: claude-code reads every memory file whole (no size drop). A file
-    // larger than the legacy 10 MB cap must now LOAD in full alongside the rest.
+fn oversized_file_is_skipped_while_other_files_still_load() {
+    // RENAMED from `oversized_file_loads_whole_no_size_drop_other_files_also_load`.
+    // "GAP 4: no size drop" was wrong — `EG` (@229022173) skips anything over
+    // `ELu = 4194304`. One oversized file must not stop the rest loading.
     let tmp = TempDir::new().unwrap();
     let home = tmp.path().join("home");
     let user_lingxi = home.join(".lingxi");
@@ -69,21 +75,31 @@ fn oversized_file_loads_whole_no_size_drop_other_files_also_load() {
     fs::write(repo.join("LINGXI.md"), &big).unwrap();
 
     let h = walk(&repo, &home, None);
+    // The walk still DISCOVERS both files — the size guard lives in the reader,
+    // not the scanner, exactly as claude-code splits `Eds` (walk) from `EG`
+    // (stat + read).
+    assert_eq!(h.entries.len(), 2, "both files are discovered");
+
     let loaded: Vec<_> = h
         .entries
         .iter()
-        .map(|e| load_file(&e.path, None).expect("no file is dropped for size"))
+        .filter_map(|e| load_file(&e.path, None).ok())
         .collect();
-    assert_eq!(loaded.len(), 2, "both the small and oversized files load");
+    // CORRECTED from "both the small and oversized files load". The oversized
+    // one is 10 MiB + 1, over `ELu = 4194304`, so claude-code skips it
+    // (`EG`: `if(!o.isFile()||o.size>r) return n?.(o),null`). The old
+    // expectation followed from a module doc that claimed no size check and
+    // cited leaked TS; the binary disagrees.
+    assert_eq!(loaded.len(), 1, "the oversized file is skipped, not loaded");
+    assert_eq!(loaded[0].path, user_lingxi.join("LINGXI.md"));
+    assert_eq!(loaded[0].body, "# small\n");
 
-    let by_path = |p: &std::path::Path| loaded.iter().find(|f| f.path == p).unwrap();
-    let big_loaded = by_path(&repo.join("LINGXI.md"));
-    assert_eq!(
-        big_loaded.size_bytes,
-        (MAX_MEMORY_FILE_SIZE + 1) as u64,
-        "oversized file is read whole, not truncated"
-    );
-    assert_eq!(by_path(&user_lingxi.join("LINGXI.md")).body, "# small\n");
+    match load_file(&repo.join("LINGXI.md"), None) {
+        Err(memory::lingxi_md::loader::LoaderError::FileTooLarge { bytes, .. }) => {
+            assert_eq!(bytes, (MAX_MEMORY_FILE_SIZE + 1) as u64);
+        }
+        other => panic!("expected FileTooLarge for the oversized file, got {other:?}"),
+    }
 }
 
 #[test]

@@ -2094,20 +2094,39 @@ pub trait OutputStream: Send + Sync {
     /// implementors and a signature change would touch all of them for a field
     /// only the stream-json transport can carry.
     ///
-    /// STAMPED by LingXi today: the five classifier kinds, plus `cancelled` on
-    /// the pre-cancel guard (which claude-code hardcodes rather than deriving).
+    /// STAMPED by LingXi today: the five classifier kinds, `cancelled` on the
+    /// pre-cancel guard (which claude-code hardcodes rather than deriving), and
+    /// `interrupted` on a tool whose own `call` returned
+    /// [`tool_api::ToolError::Aborted`].
     ///
-    /// NOT yet stamped: `interrupted`. Its only site is a tool aborted
-    /// mid-execution, whose result the streaming executor replaces with a
-    /// synthetic block that never reaches an `emit_*` call at all — claude-code
-    /// generates its SDK frame from the message stream AFTER substitution,
-    /// whereas LingXi emits at dispatch time, before the abort is known. That
-    /// emission-point difference has to be resolved before the stamp has
-    /// anywhere to attach; adding it at the collection point would double-emit
-    /// for one `tool_use_id`. Note also that `YDd` (offset 235394375) splits
-    /// `cancelled` from `interrupted` on a `background` abort reason, a concept
-    /// LingXi has no equivalent of — every LingXi abort is the `interrupted`
-    /// branch today.
+    /// The `interrupted` stamp attaches at the SAME site claude-code uses: the
+    /// per-tool execution catch `oQ_` (2.1.220 @235424972) puts
+    /// `toolDenialKind: YDd(err, signal)` on the frame it builds there, so no
+    /// emission-point change was needed — an earlier note here claimed the
+    /// oracle derived it from the post-substitution message stream, which the
+    /// binary contradicts (that path is the SYNTHETIC's `"user-rejected"`,
+    /// `createSyntheticErrorMessage` @232972360, a different frame).
+    /// Note that `YDd` (@235394375) splits `cancelled` from `interrupted` on a
+    /// `background` abort reason, a concept LingXi has no equivalent of — every
+    /// LingXi abort takes the `interrupted` branch. Its `hW.interrupted`
+    /// (ShellError) branch is likewise unmodeled: LingXi's Bash tool returns an
+    /// `Ok` interrupted result rather than an `Err`.
+    ///
+    /// STILL MISSING — the SDK FRAME for executor-substituted synthetics. The
+    /// PERSISTED side is now complete for both substitution paths: an in-flight
+    /// tool whose result `drain_one` discards has its dispatch-site kind
+    /// rewritten to `user-rejected`, and a tool cancelled while still QUEUED
+    /// gets the same kind recorded by `apply_abort_to_pending`'s caller — both
+    /// matching `createSyntheticErrorMessage` (2.1.220 @232972524).
+    /// What remains is that the stream-json frame still comes from DISPATCH,
+    /// not from the executor: the in-flight case emits its frame before the
+    /// substitution is known (so the frame carries the pre-substitution kind),
+    /// and the queued case emits no frame at all because dispatch never ran.
+    /// Fixing either requires moving frame production to the executor, which
+    /// also changes SDK frame ORDER from completion order to received order —
+    /// a contract encoded in `client-protocol/tests/events_test.rs` and
+    /// `client-protocol/snapshots/feed_status.json`, so it needs an explicit
+    /// decision rather than a silent rewrite.
     async fn emit_tool_result_denied(
         &self,
         id: &protocol::ToolUseId,

@@ -22,7 +22,7 @@ use tool_api::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
     ValidationError,
 };
-use tool_api::util::output_truncation::{truncate_shell_output, MAX_TOOL_OUTPUT_LENGTH};
+use tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH;
 use tool_api::BuiltinToolContext;
 
 /// Windows PowerShell executable.
@@ -152,6 +152,13 @@ impl Tool for PowerShellTool {
     }
     fn max_result_size_chars(&self) -> usize {
         MAX_TOOL_OUTPUT_LENGTH
+    }
+    /// `maxResultSizeChars:30000` on the PowerShell tool descriptor (2.1.220
+    /// BIN off **235536522**), folded through `M0u` → `min(30000, 50000)`.
+    /// Same persistence contract as Bash — see
+    /// `tool_api::ToolHandler::persistence_threshold`.
+    fn persistence_threshold(&self) -> Option<usize> {
+        Some(MAX_TOOL_OUTPUT_LENGTH)
     }
     fn is_concurrency_safe(&self, _: &Value) -> bool {
         false
@@ -374,8 +381,15 @@ impl Tool for PowerShellTool {
 
                 let (stdout_clean, _ansi_out) = strip_ansi_count(&out.stdout);
                 let (stderr_clean, _ansi_err) = strip_ansi_count(&out.stderr);
-                let (stdout_final, truncated) =
-                    truncate_shell_output(stdout_clean, MAX_TOOL_OUTPUT_LENGTH);
+                // no-truncation: A1/STEP-4 — same contract as Bash. 2.1.220
+                // has no shell output truncator left; `maxResultSizeChars:30000`
+                // (BIN off 235536522) is a PERSISTENCE threshold consumed by
+                // `orchestrator::tool_result_persistence`. `truncated` keeps
+                // reporting whether the limit was EXCEEDED (the oracle's
+                // `D.length>Jst()` predicate), which is what the analytics
+                // field and the TUI badge mean.
+                let truncated = stdout_clean.len() > MAX_TOOL_OUTPUT_LENGTH;
+                let stdout_final = stdout_clean;
                 let data = powershell_result_data(
                     &cmd_str,
                     out.exit_code,
@@ -451,6 +465,28 @@ mod tests {
                 None => std::env::remove_var("PATH"),
             }
         }
+    }
+
+    /// A1/STEP-4 — PowerShell mirrors Bash: no model-facing truncation, a
+    /// 30 000-byte PERSISTENCE threshold instead (2.1.220 BIN off 235536522).
+    #[test]
+    fn powershell_declares_a_30k_persistence_threshold_and_no_truncator() {
+        use tool_api::tool_trait::Tool as _;
+        let tool = PowerShellTool::new(shell_test_ctx(ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        }));
+        assert_eq!(tool.persistence_threshold(), Some(30_000));
+        // Source-level lock: the shared shell truncator must not reappear on
+        // the model-facing path. Built at runtime so this assertion's own text
+        // cannot satisfy it.
+        let needle = format!("{}{}", "truncate_shell", "_output");
+        assert!(
+            !include_str!("powershell.rs").contains(&needle),
+            "the model-facing stdout must reach the result mapper verbatim"
+        );
     }
 
     /// The OTEL runtime and its counter registry are process-global.

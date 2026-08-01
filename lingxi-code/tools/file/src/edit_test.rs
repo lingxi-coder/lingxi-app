@@ -50,6 +50,8 @@ mod tests {
                 limit: None,
                 // Simulates a prior full `Read`.
                 from_read: true,
+                seeded_from_context: false,
+                is_partial_view: false,
             },
         );
     }
@@ -1323,6 +1325,8 @@ that bypasses Perforce tracking."
                 limit: Some(2),
                 // Simulates a prior PARTIAL `Read` (offset/limit set).
                 from_read: true,
+                seeded_from_context: false,
+                is_partial_view: false,
             },
         );
         let tool = FileEditTool::new(ctx);

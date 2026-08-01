@@ -658,6 +658,8 @@ pub fn ctx_for_file_tools(
         .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
 
     super::BuiltinToolContext {
+        // No session: this context never persists tool output.
+        session_id: None,
         fs,
         bus,
         process: make_stub_process(ProcessOutput {
@@ -726,6 +728,8 @@ pub fn shell_test_ctx(out: ProcessOutput) -> super::BuiltinToolContext {
     use telemetry::AnalyticsBus;
 
     super::BuiltinToolContext {
+        // No session: this context never persists tool output.
+        session_id: None,
         fs: make_dummy_fs(),
         bus: Arc::new(AnalyticsBus::new()),
         process: make_stub_process(out),
@@ -795,6 +799,8 @@ pub fn shell_test_ctx_in(
     let ctx = shell_test_ctx(out);
     let trusted = ctx.trusted_dirs();
     super::BuiltinToolContext {
+        // No session: this context never persists tool output.
+        session_id: None,
         session_cwd: crate::session_cwd::SessionCwd::new(workspace, trusted),
         ..ctx
     }

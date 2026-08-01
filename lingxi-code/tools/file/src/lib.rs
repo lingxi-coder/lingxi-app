@@ -167,13 +167,21 @@ pub const FILE_CONTENT_CHANGED_LINTER_MESSAGE: &str =
 /// New-file creation MUST NOT call this — callers gate it behind "the file
 /// exists" (TS `ENOENT → result:true` / `meta === null` skips the guard).
 ///
-/// # Divergence (flagged)
-/// claude-code's `wMe` also short-circuits on a dedicated `isPartialView` flag
-/// (set only when a full read is token-cap-truncated for very-long-line
-/// files). LingXi's `ReadFileEntry` does not track it; it is treated as
-/// `false`. Such a read records a *truncated* slice, so the content-equality
-/// gate (`current_full_content == entry.content`) already fails for it — the
-/// outcome (stale, not full-read) is unchanged.
+/// # `isPartialView`
+/// claude-code's `wMe` also short-circuits on `isPartialView`. LingXi now
+/// TRACKS that flag (`ReadFileEntry::is_partial_view`), and
+/// [`read_covers_full_file`] honours it, so the guard is byte-faithful for
+/// every entry that sets it — notably the memory files seeded by
+/// `ConversationOrchestrator::seed_memory_read_state`, whose recorded content
+/// has YAML frontmatter and HTML comments stripped and therefore must never
+/// take the content-equality fallback.
+///
+/// KNOWN RESIDUAL (explicitly named, not silently claimed): the `Read` tool's
+/// token-truncation path (`read.rs`, the `partial_note` branch) still records
+/// `is_partial_view: false`. The behaviour there is unchanged from before this
+/// port and remains correct in outcome — such a read stores a *truncated*
+/// slice, so `current_full_content == entry.content` already fails — but
+/// wiring the flag at that site is a separate follow-up.
 pub fn check_read_before_write(
     map: &tool_api::read_file_state::ReadFileStateMap,
     canon: &std::path::Path,
@@ -230,8 +238,11 @@ pub fn check_read_before_write(
 /// whose line count is strictly below its `limit` reached EOF before the cap,
 /// so it holds the whole file.
 fn read_covers_full_file(entry: &tool_api::read_file_state::ReadFileEntry) -> bool {
-    // (e.offset ?? 1) > 1 → a read that skipped leading lines is not full.
-    if entry.offset.unwrap_or(1) > 1 {
+    // (e.offset ?? 1) > 1 || e.isPartialView → a read that skipped leading
+    // lines, or a recording whose content is NOT the file's on-disk bytes
+    // (a seeded memory file with its frontmatter/HTML comments stripped, or a
+    // token-cap-truncated read), is not full.
+    if entry.offset.unwrap_or(1) > 1 || entry.is_partial_view {
         return false;
     }
     // e.limit === void 0 → unbounded read → whole file. (2.1.212 delta.)
@@ -348,6 +359,8 @@ mod staleness_guard_tests {
                 offset: None,
                 limit: None,
                 from_read: true,
+                seeded_from_context: false,
+                is_partial_view: false,
             },
         );
         let r = check_read_before_write(&map, &p, 200, "new content");
@@ -357,6 +370,54 @@ mod staleness_guard_tests {
             }
             other => panic!("expected InvalidInput with Vbn, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn partial_view_entry_is_not_a_full_read() {
+        // `Aze`/`wMe` (@232452900): `if((e.offset??1)>1||e.isPartialView)
+        // return false`. A partial-view entry can never take the
+        // content-equality fallback, even when its recorded content happens to
+        // equal the file's current content — because that content is NOT what
+        // the model saw (a seeded memory file has its frontmatter stripped).
+        let map = new_read_file_state_map();
+        let p = PathBuf::from("/partial");
+        set(
+            &map,
+            p.clone(),
+            ReadFileEntry {
+                content: "body\n".into(),
+                mtime_ms: 100,
+                offset: None,
+                limit: None,
+                from_read: false,
+                seeded_from_context: true,
+                is_partial_view: true,
+            },
+        );
+        // mtime ADVANCED past the recorded read, content byte-identical.
+        let r = check_read_before_write(&map, &p, 200, "body\n");
+        match r.unwrap_err() {
+            tool_api::tool_trait::ToolError::InvalidInput(m) => {
+                assert_eq!(m, FILE_CONTENT_CHANGED_LINTER_MESSAGE);
+            }
+            other => panic!("expected InvalidInput with Vbn, got {other:?}"),
+        }
+        // Control: the SAME entry with `is_partial_view: false` proceeds via
+        // the content-equality fallback — proving the flag is what refused.
+        set(
+            &map,
+            p.clone(),
+            ReadFileEntry {
+                content: "body\n".into(),
+                mtime_ms: 100,
+                offset: None,
+                limit: None,
+                from_read: false,
+                seeded_from_context: true,
+                is_partial_view: false,
+            },
+        );
+        assert!(check_read_before_write(&map, &p, 200, "body\n").is_ok());
     }
 
     /// Assert the guard returned an `InvalidInput` error carrying exactly
@@ -393,6 +454,8 @@ mod staleness_guard_tests {
                 offset: Some(1),
                 limit: None,
                 from_read: true,
+                seeded_from_context: false,
+                is_partial_view: false,
             },
         );
         assert!(check_read_before_write(&map, &p, 100, "c").is_ok());
@@ -406,6 +469,8 @@ mod staleness_guard_tests {
                 offset: None,
                 limit: Some(5),
                 from_read: true,
+                seeded_from_context: false,
+                is_partial_view: false,
             },
         );
         assert!(check_read_before_write(&map, &p, 100, "c").is_ok());
@@ -428,6 +493,8 @@ mod staleness_guard_tests {
                 offset: Some(6),
                 limit: Some(2),
                 from_read: true,
+                seeded_from_context: false,
+                is_partial_view: false,
             },
         );
         assert_err_msg(
@@ -444,6 +511,8 @@ mod staleness_guard_tests {
             offset,
             limit,
             from_read: true,
+            seeded_from_context: false,
+            is_partial_view: false,
         };
         // Full read (no offset/limit) → whole file.
         assert!(read_covers_full_file(&mk(None, None, "a\nb")));
@@ -477,6 +546,8 @@ mod staleness_guard_tests {
                 offset: Some(1),
                 limit: Some(2000),
                 from_read: true,
+                seeded_from_context: false,
+                is_partial_view: false,
             },
         );
         assert!(
@@ -498,6 +569,8 @@ mod staleness_guard_tests {
                 offset: None,
                 limit: None,
                 from_read: true,
+                seeded_from_context: false,
+                is_partial_view: false,
             },
         );
         // current == recorded ⇒ not stale ⇒ Ok.
@@ -517,6 +590,8 @@ mod staleness_guard_tests {
                 offset: None,
                 limit: None,
                 from_read: true,
+                seeded_from_context: false,
+                is_partial_view: false,
             },
         );
         // mtime advanced but content matches ⇒ fallback proceeds.
@@ -536,6 +611,8 @@ mod staleness_guard_tests {
                 offset: None,
                 limit: None,
                 from_read: true,
+                seeded_from_context: false,
+                is_partial_view: false,
             },
         );
         // Now returns the richer Vbn message (linter/formatter context) — parity

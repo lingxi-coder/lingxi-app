@@ -203,6 +203,20 @@ impl OrchestratorApiClient for ProviderApiAdapter {
             .await
     }
 
+    async fn messages_create_with_context_hint(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&str>,
+        msgs: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        context_hint: Option<serde_json::Value>,
+    ) -> Result<LlmResponse, LlmError> {
+        self.service
+            .messages_create_with_context_hint(model, profile, system, msgs, tools, context_hint)
+            .await
+    }
+
     async fn messages_create_with_opts(
         &self,
         model: &str,

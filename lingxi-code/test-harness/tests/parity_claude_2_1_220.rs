@@ -525,6 +525,8 @@ async fn live_orchestrator_prompt_uses_production_context() {
             is_local_override: false,
             tier: LingxiMdTier::Project,
             globs: None,
+            raw_content: memory_body.to_string(),
+            content_differs_from_disk: false,
         }])),
         cwd.clone(),
     );

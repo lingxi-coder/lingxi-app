@@ -1100,9 +1100,17 @@ fn decode_response_http_400_maps_invalid_request_with_message() {
             serde_json::json!({"error": {"message": "bad input", "type": "invalid_request_error"}}),
         ))
         .unwrap_err();
-    assert!(
-        matches!(err, llm_client::LlmError::InvalidRequest { ref message } if message == "bad input")
-    );
+    // The stored text is the SDK's `makeMessage` form — `${status} ${body}` —
+    // not the bare `error.message` this used to assert. The status prefix is how
+    // claude-code carries HTTP status provenance, and dropping it is what left
+    // the port unable to tell a 422 from a 400 downstream.
+    match err {
+        llm_client::LlmError::InvalidRequest { message } => assert_eq!(
+            message,
+            r#"400 {"error":{"message":"bad input","type":"invalid_request_error"}}"#
+        ),
+        other => panic!("expected InvalidRequest, got {other:?}"),
+    }
 }
 
 // ── stream decoder ────────────────────────────────────────────────────────────

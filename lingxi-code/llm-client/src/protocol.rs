@@ -92,6 +92,17 @@ pub struct LlmRequest {
     /// request byte-identical (the field is skipped when serializing).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speed: Option<String>,
+    /// Optional context-hint offer (claude-code `context_hint`): tells the
+    /// server how many tokens the client could free if asked. The Anthropic
+    /// codec emits it as the top-level `context_hint` body key and
+    /// `service::beta_context` reads it back to add the
+    /// `context-hint-2026-04-09` beta. `None` (the default) keeps every
+    /// existing request byte-identical — the field is skipped when serializing.
+    ///
+    /// Built by `compaction::context_hint::ContextHintController`, which is
+    /// inert unless its gate is on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_hint: Option<serde_json::Value>,
     /// Optional request metadata. Emitted by the Anthropic codec as the
     /// `metadata` object (claude-code `claude.ts:1699-1728` always sends it).
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -81,6 +81,8 @@ fn memory_files_are_not_spliced_into_the_prompt() {
         is_local_override: false,
         tier: memory::lingxi_md::LingxiMdTier::Project,
         globs: None,
+        raw_content: "notes".into(),
+        content_differs_from_disk: false,
     }];
     ctx.tool_names = vec!["Read".into(), "Write".into()];
     let out = assemble_system_prompt(&ctx);

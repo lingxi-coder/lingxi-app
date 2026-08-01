@@ -62,6 +62,30 @@ pub trait OrchestratorApiClient: Send + Sync {
         tools: Vec<serde_json::Value>,
     ) -> Result<LlmResponse, LlmError>;
 
+    /// Non-streaming `messages.create` carrying a `context_hint` offer.
+    ///
+    /// The DEFAULT body delegates to [`Self::messages_create`], DROPPING the
+    /// hint — so every mock and non-Anthropic impl compiles unchanged and the
+    /// negotiation is a strict no-op there. Only [`ProviderApiAdapter`]
+    /// overrides it. Same shape as [`Self::messages_create_with_opts`] and for
+    /// the same reason: this trait has 13 implementors and is extended by
+    /// defaulted methods, never by signature changes.
+    ///
+    /// The turn loop calls this ONLY when the context-hint controller is active
+    /// (gated off by default); otherwise it stays on [`Self::messages_create`].
+    async fn messages_create_with_context_hint(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&str>,
+        msgs: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        _context_hint: Option<serde_json::Value>,
+    ) -> Result<LlmResponse, LlmError> {
+        self.messages_create(model, profile, system, msgs, tools)
+            .await
+    }
+
     /// Non-streaming `messages.create` with an explicit `max_tokens` override
     /// (REC.A1 8k→64k escalation, TS `query.ts:1199-1221`). The turn loop calls
     /// this ONLY when a prior `max_tokens` recovery armed
@@ -577,6 +601,24 @@ pub(crate) struct ApiErrorEnvelope {
 /// `inner_stop_reason` is always `None` here: the `ql` path leaves the synthetic
 /// inner `message.stop_reason` at `"stop_sequence"` (verified on disk).
 pub(crate) fn classify_api_error(e: &OrchestratorError) -> ApiErrorEnvelope {
+    // TRUE status first, canonical table second.
+    //
+    // This is the half of the carve-out documented above that is now closed.
+    // Provider decoders store the SDK's `${status} ${body}` text (see
+    // `providers::api_error_message`), so a real 422/424/409 is recoverable
+    // instead of being flattened to its variant's canonical status. The table
+    // below still runs whenever no prefix is present — every variant that
+    // carries no message, and every `InvalidRequest` raised by internal
+    // validation rather than a provider decode.
+    //
+    // Still provider-NEUTRAL: the prefix is written by whichever provider
+    // decoded the response, so this does not reintroduce an Anthropic-only path.
+    let parsed_status = match e {
+        OrchestratorError::ApiCall(inner) | OrchestratorError::Streaming(inner) => {
+            inner.http_status()
+        }
+        _ => None,
+    };
     let (error, api_error_status) = match e {
         OrchestratorError::ApiCall(inner) | OrchestratorError::Streaming(inner) => match inner {
             // 429 family → "rate_limit" (status 429). Carved out before reaching
@@ -636,7 +678,7 @@ pub(crate) fn classify_api_error(e: &OrchestratorError) -> ApiErrorEnvelope {
     };
     ApiErrorEnvelope {
         error,
-        api_error_status,
+        api_error_status: parsed_status.or(api_error_status),
         inner_stop_reason: None,
     }
 }
@@ -975,6 +1017,17 @@ struct WireToolSchemaCache {
 /// Reminders are outgoing-only, so the delivered date is carried here and must
 /// survive compaction; otherwise a long-lived session would receive the same
 /// midnight reminder again after every compact. The whole struct is re-seeded
+/// One `tool_result` SDK frame held until the collection point releases it.
+#[derive(Debug, Clone)]
+pub(crate) struct PendingToolFrame {
+    pub(crate) tool: String,
+    /// The model-facing text dispatch buffered. Compared against the released
+    /// content to detect a substitution.
+    pub(crate) model_text: String,
+    pub(crate) result: serde_json::Value,
+    pub(crate) denial_kind: Option<String>,
+}
+
 /// only when the live `SessionId` changes (`/clear` mints a new one; in-place
 /// resume adopts the named one).
 #[derive(Debug, Default)]
@@ -1082,6 +1135,64 @@ pub struct ConversationOrchestrator {
     /// history rather than on the message. Entries are removed on use, so a
     /// denial stamps exactly one line.
     pub(crate) tool_denial_kinds: Mutex<std::collections::HashMap<String, String>>,
+    /// Buffered `tool_result` SDK frames, keyed by `tool_use_id`.
+    ///
+    /// `None` = emit as soon as the tool finishes (the batched driver, which
+    /// dispatches in received order anyway, so completion order IS received
+    /// order there). `Some` = the STREAMING driver is active: frames are held
+    /// here and released by the collection point.
+    ///
+    /// claude-code builds its SDK frames from the message stream, which the
+    /// streaming executor has already reordered into received order and in
+    /// which a cancelled tool's real outcome has already been replaced by the
+    /// synthetic. LingXi emits at dispatch time instead, which is completion
+    /// order, and emits the REAL result of a tool whose outcome is about to be
+    /// discarded — while a queued-then-cancelled tool emits nothing at all.
+    /// Buffering here and releasing at the collection point closes both.
+    pub(crate) tool_frames: Mutex<Option<std::collections::HashMap<String, PendingToolFrame>>>,
+    /// `tool_use_id` → claude's message-level `toolUseResult` — the tool's RAW
+    /// STRUCTURED result (`se.data`, 2.1.220 BIN off **235420375**) on success,
+    /// or the plain string `` `Error: ${message}` `` on failure/denial
+    /// (BIN off **235424595**). Recorded at dispatch, consumed when the
+    /// `tool_result` user line is persisted.
+    ///
+    /// Same side-table rationale as [`Self::tool_denial_kinds`]: the value has
+    /// no place on the model wire, so it cannot ride on
+    /// `ConversationMessage`.
+    ///
+    /// RESIDUAL (deliberate): claude suppresses this field for SUBAGENT tool
+    /// results (`n.agentId && !preserveToolUseResults && …` in the same
+    /// expression). LingXi's `ConversationOrchestrator` has no `agent_id` —
+    /// subagents never run through it, so every orchestrator is a depth-0 main
+    /// chain, where claude writes the field on 17 280 / 17 280 real 2.1.220
+    /// lines. Porting the gate would mean inventing a field.
+    pub(crate) tool_use_results: Mutex<std::collections::HashMap<String, serde_json::Value>>,
+    /// `tool_use_id` → claude's message-level `mcpMeta`, a TOP-LEVEL sibling of
+    /// `toolUseResult` (never nested inside it). On the main chain
+    /// `Uks(agentId, meta)` (2.1.220 BIN off **232969604**) returns the MCP
+    /// server's meta verbatim when `agentId` is absent.
+    pub(crate) tool_use_mcp_meta: Mutex<std::collections::HashMap<String, serde_json::Value>>,
+    /// `tool_use_id` → claude's `sourceToolAssistantUUID`: the uuid of the
+    /// ASSISTANT transcript line that carried this `tool_use` block
+    /// (`sourceToolAssistantUUID: i.uuid` at every producer site). claude's
+    /// writer `insertMessageChain` (BIN off **237862200**) then derives
+    /// `parentUuid` FROM this field, which is why the two are equal on all
+    /// 96 794 real 2.1.220 lines that carry it.
+    pub(crate) tool_source_assistant_uuids: Mutex<std::collections::HashMap<String, String>>,
+    /// `tool_use_id` → hook `attachment` PAYLOADS produced while dispatching
+    /// that tool, awaiting persistence.
+    ///
+    /// claude yields a hook attachment INTO the message stream, so
+    /// `insertMessageChain` writes it after the `tool_result` it follows.
+    /// LingXi's `dispatch_tool_uses_tracked` runs the hooks but does not
+    /// persist anything — the driver persists the tool_result afterwards — so
+    /// the payloads are parked here and flushed by
+    /// [`Self::flush_hook_attachments`] immediately after that tool's
+    /// `tool_result` line lands, preserving claude's chain order. Keyed by
+    /// tool so a concurrent streaming batch cannot interleave one tool's
+    /// attachments behind another's result.
+    pub(crate) pending_hook_attachments:
+        Mutex<std::collections::HashMap<String, Vec<serde_json::Value>>>,
     /// Lazily-resolved git branch for the cwd — the parity analog of TS
     /// `getBranch()`, which claude-code calls once per `insertMessageChain`
     /// (`sessionStorage.ts:1012-1019`) and stamps onto every line of that chain.
@@ -1473,6 +1584,33 @@ pub struct ConversationOrchestrator {
     /// and never re-injected on later turns. 1:1 with TS `loadedNestedMemoryPaths`
     /// (attachments.ts:1722-1732 — a non-evicting Set keyed by rule path).
     pub(crate) sent_conditional_rules: Mutex<std::collections::HashSet<std::path::PathBuf>>,
+    /// Nested-memory sent-tracking — 1:1 with the oracle's
+    /// `loadedNestedMemoryPaths` as `k$o` (@237714543) uses it:
+    /// `if(t.loadedNestedMemoryPaths?.[i.path])continue`. Session-lifetime and
+    /// non-evicting, so each discovered memory file is surfaced ONCE.
+    ///
+    /// This is the ONLY dedup state the feature keeps.
+    /// [`crate::prompt::nested_memory::discover`] is deliberately stateless
+    /// (the oracle's `seen` is per-call), so a `LINGXI.md` written mid-session
+    /// is still found — it is this set, not the walk, that stops re-sending.
+    ///
+    /// NOT cleared on a worktree swap, unlike
+    /// [`Self::conditional_rules_cache`]: that is a CACHE (stale after a swap),
+    /// while this is a record of what the model has already been told, which a
+    /// change of cwd does not undo.
+    pub(crate) sent_nested_memory: Mutex<std::collections::HashSet<std::path::PathBuf>>,
+    /// Test-only override for the two filesystem roots nested-memory discovery
+    /// needs: `(home, managed_dir)`. `None` (production) resolves them exactly
+    /// as `RealMemoryHierarchyProvider::load` does — `dirs::home_dir()` and
+    /// `hierarchy::managed_path()`.
+    ///
+    /// Discovery probes `<home>/<config-dir>/rules` on every call, so without
+    /// an override a test would read the developer's REAL user memory and its
+    /// result would depend on the machine it ran on. Mirrors
+    /// `StaticMemoryProvider`'s role for the eager block. Set via
+    /// [`Self::with_nested_memory_roots`].
+    pub(crate) nested_memory_roots:
+        Option<(std::path::PathBuf, Option<std::path::PathBuf>)>,
     /// SKILLLIST.1 delta: skill names already emitted in a prior turn's
     /// `skill_listing` reminder. Turn-0 emits the FULL listing; later turns emit
     /// ONLY newly-appeared skills (mirrors TS `sentSkillNames` per-agent delta,
@@ -1727,6 +1865,11 @@ impl ConversationOrchestrator {
             jsonl_writer: None,
             last_jsonl_uuid: Mutex::new(None),
             tool_denial_kinds: Mutex::new(std::collections::HashMap::new()),
+            tool_frames: Mutex::new(None),
+            tool_use_results: Mutex::new(std::collections::HashMap::new()),
+            tool_use_mcp_meta: Mutex::new(std::collections::HashMap::new()),
+            tool_source_assistant_uuids: Mutex::new(std::collections::HashMap::new()),
+            pending_hook_attachments: Mutex::new(std::collections::HashMap::new()),
             git_branch_cache: Mutex::new(None),
             current_prompt_id: Mutex::new(None),
             should_exit: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -1777,6 +1920,8 @@ impl ConversationOrchestrator {
             todo_reminder_tasks: None,
             conditional_rules_cache: Arc::new(std::sync::Mutex::new(None)),
             sent_conditional_rules: Mutex::new(std::collections::HashSet::new()),
+            sent_nested_memory: Mutex::new(std::collections::HashSet::new()),
+            nested_memory_roots: None,
             sent_skill_names: Mutex::new(std::collections::HashSet::new()),
             date_change: std::sync::Mutex::new(DateChangeState::default()),
             sent_agent_names: Mutex::new(std::collections::HashSet::new()),
@@ -1881,10 +2026,162 @@ impl ConversationOrchestrator {
                 // model context. `from_read = false` preserves that invariant:
                 // the next Read must not deduplicate against this seed.
                 from_read: false,
+                seeded_from_context: false,
+                is_partial_view: false,
             },
             false,
         );
         true
+    }
+
+    /// Seed the loaded memory files (LINGXI.md + `.lingxi/rules/**`) into the
+    /// shared read-state registry — the port of claude-code's startup loop
+    /// `xCt` (2.1.220 @245883373):
+    ///
+    /// ```text
+    /// for(let Fr of yt){
+    ///   if(tHt(Fr.path))continue;
+    ///   let jn=MLu(Fr),Ao;
+    ///   try{Ao=jn?FQ(Fr.path):Date.now()}catch{Ao=Date.now()}
+    ///   vM.current.set(Fr.path,{
+    ///     content: Fr.contentDiffersFromDisk?Fr.rawContent??Fr.content:X9(Fr.content),
+    ///     timestamp: Ao, offset:void 0, limit:void 0,
+    ///     isPartialView: Fr.contentDiffersFromDisk,
+    ///     seededFromContext: jn,
+    ///     ...!jn&&{contentNotInModelContext:!0},
+    ///     keepContent:!0}), …}
+    /// ```
+    ///
+    /// This is what makes the Read tool's seeded dedup branch
+    /// (`tool_file::read`, @235741459) reachable: the model already received
+    /// these files' bodies in the system prompt's memory block, so re-`Read`ing
+    /// one returns `FILE_UNCHANGED_SEEDED_PREFIX` instead of a second copy.
+    ///
+    /// Per-file decisions, each matching the oracle:
+    /// - **Skip when already present.** `!readFileState.has(path)` (the site-2
+    ///   guard @237715046). Uses the NON-promoting
+    ///   [`tool_api::read_file_state::ReadFileStateLru::contains`] so seeding
+    ///   never reshuffles LRU order, and so a file the model genuinely `Read`
+    ///   is never overwritten by a seed. This is also what makes the
+    ///   `reason = Compact` re-entry into
+    ///   [`Self::fire_instructions_loaded_with_reason`] idempotent.
+    /// - **`seeded_from_context = MLu(f)`** =
+    ///   [`crate::prompt::memory_block::is_rendered_into_context`], derived from
+    ///   the renderer so the two cannot drift. A `paths:`-gated conditional rule
+    ///   is NOT rendered, so it seeds with `false` — its content is NOT in
+    ///   context and must never dedup.
+    /// - **`mtime_ms`** = the on-disk mtime for a rendered file (`FQ(path)`),
+    ///   `Date.now()` otherwise. ANY stat error falls back to `now` — the
+    ///   oracle wraps the whole thing in `try{…}catch{Ao=Date.now()}`, so this
+    ///   never propagates and never panics.
+    /// - **`content`**. LingXi-local adaptation, deliberate: the oracle
+    ///   normalizes the non-differing branch with `X9` (BOM strip + CRLF→LF),
+    ///   but LingXi's `Read` stores `decode_utf8_strict`
+    ///   (`tools/file/src/shared.rs` — BOM strip ONLY, no CRLF collapse) and
+    ///   `edit.rs` feeds that same raw-decoded form to the staleness
+    ///   comparator. Collapsing CRLF here would make every CRLF memory file
+    ///   fail `check_read_before_write`'s content-equality fallback forever.
+    ///   The oracle's asymmetry IS preserved: normalize only on the
+    ///   `!differs` branch; store `raw_content` verbatim on the `differs`
+    ///   branch.
+    /// - **`in_model_context`** carries the `...!jn && {contentNotInModelContext:!0}`
+    ///   spread: LingXi's existing LRU-slot flag is that field's inverted
+    ///   analog, already consumed by `model_context_keys()` /
+    ///   `drain_model_context()`, so no entry-level twin is introduced.
+    ///
+    /// # Divergence (reason)
+    /// The oracle also skips sentinel paths via `tHt` (`"<policyHelper>"`
+    /// @226886661 / `"<managed-settings>"` @230811638). LingXi's loader emits
+    /// only real walked filesystem paths — verified, no analog exists — so the
+    /// skip is omitted rather than approximated with a `starts_with('<')`
+    /// heuristic, which would be WIDER than the oracle.
+    ///
+    /// The oracle's AutoMem eviction pass (@245883373-655: delete seeded
+    /// entries once memory-stores mode latches on) likewise has no LingXi
+    /// analog — `ARe()` / `CLAUDE_MEMORY_STORES` is unported and there is no
+    /// `AutoMem` tier. No latch is invented here.
+    async fn seed_memory_read_state(&self, files: &[crate::prompt::MemoryFile]) {
+        for f in files {
+            // The registry is keyed by CANONICAL paths: `FileReadTool` looks up
+            // `canonicalize_and_validate(..)`'s output. The memory hierarchy's
+            // `f.path` is built from the orchestrator's cwd verbatim, symlinks
+            // and all — on macOS a `/var/...` cwd resolves to `/private/var/...`
+            // — so seeding under the raw path silently never matches and the
+            // dedup simply never fires. Canonicalize once here and use it for
+            // BOTH the `has` guard and the key, or the two halves disagree.
+            //
+            // Falls back to the raw path if canonicalization fails; the file was
+            // just read by the loader, so that is close to unreachable, and the
+            // fallback is no worse than not seeding at all.
+            let key = tokio::fs::canonicalize(&f.path)
+                .await
+                .unwrap_or_else(|_| f.path.clone());
+            // `!readFileState.has(path)` — never clobber a real Read, never
+            // MRU-promote (see `contains`' doc).
+            if self
+                .read_state_map
+                .lock()
+                .is_ok_and(|guard| guard.contains(&key))
+            {
+                continue;
+            }
+            let in_context = crate::prompt::memory_block::is_rendered_into_context(f);
+            let now_ms = i64::try_from(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_millis()),
+            )
+            .unwrap_or(i64::MAX);
+            // `try{Ao = jn ? FQ(Fr.path) : Date.now()}catch{Ao = Date.now()}`.
+            let mtime_ms = if in_context {
+                match tokio::fs::metadata(&f.path).await.and_then(|m| m.modified()) {
+                    Ok(t) => tool_api::read_file_state::mtime_ms_floor(t),
+                    Err(_) => now_ms,
+                }
+            } else {
+                now_ms
+            };
+            // `contentDiffersFromDisk ? (rawContent ?? content) : X9(content)`,
+            // with LingXi's BOM-strip-only normalization (see the doc above).
+            let content = if f.content_differs_from_disk {
+                f.raw_content.clone()
+            } else {
+                f.raw_content
+                    .strip_prefix('\u{feff}')
+                    .unwrap_or(&f.raw_content)
+                    .to_string()
+            };
+            tool_api::read_file_state::set_with_model_context(
+                &self.read_state_map,
+                key,
+                tool_api::read_file_state::ReadFileEntry {
+                    content,
+                    mtime_ms,
+                    offset: None,
+                    limit: None,
+                    // A seed is not a Read; the non-seeded dedup branch must
+                    // never fire off it.
+                    from_read: false,
+                    seeded_from_context: in_context,
+                    is_partial_view: f.content_differs_from_disk,
+                },
+                // ALWAYS false — deliberately NOT `in_context`.
+                //
+                // Two different axes that an earlier draft conflated:
+                //   * `seeded_from_context` (above) is the oracle's `jn`/`MLu`
+                //     and gates ONLY the seeded dedup stub.
+                //   * this flag is LingXi's post-compact RESTORE set
+                //     (`drain_model_context` -> `restore_post_compact_attachments`)
+                //     and the "files touched this turn" input to
+                //     `conditional_rules_reminder_message`.
+                //
+                // A memory file is re-injected by the SYSTEM PROMPT on every
+                // turn, so enrolling it here would re-attach LINGXI.md after
+                // every compaction and report it as touched. It belongs with the
+                // host-seeded snapshots the drain doc already excludes.
+                false,
+            );
+        }
     }
 
     /// Seed the JSONL parent-uuid chain pointer so the FIRST append after a
@@ -1893,6 +2190,97 @@ impl ConversationOrchestrator {
     /// resume-into-TUI seed alongside adopting the resumed history + id; without
     /// it the first appended message would be a chain orphan (recoverable, but
     /// this keeps the on-disk chain linear).
+    /// Emit a `tool_result` SDK frame, or buffer it when the streaming driver
+    /// has ordering active. Every dispatch-side emission goes through here.
+    pub(crate) async fn emit_tool_result_frame(
+        &self,
+        id: &protocol::ToolUseId,
+        tool: &str,
+        model_text: &str,
+        result: &serde_json::Value,
+        denial_kind: Option<&str>,
+    ) {
+        if let Some(buf) = self.tool_frames.lock().await.as_mut() {
+            buf.insert(
+                id.to_string(),
+                PendingToolFrame {
+                    tool: tool.to_string(),
+                    model_text: model_text.to_string(),
+                    result: result.clone(),
+                    denial_kind: denial_kind.map(str::to_string),
+                },
+            );
+            return;
+        }
+        match denial_kind {
+            Some(kind) => {
+                self.output
+                    .emit_tool_result_denied(id, tool, model_text, result, kind)
+                    .await;
+            }
+            None => self.output.emit_tool_result(id, tool, model_text, result).await,
+        }
+    }
+
+    /// Turn frame buffering on for the streaming driver, and off again.
+    pub(crate) async fn set_tool_frame_buffering(&self, on: bool) {
+        let mut slot = self.tool_frames.lock().await;
+        *slot = on.then(std::collections::HashMap::new);
+    }
+
+    /// Release one buffered frame, in the CALLER's order.
+    ///
+    /// `content` is the block's FINAL model-facing text, so a synthetic that
+    /// replaced a cancelled tool's real outcome wins over whatever the dispatch
+    /// buffered. A tool that never dispatched (queued, then cancelled) has no
+    /// buffered frame and still gets one, which is the case that previously
+    /// emitted nothing at all.
+    pub(crate) async fn release_tool_frame(
+        &self,
+        id: &protocol::ToolUseId,
+        content: &str,
+        is_error: bool,
+    ) {
+        let pending = self
+            .tool_frames
+            .lock()
+            .await
+            .as_mut()
+            .and_then(|b| b.remove(&id.to_string()));
+        let (tool, result, denial_kind) = match pending {
+            // A substitution replaced the model-facing text, so the buffered
+            // payload describes an outcome that was DISCARDED. claude-code's
+            // synthetic carries a synthetic `toolUseResult` too, so the real
+            // one must not reach the SDK.
+            Some(p) if p.model_text != content => (
+                p.tool,
+                serde_json::json!({ "error": content }),
+                p.denial_kind,
+            ),
+            Some(p) => (p.tool, p.result, p.denial_kind),
+            // Never dispatched: synthesize the payload the dispatch would have
+            // carried, matching the shape used by every other error result.
+            None => (
+                String::new(),
+                serde_json::json!({ "error": content }),
+                None,
+            ),
+        };
+        let result = if is_error && !result.is_object() {
+            serde_json::json!({ "error": content })
+        } else {
+            result
+        };
+        match denial_kind {
+            Some(kind) => {
+                self.output
+                    .emit_tool_result_denied(id, &tool, content, &result, &kind)
+                    .await;
+            }
+            None => self.output.emit_tool_result(id, &tool, content, &result).await,
+        }
+    }
+
     /// Record the `toolDenialKind` for a tool that was denied rather than run,
     /// so its `tool_result` user line carries the provenance when persisted.
     ///
@@ -1906,6 +2294,17 @@ impl ConversationOrchestrator {
             .insert(id.to_string(), kind.to_string());
     }
 
+    /// Drop a recorded kind whose block never reaches persistence.
+    ///
+    /// Needed because `take_tool_denial_kind` REMOVES on read: when the
+    /// streaming executor substitutes a synthetic result for a tool that
+    /// already recorded a kind at dispatch, the recorded kind must either be
+    /// rewritten to the synthetic's own kind or dropped, or it would both stamp
+    /// the wrong provenance and leak an entry for the rest of the session.
+    pub(crate) async fn remove_tool_denial_kind(&self, id: &protocol::ToolUseId) {
+        self.tool_denial_kinds.lock().await.remove(&id.to_string());
+    }
+
     /// Take the recorded kind for a message carrying EXACTLY ONE `tool_result`.
     ///
     /// The single-block guard is claude's own (`Tpr`): a user message with zero
@@ -1913,6 +2312,14 @@ impl ConversationOrchestrator {
     /// gets none. Taking (rather than reading) keeps a denial from stamping a
     /// second line if the same result were ever persisted twice.
     async fn take_tool_denial_kind(&self, msg: &ConversationMessage) -> Option<String> {
+        let only = Self::sole_tool_result_id(msg)?;
+        self.tool_denial_kinds.lock().await.remove(&only)
+    }
+
+    /// claude's `Tpr` guard, factored out so every tool-result head key shares
+    /// ONE definition: the id of the message's `tool_result` block when it
+    /// carries EXACTLY ONE, else `None`.
+    fn sole_tool_result_id(msg: &ConversationMessage) -> Option<String> {
         let ConversationMessage::User { content, .. } = msg else {
             return None;
         };
@@ -1920,10 +2327,113 @@ impl ConversationOrchestrator {
             protocol::ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id),
             _ => None,
         });
-        let (Some(only), None) = (results.next(), results.next()) else {
-            return None;
-        };
-        self.tool_denial_kinds.lock().await.remove(&only.to_string())
+        match (results.next(), results.next()) {
+            (Some(only), None) => Some(only.to_string()),
+            _ => None,
+        }
+    }
+
+    /// Record a tool's `toolUseResult` payload for its `tool_result` user line.
+    ///
+    /// `data` is claude's `se.data` on success (2.1.220 BIN off 235420375) —
+    /// the RAW structured result, not the model-facing string — or the plain
+    /// string `` `Error: ${message}` `` on the error/denial arms
+    /// (BIN off 235424595 / 235400200 / 232972524 / …).
+    pub(crate) async fn record_tool_use_result(
+        &self,
+        id: &protocol::ToolUseId,
+        data: serde_json::Value,
+    ) {
+        self.tool_use_results
+            .lock()
+            .await
+            .insert(id.to_string(), data);
+    }
+
+    /// Record an MCP tool's `mcpMeta` for its `tool_result` user line
+    /// (2.1.220 BIN off 232969604 — verbatim on the main chain).
+    pub(crate) async fn record_tool_use_mcp_meta(
+        &self,
+        id: &protocol::ToolUseId,
+        meta: serde_json::Value,
+    ) {
+        self.tool_use_mcp_meta
+            .lock()
+            .await
+            .insert(id.to_string(), meta);
+    }
+
+    /// Record the ASSISTANT line uuid that carried this `tool_use` block —
+    /// claude's `sourceToolAssistantUUID`.
+    pub(crate) async fn record_source_tool_assistant_uuid(
+        &self,
+        id: &protocol::ToolUseId,
+        assistant_line_uuid: String,
+    ) {
+        self.tool_source_assistant_uuids
+            .lock()
+            .await
+            .insert(id.to_string(), assistant_line_uuid);
+    }
+
+    /// Queue one hook `attachment` payload produced while dispatching `id`.
+    ///
+    /// Flushed by [`Self::flush_hook_attachments`] right after that tool's
+    /// `tool_result` line is written, which is where claude's own stream order
+    /// puts it.
+    pub(crate) async fn queue_hook_attachment(
+        &self,
+        id: &protocol::ToolUseId,
+        payload: serde_json::Value,
+    ) {
+        self.pending_hook_attachments
+            .lock()
+            .await
+            .entry(id.to_string())
+            .or_default()
+            .push(payload);
+    }
+
+    /// Remove and return the payloads queued for `id`, in production order.
+    pub(crate) async fn take_queued_hook_attachments(
+        &self,
+        id: &protocol::ToolUseId,
+    ) -> Vec<serde_json::Value> {
+        self.pending_hook_attachments
+            .lock()
+            .await
+            .remove(&id.to_string())
+            .unwrap_or_default()
+    }
+
+    /// Persist (and drain) every attachment queued for `id`.
+    pub(crate) async fn flush_hook_attachments(&self, id: &protocol::ToolUseId) {
+        for payload in self.take_queued_hook_attachments(id).await {
+            self.persist_hook_attachment_to_jsonl(payload).await;
+        }
+    }
+
+    /// Take the recorded `toolUseResult` under the same single-block guard.
+    async fn take_tool_use_result(&self, msg: &ConversationMessage) -> Option<serde_json::Value> {
+        let only = Self::sole_tool_result_id(msg)?;
+        self.tool_use_results.lock().await.remove(&only)
+    }
+
+    /// Take the recorded `mcpMeta` under the same single-block guard.
+    async fn take_tool_use_mcp_meta(&self, msg: &ConversationMessage) -> Option<serde_json::Value> {
+        let only = Self::sole_tool_result_id(msg)?;
+        self.tool_use_mcp_meta.lock().await.remove(&only)
+    }
+
+    /// Take the recorded `sourceToolAssistantUUID` under the same guard.
+    ///
+    /// Emitted ONLY on a map HIT: `run_turn`'s parent derivation falls back to
+    /// the turn's last assistant block uuid when the id is missing (a
+    /// defensive, in-practice-unreachable branch), and writing a uuid that is
+    /// not the tool_use's own line would be worse than omitting the key.
+    async fn take_source_tool_assistant_uuid(&self, msg: &ConversationMessage) -> Option<String> {
+        let only = Self::sole_tool_result_id(msg)?;
+        self.tool_source_assistant_uuids.lock().await.remove(&only)
     }
 
     pub async fn seed_last_jsonl_uuid(&self, last_uuid: Option<String>) {
@@ -5070,7 +5580,14 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             }
         }
         self.persist_message_to_jsonl(&tool_results_msg).await;
+        // O3: this recovery path dispatches exactly one tool — flush its hook
+        // attachment lines after its tool_result, and skip the ephemeral
+        // renderings (see the batched driver in `turn_loop.rs`).
+        self.flush_hook_attachments(tool_use_id).await;
         for (m, _source_id) in &injected_messages {
+            if m.is_meta() {
+                continue;
+            }
             self.persist_message_to_jsonl(m).await;
         }
         crate::turn_loop::apply_model_context_modifiers(self, context_modifiers).await;
@@ -5552,9 +6069,28 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // tool-result head places it after `timestamp` and before the common
         // trailer; the exactly-one-tool_result guard lives in
         // `take_tool_denial_kind`.
+        //
+        // O1: the same line also carries `toolUseResult` (the tool's raw
+        // structured result / the `Error: …` string), the MCP `mcpMeta`
+        // sibling, and `sourceToolAssistantUUID` (the assistant line that
+        // carried the `tool_use`). All four share the single-block guard and
+        // are emitted in `TOOL_RESULT_HEAD_EXTRA` order regardless of the
+        // order they are inserted here.
+        if let Some(result) = self.take_tool_use_result(msg).await {
+            jmsg.extra.insert("toolUseResult".to_string(), result);
+        }
         if let Some(kind) = self.take_tool_denial_kind(msg).await {
             jmsg.extra
                 .insert("toolDenialKind".to_string(), serde_json::Value::String(kind));
+        }
+        if let Some(meta) = self.take_tool_use_mcp_meta(msg).await {
+            jmsg.extra.insert("mcpMeta".to_string(), meta);
+        }
+        if let Some(src) = self.take_source_tool_assistant_uuid(msg).await {
+            jmsg.extra.insert(
+                "sourceToolAssistantUUID".to_string(),
+                serde_json::Value::String(src),
+            );
         }
         if msg.is_visible_in_transcript_only() || compact_summary {
             jmsg.extra.insert(
@@ -5698,6 +6234,13 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 }
             }
             if let protocol::ContentBlock::ToolUse { id, .. } = block {
+                // O1: the SAME uuid claude stamps as `sourceToolAssistantUUID`
+                // on this tool's `tool_result` user line (and from which its
+                // `parentUuid` is derived — BIN off 237862200). Recording it
+                // here keeps both turn-loop paths correct without touching any
+                // call site.
+                self.record_source_tool_assistant_uuid(id, line_uuid.clone())
+                    .await;
                 map.insert(id.clone(), line_uuid);
             }
         }
@@ -5770,6 +6313,17 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             Ok(()) => {
                 *self.last_jsonl_uuid.lock().await = Some(line_uuid.clone());
                 telemetry::emit_session_appended(&session_id_str, &line_uuid);
+                // O1: the batched path writes ONE merged line, so every
+                // `tool_use` block in it shares that line's uuid as its
+                // `sourceToolAssistantUUID`.
+                if let ConversationMessage::Assistant { content, .. } = msg {
+                    for block in content {
+                        if let protocol::ContentBlock::ToolUse { id, .. } = block {
+                            self.record_source_tool_assistant_uuid(id, line_uuid.clone())
+                                .await;
+                        }
+                    }
+                }
             }
             Err(e) => {
                 self.record_transcript_append_failure(&session_id_str, "assistant_merged", &e)
@@ -5889,6 +6443,130 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // 413 request-too-large (accumulated images/attachments): render the
             // byte-exact `$Vi()` notice instead of the opaque "request too large".
             LlmError::RequestTooLarge => request_too_large_notice(),
+            // Billing (`Flp`: `yu({content:LYr,error:"billing_error"})`) and
+            // prompt-too-long (`content:Jq`) both render BARE — no `API Error:`
+            // prefix. Both used to fall through to `Display`, i.e. the words
+            // "quota exceeded" and "context overflow".
+            LlmError::QuotaExceeded => {
+                crate::api_error_copy::CREDIT_BALANCE_TOO_LOW.to_string()
+            }
+            // Revoked OAuth token (`Uke`): a 403 whose message names it. Checked
+            // BEFORE the x-api-key branch, matching the oracle's order, and
+            // split on interactivity because a non-interactive caller cannot
+            // run /login.
+            LlmError::Authentication | LlmError::PermissionDenied
+                if crate::api_error_copy::is_oauth_revoked(
+                    err.http_status(),
+                    &err.to_string(),
+                ) =>
+            {
+                crate::api_error_copy::oauth_revoked_text(self.config.interactive_session)
+                    .to_string()
+            }
+            // Org policy turned API-key auth off (403 naming it). Checked
+            // before the generic credential branch, and names the specific
+            // thing THIS user has to unset.
+            LlmError::Authentication | LlmError::PermissionDenied
+                if crate::api_error_copy::is_api_key_auth_disabled(
+                    err.http_status(),
+                    &err.to_string(),
+                ) =>
+            {
+                crate::api_error_copy::api_key_auth_disabled_text(
+                    self.config.credential_origin,
+                    self.config.has_oauth_token,
+                )
+            }
+            // Credential rejection. The oracle gates this on the MESSAGE naming
+            // `x-api-key`, not on the status, then splits on where the key came
+            // from: an env var or `apiKeyHelper` gets "fix that", everything
+            // else gets "/login" — because /login cannot fix an external key.
+            //
+            // A 401/403 that does NOT name the header falls through to the
+            // variant's own text, matching the oracle's outer `if`.
+            LlmError::Authentication | LlmError::PermissionDenied
+                if crate::api_error_copy::mentions_api_key_header(&err.to_string()) =>
+            {
+                // A cloud-hosted route names ITS credential problem instead —
+                // "run gcloud auth ..." is useful advice, "/login" is not. The
+                // 401-vs-other split inside is only decidable because the status
+                // now survives in the message.
+                // `if(qOu()) return UOu` comes FIRST in the oracle: on a
+                // remote session the failure is reported as possibly transient
+                // before anything looks at the credential's source.
+                if crate::api_error_copy::is_remote_session() {
+                    return crate::api_error_copy::AUTH_TRANSIENT.to_string();
+                }
+                // The oracle checks `xn()==="gateway"` next. Skipped: that comes
+                // from a runtime `gatewayAuth` object the port has no equivalent
+                // of, so the branch is unreachable here rather than mis-selected.
+                let route = self
+                    .config
+                    .error_route
+                    .clone()
+                    .unwrap_or_else(crate::api_error_copy::ErrorRouteTag::from_env);
+                crate::api_error_copy::cloud_credential_text(&route, err.http_status())
+                    .unwrap_or_else(|| {
+                        crate::api_error_copy::credential_rejected_text(
+                            self.config.credential_origin,
+                        )
+                        .to_string()
+                    })
+            }
+            LlmError::ContextOverflow { .. } => {
+                crate::api_error_copy::PROMPT_TOO_LONG.to_string()
+            }
+            // 429: the oracle renders `API Error: Request rejected (429) · …`,
+            // pulling the detail out of the JSON body the decoder stringified
+            // into the message. This used to fall through to `Display`, which is
+            // the bare words "rate limited".
+            //
+            // Two first-party variants are NOT selected here and are documented
+            // as such in `api_error_copy`: the `Server is temporarily limiting
+            // requests` label and the `hpo()` status-page/gateway suffix both
+            // need provider-route plumbing this layer does not have. The
+            // fallback clause only shows when the body carries no detail, which
+            // a real 429 does.
+            LlmError::RateLimited { .. } => {
+                let raw = err.to_string();
+                let source = self
+                    .api
+                    .last_rate_limit_error_message()
+                    .unwrap_or(raw);
+                if crate::api_error_copy::is_long_context_credit_message(&source) {
+                    crate::api_error_copy::usage_credits_required_for_1m_context(false)
+                } else {
+                    // `let p = i ? le_ : "Request rejected (429)"`.
+                    //
+                    // INFERRED, not read off `eir`'s body: `i = eir(ii())` gates
+                    // three branches here — the 1M-credits clamp, the
+                    // overage-disabled-reason lookup, and this label — all of
+                    // which are subscription concepts, so it reads as "this is a
+                    // claude.ai subscriber". `is_subscriber` is LingXi's
+                    // equivalent and is already threaded from the composition
+                    // root. The distinction matters: telling a subscriber their
+                    // request was "rejected" implies they hit their own limit,
+                    // which is exactly what `le_` exists to deny.
+                    let label = if self.config.is_subscriber {
+                        crate::api_error_copy::SERVER_LIMITING
+                    } else {
+                        crate::api_error_copy::REQUEST_REJECTED_429
+                    };
+                    crate::api_error_copy::rate_limited_text(
+                        &source,
+                        label,
+                        &crate::api_error_copy::capacity_fallback(Some(
+                            &self
+                                .config
+                                .error_route
+                                .clone()
+                                .unwrap_or_else(
+                                    crate::api_error_copy::ErrorRouteTag::from_env,
+                                ),
+                        )),
+                    )
+                }
+            }
             other => other.to_string(),
         }
     }
@@ -6796,6 +7474,24 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         let agg = self.run_session_start_hooks(source).await;
         let messages = Self::session_start_context_messages(&agg);
         if !messages.is_empty() {
+            // O3: the PERSISTED record is a `hook_additional_context`
+            // ATTACHMENT line (2.1.220 BIN off 232675554). Note the three
+            // LITERALS at that site — `hookName:"SessionStart"` (BARE, NOT
+            // `SessionStart:{source}` as the hook-RUN attachments use) and
+            // `toolUseID:"SessionStart"` (a literal, NOT a uuid). Confirmed by
+            // 129 real 2.1.220 records.
+            //
+            // The `user_meta` message below is the EPHEMERAL model rendering
+            // (`zr({content: Ww(…), isMeta:true})`, renderer BIN off
+            // 238107100); it only enters `history` and is never persisted from
+            // here, so this attachment is the sole on-disk record.
+            self.persist_hook_attachment_to_jsonl(hooks::additional_context_attachment(
+                "SessionStart",
+                "SessionStart",
+                "SessionStart",
+                &agg.additional_contexts,
+            ))
+            .await;
             self.session.lock().await.history.extend(messages);
         }
         // `initialUserMessage` → seed the initial user prompt (claude-code `$os`).
@@ -6853,6 +7549,14 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         if memory_files.is_empty() {
             return;
         }
+        // Seed the read-state registry BEFORE (and OUTSIDE) the hook loop.
+        // Outside is load-bearing: the loop's `if file.globs.is_some() {
+        // continue; }` skips conditional rules for the InstructionsLoaded fire,
+        // but the oracle's `xCt` seeds them too — with `seededFromContext:
+        // false` — so folding this into the loop would silently drop them.
+        // Re-entry with `load_reason = Compact` is safe: `seed_memory_read_state`
+        // skips every path already present.
+        self.seed_memory_read_state(&memory_files).await;
         for file in memory_files {
             // §F: `load()` now also returns conditional (`paths:`-gated) rules.
             // Those are NOT eagerly loaded, so they must not fire a
@@ -7245,6 +7949,30 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     /// (isMeta, `utils/messages.ts:4130-4137`). Best-effort persist, exactly like
     /// [`Self::append_stop_hook_feedback`].
     async fn append_stop_hook_stopped_continuation(&self, reason: &str) {
+        // O2: the PERSISTED record is a `hook_stopped_continuation` attachment
+        // (BIN off 233101239): `Va({type:"hook_stopped_continuation",
+        // message:N, hookName:"Stop", toolUseID:H, hookEvent:"Stop"})`, where
+        // `N = B.stopReason||"Stop hook prevented continuation"` and `H` is the
+        // Stop dispatch's `hook-${randomUUID()}` — the SAME id shape the
+        // dispatch's `hook_additional_context` record uses (BIN off 233240830).
+        //
+        // Written BEFORE the meta message so the transcript order matches the
+        // oracle's yield order.
+        //
+        // RESIDUAL: the oracle derives the meta message FROM this attachment at
+        // API-normalization time and persists only the attachment, whereas the
+        // port persists both. Left as-is deliberately — the existing message
+        // bytes are byte-locked by the FIX C tests and unpicking the double
+        // record is a separate change.
+        self.persist_hook_attachment_to_jsonl(hooks::stopped_continuation_attachment(
+            &hooks::HookAttachmentIdentity {
+                hook_name: "Stop".to_string(),
+                hook_event: "Stop".to_string(),
+                tool_use_id: format!("hook-{}", protocol::HookId::new().as_uuid()),
+            },
+            reason,
+        ))
+        .await;
         let content = format!(
             "<system-reminder>\nStop hook stopped continuation: {reason}\n</system-reminder>"
         );
@@ -7658,6 +8386,17 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 snapshot.insert(0, ctx_msg);
             }
 
+            // Per-turn TRANSIENT reminders are collected here rather than
+            // pushed straight onto `snapshot`, because `snapshot` is MOVED into
+            // `stream()` and every recovery path below rebuilds it from
+            // `session.history`. Each of these advances session state when it
+            // is computed (sent-sets, delta trackers, consume-once drains), so
+            // recomputing them on a retry would return `None` and the reminder
+            // would be silently lost for the rest of the session. Computed
+            // ONCE, re-appended on every re-snapshot — the same discipline
+            // `deferred_reminder` and `date_change_reminder` already follow.
+            let mut turn_reminders: Vec<ConversationMessage> = Vec::new();
+
             // OUTSTYLE.3 (streaming twin): per-turn, transient output-style
             // reminder. Appended to THIS turn's OUTGOING snapshot only — never to
             // `session.history` / JSONL — so it is recomputed each turn and never
@@ -7668,7 +8407,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // message, keeping the locked streaming fixtures byte-identical. See
             // [`Self::output_style_reminder_message`].
             if let Some(reminder) = self.output_style_reminder_message().await {
-                snapshot.push(reminder);
+                turn_reminders.push(reminder);
             }
 
             // PLANMODE (streaming twin): per-turn, transient `plan_mode` reminder
@@ -7684,7 +8423,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // the blocking-limit estimate below so its tokens are counted in the
             // prompt size. See [`Self::plan_mode_reminder_message`].
             if let Some(reminder) = self.plan_mode_reminder_message().await {
-                snapshot.push(reminder);
+                turn_reminders.push(reminder);
             }
 
             // SKILLLIST.1 (streaming twin): per-turn, transient `skill_listing`
@@ -7695,7 +8434,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // provider is wired / no skills / the Skill tool is absent. See
             // [`Self::skill_listing_reminder_message`].
             if let Some(reminder) = self.skill_listing_reminder_message().await {
-                snapshot.push(reminder);
+                turn_reminders.push(reminder);
             }
 
             // §F (streaming twin): per-turn, transient `conditional_rules`
@@ -7707,7 +8446,19 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // provider / no conditional rules / nothing newly active. See
             // [`Self::conditional_rules_reminder_message`].
             if let Some(reminder) = self.conditional_rules_reminder_message().await {
-                snapshot.push(reminder);
+                turn_reminders.push(reminder);
+            }
+
+            // Nested memory (streaming twin): the LINGXI.md governing the
+            // directory of a touched file. Appended to THIS turn's OUTGOING
+            // snapshot only (never `session.history` / JSONL), directly after
+            // the conditional-rules reminder and BEFORE the blocking-limit
+            // estimate below so its tokens are counted in the prompt size —
+            // identical position to the batched twin (`turn_loop.rs`).
+            // claude-code has ONE main loop, so both LingXi twins must inject
+            // it. See [`Self::nested_memory_reminder_message`].
+            if let Some(reminder) = self.nested_memory_reminder_message().await {
+                turn_reminders.push(reminder);
             }
 
             // `<new-diagnostics>` (streaming twin — #3 main-loop parity):
@@ -7722,7 +8473,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // fixtures byte-identical. See
             // [`Self::new_diagnostics_reminder_message`].
             if let Some(reminder) = self.new_diagnostics_reminder_message().await {
-                snapshot.push(reminder);
+                turn_reminders.push(reminder);
             }
 
             // `agent_listing_delta` (streaming twin): per-turn, transient agent
@@ -7733,7 +8484,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // snapshot only (never `session.history` / JSONL). See
             // [`Self::agent_listing_reminder_message`].
             if let Some(reminder) = self.agent_listing_reminder_message().await {
-                snapshot.push(reminder);
+                turn_reminders.push(reminder);
             }
 
             // Finding #73 (streaming twin): per-turn, transient `todo_reminder`
@@ -7748,7 +8499,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // `session.history` / JSONL). `None` keeps the locked streaming
             // fixtures byte-identical. See [`Self::todo_reminder_message`].
             if let Some(reminder) = self.todo_reminder_message().await {
-                snapshot.push(reminder);
+                turn_reminders.push(reminder);
             }
 
             // async_hook_response (streaming twin): fold completed background
@@ -7757,7 +8508,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // when no source is wired / nothing completed since the last turn.
             // See [`Self::async_hook_response_reminder_message`].
             if let Some(reminder) = self.async_hook_response_reminder_message().await {
-                snapshot.push(reminder);
+                turn_reminders.push(reminder);
             }
 
             // T35: fold the terminal background tasks finished since the last
@@ -7767,7 +8518,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // is wired / nothing finished. See
             // [`Self::task_notification_reminder_message`].
             if let Some(reminder) = self.task_notification_reminder_message().await {
-                snapshot.push(reminder);
+                turn_reminders.push(reminder);
             }
 
             // P0.1 (streaming twin): per-turn, transient `relevant_memories`
@@ -7780,7 +8531,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // no prefetch is wired / empty result / everything already injected.
             // See [`Self::relevant_memory_reminder_message`].
             if let Some(reminder) = self.relevant_memory_reminder_message().await {
-                snapshot.push(reminder);
+                turn_reminders.push(reminder);
             }
 
             // EXPERIMENTAL_SKILL_SEARCH (streaming twin): per-turn, transient
@@ -7790,7 +8541,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // prefetch is wired (default OFF) / empty / everything already
             // surfaced. See [`Self::skill_discovery_reminder_message`].
             if let Some(reminder) = self.skill_discovery_reminder_message().await {
-                snapshot.push(reminder);
+                turn_reminders.push(reminder);
             }
 
             // Rebuild on every model step: a ToolSearch result marks schemas as
@@ -7801,6 +8552,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // ADVANCES the announced-set tracking, so compute it ONCE per model
             // step here and reuse this value on every retry/fallback re-snapshot
             // below (each of which rebuilds the SAME step's request).
+            snapshot.extend(turn_reminders.iter().cloned());
+
             let wire_tools = self.build_wire_tools().await;
             let deferred_reminder = self.deferred_tools_reminder_message();
             if let Some(reminder) = deferred_reminder.clone() {
@@ -7923,6 +8676,11 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 }
                 None => crate::streaming_executor::StreamingToolExecutor::new(self),
             };
+            // Hold `tool_result` frames until the collection point below can
+            // release them in RECEIVED order, with a cancelled tool's synthetic
+            // already substituted. Off again after the drive, so any later
+            // emission on this orchestrator goes straight out.
+            self.set_tool_frame_buffering(true).await;
 
             // #5: wall-clock from stream-open through pump completion (incl. any
             // 529→non-stream fallback) so the CostTracker records a REAL duration
@@ -7980,6 +8738,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                         let s = self.session.lock().await;
                         (s.history.clone(), s.model.clone(), s.model_profile.clone())
                     };
+                    // Re-append THIS step's reminders (computed once above).
+                    recov_snapshot.extend(turn_reminders.iter().cloned());
                     if let Some(ctx_msg) = self.additional_context_message().await {
                         recov_snapshot.insert(0, ctx_msg);
                     }
@@ -8002,6 +8762,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                         wire_tools.clone(),
                         None,
                         date_change_reminder.clone(),
+                        &turn_reminders,
                     )
                     .await?
                     {
@@ -8218,6 +8979,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                                     let s = self.session.lock().await;
                                     (s.history.clone(), s.model.clone(), s.model_profile.clone())
                                 };
+                                // Re-append THIS step's reminders (computed once above).
+                                re_snapshot.extend(turn_reminders.iter().cloned());
                                 if let Some(ctx_msg) = self.additional_context_message().await {
                                     re_snapshot.insert(0, ctx_msg);
                                 }
@@ -8369,6 +9132,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                             // R-P1c/R-P1d: claude-code's `A6n` prepends the additional-
                             // context meta message on EVERY `callModel`, including this
                             // non-streaming fallback. Prepend it to the re-snapshot too.
+                            // Re-append THIS step's reminders (computed once above).
+                            non_stream_snapshot.extend(turn_reminders.iter().cloned());
                             if let Some(ctx_msg) = self.additional_context_message().await {
                                 non_stream_snapshot.insert(0, ctx_msg);
                             }
@@ -8760,7 +9525,23 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 let mut all_modifiers: Vec<tool_api::ContextModifier> = Vec::new();
                 loop {
                     // (no-op unless a Bash sibling errored / the turn discarded)
-                    exec.apply_abort_to_pending();
+                    // A queued tool cancelled here gets the SAME
+                    // `user_interrupted` synthetic `drain_one` substitutes, and
+                    // claude-code stamps that message `user-rejected`
+                    // (`createSyntheticErrorMessage`, 2.1.220 @232972524), so
+                    // record the kind for the persisted tool_result line.
+                    for (id, reason) in exec.apply_abort_to_pending() {
+                        if reason == crate::streaming_executor::AbortReason::UserInterrupted {
+                            self.record_tool_denial_kind(&id, "user-rejected").await;
+                        }
+                        // O1: the synthetic that survives carries claude's own
+                        // short `toolUseResult` literal, not the block's text.
+                        self.record_tool_use_result(
+                            &id,
+                            crate::streaming_executor::synthetic_tool_use_result(reason),
+                        )
+                        .await;
+                    }
                     exec.process_queue();
                     // persist whatever just completed, in order
                     for drained in exec.take_newly_completed() {
@@ -8776,6 +9557,32 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                                 .or_else(|| assistant_uuid.clone()),
                             _ => assistant_uuid.clone(),
                         };
+                        // Release this tool's SDK frame HERE — `take_newly_completed`
+                        // yields in received order, and `drained.block` is the
+                        // post-substitution content, so a cancelled tool reports
+                        // its synthetic rather than the real outcome the executor
+                        // discarded. A queued-then-cancelled tool never dispatched
+                        // and so has no buffered frame; it gets one from here,
+                        // where previously it got none at all.
+                        if let ContentBlock::ToolResult {
+                            tool_use_id,
+                            content,
+                            is_error,
+                            ..
+                        } = &drained.block
+                        {
+                            self.release_tool_frame(tool_use_id, content, *is_error)
+                                .await;
+                        }
+                        // O3: keep this result's tool id so its hook
+                        // `attachment` lines can be flushed immediately after
+                        // its tool_result — claude's stream order.
+                        let drained_tool_use_id = match &drained.block {
+                            ContentBlock::ToolResult { tool_use_id, .. } => {
+                                Some(tool_use_id.clone())
+                            }
+                            _ => None,
+                        };
                         let user_msg = ConversationMessage::User {
                             id: MessageId::new(),
                             content: vec![drained.block],
@@ -8789,6 +9596,9 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                         }
                         self.persist_message_to_jsonl_with_parent(&user_msg, parent_uuid)
                             .await;
+                        if let Some(id) = &drained_tool_use_id {
+                            self.flush_hook_attachments(id).await;
+                        }
                         // SKILLEXEC.3 (streaming): replay tool-injected
                         // `new_messages` (the Skill tool's expanded prompt) right
                         // after the tool_result, recording each injected message's
@@ -8799,10 +9609,17 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                         // bytes stay byte-identical. Empty for every non-skill tool
                         // → strict no-op.
                         for (m, tool_use_id) in drained.injected {
+                            let is_ephemeral_rendering = m.is_meta();
                             {
                                 let mut s = self.session.lock().await;
                                 s.history.push(m.clone());
                                 s.injected_message_sources.insert(m.id(), tool_use_id);
+                            }
+                            // O3: an `is_meta` injected message is the
+                            // EPHEMERAL rendering of the attachment flushed
+                            // above — persisting it would duplicate the record.
+                            if is_ephemeral_rendering {
+                                continue;
                             }
                             self.persist_message_to_jsonl(&m).await;
                         }
@@ -8827,6 +9644,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 // Empty for every non-`model:` tool → strict no-op.
                 crate::turn_loop::apply_model_context_modifiers(self, all_modifiers).await;
             }
+            // Drive finished: stop holding frames.
+            self.set_tool_frame_buffering(false).await;
 
             // DEFERRED-3 / esc-interrupt FIX: "we were aborted" — the single
             // post-drive abort checkpoint. Once the user-interrupt token has fired,
@@ -10868,6 +11687,213 @@ DO NOT mention this to the user explicitly because they are already aware.\n</sy
         Some(ConversationMessage::user(MessageId::new(), content))
     }
 
+    /// Hermetic override for the roots [`Self::nested_memory_reminder_message`]
+    /// probes. See [`Self::nested_memory_roots`].
+    #[must_use]
+    pub fn with_nested_memory_roots(
+        mut self,
+        home: std::path::PathBuf,
+        managed_dir: Option<std::path::PathBuf>,
+    ) -> Self {
+        self.nested_memory_roots = Some((home, managed_dir));
+        self
+    }
+
+    /// The per-turn NESTED MEMORY reminder: the `LINGXI.md` (and matching
+    /// `paths:`-gated rules) governing the directories of files the session has
+    /// TOUCHED. Guidance that lives next to the code reaches the model when the
+    /// model reaches the code.
+    ///
+    /// 1:1 with claude-code `k$o` (@237714543) driven by `Rop` (@237715260):
+    ///
+    /// ```js
+    /// for(let i of e){
+    ///   if(t.loadedNestedMemoryPaths?.[i.path])continue;
+    ///   if(!t.readFileState.has(i.path)){ n.push({type:"nested_memory",…});
+    ///     t.loadedNestedMemoryPaths[i.path]=!0;
+    ///     t.readFileState.set(i.path,{…,seededFromContext:!0,keepContent:!0}) }}
+    /// ```
+    ///
+    /// 1. DISCOVER — [`crate::prompt::nested_memory::discover`] per touched
+    ///    file. Stateless by design; see [`Self::sent_nested_memory`].
+    /// 2. SKIP — anything already sent (`loadedNestedMemoryPaths`), already
+    ///    claimed by [`Self::conditional_rules_reminder_message`], or already in
+    ///    `read_file_state` (the model has the real thing).
+    /// 3. SEED — [`Self::seed_nested_memory_read_state`], so the next `Read` of
+    ///    a surfaced file returns the dedup stub instead of the bytes again.
+    /// 4. RENDER — [`crate::prompt::conditional_rules::render_reminder`], the
+    ///    same bare `Contents of {path}:` shape the oracle's `nested_memory`
+    ///    attachment renders to.
+    ///
+    /// MUTATES the sent-set, so it must be called at most ONCE per outgoing
+    /// model step — the same constraint every reminder in this family carries.
+    ///
+    /// # Divergence (reason)
+    /// `Rop` opens with `if(!zK(e,r.toolPermissionContext))return n` — a
+    /// read-permission check on the TRIGGER file. LingXi's permission context
+    /// is not plumbed to this layer, and the trigger is by construction a file
+    /// a tool already read, so the gate would be a no-op here. Not invented.
+    ///
+    /// `pub` (unlike its `pub(crate)` siblings) only so `test-harness` can drive
+    /// it against a real `FileReadTool`: `orchestrator` does not depend on
+    /// `tool-file`, so the end-to-end seed-then-dedup proof cannot live here.
+    /// Both turn drivers are still the only production callers.
+    pub async fn nested_memory_reminder_message(&self) -> Option<ConversationMessage> {
+        // Same env kill-switch the eager loader honors (`Rop`'s
+        // `CLAUDE_CODE_DISABLE_CLAUDE_MDS` guard). ANY non-empty value disables.
+        if std::env::var_os("LINGXI_DISABLE_LINGXI_MDS").is_some_and(|v| !v.is_empty()) {
+            return None;
+        }
+        let touched: Vec<std::path::PathBuf> = self
+            .read_state_map
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .model_context_keys();
+        if touched.is_empty() {
+            return None;
+        }
+        let (home, managed) = match &self.nested_memory_roots {
+            Some((home, managed)) => (home.clone(), managed.clone()),
+            None => (
+                dirs::home_dir()?,
+                Some(memory::lingxi_md::hierarchy::managed_path()),
+            ),
+        };
+        // CANONICAL cwd, not the raw one. `split_ancestors` decides "is the
+        // touched file under cwd" with a prefix test, and the two sides reach
+        // it in different forms: `read_state_map` keys are whatever
+        // `canonicalize_and_validate` produced, while `session_cwd` is whatever
+        // the user launched in. On macOS that is `/private/var/...` against
+        // `/var/...`, so every touched file looks OUTSIDE cwd and nothing is
+        // ever discovered. The oracle has no such split (its `Li` is purely
+        // lexical, so both halves agree); LingXi has to normalize on ONE side,
+        // and cwd is the side that makes every derived path match the registry
+        // the seed writes to. Falls back to the raw cwd if it does not exist.
+        let cwd = tokio::fs::canonicalize(self.session_cwd.cwd())
+            .await
+            .unwrap_or_else(|_| self.session_cwd.cwd());
+
+        let mut surfaced: Vec<crate::prompt::MemoryFile> = Vec::new();
+        {
+            let mut sent = self.sent_nested_memory.lock().await;
+            let mut sent_rules = self.sent_conditional_rules.lock().await;
+            for trigger in &touched {
+                for f in crate::prompt::nested_memory::discover(
+                    trigger,
+                    &cwd,
+                    &home,
+                    managed.as_deref(),
+                ) {
+                    if sent.contains(&f.path) {
+                        continue;
+                    }
+                    // A `paths:`-gated rule is owned by BOTH mechanisms; the
+                    // shared set means whichever reaches the model first wins
+                    // and the other stands down. Unconditional memory files
+                    // never enter this set — conditional rules is not their
+                    // owner and marking them would be a lie.
+                    if f.globs.is_some() && sent_rules.contains(&f.path) {
+                        continue;
+                    }
+                    // `!t.readFileState.has(i.path)`, canonical-keyed like the
+                    // registry itself. Note the oracle does NOT mark such a
+                    // path as loaded — it stays in `readFileState` forever, so
+                    // it stays skipped either way.
+                    let key = tokio::fs::canonicalize(&f.path)
+                        .await
+                        .unwrap_or_else(|_| f.path.clone());
+                    if self
+                        .read_state_map
+                        .lock()
+                        .is_ok_and(|guard| guard.contains(&key))
+                    {
+                        continue;
+                    }
+                    sent.insert(f.path.clone());
+                    if f.globs.is_some() {
+                        sent_rules.insert(f.path.clone());
+                    }
+                    surfaced.push(f);
+                }
+            }
+        }
+        if surfaced.is_empty() {
+            return None;
+        }
+        self.seed_nested_memory_read_state(&surfaced).await;
+        let content = surfaced
+            .iter()
+            .map(crate::prompt::conditional_rules::render_reminder)
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        Some(ConversationMessage::user(MessageId::new(), content))
+    }
+
+    /// Seed `read_file_state` for files surfaced as NESTED MEMORY — `k$o`'s
+    /// `readFileState.set` half.
+    ///
+    /// Deliberately NOT [`Self::seed_memory_read_state`], which ports the
+    /// EAGER-block seeding site (`xCt` @245883373). The two sites disagree on
+    /// two fields, and the difference is load-bearing:
+    ///
+    /// | | eager (`xCt`) | nested (`k$o`) |
+    /// |---|---|---|
+    /// | `seededFromContext` | `MLu(file)` — only if actually rendered | `!0` always |
+    /// | `timestamp` | mtime when rendered, else `Date.now()` | mtime always |
+    ///
+    /// A conditional rule is NOT in the eager block, so the eager site would
+    /// seed it `seeded_from_context:false` — and the dedup stub would never
+    /// fire for exactly the files this reminder just put in the context.
+    async fn seed_nested_memory_read_state(&self, files: &[crate::prompt::MemoryFile]) {
+        for f in files {
+            // Canonical key, lexical render — the fork that already shipped one
+            // silent bug: `FileReadTool` looks up `canonicalize_and_validate`'s
+            // output, so seeding under the raw path never matches on a macOS
+            // `/var` -> `/private/var` cwd.
+            let key = tokio::fs::canonicalize(&f.path)
+                .await
+                .unwrap_or_else(|_| f.path.clone());
+            let now_ms = i64::try_from(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_millis()),
+            )
+            .unwrap_or(i64::MAX);
+            // `try{s=FQ(i.path)}catch{s=Date.now()}` — unconditional mtime.
+            let mtime_ms = match tokio::fs::metadata(&f.path).await.and_then(|m| m.modified()) {
+                Ok(t) => tool_api::read_file_state::mtime_ms_floor(t),
+                Err(_) => now_ms,
+            };
+            let content = if f.content_differs_from_disk {
+                f.raw_content.clone()
+            } else {
+                f.raw_content
+                    .strip_prefix('\u{feff}')
+                    .unwrap_or(&f.raw_content)
+                    .to_string()
+            };
+            tool_api::read_file_state::set_with_model_context(
+                &self.read_state_map,
+                key,
+                tool_api::read_file_state::ReadFileEntry {
+                    content,
+                    mtime_ms,
+                    offset: None,
+                    limit: None,
+                    from_read: false,
+                    seeded_from_context: true,
+                    is_partial_view: f.content_differs_from_disk,
+                },
+                // ALWAYS false, for the reason spelled out on
+                // `seed_memory_read_state`, plus one specific to this site: the
+                // touched-file set is this reminder's own INPUT, so enrolling a
+                // surfaced memory file would make it a trigger for the next
+                // turn's discovery — a feedback loop walking its own ancestors.
+                false,
+            );
+        }
+    }
+
     /// P0.1: arm the memory-selector prefetch for THIS turn, firing it
     /// CONCURRENTLY with the main API call (claude-code's `wAo` prefetch
     /// side-channel). Called at the START of each turn in BOTH drivers, BEFORE
@@ -11475,6 +12501,11 @@ DO NOT mention this to the user explicitly because they are already aware.\n</sy
         let (mut results, _prevent_continuation, _injected, modifiers) =
             crate::turn_loop::dispatch_tool_uses_tracked(self, &tool_uses, cancel).await?;
         crate::turn_loop::apply_model_context_modifiers(self, modifiers).await;
+        // O3: this host-driven path writes NO transcript line at all (the block
+        // is handed back to the caller), so a queued hook attachment would be a
+        // chain orphan. Drain it rather than leaving the entry in the map for
+        // the life of the session.
+        let _ = self.take_queued_hook_attachments(&tool_uses[0].0).await;
         Ok(results.pop())
     }
 
@@ -13066,6 +14097,8 @@ mod turn_recovery_tests {
                 offset: None,
                 limit: None,
                 from_read: true,
+                seeded_from_context: false,
+                is_partial_view: false,
             },
         );
         orch.spawn_startup_responses_websocket_prewarm();
@@ -13300,6 +14333,68 @@ mod turn_recovery_tests {
                 .iter()
                 .map(protocol::ConversationMessage::text_content)
                 .collect::<Vec<_>>()
+        );
+    }
+
+    /// O2: the Stop hook's `preventContinuation` also PERSISTS a
+    /// `hook_stopped_continuation` attachment line (BIN off 233101239), not
+    /// just the meta message. `message` sits SECOND in key order and the
+    /// `toolUseID` is the dispatch's `hook-{uuid}`, matching the
+    /// `hook_additional_context` record the same Stop dispatch emits.
+    #[tokio::test]
+    async fn stop_prevent_continuation_persists_a_stopped_continuation_attachment() {
+        let et = mock_message_response(
+            vec![LlmContentBlock::Text {
+                text: "done".into(),
+                cache_control: None,
+            }],
+            Some("end_turn"),
+        );
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session.jsonl");
+        let fs: Arc<dyn traits::FileSystem> = Arc::new(
+            platform_posix::fs::PosixFileSystem::new(dir.path().to_path_buf()),
+        );
+        let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(
+            path.clone(),
+            fs,
+        ));
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![et])),
+            Arc::new(ToolRegistry::new()),
+            exec_prevent_stop(Some("STOP-CONTINUATION".into())).await,
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            dir.path().to_path_buf(),
+        )
+        .with_jsonl_writer(writer);
+
+        orch.run_turn("go").await.expect("turn ok");
+
+        let raw = std::fs::read_to_string(&path).expect("read jsonl");
+        let line = raw
+            .lines()
+            .find(|l| l.contains("hook_stopped_continuation"))
+            .unwrap_or_else(|| {
+                panic!("no hook_stopped_continuation attachment line in: {raw}")
+            });
+        let v: serde_json::Value = serde_json::from_str(line).expect("json line");
+        assert_eq!(v["type"], "attachment");
+        let a = &v["attachment"];
+        // Key ORDER is the contract — serde_json is pinned preserve_order.
+        let rendered = serde_json::to_string(a).expect("attachment json");
+        let tool_use_id = a["toolUseID"].as_str().expect("toolUseID").to_string();
+        assert_eq!(
+            rendered,
+            format!(
+                r#"{{"type":"hook_stopped_continuation","message":"STOP-CONTINUATION","hookName":"Stop","toolUseID":"{tool_use_id}","hookEvent":"Stop"}}"#
+            )
+        );
+        assert!(
+            tool_use_id.starts_with("hook-"),
+            "Stop mints `hook-${{randomUUID()}}`, got {tool_use_id}"
         );
     }
 
@@ -13794,6 +14889,8 @@ mod additional_context_tests {
             is_local_override: false,
             tier: memory::lingxi_md::LingxiMdTier::Project,
             globs: None,
+            raw_content: "MD BODY".into(),
+            content_differs_from_disk: false,
         }]));
         let orch = orch_with(mem, Some("u@example.com"));
         let msg = orch.additional_context_message().await.expect("present");
@@ -15706,6 +16803,8 @@ mod conditional_rules_reminder_tests {
             is_local_override: false,
             tier: LingxiMdTier::Project,
             globs: Some(globs.iter().map(|s| (*s).to_string()).collect()),
+            raw_content: format!("BODY OF {name}"),
+            content_differs_from_disk: false,
         }
     }
 
@@ -15737,6 +16836,8 @@ mod conditional_rules_reminder_tests {
                 offset: None,
                 limit: None,
                 from_read: true,
+                seeded_from_context: false,
+                is_partial_view: false,
             },
         );
     }
@@ -15751,6 +16852,8 @@ mod conditional_rules_reminder_tests {
                 offset: None,
                 limit: None,
                 from_read: false,
+                seeded_from_context: false,
+                is_partial_view: false,
             },
             false,
         );
@@ -15840,6 +16943,8 @@ mod conditional_rules_reminder_tests {
             is_local_override: false,
             tier: LingxiMdTier::Project,
             globs: None,
+            raw_content: "always".into(),
+            content_differs_from_disk: false,
         };
         let orch = orch_with_rules(cwd.clone(), vec![unconditional]);
         push_touched(&orch, &cwd.join("src/x.rs"));
@@ -15878,6 +16983,202 @@ mod conditional_rules_reminder_tests {
         assert!(
             !t1.contains("src-rule.md"),
             "already-sent src-rule must not re-inject: {t1}"
+        );
+    }
+}
+
+// Nested memory (`k$o` @237714543 fed by `Rop` @237715260): the per-turn
+// reminder that surfaces the LINGXI.md governing a TOUCHED file's directory.
+#[cfg(test)]
+mod nested_memory_reminder_tests {
+    use super::*;
+    use crate::test_support::{
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
+    };
+    use crate::OrchestratorConfig;
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use tool_api::registry::ToolRegistry;
+
+    const MEM: &str = branding::MEMORY_FILE;
+    const DOT: &str = branding::DOT_DIR;
+
+    fn touch(p: &Path, body: &str) {
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+
+    /// cwd=`<root>/repo`, trigger `<root>/repo/pkg/api/handler.rs`, and a HOME
+    /// under the same temp root so the User tier can never reach the real one.
+    struct Fixture {
+        _tmp: tempfile::TempDir,
+        cwd: PathBuf,
+        home: PathBuf,
+        trigger: PathBuf,
+    }
+
+    fn fixture() -> Fixture {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let cwd = root.join("repo");
+        let home = root.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let trigger = cwd.join("pkg").join("api").join("handler.rs");
+        touch(&trigger, "fn main(){}");
+        Fixture {
+            _tmp: tmp,
+            cwd,
+            home,
+            trigger,
+        }
+    }
+
+    fn orch(f: &Fixture) -> ConversationOrchestrator {
+        ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::with_files(vec![])),
+            f.cwd.clone(),
+        )
+        // Hermetic roots: without this the User/Managed pass would probe the
+        // developer's real `~/.lingxi/rules`.
+        .with_nested_memory_roots(f.home.clone(), None)
+    }
+
+    fn push_touched(orch: &ConversationOrchestrator, path: &Path) {
+        tool_api::read_file_state::set(
+            &orch.read_state_map,
+            path.to_path_buf(),
+            tool_api::read_file_state::ReadFileEntry {
+                content: String::new(),
+                mtime_ms: 0,
+                offset: None,
+                limit: None,
+                from_read: true,
+                seeded_from_context: false,
+                is_partial_view: false,
+            },
+        );
+    }
+
+    #[tokio::test]
+    async fn surfaces_ancestor_memory_once_then_never_again() {
+        let f = fixture();
+        touch(&f.cwd.join("pkg").join(MEM), "pkg guidance");
+        let orch = orch(&f);
+        push_touched(&orch, &f.trigger);
+
+        let text = orch
+            .nested_memory_reminder_message()
+            .await
+            .expect("the memory governing the touched file must surface")
+            .text_content();
+        assert!(text.starts_with("<system-reminder>"), "got: {text}");
+        assert!(text.contains("pkg guidance"), "got: {text}");
+
+        assert!(
+            orch.nested_memory_reminder_message().await.is_none(),
+            "`loadedNestedMemoryPaths` must stop a second emission"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_touched_file_yields_none() {
+        let f = fixture();
+        touch(&f.cwd.join("pkg").join(MEM), "pkg guidance");
+        assert!(orch(&f).nested_memory_reminder_message().await.is_none());
+    }
+
+    /// The sent-set must survive the read-state entry disappearing.
+    ///
+    /// In the happy path the seed itself blocks a second emission, which makes
+    /// the two guards indistinguishable — dropping `sent_nested_memory` passes
+    /// every other test here. But `read_state_map` is an LRU with entry and
+    /// byte caps, so a long session evicts; the oracle's
+    /// `loadedNestedMemoryPaths` is a plain non-evicting Set precisely so
+    /// eviction cannot resurrect an already-sent file.
+    #[tokio::test]
+    async fn eviction_from_read_state_does_not_resurrect_a_sent_file() {
+        let f = fixture();
+        let mem = f.cwd.join("pkg").join(MEM);
+        touch(&mem, "pkg guidance");
+        let orch = orch(&f);
+        push_touched(&orch, &f.trigger);
+        assert!(orch.nested_memory_reminder_message().await.is_some());
+
+        // Simulate the LRU dropping the seeded entry.
+        let canon = std::fs::canonicalize(&mem).unwrap();
+        assert!(
+            orch.read_state_map
+                .lock()
+                .unwrap()
+                .remove(&canon)
+                .is_some(),
+            "the seed must have been there to evict"
+        );
+
+        assert!(
+            orch.nested_memory_reminder_message().await.is_none(),
+            "already-sent memory must stay sent after its read-state entry is evicted"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_file_the_model_already_read_is_not_surfaced() {
+        // `k$o`: `if(!t.readFileState.has(i.path))` — a memory file the model
+        // already Read is in context verbatim; re-sending it is pure waste.
+        let f = fixture();
+        let mem = f.cwd.join("pkg").join(MEM);
+        touch(&mem, "pkg guidance");
+        let orch = orch(&f);
+        push_touched(&orch, &f.trigger);
+        push_touched(&orch, &mem);
+
+        assert!(orch.nested_memory_reminder_message().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn surfacing_seeds_read_state_so_a_later_read_dedups() {
+        let f = fixture();
+        let mem = f.cwd.join("pkg").join(MEM);
+        touch(&mem, "pkg guidance");
+        let orch = orch(&f);
+        push_touched(&orch, &f.trigger);
+        assert!(orch.nested_memory_reminder_message().await.is_some());
+
+        let entry = tool_api::read_file_state::get(
+            &orch.read_state_map,
+            &std::fs::canonicalize(&mem).unwrap(),
+        )
+        .expect("the surfaced file must be seeded under its CANONICAL path");
+        assert!(
+            entry.seeded_from_context,
+            "`seededFromContext:!0` is unconditional at this site — it is what \
+             makes the next Read return the dedup stub"
+        );
+        assert!(!entry.from_read, "a seed is not a Read");
+    }
+
+    #[tokio::test]
+    async fn a_rule_already_sent_by_conditional_rules_is_not_resent() {
+        // LingXi runs BOTH mechanisms; the oracle has one. They share
+        // `sent_conditional_rules` so a `paths:`-gated rule reaches the model
+        // at most once, whichever gets there first.
+        let f = fixture();
+        let rule = f.cwd.join("pkg").join(DOT).join("rules").join("api.md");
+        touch(&rule, "---\npaths:\n  - \"api/**\"\n---\napi rule\n");
+        let orch = orch(&f);
+        push_touched(&orch, &f.trigger);
+
+        orch.sent_conditional_rules.lock().await.insert(rule.clone());
+        assert!(
+            orch.nested_memory_reminder_message().await.is_none(),
+            "conditional-rules already sent this rule"
         );
     }
 }
@@ -16052,6 +17353,8 @@ mod relevant_memory_reminder_tests {
                 offset: None,
                 limit: None,
                 from_read: true,
+                seeded_from_context: false,
+                is_partial_view: false,
             },
         );
     }
@@ -16066,6 +17369,8 @@ mod relevant_memory_reminder_tests {
                 offset: None,
                 limit: None,
                 from_read: false,
+                seeded_from_context: false,
+                is_partial_view: false,
             },
             false,
         );
@@ -16727,6 +18032,135 @@ mod hook_attachment_persistence_tests {
     use platform_posix::fs::PosixFileSystem;
     use std::sync::Arc;
     use tool_api::registry::ToolRegistry;
+    /// Frame buffering holds `tool_result` frames until the collection point
+    /// releases them, so the SDK sees RECEIVED order rather than completion
+    /// order — and so a cancelled tool reports its synthetic instead of the
+    /// real outcome the executor discarded.
+    ///
+    /// These pin the mechanism. They do NOT prove the streaming driver's
+    /// ordering end-to-end; that would need two tools whose completion order
+    /// differs from their received order.
+    mod tool_frame_ordering_tests {
+        use super::*;
+
+        fn orch_for_frames(output: Arc<MockOutputStream>) -> ConversationOrchestrator {
+            ConversationOrchestrator::new(
+                OrchestratorConfig::default(),
+                Arc::new(MockApiClient::new(vec![])),
+                Arc::new(ToolRegistry::new()),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                output,
+                Arc::new(StaticMemoryProvider::empty()),
+                std::env::temp_dir(),
+            )
+        }
+
+        fn result_ids(events: &[traits::orchestrator::OutputEvent]) -> Vec<String> {
+            events
+                .iter()
+                .filter_map(|e| match e {
+                    traits::orchestrator::OutputEvent::ToolResult { id, .. } => {
+                        Some(id.to_string())
+                    }
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// With buffering OFF the frame goes straight out — the batched driver,
+        /// which dispatches in received order anyway, is unchanged.
+        #[tokio::test]
+        async fn buffering_off_emits_immediately() {
+            let output = Arc::new(MockOutputStream::new());
+            let orch = orch_for_frames(output.clone());
+            let id = protocol::ToolUseId::new();
+            orch.emit_tool_result_frame(&id, "Bash", "out", &serde_json::json!({}), None)
+                .await;
+            assert_eq!(result_ids(&output.snapshot().await), vec![id.to_string()]);
+        }
+
+        /// With buffering ON nothing reaches the stream until release.
+        #[tokio::test]
+        async fn buffered_frames_are_withheld_then_released_in_caller_order() {
+            let output = Arc::new(MockOutputStream::new());
+            let orch = orch_for_frames(output.clone());
+            orch.set_tool_frame_buffering(true).await;
+
+            let first = protocol::ToolUseId::new();
+            let second = protocol::ToolUseId::new();
+            // Buffered in COMPLETION order: `second` finished first.
+            orch.emit_tool_result_frame(&second, "Bash", "b", &serde_json::json!({}), None)
+                .await;
+            orch.emit_tool_result_frame(&first, "Read", "a", &serde_json::json!({}), None)
+                .await;
+            assert!(
+                result_ids(&output.snapshot().await).is_empty(),
+                "nothing may reach the stream while buffering is on"
+            );
+
+            // Released in RECEIVED order by the collection point.
+            orch.release_tool_frame(&first, "a", false).await;
+            orch.release_tool_frame(&second, "b", false).await;
+            assert_eq!(
+                result_ids(&output.snapshot().await),
+                vec![first.to_string(), second.to_string()],
+                "release order wins over completion order"
+            );
+        }
+
+        /// A tool that never dispatched (queued, then cancelled) has no buffered
+        /// frame and still gets one. Before the collection point released
+        /// frames, this case emitted nothing at all.
+        #[tokio::test]
+        async fn releasing_an_undispatched_tool_still_emits() {
+            let output = Arc::new(MockOutputStream::new());
+            let orch = orch_for_frames(output.clone());
+            orch.set_tool_frame_buffering(true).await;
+
+            let id = protocol::ToolUseId::new();
+            orch.release_tool_frame(&id, "The user doesn't want to proceed", true)
+                .await;
+            assert_eq!(
+                result_ids(&output.snapshot().await),
+                vec![id.to_string()],
+                "a never-dispatched tool must still report a frame"
+            );
+        }
+
+        /// The released content is the block's FINAL text, so a synthetic that
+        /// replaced a cancelled tool's real outcome wins over what dispatch
+        /// buffered.
+        #[tokio::test]
+        async fn substituted_content_wins_over_the_buffered_result() {
+            let output = Arc::new(MockOutputStream::new());
+            let orch = orch_for_frames(output.clone());
+            orch.set_tool_frame_buffering(true).await;
+
+            let id = protocol::ToolUseId::new();
+            orch.emit_tool_result_frame(
+                &id,
+                "Bash",
+                "REAL OUTPUT",
+                &serde_json::json!({ "stdout": "REAL OUTPUT" }),
+                None,
+            )
+            .await;
+            orch.release_tool_frame(&id, "SYNTHETIC", true).await;
+
+            let events = output.snapshot().await;
+            let found = events.iter().any(|e| matches!(
+                e,
+                traits::orchestrator::OutputEvent::ToolResult { id: gid, .. } if gid.to_string() == id.to_string()
+            ));
+            assert!(found, "the released frame must be emitted");
+            assert!(
+                !format!("{events:?}").contains("REAL OUTPUT"),
+                "the discarded real outcome must not reach the SDK: {events:?}"
+            );
+        }
+    }
+
 
     fn orch_with_writer(
         dir: &std::path::Path,
@@ -16789,6 +18223,73 @@ mod hook_attachment_persistence_tests {
             orch.last_jsonl_uuid.lock().await.as_deref(),
             v["uuid"].as_str()
         );
+    }
+
+    /// O3: attachments queued during a tool dispatch are flushed — in
+    /// production order, as `attachment` lines — AFTER the `tool_result` they
+    /// follow, matching claude's stream order (`insertMessageChain` writes the
+    /// yielded attachment message right after the yielded tool_result), and the
+    /// queue is drained so a second flush is a no-op.
+    #[tokio::test]
+    async fn queued_hook_attachments_flush_after_the_tool_result_in_order() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session.jsonl");
+        let orch = orch_with_writer(dir.path(), path.clone());
+
+        let tuid = protocol::ToolUseId::new();
+        orch.queue_hook_attachment(
+            &tuid,
+            hooks::additional_context_attachment(
+                "PostToolUse:Edit",
+                tuid.as_str(),
+                "PostToolUse",
+                &["FIRST".to_string()],
+            ),
+        )
+        .await;
+        orch.queue_hook_attachment(
+            &tuid,
+            hooks::error_during_execution_attachment(
+                "SECOND",
+                "PostToolUse:Edit",
+                tuid.as_str(),
+                "PostToolUse",
+            ),
+        )
+        .await;
+
+        let msg = ConversationMessage::User {
+            id: protocol::MessageId::new(),
+            content: vec![protocol::ContentBlock::ToolResult {
+                tool_use_id: tuid.clone(),
+                content: "ok".into(),
+                is_error: false,
+                provider_tool_use_id: None,
+                content_blocks: None,
+            }],
+            is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+        };
+        orch.persist_message_to_jsonl(&msg).await;
+        orch.flush_hook_attachments(&tuid).await;
+        // Draining: a second flush writes nothing.
+        orch.flush_hook_attachments(&tuid).await;
+
+        let raw = std::fs::read_to_string(&path).expect("read jsonl");
+        let lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(lines.len(), 3, "tool_result + 2 attachments: {raw}");
+        let v0: serde_json::Value = serde_json::from_str(lines[0]).expect("json");
+        let v1: serde_json::Value = serde_json::from_str(lines[1]).expect("json");
+        let v2: serde_json::Value = serde_json::from_str(lines[2]).expect("json");
+        assert_eq!(v0["type"], "user");
+        assert_eq!(v1["attachment"]["type"], "hook_additional_context");
+        assert_eq!(v1["attachment"]["content"][0], "FIRST");
+        assert_eq!(v2["attachment"]["type"], "hook_error_during_execution");
+        assert_eq!(v2["attachment"]["content"], "SECOND");
+        // Linear chain: result → first attachment → second attachment.
+        assert_eq!(v1["parentUuid"], v0["uuid"]);
+        assert_eq!(v2["parentUuid"], v1["uuid"]);
     }
 
     /// END-TO-END: a real `HookExecutorImpl` wired with the real sink and a
@@ -17203,6 +18704,209 @@ mod persist_with_parent_tests {
         );
     }
 
+    /// O1: a tool_result `user` line carries the tool's STRUCTURED result as
+    /// `toolUseResult` plus `sourceToolAssistantUUID` (== `parentUuid`).
+    ///
+    /// Oracle: the success arm at 2.1.220 BIN off **235420375** builds
+    /// `zr({content:Ft, …, toolUseResult: gt, …, sourceToolAssistantUUID:
+    /// i.uuid})` where `gt = se.data` is the tool's raw structured result
+    /// (NOT the model-facing string). The writer `insertMessageChain`
+    /// (BIN off **237862200**) then DERIVES `parentUuid` from
+    /// `sourceToolAssistantUUID`, which is why the two are equal on all
+    /// 96 794 real 2.1.220 lines carrying the field.
+    #[tokio::test]
+    async fn tool_result_line_carries_structured_result_and_source_assistant_uuid() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let session_path = dir.path().join("session.jsonl");
+        let orch = orch_with_writer(dir.path(), session_path.clone());
+
+        let tuid = protocol::ToolUseId::new();
+        // 1. The assistant line owning this tool_use.
+        let assistant = ConversationMessage::Assistant {
+            id: protocol::MessageId::new(),
+            content: vec![protocol::ContentBlock::ToolUse {
+                id: tuid.clone(),
+                name: "Bash".into(),
+                input: serde_json::json!({"command":"ls"}),
+                provider_id: None,
+            }],
+            stop_reason: None,
+        };
+        let map = orch.persist_assistant_per_block(&assistant, None, None).await;
+        let assistant_uuid = map.get(&tuid).cloned().expect("tool_use line uuid recorded");
+
+        // 2. The tool's structured result, recorded at dispatch.
+        orch.record_tool_use_result(
+            &tuid,
+            serde_json::json!({"stdout":"a\n","stderr":"","interrupted":false}),
+        )
+        .await;
+
+        let msg = ConversationMessage::User {
+            id: protocol::MessageId::new(),
+            content: vec![protocol::ContentBlock::ToolResult {
+                tool_use_id: tuid.clone(),
+                content: "a".into(),
+                is_error: false,
+                provider_tool_use_id: None,
+                content_blocks: None,
+            }],
+            is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+        };
+        orch.persist_message_to_jsonl_with_parent(&msg, Some(assistant_uuid.clone()))
+            .await;
+
+        let raw = std::fs::read_to_string(&session_path).expect("session file");
+        let line = raw.lines().nth(1).expect("tool_result line");
+        assert!(
+            line.contains(r#""toolUseResult":{"stdout":"a\n","stderr":"","interrupted":false}"#),
+            "structured result must ride verbatim, got: {line}"
+        );
+        assert!(
+            line.contains(&format!(r#""sourceToolAssistantUUID":"{assistant_uuid}""#)),
+            "source assistant uuid must be the tool_use's own line uuid, got: {line}"
+        );
+        assert!(
+            line.contains(&format!(r#""parentUuid":"{assistant_uuid}""#)),
+            "parentUuid must equal sourceToolAssistantUUID, got: {line}"
+        );
+        let i_res = line.find("toolUseResult").expect("result present");
+        let i_src = line
+            .find("sourceToolAssistantUUID")
+            .expect("source present");
+        let i_trailer = line.find("userType").expect("trailer present");
+        assert!(
+            i_res < i_src && i_src < i_trailer,
+            "head order must be toolUseResult < sourceToolAssistantUUID < trailer, got: {line}"
+        );
+    }
+
+    /// O1: a FAILED tool's `toolUseResult` is the plain string
+    /// `` `Error: ${message}` ``, NOT the `{"error":…}` object the port sends
+    /// on its stream-json wire (2.1.220 BIN off **235424595**).
+    #[tokio::test]
+    async fn error_tool_result_persists_the_bare_error_string() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let session_path = dir.path().join("session.jsonl");
+        let orch = orch_with_writer(dir.path(), session_path.clone());
+
+        let tuid = protocol::ToolUseId::new();
+        orch.record_tool_use_result(&tuid, serde_json::Value::String("Error: boom".into()))
+            .await;
+
+        let msg = ConversationMessage::User {
+            id: protocol::MessageId::new(),
+            content: vec![protocol::ContentBlock::ToolResult {
+                tool_use_id: tuid.clone(),
+                content: "Error: boom".into(),
+                is_error: true,
+                provider_tool_use_id: None,
+                content_blocks: None,
+            }],
+            is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+        };
+        orch.persist_message_to_jsonl(&msg).await;
+
+        let raw = std::fs::read_to_string(&session_path).expect("session file");
+        assert!(
+            raw.contains(r#""toolUseResult":"Error: boom""#),
+            "error result must be the bare string, got: {raw}"
+        );
+        assert!(
+            !raw.contains(r#""toolUseResult":{"error""#),
+            "the {{error:…}} object is the stream-json wire, not the transcript"
+        );
+    }
+
+    /// O1: an MCP tool's `mcpMeta` is a TOP-LEVEL sibling between
+    /// `toolDenialKind` and `sourceToolAssistantUUID`, never nested inside
+    /// `toolUseResult` (2.1.220 BIN off **232969604**: on the main chain
+    /// `Uks(undefined, meta)` returns the raw meta verbatim).
+    #[tokio::test]
+    async fn mcp_result_line_carries_mcp_meta_as_a_top_level_sibling() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let session_path = dir.path().join("session.jsonl");
+        let orch = orch_with_writer(dir.path(), session_path.clone());
+
+        let tuid = protocol::ToolUseId::new();
+        orch.record_tool_use_result(&tuid, serde_json::json!([{"type":"text","text":"hi"}]))
+            .await;
+        orch.record_tool_use_mcp_meta(&tuid, serde_json::json!({"_meta":{"claude/endTurn":true}}))
+            .await;
+
+        let msg = ConversationMessage::User {
+            id: protocol::MessageId::new(),
+            content: vec![protocol::ContentBlock::ToolResult {
+                tool_use_id: tuid.clone(),
+                content: "hi".into(),
+                is_error: false,
+                provider_tool_use_id: None,
+                content_blocks: None,
+            }],
+            is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+        };
+        orch.persist_message_to_jsonl(&msg).await;
+
+        let raw = std::fs::read_to_string(&session_path).expect("session file");
+        let line = raw.lines().next().expect("one line");
+        assert!(
+            line.contains(r#""mcpMeta":{"_meta":{"claude/endTurn":true}}"#),
+            "mcpMeta must ride verbatim, got: {line}"
+        );
+        let i_res = line.find(r#""toolUseResult""#).expect("result present");
+        let i_mcp = line.find(r#""mcpMeta""#).expect("meta present");
+        let i_trailer = line.find("userType").expect("trailer present");
+        assert!(
+            i_res < i_mcp && i_mcp < i_trailer,
+            "mcpMeta is a sibling AFTER toolUseResult and before the trailer, got: {line}"
+        );
+    }
+
+    /// O1: the exactly-one-`tool_result` guard (claude's `Tpr`) applies to
+    /// EVERY tool-result head key, not just `toolDenialKind` — a batched user
+    /// message carrying two results cannot attribute one message-level value.
+    #[tokio::test]
+    async fn two_tool_results_in_one_user_message_get_no_head_keys() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let session_path = dir.path().join("session.jsonl");
+        let orch = orch_with_writer(dir.path(), session_path.clone());
+
+        let a = protocol::ToolUseId::new();
+        let b = protocol::ToolUseId::new();
+        orch.record_tool_use_result(&a, serde_json::json!({"stdout":"a"}))
+            .await;
+        orch.record_tool_use_result(&b, serde_json::json!({"stdout":"b"}))
+            .await;
+        orch.record_source_tool_assistant_uuid(&a, "aaa".into())
+            .await;
+
+        let mk = |id: protocol::ToolUseId| protocol::ContentBlock::ToolResult {
+            tool_use_id: id,
+            content: "x".into(),
+            is_error: false,
+            provider_tool_use_id: None,
+            content_blocks: None,
+        };
+        let msg = ConversationMessage::User {
+            id: protocol::MessageId::new(),
+            content: vec![mk(a), mk(b)],
+            is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+        };
+        orch.persist_message_to_jsonl(&msg).await;
+
+        let raw = std::fs::read_to_string(&session_path).expect("session file");
+        assert!(!raw.contains("toolUseResult"), "got: {raw}");
+        assert!(!raw.contains("sourceToolAssistantUUID"), "got: {raw}");
+    }
+
     /// An ALLOWED tool's line is byte-unchanged — no stray key.
     #[tokio::test]
     async fn allowed_tool_result_line_has_no_denial_kind() {
@@ -17524,6 +19228,37 @@ mod persist_with_parent_tests {
     /// classifier + the on-disk transcript aggregate. Status is OMITTED (`None`)
     /// where the port has no confident canonical HTTP status (mirrors claude
     /// omitting `apiErrorStatus` when the error is not an `APIError`-with-status).
+    #[test]
+    fn classify_api_error_prefers_the_true_status_over_the_canonical_table() {
+        use llm_client::LlmError;
+        // A REAL 422 used to be persisted as 400: `InvalidRequest` mapped to its
+        // canonical status because the raw one was gone by then. The provider
+        // decoders now store the SDK's `${status} ${body}` text, so the true
+        // status survives into the transcript's `apiErrorStatus`.
+        for (status, expected) in [(422u16, 422u16), (424, 424), (409, 409)] {
+            let e = OrchestratorError::ApiCall(LlmError::InvalidRequest {
+                message: format!("{status} {{\"type\":\"error\"}}"),
+            });
+            let env = classify_api_error(&e);
+            assert_eq!(env.api_error_status, Some(expected), "status {status}");
+            // The CATEGORY still comes from the variant — only the status is
+            // sharpened, so the byte-locked file-format value is untouched.
+            assert_eq!(env.error, Some("invalid_request"));
+        }
+
+        // No prefix (internal validation, not a provider decode) → the canonical
+        // table still applies, exactly as before.
+        let internal = OrchestratorError::ApiCall(LlmError::InvalidRequest {
+            message: "invalid model name".to_string(),
+        });
+        assert_eq!(classify_api_error(&internal).api_error_status, Some(400));
+
+        // A variant carrying no message can never gain a prefix, so its
+        // canonical status is unaffected.
+        let auth = OrchestratorError::ApiCall(LlmError::Authentication);
+        assert_eq!(classify_api_error(&auth).api_error_status, Some(401));
+    }
+
     #[test]
     fn classify_api_error_maps_llm_variants_to_category_and_status() {
         use llm_client::LlmError;
@@ -18518,6 +20253,8 @@ mod post_compact_file_restore_tests {
             offset: None,
             limit: None,
             from_read: true,
+            seeded_from_context: false,
+            is_partial_view: false,
         }
     }
 

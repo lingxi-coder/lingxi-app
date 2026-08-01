@@ -463,6 +463,8 @@ async fn manual_compact_runs_reload_session_start_then_post_compact() {
         is_local_override: false,
         tier: memory::lingxi_md::LingxiMdTier::Project,
         globs: None,
+        raw_content: "compact test instructions".into(),
+        content_differs_from_disk: false,
     };
     let slot = Arc::new(sidequery::CacheSafeParamsSlot::new());
     let runner = Arc::new(

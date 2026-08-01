@@ -187,6 +187,8 @@ async fn fire_instructions_loaded_dispatches_one_event_per_file() {
         is_local_override: false,
         tier: memory::lingxi_md::LingxiMdTier::Project,
         globs: None,
+        raw_content: "project rules".into(),
+        content_differs_from_disk: false,
     };
     let local = MemoryFile {
         path: cwd.join("LINGXI.local.md"),
@@ -194,6 +196,8 @@ async fn fire_instructions_loaded_dispatches_one_event_per_file() {
         is_local_override: true,
         tier: memory::lingxi_md::LingxiMdTier::Local,
         globs: None,
+        raw_content: "local override".into(),
+        content_differs_from_disk: false,
     };
     let orch = orch_with(exec, vec![project.clone(), local.clone()], cwd);
 
@@ -238,6 +242,8 @@ async fn managed_tier_file_reports_memory_type_managed() {
         is_local_override: false,
         tier: memory::lingxi_md::LingxiMdTier::Managed,
         globs: None,
+        raw_content: "enterprise policy".into(),
+        content_differs_from_disk: false,
     };
     let orch = orch_with(exec, vec![managed.clone()], cwd);
 
@@ -274,6 +280,8 @@ async fn failing_instructions_loaded_hook_does_not_break_fire() {
         is_local_override: false,
         tier: memory::lingxi_md::LingxiMdTier::Project,
         globs: None,
+        raw_content: "x".into(),
+        content_differs_from_disk: false,
     };
     let orch = orch_with(Arc::new(exec), vec![file], cwd);
 
@@ -296,6 +304,8 @@ async fn fire_instructions_loaded_is_noop_without_a_registered_hook() {
         is_local_override: false,
         tier: memory::lingxi_md::LingxiMdTier::Project,
         globs: None,
+        raw_content: "x".into(),
+        content_differs_from_disk: false,
     };
     let orch = orch_with(exec, vec![file], cwd);
 

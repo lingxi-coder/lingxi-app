@@ -8,6 +8,7 @@ pub mod async_hook_response;
 pub mod bg_session;
 pub mod body_sections;
 pub mod conditional_rules;
+pub mod nested_memory;
 pub mod end_conversation;
 pub mod env_block;
 pub mod env_meta;
@@ -364,6 +365,19 @@ pub struct MemoryFile {
     /// `conditional_rules_reminder_message` (§F, claudemd.ts
     /// `processConditionedMdRules`).
     pub globs: Option<Vec<String>>,
+    /// claude-code `rawContent` — the file's RAW on-disk text, byte-verbatim
+    /// (carried through from [`memory::lingxi_md::loader::MemoryEntry::raw_content`]).
+    ///
+    /// Distinct from [`Self::body`], which is stripped AND trimmed. Consumed by
+    /// `ConversationOrchestrator::seed_memory_read_state` so a later `Read` of
+    /// this path can be compared against the bytes actually on disk.
+    pub raw_content: String,
+    /// claude-code `contentDiffersFromDisk` (`bn_` @230803364: `p = d !== e`,
+    /// an exact compare with NO trim) — whether frontmatter / HTML-comment
+    /// stripping changed the body relative to disk.
+    ///
+    /// Becomes the seeded entry's `is_partial_view`.
+    pub content_differs_from_disk: bool,
 }
 
 #[cfg(test)]
@@ -419,6 +433,8 @@ mod tests {
             is_local_override: false,
             tier: memory::lingxi_md::LingxiMdTier::Project,
             globs: None,
+            raw_content: "# title\nbody\n".into(),
+            content_differs_from_disk: false,
         };
         assert!(!f.is_local_override);
         assert!(f.body.contains("title"));

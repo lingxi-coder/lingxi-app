@@ -106,6 +106,19 @@ pub struct BuiltinToolContext {
     /// boot values this was constructed with — byte-identical to the old
     /// frozen fields.
     pub session_cwd: Arc<SessionCwd>,
+    /// Id of the session this tool call belongs to.
+    ///
+    /// Needed for session-scoped on-disk artifacts — claude-code persists
+    /// oversized tool output under
+    /// `<config>/projects/<sanitized-cwd>/<session-id>/tool-results/`
+    /// (`qzg()`/`xke()`, 2.1.220 @230268971), a path that cannot be built from
+    /// `session_cwd` alone. Without it the web/MCP persist sites fell back to
+    /// `<cwd>/.lingxi/tool-results`, dropping artifacts inside the user's repo.
+    ///
+    /// `None` at construction sites that have no session (tests, and the
+    /// mobile/git shims that never persist); those keep the workspace-local
+    /// fallback. The production desktop context sets it.
+    pub session_id: Option<protocol::SessionId>,
     /// Shared record of the single active worktree the session entered via
     /// `EnterWorktree` (worktree 206 parity plan, Task 8). `None` when no
     /// worktree is active — the INERT default at every construction site.
@@ -318,6 +331,36 @@ pub struct BuiltinToolContext {
 }
 
 impl BuiltinToolContext {
+    /// Directory for persisted oversized tool output.
+    ///
+    /// claude-code's `xke()` — `vas.join(qzg(), "tool-results")` where
+    /// `qzg()` is `<projects>/<sessionId>` (2.1.220 @230268971) — i.e.
+    /// `<config>/projects/<sanitized-cwd>/<session-id>/tool-results/`. Verified
+    /// on disk against real transcripts.
+    ///
+    /// Falls back to the workspace-local `<cwd>/<DOT_DIR>/tool-results` only
+    /// when [`Self::session_id`] is `None`. That is the inert case (tests, and
+    /// the mobile shims that never persist); the live desktop context sets the
+    /// id, so the fallback is not the production path. It is kept rather than
+    /// inventing a placeholder session segment — but note it writes inside the
+    /// user's workspace, which is exactly what the session-scoped path fixes.
+    #[must_use]
+    pub fn tool_results_dir(&self) -> PathBuf {
+        let cwd = self.cwd();
+        let Some(session_id) = self.session_id.as_ref() else {
+            return cwd.join(branding::DOT_DIR).join("tool-results");
+        };
+        let home = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map_or_else(PathBuf::new, PathBuf::from);
+        let lingxi_home = branding::config_home(&home, std::env::var_os(branding::CONFIG_DIR_ENV));
+        session::jsonl::tool_results_dir(
+            &lingxi_home,
+            &cwd.to_string_lossy(),
+            &session_id.as_uuid().to_string(),
+        )
+    }
+
     /// Current session cwd (worktree parity plan, Task 2). Reads through
     /// [`SessionCwd::cwd`] — byte-identical to the old frozen `workspace`
     /// field until a worktree tool calls `session_cwd.swap(..)`.
@@ -875,5 +918,51 @@ mod tests {
             ctx.android_shell.is_none(),
             "android_shell must default to None in test builder"
         );
+    }
+
+    /// With a session, persisted output goes to claude-code's session-scoped
+    /// `<projects>/<session-id>/tool-results` — and crucially NOT under `cwd`.
+    ///
+    /// Asserts the SHAPE rather than an absolute path so the test needs no
+    /// `HOME` manipulation (which races across parallel tests). The exact
+    /// layout is pinned by `session::jsonl::path`'s own tests.
+    #[test]
+    fn tool_results_dir_is_session_scoped_and_outside_the_workspace() {
+        let mut ctx = crate::test_support::ctx_for_file_tools(
+            crate::test_support::make_dummy_fs(),
+            std::sync::Arc::new(telemetry::AnalyticsBus::new()),
+            vec![],
+        );
+        let sid = protocol::SessionId::new();
+        ctx.session_id = Some(sid);
+        let dir = ctx.tool_results_dir();
+        let text = dir.to_string_lossy().to_string();
+
+        assert!(text.contains("projects"), "under the projects dir: {text}");
+        assert!(
+            text.contains(&sid.as_uuid().to_string()),
+            "carries the session id: {text}"
+        );
+        assert!(text.ends_with("tool-results"), "leaf is tool-results: {text}");
+        assert!(
+            !dir.starts_with(ctx.cwd()),
+            "must NOT write inside the user's workspace: {text}"
+        );
+    }
+
+    /// Without a session there is no session-scoped location to use, so the
+    /// workspace-local fallback stands. This is the INERT path (tests + the
+    /// mobile shims), not production — the desktop context sets the id.
+    #[test]
+    fn tool_results_dir_falls_back_under_cwd_when_there_is_no_session() {
+        let ctx = crate::test_support::ctx_for_file_tools(
+            crate::test_support::make_dummy_fs(),
+            std::sync::Arc::new(telemetry::AnalyticsBus::new()),
+            vec![],
+        );
+        assert!(ctx.session_id.is_none(), "builder leaves it unset");
+        let dir = ctx.tool_results_dir();
+        assert!(dir.starts_with(ctx.cwd()), "fallback is workspace-local: {dir:?}");
+        assert!(dir.ends_with("tool-results"), "{dir:?}");
     }
 }

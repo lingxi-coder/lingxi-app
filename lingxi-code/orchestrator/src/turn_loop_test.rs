@@ -1271,6 +1271,8 @@ mod read_file_state_tests {
                 offset: None,
                 limit: None,
                 from_read: true,
+                seeded_from_context: false,
+                is_partial_view: false,
             },
         );
     }
@@ -1314,6 +1316,8 @@ mod read_file_state_tests {
                 offset: Some(2),
                 limit: Some(1),
                 from_read: true,
+                seeded_from_context: false,
+                is_partial_view: false,
             },
         );
         let entry = tool_api::read_file_state::get(
@@ -1429,6 +1433,8 @@ mod read_file_state_tests {
                 offset: None,
                 limit: None,
                 from_read: true,
+                seeded_from_context: false,
+                is_partial_view: false,
             },
         );
         tool_api::read_file_state::set(
@@ -1440,6 +1446,8 @@ mod read_file_state_tests {
                 offset: None,
                 limit: None,
                 from_read: true,
+                seeded_from_context: false,
+                is_partial_view: false,
             },
         );
 
@@ -1515,6 +1523,8 @@ mod read_file_state_tests {
                 offset: None,
                 limit: None,
                 from_read: true,
+                seeded_from_context: false,
+                is_partial_view: false,
             },
         );
         assert!(
@@ -1585,6 +1595,8 @@ mod read_file_state_tests {
                 offset: None,
                 limit: None,
                 from_read: true,
+                seeded_from_context: false,
+                is_partial_view: false,
             },
         );
 
@@ -4560,9 +4572,19 @@ mod pre_tool_hook_tests {
 
     /// A `PreToolUse` hook returning `permissionDecision: "defer"` in
     /// NON-interactive (print) mode for a SOLO tool call defers the tool: it is
-    /// NOT executed (no tool_result), the turn is terminated
-    /// (`prevent_continuation`), and a `hook_deferred_tool` meta message is
-    /// injected carrying the faithful fields.
+    /// NOT executed (no tool_result) and the turn is terminated
+    /// (`prevent_continuation`).
+    ///
+    /// O2 CORRECTION: this test previously asserted that a `hook_deferred_tool`
+    /// JSON blob was INJECTED as a model-facing message. That was anti-parity —
+    /// the oracle's renderer for this attachment type is
+    /// `hook_deferred_tool:()=>[]` (2.1.220 BIN off **238109388**), so the model
+    /// sees nothing at all; the payload is a PERSISTED `type:"attachment"`
+    /// transcript line that exists for the resume scanner `QAs` (BIN off
+    /// 237925753) and the stream-json engine (BIN off 240899919). The
+    /// persistence itself is covered by
+    /// `turn_loop::hook_context_attachment_tests::
+    /// deferred_tool_is_persisted_and_never_shown_to_the_model`.
     #[tokio::test]
     async fn defer_in_print_mode_solo_tool_defers_and_terminates() {
         let resp = HookResponse {
@@ -4585,7 +4607,7 @@ mod pre_tool_hook_tests {
             "the deferred tool produces NO tool_result: {results:?}"
         );
         assert!(prevent, "defer terminates the turn (prevent_continuation)");
-        // a hook_deferred_tool meta message was injected
+        // The deferred-tool payload must NOT reach the model.
         let joined: String = injected
             .iter()
             .map(|(m, _)| match m {
@@ -4600,12 +4622,9 @@ mod pre_tool_hook_tests {
             })
             .collect();
         assert!(
-            joined.contains("hook_deferred_tool"),
-            "a hook_deferred_tool meta message must be injected: {joined}"
-        );
-        assert!(
-            joined.contains("\"hookEvent\":\"PreToolUse\""),
-            "the meta carries hookEvent=PreToolUse: {joined}"
+            !joined.contains("hook_deferred_tool"),
+            "the renderer is `hook_deferred_tool:()=>[]` (BIN off 238109388) — \
+             the model must never see the payload: {joined}"
         );
     }
 
@@ -5249,13 +5268,23 @@ mod memdir_index_cap_tests {
             .await
             .unwrap();
 
+        // O3 (adjudicated at the oracle): the notice is delivered as a
+        // PostToolUse `additionalContext` (`memory/src/index_cap.rs` module
+        // docs: claude's `IZg`/`XGu` callback returns it as `additionalContext`).
+        // claude's PostToolUse consumer (2.1.220 BIN off 234726655) yields ONLY
+        // a `hook_additional_context` attachment for that channel and NEVER
+        // folds it into the tool_result string — the success arm (BIN off
+        // 235420375) assembles the result blocks with no hook context at all.
+        // This assertion previously encoded the port's DOUBLE emission.
         let text = tool_result_text(&results[0]);
-        assert!(text.contains("The memory index at MEMORY.md is 170 lines"));
-        assert!(text.contains("approaching the 200-line read limit"));
+        assert!(
+            !text.contains("The memory index at MEMORY.md is 170 lines"),
+            "additionalContext must not be folded into the tool_result: {text}"
+        );
         assert_eq!(
             injected.len(),
             1,
-            "notice also surfaces as additional context"
+            "notice surfaces once, as additional context"
         );
         assert!(injected[0]
             .0

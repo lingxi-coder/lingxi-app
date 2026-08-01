@@ -40,7 +40,10 @@ pub mod watcher_rebinder;
 
 pub use async_registry::AsyncHookRegistry;
 pub use attachment::{
-    cancelled_attachment, non_blocking_error_attachment, success_attachment, CancellationTimeout,
+    additional_context_attachment, blocking_error_attachment, blocking_error_prose,
+    cancelled_attachment, deferred_tool_attachment, error_during_execution_attachment,
+    non_blocking_error_attachment, stopped_continuation_attachment,
+    success_attachment, system_message_attachment, BlockingError, CancellationTimeout,
     HookAttachmentIdentity, HookAttachmentSink,
 };
 pub use cwd_changed_firer::{CwdChangedFire, CwdChangedFirer, OptionalCwdChangedFirer};

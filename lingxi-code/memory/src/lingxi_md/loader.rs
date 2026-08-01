@@ -1,4 +1,5 @@
-//! LINGXI.md file reader (no size cap — parity with claude-code `readFile`).
+//! LINGXI.md file reader. Skips any file that is not regular or exceeds
+//! [`MEMORY_FILE_BYTE_LIMIT`] (4 MiB on bytes), matching claude-code.
 //!
 //! Beyond the raw [`load_file`] reader this module also ports the
 //! claude-code `@import` / `@include` expansion and the per-file body
@@ -6,12 +7,43 @@
 //! orchestrator can splice referenced files into the memory block exactly
 //! the way the TS reference does. See [`expand_memory_file`].
 //!
-//! claude-code reads every memory file whole (claudemd.ts:424-437 — plain
-//! `readFile`, no size check). It does NOT drop oversized files; it only
-//! surfaces a non-blocking warning list for files over
+//! ⚠️ CORRECTION — the paragraph below was wrong, and wrong in the direction
+//! that stops someone reinstating a real behaviour. It claimed claude-code
+//! applies "no size check" and that any byte cap was `LingXi`-invented. The
+//! 2.1.220 BINARY says otherwise: `Eds` (@230805636) routes every memory file
+//! through `EG` (@229022173) —
+//! `let o=await e.stat(t); if(!o.isFile()||o.size>r) return n?.(o),null;` —
+//! with `r = ELu = 4194304` (4 MiB, @230811638, declared in the same run as
+//! the `gn_ = 40000` this crate already cites). A non-regular or oversized
+//! file is SKIPPED, logged as
+//! `[CLAUDE.md] skipping {path}: not a regular file or exceeds {N} byte limit`,
+//! and reported once as `file_skipped_special_or_oversize`.
+//!
+//! The old claim cited `claudemd.ts:424-437` — LEAKED TS, which this repo has
+//! repeatedly found stale against the shipped binary. Treat the binary as the
+//! oracle here.
+//!
+//! PORTED: [`load_file`] stats first and returns
+//! [`LoaderError::FileTooLarge`] for a non-regular file or one over the limit,
+//! which every caller already treats as "no memory file here" — the oracle's
+//! `null`. [`report_skipped_memory_file`] then carries the skip line and the
+//! one-shot report, matching how the oracle splits `EG` (stat only) from `Eds`
+//! (message + report).
+//!
+//! The report is `Ne("context_claude_md_load","file_skipped_special_or_oversize")`,
+//! and `Ne` is thin — `M("tengu_feature_sad",{feature_name, error_code})`
+//! (@226537274) — so only that one call is ported here. `Ne`/`be`/`pe` also
+//! cover `context_mcp`, `context_git_detect`, `context_management` and the
+//! sibling `read_eacces` / `read_failed` / `load_threw` reasons on this very
+//! path; that context-load health family is otherwise UNPORTED and is a
+//! separate unit of work.
+//!
+//! Separately from the skip cap, claude-code surfaces a non-blocking warning
+//! list for files over
 //! [`crate::MAX_MEMORY_CHARACTER_COUNT`] (40k chars) via
 //! [`crate::get_large_memory_files`]. The 10 MB drop this loader used to
-//! enforce was a `LingXi`-invented behaviour with no TS analogue and has been
+//! enforce was still not the oracle's rule (the oracle's is 4 MiB on BYTES,
+//! before sanitisation) and has been
 //! removed.
 
 use regex::Regex;
@@ -37,44 +69,100 @@ pub enum LoaderError {
     /// I/O error reading the file.
     #[error("io: {0}")]
     Io(String),
-    /// Retained for the `memdir`/TUI consumers that still pattern-match it.
+    /// Also carries the NON-REGULAR-file case, because the oracle folds both
+    /// into one `null` return (`!o.isFile() || o.size > r`) and every caller
+    /// treats them identically: there is no memory file to read here.
     ///
-    /// [`load_file`] NO LONGER produces this variant — LINGXI.md files are
-    /// read whole (parity with claude-code, which has no size drop). The
-    /// memdir scanner keeps its own [`crate::MAX_MEMORY_FILE_SIZE`] cap, and
-    /// the `/memory` TUI dialog still carries a match arm for it; the variant
-    /// stays so those out-of-subsystem callers compile unchanged.
+    /// Produced by [`load_file`] again as of the `ELu` port; the memdir scanner
+    /// keeps its own [`crate::MAX_MEMORY_FILE_SIZE`] cap and the `/memory` TUI
+    /// dialog's match arm is unchanged.
     #[error("file too large: {bytes} bytes at {path}")]
     FileTooLarge {
         /// Path of the oversized file.
         path: PathBuf,
         /// Observed size in bytes.
         bytes: u64,
+        /// Which half of `!o.isFile() || o.size > r` rejected the path.
+        ///
+        /// Both halves skip the file identically, but the oracle SUPPRESSES its
+        /// one-shot report for a directory (`if(!CLu && !o)` with
+        /// `o = stat.isDirectory()`), so the caller needs to tell them apart.
+        /// Carried here rather than re-`stat`ing at the report site, mirroring
+        /// the oracle's `n?.(o)` callback, which hands the same stat straight
+        /// back to `Eds`.
+        is_directory: bool,
     },
 }
 
 /// Telemetry event name for the memdir oversize-skip path.
 ///
-/// Not fired by the LINGXI.md hierarchy loader anymore (it has no size drop);
-/// retained for the memdir subsystem, which documents this event name as the
-/// mechanism it reports oversize files through.
+/// ⚠️ NOT AN ORACLE EVENT. `tengu_memory_file_too_large` has ZERO occurrences in
+/// the 2.1.220 binary, and [`emit_file_too_large`] below has no production
+/// caller — only its own unit test. The doc that claimed this is "the mechanism
+/// memdir reports oversize files through" was describing an invention, not a
+/// port. The real claude-code report for a skipped memory file is
+/// [`report_skipped_memory_file`]; this pair is left in place only because
+/// removing it touches memdir's docs, and is flagged so nobody cites it as
+/// parity evidence.
 pub const TENGU_MEMORY_FILE_TOO_LARGE: &str = "tengu_memory_file_too_large";
 
-/// Load one LINGXI.md (or local override) file — whole, no size cap.
+/// `tengu_feature_sad` — the generic soft-failure counter the binary's
+/// `Ne`/`logFeatureSad` helper emits (@226537274):
+/// `Ne(e,t,r) = M("tengu_feature_sad",{...r, feature_name: fe(e), error_code: t})`.
 ///
-/// Parity with claude-code `safelyReadMemoryFileAsync` (claudemd.ts:424-437):
-/// a plain `readFile` with no size check. Oversized files are NEVER dropped;
-/// the 40k-char recommendation is a non-blocking warning surfaced separately
-/// by [`crate::get_large_memory_files`].
+/// The same event the MCP tool's `Ue` port already uses; redeclared locally
+/// because the `tengu_feature_*` family has no shared home in `telemetry::tengu`.
+const TENGU_FEATURE_SAD: &str = "tengu_feature_sad";
+
+/// `feature_name` for the memory-file loading step.
+///
+/// NOT rebranded: `feature_name`/`error_code` are analytics WIRE identifiers,
+/// which this port keeps verbatim (same rule that kept `tengu_*` event names and
+/// `mcp_auto_background`). Only human-readable text gets the LingXi name — see
+/// [`skip_log_line`].
+const CONTEXT_CLAUDE_MD_LOAD_FEATURE: &str = "context_claude_md_load";
+
+/// `error_code` reported when a memory file is skipped as special or oversized.
+const FILE_SKIPPED_SPECIAL_OR_OVERSIZE: &str = "file_skipped_special_or_oversize";
+
+/// claude-code `ELu` (2.1.220 binary offset 230811638, declared in the same run
+/// as the `gn_ = 40000` this crate cites elsewhere): the byte ceiling above
+/// which a memory file is SKIPPED rather than read.
+pub const MEMORY_FILE_BYTE_LIMIT: u64 = 4_194_304;
+
+/// Load one LINGXI.md (or local override) file, skipping it when it is not a
+/// regular file or exceeds [`MEMORY_FILE_BYTE_LIMIT`].
+///
+/// Ports claude-code `EG` (2.1.220 binary offset 229022173):
+/// `let o=await e.stat(t); if(!o.isFile()||o.size>r) return n?.(o),null;`
+/// called from `Eds` (@230805636) with `r = ELu`. Note `size > r` — a file
+/// EXACTLY at the limit still loads.
+///
+/// The size is taken from `stat`, not from the decoded string: the oracle
+/// tests the on-disk byte count BEFORE reading, so a file is skipped without
+/// ever being loaded into memory. Reading first and measuring after would both
+/// defeat the point and mis-measure, since `read_to_string` rejects non-UTF-8
+/// before any length is known.
 ///
 /// # Errors
 ///
-/// - [`LoaderError::Io`] for filesystem errors (file missing, unreadable,
-///   permissions). `load_file` never returns [`LoaderError::FileTooLarge`].
+/// - [`LoaderError::Io`] for filesystem errors (missing, unreadable,
+///   permissions, non-UTF-8).
+/// - [`LoaderError::FileTooLarge`] for a non-regular file or one over the
+///   limit — the caller treats both as "no memory file here", matching the
+///   oracle's `null` return.
 pub fn load_file(
     path: &Path,
     _bus: Option<&Arc<telemetry::AnalyticsBus>>,
 ) -> Result<LoadedFile, LoaderError> {
+    let meta = std::fs::metadata(path).map_err(|e| LoaderError::Io(e.to_string()))?;
+    if !meta.is_file() || meta.len() > MEMORY_FILE_BYTE_LIMIT {
+        return Err(LoaderError::FileTooLarge {
+            path: path.to_path_buf(),
+            bytes: meta.len(),
+            is_directory: meta.is_dir(),
+        });
+    }
     let body = std::fs::read_to_string(path).map_err(|e| LoaderError::Io(e.to_string()))?;
     // `len()` of the UTF-8 string is the byte size we just read; avoids a
     // second `metadata` syscall and is exact for the bytes loaded.
@@ -84,6 +172,64 @@ pub fn load_file(
         body,
         size_bytes,
     })
+}
+
+/// Render the skip line claude-code logs for every skipped memory file.
+///
+/// Byte-verbatim to `Eds`'s template (@230805636) apart from the file name:
+/// ``[CLAUDE.md] skipping ${e}: not a regular file or exceeds ${ELu} byte limit``.
+/// `CLAUDE.md` → `LINGXI.md` is the established rebrand for human-readable text
+/// in this crate (`format_large_memory_file_status_row` does the same to "Large
+/// CLAUDE.md will impact performance"); the limit is interpolated as the raw
+/// number, exactly as `${ELu}` renders.
+fn skip_log_line(path: &Path) -> String {
+    format!(
+        "[LINGXI.md] skipping {}: not a regular file or exceeds {MEMORY_FILE_BYTE_LIMIT} byte limit",
+        path.display()
+    )
+}
+
+/// Claim the process-wide one-shot report slot for a skipped memory file.
+///
+/// Ports the guard in `Eds`'s skip branch: `if(!CLu && !o) CLu=!0, Ne(…)`.
+/// Two details that are easy to get wrong and are pinned by tests:
+///
+/// - A directory returns `false` WITHOUT claiming the slot. The oracle only
+///   assigns `CLu` inside the `!o` arm, so a directory seen first still leaves
+///   the report available for a genuine oversize skip later.
+/// - Every skip after the first returns `false` — the log line repeats, the
+///   report does not.
+///
+/// Takes the slot by reference so the guard is testable without process-global
+/// state; [`report_skipped_memory_file`] supplies the real one.
+fn take_skip_report_slot(slot: &std::sync::atomic::AtomicBool, is_directory: bool) -> bool {
+    use std::sync::atomic::Ordering;
+    if is_directory {
+        return false;
+    }
+    slot.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+}
+
+/// `CLu` — the process-wide one-shot guard for the skip report.
+static SKIP_REPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Log, and at most once per process report, a memory file skipped by
+/// [`load_file`]'s stat guard.
+///
+/// Ports the `i===null` branch of `Eds` (@230805636). The log fires on EVERY
+/// skip at DEBUG (`w`'s default level is `debug` — `function w(e,{level:t}=
+/// {level:"debug"})` @225937669); the `tengu_feature_sad` report fires at most
+/// once and never for a directory.
+pub fn report_skipped_memory_file(path: &Path, is_directory: bool) {
+    tracing::debug!("{}", skip_log_line(path));
+    if take_skip_report_slot(&SKIP_REPORTED, is_directory) {
+        tracing::info!(
+            event = TENGU_FEATURE_SAD,
+            feature_name = CONTEXT_CLAUDE_MD_LOAD_FEATURE,
+            error_code = FILE_SKIPPED_SPECIAL_OR_OVERSIZE,
+        );
+    }
 }
 
 /// Emit `tengu_memory_file_too_large` (memdir oversize-skip path).
@@ -158,6 +304,26 @@ pub struct MemoryEntry {
     /// match-all `**` dropped. `None` means the rule applies unconditionally;
     /// `Some(_)` marks a CONDITIONAL rule that must NOT be eagerly injected.
     pub globs: Option<Vec<String>>,
+    /// The file's RAW on-disk text, byte-verbatim (claude-code `rawContent`).
+    ///
+    /// [`load_file`] returns `std::fs::read_to_string` output unmodified, so
+    /// this IS the disk text — no trim, no newline normalization, frontmatter
+    /// and HTML comments still present.
+    ///
+    /// The seeded read-state entry uses this (not [`Self::body`], which the
+    /// memory-block renderer later `.trim()`s) so a `Read` of the file can be
+    /// compared against the bytes on disk.
+    pub raw_content: String,
+    /// claude-code `contentDiffersFromDisk` — `bn_` @230803364 computes it as
+    /// `let p = d !== e`: an EXACT string compare of the stripped body `d`
+    /// against the raw disk text `e`, with **no trim**.
+    ///
+    /// `false` for an ordinary LINGXI.md (no frontmatter, no HTML comments —
+    /// stripping is a no-op), which is precisely the case the seeded Read
+    /// dedup fires on. `true` once frontmatter or a block HTML comment was
+    /// stripped, which seeds the entry with `is_partial_view: true` and so
+    /// refuses both the dedup and the staleness content-equality fallback.
+    pub content_differs_from_disk: bool,
 }
 
 /// Result of parsing one memory file's raw bytes.
@@ -260,9 +426,15 @@ pub fn discover_external_include_paths(
 ///   nothing and be skipped.
 /// - `depth`: 0 for a top-level LINGXI.md.
 ///
-/// Missing / unreadable files are silently ignored (the ENOENT branch of
-/// `safelyReadMemoryFileAsync`, claudemd.ts:433-436). There is no size cap —
-/// files are read whole.
+/// Missing / unreadable files are silently ignored — the oracle throws out of
+/// `EG` into `Eds`'s catch, which reports through a different (unported) family
+/// and prints no skip line.
+///
+/// CORRECTED: the tail of this doc read "There is no size cap — files are read
+/// whole", citing `claudemd.ts:433-436`. There IS a cap. A file rejected by
+/// [`load_file`]'s stat guard is skipped AND announced via
+/// [`report_skipped_memory_file`]; this function is the port's `Eds`, so the
+/// message and the one-shot report belong here rather than in the reader.
 #[must_use]
 pub fn expand_memory_file<S: std::hash::BuildHasher>(
     path: &Path,
@@ -281,9 +453,24 @@ pub fn expand_memory_file<S: std::hash::BuildHasher>(
     // (claudemd.ts:645).
     processed.insert(key);
 
-    // Read whole; any error (ENOENT, perms) => skip. No size cap.
-    let Ok(loaded) = load_file(path, None) else {
-        return Vec::new();
+    // Read; a stat-guard skip is logged + reported here rather than inside
+    // `load_file`, matching the oracle's split: `EG` only stats and returns
+    // `null`, and its caller `Eds` owns the message and the one-shot report.
+    //
+    // Only THIS site reports. `discover_external_include_paths` re-walks the
+    // same files to build the startup approval dialog's target list; it is a
+    // port-side pre-scan with no `Eds` counterpart, so logging there too would
+    // double every skip line for one user-visible event.
+    let loaded = match load_file(path, None) {
+        Ok(loaded) => loaded,
+        Err(LoaderError::FileTooLarge { is_directory, .. }) => {
+            report_skipped_memory_file(path, is_directory);
+            return Vec::new();
+        }
+        // ENOENT / perms / non-UTF-8: the oracle throws out of `EG` into
+        // `Eds`'s catch, which routes to `wn_` (a different report family:
+        // `read_eacces` / `read_failed`) and never prints the skip line.
+        Err(_) => return Vec::new(),
     };
 
     let parsed = parse_memory_content(&loaded.body, path, home);
@@ -293,10 +480,20 @@ pub fn expand_memory_file<S: std::hash::BuildHasher>(
     }
 
     // Parent before children (claudemd.ts:663-664).
+    //
+    // `content_differs_from_disk` is `bn_`'s `p = d !== e` (@230803364): the
+    // stripped body compared EXACTLY against the raw disk text, no trim. It
+    // must be computed HERE, before the memory-block renderer's later
+    // `.trim()`, or every file would falsely report "differs". `loaded.body` is
+    // `read_to_string` output verbatim (see `load_file`), so it IS the disk
+    // text.
+    let content_differs_from_disk = parsed.body != loaded.body;
     let mut result = vec![MemoryEntry {
         path: path.to_path_buf(),
         body: parsed.body,
         globs: parsed.globs,
+        raw_content: loaded.body,
+        content_differs_from_disk,
     }];
 
     for inc in parsed.include_paths {
@@ -1063,7 +1260,57 @@ fn path_in_working_path(path: &Path, working: &Path) -> bool {
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::atomic::AtomicBool;
     use tempfile::TempDir;
+
+    #[test]
+    fn expand_memory_file_reports_disk_fidelity() {
+        // Pins the oracle rule `bn_` @230803364: `let p = d !== e` — an EXACT
+        // string compare of the frontmatter/HTML-comment-stripped body against
+        // the RAW disk text, with NO trim. This is what keeps the seeded Read
+        // dedup from being inert: an ordinary LINGXI.md with a trailing newline
+        // and no frontmatter has `differs === false`, so its seeded entry holds
+        // the byte-exact disk text and CAN dedup.
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path();
+
+        let plain = cwd.join("LINGXI.md");
+        fs::write(&plain, "# rules\nbe good\n").unwrap();
+        let mut seen = HashSet::new();
+        let out = expand_memory_file(&plain, &mut seen, false, cwd, None, 0);
+        assert_eq!(out.len(), 1);
+        assert!(
+            !out[0].content_differs_from_disk,
+            "plain file with a trailing newline must NOT differ from disk"
+        );
+        assert_eq!(
+            out[0].raw_content, "# rules\nbe good\n",
+            "raw_content must be the byte-exact disk text, trailing newline included"
+        );
+
+        let fm = cwd.join("cond.md");
+        fs::write(&fm, "---\npaths: src/**\n---\nbody\n").unwrap();
+        let mut seen = HashSet::new();
+        let out = expand_memory_file(&fm, &mut seen, false, cwd, None, 0);
+        assert_eq!(out.len(), 1);
+        assert!(
+            out[0].content_differs_from_disk,
+            "stripped frontmatter must mark the entry as differing from disk"
+        );
+        assert_eq!(out[0].raw_content, "---\npaths: src/**\n---\nbody\n");
+        assert_ne!(out[0].body, out[0].raw_content);
+
+        let com = cwd.join("comment.md");
+        fs::write(&com, "start\n<!-- hidden -->\nend\n").unwrap();
+        let mut seen = HashSet::new();
+        let out = expand_memory_file(&com, &mut seen, false, cwd, None, 0);
+        assert_eq!(out.len(), 1);
+        assert!(
+            out[0].content_differs_from_disk,
+            "a stripped HTML comment must mark the entry as differing from disk"
+        );
+        assert_eq!(out[0].raw_content, "start\n<!-- hidden -->\nend\n");
+    }
 
     #[test]
     fn text_include_extension_gate_matches_binary() {
@@ -1102,19 +1349,130 @@ mod tests {
         assert!(out.body.contains("hello"));
         assert_eq!(out.size_bytes, 14);
     }
-
+    /// SUPERSEDED by `file_over_the_byte_limit_is_skipped`.
+    ///
+    /// This asserted an 11 MiB file loads, which followed from a module doc
+    /// claiming claude-code applies no size check. That doc cited leaked TS;
+    /// the binary skips anything over `ELu = 4194304`. The assertion is
+    /// inverted rather than deleted so the correction stays visible.
     #[test]
-    fn oversized_file_is_loaded_not_dropped() {
-        // GAP 4: claude-code has no size drop (claudemd.ts:424-437 reads whole).
-        // A file far over the old 10 MB cap must now LOAD successfully.
-        let tmp = TempDir::new().unwrap();
-        let p = tmp.path().join("LINGXI.md");
-        let bytes = vec![b'a'; 11 * 1024 * 1024];
-        fs::write(&p, &bytes).unwrap();
-        let out = load_file(&p, None).expect("oversized file must load, not error");
-        assert_eq!(out.size_bytes, 11 * 1024 * 1024);
-        assert_eq!(out.body.len(), 11 * 1024 * 1024);
+    fn oversized_file_is_skipped_not_loaded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let p = dir.path().join("LINGXI.md");
+        std::fs::write(&p, "x".repeat(11 * 1024 * 1024)).unwrap();
+        assert!(
+            load_file(&p, None).is_err(),
+            "an 11 MiB memory file is over ELu and must be skipped"
+        );
     }
+    /// A memory file over the oracle's byte limit is SKIPPED, not read.
+    ///
+    /// `Eds` (@230805636) routes every memory file through `EG` (@229022173):
+    /// `let o=await e.stat(t); if(!o.isFile()||o.size>r) return n?.(o),null;`
+    /// with `r = ELu = 4194304` (@230811638). The old expectation here — that
+    /// an 11 MiB file loads — came from a module doc that cited leaked TS and
+    /// claimed claude applies no size check. The binary says otherwise.
+    #[test]
+    fn file_over_the_byte_limit_is_skipped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let p = dir.path().join("LINGXI.md");
+        std::fs::write(&p, "x".repeat(MEMORY_FILE_BYTE_LIMIT as usize + 1)).unwrap();
+        match load_file(&p, None) {
+            Err(LoaderError::FileTooLarge { bytes, .. }) => {
+                assert_eq!(bytes, MEMORY_FILE_BYTE_LIMIT + 1);
+            }
+            other => panic!("expected FileTooLarge, got {other:?}"),
+        }
+    }
+
+    /// EXACTLY at the limit still loads — the oracle's test is `size > r`.
+    #[test]
+    fn file_at_the_byte_limit_still_loads() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let p = dir.path().join("LINGXI.md");
+        std::fs::write(&p, "x".repeat(MEMORY_FILE_BYTE_LIMIT as usize)).unwrap();
+        let out = load_file(&p, None).expect("a file at the limit is not over it");
+        assert_eq!(out.size_bytes, MEMORY_FILE_BYTE_LIMIT);
+    }
+
+    /// A directory is skipped by the `!o.isFile()` half of the same guard.
+    #[test]
+    fn non_regular_file_is_skipped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sub = dir.path().join("LINGXI.md");
+        std::fs::create_dir(&sub).unwrap();
+        assert!(
+            load_file(&sub, None).is_err(),
+            "a directory must not be read as a memory file"
+        );
+    }
+
+    /// The skip line is byte-verbatim to `Eds`'s template
+    /// (`[CLAUDE.md] skipping ${e}: not a regular file or exceeds ${ELu} byte
+    /// limit`) with the file NAME rebranded, the same split
+    /// `format_large_memory_file_status_row` already applies to "Large
+    /// CLAUDE.md will impact performance".
+    #[test]
+    fn skip_log_line_matches_the_oracle_template() {
+        assert_eq!(
+            skip_log_line(Path::new("/w/LINGXI.md")),
+            "[LINGXI.md] skipping /w/LINGXI.md: not a regular file or exceeds 4194304 byte limit"
+        );
+    }
+
+    /// `!CLu` — the report fires at most once per process, however many files
+    /// are skipped.
+    #[test]
+    fn the_skip_report_fires_only_once() {
+        let slot = AtomicBool::new(false);
+        assert!(take_skip_report_slot(&slot, false), "the first skip reports");
+        assert!(
+            !take_skip_report_slot(&slot, false),
+            "a later skip is silent"
+        );
+    }
+
+    /// `!o` — a DIRECTORY is logged but never reported, AND must not burn the
+    /// one-shot slot: the oracle only assigns `CLu` inside `if(!CLu && !o)`, so
+    /// a directory seen first still leaves the report available for a genuine
+    /// oversize skip later.
+    #[test]
+    fn a_directory_skip_is_never_reported_and_keeps_the_slot() {
+        let slot = AtomicBool::new(false);
+        assert!(
+            !take_skip_report_slot(&slot, true),
+            "a directory is not reported"
+        );
+        assert!(
+            take_skip_report_slot(&slot, false),
+            "the slot survived for a real oversize skip"
+        );
+    }
+
+    /// The two halves of `!o.isFile() || o.size > r` are distinguishable,
+    /// because only the non-directory half is reported.
+    #[test]
+    fn the_skip_error_distinguishes_a_directory_from_an_oversized_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let as_dir = dir.path().join("LINGXI.md");
+        std::fs::create_dir(&as_dir).unwrap();
+        match load_file(&as_dir, None) {
+            Err(LoaderError::FileTooLarge { is_directory, .. }) => {
+                assert!(is_directory, "a directory must be flagged as one");
+            }
+            other => panic!("expected FileTooLarge, got {other:?}"),
+        }
+
+        let big = dir.path().join("big.md");
+        std::fs::write(&big, "x".repeat(MEMORY_FILE_BYTE_LIMIT as usize + 1)).unwrap();
+        match load_file(&big, None) {
+            Err(LoaderError::FileTooLarge { is_directory, .. }) => {
+                assert!(!is_directory, "an oversized regular file is not a directory");
+            }
+            other => panic!("expected FileTooLarge, got {other:?}"),
+        }
+    }
+
 
     #[test]
     fn get_large_memory_files_flags_but_does_not_drop_40k_body() {
@@ -1134,7 +1492,7 @@ mod tests {
         );
         let small = mk("/y/LINGXI.md", "small".to_string());
         let files = vec![big.clone(), small];
-        let large = get_large_memory_files(&files);
+        let large = get_large_memory_files(&files, crate::MAX_MEMORY_CHARACTER_COUNT);
         assert_eq!(large.len(), 1, "only the >40k file is flagged");
         assert_eq!(large[0].path, big.path);
         // Body is NOT truncated — still fully loaded.

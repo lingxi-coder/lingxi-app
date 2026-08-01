@@ -139,4 +139,106 @@ impl LlmError {
             _ => None,
         }
     }
+
+    /// Recover the HTTP status this error was decoded from, when it is
+    /// knowable — the inverse of `providers::api_error_message`.
+    ///
+    /// claude-code does not keep status in a side field either; the SDK's
+    /// `makeMessage` prefixes it onto the message (`${status} ${body}`) and
+    /// downstream code parses it back off — `replace(/^429\s+/,"")` @230600821,
+    /// `replace(/^400\s+/,"")` @230602614. This is that parse, generalised.
+    ///
+    /// Returns `None` rather than guessing: a wrong status written to the
+    /// transcript's `apiErrorStatus` is worse than an absent one, which is the
+    /// same trade the oracle makes when the error is not an `APIError` with a
+    /// numeric status.
+    #[must_use]
+    pub fn http_status(&self) -> Option<u16> {
+        match self {
+            LlmError::InvalidRequest { message }
+            | LlmError::Transport { message }
+            | LlmError::StreamInterrupted { message }
+            | LlmError::CostUnavailable { message } => api_error_status(message),
+            _ => None,
+        }
+    }
+}
+
+/// Parse the leading `${status} ` that `api_error_message` writes.
+///
+/// Deliberately strict, because [`LlmError::InvalidRequest`] has ~200
+/// construction sites that never went through a provider decoder and whose
+/// messages are arbitrary prose. The shape must be exactly what `makeMessage`
+/// emits:
+///
+/// * three ASCII digits,
+/// * in `100..=599` — a real HTTP status, so `"999 bottles"` is prose,
+/// * followed by a single space with a non-empty remainder.
+///
+/// Residual ambiguity is accepted and bounded: prose beginning `"404 "` parses
+/// as a status. In practice a decoded provider error's remainder is the
+/// stringified body (`{"type":"error",…}`), and the only consumer is an
+/// `apiErrorStatus` field that previously held a hardcoded guess — so a rare
+/// false positive replaces a systematic one.
+#[must_use]
+pub fn api_error_status(message: &str) -> Option<u16> {
+    let (head, rest) = message.split_at(message.char_indices().nth(3).map_or(0, |(i, _)| i));
+    if head.len() != 3 || !head.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let rest = rest.strip_prefix(' ')?;
+    if rest.is_empty() {
+        return None;
+    }
+    let status: u16 = head.parse().ok()?;
+    (100..=599).contains(&status).then_some(status)
+}
+
+#[cfg(test)]
+mod api_error_status_tests {
+    use super::{api_error_status, LlmError};
+
+    #[test]
+    fn parses_the_shape_make_message_emits() {
+        assert_eq!(
+            api_error_status(r#"400 {"type":"error","error":{"message":"bad"}}"#),
+            Some(400)
+        );
+        assert_eq!(api_error_status("429 slow down"), Some(429));
+        assert_eq!(api_error_status("503 status code (no body)"), Some(503));
+    }
+
+    #[test]
+    fn rejects_everything_that_is_not_that_shape() {
+        // No space — `makeMessage` always emits exactly one.
+        assert_eq!(api_error_status("400bad"), None);
+        // Nothing after the space.
+        assert_eq!(api_error_status("400 "), None);
+        // Not a real HTTP status.
+        assert_eq!(api_error_status("999 bottles"), None);
+        assert_eq!(api_error_status("099 leading zero"), None);
+        assert_eq!(api_error_status("600 too high"), None);
+        // Not three digits.
+        assert_eq!(api_error_status("40 x"), None);
+        assert_eq!(api_error_status("4000 x"), None);
+        // Ordinary prose, which is what most InvalidRequest sites carry.
+        assert_eq!(api_error_status("invalid model name"), None);
+        assert_eq!(api_error_status(""), None);
+        // Multi-byte lead must not panic on a non-char-boundary split.
+        assert_eq!(api_error_status("\u{4e2d}\u{6587} x"), None);
+    }
+
+    #[test]
+    fn only_message_bearing_variants_expose_a_status() {
+        assert_eq!(
+            LlmError::InvalidRequest {
+                message: "422 {}".to_string()
+            }
+            .http_status(),
+            Some(422)
+        );
+        // A variant with no message can never carry a prefix.
+        assert_eq!(LlmError::Authentication.http_status(), None);
+        assert_eq!(LlmError::ProviderInternal.http_status(), None);
+    }
 }

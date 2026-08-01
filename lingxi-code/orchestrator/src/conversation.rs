@@ -577,6 +577,24 @@ pub(crate) struct ApiErrorEnvelope {
 /// `inner_stop_reason` is always `None` here: the `ql` path leaves the synthetic
 /// inner `message.stop_reason` at `"stop_sequence"` (verified on disk).
 pub(crate) fn classify_api_error(e: &OrchestratorError) -> ApiErrorEnvelope {
+    // TRUE status first, canonical table second.
+    //
+    // This is the half of the carve-out documented above that is now closed.
+    // Provider decoders store the SDK's `${status} ${body}` text (see
+    // `providers::api_error_message`), so a real 422/424/409 is recoverable
+    // instead of being flattened to its variant's canonical status. The table
+    // below still runs whenever no prefix is present — every variant that
+    // carries no message, and every `InvalidRequest` raised by internal
+    // validation rather than a provider decode.
+    //
+    // Still provider-NEUTRAL: the prefix is written by whichever provider
+    // decoded the response, so this does not reintroduce an Anthropic-only path.
+    let parsed_status = match e {
+        OrchestratorError::ApiCall(inner) | OrchestratorError::Streaming(inner) => {
+            inner.http_status()
+        }
+        _ => None,
+    };
     let (error, api_error_status) = match e {
         OrchestratorError::ApiCall(inner) | OrchestratorError::Streaming(inner) => match inner {
             // 429 family → "rate_limit" (status 429). Carved out before reaching
@@ -636,7 +654,7 @@ pub(crate) fn classify_api_error(e: &OrchestratorError) -> ApiErrorEnvelope {
     };
     ApiErrorEnvelope {
         error,
-        api_error_status,
+        api_error_status: parsed_status.or(api_error_status),
         inner_stop_reason: None,
     }
 }
@@ -19062,6 +19080,37 @@ mod persist_with_parent_tests {
     /// classifier + the on-disk transcript aggregate. Status is OMITTED (`None`)
     /// where the port has no confident canonical HTTP status (mirrors claude
     /// omitting `apiErrorStatus` when the error is not an `APIError`-with-status).
+    #[test]
+    fn classify_api_error_prefers_the_true_status_over_the_canonical_table() {
+        use llm_client::LlmError;
+        // A REAL 422 used to be persisted as 400: `InvalidRequest` mapped to its
+        // canonical status because the raw one was gone by then. The provider
+        // decoders now store the SDK's `${status} ${body}` text, so the true
+        // status survives into the transcript's `apiErrorStatus`.
+        for (status, expected) in [(422u16, 422u16), (424, 424), (409, 409)] {
+            let e = OrchestratorError::ApiCall(LlmError::InvalidRequest {
+                message: format!("{status} {{\"type\":\"error\"}}"),
+            });
+            let env = classify_api_error(&e);
+            assert_eq!(env.api_error_status, Some(expected), "status {status}");
+            // The CATEGORY still comes from the variant — only the status is
+            // sharpened, so the byte-locked file-format value is untouched.
+            assert_eq!(env.error, Some("invalid_request"));
+        }
+
+        // No prefix (internal validation, not a provider decode) → the canonical
+        // table still applies, exactly as before.
+        let internal = OrchestratorError::ApiCall(LlmError::InvalidRequest {
+            message: "invalid model name".to_string(),
+        });
+        assert_eq!(classify_api_error(&internal).api_error_status, Some(400));
+
+        // A variant carrying no message can never gain a prefix, so its
+        // canonical status is unaffected.
+        let auth = OrchestratorError::ApiCall(LlmError::Authentication);
+        assert_eq!(classify_api_error(&auth).api_error_status, Some(401));
+    }
+
     #[test]
     fn classify_api_error_maps_llm_variants_to_category_and_status() {
         use llm_client::LlmError;

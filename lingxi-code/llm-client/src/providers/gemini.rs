@@ -147,6 +147,7 @@ pub(crate) fn decode_error_response(response: &ProviderResponse) -> LlmError {
         .and_then(|error| error.get("status"))
         .and_then(Value::as_str)
         .unwrap_or_default();
+    let display = super::api_error_message(response.status, &response.body_json, &message);
 
     match google_status {
         "UNAUTHENTICATED" => LlmError::Authentication,
@@ -167,10 +168,10 @@ pub(crate) fn decode_error_response(response: &ProviderResponse) -> LlmError {
             if is_context_overflow_message(&message) {
                 LlmError::ContextOverflow { token_gap: 0 }
             } else {
-                LlmError::InvalidRequest { message }
+                LlmError::InvalidRequest { message: display }
             }
         }
-        _ => super::map_error_status(response.status, message, retry_after),
+        _ => super::map_error_status(response.status, &message, display, retry_after),
     }
 }
 

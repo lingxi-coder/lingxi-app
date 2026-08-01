@@ -27,17 +27,17 @@
 //! ports. Turning it on by default would make LingXi send a body field the
 //! oracle never sends — anti-parity, not parity.
 //!
-//! # ⛔ The error half is NOT wired, and cannot be yet
+//! # Where the facts come from
 //!
-//! [`HttpErrorFacts`] exists because `llm_client::LlmError` has already thrown
-//! away what the classifiers need: `providers::map_error_status` maps
-//! `400 | 422 => InvalidRequest`, collapsing the two cases the oracle must tell
-//! apart (compact-and-retry vs strip-the-beta), and sends 424 and 409 alike to
-//! `ProviderInternal`. Restoring HTTP-status provenance on `LlmError` is a
-//! prerequisite, and it is a change across every provider and consumer — so it
-//! is deliberately NOT bundled here. Everything in this module is pure and
-//! tested; the only missing piece is a caller that can populate
-//! [`HttpErrorFacts`] truthfully.
+//! [`HttpErrorFacts`] used to be unfillable: `map_error_status` sent
+//! `400 | 422` to one `LlmError` variant and 424/409 both to `ProviderInternal`,
+//! so the four classifiers could not tell apart the cases the oracle must.
+//!
+//! That is fixed at the source rather than here. Provider decoders now store
+//! the SDK's `${status} ${body}` text (`providers::api_error_message`), which is
+//! how claude-code carries status provenance in the first place, and
+//! [`LlmError::http_status`] parses it back off. [`HttpErrorFacts::from_error`]
+//! builds the facts from any decoded error.
 
 use crate::microcompact::{
     self, estimate_keep_recent, Microcompactor, TimeBasedMCConfig, MICROCOMPACT_MIN_TOKENS_SAVED,
@@ -131,6 +131,30 @@ pub struct HttpErrorFacts {
     pub request_id: Option<String>,
     /// Whether the caller classified this as a 529 overload.
     pub is_overloaded: bool,
+}
+
+impl HttpErrorFacts {
+    /// Build the facts from a decoded [`LlmError`].
+    ///
+    /// `status` comes from the `${status} ` prefix the provider decoders write;
+    /// `message` is the decoded text itself, which is what
+    /// [`is_unsupported_beta`] matches on. `is_overloaded` covers the oracle's
+    /// `is529Error`, which is a separate predicate there because a 529 never
+    /// reaches the status branches.
+    ///
+    /// `error_type` stays `None` here: it is only set on the STREAM path, where
+    /// the envelope arrives with an `invalid_request_error` type and no status
+    /// at all (oracle `Htp`). Callers on that path fill it in themselves.
+    #[must_use]
+    pub fn from_error(err: &llm_client::LlmError) -> Self {
+        Self {
+            status: err.http_status(),
+            error_type: None,
+            message: err.to_string(),
+            request_id: None,
+            is_overloaded: matches!(err, llm_client::LlmError::Overloaded { .. }),
+        }
+    }
 }
 
 /// `Ptp` — the server ASKS for the compact. 422 or 424.
@@ -637,6 +661,51 @@ mod tests {
                 assert_eq!(event.request_id.as_deref(), Some("req_1"));
                 assert!(event.post_compact_token_estimate < event.pre_compact_token_estimate);
             }
+            other => panic!("expected Reject, got {other:?}"),
+        }
+    }
+
+    /// End to end from a REAL decoded provider error — the step that was
+    /// impossible before the status prefix existed. A 422 and a 400 used to
+    /// decode to the same `LlmError::InvalidRequest`, so no classifier could
+    /// separate "compact and retry" from "strip the beta".
+    #[test]
+    fn facts_come_back_out_of_a_real_decoded_error() {
+        let reject = llm_client::LlmError::InvalidRequest {
+            message: r#"422 {"type":"error","error":{"message":"context hint"}}"#.to_string(),
+        };
+        let facts = HttpErrorFacts::from_error(&reject);
+        assert_eq!(facts.status, Some(422));
+        assert!(is_hint_reject(&facts), "422 must reach the compact-and-retry arm");
+        assert!(!is_unsupported_beta(&facts));
+
+        let unsupported = llm_client::LlmError::InvalidRequest {
+            message: "400 Unexpected value for the anthropic-beta header".to_string(),
+        };
+        let facts = HttpErrorFacts::from_error(&unsupported);
+        assert_eq!(facts.status, Some(400));
+        assert!(is_unsupported_beta(&facts), "400 must reach the strip arm");
+        assert!(
+            !is_hint_reject(&facts),
+            "the two must NOT collapse together again"
+        );
+
+        // 529 has no status branch in the oracle either — it is its own predicate.
+        let overloaded = llm_client::LlmError::Overloaded { repeated: false };
+        assert!(HttpErrorFacts::from_error(&overloaded).is_overloaded);
+    }
+
+    /// A driven controller run using only decoded errors.
+    #[test]
+    fn a_decoded_422_drives_the_controller_to_reject() {
+        let mut c = active_controller();
+        let msgs = big_history();
+        c.build_request_params(&msgs);
+        let err = llm_client::LlmError::InvalidRequest {
+            message: r#"422 {"type":"error"}"#.to_string(),
+        };
+        match c.on_request_error(&HttpErrorFacts::from_error(&err), msgs) {
+            HintErrorOutcome::Reject(edits, _) => assert!(edits.mc_applied),
             other => panic!("expected Reject, got {other:?}"),
         }
     }

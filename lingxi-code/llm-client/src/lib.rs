@@ -74,7 +74,7 @@ pub use credentials::{
     CopilotExchangeCredentialProvider, Credential, CredentialProvider, CredentialScope,
     EnvCredentialProvider, StaticCredentialProvider,
 };
-pub use error::LlmError;
+pub use error::{api_error_status, LlmError};
 pub use eventstream::{crc32, EventStreamMessage, EventStreamSplitter};
 pub use protocol::{
     stream_provider_metadata_from_headers, validate_capabilities, CacheControl, CacheEdit,

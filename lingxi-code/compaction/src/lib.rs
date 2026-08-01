@@ -8,6 +8,7 @@ pub mod autocompact;
 pub mod boundary;
 pub mod cached_microcompact;
 pub mod context_collapse;
+pub mod context_hint;
 pub mod prompt_too_long;
 pub use llm_client::model::context_window;
 pub mod grouping;

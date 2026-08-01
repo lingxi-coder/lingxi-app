@@ -162,6 +162,81 @@ pub fn collect_compactable_tool_ids(messages: &[ConversationMessage]) -> Vec<pro
     ids
 }
 
+/// Scan-only estimate of what a keep-recent microcompact WOULD clear.
+///
+/// 1:1 with claude-code `ARs` (2.1.220 @232865874), which the binary factors
+/// out precisely because two callers need it: `qsd` runs it to decide whether a
+/// compact is worth doing, and the context-hint controller runs it to decide
+/// whether to ASK the server for a hint at all — without mutating anything.
+#[derive(Debug, Clone)]
+pub struct KeepRecentEstimate {
+    /// Tool-use ids whose results would be cleared.
+    pub clear_set: HashSet<protocol::ToolUseId>,
+    /// Tool-use ids whose results would be kept (the most recent N).
+    pub keep_set: HashSet<protocol::ToolUseId>,
+    /// Number of tool-result blocks that would be cleared.
+    pub cleared_count: usize,
+    /// Approximate tokens the clear would free (TS `tokensSaved`).
+    pub tokens_saved: u64,
+}
+
+/// Compute [`KeepRecentEstimate`] without touching `messages`.
+///
+/// `keep_recent` is floored at 1 (TS `Math.max(1, t)`): keeping 0 would clear
+/// EVERY result, leaving the model with no working context.
+#[must_use]
+pub fn estimate_keep_recent(
+    messages: &[ConversationMessage],
+    keep_recent: usize,
+) -> KeepRecentEstimate {
+    let compactable_ids = collect_compactable_tool_ids(messages);
+    let keep_count = keep_recent.max(1).min(compactable_ids.len());
+    let keep_set: HashSet<protocol::ToolUseId> = compactable_ids
+        [compactable_ids.len() - keep_count..]
+        .iter()
+        .cloned()
+        .collect();
+    let clear_set: HashSet<protocol::ToolUseId> = compactable_ids
+        .iter()
+        .cloned()
+        .filter(|id| !keep_set.contains(id))
+        .collect();
+
+    let mut cleared_count = 0usize;
+    let mut tokens_saved = 0u64;
+    if !clear_set.is_empty() {
+        for m in messages {
+            if let ConversationMessage::User { content, .. } = m {
+                for b in content {
+                    if let ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        ..
+                    } = b
+                    {
+                        // An already-cleared placeholder contributes nothing
+                        // (TS `!Wxd` / `!LH_`).
+                        if clear_set.contains(tool_use_id)
+                            && content != TIME_BASED_MC_CLEARED_MESSAGE
+                        {
+                            cleared_count += 1;
+                            tokens_saved =
+                                tokens_saved.saturating_add(rough_token_count_estimation(content));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    KeepRecentEstimate {
+        clear_set,
+        keep_set,
+        cleared_count,
+        tokens_saved,
+    }
+}
+
 /// Stateful microcompactor that owns its configuration.
 pub struct Microcompactor {
     /// Active configuration; see [`TimeBasedMCConfig`].
@@ -206,52 +281,19 @@ impl Microcompactor {
         messages: Vec<ConversationMessage>,
         _now: SystemTime,
     ) -> MicrocompactResult {
-        // Pass 1: collect compactable tool_use IDs from assistant messages.
-        let compactable_ids = collect_compactable_tool_ids(&messages);
-
-        // Floor at 1: keeping 0 would clear ALL results, leaving the model with
-        // zero working context; TS `Math.max(1, config.keepRecent)`.
-        let keep_recent = self.config.keep_recent.max(1);
-        let keep_count = keep_recent.min(compactable_ids.len());
-        let keep_set: HashSet<protocol::ToolUseId> = compactable_ids
-            [compactable_ids.len() - keep_count..]
-            .iter()
-            .cloned()
-            .collect();
-        let clear_set: HashSet<protocol::ToolUseId> = compactable_ids
-            .iter()
-            .cloned()
-            .filter(|id| !keep_set.contains(id))
-            .collect();
+        // Pass 1 + the scan-only pass, both via `estimate_keep_recent` — the
+        // oracle's own factoring (`qsd` calls `ARs`), so the "would this be
+        // worth it" question has ONE implementation shared with the
+        // context-hint controller instead of two that can drift.
+        let KeepRecentEstimate {
+            clear_set,
+            cleared_count,
+            tokens_saved,
+            ..
+        } = estimate_keep_recent(&messages, self.config.keep_recent);
 
         if clear_set.is_empty() {
             return Self::noop(messages);
-        }
-
-        // Scan-only pass (TS `H5r`): count how many tool results would be
-        // cleared and the tokens that would be saved, WITHOUT mutating anything.
-        // An already-cleared placeholder contributes nothing (TS `!Wxd`).
-        let mut cleared_count = 0usize;
-        let mut tokens_saved = 0u64;
-        for m in &messages {
-            if let ConversationMessage::User { content, .. } = m {
-                for b in content {
-                    if let ContentBlock::ToolResult {
-                        tool_use_id,
-                        content,
-                        ..
-                    } = b
-                    {
-                        if clear_set.contains(tool_use_id)
-                            && content != TIME_BASED_MC_CLEARED_MESSAGE
-                        {
-                            cleared_count += 1;
-                            tokens_saved =
-                                tokens_saved.saturating_add(rough_token_count_estimation(content));
-                        }
-                    }
-                }
-            }
         }
 
         // Floor check (TS `o$i`: `if(o<k5r)return null;`). Abandon the whole

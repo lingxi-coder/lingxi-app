@@ -162,6 +162,125 @@ pub(crate) enum ErrorRoute<'a> {
     },
 }
 
+/// Owned twin of [`ErrorRoute`], for carrying a route on
+/// [`crate::OrchestratorConfig`] (which cannot hold borrowed strings).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", tag = "route")]
+pub enum ErrorRouteTag {
+    /// `"firstParty"`.
+    FirstParty {
+        /// Whether the request goes to the official endpoint (oracle `Yd()`).
+        default_endpoint: bool,
+        /// Configured base URL, named when it is a gateway.
+        base_url: String,
+    },
+    /// `"anthropicAws"`.
+    AnthropicAws,
+    /// `"anthropicGoogleCloud"`.
+    AnthropicGoogleCloud,
+    /// Anything else; the oracle's `rK[e]` display name.
+    Other {
+        /// Provider display name.
+        display: String,
+    },
+}
+
+impl ErrorRouteTag {
+    /// Resolve the route from the environment — oracle `xn()` @227682549:
+    ///
+    /// ```js
+    /// return Z.CLAUDE_CODE_USE_BEDROCK?"bedrock"
+    ///      : Z.CLAUDE_CODE_USE_FOUNDRY?"foundry"
+    ///      : Z.CLAUDE_CODE_USE_ANTHROPIC_AWS?"anthropicAws"
+    ///      : Z.CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD?"anthropicGoogleCloud"
+    ///      : Z.CLAUDE_CODE_USE_MANTLE?"mantle"
+    ///      : Z.CLAUDE_CODE_USE_VERTEX?"vertex"
+    ///      : "firstParty";
+    /// ```
+    ///
+    /// ORDER MATTERS — it is a chain, not a set, so `USE_BEDROCK` wins over
+    /// `USE_VERTEX` when both are set.
+    ///
+    /// These keep their `CLAUDE_CODE_` names: they are the PROVIDER's variables,
+    /// which the rebrand deliberately preserves (the same call sites already
+    /// read them in `apps/cli` and `migrations`). Only LingXi's own variables
+    /// take the `LINGXI_` prefix.
+    ///
+    /// `hpo()` only distinguishes firstParty / anthropicAws / anthropicGoogleCloud
+    /// from "everything else", so the remaining tags collapse into
+    /// [`Self::Other`] carrying their display name.
+    #[must_use]
+    pub fn from_env() -> Self {
+        fn on(var: &str) -> bool {
+            std::env::var(var).is_ok_and(|v| !v.is_empty() && v != "0" && v != "false")
+        }
+        if on("CLAUDE_CODE_USE_BEDROCK") {
+            return Self::Other {
+                display: "Bedrock".to_string(),
+            };
+        }
+        if on("CLAUDE_CODE_USE_FOUNDRY") {
+            return Self::Other {
+                display: "Foundry".to_string(),
+            };
+        }
+        if on("CLAUDE_CODE_USE_ANTHROPIC_AWS") {
+            return Self::AnthropicAws;
+        }
+        if on("CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD") {
+            return Self::AnthropicGoogleCloud;
+        }
+        if on("CLAUDE_CODE_USE_MANTLE") {
+            return Self::Other {
+                display: "Mantle".to_string(),
+            };
+        }
+        if on("CLAUDE_CODE_USE_VERTEX") {
+            return Self::Other {
+                display: "Vertex".to_string(),
+            };
+        }
+        // firstParty. `Yd()` picks the status page over the gateway wording;
+        // modelled as "no custom base URL is configured".
+        let base_url = std::env::var("ANTHROPIC_BASE_URL").unwrap_or_default();
+        Self::FirstParty {
+            default_endpoint: base_url.is_empty(),
+            base_url,
+        }
+    }
+
+    /// Borrow this tag as an [`ErrorRoute`].
+    #[must_use]
+    pub(crate) fn as_route(&self) -> ErrorRoute<'_> {
+        match self {
+            Self::FirstParty {
+                default_endpoint,
+                base_url,
+            } => ErrorRoute::FirstParty {
+                default_endpoint: *default_endpoint,
+                base_url,
+            },
+            Self::AnthropicAws => ErrorRoute::AnthropicAws,
+            Self::AnthropicGoogleCloud => ErrorRoute::AnthropicGoogleCloud,
+            Self::Other { display } => ErrorRoute::Other { display },
+        }
+    }
+}
+
+/// The full fallback clause: [`TEMPORARY_CAPACITY`] plus [`persistence_suffix`].
+///
+/// `None` renders the stem ALONE. That is a documented divergence, not parity:
+/// the oracle's `xn()` always resolves to some route, but LingXi's error layer
+/// only knows one when a composition root supplies it, and an unattributed
+/// suffix ("check your  service status.") would be worse than none.
+#[must_use]
+pub(crate) fn capacity_fallback(route: Option<&ErrorRouteTag>) -> String {
+    match route {
+        Some(tag) => format!("{TEMPORARY_CAPACITY}{}", persistence_suffix(tag.as_route())),
+        None => TEMPORARY_CAPACITY.to_string(),
+    }
+}
+
 /// Oracle `hpo()` — the clause appended to
 /// [`TEMPORARY_CAPACITY`], naming where to look if the trouble persists.
 ///
@@ -214,6 +333,94 @@ mod tests {
 
     /// Both of these render BARE — no `API Error:` prefix — which is the easy
     /// thing to get wrong when every neighbouring string has one.
+    /// `xn()` is a CHAIN, not a set: with both Bedrock and Vertex set, Bedrock
+    /// wins. A `match`-style port that checked them in any other order would
+    /// name the wrong provider in the message.
+    ///
+    /// Env is process-global, so this runs the whole chain in ONE test rather
+    /// than racing sibling tests that set the same variables.
+    #[test]
+    fn the_route_chain_resolves_in_the_oracle_order() {
+        const VARS: [&str; 6] = [
+            "CLAUDE_CODE_USE_BEDROCK",
+            "CLAUDE_CODE_USE_FOUNDRY",
+            "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+            "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
+            "CLAUDE_CODE_USE_MANTLE",
+            "CLAUDE_CODE_USE_VERTEX",
+        ];
+        let saved: Vec<Option<String>> = VARS.iter().map(|v| std::env::var(v).ok()).collect();
+        let saved_base = std::env::var("ANTHROPIC_BASE_URL").ok();
+        for v in VARS {
+            std::env::remove_var(v);
+        }
+        std::env::remove_var("ANTHROPIC_BASE_URL");
+
+        // Nothing set → firstParty on the official endpoint.
+        assert_eq!(
+            ErrorRouteTag::from_env(),
+            ErrorRouteTag::FirstParty {
+                default_endpoint: true,
+                base_url: String::new()
+            }
+        );
+
+        // A custom base URL keeps the route but drops the default-endpoint flag.
+        std::env::set_var("ANTHROPIC_BASE_URL", "https://gw.test:9000");
+        assert_eq!(
+            ErrorRouteTag::from_env(),
+            ErrorRouteTag::FirstParty {
+                default_endpoint: false,
+                base_url: "https://gw.test:9000".to_string()
+            }
+        );
+        std::env::remove_var("ANTHROPIC_BASE_URL");
+
+        std::env::set_var("CLAUDE_CODE_USE_VERTEX", "1");
+        assert!(matches!(ErrorRouteTag::from_env(), ErrorRouteTag::Other { .. }));
+        // Bedrock outranks Vertex — the chain order, not alphabetical.
+        std::env::set_var("CLAUDE_CODE_USE_BEDROCK", "1");
+        assert_eq!(
+            ErrorRouteTag::from_env(),
+            ErrorRouteTag::Other {
+                display: "Bedrock".to_string()
+            }
+        );
+        std::env::remove_var("CLAUDE_CODE_USE_BEDROCK");
+
+        // anthropicAws outranks Vertex too, and is its OWN branch in `hpo()`.
+        std::env::set_var("CLAUDE_CODE_USE_ANTHROPIC_AWS", "1");
+        assert_eq!(ErrorRouteTag::from_env(), ErrorRouteTag::AnthropicAws);
+        std::env::remove_var("CLAUDE_CODE_USE_ANTHROPIC_AWS");
+
+        std::env::set_var("CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD", "1");
+        assert_eq!(ErrorRouteTag::from_env(), ErrorRouteTag::AnthropicGoogleCloud);
+
+        for (v, old) in VARS.iter().zip(saved) {
+            match old {
+                Some(x) => std::env::set_var(v, x),
+                None => std::env::remove_var(v),
+            }
+        }
+        match saved_base {
+            Some(x) => std::env::set_var("ANTHROPIC_BASE_URL", x),
+            None => std::env::remove_var("ANTHROPIC_BASE_URL"),
+        }
+    }
+
+    #[test]
+    fn the_capacity_fallback_joins_stem_and_suffix_without_a_gap() {
+        assert_eq!(
+            capacity_fallback(Some(&ErrorRouteTag::AnthropicAws)),
+            "this may be a temporary capacity issue. If it persists, check https://status.claude.com."
+        );
+        // Unknown route → stem alone, never a dangling "check your  service".
+        assert_eq!(
+            capacity_fallback(None),
+            "this may be a temporary capacity issue."
+        );
+    }
+
     #[test]
     fn the_persistence_suffix_is_byte_exact_on_every_branch() {
         assert_eq!(

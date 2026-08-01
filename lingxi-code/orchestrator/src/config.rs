@@ -184,6 +184,14 @@ pub struct OrchestratorConfig {
     /// off by default because the ORACLE's `tengu_hazel_osprey` is.
     #[serde(default)]
     pub include_first_party_betas: bool,
+    /// Which upstream this session talks to, for the error copy that names
+    /// where to look when trouble persists (oracle `xn()` feeding `hpo()`).
+    ///
+    /// `None` (the default) renders the capacity clause without its suffix —
+    /// see `api_error_copy::capacity_fallback`. Supplied by a composition root,
+    /// which is the only layer that knows the resolved provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_route: Option<crate::api_error_copy::ErrorRouteTag>,
 
     /// OUTSTYLE.2: the active output-style name from `settings.outputStyle`
     /// (TS types it `z.string()`). `None` / `"default"` → no style section;
@@ -362,6 +370,7 @@ impl Default for OrchestratorConfig {
             is_subscriber: false,
             is_enterprise: false,
             include_first_party_betas: false,
+            error_route: None,
             output_style: None,
             output_style_dirs: Vec::new(),
             max_budget_nano_usd: None,
@@ -421,6 +430,7 @@ mod tests {
             is_subscriber: true,
             is_enterprise: true,
             include_first_party_betas: false,
+            error_route: None,
             output_style: Some("Explanatory".into()),
             output_style_dirs: vec![std::path::PathBuf::from("/home/u/.lingxi/output-styles")],
             max_budget_nano_usd: Some(5_000_000_000),

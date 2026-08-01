@@ -6476,7 +6476,15 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     crate::api_error_copy::rate_limited_text(
                         &source,
                         crate::api_error_copy::REQUEST_REJECTED_429,
-                        crate::api_error_copy::TEMPORARY_CAPACITY,
+                        &crate::api_error_copy::capacity_fallback(Some(
+                            &self
+                                .config
+                                .error_route
+                                .clone()
+                                .unwrap_or_else(
+                                    crate::api_error_copy::ErrorRouteTag::from_env,
+                                ),
+                        )),
                     )
                 }
             }

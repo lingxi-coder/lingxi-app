@@ -10,10 +10,13 @@
 //!
 //! # Scope
 //!
-//! This module covers the 429 family. The rest of the error-surfacing set
-//! (`Credit balance is too low`, `Invalid API key · Please run /login`, the
-//! PDF-page and password branches) is still unported and is NOT silently
-//! absorbed here.
+//! Covered here: the 429 family, the billing/PTL bare strings, and the auth
+//! family (credential rejection, cloud credentials, org-disabled, revoked
+//! token, dead OAuth session). Still unported: the PDF-page and password
+//! branches.
+//!
+//! ⚠️ Every user-facing auth instruction here names [`AUTH_COMMAND`]
+//! (`/connect`), NOT the oracle's `/login` — see that constant.
 
 use serde_json::Value;
 
@@ -50,11 +53,14 @@ pub(crate) fn usage_credits_required_for_1m_context(non_interactive: bool) -> St
 const USAGE_SETTINGS_URL: &str = "claude.ai/settings/usage?from=cc_cli_limit_message";
 
 /// Oracle `lir` — no usable credential, so the user has to sign in.
-pub(crate) const NOT_LOGGED_IN: &str = "Not logged in \u{b7} Please run /login";
+///
+/// ⚠️ DELIBERATE DIVERGENCE — see [`AUTH_COMMAND`]. The oracle's bytes are
+/// `Not logged in \xB7 Please run /login`.
+pub(crate) const NOT_LOGGED_IN: &str = "Not logged in \u{b7} Please run /connect";
 
 /// Oracle `cir` — a credential EXISTS but the server rejected it. "External"
 /// because it came from outside the app: an env var or an `apiKeyHelper`
-/// script, neither of which `/login` can fix.
+/// script, neither of which the auth command can fix.
 pub(crate) const INVALID_API_KEY: &str = "Invalid API key \u{b7} Fix external API key";
 
 /// Oracle `UOu` — an auth failure the client believes is transient.
@@ -77,14 +83,26 @@ pub(crate) fn is_remote_session() -> bool {
 ///
 /// A boolean was not enough: the org-disabled branch tells an env-var user and
 /// an `apiKeyHelper` user to unset DIFFERENT things.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum CredentialOrigin {
-    /// `ANTHROPIC_API_KEY` in the environment.
-    EnvApiKey,
+    /// An API key read from the environment, in the variable NAMED here.
+    ///
+    /// The oracle can say `ANTHROPIC_API_KEY` because claude-code only ever
+    /// reads that one. LingXi resolves the variable per provider profile
+    /// (`ProviderProfile::env_var`, the user's own `apiKeyEnv`), so the copy
+    /// carries the name that was actually read — telling a Gemini user to unset
+    /// `ANTHROPIC_API_KEY` is advice that cannot help them.
+    ///
+    /// This is why the type is no longer `Copy`.
+    EnvApiKey {
+        /// The environment variable the credential was read from.
+        var: String,
+    },
     /// An `apiKeyHelper` script.
     ApiKeyHelper,
-    /// A managed key issued by `/login`.
+    /// A managed key issued by signing in (the oracle calls this source
+    /// `"/login managed key"`; the variant name follows the oracle's term).
     LoginManagedKey,
     /// Stored key, OAuth, or nothing — none of which the user "unsets".
     #[default]
@@ -92,11 +110,11 @@ pub enum CredentialOrigin {
 }
 
 impl CredentialOrigin {
-    /// Is this credential supplied from OUTSIDE the app, so `/login` cannot fix
-    /// it? Oracle: `source==="ANTHROPIC_API_KEY" || source==="apiKeyHelper"`.
+    /// Is this credential supplied from OUTSIDE the app, so signing in cannot
+    /// fix it? Oracle: `source==="ANTHROPIC_API_KEY" || source==="apiKeyHelper"`.
     #[must_use]
-    pub(crate) fn is_external(self) -> bool {
-        matches!(self, Self::EnvApiKey | Self::ApiKeyHelper)
+    pub(crate) fn is_external(&self) -> bool {
+        matches!(self, Self::EnvApiKey { .. } | Self::ApiKeyHelper)
     }
 }
 
@@ -122,24 +140,32 @@ pub(crate) fn is_api_key_auth_disabled(status: Option<u16>, message: &str) -> bo
 ///
 /// `has_oauth_token` is `zv()` (`ms()?.accessToken != null`): with an account
 /// already signed in, unsetting the variable is enough; without one, the user
-/// also has to run `/login`.
+/// also has to sign in.
+///
+/// ⚠️ DELIBERATE DIVERGENCE — see [`AUTH_COMMAND`]. Every tail below that names
+/// a command says `/connect`; the oracle says `/login`.
 #[must_use]
 pub(crate) fn api_key_auth_disabled_text(
-    origin: CredentialOrigin,
+    origin: &CredentialOrigin,
     has_oauth_token: bool,
+    profile: Option<&str>,
 ) -> String {
+    let account = account_display(profile);
     let tail = match origin {
-        CredentialOrigin::EnvApiKey if has_oauth_token => {
-            "Unset ANTHROPIC_API_KEY to use your claude.ai account instead"
+        CredentialOrigin::EnvApiKey { var } if has_oauth_token => {
+            format!("Unset {var} to use your {account} account instead")
         }
-        CredentialOrigin::EnvApiKey => {
-            "Unset ANTHROPIC_API_KEY and run /login to sign in with your claude.ai account"
+        CredentialOrigin::EnvApiKey { var } => {
+            format!("Unset {var} and run {AUTH_COMMAND} to sign in with your {account} account")
         }
         CredentialOrigin::ApiKeyHelper => {
-            "Unset the apiKeyHelper setting and run /login to sign in with your claude.ai account"
+            format!(
+                "Unset the apiKeyHelper setting and run {AUTH_COMMAND} to sign in with your \
+                 {account} account"
+            )
         }
         CredentialOrigin::LoginManagedKey | CredentialOrigin::Other => {
-            "Run /login to sign in with your claude.ai account"
+            format!("Run {AUTH_COMMAND} to sign in with your {account} account")
         }
     };
     format!("{ORG_DISABLED_PREFIX} \u{b7} {tail}")
@@ -156,17 +182,54 @@ pub(crate) fn api_key_auth_disabled_text(
 /// intended state. Record it as Divergence(multi-provider), not a gap.
 pub(crate) const AUTH_COMMAND: &str = "/connect";
 
+/// The product name to use when copy has to say WHOSE account is at fault.
+///
+/// ⚠️ DELIBERATE DIVERGENCE. The oracle hardcodes Claude because claude-code
+/// only ever talks to Anthropic. LingXi routes to many providers, so the name
+/// comes from the live session profile (`SessionState::model_profile`) — the
+/// same source cost and telemetry attribution use.
+///
+/// The mapping deliberately mirrors the profile arm of
+/// `llm_client::pricing_provider_id_for_profile` rather than introducing a
+/// second table that could drift out of agreement with it. An unrecognised
+/// profile names ITSELF instead of guessing a vendor: telling a `deepseek` user
+/// about Claude is exactly the bug this exists to prevent.
+///
+/// ⚠️ Do NOT source this by parsing the model id — `split_profile_model`
+/// answers `anthropic` for every bare non-`claude-` id, which would silently
+/// restore the hardcoded behaviour.
+#[must_use]
+pub(crate) fn provider_display(profile: Option<&str>) -> String {
+    match profile.unwrap_or("anthropic") {
+        "anthropic" | "bedrock" | "foundry" => "Claude".to_string(),
+        "openai" | "azure" => "OpenAI".to_string(),
+        "gemini" | "vertex" => "Gemini".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// The ACCOUNT noun — what the user signs in to, which is not the product name.
+///
+/// The oracle writes "your claude.ai account", never "your Claude account", so
+/// this is deliberately a second mapping rather than a reuse of
+/// [`provider_display`]: `claude.ai` is the consumer account portal, `Claude` is
+/// the product. Collapsing them would corrupt the Anthropic string, which is
+/// otherwise byte-identical to the oracle.
+#[must_use]
+pub(crate) fn account_display(profile: Option<&str>) -> String {
+    match profile.unwrap_or("anthropic") {
+        "anthropic" | "bedrock" | "foundry" => "claude.ai".to_string(),
+        "openai" | "azure" => "OpenAI".to_string(),
+        "gemini" | "vertex" => "Google".to_string(),
+        other => other.to_string(),
+    }
+}
+
 /// Oracle `uir` — the interactive form of the revoked-token surface.
 ///
 /// ⚠️ DELIBERATE DIVERGENCE — see [`AUTH_COMMAND`]. The oracle's bytes are
 /// `OAuth token revoked \xB7 Please run /login`.
 const OAUTH_TOKEN_REVOKED: &str = "OAuth token revoked \u{b7} Please run /connect";
-
-/// Oracle's non-interactive form, where the auth command is not something the
-/// caller can run, so it names the administrator instead. Names no command, so
-/// it is byte-identical to the oracle.
-const OAUTH_REVOKED_NON_INTERACTIVE: &str =
-    "Your account does not have access to Claude. Please login again or contact your administrator.";
 
 /// Oracle `Uke` — `status===403 && message.includes("OAuth token has been revoked")`.
 ///
@@ -178,12 +241,22 @@ pub(crate) fn is_oauth_revoked(status: Option<u16>, message: &str) -> bool {
 }
 
 /// Oracle `ue_()` — the revoked-token copy, split on interactivity.
+///
+/// The non-interactive half names a PRODUCT, and both the Anthropic and the
+/// OpenAI credential providers funnel auth failures into the one renderer, so
+/// it takes the live provider profile rather than hardcoding Claude the way the
+/// oracle does. The interactive half names a command, not a product, and does
+/// not vary.
 #[must_use]
-pub(crate) fn oauth_revoked_text(interactive: bool) -> &'static str {
+pub(crate) fn oauth_revoked_text(interactive: bool, profile: Option<&str>) -> String {
     if interactive {
-        OAUTH_TOKEN_REVOKED
+        OAUTH_TOKEN_REVOKED.to_string()
     } else {
-        OAUTH_REVOKED_NON_INTERACTIVE
+        format!(
+            "Your account does not have access to {}. Please login again or \
+             contact your administrator.",
+            provider_display(profile)
+        )
     }
 }
 
@@ -236,9 +309,9 @@ pub(crate) fn mentions_api_key_header(message: &str) -> bool {
 ///
 /// `external` means the credential came from outside the app (the env var or a
 /// helper script). Everything else — stored keys, OAuth, nothing at all — gets
-/// the sign-in copy, because `/login` is the fix.
+/// the sign-in copy, because signing in is the fix.
 #[must_use]
-pub(crate) fn credential_rejected_text(origin: CredentialOrigin) -> &'static str {
+pub(crate) fn credential_rejected_text(origin: &CredentialOrigin) -> &'static str {
     if origin.is_external() {
         INVALID_API_KEY
     } else {
@@ -746,7 +819,8 @@ mod tests {
     /// returns 0 and looks like the string is absent.
     #[test]
     fn the_credential_copy_is_byte_exact() {
-        assert_eq!(NOT_LOGGED_IN, "Not logged in \u{b7} Please run /login");
+        // `/connect`, not the oracle's `/login` — see `AUTH_COMMAND`.
+        assert_eq!(NOT_LOGGED_IN, "Not logged in \u{b7} Please run /connect");
         assert_eq!(INVALID_API_KEY, "Invalid API key \u{b7} Fix external API key");
         assert_eq!(
             AUTH_TRANSIENT,
@@ -759,24 +833,24 @@ mod tests {
     }
 
     /// An externally supplied credential was rejected → tell the user to fix
-    /// THAT, because /login cannot. Anything else → /login.
+    /// THAT, because signing in cannot. Anything else → the auth command.
     #[test]
     fn credential_copy_splits_on_where_the_key_came_from() {
         assert_eq!(
-            credential_rejected_text(CredentialOrigin::EnvApiKey),
+            credential_rejected_text(&CredentialOrigin::EnvApiKey { var: "ANTHROPIC_API_KEY".to_string() }),
             INVALID_API_KEY
         );
         assert_eq!(
-            credential_rejected_text(CredentialOrigin::ApiKeyHelper),
+            credential_rejected_text(&CredentialOrigin::ApiKeyHelper),
             INVALID_API_KEY
         );
-        // A managed key or a stored/OAuth credential IS fixable by /login.
+        // A managed key or a stored/OAuth credential IS fixable by signing in.
         assert_eq!(
-            credential_rejected_text(CredentialOrigin::LoginManagedKey),
+            credential_rejected_text(&CredentialOrigin::LoginManagedKey),
             NOT_LOGGED_IN
         );
         assert_eq!(
-            credential_rejected_text(CredentialOrigin::Other),
+            credential_rejected_text(&CredentialOrigin::Other),
             NOT_LOGGED_IN
         );
     }
@@ -786,24 +860,25 @@ mod tests {
     #[test]
     fn org_disabled_names_the_right_thing_to_unset() {
         assert_eq!(
-            api_key_auth_disabled_text(CredentialOrigin::EnvApiKey, true),
+            api_key_auth_disabled_text(&CredentialOrigin::EnvApiKey { var: "ANTHROPIC_API_KEY".to_string() }, true, Some("anthropic")),
             "Your organization has disabled API key authentication \u{b7} Unset \
              ANTHROPIC_API_KEY to use your claude.ai account instead"
         );
-        // No account signed in yet → also has to run /login.
+        // No account signed in yet → also has to sign in. `/connect`, not the
+        // oracle's `/login` — see `AUTH_COMMAND`.
         assert_eq!(
-            api_key_auth_disabled_text(CredentialOrigin::EnvApiKey, false),
+            api_key_auth_disabled_text(&CredentialOrigin::EnvApiKey { var: "ANTHROPIC_API_KEY".to_string() }, false, Some("anthropic")),
             "Your organization has disabled API key authentication \u{b7} Unset \
-             ANTHROPIC_API_KEY and run /login to sign in with your claude.ai account"
+             ANTHROPIC_API_KEY and run /connect to sign in with your claude.ai account"
         );
         assert_eq!(
-            api_key_auth_disabled_text(CredentialOrigin::ApiKeyHelper, true),
+            api_key_auth_disabled_text(&CredentialOrigin::ApiKeyHelper, true, Some("anthropic")),
             "Your organization has disabled API key authentication \u{b7} Unset the \
-             apiKeyHelper setting and run /login to sign in with your claude.ai account"
+             apiKeyHelper setting and run /connect to sign in with your claude.ai account"
         );
         assert_eq!(
-            api_key_auth_disabled_text(CredentialOrigin::LoginManagedKey, true),
-            "Your organization has disabled API key authentication \u{b7} Run /login \
+            api_key_auth_disabled_text(&CredentialOrigin::LoginManagedKey, true, Some("anthropic")),
+            "Your organization has disabled API key authentication \u{b7} Run /connect \
              to sign in with your claude.ai account"
         );
     }
@@ -850,15 +925,165 @@ mod tests {
         assert_eq!(
             // `/connect`, NOT the oracle's `/login` — deliberate
             // multi-provider divergence, see `AUTH_COMMAND`.
-            oauth_revoked_text(true),
+            oauth_revoked_text(true, Some("anthropic")),
             "OAuth token revoked \u{b7} Please run /connect"
         );
-        // Non-interactive callers cannot run /login, so it names the admin.
+        // Non-interactive callers cannot run the auth command, so it names
+        // the admin instead.
         assert_eq!(
-            oauth_revoked_text(false),
+            oauth_revoked_text(false, Some("anthropic")),
             "Your account does not have access to Claude. Please login again or \
              contact your administrator."
         );
+    }
+
+    /// The org-disabled copy names two provider-specific things: the env var to
+    /// unset, and the account to sign in to. Both must follow the session, not
+    /// the oracle's hardcoded Anthropic pair.
+    #[test]
+    fn org_disabled_names_the_sessions_own_env_var_and_account() {
+        // Anthropic stays byte-identical to the oracle (modulo `/connect`).
+        assert_eq!(
+            api_key_auth_disabled_text(
+                &CredentialOrigin::EnvApiKey {
+                    var: "ANTHROPIC_API_KEY".to_string()
+                },
+                false,
+                Some("anthropic"),
+            ),
+            "Your organization has disabled API key authentication \u{b7} Unset \
+             ANTHROPIC_API_KEY and run /connect to sign in with your claude.ai account"
+        );
+        // A session on another provider names ITS variable and ITS account.
+        // Telling this user to unset ANTHROPIC_API_KEY would be advice that
+        // cannot possibly help them.
+        assert_eq!(
+            api_key_auth_disabled_text(
+                &CredentialOrigin::EnvApiKey {
+                    var: "OPENAI_API_KEY".to_string()
+                },
+                false,
+                Some("openai"),
+            ),
+            "Your organization has disabled API key authentication \u{b7} Unset \
+             OPENAI_API_KEY and run /connect to sign in with your OpenAI account"
+        );
+        // The already-signed-in variant names the var too.
+        assert_eq!(
+            api_key_auth_disabled_text(
+                &CredentialOrigin::EnvApiKey {
+                    var: "GEMINI_API_KEY".to_string()
+                },
+                true,
+                Some("gemini"),
+            ),
+            "Your organization has disabled API key authentication \u{b7} Unset \
+             GEMINI_API_KEY to use your Google account instead"
+        );
+    }
+
+    /// The account NOUN is not the product name: the oracle says "your
+    /// claude.ai account", never "your Claude account".
+    #[test]
+    fn the_account_noun_differs_from_the_product_name() {
+        assert_eq!(account_display(Some("anthropic")), "claude.ai");
+        assert_eq!(provider_display(Some("anthropic")), "Claude");
+        assert_eq!(account_display(Some("openai")), "OpenAI");
+        assert_eq!(account_display(Some("gemini")), "Google");
+        assert_eq!(account_display(Some("deepseek")), "deepseek");
+    }
+
+    /// Copy that names WHOSE account is at fault must name the provider the
+    /// session actually talks to. The oracle can hardcode Claude; LingXi cannot.
+    #[test]
+    fn the_named_product_follows_the_live_provider_profile() {
+        assert_eq!(provider_display(Some("anthropic")), "Claude");
+        assert_eq!(provider_display(Some("openai")), "OpenAI");
+        assert_eq!(provider_display(Some("azure")), "OpenAI");
+        assert_eq!(provider_display(Some("gemini")), "Gemini");
+        // Vertex is Gemini's profile in `pricing_provider_id_for_profile`;
+        // Bedrock hosts Claude. Following that table rather than inventing a
+        // second one that can disagree with it.
+        assert_eq!(provider_display(Some("vertex")), "Gemini");
+        assert_eq!(provider_display(Some("bedrock")), "Claude");
+        // An unknown/custom profile names itself rather than guessing a vendor.
+        assert_eq!(provider_display(Some("deepseek")), "deepseek");
+        // No live profile → the default route.
+        assert_eq!(provider_display(None), "Claude");
+    }
+
+    /// The non-interactive revoked copy is the one auth string that names a
+    /// product AND can be reached by more than one provider: both the Anthropic
+    /// and the OpenAI credential providers surface refresh/auth failures into
+    /// the same renderer.
+    #[test]
+    fn the_revoked_copy_names_the_session_provider_not_always_claude() {
+        assert_eq!(
+            oauth_revoked_text(false, Some("anthropic")),
+            "Your account does not have access to Claude. Please login again or \
+             contact your administrator."
+        );
+        assert_eq!(
+            oauth_revoked_text(false, Some("openai")),
+            "Your account does not have access to OpenAI. Please login again or \
+             contact your administrator."
+        );
+        // The interactive form names a command, not a product, so it does not
+        // vary by provider.
+        assert_eq!(
+            oauth_revoked_text(true, Some("openai")),
+            "OAuth token revoked \u{b7} Please run /connect"
+        );
+    }
+
+    /// Every user-facing auth string that names a command must name
+    /// [`AUTH_COMMAND`], and none may reintroduce the oracle's `/login`.
+    ///
+    /// The multi-provider ruling is easy to undo by accident: a byte-parity
+    /// pass diffing against the 2.1.220 binary sees `/connect` as a regression
+    /// and "fixes" it. This test is the thing that says no.
+    #[test]
+    fn every_auth_instruction_names_the_products_own_command() {
+        let interactive_copy = [
+            NOT_LOGGED_IN.to_string(),
+            oauth_revoked_text(true, Some("anthropic")),
+            oauth_refresh_dead_text(true).to_string(),
+        ];
+        for s in &interactive_copy {
+            assert!(
+                s.contains(AUTH_COMMAND),
+                "auth copy must name {AUTH_COMMAND}: {s}"
+            );
+        }
+        // The org-disabled tails that name a command, across every origin.
+        let org_disabled = [
+            api_key_auth_disabled_text(&CredentialOrigin::EnvApiKey { var: "ANTHROPIC_API_KEY".to_string() }, false, Some("anthropic")),
+            api_key_auth_disabled_text(&CredentialOrigin::ApiKeyHelper, true, Some("anthropic")),
+            api_key_auth_disabled_text(&CredentialOrigin::LoginManagedKey, true, Some("anthropic")),
+        ];
+        for s in &org_disabled {
+            assert!(
+                s.contains(AUTH_COMMAND),
+                "org-disabled copy must name {AUTH_COMMAND}: {s}"
+            );
+        }
+        // Nothing user-facing may say `/login` — including the copy that names
+        // no command at all.
+        for s in interactive_copy
+            .into_iter()
+            .chain(org_disabled)
+            .chain([
+                INVALID_API_KEY.to_string(),
+                oauth_revoked_text(false, Some("anthropic")),
+                oauth_refresh_dead_text(false).to_string(),
+                api_key_auth_disabled_text(&CredentialOrigin::EnvApiKey { var: "ANTHROPIC_API_KEY".to_string() }, true, Some("anthropic")),
+            ])
+        {
+            assert!(
+                !s.contains("/login"),
+                "LingXi has no /login in user-facing copy: {s}"
+            );
+        }
     }
 
     #[test]
@@ -871,7 +1096,7 @@ mod tests {
             oauth_refresh_dead_text(true),
             "Login expired \u{b7} Please run /connect"
         );
-        // Oracle's `_n()` branch: a non-interactive caller cannot run /login,
+        // Oracle's `_n()` branch: a non-interactive caller cannot run it,
         // so it states the fact instead of giving an unusable instruction.
         assert_eq!(
             oauth_refresh_dead_text(false),

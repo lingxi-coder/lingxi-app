@@ -14,7 +14,28 @@ use std::sync::Arc;
 
 use crate::{BoxFuture, Credential, CredentialProvider, CredentialScope, LlmError};
 
-use crate::oauth::openai::refresh::RefreshDriver;
+use crate::oauth::openai::refresh::{OAuthHookError, RefreshDriver};
+
+/// Which [`LlmError`] a failed refresh becomes — the `OpenAI` twin of
+/// `oauth::anthropic::credential_provider::llm_error_for`.
+///
+/// Deliberately duplicated rather than shared: the two modules own SEPARATE
+/// `OAuthHookError` types, and coupling them through a common trait would make
+/// a change to one provider's refresh contract silently reinterpret the
+/// other's. The variant meanings, not the type, are what must agree.
+///
+/// Only an IdP that REJECTED the refresh token is a dead session. A stale token
+/// hash means another caller already rotated, and an unreachable IdP is a
+/// transport failure — neither means the user has to sign in again.
+#[must_use]
+pub(crate) fn llm_error_for(err: &OAuthHookError) -> LlmError {
+    match err {
+        OAuthHookError::RefreshFailed(_) => LlmError::OAuthRefreshDead,
+        OAuthHookError::TokenStale | OAuthHookError::ProviderUnreachable(_) => {
+            LlmError::Authentication
+        }
+    }
+}
 
 /// Serves the current `OpenAI` OAuth access token, refreshing in place when expired
 /// (single-flight via the underlying refresh lock).
@@ -68,12 +89,14 @@ impl CredentialProvider for OpenAiOAuthCredentialProvider {
                 });
             }
 
-            // Expired → single-flight refresh.
+            // Expired → single-flight refresh. The failure KIND survives via
+            // `llm_error_for`; the failure MESSAGE never does, so no secret
+            // material can leak into the rendered error.
             let bearer = self
                 .driver
                 .refresh(token_hash)
                 .await
-                .map_err(|_| LlmError::Authentication)?;
+                .map_err(|e| llm_error_for(&e))?;
 
             // Read the updated account_id/fedramp after rotation.
             let (new_account_id, new_fedramp) = {
@@ -175,7 +198,7 @@ mod credential_provider_tests {
     }
 
     #[tokio::test]
-    async fn maps_refresh_failure_to_llm_authentication_error() {
+    async fn a_rejected_refresh_token_maps_to_the_dead_oauth_session_error() {
         let http = MockHttp::new(vec![(
             "oauth/token",
             Canned {
@@ -202,6 +225,12 @@ mod credential_provider_tests {
 
         let scope = CredentialScope::new(crate::ProviderId::OpenAI, "default");
         let err = provider.load(&scope).await.expect_err("should fail");
-        assert!(matches!(err, LlmError::Authentication));
+        // `invalid_grant` = the IdP rejected the refresh token, so this is a
+        // dead session and the user has to sign in again — not the generic
+        // auth failure a transient IdP outage produces.
+        assert!(
+            matches!(err, LlmError::OAuthRefreshDead),
+            "expected OAuthRefreshDead, got {err:?}"
+        );
     }
 }

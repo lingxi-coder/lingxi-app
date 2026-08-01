@@ -5031,7 +5031,13 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
             // anyway.
             credential_origin = match &auth_source {
                 llm_client::oauth::anthropic::resolver::AuthSource::EnvApiKey => {
-                    orchestrator::api_error_copy::CredentialOrigin::EnvApiKey
+                    // This is the ANTHROPIC auth resolver, and its `EnvApiKey`
+                    // is defined as `ANTHROPIC_API_KEY` (see `AuthSource`), so
+                    // naming the variable here is a fact, not a guess. Another
+                    // provider's resolver supplies its own `apiKeyEnv` name.
+                    orchestrator::api_error_copy::CredentialOrigin::EnvApiKey {
+                        var: "ANTHROPIC_API_KEY".to_string(),
+                    }
                 }
                 llm_client::oauth::anthropic::resolver::AuthSource::ApiKeyHelper { .. } => {
                     orchestrator::api_error_copy::CredentialOrigin::ApiKeyHelper

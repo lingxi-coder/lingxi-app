@@ -6466,15 +6466,23 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // Revoked OAuth token (`Uke`): a 403 whose message names it. Checked
             // BEFORE the x-api-key branch, matching the oracle's order, and
             // split on interactivity because a non-interactive caller cannot
-            // run /login.
+            // run the auth command.
+            //
+            // The non-interactive half names a product, so it takes the LIVE
+            // provider profile: this renderer is shared by every provider, and
+            // the oracle's hardcoded "Claude" would be wrong for a session
+            // routed elsewhere.
             LlmError::Authentication | LlmError::PermissionDenied
                 if crate::api_error_copy::is_oauth_revoked(
                     err.http_status(),
                     &err.to_string(),
                 ) =>
             {
-                crate::api_error_copy::oauth_revoked_text(self.config.interactive_session)
-                    .to_string()
+                let profile = self.session.lock().await.model_profile.clone();
+                crate::api_error_copy::oauth_revoked_text(
+                    self.config.interactive_session,
+                    profile.as_deref(),
+                )
             }
             // Org policy turned API-key auth off (403 naming it). Checked
             // before the generic credential branch, and names the specific
@@ -6485,9 +6493,11 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     &err.to_string(),
                 ) =>
             {
+                let profile = self.session.lock().await.model_profile.clone();
                 crate::api_error_copy::api_key_auth_disabled_text(
-                    self.config.credential_origin,
+                    &self.config.credential_origin,
                     self.config.has_oauth_token,
+                    profile.as_deref(),
                 )
             }
             // Credential rejection. The oracle gates this on the MESSAGE naming
@@ -6521,7 +6531,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 crate::api_error_copy::cloud_credential_text(&route, err.http_status())
                     .unwrap_or_else(|| {
                         crate::api_error_copy::credential_rejected_text(
-                            self.config.credential_origin,
+                            &self.config.credential_origin,
                         )
                         .to_string()
                     })

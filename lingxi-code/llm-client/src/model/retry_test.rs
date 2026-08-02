@@ -766,8 +766,8 @@ mod next_step_tests {
     #[test]
     fn terminal_error_classes_are_terminal() {
         let errors = vec![
-            LlmError::Authentication,
-            LlmError::PermissionDenied,
+            LlmError::Authentication { message: String::new() },
+            LlmError::PermissionDenied { message: String::new() },
             LlmError::ContextOverflow { token_gap: 0 },
             LlmError::QuotaExceeded,
             LlmError::ModelUnavailable,
@@ -872,8 +872,8 @@ mod next_step_tests {
         // Errors that RetryPolicy says DoNotRetry — must all be Terminal from
         // next_step (except InvalidRequest overflow, which is tested separately).
         let do_not_retry = vec![
-            LlmError::Authentication,
-            LlmError::PermissionDenied,
+            LlmError::Authentication { message: String::new() },
+            LlmError::PermissionDenied { message: String::new() },
             LlmError::ContextOverflow { token_gap: 0 },
             LlmError::QuotaExceeded,
             LlmError::ModelUnavailable,

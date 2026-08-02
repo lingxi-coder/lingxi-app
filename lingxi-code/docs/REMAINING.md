@@ -8,11 +8,15 @@ execution rather than re-derivation.
 >
 > Every deferred item in this file plus the ones carried in session memory was
 > re-checked **at the code**, not from notes. Result: **one real task, one
-> correction, one stale entry.**
+> correction, one stale entry — and the real task has since been done.**
+>
+> **Engineering items remaining: zero.** What is left are two product calls
+> (`--version` shape, whether the first-party remote-memory backend is in
+> scope) and one test-coverage gap that needs a mock IdP/registry to close.
 >
 > | Item | Verdict |
 > |---|---|
-> | **`--resume <title>`** | ❗ **REAL and now UNBLOCKED.** It was deferred because the port never WROTE `custom-title`. It does now — `jsonl/writer.rs:323,:350`, `jsonl/re_append.rs:449`, `branch.rs:134`. `resolve_session_id` (`run.rs:3573`) still accepts only a UUID, so a title argument errors. Oracle confirms the feature: `searchSessionsByCustomTitle` = 2 hits (control string 0, known-present string 4 — comparator validated). **This is the only open engineering task in the repo.** |
+> | **`--resume <title>`** | ✅ **DONE 2026-08-02** (`d1d5779d1`). Was deferred because nothing wrote `custom-title`; three write paths had since landed, which dissolved the reason. `OEe` ported as `session::jsonl::search_sessions_by_custom_title` (lowercase+trim both sides, `customTitle ?? aiTitle`, EXACT for `--resume`, newest-first); wired at `run.rs::resolve_resume_title`. ⚠️ It matches a NEW `custom_or_ai_title` field, **not** `SessionMetadata::title` — that one folds in agentName/summary/first-message and is truncated, so searching it would resume a session because its SUMMARY matched. Both error strings verified fragment-by-fragment against the binary with a control string. |
 > | "8 unprobed CLI surfaces" | **It is 6, and it is a TEST-COVERAGE gap, not a feature gap.** `install` + `update` are deliberate NOT-APPLICABLE divergences (source build, no auto-update channel): they parse the byte-faithful clap surface, then return `NOT_IMPLEMENTED` rather than fake success. The other 6 are really implemented (74–3420 lines each). Their stated blocker still stands — probing them for real reaches third-party IdP/registry. |
 > | `--version` shape | Confirmed a **branding decision**, not work. `traits::CLAUDE_CODE_VERSION` already carries the Claude-compat identifier separately. |
 > | `--bare` / `lingxiMdExcludes` | ❌ **STALE — both shipped long ago.** `--bare` is WIRED at `argv.rs:294` (exports `LINGXI_SIMPLE=1`); excludes have their own module (`memory/src/lingxi_md/excludes.rs`), are wired into `prompt/memory_block.rs`, and are registered in the settings schema. Delete this entry, do not re-derive it. |

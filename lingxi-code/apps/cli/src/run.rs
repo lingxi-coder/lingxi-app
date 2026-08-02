@@ -23,7 +23,7 @@ use command_api::format_description_with_source;
 use permission;
 use serde_json::{json, Value};
 use session::jsonl::loader::{
-    list_recent_sessions, load_session, select_session_interactive, LoaderError, SessionMetadata,
+    list_recent_sessions, select_session_interactive, LoaderError, SessionMetadata,
 };
 use session::jsonl::JsonlMessage;
 use std::path::PathBuf;
@@ -2672,7 +2672,7 @@ fn parse_pr_value(raw: &str) -> Option<u64> {
 /// `--resume <uuid>` — the concrete-id path.
 ///
 /// Parses the arg as a UUID, then (SESSION.4) verifies the session actually
-/// exists on disk via [`load_session`] BEFORE reporting success: a valid-but-
+/// exists on disk via the cross-worktree session loader BEFORE reporting success: a valid-but-
 /// unknown id errors with the TS "No conversation found with session ID: {id}"
 /// line and a non-zero exit instead of a false "Resumed session {id}".
 ///
@@ -2721,17 +2721,20 @@ async fn run_resume_by_id(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink)
 /// substring here would resume an arbitrary session on a partial title.
 ///
 /// Returns `Ok(None)` for an empty argument (nothing to search), `Ok(Some(id))`
-/// on a unique hit, and `Err(message)` for the two failure copies. A loader
-/// failure is reported as "no match" rather than surfaced: the oracle's `OEe`
-/// cannot distinguish an unreadable project dir from an empty one either, and
-/// inventing a third error here would be fabrication.
+/// on a unique hit, and `Err(message)` for a no-match, an ambiguous match, or a
+/// real catalog I/O failure. A genuinely empty catalog still follows the
+/// no-match copy; unreadable/corrupt storage must not masquerade as one.
 async fn resolve_resume_title(arg: &str) -> Result<Option<uuid::Uuid>, String> {
     if arg.is_empty() {
         return Ok(None);
     }
     // The oracle loads EVERY log for the project before filtering; the picker's
     // 5-row cap is a display limit and must not silently bound the search.
-    let rows = load_resume_rows_all().await.unwrap_or_default();
+    let rows = match load_resume_rows_all().await {
+        Ok(rows) => rows,
+        Err(LoaderError::EmptyDirectory) => Vec::new(),
+        Err(error) => return Err(error.to_string()),
+    };
     resolve_resume_title_from(rows, arg)
 }
 
@@ -3652,9 +3655,9 @@ async fn load_resume_session(session_id: uuid::Uuid) -> Result<Vec<JsonlMessage>
 /// Production disk→`Vec<JsonlMessage>` load with the inputs passed in (no env /
 /// process-cwd reads) so it is directly testable. Builds the same disk-backed
 /// [`platform_posix::PosixFileSystem`] the row loader uses and asks the
-/// M5-07/M5-08 [`load_session`] loader for the session, which returns
-/// [`LoaderError::SessionNotFound`] when no `<uuid>.jsonl` exists under the
-/// cwd's project dir.
+/// worktree-aware session loader for the session. This is deliberately the
+/// same sibling-worktree scope as [`list_recent_sessions`], so a row surfaced
+/// by either resume picker or title search is always loadable.
 pub(crate) async fn load_resume_session_from(
     lingxi_home: &std::path::Path,
     cwd: &std::path::Path,
@@ -3662,7 +3665,7 @@ pub(crate) async fn load_resume_session_from(
 ) -> Result<Vec<JsonlMessage>, LoaderError> {
     let cwd_str = cwd.to_string_lossy().into_owned();
     let fs: Arc<dyn FileSystem> = Arc::new(platform_posix::PosixFileSystem::new(cwd.to_path_buf()));
-    load_session(lingxi_home, &cwd_str, session_id, fs).await
+    session::jsonl::load_session_across_worktrees(lingxi_home, &cwd_str, session_id, fs).await
 }
 
 /// Claude config home dir. `$LINGXI_CONFIG_DIR` when set wins (claude-code `tr()`

@@ -51,9 +51,10 @@ pub use writer::JsonlWriter;
 // New M5-08 public surface.
 pub use loader::{
     build_conversation_chain, discovered_tool_names, find_tip, list_recent_sessions,
-    list_recent_sessions_with_diagnostics, load_session, pre_compact_discovered_tools,
-    read_agent_resume_state, read_agent_snapshot, search_sessions_by_custom_title,
-    select_session_interactive, LoaderError, SessionCatalog, SessionMetadata,
+    list_recent_sessions_with_diagnostics, load_session, load_session_across_worktrees,
+    pre_compact_discovered_tools, read_agent_resume_state, read_agent_snapshot,
+    search_sessions_by_custom_title, select_session_interactive, LoaderError, SessionCatalog,
+    SessionMetadata,
 };
 pub use title::{derive_fork_name, extract_title, FORK_NAME_FALLBACK};
 

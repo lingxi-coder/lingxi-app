@@ -907,8 +907,129 @@ pub async fn load_session(
 ) -> Result<Vec<JsonlMessage>, LoaderError> {
     let arg = session_id.to_string();
     let path = session_path(lingxi_home, cwd, &arg);
-    if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
+    load_session_from_path(path, arg, fs).await
+}
+
+/// Load a session by UUID from the same worktree-aware corpus used by
+/// [`list_recent_sessions`].
+///
+/// The resume picker and title search intentionally union sibling worktrees.
+/// Loading the selected UUID only from the current cwd's project directory
+/// made those rows visible but impossible to resume. This function keeps
+/// discovery and loading on the same scope, choosing the newest transcript if
+/// a UUID is present under more than one sibling project directory (the same
+/// dedupe rule as [`deduplicate_by_session_id`]).
+pub async fn load_session_across_worktrees(
+    lingxi_home: &Path,
+    cwd: &str,
+    session_id: Uuid,
+    fs: Arc<dyn FileSystem>,
+) -> Result<Vec<JsonlMessage>, LoaderError> {
+    let worktree_paths = git_worktree_paths(cwd);
+    load_session_across_worktrees_inner(lingxi_home, cwd, session_id, fs, &worktree_paths).await
+}
+
+async fn load_session_across_worktrees_inner(
+    lingxi_home: &Path,
+    cwd: &str,
+    session_id: Uuid,
+    fs: Arc<dyn FileSystem>,
+    worktree_paths: &[String],
+) -> Result<Vec<JsonlMessage>, LoaderError> {
+    if worktree_paths.len() <= 1 {
+        return load_session(lingxi_home, cwd, session_id, fs).await;
+    }
+
+    let arg = session_id.to_string();
+    let projects_root = lingxi_home.join("projects");
+    let prefixes: Vec<String> = worktree_paths
+        .iter()
+        .map(|worktree| project_dir_name(worktree))
+        .collect();
+    let mut entries = match tokio::fs::read_dir(&projects_root).await {
+        Ok(entries) => entries,
+        // Keep the catalog's fallback semantics: when the projects root cannot
+        // be enumerated, try the exact cwd project directory before failing.
+        Err(_) => return load_session(lingxi_home, cwd, session_id, fs).await,
+    };
+    let mut selected: Option<(PathBuf, SystemTime)> = None;
+
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|source| LoaderError::Io {
+            arg: projects_root.display().to_string(),
+            source,
+        })?
+    {
+        if !entry
+            .file_type()
+            .await
+            .map(|kind| kind.is_dir())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !prefixes
+            .iter()
+            .any(|prefix| worktree_dir_matches(name, prefix))
+        {
+            continue;
+        }
+
+        let candidate = entry.path().join(format!("{arg}.jsonl"));
+        let metadata = match tokio::fs::metadata(&candidate).await {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(source) => {
+                return Err(LoaderError::Io {
+                    arg: candidate.display().to_string(),
+                    source,
+                })
+            }
+        };
+        if !metadata.is_file() {
+            return Err(LoaderError::Io {
+                arg: candidate.display().to_string(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "session transcript is not a regular file",
+                ),
+            });
+        }
+        let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+        let replace = selected
+            .as_ref()
+            .is_none_or(|(_, selected_modified)| modified > *selected_modified);
+        if replace {
+            selected = Some((candidate, modified));
+        }
+    }
+
+    let Some((path, _)) = selected else {
         return Err(LoaderError::SessionNotFound { arg });
+    };
+    load_session_from_path(path, arg, fs).await
+}
+
+async fn load_session_from_path(
+    path: PathBuf,
+    arg: String,
+    fs: Arc<dyn FileSystem>,
+) -> Result<Vec<JsonlMessage>, LoaderError> {
+    match tokio::fs::metadata(&path).await {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(LoaderError::SessionNotFound { arg });
+        }
+        Err(source) => {
+            return Err(LoaderError::Io {
+                arg: path.display().to_string(),
+                source,
+            });
+        }
     }
     let reader = JsonlReader::new(path, fs);
     let loaded = reader.read_routed().await.map_err(|e| LoaderError::Io {
@@ -2327,8 +2448,47 @@ mod tests {
             "dedupe keeps the newest mtime"
         );
 
+        let loaded =
+            load_session_across_worktrees_inner(&lingxi_home, wt_a, dup, fs.clone(), &worktrees)
+                .await
+                .expect("the catalog-selected duplicate must also load");
+        assert_eq!(
+            loaded[0].message["content"], "dup-new",
+            "discovery and loading must use the same duplicate rule"
+        );
+
         // Distinct surviving sessions: a_root, a_sub, b_root, dup.
         assert_eq!(rows.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn loads_a_session_selected_from_a_sibling_worktree() {
+        let temp = TempDir::new().unwrap();
+        let lingxi_home = temp.path().join("home");
+        let wt_a = "/wt/alpha";
+        let wt_b = "/wt/beta";
+        let sibling_dir = lingxi_home.join("projects").join(project_dir_name(wt_b));
+        let id = Uuid::new_v4();
+        write_session_id(
+            &sibling_dir,
+            id,
+            wt_b,
+            "sibling transcript",
+            SystemTime::now(),
+        );
+
+        let fs = make_fs(temp.path());
+        let worktrees = vec![wt_a.to_string(), wt_b.to_string()];
+        let messages = load_session_across_worktrees_inner(&lingxi_home, wt_a, id, fs, &worktrees)
+            .await
+            .expect("a row discovered in a sibling worktree must also load");
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].session_id, id.to_string());
+        assert_eq!(
+            messages[0].message["content"],
+            serde_json::Value::String("sibling transcript".to_string())
+        );
     }
 
     #[tokio::test]
@@ -2446,7 +2606,11 @@ mod tests {
     fn title_search_is_case_and_whitespace_insensitive() {
         let rows = vec![search_row(1, 100, "d", Some("  Ship The Parser  "))];
         let hit = search_sessions_by_custom_title(rows, "\tship the parser ", true, None);
-        assert_eq!(hit.len(), 1, "case + surrounding whitespace must not matter");
+        assert_eq!(
+            hit.len(),
+            1,
+            "case + surrounding whitespace must not matter"
+        );
     }
 
     /// The search source is `customTitle ?? aiTitle` — NOT the merged display
@@ -2466,7 +2630,10 @@ mod tests {
     /// query cannot sweep up every session.
     #[test]
     fn title_search_skips_untitled_rows_even_for_an_empty_query() {
-        let rows = vec![search_row(1, 100, "d", None), search_row(2, 100, "d", Some(""))];
+        let rows = vec![
+            search_row(1, 100, "d", None),
+            search_row(2, 100, "d", Some("")),
+        ];
         assert!(search_sessions_by_custom_title(rows, "", false, None).is_empty());
     }
 

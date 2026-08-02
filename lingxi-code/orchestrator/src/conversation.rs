@@ -6550,6 +6550,17 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                         .to_string()
                     })
             }
+            // TERMINAL 401/403 arm (@230607344). Every specific auth branch
+            // above declined, so the oracle still renders an `API Error:` line
+            // carrying the provider detail rather than falling through to the
+            // variant's bare `Display` ("authentication failed" /
+            // "permission denied"), which is what this port used to show.
+            LlmError::Authentication { .. } | LlmError::PermissionDenied { .. } => {
+                crate::api_error_copy::auth_failed_fallback(
+                    self.config.interactive_session,
+                    err.provider_message().unwrap_or_default(),
+                )
+            }
             LlmError::ContextOverflow { .. } => {
                 crate::api_error_copy::PROMPT_TOO_LONG.to_string()
             }
@@ -20979,11 +20990,16 @@ mod main_thread_agent_tests {
             crate::api_error_copy::OAUTH_ORG_NOT_ALLOWED
         );
 
-        // A 403 with unrelated text still falls through to the bare Display.
+        // A 403 with unrelated text reaches the oracle's TERMINAL arm, which
+        // still carries the provider detail — NOT the bare `Display`.
         let plain = LlmError::PermissionDenied {
             message: "403 forbidden".to_string(),
         };
-        assert_eq!(orch.model_error_text(&plain).await, "permission denied");
+        assert_eq!(
+            orch.model_error_text(&plain).await,
+            "Failed to authenticate. API Error: 403 forbidden",
+            "default config is non-interactive"
+        );
     }
 
     /// The org-level OAuth block must reach the user as its own copy, and must

@@ -231,6 +231,38 @@ pub(crate) fn account_display(profile: Option<&str>) -> String {
 /// `OAuth token revoked \xB7 Please run /login`.
 const OAUTH_TOKEN_REVOKED: &str = "OAuth token revoked \u{b7} Please run /connect";
 
+/// Oracle's TERMINAL 401/403 arm — reached when no specific auth branch
+/// matched (@230607344):
+///
+/// ```js
+/// return yu({error:"authentication_failed", content: _n()
+///   ? `Failed to authenticate. ${IT}: ${i}`
+///   : `Please run /login \xB7 ${IT}: ${i}`})
+/// ```
+///
+/// `i` is `sir(e)`, the oracle's error-text normalizer. For a real API error
+/// with a body that is just `e.message` — i.e. the SDK's `${status} ${body}`,
+/// which is what [`llm_client::LlmError::provider_message`] holds — so this is
+/// byte-correct on the common path.
+///
+/// ⚠️ INCOMPLETE: `sir`'s SPECIAL cases are NOT ported (0 hits in this port) —
+/// `StreamSuspended` → "Connection interrupted by system sleep", `ETIMEDOUT` →
+/// "Request timed out. …", the seven SSL-code arms → "Unable to connect to
+/// API: …", `"Connection error."` → "Unable to connect to API…", and the
+/// empty-message fallback `API error (status …)`. Those need `sir` ported as
+/// its own unit; note the port's [`llm_client::ssl::ssl_hint`] is a DIFFERENT
+/// oracle function (`YLe`), not these strings.
+///
+/// ⚠️ DELIBERATE DIVERGENCE — see [`AUTH_COMMAND`].
+#[must_use]
+pub(crate) fn auth_failed_fallback(interactive: bool, detail: &str) -> String {
+    if interactive {
+        format!("Please run {AUTH_COMMAND} {SEP} {API_ERROR}: {detail}")
+    } else {
+        format!("Failed to authenticate. {API_ERROR}: {detail}")
+    }
+}
+
 /// Oracle `ce_` (returned by `de_()`) — the org has switched OFF the Claude
 /// SUBSCRIPTION path, so an API key is the way in.
 ///
@@ -960,6 +992,20 @@ mod tests {
             oauth_revoked_text(false, Some("anthropic")),
             "Your account does not have access to Claude. Please login again or \
              contact your administrator."
+        );
+    }
+
+    /// The terminal 401/403 arm, reached when no specific branch matched.
+    #[test]
+    fn the_auth_fallback_carries_the_api_error_detail() {
+        assert_eq!(
+            auth_failed_fallback(true, "403 {\"error\":\"nope\"}"),
+            "Please run /connect \u{b7} API Error: 403 {\"error\":\"nope\"}"
+        );
+        // Non-interactive states the fact instead of naming a command.
+        assert_eq!(
+            auth_failed_fallback(false, "401 bad"),
+            "Failed to authenticate. API Error: 401 bad"
         );
     }
 

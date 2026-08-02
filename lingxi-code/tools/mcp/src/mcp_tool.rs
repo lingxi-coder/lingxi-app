@@ -195,8 +195,16 @@ pub(crate) fn auth_kind_from_spec(spec: &McpTransportSpec) -> (&'static str, &'s
         McpTransportSpec::Sse { headers, .. } if !headers.is_empty() => ("sse", "static_headers"),
         McpTransportSpec::Sse { .. } => ("sse", "none"),
         McpTransportSpec::Http { oauth: Some(_), .. } => ("http", "oauth"),
+        McpTransportSpec::Http {
+            headers_helper: Some(_),
+            ..
+        } => ("http", "headers_helper"),
         McpTransportSpec::Http { headers, .. } if !headers.is_empty() => ("http", "static_headers"),
         McpTransportSpec::Http { .. } => ("http", "none"),
+        McpTransportSpec::WebSocket {
+            headers_helper: Some(_),
+            ..
+        } => ("websocket", "headers_helper"),
         McpTransportSpec::WebSocket { headers, .. } if !headers.is_empty() => {
             ("websocket", "static_headers")
         }
@@ -900,23 +908,20 @@ impl Tool for MCPTool {
             }
         };
 
-        let client = match registry.get_client(&server).await {
-            Some(c) => c,
-            None => {
-                emit(
-                    self.bus(),
-                    MCP_FAILED,
-                    &[
-                        ("_PROTO_server_name", pii(&server)),
-                        ("error_kind", verified_str("server_not_registered")),
-                    ],
-                )
-                .await;
-                return Err(ToolError::InvalidInput(format!(
-                    "MCPTool: MCP server {server:?} is not registered"
-                )));
-            }
-        };
+        if registry.get_client(&server).await.is_none() {
+            emit(
+                self.bus(),
+                MCP_FAILED,
+                &[
+                    ("_PROTO_server_name", pii(&server)),
+                    ("error_kind", verified_str("server_not_registered")),
+                ],
+            )
+            .await;
+            return Err(ToolError::InvalidInput(format!(
+                "MCPTool: MCP server {server:?} is not registered"
+            )));
+        }
 
         // MCP.3 + MCP.4: thread the model's toolUseId into the request and wire
         // MCP progress-notification forwarding. claude-code reads the toolUseId
@@ -1014,8 +1019,9 @@ impl Tool for MCPTool {
             None
         };
         let Some(task_registry) = bg_registry else {
-            let res = client
-                .call_tool_with_progress(
+            let res = registry
+                .call_tool_with_auth_retry(
+                    &server,
                     &dispatch_full_name,
                     arguments,
                     tool_use_id_str.as_deref(),
@@ -1058,12 +1064,13 @@ impl Tool for MCPTool {
         let cancel = tokio_util::sync::CancellationToken::new();
         let parent_cancel = ctx.cancel.clone();
         let mut call_task = {
-            let client = client.clone();
+            let registry = registry.clone();
             let bus = bus.clone();
             let output_dir = output_dir.clone();
             let token_counter = token_counter.clone();
             let default_model = default_model.clone();
             let server = server.clone();
+            let call_server = server.clone();
             let tool = tool.clone();
             let tool_use_id = tool_use_id.clone();
             let progress = progress.clone();
@@ -1072,7 +1079,8 @@ impl Tool for MCPTool {
             let cancel = cancel.clone();
             let parent_cancel = parent_cancel.clone();
             tokio::spawn(async move {
-                let call_fut = client.call_tool_with_progress(
+                let call_fut = registry.call_tool_with_auth_retry(
+                    &call_server,
                     &dispatch_full_name,
                     arguments,
                     tool_use_id_str.as_deref(),
@@ -1985,6 +1993,7 @@ mod tests {
                 client_id: Some("cid".into()),
                 callback_port: Some(8080),
                 auth_server_metadata_url: Some("https://m".into()),
+                scopes: None,
                 xaa: Some(false),
             }),
         };
@@ -2020,10 +2029,12 @@ mod tests {
         let spec = McpTransportSpec::Http {
             url: "https://x".into(),
             headers: traits::McpHeaders::new(),
+            headers_helper: None,
             oauth: Some(traits::McpOAuthConfigDto {
                 client_id: None,
                 callback_port: None,
                 auth_server_metadata_url: None,
+                scopes: None,
                 xaa: None,
             }),
         };
@@ -2032,11 +2043,12 @@ mod tests {
 
     #[test]
     fn auth_kind_websocket_static_headers() {
-        let mut h = StdHashMap::new();
+        let mut h = traits::McpHeaders::new();
         h.insert("X-Token".into(), "abc".into());
         let spec = McpTransportSpec::WebSocket {
             url: "wss://x".into(),
             headers: h,
+            headers_helper: None,
         };
         assert_eq!(auth_kind_from_spec(&spec), ("websocket", "static_headers"));
     }

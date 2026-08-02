@@ -1551,7 +1551,12 @@ fn write_server(
     // 3. `bPe`/`gPe` — enterprise allow/deny policy (from the managed settings
     //    tiers). Inert when no policy is configured (nothing denied, all
     //    allowed).
-    let policy = mcp::enterprise_policy::read_managed_mcp_policy();
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let policy = mcp::enterprise_policy::read_effective_mcp_policy(
+        &crate::run::lingxi_home_dir(),
+        &cwd,
+        mcp::enterprise_policy::flag_settings_policy(),
+    );
     if mcp::enterprise_policy::is_denied(name, entry, &policy) {
         return Err(mcp::enterprise_policy::denied_message(name));
     }
@@ -2119,15 +2124,19 @@ fn load_all_servers() -> Vec<mcp::connection::McpServerConfig> {
         Err(_) => PathBuf::from("."),
     };
     let project_mcp = nearest_project_mcp_json(&cwd);
-    let Some(global) = global_config_path() else {
+    let mut servers = if let Some(global) = global_config_path() {
+        mcp::json_config::load_mcp_servers(&project_mcp, &global, &cwd)
+    } else {
         // No home: only a project .mcp.json could exist.
-        return mcp::json_config::load_mcp_servers(
-            &project_mcp,
-            &PathBuf::from("/nonexistent"),
-            &cwd,
-        );
+        mcp::json_config::load_mcp_servers(&project_mcp, &PathBuf::from("/nonexistent"), &cwd)
     };
-    mcp::json_config::load_mcp_servers(&project_mcp, &global, &cwd)
+    let policy = mcp::enterprise_policy::read_effective_mcp_policy(
+        &crate::run::lingxi_home_dir(),
+        &cwd,
+        mcp::enterprise_policy::flag_settings_policy(),
+    );
+    mcp::enterprise_policy::apply_enterprise_mcp_policy_with(&mut servers, &policy);
+    servers
 }
 
 /// Sorted list of all configured server names across every scope.

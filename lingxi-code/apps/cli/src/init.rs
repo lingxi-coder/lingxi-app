@@ -980,7 +980,9 @@ fn flag_settings_env(settings: &str) -> std::collections::BTreeMap<String, Strin
 /// settings composition. Accepts the same inline-object-or-file shape as the
 /// existing flagSettings consumers. Invalid input remains absent here; the CLI
 /// validation/error surface continues to be owned by argument initialization.
-fn parse_flag_settings(settings: Option<&str>) -> Option<engine::settings::SettingsJson> {
+pub(crate) fn parse_flag_settings(
+    settings: Option<&str>,
+) -> Option<engine::settings::SettingsJson> {
     let raw = settings?.trim();
     let text = if raw.starts_with('{') {
         raw.to_string()

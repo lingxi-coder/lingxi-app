@@ -18,6 +18,7 @@ pub mod config_diagnostics;
 pub mod connection;
 pub mod enterprise_policy;
 pub mod env_expansion;
+pub mod headers_helper;
 pub mod hook_dispatch;
 pub mod identity;
 pub mod inbound;

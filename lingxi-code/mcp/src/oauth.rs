@@ -1419,6 +1419,7 @@ mod tests {
         let spec = McpTransportSpec::Http {
             url: "https://mcp.example.com/v1".into(),
             headers: traits::McpHeaders::new(),
+            headers_helper: None,
             oauth: None,
         };
         let key = server_key("acme", &spec);
@@ -1433,6 +1434,7 @@ mod tests {
         let spec_other = McpTransportSpec::Http {
             url: "https://mcp.example.com/v2".into(),
             headers: traits::McpHeaders::new(),
+            headers_helper: None,
             oauth: None,
         };
         assert_ne!(server_key("acme", &spec_other), key);
@@ -1647,6 +1649,7 @@ mod tests {
         let spec = McpTransportSpec::Http {
             url: "https://mcp.example.com/v1".into(),
             headers,
+            headers_helper: None,
             oauth: None,
         };
         let key = server_key("acme", &spec);
@@ -1663,6 +1666,7 @@ mod tests {
         let spec = McpTransportSpec::Http {
             url: "https://mcp.example.com/v1".into(),
             headers: traits::McpHeaders::new(),
+            headers_helper: None,
             oauth: None,
         };
         assert_eq!(server_key("acme", &spec), "acme|f729261a8041fc55");

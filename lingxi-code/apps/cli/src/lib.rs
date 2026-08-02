@@ -699,6 +699,11 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         eprintln!("lingxi-cli: {error}");
         return exit_codes::RUNTIME_ERROR;
     }
+    if let Some(settings) = crate::init::parse_flag_settings(parsed.settings.as_deref()) {
+        if let Ok(value) = serde_json::to_value(settings) {
+            let _ = mcp::enterprise_policy::install_flag_settings_policy(value);
+        }
+    }
 
     // Top-level subcommand dispatch (mcp/auth/plugin/project/setup-token/agents/
     // install/update/doctor/auto-mode/ultrareview). When clap matched a leading

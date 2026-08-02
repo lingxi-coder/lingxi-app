@@ -767,7 +767,7 @@ impl McpClient {
                         tool: tool_name,
                         secs,
                     }),
-                    Ok(Err(e)) => Err(McpClientError::Rpc(e.to_string())),
+                    Ok(Err(e)) => Err(mcp_client_error_from_rpc(&e.to_string())),
                     Ok(Ok(resp)) => Ok(McpToolResultDto {
                         content: resp.content,
                         is_error: resp.is_error,
@@ -784,7 +784,7 @@ impl McpClient {
                     tool: tool_name,
                     secs,
                 }),
-                Ok(Err(e)) => Err(McpClientError::Rpc(e.to_string())),
+                Ok(Err(e)) => Err(mcp_client_error_from_rpc(&e.to_string())),
                 Ok(Ok(resp)) => Ok(McpToolResultDto {
                     content: resp.content,
                     is_error: resp.is_error,
@@ -1468,6 +1468,14 @@ CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT (ms) globally (0 disables)."
     /// failure; the inner string is the stringified `JsonRpcError`.
     #[error("JSON-RPC error: {0}")]
     Rpc(String),
+    /// HTTP status metadata retained by streamable HTTP/SSE transports.
+    #[error("HTTP {status}{detail}", detail = www_authenticate.as_ref().map(|value| format!(": {value}")).unwrap_or_default())]
+    HttpResponse {
+        /// HTTP response status.
+        status: u16,
+        /// `WWW-Authenticate` response header.
+        www_authenticate: Option<String>,
+    },
     /// Server returned a syntactically valid response that did not match
     /// the expected DTO shape.
     #[error("malformed response: {0}")]
@@ -1475,6 +1483,42 @@ CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT (ms) globally (0 disables)."
     /// `initialize` handshake failed.
     #[error("initialize failed: {0}")]
     Initialize(String),
+}
+
+impl McpClientError {
+    /// Whether this error permits one credential refresh and retry.
+    #[must_use]
+    pub fn is_auth_response(&self) -> bool {
+        matches!(
+            self,
+            Self::HttpResponse {
+                status: 401 | 403,
+                ..
+            }
+        )
+    }
+}
+
+fn mcp_client_error_from_rpc(message: &str) -> McpClientError {
+    let Some(marker) = message.find("MCP_HTTP_STATUS=") else {
+        return McpClientError::Rpc(message.to_string());
+    };
+    let metadata = &message[marker + "MCP_HTTP_STATUS=".len()..];
+    let Some((status, rest)) = metadata.split_once(';') else {
+        return McpClientError::Rpc(message.to_string());
+    };
+    let Ok(status) = status.parse::<u16>() else {
+        return McpClientError::Rpc(message.to_string());
+    };
+    let www_authenticate = rest
+        .strip_prefix("WWW_AUTHENTICATE=")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    McpClientError::HttpResponse {
+        status,
+        www_authenticate,
+    }
 }
 
 /// `isEnvTruthy` (`envUtils.ts:32-37`): unset/empty ⇒ false; else `true` unless

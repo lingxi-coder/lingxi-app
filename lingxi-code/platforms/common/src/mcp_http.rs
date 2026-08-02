@@ -43,11 +43,28 @@ pub enum HttpConnectError {
     /// Authorization header value was invalid (non-ASCII, control chars).
     #[error("invalid auth token: {0}")]
     InvalidAuth(String),
+    /// Remote response retained for authentication recovery.
+    #[error("HTTP {status}{detail}", detail = www_authenticate.as_ref().map(|value| format!(": {value}")).unwrap_or_default())]
+    HttpResponse {
+        /// HTTP status code.
+        status: u16,
+        /// `WWW-Authenticate` response header.
+        www_authenticate: Option<String>,
+    },
 }
 
 impl From<HttpConnectError> for McpError {
     fn from(value: HttpConnectError) -> Self {
-        Self::Connection(value.to_string())
+        match value {
+            HttpConnectError::HttpResponse {
+                status,
+                www_authenticate,
+            } => Self::HttpResponse {
+                status,
+                www_authenticate,
+            },
+            other => Self::Connection(other.to_string()),
+        }
     }
 }
 
@@ -190,7 +207,19 @@ where
             }
 
             if !response.status().is_success() {
-                tracing::warn!(status = %response.status(), "mcp http: non-success response");
+                let status = response.status().as_u16();
+                let www_authenticate = response
+                    .headers()
+                    .get(reqwest::header::WWW_AUTHENTICATE)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_string);
+                tracing::warn!(status, "mcp http: non-success response");
+                if let Some(error) = http_error_message(&frame, status, www_authenticate.as_deref())
+                {
+                    if inbound_tx.send(error).is_err() {
+                        return;
+                    }
+                }
                 continue;
             }
 
@@ -262,4 +291,30 @@ where
         Box::pin(inbound),
         Box::pin(outbound),
     ))
+}
+
+fn http_error_message(
+    request: &JsonRpcMessage,
+    status: u16,
+    www_authenticate: Option<&str>,
+) -> Option<JsonRpcMessage> {
+    let request = serde_json::to_value(request).ok()?;
+    let id = request.get("id")?.clone();
+    let marker = format!(
+        "MCP_HTTP_STATUS={status};WWW_AUTHENTICATE={}",
+        www_authenticate.unwrap_or_default()
+    );
+    serde_json::from_value(serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {
+            "code": -32001,
+            "message": marker,
+            "data": {
+                "httpStatus": status,
+                "wwwAuthenticate": www_authenticate
+            }
+        }
+    }))
+    .ok()
 }

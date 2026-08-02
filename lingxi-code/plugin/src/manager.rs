@@ -949,6 +949,11 @@ impl PluginManager {
         //    regardless of the state `connect_all` leaves them in.
         if !mcp_scoped.is_empty() {
             let names: Vec<String> = mcp_scoped.iter().map(|cfg| cfg.name.clone()).collect();
+            for name in &names {
+                self.mcp_registry
+                    .set_headers_helper_plugin_root(name.clone(), install_dir.to_path_buf())
+                    .await;
+            }
             self.plugin_mcp_names
                 .write()
                 .await
@@ -993,6 +998,11 @@ impl PluginManager {
         // MCP cleanup: remove exactly the scoped `plugin:{plugin}:*` entries
         // this plugin seeded into the registry's connection map.
         if let Some(names) = self.plugin_mcp_names.write().await.remove(id) {
+            for name in &names {
+                self.mcp_registry
+                    .remove_headers_helper_plugin_root(name)
+                    .await;
+            }
             let mut conns = self.mcp_registry.connections.write().await;
             for n in &names {
                 conns.remove(n);
@@ -1044,7 +1054,7 @@ fn substitute_mcp_config(cfg: &mut McpServerConfig, ctx: &Map<String, Value>) {
                 *v = user_config::substitute_string_field(v, ctx);
             }
         }
-        McpTransportSpec::WebSocket { url, headers } => {
+        McpTransportSpec::WebSocket { url, headers, .. } => {
             *url = user_config::substitute_string_field(url, ctx);
             for v in headers.values_mut() {
                 *v = user_config::substitute_string_field(v, ctx);

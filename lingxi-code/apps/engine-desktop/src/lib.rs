@@ -6469,7 +6469,47 @@ pub async fn build(
     // (`deniedMcpServers`/`allowedMcpServers`) is dropped before connect. Inert
     // (no server removed) when no managed config/policy is present, so a default
     // deployment is byte-identical.
-    mcp::enterprise_policy::apply_enterprise_mcp_policy(&mut mcp_configs);
+    let mut ordinary_mcp_policy_sources = Vec::new();
+    let (include_user_policy, include_project_policy) = cfg.setting_source_scope;
+    for (path, included) in [
+        (cfg.lingxi_home.join("settings.json"), include_user_policy),
+        (
+            cwd.join(branding::DOT_DIR).join("settings.json"),
+            include_project_policy,
+        ),
+        (
+            cwd.join(branding::DOT_DIR).join("settings.local.json"),
+            include_project_policy,
+        ),
+    ] {
+        if !included {
+            continue;
+        }
+        if let Ok(raw) = tokio::fs::read_to_string(path).await {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
+                ordinary_mcp_policy_sources.push(value);
+            }
+        }
+    }
+    if let Some(flag) = cfg
+        .flag_settings
+        .as_ref()
+        .and_then(|settings| serde_json::to_value(settings).ok())
+    {
+        ordinary_mcp_policy_sources.push(flag);
+    }
+    let managed_mcp_policy_sources: Vec<serde_json::Value> = managed_settings_for_strict
+        .iter()
+        .filter_map(|raw| serde_json::from_str(raw).ok())
+        .collect();
+    let effective_mcp_policy = mcp::enterprise_policy::McpPolicy::from_effective_settings(
+        &ordinary_mcp_policy_sources,
+        &managed_mcp_policy_sources,
+    );
+    mcp::enterprise_policy::apply_enterprise_mcp_policy_with(
+        &mut mcp_configs,
+        &effective_mcp_policy,
+    );
     if strict_plugin_only_mcp {
         // The strict slot accepts plugin and policy-controlled sources only.
         // Plugin servers materialize later through PluginManager; preserve
@@ -7197,6 +7237,7 @@ pub async fn build(
         )
         .with_hook_dispatcher(Some(elicitation_dispatcher))
         .with_oauth(mcp_oauth_deps)
+        .with_headers_helper_cwd(cwd.clone())
         // Advertise the session's additional working dirs (settings
         // `additionalDirectories` + `--add-dir`) on every server's `roots/list`,
         // matching claude-code r1d() = [cwd, ...additionalWorkingDirectories].

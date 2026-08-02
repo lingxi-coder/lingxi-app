@@ -192,6 +192,12 @@ fn map_http_error(error: &HttpError) -> LlmError {
     if let Some(code) = crate::ssl::detect_ssl_code(&message) {
         return LlmError::tls_cert(code);
     }
+    // `HttpError::Timeout` is already TYPED here — keep the distinction rather
+    // than collapsing it and recovering it from text later. The oracle's `x2()`
+    // yields a separate `ETIMEDOUT` code and `sir()` renders its own line.
+    if matches!(error, HttpError::Timeout(_)) {
+        return LlmError::TransportTimeout { message };
+    }
     LlmError::Transport { message }
 }
 

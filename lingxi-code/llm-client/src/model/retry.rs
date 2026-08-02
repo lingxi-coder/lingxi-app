@@ -626,7 +626,9 @@ pub fn next_step_with_backoff(
             DriveStep::RetryAfter(delay)
         }
 
-        LlmError::ProviderInternal | LlmError::Transport { .. } => {
+        LlmError::ProviderInternal
+        | LlmError::Transport { .. }
+        | LlmError::TransportTimeout { .. } => {
             // Reset the consecutive-overloaded counter.
             state.consecutive_overloaded = 0;
 

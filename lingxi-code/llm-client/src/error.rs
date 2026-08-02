@@ -107,6 +107,20 @@ pub enum LlmError {
         /// Transport-layer failure message.
         message: String,
     },
+    /// The request did not complete within the timeout.
+    ///
+    /// Split from [`Self::Transport`] because the oracle's `x2()` cause-chain
+    /// yields a distinct `ETIMEDOUT` code and `sir()` renders distinct text for
+    /// it. `HttpError::Timeout` is already a typed variant here, so keeping the
+    /// distinction costs nothing and avoids recovering it by scanning message
+    /// text — a predicate the oracle does not have.
+    ///
+    /// Retry/telemetry classification treats this exactly like `Transport`.
+    #[error("transport error: {message}")]
+    TransportTimeout {
+        /// Transport-layer failure message.
+        message: String,
+    },
     /// Transport failed due to a TLS/SSL certificate error.
     ///
     /// A certificate failure (expired cert, self-signed cert, a corporate
@@ -203,6 +217,7 @@ impl LlmError {
             | LlmError::PermissionDenied { message }
             | LlmError::InvalidRequest { message }
             | LlmError::Transport { message }
+            | LlmError::TransportTimeout { message }
             | LlmError::StreamInterrupted { message }
             | LlmError::CostUnavailable { message } => Some(message),
             _ => None,
@@ -265,6 +280,9 @@ pub fn error_display_text(error: &LlmError) -> String {
         return error.to_string();
     };
 
+    if matches!(error, LlmError::TransportTimeout { .. }) {
+        return "Request timed out. Check your internet connection and proxy settings".to_string();
+    }
     if message == "Connection error." {
         return "Unable to connect to API. Check your internet connection".to_string();
     }
@@ -377,6 +395,15 @@ mod api_error_status_tests {
         assert_eq!(
             ssl("WAT"),
             "Unable to connect to API: SSL error (WAT)"
+        );
+
+        // The ETIMEDOUT arm — reachable because `HttpError::Timeout` is typed
+        // and `map_http_error` no longer collapses it into `Transport`.
+        assert_eq!(
+            error_display_text(&LlmError::TransportTimeout {
+                message: "request timed out after 30s".to_string()
+            }),
+            "Request timed out. Check your internet connection and proxy settings"
         );
 
         // The connection-error arm.

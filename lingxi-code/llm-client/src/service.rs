@@ -1771,7 +1771,8 @@ impl ApiService {
             // "server" — api-client `Server { .. } => "server"` (:1157)
             LlmError::ProviderInternal => "server",
             // "http" — api-client `Http(_) => "http"` (:1146)
-            LlmError::Transport { .. } => "http",
+            // A timeout is still an HTTP-layer failure for telemetry.
+            LlmError::Transport { .. } | LlmError::TransportTimeout { .. } => "http",
             // "ssl_cert_error" — 2.1.201 classifier distinguishes SSL/cert
             // transport failures (`if(JF(e)?.isSSLError)return"ssl_cert_error"`).
             LlmError::TlsCert { .. } => "ssl_cert_error",
@@ -2146,6 +2147,7 @@ impl ApiService {
             // would put a status in the transcript that no server ever sent.
             LlmError::OAuthRefreshDead
             | LlmError::Transport { .. }
+            | LlmError::TransportTimeout { .. }
             | LlmError::TlsCert { .. }
             | LlmError::StreamInterrupted { .. }
             | LlmError::CostUnavailable { .. }

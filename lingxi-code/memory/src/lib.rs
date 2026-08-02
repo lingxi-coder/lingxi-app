@@ -292,6 +292,12 @@ pub fn memory_file_char_count(content: &str) -> usize {
 /// the trailing `.0` is KEPT: `40000 → "40.0k"`, `150000 → "150.0k"`.
 /// Sub-1000 values render as plain integers (`900 → "900"`). Intl's default
 /// rounding mode is `halfExpand`, which for non-negative inputs is half-up.
+///
+/// ⚠️ The unit must be re-selected AFTER rounding. ICU picks the compact
+/// multiplier from the ROUNDED value, so `999_950` formats as `1.0m`, not
+/// `1000.0k`. Rounding inside the pre-selected unit and stopping there is the
+/// classic carry bug; it can only ever promote by one decade (the rounded
+/// mantissa is at most 1000.0), so one re-check per unit suffices.
 #[must_use]
 pub fn format_compact_count(value: u64) -> String {
     // en-US compact short units, largest first.
@@ -301,10 +307,18 @@ pub fn format_compact_count(value: u64) -> String {
         (1_000_000, 'm'),
         (1_000, 'k'),
     ];
-    for (divisor, suffix) in UNITS {
+    for (idx, (divisor, suffix)) in UNITS.into_iter().enumerate() {
         if value >= divisor {
             let d = u128::from(divisor);
-            let tenths = (u128::from(value) * 10 + d / 2) / d;
+            let mut tenths = (u128::from(value) * 10 + d / 2) / d;
+            let mut suffix = suffix;
+            // Rounding carried the mantissa to 1000.0 of this unit — ICU would
+            // have bucketed one decade up instead. `t` is the largest unit, so
+            // it has nowhere to promote to and keeps the carried mantissa.
+            if tenths >= 10_000 && idx > 0 {
+                tenths /= 1_000;
+                suffix = UNITS[idx - 1].1;
+            }
             return format!("{}.{}{suffix}", tenths / 10, tenths % 10);
         }
     }
@@ -524,6 +538,29 @@ mod large_memory_file_tests {
         assert_eq!(format_compact_count(1_000), "1.0k");
         assert_eq!(format_compact_count(1_500_000), "1.5m");
         assert_eq!(format_compact_count(2_000_000_000), "2.0b");
+    }
+
+    /// ICU selects the compact multiplier from the ROUNDED value, so the top
+    /// 50 units of every decade carry into the next unit. Verified against
+    /// `Intl.NumberFormat("en-US",{notation:"compact",maximumFractionDigits:1,
+    /// minimumFractionDigits:1})` in node.
+    #[test]
+    fn compact_count_reselects_the_unit_after_rounding_carries() {
+        // Just below the carry — stays in its own unit.
+        assert_eq!(format_compact_count(999_449), "999.4k");
+        assert_eq!(format_compact_count(999_949), "999.9k");
+        // Half-up rounding pushes the mantissa to 1000.0k ⇒ ICU says `1.0m`.
+        assert_eq!(format_compact_count(999_950), "1.0m");
+        assert_eq!(format_compact_count(999_999), "1.0m");
+        assert_eq!(format_compact_count(1_000_000), "1.0m");
+        // Same carry one and two decades up.
+        assert_eq!(format_compact_count(999_949_999), "999.9m");
+        assert_eq!(format_compact_count(999_950_000), "1.0b");
+        assert_eq!(format_compact_count(999_999_999), "1.0b");
+        assert_eq!(format_compact_count(999_950_000_000), "1.0t");
+        // `t` is the largest unit — nothing to promote to, so the carried
+        // mantissa stands (matching Intl, which keeps counting in trillions).
+        assert_eq!(format_compact_count(999_950_000_000_000), "1000.0t");
     }
 
     #[test]

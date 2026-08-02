@@ -2366,6 +2366,7 @@ impl ChatWidget {
             self.bottom_pane.vim_enabled(),
             self.transcript.verbose(),
             self.theme_name,
+            &self.session.large_memory_warnings,
         );
         self.bottom_pane.show_view(Box::new(view));
         ChatOutcome::Continue

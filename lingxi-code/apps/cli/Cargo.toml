@@ -52,6 +52,13 @@ engine = { path = "../../engine" }
 msgqueue = { path = "../../msgqueue" }
 # stream-json P2b: contextWindow/maxOutputTokens per model from the llm-client catalog.
 llm-client = { path = "../../llm-client" }
+# `/status` oversized-memory-file warnings resolve the session's model through
+# `agent::model_resolution::resolve_user_specified_model` (claude-code `Ei`)
+# before deriving the size threshold: `orch_cfg.model` is `cfg.default_model`
+# with only a `profile/` prefix stripped, so an `opus`/`opusplan`/`sonnet`
+# install leaves it a bare ALIAS. This is the same seam
+# `engine_desktop::build` already uses for the subagent spawner's parent model.
+agent = { path = "../../agent" }
 # Canonical pricing-model id for the stream-json per-model usage block
 # (`canonicalModel`, cc 2.1.218 `yo(r)` = `firstPartyNameToCanonical`).
 cost = { path = "../../cost" }

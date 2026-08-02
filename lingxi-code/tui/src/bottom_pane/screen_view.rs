@@ -201,10 +201,11 @@ impl ScreenView {
         vim: bool,
         verbose: bool,
         theme: ThemeName,
+        large_memory_warnings: &[String],
     ) -> Self {
         Self::new(
             "Status",
-            status_lines(d, model, vim, verbose, theme),
+            status_lines(d, model, vim, verbose, theme, large_memory_warnings),
             "esc to close · ↑/↓ scroll",
         )
     }
@@ -739,13 +740,22 @@ fn doctor_lines(d: &DoctorInfo) -> Vec<Line<'static>> {
     ]
 }
 
-/// `/status` body: session facts + editor toggles.
+/// `/status` body: session facts + editor toggles, plus any
+/// `large_memory_warnings` appended as a trailing `Warnings` block.
+///
+/// The warning rows are claude-code `htf()` (2.1.220 binary offset 241152161),
+/// which contributes `Large <path> will impact performance (<n> chars > <max>)`
+/// to the `/status` body for each memory file over
+/// [`memory::max_memory_character_count`]. LingXi's `/status` panel is an
+/// intentional divergence with a fixed row set, so the warnings are appended
+/// under their own header rather than woven into the oracle's row order.
 fn status_lines(
     d: &DoctorInfo,
     model: Option<&ModelRow>,
     vim: bool,
     verbose: bool,
     theme: ThemeName,
+    large_memory_warnings: &[String],
 ) -> Vec<Line<'static>> {
     let model_label = model.map_or_else(
         || "unknown".to_string(),
@@ -757,7 +767,7 @@ fn status_lines(
             }
         },
     );
-    vec![
+    let mut lines = vec![
         header("Session"),
         row("└ Version", &d.cli_version),
         row("└ Model", &model_label),
@@ -772,7 +782,29 @@ fn status_lines(
         row("└ Theme", theme.as_wire()),
         row("└ Vim mode", on_off(vim)),
         row("└ Verbose", on_off(verbose)),
-    ]
+    ];
+    // APPEND-ONLY — an empty warning list leaves the panel byte-identical.
+    // Oracle `Ava` (@241166200) renders `null` for an empty list and otherwise a
+    // bold "System diagnostics" above the rows; the header text is the oracle's,
+    // not a LingXi coinage. (`header` adds UNDERLINED on top of the oracle's
+    // bold — that is this panel's own house style, applied to every section.)
+    if !large_memory_warnings.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(header("System diagnostics"));
+        for warning in large_memory_warnings {
+            // NOT `row("└", warning)`: `row` pads its KEY to `KEY_WIDTH`, which
+            // buys value-column alignment only when there IS a key. A bare
+            // "└" would spend 17 columns on nothing, and the paragraph this
+            // renders into never soft-wraps (see `ScreenView::render`), so at
+            // 80 columns that pushes `(52.3k chars > 40.0k)` — the whole point
+            // of the warning — off the right edge with no way to scroll to it.
+            lines.push(Line::from(vec![
+                Span::styled("└ ", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(warning.clone()),
+            ]));
+        }
+    }
+    lines
 }
 
 /// `/config` body: session-scoped settings plus the on-disk settings files
@@ -930,18 +962,59 @@ mod tests {
             is_current: true,
             supports_reasoning: true,
         };
-        let lines = status_lines(&d, Some(&model), true, false, ThemeName::Dark);
+        let lines = status_lines(&d, Some(&model), true, false, ThemeName::Dark, &[]);
         let text = text_of(&lines);
         assert!(text.contains("Session"), "{text}");
         assert!(text.contains("Opus (Anthropic)"), "{text}");
         assert!(text.contains("3 configured, 2 connected"), "{text}");
         assert!(text.contains("Vim mode"), "{text}");
         assert!(text.contains("dark"), "{text}");
+        // No warnings ⇒ NO `Warnings` block at all (claude-code `htf()` returns
+        // `[]`, and a `/status` section with no rows is never drawn).
+        assert!(!text.contains("System diagnostics"), "{text}");
         // No current model degrades to "unknown", never panics.
-        let no_model = status_lines(&d, None, false, true, ThemeName::LightAnsi);
+        let no_model = status_lines(&d, None, false, true, ThemeName::LightAnsi, &[]);
         let text = text_of(&no_model);
         assert!(text.contains("unknown"), "{text}");
         assert!(text.contains("light-ansi"), "{text}");
+    }
+
+    #[test]
+    fn status_screen_appends_large_memory_warnings_after_the_locked_rows() {
+        // claude-code `htf()` (2.1.220 binary offset 241152161) contributes one
+        // `Large … will impact performance (… chars > …)` row per oversized
+        // memory file to the `/status` body. LingXi's `/status` panel is an
+        // intentional divergence (a fixed row set), so the warnings are
+        // APPENDED — the existing Session/Editor rows must not move or reword.
+        let d = crate::session::DoctorInfo {
+            cli_version: "lingxi-cli v0.12.0".to_string(),
+            lingxi_home: "/home/u/.lingxi".to_string(),
+            cwd: "/work".to_string(),
+            mcp_configured: 0,
+            mcp_connected: 0,
+            truecolor: false,
+            term_size: (80, 24),
+            image_protocol: "none".to_string(),
+        };
+        let warnings = vec![memory::format_large_memory_file_status_row(
+            "LINGXI.md", 52_310, 40_000,
+        )];
+        let baseline = status_lines(&d, None, false, false, ThemeName::Dark, &[]);
+        let lines = status_lines(&d, None, false, false, ThemeName::Dark, &warnings);
+        // Append-only: every baseline line is still present, in order, at the
+        // same index. `starts_with` (not `lines[..baseline.len()]`) so a panel
+        // that SHRANK fails as an assertion instead of an index panic.
+        assert!(
+            lines.starts_with(&baseline),
+            "warnings must be appended, not woven into the locked rows"
+        );
+        assert_eq!(lines.len(), baseline.len() + 3, "blank + header + one row");
+        let text = text_of(&lines);
+        assert!(text.contains("System diagnostics"), "{text}");
+        assert!(
+            text.contains("Large LINGXI.md will impact performance (52.3k chars > 40.0k)"),
+            "{text}"
+        );
     }
 
     #[test]

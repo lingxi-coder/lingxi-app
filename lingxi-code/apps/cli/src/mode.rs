@@ -2323,7 +2323,43 @@ async fn build_session_info(orch: &dyn OrchestratorHandle) -> tui::session::Sess
     // Small on-disk walks, captured once at launch like the listings above.
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let skills = skills_rows(&cwd, &crate::run::lingxi_home_dir());
-    let memory = dirs::home_dir().map_or_else(Vec::new, |home| memory_rows(&cwd, &home));
+    // One home lookup for both the `/memory` rows and the `/status` warnings.
+    let home_dir = dirs::home_dir();
+    let memory = home_dir
+        .as_ref()
+        .map_or_else(Vec::new, |home| memory_rows(&cwd, home));
+    // `/status` oversized-memory-file warnings (`htf()`, 2.1.220 @241152161).
+    //
+    // The oracle is `fJr(await ZH())` — it filters the ALREADY-LOADED memory
+    // set, it does not re-walk the filesystem. So this reads the SAME provider
+    // production loads the system-prompt block from
+    // (`RealMemoryHierarchyProvider`), which is what makes the warning agree
+    // with what is actually in the context: it honors the
+    // `LINGXI_DISABLE_LINGXI_MDS` kill-switch (`htf`'s `if(Epe())return[]`),
+    // probes the Managed tier (`LLu` admits `User|Project|Local|Managed`),
+    // splices each `@import`'d file as its own entry, applies the loader's
+    // 4 MiB `MEMORY_FILE_BYTE_LIMIT` skip, and yields the frontmatter- and
+    // comment-STRIPPED body the oracle measures (`bn_`'s `content`, not
+    // `rawContent`) in claude-code splice order.
+    //
+    // Two gates this still misses, both because they live in the `DesktopConfig`
+    // the composition root already consumed and are not reachable from an
+    // `OrchestratorHandle`: `--bare` (which sets `memory_provider: None` without
+    // exporting the env kill-switch) and the `lingxiMdExcludes` setting.
+    let memory_files = orchestrator::prompt::real_provider().load(&cwd).await;
+    // `pJr()` (@230802563) derives the threshold from the model. Resolve the
+    // picker ALIAS first (`Ei`, @227933508): `current_model` is the raw session
+    // model, and `memory::memory_chars_per_token`'s contract is "pass a
+    // concrete model id, not a picker alias" — a bare `opus` otherwise scores
+    // as an unknown 200k/4-cpt model (threshold 40k) when it resolves to a
+    // natively-1M model (threshold 150k).
+    let threshold_model = agent::model_resolution::resolve_user_specified_model(&current_model);
+    let large_memory_warnings = large_memory_warning_rows(
+        &memory_files,
+        &cwd,
+        home_dir.as_deref(),
+        &threshold_model,
+    );
 
     // Managed `availableModels` allowlist for the `/model` picker filter (parity
     // 2.1.207 H-BIN-08): reads the same policy tier the boot default-model
@@ -2340,6 +2376,7 @@ async fn build_session_info(orch: &dyn OrchestratorHandle) -> tui::session::Sess
         models,
         model_allowlist,
         model_overrides,
+        large_memory_warnings,
     }
 }
 
@@ -2403,6 +2440,99 @@ fn memory_rows(cwd: &std::path::Path, os_home: &std::path::Path) -> Vec<tui::ses
         ));
     }
     rows
+}
+
+/// claude-code `Ad(e)` (2.1.220 binary offset 226626865) — shorten an absolute
+/// path for display: cwd-relative when it does not escape upward, else
+/// `~`-abbreviated when under `$HOME`, else the absolute path verbatim.
+///
+/// `home` is an `Option` because Rust's `dirs::home_dir()` can fail where
+/// Node's `os.homedir()` cannot (a service account with no `$HOME` and no
+/// passwd entry). `None` simply skips the `~` branch — it must NOT suppress the
+/// caller's whole result, since the cwd-relative branch is the one that names
+/// project-tier files.
+fn shorten_memory_path(
+    path: &std::path::Path,
+    cwd: &std::path::Path,
+    home: Option<&std::path::Path>,
+) -> String {
+    // `y0h(e).relativePath` then `if(t && !t.startsWith(".."))`.
+    if let Ok(rel) = path.strip_prefix(cwd) {
+        if !rel.as_os_str().is_empty() {
+            return rel.display().to_string();
+        }
+    }
+    // `if(e.startsWith(homedir()+sep)) return "~"+e.slice(homedir().length)`.
+    // Note the oracle requires the SEPARATOR, so `$HOME` itself is not
+    // abbreviated — `strip_prefix` on a `Path` has exactly that component
+    // boundary semantics.
+    if let Some(home) = home {
+        if let Ok(rel) = path.strip_prefix(home) {
+            if !rel.as_os_str().is_empty() {
+                return format!("~{}{}", std::path::MAIN_SEPARATOR, rel.display());
+            }
+        }
+    }
+    path.display().to_string()
+}
+
+/// claude-code `htf()` (2.1.220 binary offset 241152161) over
+/// `fJr(memoryFiles)` (@230809207): one `/status` warning row per LOADED memory
+/// file whose body exceeds `pJr()` (@230802563) characters.
+///
+/// `files` must be the set the system prompt was actually built from (the
+/// oracle's `await ZH()`); every gate that decides membership — the
+/// `LINGXI_DISABLE_LINGXI_MDS` kill-switch, the Managed tier, `@import`
+/// expansion, the loader's 4 MiB `MEMORY_FILE_BYTE_LIMIT` skip — belongs to the
+/// provider, not here. This function is deliberately PURE so it stays hermetic
+/// under test.
+///
+/// `model` derives the threshold: `max(40000, round(contextWindow * 0.05 *
+/// charsPerToken))`. For every 200k-context model that collapses to the 40 000
+/// floor; it only rises for 1M-context models. Pass a CONCRETE model id — the
+/// caller owns alias resolution (`Ei`), per
+/// [`memory::memory_chars_per_token`]'s contract.
+///
+/// ⚠️ The beta list is empty. That is a real, narrow divergence, not a
+/// no-op: `--betas context-1m-2025-08-07` on a 200k Claude model gives the
+/// session a 1M window (and so a 150k–200k threshold) while this computes
+/// 40 000. `StatusSnapshot` carries no betas, so closing it means adding the
+/// field the orchestrator already has (`active_betas()`) — deliberately out of
+/// scope here. An explicit `[1m]` model suffix and every natively-1M model are
+/// still detected from the model id alone.
+///
+/// The `> max_chars` test is [`memory::get_large_memory_files`]' 1:1 port of
+/// `fJr` inlined: that helper takes `memory::file::MemoryFile` (mtime +
+/// frontmatter), which cannot be built from a loaded LINGXI.md without
+/// fabricating fields. Its `tHt`/`LLu` adjudication still applies verbatim —
+/// [`memory::lingxi_md::LingxiMdTier`] has exactly `LLu`'s four variants, and
+/// LingXi has no synthetic managed path for `tHt` to skip.
+fn large_memory_warning_rows(
+    files: &[orchestrator::prompt::MemoryFile],
+    cwd: &std::path::Path,
+    os_home: Option<&std::path::Path>,
+    model: &str,
+) -> Vec<String> {
+    let max_chars = memory::max_memory_character_count(
+        llm_client::model::context_window::context_window_for_model(model, &[]),
+        memory::memory_chars_per_token(model),
+    );
+    let max_u64 = u64::try_from(max_chars).unwrap_or(u64::MAX);
+    files
+        .iter()
+        .filter_map(|file| {
+            // `fJr` compares `content.length` — UTF-16 code units — on the
+            // STRIPPED body (`bn_`'s `content`), never on `rawContent`.
+            let chars = memory::memory_file_char_count(&file.body);
+            (chars > max_chars).then(|| {
+                memory::format_large_memory_file_status_row(
+                    &shorten_memory_path(&file.path, cwd, os_home),
+                    u64::try_from(chars).unwrap_or(u64::MAX),
+                    max_u64,
+                )
+            })
+        })
+        .collect()
 }
 
 /// Resolve `(lingxi_home, project_dir)` the settings reader/writer address.
@@ -2654,6 +2784,129 @@ mod tests {
     fn prompt_routes_to_print() {
         let a = argv(Some("fix it"), false);
         assert_eq!(decide_mode_with(&a, true), Mode::Print("fix it".into()));
+    }
+
+    /// `Ad(e)` (2.1.220 binary offset 226626865):
+    /// `let{relativePath:t}=y0h(e); if(t&&!t.startsWith(".."))return t;
+    ///  let r=homedir(); if(e.startsWith(r+sep))return "~"+e.slice(r.length);
+    ///  return e`.
+    #[test]
+    fn shorten_memory_path_prefers_cwd_relative_then_tilde_then_absolute() {
+        let cwd = std::path::Path::new("/work/repo");
+        let home = Some(std::path::Path::new("/home/u"));
+        // Under cwd → cwd-relative, no leading "./".
+        assert_eq!(
+            shorten_memory_path(std::path::Path::new("/work/repo/LINGXI.md"), cwd, home),
+            "LINGXI.md"
+        );
+        assert_eq!(
+            shorten_memory_path(std::path::Path::new("/work/repo/a/b/LINGXI.md"), cwd, home),
+            "a/b/LINGXI.md"
+        );
+        // Escapes cwd (relative would start with "..") but lives under $HOME →
+        // "~"-abbreviated.
+        assert_eq!(
+            shorten_memory_path(std::path::Path::new("/home/u/.lingxi/LINGXI.md"), cwd, home),
+            "~/.lingxi/LINGXI.md"
+        );
+        // Neither → the absolute path, verbatim.
+        assert_eq!(
+            shorten_memory_path(std::path::Path::new("/etc/lingxi/LINGXI.md"), cwd, home),
+            "/etc/lingxi/LINGXI.md"
+        );
+        // `$HOME` itself is not `$HOME + sep`, so it does NOT abbreviate.
+        assert_eq!(
+            shorten_memory_path(std::path::Path::new("/home/u"), cwd, home),
+            "/home/u"
+        );
+    }
+
+    /// Build a loaded-memory-file fixture with a body of exactly `chars` UTF-16
+    /// code units, as the provider would hand it to `large_memory_warning_rows`.
+    fn loaded_memory_file(path: &str, chars: usize) -> orchestrator::prompt::MemoryFile {
+        orchestrator::prompt::MemoryFile {
+            path: std::path::PathBuf::from(path),
+            body: "x".repeat(chars),
+            is_local_override: false,
+            tier: memory::lingxi_md::LingxiMdTier::Project,
+            globs: None,
+            raw_content: String::new(),
+            content_differs_from_disk: false,
+        }
+    }
+
+    /// `htf()` (@241152161) over `fJr(memoryFiles)` (@230809207): one row per
+    /// LOADED memory file whose UTF-16 length exceeds `pJr()` (@230802563).
+    ///
+    /// Hermetic by construction — the fixture IS the loaded set, so the test
+    /// touches neither the filesystem nor `$LINGXI_CONFIG_DIR` /
+    /// `$LINGXI_MANAGED_DIR`, which a real hierarchy walk would read.
+    #[test]
+    fn large_memory_warning_rows_are_byte_locked_and_model_derived() {
+        let cwd = std::path::Path::new("/work/repo");
+        let home = Some(std::path::Path::new("/home/u"));
+        // 52_310 chars — the worked example from the byte-lock test in `memory`.
+        let files = vec![loaded_memory_file("/work/repo/LINGXI.md", 52_310)];
+
+        // A 200k-context model: threshold collapses to the 40k floor → flagged.
+        let rows = large_memory_warning_rows(&files, cwd, home, "claude-sonnet-4-5");
+        assert_eq!(
+            rows,
+            vec!["Large LINGXI.md will impact performance (52.3k chars > 40.0k)".to_string()],
+        );
+
+        // The SAME file under a 1M-context model: `max(40000, round(1e6*0.05*3))`
+        // = 150_000 > 52_310 → NOT flagged. This is the only regime in which the
+        // model-derived threshold differs from the old flat 40k constant.
+        assert!(large_memory_warning_rows(&files, cwd, home, "claude-opus-5[1m]").is_empty());
+
+        // A file exactly AT the threshold is not flagged (`>`), one char over is.
+        let at = vec![loaded_memory_file("/work/repo/LINGXI.md", 40_000)];
+        assert!(large_memory_warning_rows(&at, cwd, home, "claude-sonnet-4-5").is_empty());
+        let over = vec![loaded_memory_file("/work/repo/LINGXI.md", 40_001)];
+        assert_eq!(
+            large_memory_warning_rows(&over, cwd, home, "claude-sonnet-4-5").len(),
+            1
+        );
+
+        // Rows follow the provider's order (claude-code splice order:
+        // Managed → User → parents → cwd), one per oversized file.
+        let many = vec![
+            loaded_memory_file("/home/u/.lingxi/LINGXI.md", 52_310),
+            loaded_memory_file("/work/repo/LINGXI.md", 52_310),
+        ];
+        assert_eq!(
+            large_memory_warning_rows(&many, cwd, home, "claude-sonnet-4-5"),
+            vec![
+                "Large ~/.lingxi/LINGXI.md will impact performance (52.3k chars > 40.0k)"
+                    .to_string(),
+                "Large LINGXI.md will impact performance (52.3k chars > 40.0k)".to_string(),
+            ],
+        );
+    }
+
+    /// The threshold model must be the RESOLVED wire id, not the raw picker
+    /// alias: `lingxi --model opus` leaves `StatusSnapshot.model` as the literal
+    /// `"opus"`, which scores as an unknown 200k/4-cpt model (40k threshold)
+    /// though it resolves to a natively-1M model (150k threshold).
+    #[test]
+    fn large_memory_warning_threshold_uses_the_resolved_model_not_the_alias() {
+        let cwd = std::path::Path::new("/work/repo");
+        let home = Some(std::path::Path::new("/home/u"));
+        let files = vec![loaded_memory_file("/work/repo/LINGXI.md", 52_310)];
+
+        // The bare alias would flag the file …
+        assert_eq!(
+            large_memory_warning_rows(&files, cwd, home, "opus").len(),
+            1,
+            "the unresolved alias must be the case that misfires"
+        );
+        // … while the id `Ei` resolves it to does not.
+        let resolved = agent::model_resolution::resolve_user_specified_model("opus");
+        assert!(
+            large_memory_warning_rows(&files, cwd, home, &resolved).is_empty(),
+            "resolved {resolved} should be a 1M model with a 150k threshold"
+        );
     }
 
     /// `/sandbox` persistence: `SetEnabled` writes `sandbox.enabled` to USER

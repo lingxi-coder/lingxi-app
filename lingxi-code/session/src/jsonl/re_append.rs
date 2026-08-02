@@ -255,9 +255,9 @@ pub fn extract_quoted_field(line: &str, key: &str) -> Option<String> {
                 }
                 if bytes[cursor] == b'"' {
                     if best_at.is_none_or(|prev| at > prev) {
-                        best = Some(unescape_json_string(
-                            &String::from_utf8_lossy(&bytes[start..cursor.min(bytes.len())]),
-                        ));
+                        best = Some(unescape_json_string(&String::from_utf8_lossy(
+                            &bytes[start..cursor.min(bytes.len())],
+                        )));
                         best_at = Some(at);
                     }
                     break;
@@ -506,10 +506,7 @@ pub fn plan_re_append(
     if let Some(permission_mode) = truthy(&state.permission_mode) {
         entries.push(obj(vec![
             ("type", Value::String("permission-mode".into())),
-            (
-                "permissionMode",
-                Value::String(permission_mode.to_string()),
-            ),
+            ("permissionMode", Value::String(permission_mode.to_string())),
             ("sessionId", sid()),
         ]));
     }
@@ -791,7 +788,10 @@ mod tests {
             lines[7],
             r#"{"type":"agent-setting","agentSetting":"reviewer","sessionId":"S1"}"#
         );
-        assert_eq!(lines[8], r#"{"type":"mode","mode":"default","sessionId":"S1"}"#);
+        assert_eq!(
+            lines[8],
+            r#"{"type":"mode","mode":"default","sessionId":"S1"}"#
+        );
         assert_eq!(
             lines[9],
             r#"{"type":"permission-mode","permissionMode":"acceptEdits","sessionId":"S1"}"#
@@ -1413,9 +1413,15 @@ mod tests {
     #[test]
     fn iso_timestamp_matches_javascript_to_iso_string() {
         assert_eq!(format_iso_millis(0), "1970-01-01T00:00:00.000Z");
-        assert_eq!(format_iso_millis(1_753_920_000_123), "2025-07-31T00:00:00.123Z");
+        assert_eq!(
+            format_iso_millis(1_753_920_000_123),
+            "2025-07-31T00:00:00.123Z"
+        );
         // Leap day.
-        assert_eq!(format_iso_millis(1_709_164_800_000), "2024-02-29T00:00:00.000Z");
+        assert_eq!(
+            format_iso_millis(1_709_164_800_000),
+            "2024-02-29T00:00:00.000Z"
+        );
         let now = iso_now();
         assert_eq!(now.len(), 24, "{now}");
         assert!(now.ends_with('Z'));

@@ -463,7 +463,8 @@ pub(crate) const PROMPT_TOO_LONG: &str = "Prompt is too long";
 /// not have. Kept (and tested) so the string is already byte-verified when that
 /// plumbing lands — deleting and re-deriving it later is how transcription
 /// errors get in.
-pub(crate) const SERVER_LIMITING: &str = "Server is temporarily limiting requests (not your usage limit)";
+pub(crate) const SERVER_LIMITING: &str =
+    "Server is temporarily limiting requests (not your usage limit)";
 
 /// Recover the detail clause from a 429 message — oracle:
 ///
@@ -810,7 +811,10 @@ mod tests {
         std::env::remove_var("ANTHROPIC_BASE_URL");
 
         std::env::set_var("CLAUDE_CODE_USE_VERTEX", "1");
-        assert!(matches!(ErrorRouteTag::from_env(), ErrorRouteTag::Other { .. }));
+        assert!(matches!(
+            ErrorRouteTag::from_env(),
+            ErrorRouteTag::Other { .. }
+        ));
         // Bedrock outranks Vertex — the chain order, not alphabetical.
         std::env::set_var("CLAUDE_CODE_USE_BEDROCK", "1");
         assert_eq!(
@@ -827,7 +831,10 @@ mod tests {
         std::env::remove_var("CLAUDE_CODE_USE_ANTHROPIC_AWS");
 
         std::env::set_var("CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD", "1");
-        assert_eq!(ErrorRouteTag::from_env(), ErrorRouteTag::AnthropicGoogleCloud);
+        assert_eq!(
+            ErrorRouteTag::from_env(),
+            ErrorRouteTag::AnthropicGoogleCloud
+        );
 
         for (v, old) in VARS.iter().zip(saved) {
             match old {
@@ -906,8 +913,14 @@ mod tests {
     #[test]
     fn every_persistence_suffix_branch_leads_with_a_space() {
         for r in [
-            ErrorRoute::FirstParty { default_endpoint: true, base_url: "" },
-            ErrorRoute::FirstParty { default_endpoint: false, base_url: "https://x.test" },
+            ErrorRoute::FirstParty {
+                default_endpoint: true,
+                base_url: "",
+            },
+            ErrorRoute::FirstParty {
+                default_endpoint: false,
+                base_url: "https://x.test",
+            },
             ErrorRoute::AnthropicAws,
             ErrorRoute::AnthropicGoogleCloud,
             ErrorRoute::Other { display: "X" },
@@ -926,7 +939,10 @@ mod tests {
     fn the_credential_copy_is_byte_exact() {
         // `/connect`, not the oracle's `/login` — see `AUTH_COMMAND`.
         assert_eq!(NOT_LOGGED_IN, "Not logged in \u{b7} Please run /connect");
-        assert_eq!(INVALID_API_KEY, "Invalid API key \u{b7} Fix external API key");
+        assert_eq!(
+            INVALID_API_KEY,
+            "Invalid API key \u{b7} Fix external API key"
+        );
         assert_eq!(
             AUTH_TRANSIENT,
             "Authentication error \u{b7} This may be a temporary network issue, please try again"
@@ -942,7 +958,9 @@ mod tests {
     #[test]
     fn credential_copy_splits_on_where_the_key_came_from() {
         assert_eq!(
-            credential_rejected_text(&CredentialOrigin::EnvApiKey { var: "ANTHROPIC_API_KEY".to_string() }),
+            credential_rejected_text(&CredentialOrigin::EnvApiKey {
+                var: "ANTHROPIC_API_KEY".to_string()
+            }),
             INVALID_API_KEY
         );
         assert_eq!(
@@ -965,14 +983,26 @@ mod tests {
     #[test]
     fn org_disabled_names_the_right_thing_to_unset() {
         assert_eq!(
-            api_key_auth_disabled_text(&CredentialOrigin::EnvApiKey { var: "ANTHROPIC_API_KEY".to_string() }, true, Some("anthropic")),
+            api_key_auth_disabled_text(
+                &CredentialOrigin::EnvApiKey {
+                    var: "ANTHROPIC_API_KEY".to_string()
+                },
+                true,
+                Some("anthropic")
+            ),
             "Your organization has disabled API key authentication \u{b7} Unset \
              ANTHROPIC_API_KEY to use your claude.ai account instead"
         );
         // No account signed in yet → also has to sign in. `/connect`, not the
         // oracle's `/login` — see `AUTH_COMMAND`.
         assert_eq!(
-            api_key_auth_disabled_text(&CredentialOrigin::EnvApiKey { var: "ANTHROPIC_API_KEY".to_string() }, false, Some("anthropic")),
+            api_key_auth_disabled_text(
+                &CredentialOrigin::EnvApiKey {
+                    var: "ANTHROPIC_API_KEY".to_string()
+                },
+                false,
+                Some("anthropic")
+            ),
             "Your organization has disabled API key authentication \u{b7} Unset \
              ANTHROPIC_API_KEY and run /connect to sign in with your claude.ai account"
         );
@@ -994,7 +1024,10 @@ mod tests {
             Some(403),
             "403 API Key authentication is disabled for this organization"
         ));
-        assert!(!is_api_key_auth_disabled(Some(401), "api key authentication is disabled"));
+        assert!(!is_api_key_auth_disabled(
+            Some(401),
+            "api key authentication is disabled"
+        ));
         assert!(!is_api_key_auth_disabled(Some(403), "forbidden"));
     }
 
@@ -1008,7 +1041,10 @@ mod tests {
         std::env::set_var("LINGXI_REMOTE", "1");
         assert!(is_remote_session());
         std::env::set_var("LINGXI_REMOTE", "0");
-        assert!(!is_remote_session(), "`0` is falsy, matching the oracle's `Yt`");
+        assert!(
+            !is_remote_session(),
+            "`0` is falsy, matching the oracle's `Yt`"
+        );
         match saved {
             Some(v) => std::env::set_var("LINGXI_REMOTE", v),
             None => std::env::remove_var("LINGXI_REMOTE"),
@@ -1017,7 +1053,10 @@ mod tests {
 
     #[test]
     fn the_oauth_revoked_gate_needs_both_halves() {
-        assert!(is_oauth_revoked(Some(403), "403 OAuth token has been revoked"));
+        assert!(is_oauth_revoked(
+            Some(403),
+            "403 OAuth token has been revoked"
+        ));
         // A 403 alone is an ordinary permission failure.
         assert!(!is_oauth_revoked(Some(403), "403 forbidden"));
         // The phrase alone, on another status, is not this case.
@@ -1058,11 +1097,20 @@ mod tests {
             "401 bad key"
         );
         // No status prefix → the extracted text alone.
-        assert_eq!(llm_client::api_error_detail(r#"{"message":"plain"}"#), "plain");
+        assert_eq!(
+            llm_client::api_error_detail(r#"{"message":"plain"}"#),
+            "plain"
+        );
         // Nothing extractable → unchanged, as the oracle's final return does.
-        assert_eq!(llm_client::api_error_detail(r#"403 {"nope":1}"#), r#"403 {"nope":1}"#);
+        assert_eq!(
+            llm_client::api_error_detail(r#"403 {"nope":1}"#),
+            r#"403 {"nope":1}"#
+        );
         // No JSON at all → unchanged.
-        assert_eq!(llm_client::api_error_detail("403 forbidden"), "403 forbidden");
+        assert_eq!(
+            llm_client::api_error_detail("403 forbidden"),
+            "403 forbidden"
+        );
     }
 
     /// Serializes every test in this module that touches the process
@@ -1288,7 +1336,13 @@ mod tests {
         }
         // The org-disabled tails that name a command, across every origin.
         let org_disabled = [
-            api_key_auth_disabled_text(&CredentialOrigin::EnvApiKey { var: "ANTHROPIC_API_KEY".to_string() }, false, Some("anthropic")),
+            api_key_auth_disabled_text(
+                &CredentialOrigin::EnvApiKey {
+                    var: "ANTHROPIC_API_KEY".to_string(),
+                },
+                false,
+                Some("anthropic"),
+            ),
             api_key_auth_disabled_text(&CredentialOrigin::ApiKeyHelper, true, Some("anthropic")),
             api_key_auth_disabled_text(&CredentialOrigin::LoginManagedKey, true, Some("anthropic")),
         ];
@@ -1300,16 +1354,18 @@ mod tests {
         }
         // Nothing user-facing may say `/login` — including the copy that names
         // no command at all.
-        for s in interactive_copy
-            .into_iter()
-            .chain(org_disabled)
-            .chain([
-                INVALID_API_KEY.to_string(),
-                oauth_revoked_text(false, Some("anthropic")),
-                oauth_refresh_dead_text(false).to_string(),
-                api_key_auth_disabled_text(&CredentialOrigin::EnvApiKey { var: "ANTHROPIC_API_KEY".to_string() }, true, Some("anthropic")),
-            ])
-        {
+        for s in interactive_copy.into_iter().chain(org_disabled).chain([
+            INVALID_API_KEY.to_string(),
+            oauth_revoked_text(false, Some("anthropic")),
+            oauth_refresh_dead_text(false).to_string(),
+            api_key_auth_disabled_text(
+                &CredentialOrigin::EnvApiKey {
+                    var: "ANTHROPIC_API_KEY".to_string(),
+                },
+                true,
+                Some("anthropic"),
+            ),
+        ]) {
             assert!(
                 !s.contains("/login"),
                 "LingXi has no /login in user-facing copy: {s}"
@@ -1359,7 +1415,9 @@ mod tests {
         // the oracle's inner test is `l==="anthropicAws"||l==="mantle"`.
         assert_eq!(
             cloud_credential_text(
-                &ErrorRouteTag::Other { display: "Bedrock".into() },
+                &ErrorRouteTag::Other {
+                    display: "Bedrock".into()
+                },
                 Some(401)
             )
             .unwrap(),
@@ -1379,7 +1437,10 @@ mod tests {
         );
         // A first-party route is not cloud-hosted → the caller falls through.
         assert!(cloud_credential_text(
-            &ErrorRouteTag::FirstParty { default_endpoint: true, base_url: String::new() },
+            &ErrorRouteTag::FirstParty {
+                default_endpoint: true,
+                base_url: String::new()
+            },
             Some(401)
         )
         .is_none());
@@ -1397,20 +1458,26 @@ mod tests {
     #[test]
     fn the_rendered_429_is_byte_exact() {
         // The common shape: a decoded body, so the detail comes from JSON.
-        let msg = r#"429 {"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}"#;
+        let msg =
+            r#"429 {"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}"#;
         assert_eq!(
             rate_limited_text(msg, REQUEST_REJECTED_429, TEMPORARY_CAPACITY),
             "API Error: Request rejected (429) \u{b7} slow down"
         );
         // The separator is U+00B7, not a hyphen or an ASCII middot lookalike.
-        assert!(rate_limited_text(msg, REQUEST_REJECTED_429, TEMPORARY_CAPACITY)
-            .contains('\u{b7}'));
+        assert!(
+            rate_limited_text(msg, REQUEST_REJECTED_429, TEMPORARY_CAPACITY).contains('\u{b7}')
+        );
     }
 
     #[test]
     fn the_first_party_label_swaps_in() {
         assert_eq!(
-            rate_limited_text("429 {\"message\":\"x\"}", SERVER_LIMITING, TEMPORARY_CAPACITY),
+            rate_limited_text(
+                "429 {\"message\":\"x\"}",
+                SERVER_LIMITING,
+                TEMPORARY_CAPACITY
+            ),
             "API Error: Server is temporarily limiting requests (not your usage limit) \u{b7} x"
         );
     }
@@ -1425,7 +1492,10 @@ mod tests {
         // Top-level `message` when there is no `error.message`.
         assert_eq!(rate_limit_detail(r#"429 {"message":"b"}"#), "b");
         // Not JSON → the stripped remainder verbatim.
-        assert_eq!(rate_limit_detail("429 Too Many Requests"), "Too Many Requests");
+        assert_eq!(
+            rate_limit_detail("429 Too Many Requests"),
+            "Too Many Requests"
+        );
         // Nothing after the status → empty, so the caller's fallback shows.
         assert_eq!(
             rate_limited_text("429 ", REQUEST_REJECTED_429, TEMPORARY_CAPACITY),

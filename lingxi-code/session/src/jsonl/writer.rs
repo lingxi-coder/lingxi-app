@@ -579,7 +579,6 @@ mod tests {
         );
     }
 
-
     /// End-to-end: metadata that has scrolled out of the 64 KiB tail window is
     /// re-appended so a tail-scanning reader sees it again — the entire point
     /// of `reAppendSessionMetadata`.
@@ -613,7 +612,10 @@ mod tests {
 
         let tail = crate::jsonl::read_tail(&path);
         let routed = crate::jsonl::route_lines(&tail);
-        assert_eq!(routed.custom_titles.get(sid).map(String::as_str), Some("Kept Title"));
+        assert_eq!(
+            routed.custom_titles.get(sid).map(String::as_str),
+            Some("Kept Title")
+        );
         assert_eq!(routed.modes.get(sid).map(String::as_str), Some("default"));
         assert_eq!(
             writer.bytes_since_metadata_re_append(),
@@ -631,7 +633,9 @@ mod tests {
     async fn back_to_back_re_appends_write_nothing_the_second_time() {
         let (dir, path, writer) = temp_writer("dedup");
         let sid = "11111111-2222-3333-4444-555555555555";
-        writer.append_payload_for_test("{\"type\":\"user\"}\n").await;
+        writer
+            .append_payload_for_test("{\"type\":\"user\"}\n")
+            .await;
 
         let mut state = SessionMetadataState {
             title: Some("T".into()),
@@ -684,7 +688,12 @@ mod tests {
         let mut state = SessionMetadataState::default();
         assert_eq!(
             writer
-                .re_append_session_metadata(&mut state, "11111111-2222-3333-4444-555555555555", true, false)
+                .re_append_session_metadata(
+                    &mut state,
+                    "11111111-2222-3333-4444-555555555555",
+                    true,
+                    false
+                )
                 .await
                 .unwrap(),
             0

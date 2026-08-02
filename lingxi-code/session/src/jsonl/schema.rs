@@ -599,8 +599,7 @@ mod tool_result_head_tests {
         let mut m = base();
         m.extra
             .insert("sourceToolAssistantUUID".into(), json!("a-uuid"));
-        m.extra
-            .insert("toolDenialKind".into(), json!("cancelled"));
+        m.extra.insert("toolDenialKind".into(), json!("cancelled"));
         m.extra.insert("toolUseResult".into(), json!("x"));
         let s = serde_json::to_string(&m).unwrap();
         let i_res = s.find("toolUseResult").unwrap();

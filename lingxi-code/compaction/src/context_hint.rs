@@ -655,7 +655,10 @@ mod tests {
                 assert!(edits.mc_applied, "422 must actually compact");
                 assert_eq!(
                     edits.log_line,
-                    format!("[CONTEXT_HINT_REJECT] mc=true tokensSaved={}", edits.mc_tokens_saved)
+                    format!(
+                        "[CONTEXT_HINT_REJECT] mc=true tokensSaved={}",
+                        edits.mc_tokens_saved
+                    )
                 );
                 assert!(!edits.cleared_ids.is_empty());
                 assert_eq!(event.request_id.as_deref(), Some("req_1"));
@@ -676,7 +679,10 @@ mod tests {
         };
         let facts = HttpErrorFacts::from_error(&reject);
         assert_eq!(facts.status, Some(422));
-        assert!(is_hint_reject(&facts), "422 must reach the compact-and-retry arm");
+        assert!(
+            is_hint_reject(&facts),
+            "422 must reach the compact-and-retry arm"
+        );
         assert!(!is_unsupported_beta(&facts));
 
         let unsupported = llm_client::LlmError::InvalidRequest {
@@ -730,8 +736,9 @@ mod tests {
 
         let facts = HttpErrorFacts {
             status: Some(400),
-            message: "Unexpected value(s) `context-hint-2026-04-09` for the `anthropic-beta` header"
-                .into(),
+            message:
+                "Unexpected value(s) `context-hint-2026-04-09` for the `anthropic-beta` header"
+                    .into(),
             ..HttpErrorFacts::default()
         };
         assert!(matches!(

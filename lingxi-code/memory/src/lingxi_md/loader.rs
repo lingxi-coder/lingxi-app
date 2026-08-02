@@ -1425,7 +1425,10 @@ mod tests {
     #[test]
     fn the_skip_report_fires_only_once() {
         let slot = AtomicBool::new(false);
-        assert!(take_skip_report_slot(&slot, false), "the first skip reports");
+        assert!(
+            take_skip_report_slot(&slot, false),
+            "the first skip reports"
+        );
         assert!(
             !take_skip_report_slot(&slot, false),
             "a later skip is silent"
@@ -1467,12 +1470,14 @@ mod tests {
         std::fs::write(&big, "x".repeat(MEMORY_FILE_BYTE_LIMIT as usize + 1)).unwrap();
         match load_file(&big, None) {
             Err(LoaderError::FileTooLarge { is_directory, .. }) => {
-                assert!(!is_directory, "an oversized regular file is not a directory");
+                assert!(
+                    !is_directory,
+                    "an oversized regular file is not a directory"
+                );
             }
             other => panic!("expected FileTooLarge, got {other:?}"),
         }
     }
-
 
     #[test]
     fn get_large_memory_files_flags_but_does_not_drop_40k_body() {

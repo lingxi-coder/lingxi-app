@@ -2565,9 +2565,7 @@ mod tests {
         );
         assert!(is_dedup_result(&seeded));
         // A near-miss system-reminder must NOT match.
-        assert!(!is_dedup_result(
-            "<system-reminder>This file is already"
-        ));
+        assert!(!is_dedup_result("<system-reminder>This file is already"));
         assert!(!is_dedup_result(EMPTY_FILE_WARNING));
     }
 
@@ -3774,8 +3772,8 @@ mod tests {
         );
 
         let canon = std::fs::canonicalize(&target).unwrap();
-        let entry = tool_api::read_file_state::get(&map, &canon)
-            .expect("the read recorded an entry");
+        let entry =
+            tool_api::read_file_state::get(&map, &canon).expect("the read recorded an entry");
         assert!(
             entry.is_partial_view,
             "a token-truncated read is a PARTIAL view, not a full read"
@@ -4182,7 +4180,10 @@ mod tests {
             let (ctx, _sink) = make_ctx(&tmp);
             seed_entry(&ctx, &canon, "a\nb\nc\n", false);
             let tool = FileReadTool::new(ctx);
-            let r = tool.call(input.clone(), fresh_ctx(), fresh_tx()).await.unwrap();
+            let r = tool
+                .call(input.clone(), fresh_ctx(), fresh_tx())
+                .await
+                .unwrap();
             assert_ne!(
                 r.data["type"], "file_unchanged",
                 "ranged read must not dedup: {input}"

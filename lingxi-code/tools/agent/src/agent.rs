@@ -2393,7 +2393,8 @@ mod f_description_l_gate_tests {
     /// "final message is returned to you as the tool result" arm.
     #[test]
     fn first_tail_bullet_uses_the_l_true_arm_by_default() {
-        let p = prompt_env(|| AgentTool::build_prompt_with_async_agents(&agents(), &[], false, true));
+        let p =
+            prompt_env(|| AgentTool::build_prompt_with_async_agents(&agents(), &[], false, true));
         assert!(
             p.contains(
                 "\n\n- The agent's final report is not shown to the user \u{2014} relay what matters.\n- Use "
@@ -2412,7 +2413,8 @@ mod f_description_l_gate_tests {
     /// are disabled.
     #[test]
     fn first_tail_bullet_uses_the_l_false_arm_when_async_agents_unavailable() {
-        let p = prompt_env(|| AgentTool::build_prompt_with_async_agents(&agents(), &[], false, false));
+        let p =
+            prompt_env(|| AgentTool::build_prompt_with_async_agents(&agents(), &[], false, false));
         assert!(p.contains(
             "\n\n- The agent's final message is returned to you as the tool result; it is not shown to the user \u{2014} relay what matters.\n- Use "
         ));
@@ -2426,7 +2428,8 @@ mod f_description_l_gate_tests {
     /// text, so `contains` on the old string does not discriminate.
     #[test]
     fn background_bullet_carries_the_full_long_arm() {
-        let p = prompt_env(|| AgentTool::build_prompt_with_async_agents(&agents(), &[], false, true));
+        let p =
+            prompt_env(|| AgentTool::build_prompt_with_async_agents(&agents(), &[], false, true));
         assert!(
             p.ends_with(
                 "\n- Subagents run in the background by default; you'll be notified when one completes. Pass `run_in_background: false` for a synchronous run when you need the result before continuing. Never fabricate or predict a pending agent's results \u{2014} the notification is never something you write yourself; if the user asks before it arrives, say it's still running."
@@ -2440,7 +2443,8 @@ mod f_description_l_gate_tests {
     /// at all, not a shortened one.
     #[test]
     fn background_bullet_absent_when_async_agents_unavailable() {
-        let p = prompt_env(|| AgentTool::build_prompt_with_async_agents(&agents(), &[], false, false));
+        let p =
+            prompt_env(|| AgentTool::build_prompt_with_async_agents(&agents(), &[], false, false));
         assert!(
             !p.contains("Subagents run in the background"),
             "l=false must drop the background bullet entirely"
@@ -2455,7 +2459,8 @@ mod f_description_l_gate_tests {
     /// by default ⇒ the background bullet is LAST.
     #[test]
     fn tail_bullet_order_matches_the_binary() {
-        let p = prompt_env(|| AgentTool::build_prompt_with_async_agents(&agents(), &[], false, true));
+        let p =
+            prompt_env(|| AgentTool::build_prompt_with_async_agents(&agents(), &[], false, true));
         let i1 = p.find("- The agent's final report is not shown").unwrap();
         let i2 = p.find("- Use SendMessage").unwrap();
         let i3 = p.find("- Each agent type's model").unwrap();
@@ -2472,7 +2477,8 @@ mod f_description_l_gate_tests {
     #[test]
     fn coordinator_branch_has_no_tail_bullets_either_way() {
         for l in [true, false] {
-            let p = prompt_env(|| AgentTool::build_prompt_with_async_agents(&agents(), &[], true, l));
+            let p =
+                prompt_env(|| AgentTool::build_prompt_with_async_agents(&agents(), &[], true, l));
             assert!(!p.contains("relay what matters"));
             assert!(!p.contains("Subagents run in the background"));
         }

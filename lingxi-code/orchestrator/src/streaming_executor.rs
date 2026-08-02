@@ -605,7 +605,9 @@ impl<'a> StreamingToolExecutor<'a> {
         loop {
             for (id, reason) in self.apply_abort_to_pending() {
                 if reason == AbortReason::UserInterrupted {
-                    self.orch.record_tool_denial_kind(&id, "user-rejected").await;
+                    self.orch
+                        .record_tool_denial_kind(&id, "user-rejected")
+                        .await;
                 }
                 self.orch
                     .record_tool_use_result(&id, synthetic_tool_use_result(reason))
@@ -905,7 +907,11 @@ mod synthetic_denial_kind_tests {
         exec.discard();
         let _ = exec.run_to_completion().await.unwrap();
         assert!(
-            !orch.tool_denial_kinds.lock().await.contains_key(&id.to_string()),
+            !orch
+                .tool_denial_kinds
+                .lock()
+                .await
+                .contains_key(&id.to_string()),
             "a streaming-fallback synthetic carries NO toolDenialKind"
         );
     }

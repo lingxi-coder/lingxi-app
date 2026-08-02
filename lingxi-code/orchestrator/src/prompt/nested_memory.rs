@@ -96,7 +96,8 @@ fn matching_conditional(files: Vec<MemoryFile>, trigger: &Path, cwd: &Path) -> V
     files
         .into_iter()
         .filter(|f| {
-            f.globs.is_some() && super::conditional_rules::rule_matches_touched_file(f, trigger, cwd)
+            f.globs.is_some()
+                && super::conditional_rules::rule_matches_touched_file(f, trigger, cwd)
         })
         .collect()
 }

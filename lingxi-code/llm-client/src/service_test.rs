@@ -2740,11 +2740,15 @@ mod tests {
     fn error_kind_labels_match_api_client_originals() {
         // api-client: Unauthorized → "unauthorized"
         assert_eq!(
-            ApiService::error_kind(&LlmError::Authentication { message: String::new() }),
+            ApiService::error_kind(&LlmError::Authentication {
+                message: String::new()
+            }),
             "unauthorized"
         );
         assert_eq!(
-            ApiService::error_kind(&LlmError::PermissionDenied { message: String::new() }),
+            ApiService::error_kind(&LlmError::PermissionDenied {
+                message: String::new()
+            }),
             "unauthorized"
         );
         // api-client: Server → "server"

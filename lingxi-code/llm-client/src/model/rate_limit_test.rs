@@ -202,7 +202,9 @@ mod tests {
             None
         );
         assert_eq!(
-            retry_secs_from_error(&crate::LlmError::Authentication { message: String::new() }),
+            retry_secs_from_error(&crate::LlmError::Authentication {
+                message: String::new()
+            }),
             None
         );
         assert_eq!(

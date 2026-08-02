@@ -98,9 +98,7 @@ fn orch(files: Vec<MemoryFile>, cwd: PathBuf, map: ReadFileStateMap) -> Conversa
         hooks,
         Arc::new(NoOpPermissionGate),
         Arc::new(MockOutputStream::new()),
-        Arc::new(orchestrator::test_support::StaticMemoryProvider::with_files(
-            files,
-        )),
+        Arc::new(orchestrator::test_support::StaticMemoryProvider::with_files(files)),
         cwd,
     )
     .with_read_state_map(map)
@@ -156,9 +154,18 @@ async fn fire_instructions_loaded_seeds_memory_files_into_read_state() {
 
     let files = load_fixture_files(&cwd, &managed).await;
     let paths: Vec<_> = files.iter().map(|f| f.path.clone()).collect();
-    assert!(paths.contains(&plain), "fixture must load LINGXI.md: {paths:?}");
-    assert!(paths.contains(&cond), "fixture must load the conditional rule");
-    assert!(paths.contains(&fm), "fixture must load the frontmatter rule");
+    assert!(
+        paths.contains(&plain),
+        "fixture must load LINGXI.md: {paths:?}"
+    );
+    assert!(
+        paths.contains(&cond),
+        "fixture must load the conditional rule"
+    );
+    assert!(
+        paths.contains(&fm),
+        "fixture must load the frontmatter rule"
+    );
     assert!(paths.contains(&crlf), "fixture must load the CRLF rule");
 
     let map = tool_api::read_file_state::new_read_file_state_map();
@@ -168,7 +175,10 @@ async fn fire_instructions_loaded_seeds_memory_files_into_read_state() {
 
     // (a) plain LINGXI.md -------------------------------------------------
     let e = entry_for(&map, &plain);
-    assert!(e.seeded_from_context, "rendered file seeds with MLu == true");
+    assert!(
+        e.seeded_from_context,
+        "rendered file seeds with MLu == true"
+    );
     assert!(!e.is_partial_view, "plain file does not differ from disk");
     assert!(!e.from_read, "seeding is not a Read");
     assert_eq!(e.offset, None);
@@ -189,7 +199,10 @@ async fn fire_instructions_loaded_seeds_memory_files_into_read_state() {
         !e.seeded_from_context,
         "a paths:-gated rule is NOT in model context -> seededFromContext false"
     );
-    assert!(e.mtime_ms >= before, "non-rendered file uses the Date.now() branch");
+    assert!(
+        e.mtime_ms >= before,
+        "non-rendered file uses the Date.now() branch"
+    );
     assert!(
         !map.lock().unwrap().model_context_keys().contains(&cond),
         "the `...!jn && {{contentNotInModelContext:!0}}` spread -> not model-visible"
@@ -197,7 +210,10 @@ async fn fire_instructions_loaded_seeds_memory_files_into_read_state() {
 
     // (c) unconditional-but-differing rule ---------------------------------
     let e = entry_for(&map, &fm);
-    assert!(e.seeded_from_context, "no `paths:` key -> still rendered eagerly");
+    assert!(
+        e.seeded_from_context,
+        "no `paths:` key -> still rendered eagerly"
+    );
     assert!(
         e.is_partial_view,
         "stripped frontmatter -> isPartialView: contentDiffersFromDisk"
@@ -226,7 +242,10 @@ async fn fire_instructions_loaded_seeds_memory_files_into_read_state() {
     // which only gates the dedup stub. An earlier draft passed the MLu result to
     // both and so silently enrolled LINGXI.md in post-compact restore.
     let visible = map.lock().unwrap().model_context_keys();
-    assert!(!visible.contains(&plain), "a rendered memory file is still not a restore candidate");
+    assert!(
+        !visible.contains(&plain),
+        "a rendered memory file is still not a restore candidate"
+    );
     assert!(!visible.contains(&fm));
     assert!(!visible.contains(&cond));
 }

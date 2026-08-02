@@ -943,7 +943,10 @@ mod tests {
             text.contains(&sid.as_uuid().to_string()),
             "carries the session id: {text}"
         );
-        assert!(text.ends_with("tool-results"), "leaf is tool-results: {text}");
+        assert!(
+            text.ends_with("tool-results"),
+            "leaf is tool-results: {text}"
+        );
         assert!(
             !dir.starts_with(ctx.cwd()),
             "must NOT write inside the user's workspace: {text}"
@@ -962,7 +965,10 @@ mod tests {
         );
         assert!(ctx.session_id.is_none(), "builder leaves it unset");
         let dir = ctx.tool_results_dir();
-        assert!(dir.starts_with(ctx.cwd()), "fallback is workspace-local: {dir:?}");
+        assert!(
+            dir.starts_with(ctx.cwd()),
+            "fallback is workspace-local: {dir:?}"
+        );
         assert!(dir.ends_with("tool-results"), "{dir:?}");
     }
 }

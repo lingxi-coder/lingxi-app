@@ -427,10 +427,7 @@ pub fn stopped_continuation_attachment(id: &HookAttachmentIdentity, message: &st
 pub fn system_message_attachment(id: &HookAttachmentIdentity, content: &str) -> Value {
     let mut m = Map::new();
     m.insert("type".into(), Value::String("hook_system_message".into()));
-    m.insert(
-        "content".into(),
-        Value::String(inline_hook_output(content)),
-    );
+    m.insert("content".into(), Value::String(inline_hook_output(content)));
     m.insert("hookName".into(), Value::String(id.hook_name.clone()));
     m.insert("toolUseID".into(), Value::String(id.tool_use_id.clone()));
     m.insert("hookEvent".into(), Value::String(id.hook_event.clone()));

@@ -261,7 +261,9 @@ pub fn error_display_text(error: &LlmError) -> String {
             | "UNABLE_TO_GET_ISSUER_CERT_LOCALLY" => "Unable to connect to API: SSL certificate \
                  verification failed. Check your proxy or corporate SSL certificates"
                 .to_string(),
-            "CERT_HAS_EXPIRED" => "Unable to connect to API: SSL certificate has expired".to_string(),
+            "CERT_HAS_EXPIRED" => {
+                "Unable to connect to API: SSL certificate has expired".to_string()
+            }
             "CERT_REVOKED" => {
                 "Unable to connect to API: SSL certificate has been revoked".to_string()
             }
@@ -400,10 +402,7 @@ mod api_error_status_tests {
              corporate SSL certificates"
         );
         // Unknown code keeps the oracle's parameterised default.
-        assert_eq!(
-            ssl("WAT"),
-            "Unable to connect to API: SSL error (WAT)"
-        );
+        assert_eq!(ssl("WAT"), "Unable to connect to API: SSL error (WAT)");
 
         // The suspend arm: the watchdog fired but the WALL clock ran far past
         // the monotonic timeout, which only happens if the machine slept.
@@ -496,7 +495,13 @@ mod api_error_status_tests {
             Some(422)
         );
         // A variant with no message can never carry a prefix.
-        assert_eq!(LlmError::Authentication { message: String::new() }.http_status(), None);
+        assert_eq!(
+            LlmError::Authentication {
+                message: String::new()
+            }
+            .http_status(),
+            None
+        );
         assert_eq!(LlmError::ProviderInternal.http_status(), None);
     }
 }

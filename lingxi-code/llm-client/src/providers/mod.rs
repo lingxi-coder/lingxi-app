@@ -190,10 +190,7 @@ mod tests {
         );
 
         // No status but a body → bare message, no prefix.
-        assert_eq!(
-            api_error_message(0, &json!({"message":"boom"}), ""),
-            "boom"
-        );
+        assert_eq!(api_error_message(0, &json!({"message":"boom"}), ""), "boom");
     }
 
     /// JS falsiness, not Rust `Option`-ness: an EMPTY `message` is falsy, so the
@@ -244,7 +241,12 @@ mod tests {
         // text (which is what a naive implementation would classify on) is a
         // JSON blob that merely happens to contain it too.
         assert!(matches!(
-            map_error_status(413, "exceeds the context window", "irrelevant".to_string(), None),
+            map_error_status(
+                413,
+                "exceeds the context window",
+                "irrelevant".to_string(),
+                None
+            ),
             LlmError::ContextOverflow { token_gap: 0 }
         ));
         // Raw does NOT say it → RequestTooLarge, even if the display text does.

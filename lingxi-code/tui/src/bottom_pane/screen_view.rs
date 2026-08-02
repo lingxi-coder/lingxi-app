@@ -997,7 +997,9 @@ mod tests {
             image_protocol: "none".to_string(),
         };
         let warnings = vec![memory::format_large_memory_file_status_row(
-            "LINGXI.md", 52_310, 40_000,
+            "LINGXI.md",
+            52_310,
+            40_000,
         )];
         let baseline = status_lines(&d, None, false, false, ThemeName::Dark, &[]);
         let lines = status_lines(&d, None, false, false, ThemeName::Dark, &warnings);

@@ -1615,8 +1615,7 @@ pub struct ConversationOrchestrator {
     /// result would depend on the machine it ran on. Mirrors
     /// `StaticMemoryProvider`'s role for the eager block. Set via
     /// [`Self::with_nested_memory_roots`].
-    pub(crate) nested_memory_roots:
-        Option<(std::path::PathBuf, Option<std::path::PathBuf>)>,
+    pub(crate) nested_memory_roots: Option<(std::path::PathBuf, Option<std::path::PathBuf>)>,
     /// SKILLLIST.1 delta: skill names already emitted in a prior turn's
     /// `skill_listing` reminder. Turn-0 emits the FULL listing; later turns emit
     /// ONLY newly-appeared skills (mirrors TS `sentSkillNames` per-agent delta,
@@ -2140,7 +2139,10 @@ impl ConversationOrchestrator {
             .unwrap_or(i64::MAX);
             // `try{Ao = jn ? FQ(Fr.path) : Date.now()}catch{Ao = Date.now()}`.
             let mtime_ms = if in_context {
-                match tokio::fs::metadata(&f.path).await.and_then(|m| m.modified()) {
+                match tokio::fs::metadata(&f.path)
+                    .await
+                    .and_then(|m| m.modified())
+                {
                     Ok(t) => tool_api::read_file_state::mtime_ms_floor(t),
                     Err(_) => now_ms,
                 }
@@ -2224,7 +2226,11 @@ impl ConversationOrchestrator {
                     .emit_tool_result_denied(id, tool, model_text, result, kind)
                     .await;
             }
-            None => self.output.emit_tool_result(id, tool, model_text, result).await,
+            None => {
+                self.output
+                    .emit_tool_result(id, tool, model_text, result)
+                    .await
+            }
         }
     }
 
@@ -2266,11 +2272,7 @@ impl ConversationOrchestrator {
             Some(p) => (p.tool, p.result, p.denial_kind),
             // Never dispatched: synthesize the payload the dispatch would have
             // carried, matching the shape used by every other error result.
-            None => (
-                String::new(),
-                serde_json::json!({ "error": content }),
-                None,
-            ),
+            None => (String::new(), serde_json::json!({ "error": content }), None),
         };
         let result = if is_error && !result.is_object() {
             serde_json::json!({ "error": content })
@@ -2283,7 +2285,11 @@ impl ConversationOrchestrator {
                     .emit_tool_result_denied(id, &tool, content, &result, &kind)
                     .await;
             }
-            None => self.output.emit_tool_result(id, &tool, content, &result).await,
+            None => {
+                self.output
+                    .emit_tool_result(id, &tool, content, &result)
+                    .await
+            }
         }
     }
 
@@ -6086,8 +6092,10 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             jmsg.extra.insert("toolUseResult".to_string(), result);
         }
         if let Some(kind) = self.take_tool_denial_kind(msg).await {
-            jmsg.extra
-                .insert("toolDenialKind".to_string(), serde_json::Value::String(kind));
+            jmsg.extra.insert(
+                "toolDenialKind".to_string(),
+                serde_json::Value::String(kind),
+            );
         }
         if let Some(meta) = self.take_tool_use_mcp_meta(msg).await {
             jmsg.extra.insert("mcpMeta".to_string(), meta);
@@ -6453,9 +6461,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // prompt-too-long (`content:Jq`) both render BARE — no `API Error:`
             // prefix. Both used to fall through to `Display`, i.e. the words
             // "quota exceeded" and "context overflow".
-            LlmError::QuotaExceeded => {
-                crate::api_error_copy::CREDIT_BALANCE_TOO_LOW.to_string()
-            }
+            LlmError::QuotaExceeded => crate::api_error_copy::CREDIT_BALANCE_TOO_LOW.to_string(),
             // Dead OAuth session (`e instanceof qQt`): the IdP REJECTED the
             // stored refresh token, so no retry can help and only a fresh
             // sign-in will. Keyed on the variant, mirroring the oracle's
@@ -6523,7 +6529,9 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // A 401/403 that does NOT name the header falls through to the
             // variant's own text, matching the oracle's outer `if`.
             LlmError::Authentication { .. } | LlmError::PermissionDenied { .. }
-                if crate::api_error_copy::mentions_api_key_header(err.provider_message().unwrap_or_default()) =>
+                if crate::api_error_copy::mentions_api_key_header(
+                    err.provider_message().unwrap_or_default(),
+                ) =>
             {
                 // A cloud-hosted route names ITS credential problem instead —
                 // "run gcloud auth ..." is useful advice, "/login" is not. The
@@ -6571,9 +6579,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     &llm_client::error_display_text(err),
                 )
             }
-            LlmError::ContextOverflow { .. } => {
-                crate::api_error_copy::PROMPT_TOO_LONG.to_string()
-            }
+            LlmError::ContextOverflow { .. } => crate::api_error_copy::PROMPT_TOO_LONG.to_string(),
             // 429: the oracle renders `API Error: Request rejected (429) · …`,
             // pulling the detail out of the JSON body the decoder stringified
             // into the message. This used to fall through to `Display`, which is
@@ -6587,10 +6593,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // a real 429 does.
             LlmError::RateLimited { .. } => {
                 let raw = err.to_string();
-                let source = self
-                    .api
-                    .last_rate_limit_error_message()
-                    .unwrap_or(raw);
+                let source = self.api.last_rate_limit_error_message().unwrap_or(raw);
                 if crate::api_error_copy::is_long_context_credit_message(&source) {
                     crate::api_error_copy::usage_credits_required_for_1m_context(false)
                 } else {
@@ -6618,9 +6621,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                                 .config
                                 .error_route
                                 .clone()
-                                .unwrap_or_else(
-                                    crate::api_error_copy::ErrorRouteTag::from_env,
-                                ),
+                                .unwrap_or_else(crate::api_error_copy::ErrorRouteTag::from_env),
                         )),
                     )
                 }
@@ -11836,12 +11837,9 @@ DO NOT mention this to the user explicitly because they are already aware.\n</sy
             let mut sent = self.sent_nested_memory.lock().await;
             let mut sent_rules = self.sent_conditional_rules.lock().await;
             for trigger in &touched {
-                for f in crate::prompt::nested_memory::discover(
-                    trigger,
-                    &cwd,
-                    &home,
-                    managed.as_deref(),
-                ) {
+                for f in
+                    crate::prompt::nested_memory::discover(trigger, &cwd, &home, managed.as_deref())
+                {
                     if sent.contains(&f.path) {
                         continue;
                     }
@@ -11934,7 +11932,10 @@ DO NOT mention this to the user explicitly because they are already aware.\n</sy
             )
             .unwrap_or(i64::MAX);
             // `try{s=FQ(i.path)}catch{s=Date.now()}` — unconditional mtime.
-            let mtime_ms = match tokio::fs::metadata(&f.path).await.and_then(|m| m.modified()) {
+            let mtime_ms = match tokio::fs::metadata(&f.path)
+                .await
+                .and_then(|m| m.modified())
+            {
                 Ok(t) => tool_api::read_file_state::mtime_ms_floor(t),
                 Err(_) => now_ms,
             };
@@ -14426,13 +14427,10 @@ mod turn_recovery_tests {
         );
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("session.jsonl");
-        let fs: Arc<dyn traits::FileSystem> = Arc::new(
-            platform_posix::fs::PosixFileSystem::new(dir.path().to_path_buf()),
-        );
-        let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(
-            path.clone(),
-            fs,
+        let fs: Arc<dyn traits::FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
+            dir.path().to_path_buf(),
         ));
+        let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(path.clone(), fs));
         let orch = ConversationOrchestrator::new(
             OrchestratorConfig::default(),
             Arc::new(MockApiClient::new(vec![et])),
@@ -14451,9 +14449,7 @@ mod turn_recovery_tests {
         let line = raw
             .lines()
             .find(|l| l.contains("hook_stopped_continuation"))
-            .unwrap_or_else(|| {
-                panic!("no hook_stopped_continuation attachment line in: {raw}")
-            });
+            .unwrap_or_else(|| panic!("no hook_stopped_continuation attachment line in: {raw}"));
         let v: serde_json::Value = serde_json::from_str(line).expect("json line");
         assert_eq!(v["type"], "attachment");
         let a = &v["attachment"];
@@ -17188,11 +17184,7 @@ mod nested_memory_reminder_tests {
         // Simulate the LRU dropping the seeded entry.
         let canon = std::fs::canonicalize(&mem).unwrap();
         assert!(
-            orch.read_state_map
-                .lock()
-                .unwrap()
-                .remove(&canon)
-                .is_some(),
+            orch.read_state_map.lock().unwrap().remove(&canon).is_some(),
             "the seed must have been there to evict"
         );
 
@@ -17249,7 +17241,10 @@ mod nested_memory_reminder_tests {
         let orch = orch(&f);
         push_touched(&orch, &f.trigger);
 
-        orch.sent_conditional_rules.lock().await.insert(rule.clone());
+        orch.sent_conditional_rules
+            .lock()
+            .await
+            .insert(rule.clone());
         assert!(
             orch.nested_memory_reminder_message().await.is_none(),
             "conditional-rules already sent this rule"
@@ -18235,7 +18230,6 @@ mod hook_attachment_persistence_tests {
         }
     }
 
-
     fn orch_with_writer(
         dir: &std::path::Path,
         path: std::path::PathBuf,
@@ -18806,8 +18800,13 @@ mod persist_with_parent_tests {
             }],
             stop_reason: None,
         };
-        let map = orch.persist_assistant_per_block(&assistant, None, None).await;
-        let assistant_uuid = map.get(&tuid).cloned().expect("tool_use line uuid recorded");
+        let map = orch
+            .persist_assistant_per_block(&assistant, None, None)
+            .await;
+        let assistant_uuid = map
+            .get(&tuid)
+            .cloned()
+            .expect("tool_use line uuid recorded");
 
         // 2. The tool's structured result, recorded at dispatch.
         orch.record_tool_use_result(
@@ -21072,7 +21071,11 @@ mod main_thread_agent_tests {
             .large_memory_warnings()
             .await
             .expect("production orchestrator can recompute memory warnings");
-        assert_eq!(rows.len(), 1, "the oversized file must be reported: {rows:?}");
+        assert_eq!(
+            rows.len(),
+            1,
+            "the oversized file must be reported: {rows:?}"
+        );
         assert!(
             rows[0].starts_with("Large ") && rows[0].contains("will impact performance"),
             "oracle row shape: {}",
@@ -21137,9 +21140,11 @@ mod main_thread_agent_tests {
         let mut config = OrchestratorConfig::default();
         config.interactive_session = true;
         let orch = orch_with_config(config);
-        let text = orch.model_error_text(&LlmError::Authentication {
-            message: String::new(),
-        }).await;
+        let text = orch
+            .model_error_text(&LlmError::Authentication {
+                message: String::new(),
+            })
+            .await;
         assert!(
             !text.contains("Login expired"),
             "a generic auth failure must not be rendered as an expired login: {text}"

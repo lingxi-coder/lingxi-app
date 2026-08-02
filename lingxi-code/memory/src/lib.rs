@@ -190,9 +190,7 @@ fn canonical_model_family(model: &str) -> String {
     }
     // `e.replace(/-\d{8}$/,"")` — a trailing dash + exactly 8 digits.
     let stripped = match lower.rfind('-') {
-        Some(i)
-            if lower.len() - i == 9 && lower[i + 1..].bytes().all(|b| b.is_ascii_digit()) =>
-        {
+        Some(i) if lower.len() - i == 9 && lower[i + 1..].bytes().all(|b| b.is_ascii_digit()) => {
             &lower[..i]
         }
         _ => lower.as_str(),
@@ -266,7 +264,8 @@ pub fn max_memory_character_count(context_window: u64, chars_per_token: u64) -> 
     };
     // `Math.round(window * 0.05 * cpt)` in integer arithmetic — see
     // [`MEMORY_CONTEXT_FRACTION_BPS`] for the identity.
-    let scaled = u128::from(window) * u128::from(MEMORY_CONTEXT_FRACTION_BPS) * u128::from(chars_per_token);
+    let scaled =
+        u128::from(window) * u128::from(MEMORY_CONTEXT_FRACTION_BPS) * u128::from(chars_per_token);
     let rounded = usize::try_from((scaled + 5_000) / 10_000).unwrap_or(usize::MAX);
     rounded.max(MAX_MEMORY_CHARACTER_COUNT)
 }
@@ -450,7 +449,10 @@ mod large_memory_file_tests {
         // The bare major with no minor at all DOES take the fallback.
         assert_eq!(memory_chars_per_token("claude-opus-4"), 4);
         assert_eq!(memory_chars_per_token("claude-sonnet-4"), 4);
-        assert_eq!(memory_chars_per_token("us.anthropic.claude-opus-4-5-v1:0"), 4);
+        assert_eq!(
+            memory_chars_per_token("us.anthropic.claude-opus-4-5-v1:0"),
+            4
+        );
         assert_eq!(memory_chars_per_token("claude-3-5-haiku-20241022"), 4);
         // NOT in isg (present in `asg` but that is a different set) → 3.
         assert_eq!(memory_chars_per_token("claude-opus-4-7"), 3);

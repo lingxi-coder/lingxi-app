@@ -674,11 +674,7 @@ impl StreamJsonStream {
             "uuid": uuid,
             "timestamp": timestamp
         });
-        let meta = build_tool_result_meta(
-            denial_kind,
-            user_feedback,
-            &frame["message"]["content"],
-        );
+        let meta = build_tool_result_meta(denial_kind, user_feedback, &frame["message"]["content"]);
         if !meta.is_empty() {
             frame
                 .as_object_mut()
@@ -3140,7 +3136,11 @@ mod tests {
 
     #[test]
     fn tool_result_meta_carries_denial_kind_for_single_tool_result() {
-        let meta = build_tool_result_meta(Some("user-rejected"), None, &tool_result_content(&["toolu_1"]));
+        let meta = build_tool_result_meta(
+            Some("user-rejected"),
+            None,
+            &tool_result_content(&["toolu_1"]),
+        );
         assert_eq!(
             serde_json::to_string(&meta).unwrap(),
             r#"[{"id":"toolu_1","non_execution_kind":"user-rejected"}]"#
@@ -3162,7 +3162,8 @@ mod tests {
 
     #[test]
     fn tool_result_meta_is_empty_without_denial_kind() {
-        let meta = build_tool_result_meta(None, Some("ignored"), &tool_result_content(&["toolu_1"]));
+        let meta =
+            build_tool_result_meta(None, Some("ignored"), &tool_result_content(&["toolu_1"]));
         assert!(meta.is_empty());
     }
 
@@ -3176,7 +3177,10 @@ mod tests {
         assert!(two.is_empty(), "two tool_result blocks must yield no meta");
 
         let none = build_tool_result_meta(Some("user-rejected"), None, &Value::Array(vec![]));
-        assert!(none.is_empty(), "zero tool_result blocks must yield no meta");
+        assert!(
+            none.is_empty(),
+            "zero tool_result blocks must yield no meta"
+        );
     }
 
     #[test]

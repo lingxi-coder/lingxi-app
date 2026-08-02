@@ -72,7 +72,10 @@ fn every_rebuilt_request_snapshot_re_appends_the_turn_reminders() {
     // In the streaming driver each assembly of an outgoing request prepends the
     // additional-context message, so that count IS the number of assemblies.
     let assemblies = STREAMING.matches("insert(0, ctx_msg)").count();
-    assert!(assemblies >= 4, "expected the main path plus its recoveries");
+    assert!(
+        assemblies >= 4,
+        "expected the main path plus its recoveries"
+    );
     assert_eq!(
         STREAMING.matches(EXTEND).count(),
         assemblies,

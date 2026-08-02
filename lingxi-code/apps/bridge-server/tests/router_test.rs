@@ -1492,14 +1492,11 @@ async fn resume_session_replays_adopts_and_emits_full_transcript() {
     // Assert the fold HAPPENED rather than the row simply being dropped —
     // a count alone cannot tell those two apart.
     assert!(
-        messages
-            .iter()
-            .flat_map(|m| &m.blocks)
-            .any(|b| matches!(
-                b,
-                client_protocol::message::MessageBlockDto::CompactBoundary { summary, .. }
-                    if !summary.is_empty()
-            )),
+        messages.iter().flat_map(|m| &m.blocks).any(|b| matches!(
+            b,
+            client_protocol::message::MessageBlockDto::CompactBoundary { summary, .. }
+                if !summary.is_empty()
+        )),
         "the folded summary must survive into a CompactBoundary block"
     );
 }

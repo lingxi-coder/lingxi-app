@@ -3216,12 +3216,12 @@ impl ApiService {
                                 let wall = std::time::SystemTime::now();
                                 match tokio::time::timeout(t, frames.next_frame()).await {
                                     Ok(r) => r,
-                                    Err(_elapsed) => Err(
-                                        crate::model::stream_watchdog::watchdog_abort_error(
+                                    Err(_elapsed) => {
+                                        Err(crate::model::stream_watchdog::watchdog_abort_error(
                                             t,
                                             wall.elapsed().unwrap_or(t),
-                                        ),
-                                    ),
+                                        ))
+                                    }
                                 }
                             }
                             None => frames.next_frame().await,

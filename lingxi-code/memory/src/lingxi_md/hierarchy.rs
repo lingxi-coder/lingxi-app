@@ -330,7 +330,14 @@ pub fn probe_dir_nested(
     out: &mut Vec<HierarchyEntry>,
     processed: &mut std::collections::HashSet<PathBuf>,
 ) {
-    emit_probe(dir, FILE_NAME, false, super::LingxiMdTier::Project, out, processed);
+    emit_probe(
+        dir,
+        FILE_NAME,
+        false,
+        super::LingxiMdTier::Project,
+        out,
+        processed,
+    );
     emit_probe(
         &dir.join(DOT_LINGXI),
         FILE_NAME,
@@ -963,10 +970,16 @@ mod split_ancestors_tests {
     /// cwd itself excluded from `nested` and included in `cwd_level`.
     #[test]
     fn splits_nested_and_cwd_level_at_the_cwd_boundary() {
-        let a = split_ancestors(Path::new("/w/repo/pkg/api/handler.rs"), Path::new("/w/repo"));
+        let a = split_ancestors(
+            Path::new("/w/repo/pkg/api/handler.rs"),
+            Path::new("/w/repo"),
+        );
         assert_eq!(
             a.nested,
-            vec![PathBuf::from("/w/repo/pkg"), PathBuf::from("/w/repo/pkg/api")],
+            vec![
+                PathBuf::from("/w/repo/pkg"),
+                PathBuf::from("/w/repo/pkg/api")
+            ],
             "outermost-first, cwd excluded"
         );
         assert_eq!(
@@ -1090,6 +1103,10 @@ mod nested_probe_tests {
         probe_dir_nested(d, &mut out, &mut processed);
         let first = out.len();
         probe_dir_nested(d, &mut out, &mut processed);
-        assert_eq!(out.len(), first, "second probe of the same dir adds nothing");
+        assert_eq!(
+            out.len(),
+            first,
+            "second probe of the same dir adds nothing"
+        );
     }
 }

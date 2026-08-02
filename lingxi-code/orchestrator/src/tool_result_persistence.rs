@@ -188,12 +188,7 @@ pub fn tool_results_dir(config_home: &Path, cwd: &str, session_uuid: &str) -> Pa
 /// # Errors
 /// Returns the OS error message when the exclusive create fails for a reason
 /// other than an already-existing path.
-pub async fn persist(
-    dir: &Path,
-    id: &str,
-    body: &str,
-    is_json: bool,
-) -> Result<Persisted, String> {
+pub async fn persist(dir: &Path, id: &str, body: &str, is_json: bool) -> Result<Persisted, String> {
     // `k2e`: `try{await Gi().mkdir(xke())}catch{}`. The oracle's wrapper
     // creates the whole chain (its on-disk sessions carry sibling `subagents`
     // / `workflows` directories under the same session dir), so `create_dir_all`

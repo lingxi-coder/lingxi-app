@@ -199,7 +199,11 @@ fn rendered_into_context_matches_format_output() {
     // `MLu` (@230809370) as a duplicate of the renderer's drops; LingXi
     // DERIVES the renderer's filter from `is_rendered_into_context`, so this
     // test pins that they cannot diverge.
-    let mut cond = mf("/proj/.lingxi/rules/cond.md", "conditional body", LingxiMdTier::Project);
+    let mut cond = mf(
+        "/proj/.lingxi/rules/cond.md",
+        "conditional body",
+        LingxiMdTier::Project,
+    );
     cond.globs = Some(vec!["src".into()]);
     let mut blank = mf("/proj/blank.md", "   \n  ", LingxiMdTier::Project);
     blank.globs = None;

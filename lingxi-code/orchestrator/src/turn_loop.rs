@@ -2505,17 +2505,29 @@ async fn apply_tool_result_persistence(
         };
     }
     if tool_result_has_media(content_blocks) {
-        return PersistenceOutcome { content, replaced: false };
+        return PersistenceOutcome {
+            content,
+            replaced: false,
+        };
     }
     let Some(threshold) = threshold else {
-        return PersistenceOutcome { content, replaced: false };
+        return PersistenceOutcome {
+            content,
+            replaced: false,
+        };
     };
     let size = tool_result_size(&content, content_blocks);
     if size <= threshold {
-        return PersistenceOutcome { content, replaced: false };
+        return PersistenceOutcome {
+            content,
+            replaced: false,
+        };
     }
     let Some(home) = orch.config_home.as_ref() else {
-        return PersistenceOutcome { content, replaced: false };
+        return PersistenceOutcome {
+            content,
+            replaced: false,
+        };
     };
 
     // `x2e` serializes an ARRAY body with `JSON.stringify(e,null,2)` and a
@@ -2525,7 +2537,12 @@ async fn apply_tool_result_persistence(
             Ok(s) => (s, true),
             // `e.some(l=>l.type!=="text")` already returned an error above in
             // the oracle; an unserializable array is the same "leave it alone".
-            Err(_) => return PersistenceOutcome { content, replaced: false },
+            Err(_) => {
+                return PersistenceOutcome {
+                    content,
+                    replaced: false,
+                }
+            }
         },
         None => (content.clone(), false),
     };
@@ -2545,7 +2562,10 @@ async fn apply_tool_result_persistence(
                 path = %dir.join(tool_use_id.as_str()).display(),
                 "Failed to persist tool result: {msg}"
             );
-            return PersistenceOutcome { content, replaced: false };
+            return PersistenceOutcome {
+                content,
+                replaced: false,
+            };
         }
     };
     let path_display = persisted.filepath.display().to_string();
@@ -2695,13 +2715,13 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             )
             .await;
             orch.emit_tool_result_frame(
-                    tool_use_id,
-                    name,
-                    &model_text,
-                    &serde_json::json!({ "error": format!("tool not found: {name}") }),
-                    None,
-                )
-                .await;
+                tool_use_id,
+                name,
+                &model_text,
+                &serde_json::json!({ "error": format!("tool not found: {name}") }),
+                None,
+            )
+            .await;
             results.push(result_block);
             continue;
         };
@@ -2740,13 +2760,13 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             )
             .await;
             orch.emit_tool_result_frame(
-                    tool_use_id,
-                    name,
-                    &model_text,
-                    &serde_json::json!({ "error": detail }),
-                    None,
-                )
-                .await;
+                tool_use_id,
+                name,
+                &model_text,
+                &serde_json::json!({ "error": detail }),
+                None,
+            )
+            .await;
             results.push(result_block);
             continue;
         }
@@ -2841,13 +2861,13 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             )
             .await;
             orch.emit_tool_result_frame(
-                    tool_use_id,
-                    name,
-                    &model_text,
-                    &serde_json::json!({ "error": msg }),
-                    None,
-                )
-                .await;
+                tool_use_id,
+                name,
+                &model_text,
+                &serde_json::json!({ "error": msg }),
+                None,
+            )
+            .await;
             results.push(result_block);
             continue;
         }
@@ -2883,13 +2903,13 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             )
             .await;
             orch.emit_tool_result_frame(
-                    tool_use_id,
-                    name,
-                    CANCEL_MESSAGE,
-                    &serde_json::json!({ "error": CANCEL_MESSAGE }),
-                    Some("cancelled"),
-                )
-                .await;
+                tool_use_id,
+                name,
+                CANCEL_MESSAGE,
+                &serde_json::json!({ "error": CANCEL_MESSAGE }),
+                Some("cancelled"),
+            )
+            .await;
             results.push(result_block);
             continue;
         }
@@ -3213,13 +3233,13 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 content_blocks: None,
             };
             orch.emit_tool_result_frame(
-                    tool_use_id,
-                    name,
-                    &model_text,
-                    &serde_json::json!({ "error": model_text.clone() }),
-                    None,
-                )
-                .await;
+                tool_use_id,
+                name,
+                &model_text,
+                &serde_json::json!({ "error": model_text.clone() }),
+                None,
+            )
+            .await;
             results.push(result_block);
             // HOOK.1: even on a BLOCK, the PreToolUse `additionalContext` was
             // pushed in claude-code's pre-hook phase (`toolExecution.ts:846`),
@@ -3754,13 +3774,13 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 )
                 .await;
                 orch.emit_tool_result_frame(
-                        tool_use_id,
-                        name,
-                        &reason,
-                        &serde_json::json!({ "error": reason }),
-                        Some(denial_kind),
-                    )
-                    .await;
+                    tool_use_id,
+                    name,
+                    &reason,
+                    &serde_json::json!({ "error": reason }),
+                    Some(denial_kind),
+                )
+                .await;
                 results.push(result_block);
                 // `ask`-behavior rejection contentBlocks (`toolExecution.ts:1039-1046`):
                 // append the image/non-text blocks at the TOP LEVEL of the deny
@@ -3989,11 +4009,8 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 // 235424595), NOT a structured object. The `{"error": …}`
                 // object below is the port's stream-json SDK frame — a
                 // different wire that legitimately differs here.
-                orch.record_tool_use_result(
-                    tool_use_id,
-                    serde_json::Value::String(text.clone()),
-                )
-                .await;
+                orch.record_tool_use_result(tool_use_id, serde_json::Value::String(text.clone()))
+                    .await;
                 (text, true, serde_json::json!({ "error": bare }), is_abort)
             }
         };
@@ -4004,15 +4021,16 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             // (via `take_tool_denial_kind`); `emit_tool_result_denied` carries
             // the same kind on the stream-json frame. Same shape as the
             // hardcoded `"cancelled"` on the pre-cancel guard above.
-            orch.record_tool_denial_kind(tool_use_id, "interrupted").await;
-            orch.emit_tool_result_frame(
-                    tool_use_id,
-                    name,
-                    &content,
-                    &emit_payload,
-                    Some("interrupted"),
-                )
+            orch.record_tool_denial_kind(tool_use_id, "interrupted")
                 .await;
+            orch.emit_tool_result_frame(
+                tool_use_id,
+                name,
+                &content,
+                &emit_payload,
+                Some("interrupted"),
+            )
+            .await;
         } else {
             orch.emit_tool_result_frame(tool_use_id, name, &content, &emit_payload, None)
                 .await;
@@ -4141,7 +4159,10 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         // the normalizer renders it as an `isMeta` user message
         // (BIN off 238107476). Previously `post_agg.decision` was never read
         // here, so a blocking PostToolUse hook produced nothing at all.
-        if matches!(post_agg.decision, Some(hooks::response::HookDecision::Block)) {
+        if matches!(
+            post_agg.decision,
+            Some(hooks::response::HookDecision::Block)
+        ) {
             let err = hooks::BlockingError {
                 // `e.reason || "Blocked by hook"` (BIN off 237775430). On the
                 // plain-text exit-2 arm the executor already parked the fully
@@ -5138,7 +5159,11 @@ mod tool_denial_kind_tests {
             "automode-unavailable"
         );
         assert_eq!(
-            tool_denial_kind(false, Some("classifier"), Some("Classifier unavailable later")),
+            tool_denial_kind(
+                false,
+                Some("classifier"),
+                Some("Classifier unavailable later")
+            ),
             "automode-blocked",
             "TRt is matched by equality, so a longer string is NOT unavailable"
         );
@@ -5162,7 +5187,11 @@ mod tool_denial_kind_tests {
     #[test]
     fn other_classifier_reasons_are_automode_blocked() {
         assert_eq!(
-            tool_denial_kind(false, Some("classifier"), Some("writes outside the workspace")),
+            tool_denial_kind(
+                false,
+                Some("classifier"),
+                Some("writes outside the workspace")
+            ),
             "automode-blocked"
         );
         assert_eq!(
@@ -5174,7 +5203,13 @@ mod tool_denial_kind_tests {
 
     #[test]
     fn non_classifier_denials_are_permission_rule() {
-        for kind in [None, Some("rule"), Some("mode"), Some("hook"), Some("safetyCheck")] {
+        for kind in [
+            None,
+            Some("rule"),
+            Some("mode"),
+            Some("hook"),
+            Some("safetyCheck"),
+        ] {
             assert_eq!(
                 tool_denial_kind(false, kind, Some("Classifier unavailable")),
                 "permission-rule",
@@ -5817,11 +5852,7 @@ mod hook_context_attachment_tests {
         let mut registry = HookRegistry::new();
         registry.register(hook);
         let reg = Arc::new(tokio::sync::RwLock::new(registry));
-        let mut exec = HookExecutorImpl::new(
-            reg,
-            Arc::new(UnusedHttp),
-            Arc::new(UnusedRuntime),
-        );
+        let mut exec = HookExecutorImpl::new(reg, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
         exec.register_builtin(Arc::new(FixedPostHook { response }));
         Arc::new(exec)
     }
@@ -5868,8 +5899,7 @@ mod hook_context_attachment_tests {
         let mut registry = HookRegistry::new();
         registry.register(hook);
         let reg = Arc::new(tokio::sync::RwLock::new(registry));
-        let mut exec =
-            HookExecutorImpl::new(reg, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
+        let mut exec = HookExecutorImpl::new(reg, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
         exec.register_builtin(Arc::new(FixedPostHook { response }));
         Arc::new(exec)
     }
@@ -5984,10 +6014,9 @@ mod hook_context_attachment_tests {
             additional_context: Some("BATCH-CTX".into()),
             ..HookResponse::default()
         });
-        let (_results, prevent, injected, _mods) =
-            dispatch_tool_uses_tracked(&orch, &uses(), None)
-                .await
-                .expect("dispatch");
+        let (_results, prevent, injected, _mods) = dispatch_tool_uses_tracked(&orch, &uses(), None)
+            .await
+            .expect("dispatch");
         assert!(!prevent, "additionalContext alone must not stop the turn");
         let ctx_msg = injected
             .iter()
@@ -6010,10 +6039,9 @@ mod hook_context_attachment_tests {
             reason: Some("STOP".into()),
             ..HookResponse::default()
         });
-        let (_results, prevent, injected, _mods) =
-            dispatch_tool_uses_tracked(&orch, &uses(), None)
-                .await
-                .expect("dispatch");
+        let (_results, prevent, injected, _mods) = dispatch_tool_uses_tracked(&orch, &uses(), None)
+            .await
+            .expect("dispatch");
         assert!(prevent);
         let texts: Vec<String> = injected
             .iter()
@@ -6203,7 +6231,10 @@ mod hook_context_attachment_tests {
             .await
             .expect("dispatch");
         let queued = orch.take_queued_hook_attachments(&id).await;
-        assert_eq!(queued[0]["blockingError"]["blockingError"], "Blocked by hook");
+        assert_eq!(
+            queued[0]["blockingError"]["blockingError"],
+            "Blocked by hook"
+        );
     }
 
     /// O2: the PostToolUse `preventContinuation` message was already
@@ -6278,8 +6309,9 @@ mod hook_context_attachment_tests {
         use protocol::MessageId;
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("session.jsonl");
-        let fs: Arc<dyn traits::FileSystem> =
-            Arc::new(platform_posix::fs::PosixFileSystem::new(dir.path().to_path_buf()));
+        let fs: Arc<dyn traits::FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
+            dir.path().to_path_buf(),
+        ));
         let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(path.clone(), fs));
         let mut tools = ToolRegistry::new();
         tools.register_builtin(Arc::new(EchoTool) as Arc<dyn Tool>);
@@ -6390,9 +6422,10 @@ mod hook_context_attachment_tests {
             Arc::new(NoOpPermissionGate),
             Arc::new(MockOutputStream::new()),
             Arc::new(crate::test_support::StaticMemoryProvider::empty()),
-            jsonl.map_or_else(|| PathBuf::from("/tmp"), |p| {
-                p.parent().expect("parent").to_path_buf()
-            }),
+            jsonl.map_or_else(
+                || PathBuf::from("/tmp"),
+                |p| p.parent().expect("parent").to_path_buf(),
+            ),
         );
         match jsonl {
             None => orch,
@@ -6517,11 +6550,7 @@ mod hook_context_attachment_tests {
         let mut registry = HookRegistry::new();
         registry.register(hook);
         let reg = Arc::new(tokio::sync::RwLock::new(registry));
-        let mut exec = HookExecutorImpl::new(
-            reg,
-            Arc::new(UnusedHttp),
-            Arc::new(UnusedRuntime),
-        );
+        let mut exec = HookExecutorImpl::new(reg, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
         exec.register_builtin(Arc::new(FixedPostHook {
             response: HookResponse {
                 additional_context: Some("PRE-CTX".into()),
@@ -6548,7 +6577,9 @@ mod hook_context_attachment_tests {
         let queued = orch.take_queued_hook_attachments(&id).await;
         assert_eq!(queued.len(), 1, "one attachment, got {queued:?}");
         assert_eq!(
-            queued[0].get("hookName").and_then(serde_json::Value::as_str),
+            queued[0]
+                .get("hookName")
+                .and_then(serde_json::Value::as_str),
             Some("PreToolUse:Echo")
         );
         let rendering = injected
@@ -6652,8 +6683,13 @@ mod tool_result_persistence_wiring_tests {
             _ctx: ToolUseContext,
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
-            let len = usize::try_from(input.get("len").and_then(serde_json::Value::as_u64).unwrap())
-                .unwrap();
+            let len = usize::try_from(
+                input
+                    .get("len")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap(),
+            )
+            .unwrap();
             let body = "x".repeat(len);
             Ok(ToolCallResult {
                 data: json!(body),
@@ -6685,13 +6721,11 @@ mod tool_result_persistence_wiring_tests {
         }
     }
 
-    fn use_of(name: &str, len: usize) -> Vec<(ToolUseId, String, serde_json::Value, Option<String>)> {
-        vec![(
-            ToolUseId::new(),
-            name.into(),
-            json!({ "len": len }),
-            None,
-        )]
+    fn use_of(
+        name: &str,
+        len: usize,
+    ) -> Vec<(ToolUseId, String, serde_json::Value, Option<String>)> {
+        vec![(ToolUseId::new(), name.into(), json!({ "len": len }), None)]
     }
 
     async fn dispatch_content(
@@ -6783,7 +6817,8 @@ mod tool_result_persistence_wiring_tests {
                 "IGNORED".into(),
                 Some(&blocks),
             )
-            .await.content;
+            .await
+            .content;
             assert_eq!(out, "IGNORED", "{media} block must suppress persistence");
         }
         assert!(!tmp.path().join("projects").exists());
@@ -6798,7 +6833,8 @@ mod tool_result_persistence_wiring_tests {
             "IGNORED".into(),
             Some(&blocks),
         )
-        .await.content;
+        .await
+        .content;
         assert!(out.starts_with(PERSISTED_OUTPUT_OPEN), "control: {out}");
         // An ARRAY body is written as pretty JSON under a `.json` stem (`kKr`).
         assert!(out.contains(&format!("{}.json", id.as_str())), "{out}");

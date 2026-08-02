@@ -888,11 +888,15 @@ mod tests {
     fn aws_auth_error_is_provider_gated() {
         // 401/403 on the Bedrock provider trigger; every other provider never does.
         assert!(is_aws_auth_error(
-            &LlmError::Authentication { message: String::new() },
+            &LlmError::Authentication {
+                message: String::new()
+            },
             &ProviderId::BedrockClaude
         ));
         assert!(is_aws_auth_error(
-            &LlmError::PermissionDenied { message: String::new() },
+            &LlmError::PermissionDenied {
+                message: String::new()
+            },
             &ProviderId::BedrockClaude
         ));
         assert!(!is_aws_auth_error(
@@ -913,7 +917,12 @@ mod tests {
             },
         ] {
             assert!(
-                !is_aws_auth_error(&LlmError::Authentication { message: String::new() }, &provider),
+                !is_aws_auth_error(
+                    &LlmError::Authentication {
+                        message: String::new()
+                    },
+                    &provider
+                ),
                 "refresh must never trigger for {provider:?}"
             );
         }

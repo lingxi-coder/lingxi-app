@@ -122,12 +122,16 @@ mod tests {
         // Another caller rotated first — the retry succeeds, nothing expired.
         assert_eq!(
             llm_error_for(&OAuthHookError::TokenStale),
-            LlmError::Authentication { message: String::new() }
+            LlmError::Authentication {
+                message: String::new()
+            }
         );
         // The IdP was unreachable; the refresh token may be perfectly valid.
         assert_eq!(
             llm_error_for(&OAuthHookError::ProviderUnreachable("dns".into())),
-            LlmError::Authentication { message: String::new() }
+            LlmError::Authentication {
+                message: String::new()
+            }
         );
     }
 }

@@ -1528,7 +1528,8 @@ impl HookExecutorImpl {
             // The exit-2 arm supplies `iSe`; every other blocking arm (JSON
             // `decision:"block"`, PreToolUse `permissionDecision:"deny"`) is
             // reached through `Tfn({command: ee})`, i.e. `qq`.
-            if !already_blocked && matches!(resp.decision, Some(crate::response::HookDecision::Block))
+            if !already_blocked
+                && matches!(resp.decision, Some(crate::response::HookDecision::Block))
             {
                 agg.block_command = Some(
                     resp.block_command

@@ -42,7 +42,10 @@ fn nested_dirs_between_cwd_and_the_file_are_discovered_outermost_first() {
 
     assert_eq!(
         paths,
-        vec![cwd.join("pkg").join(MEM), cwd.join("pkg").join("api").join(MEM)],
+        vec![
+            cwd.join("pkg").join(MEM),
+            cwd.join("pkg").join("api").join(MEM)
+        ],
         "outermost-first"
     );
 }
@@ -122,7 +125,10 @@ fn conditional_rules_are_matched_against_the_trigger_and_ordered_last() {
         names.contains(&MEM.to_string()),
         "unconditional file present: {names:?}"
     );
-    assert!(names.contains(&"api.md".to_string()), "matching rule: {names:?}");
+    assert!(
+        names.contains(&"api.md".to_string()),
+        "matching rule: {names:?}"
+    );
     assert!(
         !names.contains(&"web.md".to_string()),
         "non-matching rule must NOT be surfaced: {names:?}"
@@ -148,7 +154,10 @@ fn a_user_tier_rule_resolves_its_external_imports() {
     // A User-tier rule's globs resolve against CWD (oracle: the Project branch
     // takes `dirname^2` of the rules dir, everything else takes cwd).
     let outside = home.join("shared-rule.md");
-    touch(&outside, "---\npaths:\n  - \"pkg/**\"\n---\nshared rule body\n");
+    touch(
+        &outside,
+        "---\npaths:\n  - \"pkg/**\"\n---\nshared rule body\n",
+    );
     touch(
         &home.join(DOT).join("rules").join("u.md"),
         &format!(
@@ -163,7 +172,10 @@ fn a_user_tier_rule_resolves_its_external_imports() {
         .map(|f| f.path.file_name().unwrap().to_string_lossy().to_string())
         .collect();
 
-    assert!(names.contains(&"u.md".to_string()), "the rule itself: {names:?}");
+    assert!(
+        names.contains(&"u.md".to_string()),
+        "the rule itself: {names:?}"
+    );
     assert!(
         names.contains(&"shared-rule.md".to_string()),
         "its external @import must be spliced in: {names:?}"
@@ -180,7 +192,10 @@ fn a_managed_tier_rule_does_not_resolve_external_imports() {
     let (_tmp, cwd, home, trigger) = fixture();
     let managed = home.parent().unwrap().join("managed");
     let outside = managed.join("shared-rule.md");
-    touch(&outside, "---\npaths:\n  - \"pkg/**\"\n---\nshared rule body\n");
+    touch(
+        &outside,
+        "---\npaths:\n  - \"pkg/**\"\n---\nshared rule body\n",
+    );
     touch(
         &managed.join(DOT).join("rules").join("m.md"),
         &format!(
@@ -195,7 +210,10 @@ fn a_managed_tier_rule_does_not_resolve_external_imports() {
         .map(|f| f.path.file_name().unwrap().to_string_lossy().to_string())
         .collect();
 
-    assert!(names.contains(&"m.md".to_string()), "the rule itself: {names:?}");
+    assert!(
+        names.contains(&"m.md".to_string()),
+        "the rule itself: {names:?}"
+    );
     assert!(
         !names.contains(&"shared-rule.md".to_string()),
         "Managed gets includeExternal:!1 — the import must NOT surface: {names:?}"

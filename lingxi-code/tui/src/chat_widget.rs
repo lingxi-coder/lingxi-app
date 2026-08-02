@@ -6062,11 +6062,36 @@ mod tests {
     }
 
     /// `/reload-skills` reloads the wired shared registry and reports the count.
+    ///
+    /// The registry must actually CARRY the handler: `cmd_reload_skills` guards
+    /// on `get_handler("reload-skills")`, so wiring an empty registry only ever
+    /// exercised the "configured handler missing" arm — the test asserted the
+    /// success path while proving the failure path.
+    ///
+    /// Roots are a temp dir, not the developer's real cwd/home: the handler
+    /// walks them for skills, and `ReloadSkillsHandler::new` would make the
+    /// count depend on whatever is installed on the machine running the test.
     #[test]
     fn reload_skills_reports_count_when_registry_wired() {
         let mut widget = widget();
         let registry =
             std::sync::Arc::new(tokio::sync::RwLock::new(command_api::CommandRegistry::new()));
+        let empty = tempfile::tempdir().expect("tempdir");
+        {
+            let handler = std::sync::Arc::new(command_core::ReloadSkillsHandler::with_all_roots(
+                std::sync::Arc::clone(&registry),
+                empty.path().to_path_buf(),
+                empty.path().to_path_buf(),
+                None,
+                empty.path().to_path_buf(),
+                Vec::new(),
+                false,
+            ));
+            registry
+                .try_write()
+                .expect("uncontended")
+                .register_builtin_handler(handler);
+        }
         widget.set_command_registry(registry);
         let outcome = widget.cmd_reload_skills("");
         assert!(matches!(outcome, ChatOutcome::Continue));
